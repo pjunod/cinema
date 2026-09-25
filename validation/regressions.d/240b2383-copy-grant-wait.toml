@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["240b2383"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The copy writer's bounded grant wait was armed for a session that had already published and not for one that never could, so a playing session was failed after two minutes of an ordinary budget hold and a session that could never publish waited forever. `scratch_charge_grant_wait_gives_up_only_before_first_publication` checks both directions on a paused clock: a never-published writer must give up with the insufficient-capacity marker, and a published one must still be waiting after three budgets."

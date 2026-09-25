@@ -633,10 +633,17 @@ fn select_audio_track(
 /// stereo one stays stereo — and a layout the probe never learned (an AC-4
 /// track before its first random-access frame) is resolved when the first
 /// frame arrives instead of being forced to stereo up front.
+///
+/// Only layouts with an ADTS `channel_configuration` are listed. `5.1(side)`
+/// — the layout every ATSC AC-3 5.1 track decodes to — has none, so the AAC
+/// encoder signals it as configuration 0 plus a PCE, which hls.js and the
+/// browsers' MSE read as an audio track with no channels and never start
+/// (measured 2026-09-24: Safari and Chrome black with 0 decoded frames on
+/// 157.1). `5.1` is configuration 6; the side pair maps onto it 1:1.
 pub(crate) fn encoded_channel_layouts(ceiling: u8) -> String {
     let mut layouts = Vec::new();
     if ceiling >= 6 {
-        layouts.extend(["5.1(side)", "5.1"]);
+        layouts.push("5.1");
     }
     if ceiling >= 2 {
         layouts.push("stereo");

@@ -177,11 +177,14 @@ fn session_log_text(text: &str, session_id: &str) -> String {
 }
 
 fn ffmpeg_args_log_message(label: &str, args: &[String], session_id: &str) -> String {
-    format!("{label}: {}", session_log_text(&args.join(" "), session_id))
+    format!(
+        "{label}: {}",
+        session_log_text(&crate::scratch_put::redact(&args.join(" ")), session_id)
+    )
 }
 
 fn log_ffmpeg_stderr(session_id: &str, encoder: &str, line: &str) {
-    let line = session_log_text(line, session_id);
+    let line = session_log_text(&crate::scratch_put::redact(line), session_id);
     tracing::warn!(
         session = %session_log_id(session_id),
         encoder,
@@ -954,12 +957,11 @@ const ROLLING_SCRATCH_UNKNOWN_RATE_BYTES: i64 = 256 * 1024 * 1024;
 /// remaining uncontrolled initial burst, and the writes already issued when a
 /// suspension lands.
 ///
-/// For the native copy writer this is a convenience, not the bound — every
-/// object passes an exact grant at `copyseg::publish_file`, so an
-/// under-estimated envelope makes the writer wait rather than overrun. For
-/// direct FFmpeg output there is no such boundary, and the envelope is a
-/// measurement-derived allowance rather than an enforced one. That asymmetry
-/// is why only the copy path is admitted with a reduced startup reservation.
+/// For every rolling writer this is a convenience, not the bound. Each object
+/// the native copy writer publishes passes an exact grant at
+/// `copyseg::publish_file`, and each piece FFmpeg's muxer uploads passes one
+/// in `scratch_put`, so an under-estimated envelope makes the writer wait
+/// rather than overrun.
 const ROLLING_SCRATCH_ENVELOPE_SAFETY: f64 = 5.0;
 
 /// How far above a title's *average* bitrate its opening is sized.
@@ -988,12 +990,15 @@ const ROLLING_SCRATCH_EVALUATION_INTERVAL: Duration = Duration::from_secs(1);
 ///
 /// The historical answer was always the whole per-session ceiling, which is
 /// why three rolling producers exhausted an 8 GiB budget no matter how little
-/// they actually wrote. A writer whose every write passes a grant boundary
-/// can start small and grow instead; one whose writes cannot be intercepted
-/// still has to reserve the ceiling, because nothing else bounds it.
+/// they actually wrote. Every rolling writer now passes a grant boundary --
+/// the copy segmenter in `copyseg`, FFmpeg's own muxer through
+/// `scratch_put` -- so every producer starts small and grows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RollingScratchSizing {
-    /// The configured per-session ceiling plus one in-flight envelope.
+    /// The configured per-session ceiling plus one in-flight envelope. No
+    /// producer is admitted this way any more; tests use it to model the
+    /// historical whole-ceiling reservation.
+    #[cfg(test)]
     SessionCeiling,
     /// A startup allowance covering every enabled publish gate plus one
     /// complete segment, plus the enforcement envelope. Grows under an
@@ -1072,6 +1077,7 @@ impl RollingScratchSizing {
     fn grant_bytes(self, limits: AheadLimits) -> i64 {
         let full = Self::ceiling(limits);
         match self {
+            #[cfg(test)]
             Self::SessionCeiling => full,
             Self::Startup(bytes) => bytes.clamp(ROLLING_SCRATCH_MIN_GRANT_BYTES.min(full), full),
         }
@@ -1829,7 +1835,9 @@ fn spawn_ffmpeg(
             runtime_cache,
             progress: crate::producer_spawn::Progress::Stdout,
             descriptors,
-            env: &[],
+            // The muxer's uploads go to a loopback endpoint. An inherited
+            // `http_proxy` would send them, token and all, to the proxy.
+            env: &[("http_proxy", std::ffi::OsStr::new(""))],
         },
     )?;
     // Built before the progress observer is moved into its own task: the sink
@@ -1920,7 +1928,7 @@ fn spawn_ffmpeg_pipe(
             runtime_cache,
             progress: crate::producer_spawn::Progress::Stderr,
             descriptors,
-            env: &[],
+            env: &[("http_proxy", std::ffi::OsStr::new(""))],
         },
     )?;
     let reader = Some({
@@ -2341,7 +2349,9 @@ impl PrepublicationTranscodeRetry {
         prepared: PreparedTranscodeRetry,
         plan: &ResolvedTranscode,
         pacing: Pacing,
-        dir: &std::path::Path,
+        // The upload base this recipe's muxer writes through: a lane of the
+        // session's `scratch_put` endpoint, never a bare directory.
+        output: &str,
         presentation_contract_fingerprint: &str,
         software_pool: crate::admission::SwPool,
         software_budget: usize,
@@ -2377,10 +2387,9 @@ impl PrepublicationTranscodeRetry {
         }
         let observation =
             DiagnosticObservation::for_plan(plan, measured_decoders, automatic_recovery_enabled);
-        let execution =
-            TranscodeExecution::from_options(file, &retry_opts, pacing, &dir.to_string_lossy())
-                .map_err(|error| error.to_string())?
-                .observing_qualified_grammar(observation.qualified_logging());
+        let execution = TranscodeExecution::from_options(file, &retry_opts, pacing, output)
+            .map_err(|error| error.to_string())?
+            .observing_qualified_grammar(observation.qualified_logging());
         let args = transcode::hls_args(plan, &execution);
         let fingerprint_body = serde_json::json!({
             "version": 2,
@@ -3995,6 +4004,7 @@ async fn execute_prepublication_transcode_retry(
     )));
     let transaction = async {
         terminate_exact_prepublication_child(&session, failed_attempt).await?;
+        retire_upload_lane(&session).await;
         clear_session_dir(&session.dir)
             .await
             .map_err(|error| format!("clearing predecessor scratch: {error}"))?;
@@ -4195,6 +4205,7 @@ async fn execute_prepublication_copy_retry(
     )));
     let transaction = async {
         terminate_exact_prepublication_child(&session, failed_attempt).await?;
+        retire_upload_lane(&session).await;
         clear_session_dir(&session.dir)
             .await
             .map_err(|error| format!("clearing copy-reader predecessor scratch: {error}"))?;
@@ -4512,6 +4523,31 @@ fn spawn_copy_reader_owner(
     });
 }
 
+/// Refuse every further upload from the reaped attempt before its directory
+/// is cleared, and wait for the ones already under way to finish refusing.
+/// Its connections can outlive the process, and one that renamed into the
+/// cleared directory would be read as the retry's output.
+async fn retire_upload_lane(session: &Session) {
+    if let Some(upload) = session.upload.as_ref() {
+        if tokio::time::timeout(Duration::from_secs(15), upload.retire_writing_lane())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                "the replaced attempt's uploads did not settle in 15 s; they stay refused"
+            );
+        }
+    }
+}
+
+/// The bits per second a transcode produces: its video target plus its audio.
+fn transcode_output_bitrate(opts: &TranscodeOptions) -> Option<f64> {
+    let kbps = opts
+        .video_bitrate_kbps
+        .saturating_add(opts.audio_bitrate_kbps);
+    (kbps > 0).then(|| f64::from(kbps) * 1_000.0)
+}
+
 /// Read one exact-attempt completion snapshot under the actor's classification
 /// deadline. This is a one-shot probe, not a polling recovery owner: the actor
 /// alone decides completion versus partial-success failure from the returned
@@ -4524,6 +4560,23 @@ async fn classify_successful_transcode_exit(
     crate::playback_control::RollingProducerCompletionDisposition,
     crate::playback_control::ProducerAttemptRejection,
 > {
+    // An upload FFmpeg finished can still be queued on the socket after it
+    // exits. With file output every object was in place at reap; draining
+    // the endpoint restores exactly that before the playlist is read.
+    // The drain gets most of the budget, never all of it: the playlist read
+    // must still run. An exited producer's last pieces are admitted without
+    // waiting on the grant, so in practice it takes milliseconds.
+    if let Some(upload) = session.upload.as_ref() {
+        let drain_deadline = probe
+            .deadline
+            .checked_sub(Duration::from_millis(750))
+            .unwrap_or(probe.deadline);
+        let _ = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(drain_deadline),
+            upload.drain(),
+        )
+        .await;
+    }
     let bytes = if session.control.current_producer_attempt() == probe.producer_attempt
         && session.compatibility_producer_attempt() == probe.producer_attempt
     {
@@ -4770,6 +4823,7 @@ async fn run_prepublication_producer_executor(
                         replacement.mark_admission_pending();
                         let cleanup = async {
                             terminate_exact_prepublication_child(&session, *failed_attempt).await?;
+                            retire_upload_lane(&session).await;
                             clear_session_dir(&session.dir).await.map_err(|error| {
                                 format!("clearing failed producer scratch: {error}")
                             })?;
@@ -6234,6 +6288,10 @@ struct Session {
     /// flow evaluations. Zero for a session admitted with its whole ceiling,
     /// which has nothing to grow into.
     scratch_envelope: i64,
+    /// Where FFmpeg's HLS muxer writes for this session: every object it
+    /// uploads passes the scratch grant before it reaches the disk
+    /// ([`crate::scratch_put`]). `None` where no muxer attempt can run.
+    upload: Option<crate::scratch_put::PutSink>,
     /// Bytes renamed out of served segment paths but not yet physically
     /// unlinked. Hidden garbage still consumes the same scratch budget.
     retention_garbage_bytes: Arc<AtomicI64>,
@@ -6549,15 +6607,21 @@ impl Session {
     /// runs, a scan that happens to find few bytes is not evidence that the
     /// future capacity it was admitted with is no longer needed.
     async fn refresh_scratch_bytes(&self) -> ScratchMeasurement {
+        // What had landed before the walk began is all the walk can be
+        // trusted to have seen.
+        let written_before = self
+            .scratch
+            .as_ref()
+            .map_or(0, |permit| permit.ledger().written_of(permit.key()));
         let measurement = self.measure_scratch_bytes().await;
         match measurement {
             ScratchMeasurement::Complete(bytes) => {
                 self.live_bytes.store(bytes, Release);
-                self.observe_scratch_bytes(bytes);
+                self.observe_scratch_bytes(bytes, written_before);
             }
             ScratchMeasurement::Absent => {
                 self.live_bytes.store(0, Release);
-                self.observe_scratch_bytes(0);
+                self.observe_scratch_bytes(0, written_before);
             }
             ScratchMeasurement::Incomplete | ScratchMeasurement::NotScratch => {}
         }
@@ -6570,9 +6634,11 @@ impl Session {
             .map(crate::scratch_ledger::ScratchPermit::key)
     }
 
-    fn observe_scratch_bytes(&self, bytes: i64) {
+    fn observe_scratch_bytes(&self, bytes: i64, written_before: i64) {
         if let Some(permit) = self.scratch.as_ref() {
-            permit.ledger().observe_used(permit.key(), bytes);
+            permit
+                .ledger()
+                .observe_walk(permit.key(), bytes, written_before);
         }
     }
 
@@ -6613,6 +6679,15 @@ impl Session {
     }
 
     async fn publication_cycle_at(&self, session_id: &str, now: Instant) -> Result<(), String> {
+        // A write the muxer's upload needed failed. FFmpeg does not read the
+        // reply, so it would keep producing objects no playlist can name.
+        if let Some(reason) = self
+            .upload
+            .as_ref()
+            .and_then(crate::scratch_put::PutSink::failure)
+        {
+            return Err(reason);
+        }
         let _ = self.refresh_scratch_bytes().await;
         if self.replacing_child.load(Acquire) {
             return Ok(());
@@ -13248,6 +13323,9 @@ pub struct TranscodeManager {
     /// consult it outside an `async` settings read — the native copy writer
     /// asks it before every object it publishes.
     scratch_cap: Arc<AtomicI64>,
+    /// Rung by a scratch writer when its allocation starts or stops waiting
+    /// on a refused grant. The reaper answers with a flow evaluation.
+    scratch_starved: Arc<tokio::sync::Notify>,
     /// Shared with cache housekeeping. A row can say bytes exist, but only
     /// this registry can say an HTTP session on this node is using them now.
     cache_readers: crate::cachekeep::ActiveCacheReaders,
@@ -13729,6 +13807,7 @@ impl TranscodeManager {
             scratch_sample_generation: AtomicU64::new(0),
             scratch_ledger: crate::scratch_ledger::ScratchLedger::new(),
             scratch_cap: Arc::new(AtomicI64::new(HLS_SCRATCH_MAX_BYTES_DEFAULT)),
+            scratch_starved: Arc::new(tokio::sync::Notify::new()),
             cache_readers: crate::cachekeep::ActiveCacheReaders::default(),
             cache_offer_verdicts: Arc::new(std::sync::Mutex::new(HashMap::new())),
             cache_offer_verifier: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -16602,6 +16681,7 @@ impl TranscodeManager {
             scratch: None,
             retired_release: Arc::new(RetiredRelease::new()),
             scratch_envelope: 0,
+            upload: None,
             retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
             retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             retention_cleanup_active: Arc::new(AtomicBool::new(false)),
@@ -21582,10 +21662,6 @@ impl TranscodeManager {
         }
         let hw_slot = admission.hw_slot;
         let sw_permit = admission.sw_permit;
-        let scratch_reservation = self
-            .reserve_rolling_scratch(RollingScratchSizing::SessionCeiling)
-            .await?;
-
         let session_id = takeover
             .as_ref()
             .map(|takeover| takeover.provisional_session_id.clone())
@@ -21636,6 +21712,19 @@ impl TranscodeManager {
         // byte-producing decision, so it receives a fresh complete plan;
         // neither the old encoder nor its decode surface is patched in place.
         let plan = self.resolve_movie_plan(&file, &opts, encoder).await?;
+        // Every object FFmpeg's muxer writes for this session passes a
+        // scratch grant before it reaches the disk, so the session starts on
+        // its startup allowance and grows, instead of reserving the whole
+        // per-session ceiling that an unbounded writer had to.
+        let output_bitrate = transcode_output_bitrate(&opts);
+        let scratch_envelope = rolling_scratch_envelope(output_bitrate, 1.0);
+        let scratch_reservation = self
+            .reserve_rolling_scratch(RollingScratchSizing::Startup(rolling_startup_bytes(
+                output_bitrate,
+                1.0,
+            )))
+            .await?;
+        let upload = self.bind_scratch_upload(&dir, &scratch_reservation, scratch_envelope)?;
         let pacing = self.pacing(false).await;
         let automatic_decoder_recovery = self.automatic_decoder_recovery_enabled();
         let observation = DiagnosticObservation::for_plan(
@@ -21643,10 +21732,9 @@ impl TranscodeManager {
             &self.measured_decoders,
             automatic_decoder_recovery,
         );
-        let execution =
-            TranscodeExecution::from_options(&file, &opts, pacing, &dir.to_string_lossy())
-                .map_err(|error| error.to_string())?
-                .observing_qualified_grammar(observation.qualified_logging());
+        let execution = TranscodeExecution::from_options(&file, &opts, pacing, &upload.base_url(0))
+            .map_err(|error| error.to_string())?
+            .observing_qualified_grammar(observation.qualified_logging());
         let args = transcode::hls_args(&plan, &execution);
         if plan.input_is_hdr()
             && plan.options().pipeline == Pipeline::Cpu
@@ -21730,7 +21818,7 @@ impl TranscodeManager {
                         prepared,
                         &retry_plan,
                         pacing,
-                        &dir,
+                        &upload.base_url(1),
                         &presentation_contract_fingerprint,
                         self.admissions.software_pool(),
                         software_budget,
@@ -21783,7 +21871,7 @@ impl TranscodeManager {
                                             prepared,
                                             &alternate_plan,
                                             pacing,
-                                            &dir,
+                                            &upload.base_url(2),
                                             &presentation_contract_fingerprint,
                                             self.admissions.software_pool(),
                                             software_budget,
@@ -22031,7 +22119,8 @@ impl TranscodeManager {
             live_bytes: Arc::new(AtomicI64::new(0)),
             scratch: Some(scratch_reservation.bound_to(&session_id, 0)),
             retired_release: Arc::new(RetiredRelease::new()),
-            scratch_envelope: 0,
+            scratch_envelope,
+            upload: Some(upload),
             retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
             retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             retention_cleanup_active: Arc::new(AtomicBool::new(false)),
@@ -22296,17 +22385,16 @@ impl TranscodeManager {
             .flatten()
             .map(|i| i.title)
             .unwrap_or_else(|| "(unknown)".to_owned());
-        // The copy writer is the one producer whose every object passes a
-        // Rust grant boundary before it exists, so it is the one that may
-        // start small and grow. Sizing covers the *effective* startup gate —
+        // Every object this session writes passes a Rust grant boundary
+        // before it exists, so it may start small and grow. Sizing covers the
+        // *effective* startup gate —
         // the rolling publication clock's runway, not just the copy writer's
         // own 12 s — plus one complete segment, plus the envelope, because a
         // session that cannot reach a published playlist has no client to
         // drain it and nothing to wait for.
         //
-        // Direct and transcoded output keeps the whole per-session ceiling:
-        // FFmpeg's `-f hls` writes pass no such boundary, and a measurement
-        // taken afterwards can only discover an overrun, never prevent one.
+        // FFmpeg's own `-f hls` muxer, where this session uses it, is held
+        // to the same rule through the upload endpoint bound below.
         let copy_bitrate = file
             .bitrate
             .filter(|rate| *rate > 0)
@@ -22335,6 +22423,12 @@ impl TranscodeManager {
             .await
             .map_err(|error| format!("holding Windows session directory: {error}"))?;
         let mut start_settlement = PrepublicationStartSettlement::new(dir.clone());
+        // FFmpeg's own HLS muxer -- the legacy writer, a takeover, and the
+        // legacy retry a segmenter session keeps in reserve -- uploads
+        // through this endpoint, so its objects are granted before they land
+        // exactly as the segmenter's are. Lane 0 is the initial attempt and
+        // lane 1 the retry.
+        let upload = self.bind_scratch_upload(&dir, &scratch_reservation, scratch_envelope)?;
 
         // An ffmpeg capability, read from the daemon's own record of which
         // ffmpeg it runs. It used to be read off the CACHE config — which
@@ -22396,7 +22490,7 @@ impl TranscodeManager {
             );
         }
         let pacing = self.pacing(true).await;
-        let legacy_args = || match takeover.as_ref() {
+        let legacy_args = |output: &str| match takeover.as_ref() {
             Some(takeover) => transcode::hls_copy_args_with_sequence(
                 &file,
                 start_seconds,
@@ -22406,7 +22500,7 @@ impl TranscodeManager {
                 video_options,
                 takeover.media_sequence,
                 &init_object_name(Some(takeover.owner_epoch)),
-                &dir.to_string_lossy(),
+                output,
             ),
             None => transcode::hls_copy_args_with_dolby_vision(
                 &file,
@@ -22415,7 +22509,7 @@ impl TranscodeManager {
                 options.transcode_audio,
                 pacing,
                 video_options,
-                &dir.to_string_lossy(),
+                output,
             ),
         };
         // Take over the cutting when the source is one whose keyframes can be
@@ -22435,7 +22529,7 @@ impl TranscodeManager {
                 video_options,
             )
         } else {
-            legacy_args()
+            legacy_args(&upload.base_url(0))
         };
         tracing::info!(
             session = %session_log_id(&session_id),
@@ -22478,7 +22572,7 @@ impl TranscodeManager {
         let retry = build_prepublication_copy_retry(
             segmenting,
             video_options,
-            legacy_args(),
+            legacy_args(&upload.base_url(1)),
             &presentation_contract_fingerprint,
             self.runtime_cache.clone(),
         );
@@ -22619,6 +22713,7 @@ impl TranscodeManager {
             scratch: Some(scratch_reservation.bound_to(&session_id, 0)),
             retired_release: Arc::new(RetiredRelease::new()),
             scratch_envelope,
+            upload: Some(upload),
             retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
             retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             retention_cleanup_active: Arc::new(AtomicBool::new(false)),
@@ -22757,6 +22852,7 @@ impl TranscodeManager {
                     Arc::clone(&self.scratch_cap),
                     scratch_envelope,
                 )
+                .with_starved_signal(Arc::clone(&self.scratch_starved))
             });
             spawn_copy_reader_owner(
                 Arc::clone(&session),
@@ -27364,9 +27460,11 @@ impl TranscodeManager {
     /// Re-authorize one producing session, and say whether it must stay held.
     ///
     /// `Some(grant)` means the budget refused to raise this entry and the
-    /// producer has already materialized everything it is authorized to. A
-    /// denied grant is a hold, never permission to write into space nobody
-    /// accounted for.
+    /// producer has already materialized everything it is authorized to, or
+    /// that one of its writers is waiting on a refused grant. A denied grant
+    /// is a hold, never permission to write into space nobody accounted for,
+    /// and a starved writer means the producer is blocked on a write: held,
+    /// that is a hold; unheld, its progress deadline reads it as a stall.
     fn regrant_rolling_scratch(&self, session: &Session, limits: AheadLimits) -> Option<i64> {
         let permit = session.scratch.as_ref()?;
         if session.scratch_envelope <= 0 {
@@ -27376,12 +27474,57 @@ impl TranscodeManager {
         }
         let ledger = permit.ledger();
         let key = permit.key();
-        if ledger.regrant(key, session.scratch_envelope, limits.global_max_bytes) {
-            return None;
+        let regranted = ledger.regrant(key, session.scratch_envelope, limits.global_max_bytes);
+        if ledger.starved(key) || (!regranted && ledger.grant_exhausted(key)) {
+            return Some(ledger.grant_of(key).unwrap_or(0));
         }
-        ledger
-            .grant_exhausted(key)
-            .then(|| ledger.grant_of(key).unwrap_or(0))
+        None
+    }
+
+    /// Evaluate flow for every session whose writer just started or stopped
+    /// waiting on a refused grant, so the hold lands while the writer waits
+    /// and lifts as soon as it can write, not at the next repair pass.
+    async fn evaluate_starved_sessions(self: &Arc<Self>) {
+        let sessions = self
+            .sessions
+            .lock()
+            .await
+            .iter()
+            .map(|(id, session)| (id.clone(), Arc::clone(session)))
+            .collect::<Vec<_>>();
+        for (id, session) in sessions {
+            let Some(permit) = session.scratch.as_ref() else {
+                continue;
+            };
+            if permit.ledger().starved(permit.key()) || session.suspended.load(Relaxed) {
+                self.ensure_flow_worker(&id, Arc::clone(&session));
+                let _ = session.control.request_flow();
+            }
+        }
+    }
+
+    /// Bind the upload endpoint a session's FFmpeg muxer writes through,
+    /// spending grants from the allocation admission just made.
+    fn bind_scratch_upload(
+        &self,
+        dir: &std::path::Path,
+        reservation: &crate::scratch_ledger::ScratchPermit,
+        envelope: i64,
+    ) -> Result<crate::scratch_put::PutSink, String> {
+        crate::scratch_put::PutSink::bind(
+            dir.to_path_buf(),
+            Some(
+                crate::copyseg::WriteGrants::new(
+                    Arc::clone(reservation.ledger()),
+                    reservation.key(),
+                    Arc::clone(&self.scratch_cap),
+                    envelope,
+                )
+                .with_starved_signal(Arc::clone(&self.scratch_starved)),
+            ),
+        )
+        // Loopback bind fails on descriptor or port exhaustion: transient.
+        .map_err(|error| capacity_error(format!("binding the scratch upload endpoint: {error}")))
     }
 
     /// Background loop: kill and remove sessions idle beyond the timeout,
@@ -27389,7 +27532,13 @@ impl TranscodeManager {
     pub async fn reap_loop(self: Arc<Self>) {
         let mut ticker = tokio::time::interval(FLOW_CONTROL_REPAIR_INTERVAL);
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                _ = ticker.tick() => {}
+                () = self.scratch_starved.notified() => {
+                    self.evaluate_starved_sessions().await;
+                    continue;
+                }
+            }
             let now_unix_ms = crate::media_sessions::unix_ms();
             self.terminal_controls
                 .lock()
@@ -27696,7 +27845,9 @@ fn ensure_retention_cleanup(session: &Session) {
                 let live = live_bytes.load(Relaxed).saturating_sub(bytes);
                 live_bytes.store(live, Release);
                 if let Some((ledger, key)) = scratch.as_ref() {
-                    ledger.observe_used(*key, live);
+                    // Not a walk: writes that landed since the last one are
+                    // not in `live`, and must stay charged.
+                    ledger.observe_unlinked(*key, live);
                 }
             }
         }
@@ -27858,7 +28009,10 @@ async fn gc_expired_segments(session: &Session) {
         // would find these files anyway -- they are regular files in the same
         // flat directory -- but "anyway" is up to a poll interval away, and
         // the global cap is compared against the ledger on every admission.
-        session.observe_scratch_bytes(live);
+        // Not a walk, so it leaves the landed-since-last-walk bytes alone.
+        if let Some(permit) = session.scratch.as_ref() {
+            permit.ledger().observe_unlinked(permit.key(), live);
+        }
     }
     drop(index);
     drop(producer_transition);
@@ -28937,6 +29091,7 @@ fn test_session_with_control(
         scratch: None,
         retired_release: Arc::new(RetiredRelease::new()),
         scratch_envelope: 0,
+        upload: None,
         retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
         retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
         retention_cleanup_active: Arc::new(AtomicBool::new(false)),

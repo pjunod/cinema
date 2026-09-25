@@ -421,7 +421,12 @@ also_in = ["crates/plurxd/src/transcode"]
 # This row's value is the whole integration tree re-measured after every plan
 # in this wave was merged together, so it is the sum of all of their deltas and
 # will not equal any single branch's arithmetic.
-expected_occurrences = 45
+# 45 -> 46 with the FFmpeg write boundary: the 250 ms poll in
+# `scratch_charge_a_transcode_starts_small_and_writes_through_the_grant`, which
+# waits for the real transcode it started to write its final playlist. Test-only,
+# bounded by its loop count, and it asserts rather than hangs. It owns no
+# producer and decides nothing about recovery.
+expected_occurrences = 46
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -1999,6 +2004,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # bounded held-file hashing worker, and two test-only HTTP fixture servers.
 # The hash worker holds its file until it exits; timeout discards its result
 # and it cannot publish captions. Fixture servers are aborted after use.
+# 591 -> 600 with the FFmpeg write boundary (`scratch_put.rs`). Two shipped
+# spawns: the endpoint's accept loop, owned by the session's `PutSink` and
+# aborted when it drops (it only accepts, never writes), and one task per
+# upload connection, counted in flight so `drain` can see it and deliberately
+# never aborted -- it finishes its current file write and exits when the sink
+# closes, its lane is retired or the allocation is fenced, and it holds a
+# scratch writer registration so retirement's barrier waits for it. Neither
+# owns a process, a recipe or a recovery decision. Seven are test fixtures:
+# four `spawn_blocking` calls that run a finite FFmpeg encode or remux to
+# completion, and three request senders joined before their tests end.
 # 587 -> 591 (measured) with L-02 M3/M4. Production, three: one
 # `tokio::task::spawn_blocking` in `LiveTvManager::touch_incarnation`, a
 # write of one small JSON file every 30 s while anything is live, awaited by
@@ -2015,7 +2030,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # process, no producer.
 # Merged with main's subtitle acquisition: the value is the whole merged
 # tree re-measured after the merge, the sum of both contributions.
-expected_occurrences = 595
+# Merged with main's FFmpeg write boundary (#505): the value is the whole
+# merged tree re-measured after the merge.
+expected_occurrences = 604
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2721,6 +2738,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Subtitle acquisition adds four: the 60-second background cadence, its
 # 120-second work budget, and five-second bounds on opening and hashing one
 # media file. Shutdown and lease loss cancel the async acquisition page.
+# 905 -> 921 with the FFmpeg write boundary. Shipped: in `scratch_put.rs` the
+# upload's 10 s request-head timeout, the 250 ms grant poll a starved writer
+# waits on (its end is decided by the budget, the lane or the session, never by
+# the timer), the accept loop's 50 ms back-off after an accept error, and a
+# 5 ms `std::thread::sleep` between retries of a descriptor-exhausted drain
+# sweep; in `transcode.rs` the 15 s bound on retiring a reaped attempt's lane
+# before a retry clears the directory, and the completion probe's drain bound,
+# which sits inside the actor's existing classification deadline. None is a
+# playback-progress watchdog or chooses a recipe. The other ten are test-only
+# and awaited: the receiver tests' sleeps and timeouts, and in `copyseg.rs`
+# the bounded grant-wait and starvation-signal checks.
 # 901 -> 913 (measured) with L-02 M3/M4: three new in production, one
 # replaced, nine in tests. The scratch-sweep loop's `tokio::time::sleep(ORPHAN_RETRY)` replaces its
 # `sleep(SCRATCH_SWEEP_INTERVAL)` (the hourly sweep now runs when due inside
@@ -2740,7 +2768,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # test wait. None owns a producer.
 # Merged with main's subtitle acquisition: the value is the whole merged
 # tree re-measured after the merge, the sum of both contributions.
-expected_occurrences = 917
+# Merged with main's FFmpeg write boundary (#505): the value is the whole
+# merged tree re-measured after the merge.
+expected_occurrences = 933
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2960,13 +2990,20 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # of one that exits before registration). Once per host, `kill_on_drop`,
 # bounded by a 120 s `tokio::time::timeout`, awaited to completion through
 # `output()`. It owns no producer and runs under `#[cfg(test)]` only.
+# 161 -> 163 with the FFmpeg write boundary: two test-only FFmpeg commands in
+# `scratch_put.rs` that encode or remux a short fixture once to files and once
+# through the upload endpoint, so the tests can compare the objects byte for
+# byte. Each runs to completion inside `spawn_blocking` before its fixture is
+# dropped.
 # 161 -> 162 (measured) with L-02 M4: one test-only
 # `tokio::process::Command::new("sleep")` in
 # `live_tv::tests::a_failed_cleanup_retires_the_session_and_keeps_the_child_until_reaped`,
 # spawned through `spawn_job_owned` as the unconfirmed FFmpeg an orphan
 # record must keep. The test's orphan retry kills and reaps it, and asserts
 # it gone; its job owns it if the test fails first.
-expected_occurrences = 162
+# Merged with main's FFmpeg write boundary (#505): the value is the whole
+# merged tree re-measured after the merge.
+expected_occurrences = 164
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3311,7 +3348,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `output()`. It owns no producer and runs under `#[cfg(test)]` only.
 # Subtitle acquisition adds two reqwest Response::status() reads for
 # HTTP status and redirect handling. Neither launches a process.
-expected_occurrences = 372
+# 372 -> 374: the `.status()` on those two test-only FFmpeg commands,
+# inventoried under `process-command-construction` above. Same children,
+# counted once in each sentinel.
+expected_occurrences = 374
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
