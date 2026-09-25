@@ -4806,7 +4806,39 @@ pub async fn activity_detail(
             }
         };
     }
+    // Every child process this node is running, with its priority class, what
+    // it is for and whether the kernel honoured the class (plan P-02 §3.2):
+    // hardware in use is visible here with a stop beside it. Operator-only,
+    // like the analysis block, and this node's own children only.
+    if user.0.is_admin {
+        response["processes"] = serde_json::to_value(plurx_core::process::priority::running())
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+    }
     Ok(Json(response))
+}
+
+/// DELETE /api/v1/activity/processes/{pid} (admin) — kill one child process
+/// the Activity page lists.
+///
+/// Only a pid the launcher registered can be named, and the kill goes
+/// through the pidfd taken at spawn, so a number that has since been reused
+/// by an unrelated process cannot be hit. The child's owner sees an ordinary
+/// exit: a playback producer's session reports it as it reports a crashed
+/// encoder, a background probe records a failed probe.
+pub async fn stop_process(
+    _admin: AdminUser,
+    axum::extract::Path(pid): axum::extract::Path<u32>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    match plurx_core::process::priority::stop(pid) {
+        Ok(true) => Ok(Json(
+            serde_json::json!({ "ok": true, "note": "stopped; its owner sees the process exit" }),
+        )),
+        Ok(false) => Err(ApiError::NotFound("process")),
+        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+            Err(ApiError::Conflict(error.to_string()))
+        }
+        Err(error) => Err(ApiError::Internal(error.to_string())),
+    }
 }
 
 /// DELETE /api/v1/activity/producer (admin) — stop the pre-transcode pass.
@@ -5333,8 +5365,11 @@ pub(crate) async fn metrics(
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
-         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         state.offline.prometheus(),
+        // Every child by priority class (plan P-02 §3.2): what this node's
+        // hardware is being spent on, and whether the kernel honoured it.
+        plurx_core::process::priority::prometheus(),
         plurx_core::store::prometheus_store_operations(),
         crate::store_result::prometheus(),
         plurx_core::scan::prometheus_scan_walk(),
