@@ -764,78 +764,204 @@ pub async fn search(
 
 #[cfg(test)]
 mod tests {
-    fn handler_body(start: &str, end: &str) -> String {
-        let source = include_str!("browse.rs");
-        let source = source
-            .split("\n#[cfg(test)]\nmod tests")
-            .next()
-            .unwrap_or(source);
-        source
-            .split_once(start)
-            .unwrap_or_else(|| panic!("missing {start}"))
-            .1
-            .split_once(end)
-            .unwrap_or_else(|| panic!("missing {end}"))
-            .0
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect()
+    use axum::extract::{Path, Query, State};
+    use axum::Json;
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, User};
+    use plurx_core::store::{scope_http_store_operations, HttpStoreOperationCounts};
+
+    use crate::http::extract::{AuthUser, ReadAfter};
+    use crate::state::AppState;
+
+    /// A movie library and a show library, one user with progress on a
+    /// movie and one watched episode, so every browse page below has cards,
+    /// containers and watch rows to annotate.
+    struct WatchPages {
+        state: AppState,
+        user: User,
+        shows: i64,
+        show: i64,
     }
 
-    fn watch_reads(body: &str) -> Vec<&'static str> {
-        [
-            ".watch_summary(",
-            ".watch_map(",
-            ".watch_rollup(",
-            ".watch_rollups(",
-            ".progress_rails(",
-            ".continue_watching(",
-            ".next_up(",
-            "watch_lookup(",
-        ]
-        .into_iter()
-        .flat_map(|call| std::iter::repeat_n(call, body.matches(call).count()))
-        .collect()
+    async fn seed_watch_pages() -> WatchPages {
+        let (_, state) = crate::http::tests::test_app_with_state();
+        let store = &state.store;
+        let user = store
+            .create_user("watch-pages", "hash", false)
+            .await
+            .expect("user");
+        let item = |library_id, kind, parent_id, title: &str, season, episode| NewItem {
+            library_id,
+            kind,
+            parent_id,
+            title: title.to_owned(),
+            year: None,
+            season_number: season,
+            episode_number: episode,
+        };
+        let library = |name: &str, kind| NewLibrary {
+            name: name.to_owned(),
+            kind,
+            paths: vec![std::path::PathBuf::from(format!("/{name}"))],
+            anime: false,
+        };
+        let movies = store
+            .create_library(&library("movies", LibraryKind::Movies))
+            .await
+            .expect("movie library")
+            .id;
+        let shows = store
+            .create_library(&library("shows", LibraryKind::Shows))
+            .await
+            .expect("show library")
+            .id;
+        let movie = store
+            .insert_item(&item(movies, ItemKind::Movie, None, "Movie", None, None))
+            .await
+            .expect("movie");
+        let show = store
+            .insert_item(&item(shows, ItemKind::Show, None, "Show", None, None))
+            .await
+            .expect("show");
+        let season = store
+            .insert_item(&item(
+                shows,
+                ItemKind::Season,
+                Some(show),
+                "S1",
+                Some(1),
+                None,
+            ))
+            .await
+            .expect("season");
+        let mut episodes = Vec::new();
+        for number in 1..=2 {
+            episodes.push(
+                store
+                    .insert_item(&item(
+                        shows,
+                        ItemKind::Episode,
+                        Some(season),
+                        &format!("E{number}"),
+                        Some(1),
+                        Some(number),
+                    ))
+                    .await
+                    .expect("episode"),
+            );
+        }
+        store
+            .put_progress(user.id, movie, 10_000, Some(100_000))
+            .await
+            .expect("movie progress");
+        store
+            .set_watched(user.id, episodes[0], true)
+            .await
+            .expect("first episode watched");
+        WatchPages {
+            state,
+            user,
+            shows,
+            show,
+        }
     }
 
-    /// K-04 M3: Home's library previews read watch state exactly once — one
-    /// `watch_summary` for every card's watch row and every container's
-    /// rollup. That call is one consistent statement on the replicated store
-    /// (`watch_summary_and_progress_rails_are_one_read_matching_the_separate_reads`
-    /// in the store contract counts it), so the page costs one Authority read
-    /// for watch state, down from two.
-    #[test]
-    fn home_previews_reads_watch_state_exactly_once() {
-        let body = handler_body("pub async fn home_previews", "pub async fn hubs");
-        assert_eq!(watch_reads(&body), [".watch_summary("]);
-        assert!(body.contains("state.catalogue.watch_summary("));
+    /// Run one handler inside a request scope, as the route middleware does,
+    /// and return its body with the number of watch-state reads the Store
+    /// performed for it.
+    async fn watch_reads_of<T: serde::Serialize>(
+        handler: impl std::future::Future<Output = Result<Json<T>, super::ApiError>>,
+    ) -> (serde_json::Value, u64) {
+        let counts = HttpStoreOperationCounts::default();
+        let Ok(Json(body)) = scope_http_store_operations(counts.clone(), handler).await else {
+            panic!("handler failed");
+        };
+        (
+            serde_json::to_value(body).expect("serialize body"),
+            counts.watch_reads(),
+        )
     }
 
-    /// The same for the other browse pages that used to issue two watch
-    /// reads: the item page asks once for its children and its rollup, the
-    /// grid once for its cards and its containers, and Home's rails once for
-    /// both progress-derived rails (recently-added keeps its own lookup,
-    /// which depends on the catalogue rows it annotates).
-    #[test]
-    fn home_hubs_grid_and_item_pages_read_watch_state_once_per_dependency() {
-        assert_eq!(
-            watch_reads(&handler_body(
-                "pub async fn list_items",
-                "pub struct ItemDetail"
-            )),
-            [".watch_summary("]
+    /// K-04 M3's acceptance (§5.4), as a counter rather than a reading of
+    /// the source (review of #504, finding 3): Home's library previews read
+    /// watch state exactly once — one `watch_summary` for every card's watch
+    /// row and every container's rollup. The counter is the Store's own, so
+    /// a watch read added through any method, `state.store` included, is
+    /// counted; the store contract pins that the one read is one statement
+    /// on the replicated store.
+    #[tokio::test]
+    async fn home_previews_reads_watch_state_exactly_once() {
+        let pages = seed_watch_pages().await;
+        let (body, reads) = watch_reads_of(super::home_previews(
+            AuthUser(pages.user.clone()),
+            State(pages.state.clone()),
+            ReadAfter(None),
+        ))
+        .await;
+        assert_eq!(reads, 1, "home previews: {body}");
+        let cards: Vec<&serde_json::Value> = body["libraries"]
+            .as_array()
+            .expect("libraries")
+            .iter()
+            .flat_map(|page| page["items"].as_array().expect("items"))
+            .collect();
+        assert!(
+            cards.iter().any(|card| card.get("watch").is_some()),
+            "the one read answered the watch rows: {body}"
         );
-        assert_eq!(
-            watch_reads(&handler_body(
-                "pub async fn item_detail",
-                "pub async fn home_previews"
-            )),
-            [".watch_summary("]
+        assert!(
+            cards
+                .iter()
+                .any(|card| card["id"] == pages.show && card.get("rollup").is_some()),
+            "the one read answered the rollups: {body}"
         );
-        assert_eq!(
-            watch_reads(&handler_body("pub async fn hubs", "pub struct SearchQuery")),
-            [".progress_rails(", "watch_lookup("]
+    }
+
+    /// The same counter for the other browse pages that used to issue two
+    /// watch reads: the grid once for its cards and its containers, the item
+    /// page once for its children and its rollup, and Home's rails once for
+    /// both progress-derived rails, plus the recently-added rail's own lookup
+    /// when it has cards (it annotates catalogue rows it has to read first).
+    #[tokio::test]
+    async fn home_hubs_grid_and_item_pages_read_watch_state_once_per_dependency() {
+        let pages = seed_watch_pages().await;
+        let (body, reads) = watch_reads_of(super::list_items(
+            AuthUser(pages.user.clone()),
+            State(pages.state.clone()),
+            ReadAfter(None),
+            Path(pages.shows),
+            Query(serde_json::from_value(serde_json::json!({})).expect("default query")),
+        ))
+        .await;
+        assert_eq!(reads, 1, "library grid: {body}");
+
+        let (body, reads) = watch_reads_of(super::item_detail(
+            AuthUser(pages.user.clone()),
+            State(pages.state.clone()),
+            ReadAfter(None),
+            Path(pages.show),
+        ))
+        .await;
+        assert_eq!(reads, 1, "item page: {body}");
+
+        let (body, reads) = watch_reads_of(super::hubs(
+            AuthUser(pages.user.clone()),
+            State(pages.state.clone()),
+            ReadAfter(None),
+            Query(serde_json::from_value(serde_json::json!({})).expect("default query")),
+        ))
+        .await;
+        assert!(
+            !body["continue_watching"]
+                .as_array()
+                .expect("continue watching")
+                .is_empty(),
+            "the rails were read: {body}"
         );
+        let recent = !body["recently_added"]
+            .as_array()
+            .expect("recently added")
+            .is_empty();
+        assert_eq!(reads, 1 + u64::from(recent), "hubs: {body}");
     }
 
     use super::index_refusal_summary;

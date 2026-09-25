@@ -31159,25 +31159,35 @@ async fn watch_summary_and_progress_rails_are_one_read_matching_the_separate_rea
         assert_eq!(summary.rollups, expected_rollups, "{label} rollup half");
     };
 
+    // The per-request watch-read counter the HTTP layer asserts on counts
+    // exactly these statements: one each.
     store.validation_reset_operation_counts();
-    let summary = dynamic
-        .watch_summary(fixture.user, &item_ids, &container_ids)
-        .await
-        .expect("Authority summary");
+    let request = plurx_core::store::HttpStoreOperationCounts::default();
+    let summary = plurx_core::store::scope_http_store_operations(
+        request.clone(),
+        dynamic.watch_summary(fixture.user, &item_ids, &container_ids),
+    )
+    .await
+    .expect("Authority summary");
     check_summary(summary, "Authority");
     assert_watch_read_path(&store, false, "Authority summary is one consistent read");
+    assert_eq!(request.watch_reads(), 1, "summary: one counted watch read");
 
     store.validation_reset_operation_counts();
-    let rails = dynamic
-        .progress_rails(fixture.user, 20)
-        .await
-        .expect("Authority rails");
+    let request = plurx_core::store::HttpStoreOperationCounts::default();
+    let rails = plurx_core::store::scope_http_store_operations(
+        request.clone(),
+        dynamic.progress_rails(fixture.user, 20),
+    )
+    .await
+    .expect("Authority rails");
     assert_eq!(
         serde_json::to_value(rails).expect("serialize rails"),
         expected_rails,
         "Authority rails"
     );
     assert_watch_read_path(&store, false, "Authority rails are one consistent read");
+    assert_eq!(request.watch_reads(), 1, "rails: one counted watch read");
 
     store.validation_reset_operation_counts();
     let summary = watch_fence_reader(&store, commit)

@@ -5330,6 +5330,7 @@ pub async fn requeue_cluster_fragment_index_after_no_holder(
 #[derive(Clone, Default)]
 pub struct HttpStoreOperationCounts {
     counts: std::sync::Arc<[std::sync::atomic::AtomicU64; 3]>,
+    watch_reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl HttpStoreOperationCounts {
@@ -5338,6 +5339,16 @@ impl HttpStoreOperationCounts {
         use std::sync::atomic::Ordering;
 
         std::array::from_fn(|index| self.counts[index].load(Ordering::Relaxed))
+    }
+
+    /// Watch-state reads the Store performed inside this request (K-04 M3),
+    /// on either backend: one per statement a [`WatchStore`] read method
+    /// sends to the replicated store, Authority or local, and one per
+    /// connection checkout on SQLite. Catalogue queries that merely filter by
+    /// watch state are catalogue reads and are not counted here.
+    #[must_use]
+    pub fn watch_reads(&self) -> u64 {
+        self.watch_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn record(&self, class_index: usize) {
@@ -5366,6 +5377,16 @@ pub async fn scope_http_store_operations<T>(
 
 pub(super) fn record_http_store_operation(class_index: usize) {
     let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| counts.record(class_index));
+}
+
+/// Count one watch-state read into the current request, if any. Called by
+/// both backends at the one place each issues a watch read.
+pub(super) fn record_http_watch_read() {
+    let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| {
+        counts
+            .watch_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    });
 }
 
 /// Both halves of [`WatchStore::watch_summary`].

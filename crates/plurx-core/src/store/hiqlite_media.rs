@@ -3768,14 +3768,13 @@ impl WatchStore for HiqliteAuthStore {
         item_id: i64,
     ) -> Result<Option<WatchState>, StoreError> {
         Ok(self
-            .client()
-            .query_consistent_map::<WatchRow, _>(
+            .watch_query::<WatchRow>(
+                WatchRead::Authority,
                 "SELECT position_ms, duration_ms, watched, updated_at \
                  FROM watch_state WHERE user_id = $1 AND item_id = $2",
                 params!(user_id, item_id),
             )
-            .await
-            .map_err(database_error)?
+            .await?
             .into_iter()
             .next()
             .map(Into::into))
@@ -4066,6 +4065,9 @@ impl HiqliteAuthStore {
     where
         T: for<'a, 'r> From<&'a mut Row<'r>> + Send + 'static,
     {
+        // Every watch-state read on this backend is one statement through
+        // here, so this is where a request's watch reads are counted.
+        super::record_http_watch_read();
         match read {
             WatchRead::Authority => self.client().query_consistent_map(sql, params).await,
             WatchRead::Local => self.client().query_map(sql, params).await,

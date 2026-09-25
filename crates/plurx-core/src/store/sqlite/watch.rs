@@ -128,6 +128,19 @@ fn watch_rollups_on(
     Ok(out)
 }
 
+impl SqliteStore {
+    /// One watch-state read: one connection checkout, counted into the
+    /// current HTTP request's watch reads (K-04 M3).
+    async fn watch_read<T, F>(&self, read: F) -> Result<T, StoreError>
+    where
+        F: FnOnce(&rusqlite::Connection) -> Result<T, StoreError> + Send + 'static,
+        T: Send + 'static,
+    {
+        crate::store::record_http_watch_read();
+        self.with_conn(read).await
+    }
+}
+
 #[async_trait]
 impl WatchStore for SqliteStore {
     async fn watch_state(
@@ -135,7 +148,7 @@ impl WatchStore for SqliteStore {
         user_id: i64,
         item_id: i64,
     ) -> Result<Option<WatchState>, StoreError> {
-        self.with_conn(move |conn| {
+        self.watch_read(move |conn| {
             Ok(conn
                 .query_row(
                     "SELECT position_ms, duration_ms, watched, updated_at
@@ -157,7 +170,7 @@ impl WatchStore for SqliteStore {
             return Ok(Vec::new());
         }
         let item_ids = item_ids.to_vec();
-        self.with_conn(move |conn| watch_map_on(conn, user_id, &item_ids))
+        self.watch_read(move |conn| watch_map_on(conn, user_id, &item_ids))
             .await
     }
 
@@ -171,7 +184,7 @@ impl WatchStore for SqliteStore {
         let container_ids = container_ids.to_vec();
         // One closure on the one connection: nothing can write between the
         // two statements, so both halves describe the same watch state.
-        self.with_conn(move |conn| {
+        self.watch_read(move |conn| {
             Ok(WatchSummary {
                 watch: watch_map_on(conn, user_id, &item_ids)?,
                 rollups: watch_rollups_on(conn, user_id, &container_ids)?,
@@ -181,7 +194,7 @@ impl WatchStore for SqliteStore {
     }
 
     async fn progress_rails(&self, user_id: i64, limit: i64) -> Result<ProgressRails, StoreError> {
-        self.with_conn(move |conn| {
+        self.watch_read(move |conn| {
             let sql =
                 super::super::sql_source::progress_rails(&item_cols("i"), &item_cols("e")).sqlite();
             let mut stmt = conn.prepare(&sql)?;
@@ -478,7 +491,7 @@ impl WatchStore for SqliteStore {
     }
 
     async fn watch_rollup(&self, user_id: i64, item_id: i64) -> Result<WatchRollup, StoreError> {
-        self.with_conn(move |conn| {
+        self.watch_read(move |conn| {
             let (leaves, watched) = conn.query_row(
                 &format!(
                     "WITH RECURSIVE tree(id) AS (
@@ -507,7 +520,7 @@ impl WatchStore for SqliteStore {
         ids: &[i64],
     ) -> Result<std::collections::HashMap<i64, WatchRollup>, StoreError> {
         let ids = ids.to_vec();
-        self.with_conn(move |conn| watch_rollups_on(conn, user_id, &ids))
+        self.watch_read(move |conn| watch_rollups_on(conn, user_id, &ids))
             .await
     }
 
@@ -516,7 +529,7 @@ impl WatchStore for SqliteStore {
         user_id: i64,
         limit: i64,
     ) -> Result<Vec<InProgressItem>, StoreError> {
-        self.with_conn(move |conn| {
+        self.watch_read(move |conn| {
             // In-progress = has a position, not finished. Episodes carry their
             // show's title so a card can read "Severance · S1E3".
             let mut stmt = conn.prepare(&format!(
@@ -549,7 +562,7 @@ impl WatchStore for SqliteStore {
     }
 
     async fn next_up(&self, user_id: i64, limit: i64) -> Result<Vec<RecentItem>, StoreError> {
-        self.with_conn(move |conn| {
+        self.watch_read(move |conn| {
             // Episode ordering key = season*100000 + episode. Next-up per show
             // is the smallest-ordering episode that is unwatched and not in
             // progress, strictly after the last watched episode of that show.
