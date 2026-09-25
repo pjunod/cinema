@@ -30773,7 +30773,7 @@ async fn catalogue_recently_added_leaves_out_recordings_on_every_backend() {
 #[tokio::test]
 async fn search_renamed_title_is_found_by_its_new_title_only() {
     use plurx_core::metadata::classification::classify;
-    use plurx_core::store::classification::{ClassificationStore, Record};
+    use plurx_core::store::classification::Record;
 
     for_each_backend(|store, backend| async move {
         let library = store
