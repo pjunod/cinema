@@ -58,9 +58,12 @@ any in-band parameter set disagrees with the `hvcC`. The daemon measures it
 — about a second on a cold NAS-mounted 2160p film — and grafts the record onto
 the file's stored probe JSON under `plurx_hevc_parameter_sets`, fenced to the
 file's size and mtime. It runs on the playback copy decision path the first
-time a file without a current record is played; background index discovery
-does not measure, so the library is never swept. A failed or overrun census
-records nothing and falls back to the historical behaviour.
+time a file without a current record is played as a copy; encodes, direct
+plays and background index discovery do not measure, so the library is never
+swept. A run in which any sample failed or overran can record a disagreement
+it saw but never agreement; otherwise it records nothing and the copy keeps
+the historical behaviour. The record is not a source fact, so the held-source
+probe comparison ignores it.
 
 **The decision.** `CopyVideoOptions::from_probe` reads the record, beside the
 `extradata_size` fact that already drives empty-`hvcC` promotion, so every
@@ -69,7 +72,7 @@ copy path and every node decides from the same replicated row:
 | Source | Bitstream filter | `merge` | Index identity |
 |---|---|---|---|
 | In-band sets repeat the record, or none (Blu-ray remux, most encodes) | unchanged: deletes 32–34 | unchanged: deletes 32–34 | unchanged |
-| In-band sets redefine the record (UNABOMBER) | keeps 32–34; DV layers handled exactly as before | keeps them | new (the argv differs) |
+| In-band sets redefine the record (UNABOMBER) | keeps 32–34; DV layers handled exactly as before | keeps them | new (a recipe marker, on every branch) |
 
 The `hvc1`/`dvh1` label is unchanged. Only the second row's files change at
 all, so there is no library re-index, no protocol bump and no refusal.

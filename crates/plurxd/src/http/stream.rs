@@ -2287,7 +2287,13 @@ pub async fn decision(
     // meaning until M2 moves every create path to the richer contract.
     decision.delivered_audio =
         playback::resolve_audio_for_method(&file, &q.profile(decision_now_ms), decision.method);
-    let probe_json = crate::hevc_census::probe_json_for_copy(state.store.as_ref(), &file).await?;
+    // Only a copy needs the census; an encode never carries the source's
+    // parameter sets, and a direct play serves them untouched.
+    let probe_json = if decision.method == playback::PlaybackMethod::Remux {
+        crate::hevc_census::probe_json_for_copy(state.store.as_ref(), &file).await?
+    } else {
+        state.store.get_file_probe_json(id).await?
+    };
     let vod_video = plurx_core::transcode::CopyVideoOptions::from_probe(
         &file,
         probe_json.as_deref(),

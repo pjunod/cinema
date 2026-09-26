@@ -24752,6 +24752,15 @@ async fn media_contract_runs_through_dyn_store() {
             .await
             .expect("fenced census"));
         assert!(!store
+            .merge_file_probe_hevc_parameter_sets(
+                movie_file,
+                measured.size,
+                measured.mtime + 1,
+                census,
+            )
+            .await
+            .expect("mtime-fenced census"));
+        assert!(!store
             .get_file_probe_json(movie_file)
             .await
             .expect("probe JSON")

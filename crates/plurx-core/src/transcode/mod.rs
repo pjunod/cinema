@@ -2058,8 +2058,23 @@ pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<Str
     if options.dv_convert && source.hdr.as_deref() == Some("dolby_vision") {
         args.push(DV_CONVERT_MARKER.into());
     }
+    // Retention changes the bytes on every branch, including the two that
+    // emit no 32-34 filter at all (Profile 5 preservation and empty-hvcC
+    // promotion): there it is the segmenter's merge that stops stripping.
+    // The filter string cannot carry that, so the recipe does.
+    if options.retain_hevc_parameter_sets
+        && matches!(source.video_codec.as_deref(), Some("hevc" | "h265"))
+    {
+        args.push(HEVC_RETAIN_PARAMETER_SETS_MARKER.into());
+    }
     args
 }
+
+/// The marker `copy_video_args` carries for a copy that keeps its in-band HEVC
+/// parameter sets ([`CopyVideoOptions::retains_hevc_parameter_sets`]).
+///
+/// Like [`DV_CONVERT_MARKER`], fingerprinted and then removed before exec.
+pub const HEVC_RETAIN_PARAMETER_SETS_MARKER: &str = "--plurx-hevc-parameter-sets=retain";
 
 /// The marker `copy_video_args` carries for a Profile 7 → 8.1 conversion.
 ///

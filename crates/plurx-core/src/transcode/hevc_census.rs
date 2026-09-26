@@ -189,6 +189,10 @@ pub fn sample_args(path: &Path, at_seconds: f64) -> Vec<OsString> {
     for arg in [
         "-map",
         "0:V:0",
+        // The mp4 muxer adds a chapter text track that `-map` does not govern;
+        // production copies drop it the same way.
+        "-map_chapters",
+        "-1",
         "-frames:v",
         "1",
         "-an",
@@ -222,6 +226,17 @@ pub fn observe(output: &[u8]) -> Result<InBandParameterSets, String> {
                 let Some(init) = init.as_ref() else {
                     return Err("a fragment arrived before the moov".into());
                 };
+                let Some(video) = init.video() else {
+                    return Err("the sample's moov declares no video track".into());
+                };
+                // Only the fragment carrying the keyframe says anything; a run
+                // of some other track is not an observation of "absent".
+                if fragment
+                    .track(video.id)
+                    .is_none_or(|track| track.sample_count() == 0)
+                {
+                    continue;
+                }
                 return fmp4::compare_in_band_parameter_sets(init, &fragment)
                     .map_err(|error| error.to_string());
             }
@@ -353,6 +368,36 @@ mod tests {
     }
 
     #[test]
+    fn retention_moves_every_copy_identity_and_never_reaches_ffmpeg() {
+        // The Profile 5 and empty-hvcC branches emit no 32-34 filter, so the
+        // bitstream filter alone cannot tell a retaining copy from one whose
+        // segmenter still strips. The marker must move the fingerprint on
+        // every branch and be gone from what ffmpeg runs.
+        use crate::transcode::{copy_video_args, strip_plurx_markers, CopyVideoOptions};
+        for hdr in [None, Some("dolby_vision")] {
+            for preserve in [false, true] {
+                for promote in [false, true] {
+                    let mut file = hevc();
+                    file.hdr = hdr.map(str::to_owned);
+                    let base =
+                        CopyVideoOptions::new(true, preserve).with_parameter_set_promotion(promote);
+                    let retaining = base.with_parameter_set_retention(true);
+                    let before = copy_video_args(&file, base);
+                    let after = copy_video_args(&file, retaining);
+                    assert_ne!(
+                        crate::segplan::argv_fingerprint(&before),
+                        crate::segplan::argv_fingerprint(&after),
+                        "{hdr:?} preserve={preserve} promote={promote}"
+                    );
+                    assert!(!strip_plurx_markers(&after)
+                        .iter()
+                        .any(|arg| arg.starts_with("--plurx-")));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_sample_argv_copies_one_unfiltered_keyframe() {
         let args: Vec<String> = sample_args(Path::new("/m/film.mkv"), 600.0)
             .into_iter()
@@ -360,7 +405,10 @@ mod tests {
             .collect();
         let joined = args.join(" ");
         assert!(joined.contains("-ss 600.000 -i /m/film.mkv"), "{joined}");
-        assert!(joined.contains("-map 0:V:0 -frames:v 1"), "{joined}");
+        assert!(
+            joined.contains("-map 0:V:0 -map_chapters -1 -frames:v 1"),
+            "{joined}"
+        );
         assert!(!joined.contains("-bsf"), "{joined}");
         assert!(!sample_args(Path::new("/m/film.mkv"), 0.0)
             .iter()

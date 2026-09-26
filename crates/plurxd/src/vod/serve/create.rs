@@ -183,9 +183,14 @@ impl VodServe {
             ));
         };
         let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
-        let probe_json = crate::hevc_census::probe_json_for_copy(self.shared.store.as_ref(), file)
-            .await
-            .map_err(|error| format!("reading the file probe: {error}"))?;
+        // An encoded rendition never carries the source's parameter sets, so
+        // only a copy waits on the census.
+        let probe_json = if prepared.encoding.is_none() {
+            crate::hevc_census::probe_json_for_copy(self.shared.store.as_ref(), file).await
+        } else {
+            self.shared.store.get_file_probe_json(file.id).await
+        }
+        .map_err(|error| format!("reading the file probe: {error}"))?;
         let video = copy_video_pipeline(
             file,
             probe_json.as_deref(),

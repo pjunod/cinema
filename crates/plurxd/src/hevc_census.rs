@@ -14,9 +14,10 @@
 //! preparation a play queues names the identity the census chose. Measured on the NAS-mounted
 //! library: seven samples of a cold 2160p film cost about a second. A census
 //! that fails or overruns records nothing and answers with the stored probe
-//! unchanged, which is the copy path's behaviour before this existed; a
-//! failure is not retried for [`RETRY_AFTER_FAILURE`] so a file that cannot be
-//! read does not charge every request for the attempt.
+//! unchanged, which is the copy path's behaviour before this existed. A run
+//! with any failed sample is incomplete and can only record a disagreement it
+//! actually saw. A failure is not retried for [`RETRY_AFTER_FAILURE`] so a file
+//! that cannot be read does not charge every request for the attempt.
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -70,7 +71,29 @@ pub(crate) async fn probe_json_for_copy(
             .unwrap_or_else(|poison| poison.into_inner());
         Arc::clone(in_flight.entry(file.id).or_default())
     };
-    let _measuring = lock.lock().await;
+    let measuring = lock.lock().await;
+    let answer = measure_and_record(store, file).await;
+    drop(measuring);
+    // Nobody else waits on this file's lock: forget it, so the map holds only
+    // files being measured rather than every HEVC title ever played.
+    {
+        let mut in_flight = IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if in_flight
+            .get(&file.id)
+            .is_some_and(|held| Arc::ptr_eq(held, &lock) && Arc::strong_count(held) == 2)
+        {
+            in_flight.remove(&file.id);
+        }
+    }
+    answer
+}
+
+async fn measure_and_record(
+    store: &dyn Store,
+    file: &MediaFile,
+) -> Result<Option<String>, StoreError> {
     // Another request may have recorded it while this one waited.
     let probe_json = store.get_file_probe_json(file.id).await?;
     if !hevc_census::needs_census(file, probe_json.as_deref()) || recently_failed(file) {
@@ -104,10 +127,12 @@ pub(crate) async fn probe_json_for_copy(
                 file_id = file.id,
                 "HEVC parameter-set census not recorded: the file changed while it was measured"
             );
+            note_failure(file);
             Ok(probe_json)
         }
         Err(error) => {
             tracing::warn!(file_id = file.id, %error, "recording the HEVC parameter-set census");
+            note_failure(file);
             Ok(probe_json)
         }
     }
@@ -136,7 +161,7 @@ async fn measure(file: &MediaFile) -> Option<Census> {
     let deadline = tokio::time::Instant::now() + CENSUS_BUDGET;
     let mut observations = Vec::new();
     let mut failures = Vec::new();
-    let mut complete = true;
+    let mut timed_out = false;
     loop {
         match tokio::time::timeout_at(deadline, samples.join_next()).await {
             Ok(Some(Ok(Ok(observed)))) => observations.push(observed),
@@ -145,12 +170,28 @@ async fn measure(file: &MediaFile) -> Option<Census> {
             Ok(None) => break,
             Err(_) => {
                 samples.abort_all();
-                complete = false;
+                timed_out = true;
                 break;
             }
         }
     }
-    let census = Census::from_observations(file, &observations, complete);
+    conclude(file, &observations, &failures, timed_out)
+}
+
+/// What a run of samples may record.
+///
+/// A sample that failed is a part of the film the census did not see, so the
+/// run is incomplete whether it failed fast or overran the budget: a later
+/// keyframe is exactly where a chunk-encoded film redefines what its opening
+/// one repeated. Only a disagreement survives a partial run.
+fn conclude(
+    file: &MediaFile,
+    observations: &[InBandParameterSets],
+    failures: &[String],
+    timed_out: bool,
+) -> Option<Census> {
+    let complete = !timed_out && failures.is_empty();
+    let census = Census::from_observations(file, observations, complete);
     if census.is_none() {
         tracing::warn!(
             file_id = file.id,
@@ -467,6 +508,33 @@ mod tests {
             index.promotion.parameter_sets.is_empty(),
             "{:?}",
             index.promotion
+        );
+    }
+
+    #[test]
+    fn a_census_with_a_failed_sample_cannot_conclude_constant() {
+        use InBandParameterSets::*;
+        let file = hevc_file_at(std::path::PathBuf::from("/m/film.mkv"));
+        let failed = ["ffmpeg exited Some(1): seek failed".to_owned()];
+        // Every sample agreed and none failed: agreement.
+        assert_eq!(
+            conclude(&file, &[MatchSampleEntry, Absent], &[], false).map(|c| c.verdict),
+            Some(hevc_census::Verdict::Constant)
+        );
+        // The opening keyframe agreed but a later one was never seen.
+        assert_eq!(conclude(&file, &[MatchSampleEntry], &failed, false), None);
+        // Or the budget ran out before it was.
+        assert_eq!(conclude(&file, &[MatchSampleEntry], &[], true), None);
+        // A disagreement that was seen stands either way.
+        assert_eq!(
+            conclude(
+                &file,
+                &[MatchSampleEntry, DifferFromSampleEntry],
+                &failed,
+                true
+            )
+            .map(|c| c.verdict),
+            Some(hevc_census::Verdict::Varying)
         );
     }
 
