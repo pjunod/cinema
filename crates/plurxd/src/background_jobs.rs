@@ -17,6 +17,11 @@ use tokio::sync::{watch, Mutex};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+#[path = "background_job_metrics.rs"]
+mod metrics;
+pub(crate) use metrics::prometheus;
+use metrics::Event;
+
 const PUBLICATION_MARGIN: Duration = Duration::from_secs(3);
 
 pub(crate) fn retry_delay_ms(id: &str, failed_attempts: i64) -> i64 {
@@ -40,12 +45,22 @@ fn unix_ms() -> Result<i64, StoreError> {
         .map_err(|_| StoreError::Task("background clock overflow".into()))
 }
 
+fn settlement_event(settlement: &JobSettlement) -> Event {
+    match settlement {
+        JobSettlement::Yield { .. } => Event::Yield,
+        JobSettlement::Retry { .. } | JobSettlement::Fail { .. } => Event::ChargedFailure,
+        JobSettlement::Cancel | JobSettlement::Stop { .. } => Event::Cancel,
+    }
+}
+
 struct ClaimState {
     token: Option<JobToken>,
     cancelling: bool,
 }
 
 struct Inner {
+    kind: plurx_core::store::background_jobs::JobKind,
+    started: Instant,
     store: Arc<dyn Store>,
     authority: Arc<dyn ClusterJobAuthority>,
     state: Mutex<ClaimState>,
@@ -66,6 +81,34 @@ pub(crate) struct ActiveBackgroundJob {
 /// caller continues holding its local permit; do not try another candidate
 /// merely because the first acknowledgement disappeared.
 pub(crate) async fn claim_with_resolution(
+    store: &dyn Store,
+    candidate: &BackgroundJob,
+    request: ClaimJob,
+) -> Result<Option<(BackgroundJob, Instant)>, StoreError> {
+    let kind = request.kind;
+    let issued = Instant::now();
+    metrics::event(kind, Event::ClaimWrite);
+    let queue_age = request
+        .now_ms
+        .saturating_sub(candidate.created_at_ms)
+        .max(0) as u64;
+    let result = claim_with_resolution_inner(store, candidate, request).await;
+    metrics::claim_latency(kind, issued.elapsed());
+    match &result {
+        Ok(Some(_)) => {
+            metrics::event(kind, Event::ClaimAccepted);
+            metrics::queue_wait(kind, Duration::from_millis(queue_age));
+            if candidate.state == plurx_core::store::background_jobs::JobState::Running {
+                metrics::event(kind, Event::Takeover);
+            }
+        }
+        Ok(None) => metrics::event(kind, Event::ClaimRefused),
+        Err(_) => metrics::event(kind, Event::ClaimError),
+    }
+    result
+}
+
+async fn claim_with_resolution_inner(
     store: &dyn Store,
     candidate: &BackgroundJob,
     request: ClaimJob,
@@ -145,6 +188,7 @@ impl ActiveBackgroundJob {
         authority: Arc<dyn ClusterJobAuthority>,
         token: JobToken,
         deadline: Instant,
+        kind: plurx_core::store::background_jobs::JobKind,
     ) -> Result<Self, StoreError> {
         token.validate()?;
         if Instant::now() >= deadline {
@@ -154,6 +198,8 @@ impl ActiveBackgroundJob {
         }
         let (deadline, _) = watch::channel(deadline);
         let fence = JobFence(Arc::new(Inner {
+            kind,
+            started: Instant::now(),
             store,
             authority,
             state: Mutex::new(ClaimState {
@@ -231,6 +277,7 @@ impl ActiveBackgroundJob {
         if let Err(error) = self.fence.retire().await {
             tracing::warn!(%error, "background retirement remains ambiguous");
         }
+        metrics::execution(self.fence.0.kind, self.fence.0.started.elapsed());
     }
 }
 
@@ -270,6 +317,7 @@ impl JobFence {
         };
         let issued = Instant::now();
         let now_ms = unix_ms()?;
+        metrics::event(self.0.kind, Event::RenewWrite);
         let renewed = self
             .0
             .store
@@ -334,6 +382,7 @@ impl JobFence {
         let Some(token) = state.token.clone() else {
             return Ok(false);
         };
+        let event = settlement_event(&settlement);
         let result = self
             .0
             .store
@@ -344,6 +393,7 @@ impl JobFence {
             })
             .await?;
         if result {
+            metrics::event(self.0.kind, event);
             state.token = None;
         }
         Ok(result)
@@ -385,9 +435,11 @@ impl JobFence {
     ) -> Result<bool, StoreError> {
         let mut state = self.0.state.lock().await;
         if !self.0.authority.may_run_cluster_jobs().await || !self.may_publish() {
+            metrics::event(self.0.kind, Event::FencedPublication);
             return Ok(false);
         }
         let Some(token) = state.token.clone() else {
+            metrics::event(self.0.kind, Event::FencedPublication);
             return Ok(false);
         };
         let mut request = PublishTranscodeJob {
@@ -411,6 +463,14 @@ impl JobFence {
             result,
             JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
         );
+        metrics::event(
+            self.0.kind,
+            if published {
+                Event::Published
+            } else {
+                Event::FencedPublication
+            },
+        );
         if published {
             state.token = None;
         }
@@ -423,9 +483,11 @@ impl JobFence {
     ) -> Result<bool, StoreError> {
         let mut state = self.0.state.lock().await;
         if !self.0.authority.may_run_cluster_jobs().await || !self.may_publish() {
+            metrics::event(self.0.kind, Event::FencedPublication);
             return Ok(false);
         }
         let Some(token) = state.token.clone() else {
+            metrics::event(self.0.kind, Event::FencedPublication);
             return Ok(false);
         };
         let mut request = plurx_core::store::background_jobs::PublishFragmentJob {
@@ -446,6 +508,14 @@ impl JobFence {
         let published = matches!(
             result,
             JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
+        );
+        metrics::event(
+            self.0.kind,
+            if published {
+                Event::Published
+            } else {
+                Event::FencedPublication
+            },
         );
         if published {
             state.token = None;
@@ -478,6 +548,7 @@ impl JobFence {
             })
             .await?;
         if result {
+            metrics::event(self.0.kind, Event::ChargedFailure);
             state.token = None;
         }
         Ok(result)
@@ -507,6 +578,7 @@ impl JobFence {
                 not_before_ms: now_ms,
             }
         };
+        let event = settlement_event(&settlement);
         if matches!(
             self.0
                 .store
@@ -518,6 +590,7 @@ impl JobFence {
                 .await,
             Ok(true)
         ) {
+            metrics::event(self.0.kind, event);
             return Ok(());
         }
         // Cancellation or an unacknowledged renewal may have advanced only
@@ -553,7 +626,10 @@ impl JobFence {
             _ => None,
         };
         if let Some(request) = request {
-            self.0.store.settle_job(request).await?;
+            let event = settlement_event(&request.settlement);
+            if self.0.store.settle_job(request).await? {
+                metrics::event(self.0.kind, event);
+            }
         }
         Ok(())
     }
@@ -669,6 +745,7 @@ pub(crate) async fn claim_pretranscode(
                 job.token
                     .ok_or_else(|| StoreError::Task("claimed job has no ownership token".into()))?,
                 deadline,
+                JobKind::TranscodePrepare,
             )?;
             let fence = crate::transcode::PretranscodeFence::new(
                 projection.clone(),
@@ -778,6 +855,7 @@ pub(crate) async fn claim_fragment(
                 job.token
                     .ok_or_else(|| StoreError::Task("claimed fragment has no token".into()))?,
                 deadline,
+                kind,
             )?;
             return Ok(Some((projection, active, admission)));
         }
@@ -855,6 +933,7 @@ mod tests {
             Arc::new(UnclusteredJobAuthority),
             job.token.expect("token"),
             deadline,
+            JobKind::FragmentIndexBuild,
         )
         .expect("start");
         (store, id, active)

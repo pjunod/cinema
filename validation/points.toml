@@ -597,6 +597,7 @@ paths = [
   "crates/plurxd/src/playstart.rs",
   "crates/plurxd/src/state.rs",
   "crates/plurxd/src/background_jobs.rs",
+  "crates/plurxd/src/background_job_metrics.rs",
   "crates/plurxd/src/transcode.rs",
   "crates/plurxd/src/transcode/**",
 ]

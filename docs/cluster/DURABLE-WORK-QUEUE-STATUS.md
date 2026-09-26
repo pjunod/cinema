@@ -271,3 +271,12 @@ implementation is claimed; “compiled” does not mean tests passed.
   mutation. New backend contracts are written and awaiting final execution.
   This is deliberately partial: matching work on another node still needs a
   portable transcode delivery path; no cross-node offline convergence is claimed.
+
+- 2026-09-26: exact offline joining committed as `d00a7a532`; pinned all-target
+  compile and the normal hook passed. Added fixed-label process counters for
+  claim writes/results, renew writes, takeovers, charged failure attempts,
+  yields, cancellation and publication fencing, plus claim, queue-wait and
+  physical-worker-duration histograms. The scrape reads atomics only. These
+  counters reset with the process and describe acknowledged events, so a lost
+  reply may undercount; replicated job/attempt history remains authoritative.
+  Histogram boundary contracts are written, not executed.
