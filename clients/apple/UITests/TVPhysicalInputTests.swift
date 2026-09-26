@@ -6,6 +6,33 @@ import XCTest
 final class TVPhysicalInputTests: XCTestCase {
     private let remote = XCUIRemote.shared
 
+    func testSettingsChoicesOpenAsMenusOnAppleTV() throws {
+        let app = XCUIApplication()
+        wakeDevice()
+        app.launch()
+        let settings = app.tabBars.buttons["Settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 30),
+                      "Apple TV must already be signed in")
+        XCTAssertTrue(focus(settings, in: app), "Could not focus Settings tab")
+        remote.press(.select)
+
+        let quality = app.descendants(matching: .any)
+            .matching(identifier: "settings-quality").firstMatch
+        XCTAssertTrue(quality.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(focus(quality, in: app), "Could not focus Quality picker")
+        remote.press(.select)
+
+        let auto = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Auto")).firstMatch
+        let original = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Original")).firstMatch
+        XCTAssertTrue(auto.waitForExistence(timeout: 5) && original.waitForExistence(timeout: 5),
+                      "Quality opened without both Auto and Original choices")
+        XCTAssertTrue(auto.isHittable && original.isHittable,
+                      "Quality choices are not usable in the open menu")
+        attachScreen(app, name: "settings-quality-menu-open")
+    }
+
     func testPlaybackRemoteControls() throws {
         let app = try playbackApp()
         let playPause = app.buttons["player-play-pause"]

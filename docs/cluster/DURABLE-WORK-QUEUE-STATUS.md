@@ -2,7 +2,7 @@
 
 **Status:** M1–M3 final validation; fixing test failures · **Updated:** 2026-09-26 ·
 **Branch:** `codex/durable-cluster-work` ·
-**Base:** `2ab0cd497` · **PR:** [#532 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/532)
+**Base:** `cb67fe938` · **PR:** [#532 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/532)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -358,3 +358,7 @@ retires a producer when its final interest disappears. Activity fixture coverage
 was updated to execute the queue renderer; all 28 checks pass. Developer settings
 passed 34 checks, docs index passed four, and the process UI contract passed.
 The failing replicated test is being rerun before the main fast lane starts.
+
+- Integrated main `cb67fe938` before final lane: Apple menus/runner updates
+  and the equivalent upstream macOS process-priority compile fix. Queue code
+  is unchanged by this merge; normal pinned compiler checks are rerun.

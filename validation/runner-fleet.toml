@@ -228,15 +228,15 @@ arch = "X64"
 labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
 
 # --- maca / macb: laptops, non-voters -----------------------------------------
-# The macOS runner is the only Apple CI capacity there is. The two Linux ARM64
+# The macOS Apple runner is on the MacBook Pro (`macb`). The two Linux ARM64
 # guests are Lima VMs registered by hand rather than by ansible, and they are
 # the required `ci-arm64` packaging pool: `macb` is primary, `maca` is backup.
 [[runners]]
-name = "gha-maca-apple-01"
-host = "maca"
+name = "gha-macb-apple-01"
+host = "macb"
 os = "macOS"
 arch = "ARM64"
-labels = ["lab", "apple", "xcode-26"]
+labels = ["lab", "apple", "xcode-27"]
 
 [[runners]]
 name = "gha-maca-linux-arm-01"

@@ -227,13 +227,9 @@ pub fn observe(pid: u32) -> Observed {
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     {
-        // Apple's id_t is already u32; other Unix targets may require a
-        // checked narrowing conversion before the kernel observation.
-        #[cfg(target_vendor = "apple")]
-        let pid: libc::id_t = pid;
-        #[cfg(not(target_vendor = "apple"))]
-        let Ok(pid) = libc::id_t::try_from(pid) else {
-            return Observed::default();
+        let pid = match libc::id_t::try_from(pid) {
+            Ok(pid) => pid,
+            Err(_) => return Observed::default(),
         };
         // SAFETY: plain syscall; errno distinguishes -1 as a value from -1
         // as an error, and a pid that no longer exists reads as unknown.

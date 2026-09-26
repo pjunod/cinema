@@ -267,7 +267,7 @@ jobs:
     name: fast Apple compile
     needs: [scope, preflight]
     if: needs.scope.outputs.apple == 'true'
-    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-26]
+    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27]
     timeout-minutes: 10
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -279,8 +279,8 @@ jobs:
       - name: Verify the pinned Apple toolchain
         run: |
           xcode_version="$(xcodebuild -version)"
-          grep -Fxq "Xcode 26.6" <<< "$xcode_version"
-          grep -Fxq "Build version 17F113" <<< "$xcode_version"
+          grep -Fxq "Xcode 27.0" <<< "$xcode_version"
+          grep -Fxq "Build version 27A266a" <<< "$xcode_version"
           test "$(xcodegen --version)" = "Version: 2.46.0"
       - name: Cache DerivedData
         uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
