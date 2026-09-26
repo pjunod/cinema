@@ -2110,7 +2110,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # test-only: the offline worker loop under test in
 # `offline::tests::claim_a_wake_claims_what_the_local_replica_does_not_show_yet`,
 # aborted before the test returns. No production spawn.
-expected_occurrences = 639
+# 639 -> 641 with K-10 M4 (offline expiry sweep), measured from the
+# validation unittests' actual count, both test-only: the offline worker loop
+# under test in `offline::tests::expiry_an_idle_worker_sweeps_only_on_the_forced_interval`
+# and `offline::tests::expiry_a_lapsed_package_is_swept_within_one_tick_and_a_live_one_is_kept`,
+# each aborted before its test returns. No production spawn; the expiry pass
+# runs inside the existing offline worker loop. Neither owns a producer, a
+# process or a recipe decision.
+expected_occurrences = 641
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2994,7 +3001,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # and the zero-length `tokio::time::timeout` in the `#[cfg(test)]`
 # `OfflineManager::take_wake` probe, which only asks whether a wake permit is
 # stored. No production timer.
-expected_occurrences = 1009
+# 1009 -> 1012 with K-10 M4 (offline expiry sweep), measured from the
+# validation unittests' actual count, all test-only (virtual clock) in
+# `offline::tests`: the 30-minute idle wait, the 65 s idle wait and the
+# 250 ms lapse poll. Shipped, unchanged: the expiry pass reuses the offline
+# worker's one `tokio::time::sleep(delay)`, now never sleeping past the next
+# 60 s expiry pass on Tokio's clock. No production timer; none paces or
+# bounds a producer.
+expected_occurrences = 1012
 
 [[module_structures]]
 id = "bare-time-constructor"
