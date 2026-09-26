@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 implemented; adversarial review next · **Updated:** 2026-09-26 ·
+**Status:** M1–M3 implemented; adversarial review in progress · **Updated:** 2026-09-26 ·
 **Branch:** `codex/durable-cluster-work` ·
 **Base:** `2ab0cd497` · **PR:** [#532 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/532)
 
@@ -21,7 +21,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
-| Final adversarial review | Not started | Only at a complete main-bound PR |
+| Final adversarial review | In progress | Independent agent reviewing completed M1–M3 against main `2ab0cd497`; tests remain deferred until findings are addressed |
 | Fast lane | Not run | After review findings are addressed |
 | Merge / cleanup | Not started | Green required lane before merge |
 
@@ -333,3 +333,8 @@ implementation is claimed; “compiled” does not mean tests passed.
   stale-token refusal, uncharged retirement and capacity release within the
   five-second playback budget. Written and compiled evidence remains separate
   from test execution, which is still deferred.
+
+- 2026-09-26: core implementation is ready for its single final adversarial
+  review. Review started against the integrated main base after pinned Clippy
+  passed. PR #532 remains a draft. Tests have not started and no merge or
+  production change is claimed.

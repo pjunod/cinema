@@ -227,7 +227,7 @@ Cutover seals old accepted requests in a finite backlog, drains bounded pages
 without losing capacity-refused work, and removes the old execution APIs.
 Operators must quiesce old workers before conversion; mixed old/new execution
 is not a supported rolling migration. See
-[OPERATIONS.md](OPERATIONS.md#distributed-speculative-transcode) for operation
+[OPERATIONS.md](OPERATIONS.md#distributed-speculative-production) for operation
 and [the queue contract](cluster/DURABLE-WORK-QUEUE-IMPLEMENTATION.md) for
 failure recovery, retention and extension boundaries.
 
