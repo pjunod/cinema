@@ -699,8 +699,25 @@ and `b5de25e4962d9f2d928b29f21f6538b3a0bf57c19c665a2a1ac45918ee1fabf1`.
 The two-cliff raw report has SHA-256
 `24489f4d442d37302b4a2ab404f2b2a18e010e28c49d88194bb577b5e6c6e8ad`.
 
-This is the measurement §3.8 requires, and it runs **before** any
-controller exists, so the "after" has a "before".
+#### Candidate browser measurements, 2026-09-26
+
+The pinned Rust 1.97.1 server binary built from draft PR #527 head
+`c9bbdb134` has SHA-256
+`d28f8b12478a1708f696442008439ba1687be501e9735c4c8e5d512477c7f504`.
+These runs describe that candidate, not a deployed or final-main build.
+
+| Browser and case | Result | Receipt |
+|---|---|---|
+| Chrome, 8→1.1→0.35 Mb/s SDR | Both 75 s cliffs passed. Measured media delivery was 1,085.6 and 349.1 kb/s. The first presented frames at 240p and 144p arrived 5.177 and 5.101 s after their cliffs. Maximum frame gap was 100 ms on each; zero restarts, stalls or hitches. Evidence scope is browser video only. | Raw `c87467aeb88a3a8e8e257e363578e08454c7d1c8bd0d85d82a6bb243ba505104`; normalized `78ef88f3e4ca2629936e6fc967b0eb01342e650eac5202580903e6362ba6746a`; JUnit `75967de32ca2d37a4862bfc6f29c40ef2af032d9f4d6dac7085358fe48699088`. |
+| Firefox, same SDR profile | WebDriver initially missed page-level `let` bindings from its isolated realm. The harness now evaluates in the page realm and reached playback. Both 75 s cliffs shaped correctly, downshifts reached 240p and 144p after 3.235 and 5.212 s, and neither restarted or stalled. The first transition's 134.26 ms video gap exceeds the 100 ms limit; the second gap was 99.94 ms. Result: failed, requiring a final-branch repeat. | Raw `18d4b340e135d58e8c6021256e3f7b73ba2e5a64416a1adfa0c2755696f5ccc5`; normalized `aecb54039f4ecfae856774707459fe5a8456edf059a2099c04defcfe42547961`; JUnit `26117eea138ee43955d91806f67391073333b015923a5b1a9b7033c41a683814`. |
+| Chrome, synthetic 4K HDR Auto smoke | This host reported no HDR display, and the server selected CPU tone mapping to SDR. The player showed no first presented frame within 30 s, so the run cannot measure an HDR→SDR transition or qualify HDR playback. | Raw `d184d30221d038d805ddd47f537f0df31e75657fedc416d3787e483a4586440d`; normalized `7c99021469af549cca8448207b4d5b8d9a5b4f0dad2bc12a652c1f6314641ae2`; JUnit `5711c77e477df96a4bdf8a83fea69918660fb5083b831e12f2dc3a333d14d28e`. |
+
+Safari session creation and native device traces remain open. The earlier
+loaded-host Chrome failure also remains open. None of these measurements
+completes D3's per-platform, per-profile six-metric matrix.
+
+The original baseline above is the "before" measurement §3.8 requires for
+native controllers. Candidate browser runs do not replace that baseline.
 
 The instrument exists. `scripts/playback-lab` carries a loopback token-
 bucket shaper with a mandatory descent (`playback-lab:42-98`; a profile
