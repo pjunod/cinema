@@ -1525,8 +1525,9 @@ docker: ## Build the container image
 	docker build --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" -t plurx/plurxd:latest .
 
 .PHONY: container-smoke
-container-smoke: docker ## Build, start, probe, restart, and re-probe the container
+container-smoke: docker ## Build, start, probe, restart, re-probe, then back up and restore the container
 	@scripts/container-smoke plurx/plurxd:latest
+	@scripts/container-restore-smoke plurx/plurxd:latest
 
 # The Compose deploy, as one command that cannot forget the stamp.
 #

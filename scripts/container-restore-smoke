@@ -1,0 +1,173 @@
+#!/bin/sh
+# K-01 M4 (docs/cluster/CLUSTER-BACKUP-AND-RESTORE.md §5.4): prove that the
+# packaged image can build a portable backup artefact from a running
+# single-voter instance and that the same image restores it, offline, into a
+# second container with an empty volume that then serves the same instance,
+# users, credentials and libraries. This is the §3.6 "isolated instance
+# first" drill, run against a disposable loopback-only pair of containers.
+set -eu
+
+image="${1:-plurx/plurxd:latest}"
+source_name="plurx-restore-source-$$"
+restored_name="plurx-restore-target-$$"
+scratch="$(mktemp -d "${TMPDIR:-/tmp}/plurx-restore-smoke.XXXXXX")"
+started_at="$(date +%s)"
+admin_user="restore-admin"
+admin_password="restore-smoke-admin-$$"
+viewer_user="restore-viewer"
+viewer_password="restore-smoke-viewer-$$"
+library_name="Restore Smoke Movies"
+# The image runs as an unprivileged user whose UID need not match the caller.
+# Both volumes are disposable, so make them writable by the container.
+mkdir "$scratch/source" "$scratch/restored"
+chmod 0777 "$scratch" "$scratch/source" "$scratch/restored"
+
+cleanup() {
+  docker rm -f "$source_name" "$restored_name" >/dev/null 2>&1 || true
+  # State, the archive, and the owner-only credential key belong to the
+  # container UID. Make the disposable contents removable by the host.
+  docker run --rm \
+    --user 0:0 \
+    --entrypoint /bin/sh \
+    --volume "$scratch:/scratch" \
+    "$image" \
+    -c 'chmod -R a+rwX /scratch' >/dev/null 2>&1 || true
+  case "$scratch" in
+    */plurx-restore-smoke.*) rm -rf -- "$scratch" ;;
+  esac
+}
+trap cleanup EXIT HUP INT TERM
+
+fail() {
+  for container in "$source_name" "$restored_name"; do
+    docker logs "$container" >&2 2>/dev/null || true
+  done
+  echo "container restore smoke: $*" >&2
+  exit 1
+}
+
+# Resolve the ephemeral loopback port every time a container starts; Docker
+# may choose a different one after a restart.
+base_url() {
+  binding="$(docker port "$1" 32400/tcp | head -n 1)"
+  test -n "$binding" || fail "$1 published no host port for 32400/tcp"
+  printf 'http://127.0.0.1:%s' "${binding##*:}"
+}
+
+wait_ready() {
+  attempt=0
+  until curl -fsS "$1/readyz" >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 90 ]; then
+      fail "$2 did not become ready at $1 within 90 seconds"
+    fi
+    sleep 1
+  done
+}
+
+json_string() {
+  sed -n "s/.*\"$1\" *: *\"\([^\"]*\)\".*/\1/p" | head -n 1
+}
+
+post_json() {
+  # $1 url, $2 bearer token or "-", $3 body
+  if [ "$2" = "-" ]; then
+    curl -fsS -H 'content-type: application/json' --data "$3" "$1"
+  else
+    curl -fsS -H 'content-type: application/json' \
+      -H "authorization: Bearer $2" --data "$3" "$1"
+  fi
+}
+
+start_instance() {
+  docker create \
+    --name "$1" \
+    --publish 127.0.0.1:0:32400 \
+    --volume "$2:/var/lib/plurx" \
+    "$image" >/dev/null
+  docker start "$1" >/dev/null
+}
+
+# 1. A fresh instance with one admin, one ordinary user, and one library.
+start_instance "$source_name" "$scratch/source"
+source_base="$(base_url "$source_name")"
+wait_ready "$source_base" "source instance"
+instance_source="$(curl -fsS "$source_base/api/v1/server" | json_string instance_id)"
+test -n "$instance_source" || fail "source instance reported no instance_id"
+
+admin_token="$(post_json "$source_base/api/v1/setup" - \
+  "{\"username\":\"$admin_user\",\"password\":\"$admin_password\"}" | json_string token)"
+test -n "$admin_token" || fail "first-run setup returned no admin token"
+post_json "$source_base/api/v1/users" "$admin_token" \
+  "{\"username\":\"$viewer_user\",\"password\":\"$viewer_password\"}" >/dev/null \
+  || fail "creating the ordinary user failed"
+docker exec "$source_name" mkdir -p /var/lib/plurx/media/movies /var/lib/plurx/backups
+post_json "$source_base/api/v1/libraries" "$admin_token" \
+  "{\"name\":\"$library_name\",\"kind\":\"movies\",\"paths\":[\"/var/lib/plurx/media/movies\"]}" \
+  >/dev/null || fail "creating the library failed"
+curl -fsS -H "authorization: Bearer $admin_token" "$source_base/api/v1/libraries" \
+  | grep -F "\"$library_name\"" >/dev/null || fail "source instance does not list the new library"
+
+# 2. The operator CLI asks the running voter for one artefact now. The token
+# travels only through an owner-only file inside the container, never argv.
+docker exec -e PLURX_SMOKE_TOKEN="$admin_token" "$source_name" \
+  sh -c 'umask 077 && printf %s "$PLURX_SMOKE_TOKEN" > /tmp/restore-smoke.token'
+backup_report="$(docker exec "$source_name" plurxd cluster backup \
+  --server http://127.0.0.1:32400 \
+  --token-file /tmp/restore-smoke.token \
+  --output /var/lib/plurx/backups)" || fail "plurxd cluster backup failed"
+printf '%s' "$backup_report" | grep '"status": "ok"' >/dev/null \
+  || fail "cluster backup did not publish an artefact: $backup_report"
+archive_path="$(printf '%s' "$backup_report" | json_string path)"
+archive="${archive_path##*/}"
+case "$archive" in
+  plurx-backup-*) ;;
+  *) fail "cluster backup reported an unexpected artefact path '$archive_path'" ;;
+esac
+printf '%s' "$backup_report" | grep -F "\"cluster_id\"" >/dev/null \
+  || fail "cluster backup reported no manifest"
+
+# The source is now the lost cluster. Stop it before anything is restored.
+docker stop --time 10 "$source_name" >/dev/null
+
+# 3. Offline verification, then restore into a second, empty volume.
+docker run --rm \
+  --volume "$scratch/source/backups:/backups:ro" \
+  "$image" restore --verify --archive "/backups/$archive" >/dev/null \
+  || fail "restore --verify rejected the artefact"
+docker run --rm \
+  --volume "$scratch/source/backups:/backups:ro" \
+  --volume "$scratch/restored:/var/lib/plurx" \
+  "$image" restore --archive "/backups/$archive" --data-dir /var/lib/plurx >/dev/null \
+  || fail "restore into an empty data directory failed"
+# Restore never writes over an existing replicated store.
+if docker run --rm \
+  --volume "$scratch/source/backups:/backups:ro" \
+  --volume "$scratch/restored:/var/lib/plurx" \
+  "$image" restore --archive "/backups/$archive" --data-dir /var/lib/plurx \
+  >/dev/null 2>&1; then
+  fail "a second restore over the restored data directory was accepted"
+fi
+
+# 4. The restored instance serves the same identity, users, and library.
+start_instance "$restored_name" "$scratch/restored"
+restored_base="$(base_url "$restored_name")"
+wait_ready "$restored_base" "restored instance"
+instance_restored="$(curl -fsS "$restored_base/api/v1/server" | json_string instance_id)"
+test "$instance_source" = "$instance_restored" \
+  || fail "restored instance_id '$instance_restored' differs from '$instance_source'"
+curl -fsS -H "authorization: Bearer $admin_token" "$restored_base/api/v1/libraries" \
+  | grep -F "\"$library_name\"" >/dev/null \
+  || fail "the pre-loss admin token cannot list the restored library"
+viewer_token="$(post_json "$restored_base/api/v1/auth/login" - \
+  "{\"username\":\"$viewer_user\",\"password\":\"$viewer_password\"}" | json_string token)"
+test -n "$viewer_token" || fail "the ordinary user cannot log in to the restored instance"
+relogin_token="$(post_json "$restored_base/api/v1/auth/login" - \
+  "{\"username\":\"$admin_user\",\"password\":\"$admin_password\"}" | json_string token)"
+test -n "$relogin_token" || fail "the admin cannot log in to the restored instance"
+curl -fsS -H "authorization: Bearer $relogin_token" "$restored_base/api/v1/libraries" \
+  | grep -F "\"$library_name\"" >/dev/null \
+  || fail "a fresh admin login cannot list the restored library"
+
+elapsed=$(( $(date +%s) - started_at ))
+echo "container restore smoke passed in ${elapsed}s: backup $archive restored as instance $instance_restored with its users and library"

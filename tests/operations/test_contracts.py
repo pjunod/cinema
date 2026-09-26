@@ -3703,6 +3703,45 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotRegex(smoke, r"curl [^\n]+\| grep -q")
         self.assertIn('test "$instance_before" = "$instance_after"', smoke)
 
+    def test_container_restore_smoke_drills_backup_and_offline_restore(self):
+        # K-01 M4: the packaged image backs up a running instance through the
+        # operator CLI, verifies and restores the artefact offline into an
+        # empty second volume, and the restored instance keeps its identity,
+        # users, tokens and libraries. The container lane runs it after the
+        # stop/start smoke, and `make container-smoke` runs both.
+        drill = read("scripts/container-restore-smoke")
+        subprocess.run(
+            ["sh", "-n", str(ROOT / "scripts/container-restore-smoke")], check=True
+        )
+        self.assertIn("trap cleanup EXIT HUP INT TERM", drill)
+        self.assertIn("--publish 127.0.0.1:0:32400", drill)
+        self.assertIn("--user 0:0", drill)
+        self.assertIn("plurxd cluster backup", drill)
+        self.assertIn("--token-file /tmp/restore-smoke.token", drill)
+        self.assertIn("umask 077", drill)
+        self.assertNotIn("--token ", drill)
+        self.assertIn('restore --verify --archive "/backups/$archive"', drill)
+        self.assertIn(
+            'restore --archive "/backups/$archive" --data-dir /var/lib/plurx', drill
+        )
+        self.assertIn('docker stop --time 10 "$source_name"', drill)
+        self.assertIn("a second restore over the restored data directory was accepted", drill)
+        self.assertIn('test "$instance_source" = "$instance_restored"', drill)
+        self.assertIn('"$restored_base/api/v1/auth/login"', drill)
+        self.assertIn('"$restored_base/api/v1/libraries"', drill)
+        self.assertNotRegex(drill, r"curl [^\n]+\| grep -q")
+
+        makefile = read("Makefile")
+        target = makefile.split("container-smoke: docker", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("@scripts/container-smoke plurx/plurxd:latest", target)
+        self.assertIn("@scripts/container-restore-smoke plurx/plurxd:latest", target)
+        workflow = read(".github/workflows/ci.yml")
+        package = workflow.split("  package_smoke:", 1)[1].split("\n  publish:", 1)[0]
+        self.assertLess(
+            package.index('scripts/container-smoke "$IMAGE"'),
+            package.index('run: scripts/container-restore-smoke "$IMAGE"'),
+        )
+
     def test_perf_report_counts_copy_video_as_a_real_session(self):
         namespace = runpy.run_path(str(ROOT / "scripts/perf-report"))
         lines = []
