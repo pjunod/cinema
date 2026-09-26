@@ -1200,7 +1200,7 @@ async fn background_library_publication_requires_both_live_owners() {
                     not_before_ms: claim_time,
                     now_ms: claim_time,
                     request: JobRequest {
-                        scope: "library".into(),
+                        scope: "binding-fixture".into(),
                         request_id: id.clone(),
                         request_digest: "a".repeat(64),
                         consumer_kind: "library_scan".into(),
@@ -1342,4 +1342,131 @@ async fn background_library_publication_requires_both_live_owners() {
         }
     })
     .await;
+}
+
+#[tokio::test]
+async fn background_library_intents_preserve_hints_and_do_not_settle_late_arrivals() {
+    use super::acquired;
+    use plurx_core::store::background_jobs_library::{
+        LibraryIdHints, LibraryWorkInput, LibraryWorkResult,
+    };
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "durable-library-intents").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let library_id = store.get_item(file.item_id).await.expect("item").expect("item").library_id;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock").as_millis() as i64;
+        let input = NewLibraryWork {
+            request_id: "scan-request-one".into(), library_id, now_ms: now,
+            input: LibraryWorkInput::Targeted {
+                path: file.path.clone(), ids: Some(LibraryIdHints { tmdb: Some(123), ..Default::default() }),
+                book: None, correlation_id: Some("caller-one".into()), source: Some("integration".into()),
+            },
+        };
+        let EnqueueOutcome::Accepted { job_id, .. } = store.enqueue_library_work(input.clone()).await.expect("enqueue")
+            else { panic!("{backend}: first admission refused"); };
+        assert!(matches!(store.enqueue_library_work(input.clone()).await.expect("replay"), EnqueueOutcome::Existing { .. }), "{backend}");
+        let mut different = input.clone();
+        different.input = LibraryWorkInput::Targeted { path: file.path.clone(),
+            ids: Some(LibraryIdHints { tmdb: Some(456), ..Default::default() }), book: None,
+            correlation_id: Some("caller-two".into()), source: Some("integration".into()) };
+        assert!(matches!(store.enqueue_library_work(different.clone()).await.expect("identity conflict"), EnqueueOutcome::Conflict), "{backend}");
+        different.request_id = "scan-request-two".into();
+        let ClaimOutcome::Claimed { job } = store.claim_job(ClaimJob {
+            job_id: job_id.clone(), expected_revision: 0, node_id: "node-a".into(),
+            boot_id: uuid::Uuid::new_v4().to_string(), claim_id: uuid::Uuid::new_v4().to_string(),
+            kind: JobKind::LibraryScan, payload_version: 1, now_ms: now, dispatched_at_ms: now,
+        }).await.expect("claim") else { panic!("{backend}: claim refused"); };
+        let token = job.token.expect("token");
+        let lease = acquired(store.acquire_lease(&format!("scan:library:{library_id}"), "node-a", now, now + 90_000)
+            .await.expect("domain lease"), backend);
+        assert!(store.bind_library_job(BindLibraryJob { token: token.clone(), lease: lease.clone(), now_ms: now })
+            .await.expect("bind"), "{backend}");
+        // Arrives after the worker took its first snapshot, with a distinct
+        // hint for the same path. It joins the computation but owes its own work.
+        assert!(matches!(store.enqueue_library_work(different).await.expect("late join"),
+            EnqueueOutcome::Accepted { job_id: joined, .. } if joined == job_id), "{backend}");
+        let completion = CompleteLibraryWork { token: token.clone(), lease: lease.clone(),
+            request_id: input.request_id.clone(), now_ms: now + 1,
+            result: LibraryWorkResult::Completed { scan: plurx_core::scan::TargetedScan {
+                report: plurx_core::scan::ScanReport::default(), items: vec![] } },
+        };
+        assert!(store.complete_library_work(completion.clone()).await.expect("first completion"), "{backend}");
+        assert!(!store.complete_library_work(completion.clone()).await.expect("completion replay"), "{backend}");
+        assert_eq!(store.background_job(&job_id).await.expect("job").expect("job").state, JobState::Running, "{backend}");
+        let pending = store.library_work_requests(LibraryWorkQuery {
+            job_id: Some(job_id.clone()), pending_only: true, limit: 256, ..Default::default()
+        }).await.expect("pending");
+        assert_eq!(pending.len(), 1, "{backend}");
+        assert_eq!(pending[0].request_id, "scan-request-two", "{backend}");
+        assert!(matches!(&pending[0].input, LibraryWorkInput::Targeted { ids: Some(ids), .. } if ids.tmdb == Some(456)), "{backend}");
+        let second = CompleteLibraryWork { request_id: "scan-request-two".into(), ..completion };
+        assert!(store.complete_library_work(second).await.expect("second completion"), "{backend}");
+        assert_eq!(store.background_job(&job_id).await.expect("job").expect("job").state, JobState::Succeeded, "{backend}");
+        let results = store.library_work_requests(LibraryWorkQuery { job_id: Some(job_id), limit: 256, ..Default::default() })
+            .await.expect("durable results");
+        assert_eq!(results.len(), 2, "{backend}");
+        assert!(results.iter().all(|row| row.state == "completed" && row.result.is_some()), "{backend}");
+    }).await;
+}
+
+#[tokio::test]
+async fn background_library_accepted_intent_survives_database_reopen() {
+    use plurx_core::store::background_jobs_library::{LibraryTrigger, LibraryWorkInput};
+    use plurx_core::store::{SqliteStore, Store};
+    use std::sync::Arc;
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("durable-library.sqlite");
+    let original: Arc<dyn Store> = Arc::new(SqliteStore::open(&path).expect("open"));
+    let (_, file_id) = seed_file(&original, "library-restart").await;
+    let file = original
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("file");
+    let library_id = original
+        .get_item(file.item_id)
+        .await
+        .expect("item")
+        .expect("item")
+        .library_id;
+    let input = NewLibraryWork {
+        request_id: "restart-request".into(),
+        library_id,
+        input: LibraryWorkInput::Full {
+            refresh: true,
+            trigger: LibraryTrigger::Manual,
+        },
+        now_ms: 1_000,
+    };
+    let EnqueueOutcome::Accepted { job_id, .. } = original
+        .enqueue_library_work(input.clone())
+        .await
+        .expect("admission")
+    else {
+        panic!("admission refused");
+    };
+    drop(original);
+    let reopened = SqliteStore::open(&path).expect("reopen");
+    let rows = reopened
+        .library_work_requests(LibraryWorkQuery {
+            request_id: Some(input.request_id.clone()),
+            limit: 1,
+            ..Default::default()
+        })
+        .await
+        .expect("persisted request");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].job_id, job_id);
+    assert_eq!(rows[0].state, "pending");
+    assert!(matches!(
+        rows[0].input,
+        LibraryWorkInput::Full { refresh: true, .. }
+    ));
+    assert!(matches!(
+        reopened
+            .enqueue_library_work(input)
+            .await
+            .expect("replay after restart"),
+        EnqueueOutcome::Existing { .. }
+    ));
 }

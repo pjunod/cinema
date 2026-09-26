@@ -509,6 +509,9 @@ const SHARED_CACHE_METHODS: &[&str] = &[
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
     "bind_library_job",
+    "enqueue_library_work",
+    "library_work_requests",
+    "complete_library_work",
     "bind_transcode_job_recipe",
     "join_offline_job",
     "import_legacy_jobs",
@@ -17525,7 +17528,8 @@ fn contract_inventory_matches_every_store_method() {
     // covers it on both backends. No new trait or supertrait of `Store`.
     // Shared queue replaces legacy execution and adds 20 net Store methods.
     // E0 adds the catalogue/queue dual-owner binding.
-    assert_eq!(declared.len(), 417, "review the Store method count");
+    // Three library admission/query/completion operations preserve each caller.
+    assert_eq!(declared.len(), 420, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

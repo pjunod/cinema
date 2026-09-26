@@ -303,7 +303,7 @@ pub const TEXT_BOOK_EXTS: &[&str] = &["epub", "pdf", "mobi", "azw", "azw3", "fb2
 /// walk failures`. It deliberately overlaps the record buckets, and the fields
 /// below let the UI show *which* — "2 added (2 incomplete)" rather than "2
 /// added … 2 errors" with no stated relationship between the two numbers.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ScanReport {
     pub added: usize,
     pub updated: usize,
@@ -365,7 +365,7 @@ pub struct ScanReport {
 ///
 /// Returned by the targeted scan so the caller can act on the result instead
 /// of polling to find out what happened.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlacedFile {
     pub item_id: i64,
     pub file_id: i64,
@@ -373,7 +373,7 @@ pub struct PlacedFile {
 }
 
 /// One folder's skipped files, collapsed into a single reportable row.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SkipGroup {
     /// The folder the files sit under — the show directory, not the release
     /// subfolder. Grouping any deeper reproduces the per-file list one level
@@ -984,7 +984,7 @@ pub fn library_root_fingerprint(paths: &[std::path::PathBuf]) -> Result<String, 
 }
 
 /// What a targeted scan produced.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TargetedScan {
     pub report: ScanReport,
     pub items: Vec<PlacedFile>,

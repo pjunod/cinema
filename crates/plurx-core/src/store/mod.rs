@@ -102,6 +102,7 @@ mod background_jobs_delivery;
 pub mod background_jobs_domain;
 mod background_jobs_fragment;
 pub mod background_jobs_fragment_admission;
+pub mod background_jobs_library;
 mod background_jobs_maintenance;
 mod background_jobs_migration;
 mod background_jobs_observation;

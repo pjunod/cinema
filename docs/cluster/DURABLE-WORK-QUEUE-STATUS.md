@@ -437,3 +437,13 @@ The failing replicated test is being rerun before the main fast lane starts.
   only after this follow-on PR's adversarial review. No scan entry point has
   been redirected yet. Core PR run 3289 passed preflight and web syntax; Rust
   and Windows validation are running.
+
+- E0 storage: durable library admission now commits input hints with its waiter,
+  and typed per-request completion checks both owners. Requests arriving during
+  execution remain pending until processed; completion cannot settle them by
+  accident. Results survive independently of process memory and retire with
+  their seven-day receipts. Bounds are 256 pending interests per library,
+  16 KiB input and 64 KiB result per request; the handler must report oversized
+  results explicitly rather than silently truncate item IDs. The all-target
+  core compile passed. These APIs are not yet connected to scan entry points;
+  regression execution is deferred to the follow-on review.

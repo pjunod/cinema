@@ -15,6 +15,9 @@ pub use super::background_jobs_domain::BindLibraryJob;
 use super::background_jobs_fragment::PUBLISH_FRAGMENT_SQL;
 pub use super::background_jobs_fragment::{FragmentJobFailure, PublishFragmentJob};
 pub use super::background_jobs_fragment_admission::EnqueueFragmentJob;
+pub use super::background_jobs_library::{
+    CompleteLibraryWork, LibraryWorkQuery, LibraryWorkRecord, NewLibraryWork,
+};
 use super::background_jobs_maintenance::{CANCEL_WAITER_SQL, MAINTENANCE_NEEDED, MAINTENANCE_SQL};
 pub use super::background_jobs_migration::JobMigrationStatus;
 pub use super::background_jobs_observation::{
@@ -108,6 +111,11 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
     ) THEN 'producer_fenced'
     WHEN prior_job IS NOT NULL AND prior_digest != json_extract(body, '$.request.request_digest') THEN 'conflict'
     WHEN prior_job IS NOT NULL THEN 'existing'
+    WHEN json_type(body, '$.library_request') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM libraries WHERE id = json_extract(body, '$.payload.library_id')) THEN 'source_changed'
+    WHEN json_type(body, '$.library_request') IS NOT NULL AND (SELECT COUNT(*) FROM background_library_requests request
+      JOIN background_job_waiters waiter ON waiter.request_scope = 'library' AND waiter.request_id = request.request_id
+      WHERE request.library_id = json_extract(body, '$.payload.library_id') AND waiter.state = 'pending') >= 256 THEN 'queue_full'
     WHEN json_type(body, '$.offline_join') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM offline_packages package JOIN background_jobs original
         ON original.id = json_extract(body, '$.offline_join.job_id')
@@ -910,6 +918,17 @@ pub struct CancelWaiterOutcome {
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    async fn enqueue_library_work(
+        &self,
+        request: NewLibraryWork,
+    ) -> Result<EnqueueOutcome, StoreError>;
+    async fn library_work_requests(
+        &self,
+        query: LibraryWorkQuery,
+    ) -> Result<Vec<LibraryWorkRecord>, StoreError>;
+    async fn complete_library_work(&self, request: CompleteLibraryWork)
+        -> Result<bool, StoreError>;
+
     async fn bind_library_job(&self, request: BindLibraryJob) -> Result<bool, StoreError>;
     async fn bind_transcode_job_recipe(
         &self,
@@ -1023,6 +1042,25 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn enqueue_library_work(
+        &self,
+        request: NewLibraryWork,
+    ) -> Result<EnqueueOutcome, StoreError> {
+        super::background_jobs_library::enqueue(self, request).await
+    }
+    async fn library_work_requests(
+        &self,
+        query: LibraryWorkQuery,
+    ) -> Result<Vec<LibraryWorkRecord>, StoreError> {
+        super::background_jobs_library::list(self, query).await
+    }
+    async fn complete_library_work(
+        &self,
+        request: CompleteLibraryWork,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_library::complete(self, request).await
+    }
+
     async fn bind_library_job(&self, request: BindLibraryJob) -> Result<bool, StoreError> {
         super::background_jobs_domain::bind(self, request).await
     }

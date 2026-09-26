@@ -1156,6 +1156,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs::SCHEMA,
     // v72: durable library execution binds the existing catalogue lease.
     super::background_jobs_domain::SCHEMA,
+    // v73: durable library requests and their independent results.
+    super::background_jobs_library::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

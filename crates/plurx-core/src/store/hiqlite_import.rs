@@ -1593,6 +1593,23 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "background_library_requests",
+        columns: &[
+            "request_id",
+            "library_id",
+            "job_id",
+            "input_json",
+            "result_json",
+            "completed_claim_id",
+            "completed_at_ms",
+        ],
+        order_by: "request_id",
+        minimum_schema: super::background_jobs_library::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "job_leases",
         columns: &[
             "resource",

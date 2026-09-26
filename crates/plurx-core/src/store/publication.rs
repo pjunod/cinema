@@ -178,6 +178,46 @@ impl<'a> PublicationStore<'a> {
         }
     }
 
+    /// Keep the domain heartbeat behind this read guard while the queue binds
+    /// or completes its exact attempt. Catalogue writes use the same lock.
+    pub async fn bind_library_job(
+        &self,
+        token: super::background_jobs::JobToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let guard = self.token().await?;
+        let lease = guard.as_ref().ok_or_else(|| self.invalidated())?.clone();
+        self.store
+            .bind_library_job(super::background_jobs::BindLibraryJob {
+                token,
+                lease,
+                now_ms,
+            })
+            .await
+    }
+
+    /// False requires reading the request result: a previous acknowledgement
+    /// may have been lost, or either of the two owners may have changed.
+    pub async fn complete_library_work(
+        &self,
+        token: super::background_jobs::JobToken,
+        request_id: String,
+        result: super::background_jobs_library::LibraryWorkResult,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let guard = self.token().await?;
+        let lease = guard.as_ref().ok_or_else(|| self.invalidated())?.clone();
+        self.store
+            .complete_library_work(super::background_jobs::CompleteLibraryWork {
+                token,
+                lease,
+                request_id,
+                result,
+                now_ms,
+            })
+            .await
+    }
+
     pub fn raw(&self) -> &'a dyn Store {
         self.store
     }
