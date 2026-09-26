@@ -17,6 +17,9 @@ use tokio::sync::{watch, Mutex};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
+#[path = "background_job_faults.rs"]
+mod faults;
 #[path = "background_job_metrics.rs"]
 mod metrics;
 pub(crate) use metrics::prometheus;
@@ -92,7 +95,7 @@ pub(crate) async fn claim_with_resolution(
         .now_ms
         .saturating_sub(candidate.created_at_ms)
         .max(0) as u64;
-    let result = claim_with_resolution_inner(store, candidate, request).await;
+    let result = claim_with_resolution_inner(store, request).await;
     metrics::claim_latency(kind, issued.elapsed());
     match &result {
         Ok(Some(_)) => {
@@ -110,12 +113,14 @@ pub(crate) async fn claim_with_resolution(
 
 async fn claim_with_resolution_inner(
     store: &dyn Store,
-    candidate: &BackgroundJob,
     request: ClaimJob,
 ) -> Result<Option<(BackgroundJob, Instant)>, StoreError> {
     let issued = Instant::now();
     let deadline = issued + Duration::from_millis(JOB_LEASE_MS as u64);
-    match store.claim_job(request.clone()).await {
+    let claimed = store.claim_job(request.clone()).await;
+    #[cfg(test)]
+    let claimed = faults::after_commit(faults::CLAIM, claimed);
+    match claimed {
         Ok(ClaimOutcome::Claimed { job }) if Instant::now() < deadline => {
             let remaining = job.token.as_ref().map_or(0, |token| {
                 token
@@ -145,19 +150,20 @@ async fn claim_with_resolution_inner(
             .await;
         match resolution {
             Ok(ClaimResolution::Running { token }) if Instant::now() < deadline => {
-                let mut job = candidate.clone();
-                job.fence = token.fence;
-                job.revision = token.revision;
-                job.state = plurx_core::store::background_jobs::JobState::Running;
-                let remaining = token
-                    .lease_expires_ms
-                    .saturating_sub(request.now_ms)
-                    .clamp(0, JOB_LEASE_MS);
-                let confirmed_deadline = issued + Duration::from_millis(remaining as u64);
-                job.token = Some(token);
-                return Ok(
-                    (Instant::now() < confirmed_deadline).then_some((job, confirmed_deadline))
-                );
+                // A takeover charges the abandoned attempt and can change
+                // scheduling/checkpoint state. Recover the committed row,
+                // never pair a new token with the pre-claim candidate image.
+                if let Ok(Some(job)) = store.background_job(&request.job_id).await {
+                    if job.token.as_ref() == Some(&token) {
+                        let remaining = token
+                            .lease_expires_ms
+                            .saturating_sub(request.now_ms)
+                            .clamp(0, JOB_LEASE_MS);
+                        let confirmed_deadline = issued + Duration::from_millis(remaining as u64);
+                        return Ok((Instant::now() < confirmed_deadline)
+                            .then_some((job, confirmed_deadline)));
+                    }
+                }
             }
             Ok(ClaimResolution::CancelRequested { cleanup_token }) => {
                 store
@@ -326,6 +332,8 @@ impl JobFence {
                 now_ms,
             })
             .await;
+        #[cfg(test)]
+        let renewed = faults::after_commit(faults::RENEW, renewed);
         let token = match renewed {
             Ok(outcomes) => match outcomes.into_iter().next() {
                 Some(RenewOutcome::Renewed { token }) => Some(token),
@@ -447,7 +455,10 @@ impl JobFence {
             output,
             now_ms: unix_ms()?,
         };
-        let result = match self.0.store.publish_transcode_job(request.clone()).await {
+        let reply = self.0.store.publish_transcode_job(request.clone()).await;
+        #[cfg(test)]
+        let reply = faults::after_commit(faults::PUBLISH, reply);
+        let result = match reply {
             Ok(result) => result,
             // Retry the exact publication once; the Store recognizes its
             // committed result even when the original token is now terminal.
@@ -495,7 +506,10 @@ impl JobFence {
             artifact,
             now_ms: unix_ms()?,
         };
-        let result = match self.0.store.publish_fragment_job(request.clone()).await {
+        let reply = self.0.store.publish_fragment_job(request.clone()).await;
+        #[cfg(test)]
+        let reply = faults::after_commit(faults::PUBLISH, reply);
+        let result = match reply {
             Ok(result) => result,
             Err(error) => {
                 if !self.0.authority.may_run_cluster_jobs().await || !self.may_publish() {
@@ -878,18 +892,51 @@ mod tests {
 
     async fn active() -> (Arc<dyn Store>, String, ActiveBackgroundJob) {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let library = store
+            .create_library(&plurx_core::domain::NewLibrary {
+                name: "worker fault fixture".into(),
+                kind: plurx_core::domain::LibraryKind::Movies,
+                paths: vec!["/worker-fault".into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&plurx_core::domain::NewItem {
+                library_id: library.id,
+                kind: plurx_core::domain::ItemKind::Movie,
+                parent_id: None,
+                title: "worker fault fixture".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let file_id = store
+            .upsert_file(item, "/worker-fault/movie.mkv", 100, 1, &Default::default())
+            .await
+            .expect("file");
+        let cache_key = plurx_core::store::cluster_fragment_index_key(
+            file_id,
+            100,
+            1,
+            &"d".repeat(64),
+            &"a".repeat(64),
+        )
+        .expect("key");
         let id = uuid::Uuid::new_v4().to_string();
         let now_ms = unix_ms().expect("clock");
         store
             .enqueue_job(EnqueueJob {
                 id: id.clone(),
                 payload: JobPayload::FragmentIndexBuild {
-                    file_id: 1,
+                    file_id,
                     source_generation: "source:1".into(),
                     source_size: 100,
                     source_mtime: 1,
                     source_sha256: "d".repeat(64),
-                    cache_key: "c".repeat(64),
+                    cache_key,
                     pipeline_digest: "a".repeat(64),
                 },
                 dedupe_key: "fragment:1".into(),
@@ -971,6 +1018,141 @@ mod tests {
         fence.0.lost.cancel();
         drop(locked);
         assert!(waiter.await.expect("snapshot task").is_none());
+        active.finish().await;
+    }
+    #[tokio::test]
+    async fn lost_claim_acknowledgement_resolves_the_original_attempt() {
+        let (store, id, active) = active().await;
+        let candidate = store.background_job(&id).await.expect("read").expect("job");
+        let now_ms = candidate
+            .token
+            .as_ref()
+            .expect("predecessor")
+            .lease_expires_ms
+            + 1;
+        let request = ClaimJob {
+            job_id: id.clone(),
+            expected_revision: candidate.revision,
+            node_id: "recovery-node".into(),
+            boot_id: uuid::Uuid::new_v4().to_string(),
+            claim_id: uuid::Uuid::new_v4().to_string(),
+            kind: JobKind::FragmentIndexBuild,
+            payload_version: 1,
+            now_ms,
+            dispatched_at_ms: now_ms,
+        };
+        let (result, dropped) = faults::dropping(
+            faults::CLAIM,
+            claim_with_resolution(store.as_ref(), &candidate, request.clone()),
+        )
+        .await;
+        assert_eq!(dropped, faults::CLAIM);
+        let (recovered, _) = result.expect("resolve").expect("owned");
+        assert_eq!(
+            recovered.failed_attempts,
+            candidate.failed_attempts + 1,
+            "takeover accounting must come from the committed row"
+        );
+        let token = recovered.token.expect("token");
+        assert_eq!(token.claim_id, request.claim_id);
+        assert_eq!(token.boot_id, request.boot_id);
+        assert_eq!(token.fence, candidate.fence + 1);
+        assert_eq!(
+            store
+                .background_job(&id)
+                .await
+                .expect("read")
+                .expect("job")
+                .token,
+            Some(token)
+        );
+        assert_eq!(store.job_attempts(&id).await.expect("attempts").len(), 2);
+        active.finish().await;
+    }
+
+    #[tokio::test]
+    async fn lost_renewal_acknowledgement_recovers_the_advanced_revision() {
+        let (store, id, active) = active().await;
+        let fence = active.fence();
+        let before = fence.snapshot().await.expect("token");
+        let (result, dropped) = faults::dropping(faults::RENEW, fence.renew()).await;
+        assert_eq!(dropped, faults::RENEW);
+        assert!(result.expect("renewal resolution"));
+        let after = fence.snapshot().await.expect("recovered token");
+        assert_eq!(after.claim_id, before.claim_id);
+        assert_eq!(after.fence, before.fence);
+        assert_eq!(after.revision, before.revision + 1);
+        assert_eq!(
+            store
+                .background_job(&id)
+                .await
+                .expect("read")
+                .expect("job")
+                .token,
+            Some(after)
+        );
+        active.finish().await;
+    }
+
+    #[tokio::test]
+    async fn lost_publication_acknowledgement_reconciles_one_artifact() {
+        let (store, id, active) = active().await;
+        let job = store.background_job(&id).await.expect("read").expect("job");
+        let token = job.token.clone().expect("token");
+        let JobPayload::FragmentIndexBuild {
+            file_id,
+            source_size,
+            source_mtime,
+            source_sha256,
+            cache_key,
+            pipeline_digest,
+            ..
+        } = job.supported_payload().expect("payload")
+        else {
+            panic!("fragment");
+        };
+        let artifact = plurx_core::store::ClusterFragmentIndexArtifact {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size,
+            source_mtime,
+            source_sha256,
+            pipeline_sha256: pipeline_digest,
+            blob_sha256: "e".repeat(64),
+            bytes: 128,
+            built_by_node_id: token.node_id,
+            built_at_ms: unix_ms().expect("clock"),
+        };
+        let fence = active.fence();
+        let (result, dropped) =
+            faults::dropping(faults::PUBLISH, fence.publish_fragment(artifact.clone())).await;
+        assert_eq!(dropped, faults::PUBLISH);
+        assert!(result.expect("publication resolution"));
+        assert!(fence.snapshot().await.is_none());
+        assert_eq!(
+            store
+                .background_job(&id)
+                .await
+                .expect("read")
+                .expect("job")
+                .state,
+            JobState::Succeeded
+        );
+        let saved = store
+            .cluster_fragment_index_artifact(&cache_key)
+            .await
+            .expect("artifact")
+            .expect("artifact");
+        assert_eq!(saved.blob_sha256, artifact.blob_sha256);
+        assert_eq!(
+            store
+                .cluster_fragment_index_locations(&cache_key)
+                .await
+                .expect("locations")
+                .len(),
+            1
+        );
+        assert_eq!(store.job_attempts(&id).await.expect("attempts").len(), 1);
         active.finish().await;
     }
 }

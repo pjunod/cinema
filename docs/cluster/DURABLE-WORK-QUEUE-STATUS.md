@@ -288,3 +288,11 @@ implementation is claimed; “compiled” does not mean tests passed.
   preserve audited-retry inputs. Fragment renewal checks retain owner/fence/
   expiry coverage while treating delivery target as an independent interest.
   These are source updates, not a claim that the regressions have passed.
+
+- 2026-09-26: added caller-scoped, test-only loss of committed claim, renewal
+  and publication replies. Contracts assert original claim identity, exact
+  renewal revision and one artifact/location after publication reconciliation.
+  Corrected claim recovery to fetch the committed job row: pairing a recovered
+  token with the old candidate snapshot lost takeover failure accounting and
+  could retain stale priority/checkpoint information. No product setting or
+  runtime feature gate was introduced; fault hooks compile only in test builds.
