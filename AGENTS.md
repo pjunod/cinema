@@ -76,6 +76,12 @@ test failures, or denied lints.
   `validation/merge-errata.toml` sets its boundary, `make history-check`
   reads them from the landing commit, and a corrective landing without them
   turns every later pull request red until an errata row records it.
+  `.forgejo/default_merge_message/MERGE_TEMPLATE.md` prefills Forgejo's web
+  merge form with the description, so a web merge left as prefilled carries
+  them. The API does not: `POST …/pulls/<N>/merge` without
+  `MergeMessageField` lands the title line alone (Forgejo drops the
+  template's body on that path), so an API merge must pass the lines in
+  `MergeMessageField`.
 
 - A focused `plurx-core` regression that covers replicated storage must use
   `make unit-core` or pass `--features hiqlite-store`. Bare

@@ -3423,6 +3423,12 @@ pub async fn update_settings(
             state.store.put_setting(key, &value).await?;
         }
     }
+    if req.monarr_url.is_some() || req.monarr_api_key.is_some() {
+        // The drain caches the pair for 60 s. A write here is seen at once
+        // only if this node holds the `watched:outbox` lease; the owner, when
+        // it is another node, sees it within its 60 s refresh.
+        state.watched.settings_changed();
+    }
     if let Some(on) = req.monarr_watched_sync {
         state
             .store
@@ -3705,6 +3711,12 @@ pub async fn update_settings(
                 if on { "1" } else { "0" },
             )
             .await?;
+    }
+    if req.cluster_media_pool_enabled.is_some() || req.cluster_session_takeover_enabled.is_some() {
+        // The takeover loop caches an "off" for 60 s; drop it and wake the
+        // loop now. An "on" is never cached, so turning takeover off is seen
+        // on the next 2 s tick here and on every other node.
+        crate::media_sessions::takeover_settings_changed();
     }
     if let Some(mode) = &req.sub_mode {
         // Normalize through the parser so only valid modes are stored.
@@ -5333,8 +5345,9 @@ pub(crate) async fn metrics(
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
-         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         state.offline.prometheus(),
+        crate::watched::prometheus(),
         plurx_core::store::prometheus_store_operations(),
         plurx_core::store::prometheus_sqlite_health(),
         crate::store_result::prometheus(),
@@ -5717,17 +5730,41 @@ mod tests {
     #[test]
     fn the_roster_reader_has_exactly_these_callers() {
         let http = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/http");
-        let mut found: Vec<(String, String)> = Vec::new();
-        for entry in std::fs::read_dir(&http).expect("the http module directory") {
-            let path = entry.expect("a directory entry").path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
-                continue;
+        // Every module under `http/`, child modules included: a split moves a
+        // route into `http/<parent>/<child>.rs`, and a scan of the top level
+        // alone would stop seeing it without failing. Test children
+        // (`tests.rs`, `tests/`) quote call sites as literals and are skipped
+        // for the same reason the inline test module is split off below.
+        let mut modules = Vec::new();
+        let mut directories = vec![http.clone()];
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(&directory).expect("an http module directory") {
+                let path = entry.expect("a directory entry").path();
+                let stem = path.file_stem().and_then(|stem| stem.to_str());
+                if stem == Some("tests") {
+                    continue;
+                }
+                if path.is_dir() {
+                    directories.push(path);
+                } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                    modules.push(path);
+                }
             }
+        }
+        assert!(
+            modules
+                .iter()
+                .any(|path| path.parent() != Some(http.as_path())),
+            "the walk no longer reaches the child modules under http/"
+        );
+        let mut found: Vec<(String, String)> = Vec::new();
+        for path in modules {
             let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .expect("a file name")
-                .to_owned();
+                .strip_prefix(&http)
+                .expect("a module under http/")
+                .to_str()
+                .expect("a UTF-8 module path")
+                .replace('\\', "/");
             let source = std::fs::read_to_string(&path).expect("a readable module");
             // Production halves only: the test modules quote these call sites
             // as string literals, and a test is not a route. Split on the test
