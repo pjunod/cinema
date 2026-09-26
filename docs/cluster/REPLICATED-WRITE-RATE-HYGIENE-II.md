@@ -158,10 +158,17 @@ owns the lease and the pages.
   release time) is a local, cluster-wide record of the last pass, so nodes do
   not take turns re-walking a library a peer has just walked. A fresh process
   forces one pass unless it sees a peer's pass after its own start.
-- **Idle backoff.** `gap` starts at **30 s** (today's between-pass sleep);
-  a pass that wrote nothing and made no provider request doubles it, up to
-  the forced interval; a pass with work resets it. The idle hint is polled
-  every 30 s, backing off to `IDLE_TICK_MAX` = **2 min**.
+- **Idle backoff.** `gap` starts at **30 s** (today's between-pass sleep).
+  Only a pass the hint started that wrote nothing and made no provider
+  request doubles it, up to the forced interval — the case of a hint that
+  keeps firing for nothing. A pass with work resets it, and so does any
+  decision that reads the hint silent: the false firing it backed off from
+  has ended, so the next firing is new work and is owed the idle ceiling. A
+  forced pass that found nothing leaves it alone; on an idle library the
+  forced passes are the only passes, and letting them double the gap held the
+  next change for up to 30 min on a node with no peer to take the hinted pass
+  (#540 review, finding 1). The idle hint is polled every 30 s, backing off
+  to `IDLE_TICK_MAX` = **2 min**.
 - **Wake.** There is no single local enqueue for classification — items are
   written by scans, metadata refreshes, provider jobs and edits on any node —
   so the local hint polled at ≤ 2 min stands in for it. This is the one
@@ -217,9 +224,14 @@ the authority for its own node only. `cargo test -p plurxd
 offline::tests::claim_` (paused clock): an idle 10 minutes makes 20–21
 claims (was 300); a locally created package is claimed within one base tick;
 a package queued for this node elsewhere (re-home, re-enable), with no wake,
-within the 10 s ceiling. `plurx_core::store::offline_claim` unit tests: a
-hint that stays silent is overruled at exactly 30 s. Reverting the hint, the
-wake or the forced claim fails a test.
+within the 10 s ceiling; and, over a lagging replica whose hint stays silent,
+a woken package is still claimed within one base tick
+(`claim_a_wake_claims_what_the_local_replica_does_not_show_yet`). `http::offline`:
+a created package wakes this node's worker and an idempotent retry does not
+(`a_created_package_wakes_this_nodes_offline_worker`).
+`plurx_core::store::offline_claim` unit tests: a hint that stays silent is
+overruled at exactly 30 s. Reverting the hint, the forced claim, the wake's
+forced claim (`policy.wake()`) or the `create` call site fails a test.
 
 ### 5.2 M2 — classification lease and pass hint
 
@@ -231,10 +243,14 @@ the hint is false for a fully classified library and true for each of the
 six conditions `classify_page` acts on. `cargo test -p plurxd
 library_search::classification_`: a multi-page pass acquires and releases
 the lease once (was once per page); an idle library runs no page and takes
-no lease for 10 minutes; a new item is classified within the idle ceiling; a
-peer's dead lease is taken over within TTL + retry and the pass resumes;
-`state::tests` enumeration green. Reverting the lease hold, the lease hint or
-the pass hint fails a test.
+no lease for 10 minutes; a new item is classified within the idle ceiling,
+also after six idle hours of forced passes; a peer's dead lease is taken over
+within TTL + retry and the pass resumes; `state::tests` enumeration green.
+`classification_schedule` unit tests: twelve idle forced passes then a change
+60 s later is passed within the idle ceiling; a forced pass that found nothing
+does not grow the gap; a silent hint ends a false firing's backoff. Reverting
+the lease hold, the lease hint, the pass hint or either gap rule fails a
+test.
 
 ### 5.3 M3 — fleet after-measurement
 
@@ -272,6 +288,7 @@ overrule them.
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | plan | #531 | `1173194ce`. Plan written; premises re-verified at `7b7c11f35`; board row K-10 claimed. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1, M2 | #531 | `170dc84b2`. Local hints `offline_queue_hint` and `classification_hint` on both backends; `plurx_core::store::offline_claim` (hint + 30 s forced claim + 2→10 s backoff + local wake) driving `OfflineManager::run`; `plurx_core::store::classification_schedule` (lease-row and pass hints, 30 min forced pass counted from the last pass anywhere, 30 s→2 min idle polls) driving a worker that holds `metadata-classification` through `acquire_cluster_job_with_policy` for a whole pass; the resource joins `CLUSTER_SINGLETON_RESOURCES`; `plurx_offline_claim_ticks_total{outcome}` and `plurx_classification_ticks_total{outcome}`. **Three-voter idle minute, measured:** offline 30 → 2 proposals (0 consistent reads, 8 local reads); classification 120 → 0 (0 consistent reads, 2 decisions × 2 local reads), and a node facing a held lease 0 proposals over 4 local looks where a blind contest is 1 per try. plurxd (paused clock): one lease for a 4-page pass (was one per page); an idle library takes no lease and reads no page for 10 min; a new item classified within 2 min + its pass; two workers on one store walk the library once (every entry revision 1); a dead peer's lease is not contested while live and is taken over when it lapses. Offline: 20–21 claims in 10 idle minutes (was 300), a local creation claimed within one tick, a package queued elsewhere within 10 s. Revert proofs, each failing its tests: offline hint ignored; forced claim removed; wake branch removed; wake not forcing with a silent hint; SQLite queue hint forced silent; lease taken per page; lease-row hint ignored; pass hint forced true; a peer's released row not counted as a pass. The hint parity contract caught a real defect before commit: SQLite numbers `$N` parameters by first appearance, so the first draft bound the version and the clock the wrong way round and the hint always fired. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | merge + gates | #531 | `ff3cb7789` merges `plan/K-03` at `e3687722b` (main `c625dee1f`): Store method count 394, rolling-producer rows re-measured (637, 999), and the `/metrics` format string given its nineteenth placeholder after an auto-merge left 18 for 19 arguments. Gates at the merged head: history-check, validation-lint, validation unittests, operations-check, spike-lock-check, fmt, clippy `-D warnings` all exit 0; `cargo test -p plurx-core -p plurxd` passes every unit and integration target (1291 + 148 + 2932) and exited 101 only on the `plurx-core` doctest target, which could not find the `hiqlite` rlib in the shared target directory — rerun alone, exit 0. `make cluster-store-check` exits 2 with the same 17 failures, by name, as `plan/K-03` at `e3687722b` (one `populated_v14…` parity count and sixteen `subtitle_*` cases on a missing `subtitle_source_publications` table); the four K-10 three-voter cases pass. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | review round | #540 | Adversarial review (comment 5220), two findings. `f86a24e13` merges main at `42ea7a9af` (conflicts: Store method count 395 = main's 393 + K-10's two hints; `/metrics` keeps main's priority-class exposition and K-10's classification ticks, format string 20 placeholders for 20 arguments; rolling-producer time-constructor row measured 1004), built and tested before any change (fmt, clippy, `cargo test -p plurx-core -p plurxd` all 0). **Finding 1 (P1), fixed** in `eb7524c82`: idle forced passes doubled the classification gap to 30 min, so a change on an idle single-node install waited up to 30 min, not the §4 ≤ 2 min; the gap now doubles only after a hinted pass that found nothing, and a silent hint reading resets it (§3.2). Pinned by `classification_schedule::tests::a_change_after_idle_forced_passes_is_passed_within_the_idle_ceiling` (the reviewer's reproduction), `a_forced_pass_that_found_nothing_does_not_grow_the_gap`, `a_silent_hint_ends_the_backoff_a_false_firing_grew` and `library_search::tests::classification_a_change_after_idle_forced_passes_waits_only_the_idle_ceiling`; reverting both hunks fails all four, each hunk alone fails its own unit test (proved). **Finding 2 (P2), addressed** in `2a6ff26d2`: the earlier revert proof "wake not forcing with a silent hint" was a combined mutation, not a standing test, and no plurxd test failed with `policy.wake()` removed. `OfflineManager::run` now delegates to `run_with_claims` (production passes its own store); `offline::tests::claim_a_wake_claims_what_the_local_replica_does_not_show_yet` runs the worker over a lagging-replica stub whose hint stays silent and fails with `policy.wake()` replaced by `{}` (proved; `claim_a_locally_created_package_wakes_the_worker` still passes under that revert, as the review found), and `http::offline::tests::a_created_package_wakes_this_nodes_offline_worker` fails with the `create` call site removed (proved). Rolling-producer rows measured: task-spawn 639, time-constructor 1009 (all new shapes test-only). |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 | #531 | **needs: fleet** — the after-measurement runs only on a deployed build; steps below. |
 
 ### needs: M3 fleet after-measurement (GPT)
