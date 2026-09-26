@@ -640,6 +640,15 @@ track is not proof of speaker or HDMI output. Buffering interruptions exclude
 intentional pauses; unavailable counters say `Not reported`, not zero. Live-edge
 distance is to available stream media and is not broadcast latency.
 
+**Web Live TV controls follow the attached session.** The guide has one
+transport button: Pause while playing or buffering, Resume live while paused
+or blocked by browser autoplay, and no transport button while idle, tuning,
+or failed. The Playback info opener is disabled without an active session.
+The live panel requires attached media and closes when that attachment is
+lost; an empty tuner panel must not survive onto a movie page. Ordinary file
+playback keeps its own information panel. The lifecycle regressions live in
+[`tests/web/live-tv.test.js`](../../tests/web/live-tv.test.js).
+
 **Diagnostics remain available.** The canonical fields below retain their IDs,
 units and platform applicability. Source, delivery, encoder, control and surface
 history are still reachable under grouped disclosures. Extra Live TV fields
