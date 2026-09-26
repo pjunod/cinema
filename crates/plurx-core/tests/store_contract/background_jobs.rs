@@ -582,3 +582,116 @@ async fn background_retry_is_new_audited_interest_idempotent_and_source_fenced()
         assert!(matches!(store.retry_background_job(&original_id, &request_id, user_id, 1006).await.expect("replay after replacement"), Some(EnqueueOutcome::Existing { job_id: replay, .. }) if replay == job_id));
     }).await;
 }
+
+#[tokio::test]
+async fn background_candidates_rotate_scopes_and_offer_lower_work_after_eight_completions() {
+    for_each_backend(|store, backend| async move {
+        let request = |index: usize, priority: u8, scope: &str| EnqueueJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            payload: JobPayload::LibraryScan {
+                library_id: 1,
+                generation: format!("generation:{index}"),
+            },
+            dedupe_key: format!("fairness:{index}"),
+            priority,
+            not_before_ms: 1000,
+            now_ms: 1000,
+            request: JobRequest {
+                scope: scope.into(),
+                request_id: uuid::Uuid::new_v4().to_string(),
+                request_digest: "a".repeat(64),
+                consumer_kind: "scan".into(),
+                consumer_ref: "library:1".into(),
+                target_node_id: None,
+                deadline_ms: None,
+                retain_identity: false,
+            },
+        };
+        let high_old_scope = request(0, 2, "user:1");
+        let high_new_scope = request(1, 2, "user:2");
+        let low = request(2, 0, "user:3");
+        for item in [&high_old_scope, &high_new_scope, &low] {
+            store.enqueue_job(item.clone()).await.expect("candidate");
+        }
+        for index in 0..8 {
+            let completed = request(index + 3, 2, "user:1");
+            store
+                .enqueue_job(completed.clone())
+                .await
+                .expect("history enqueue");
+            let now = 2000 + index as i64 * 10;
+            let ClaimOutcome::Claimed { job } = store
+                .claim_job(ClaimJob {
+                    job_id: completed.id,
+                    expected_revision: 0,
+                    node_id: "node-a".into(),
+                    boot_id: uuid::Uuid::new_v4().to_string(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::LibraryScan,
+                    payload_version: 1,
+                    now_ms: now,
+                    dispatched_at_ms: now,
+                })
+                .await
+                .expect("history claim")
+            else {
+                panic!("{backend}: history claim");
+            };
+            store
+                .settle_job(SettleJob {
+                    token: job.token.expect("token"),
+                    settlement: JobSettlement::Fail {
+                        error_code: "unsupported".into(),
+                    },
+                    now_ms: now + 1,
+                })
+                .await
+                .expect("terminal completion");
+            if index == 6 {
+                let candidates = store
+                    .job_candidates(CandidateQuery {
+                        node_id: "node-a".into(),
+                        kinds: vec![JobKind::LibraryScan],
+                        after: None,
+                        now_ms: 2070,
+                        limit: 100,
+                    })
+                    .await
+                    .expect("seven completions");
+                assert_eq!(
+                    candidates.jobs[0].id, high_new_scope.id,
+                    "{backend}: rotate the previously unserved user first within priority"
+                );
+                assert_eq!(candidates.jobs[1].id, high_old_scope.id);
+                assert_eq!(candidates.jobs[2].id, low.id);
+            }
+        }
+        let viewer = request(20, 3, "user:4");
+        store.enqueue_job(viewer.clone()).await.expect("viewer");
+        let mut cursor = None;
+        let mut order = Vec::new();
+        loop {
+            let page = store
+                .job_candidates(CandidateQuery {
+                    node_id: "node-a".into(),
+                    kinds: vec![JobKind::LibraryScan],
+                    after: cursor,
+                    now_ms: 3000,
+                    limit: 1,
+                })
+                .await
+                .expect("paged fair candidates");
+            order.extend(page.jobs.into_iter().map(|job| job.id));
+            cursor = page.next;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(
+            order,
+            vec![viewer.id, low.id, high_new_scope.id, high_old_scope.id],
+            "{backend}: priority 3 stays first; stable cursor preserves the lower-class turn"
+        );
+    })
+    .await;
+}

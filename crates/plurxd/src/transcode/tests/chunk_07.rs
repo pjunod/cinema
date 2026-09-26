@@ -346,6 +346,23 @@ use crate::queue_fixture::QueueFixture;
         (mgr, work, cache)
     }
 
+    #[tokio::test]
+    async fn heavy_background_admission_is_shared_and_released_with_its_guard() {
+        let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let (manager, _work, _cache) = cached_manager(&store);
+        // Model a different heavy worker that needs no software threads.
+        let heavy = Arc::clone(&manager.background_heavy).try_acquire_owned().expect("heavy slot");
+        assert_eq!(manager.admissions.software_in_use(), 0);
+        assert!(manager.admit_fragment().await.is_none());
+        drop(heavy);
+        let first = manager.admit_fragment().await.expect("index admission");
+        assert!(Arc::clone(&manager.background_heavy).try_acquire_owned().is_err());
+        assert!(manager.admit_fragment().await.is_none());
+        drop(first);
+        assert_eq!(manager.admissions.software_in_use(), 0);
+        assert!(manager.admit_fragment().await.is_some());
+    }
+
     async fn recipe_hash_for_options(
         mgr: &TranscodeManager,
         file: &plurx_core::domain::MediaFile,

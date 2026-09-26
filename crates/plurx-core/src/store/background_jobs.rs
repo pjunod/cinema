@@ -778,6 +778,10 @@ pub struct JobPage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CandidateCursor {
+    /// Keep ordering inputs fixed across this bounded keyset walk.
+    pub selected_at_ms: i64,
+    pub fairness_floor: u8,
+    pub scope_last_claim_ms: i64,
     pub priority: u8,
     pub created_at_ms: i64,
     pub id: String,
@@ -1233,45 +1237,110 @@ impl<T: QueueSql> BackgroundJobStore for T {
             || query.now_ms < 0
             || query.limit == 0
             || query.limit > MAX_PAGE_SIZE
+            || query.after.as_ref().is_some_and(|cursor| {
+                cursor.priority > 3
+                    || cursor.fairness_floor > 3
+                    || cursor.scope_last_claim_ms < 0
+                    || cursor.selected_at_ms < 0
+                    || cursor.selected_at_ms > query.now_ms
+            })
         {
             return Err(invalid("invalid background candidate query"));
         }
         let rows = self.queue_sql(format!(
-            "SELECT {JOB_JSON} AS result_json FROM background_jobs
-              WHERE kind IN (SELECT value FROM json_each($1, '$.kinds')) AND payload_version = 1
-                AND (target_node_id IS NULL OR target_node_id = json_extract($1, '$.node_id'))
-                AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))
-                AND (retry_deadline_ms = 0 OR retry_deadline_ms > json_extract($1, '$.now_ms'))
-                AND not_before_ms <= json_extract($1, '$.now_ms')
-                AND EXISTS (SELECT 1 FROM background_job_waiters WHERE job_id = background_jobs.id
-                  AND state = 'pending' AND (deadline_ms IS NULL OR deadline_ms > json_extract($1, '$.now_ms'))
-                  AND (background_jobs.kind != 'fragment_index_build' OR (
-                    not_before_ms <= json_extract($1, '$.now_ms')
-                    AND (retry_deadline_ms = 0 OR retry_deadline_ms > json_extract($1, '$.now_ms'))
-                    AND failed_attempts + CASE WHEN background_jobs.state = 'running'
-                      AND participation_fence = background_jobs.fence THEN 1 ELSE 0 END < attempt_limit)))
-                AND (json_extract($1, '$.after') IS NULL
-                  OR priority < json_extract($1, '$.after.priority')
-                  OR (priority = json_extract($1, '$.after.priority')
-                    AND (created_at_ms, id) > (json_extract($1, '$.after.created_at_ms'), json_extract($1, '$.after.id'))))
-              ORDER BY priority DESC, created_at_ms, id LIMIT json_extract($1, '$.limit') + 1"
+            r#"WITH selection AS (
+                SELECT COALESCE(json_extract($1, '$.after.selected_at_ms'), json_extract($1, '$.now_ms')) AS selected_at_ms
+            ), recent AS (
+                SELECT job.priority FROM background_job_attempts attempt JOIN background_jobs job ON job.id = attempt.job_id
+                WHERE attempt.owner_node_id = json_extract($1, '$.node_id')
+                  AND job.kind IN (SELECT value FROM json_each($1, '$.kinds'))
+                  AND attempt.outcome IN ('succeeded','failed','cancelled')
+                  AND attempt.finished_at_ms <= (SELECT selected_at_ms FROM selection)
+                ORDER BY attempt.finished_at_ms DESC, attempt.job_id, attempt.fence DESC LIMIT 8
+            ), fairness AS (
+                SELECT COALESCE(json_extract($1, '$.after.fairness_floor'),
+                    CASE WHEN COUNT(*) = 8 THEN MIN(priority) ELSE 0 END) AS fairness_floor FROM recent
+            ), interests AS (
+                SELECT waiter.job_id, waiter.state, waiter.not_before_ms, waiter.retry_deadline_ms,
+                    waiter.deadline_ms, waiter.failed_attempts, waiter.attempt_limit, waiter.participation_fence,
+                    CASE WHEN waiter.request_scope LIKE 'user:%' THEN waiter.request_scope
+                        WHEN COALESCE(item.library_id, json_extract(job.payload_json, '$.library_id')) IS NOT NULL
+                        THEN 'library:' || COALESCE(item.library_id, json_extract(job.payload_json, '$.library_id'))
+                        ELSE waiter.request_scope END AS scheduling_scope
+                FROM background_job_waiters waiter JOIN background_jobs job ON job.id = waiter.job_id
+                LEFT JOIN files file ON file.id = json_extract(job.payload_json, '$.file_id')
+                LEFT JOIN items item ON item.id = file.item_id
+            ), scope_usage AS (
+                SELECT interest.scheduling_scope, MAX(attempt.started_at_ms) AS last_claim_ms
+                FROM interests interest JOIN background_job_attempts attempt ON attempt.job_id = interest.job_id
+                WHERE attempt.owner_node_id = json_extract($1, '$.node_id')
+                    AND attempt.started_at_ms <= (SELECT selected_at_ms FROM selection)
+                GROUP BY interest.scheduling_scope
+            ), eligible AS (
+                SELECT job.id, MIN(COALESCE(usage.last_claim_ms, 0)) AS scope_last_claim_ms
+                FROM background_jobs job JOIN interests interest ON interest.job_id = job.id
+                LEFT JOIN scope_usage usage ON usage.scheduling_scope = interest.scheduling_scope
+                WHERE job.kind IN (SELECT value FROM json_each($1, '$.kinds')) AND job.payload_version = 1
+                    AND (job.target_node_id IS NULL OR job.target_node_id = json_extract($1, '$.node_id'))
+                    AND (job.state = 'queued' OR (job.state = 'running' AND job.lease_expires_ms <= json_extract($1, '$.now_ms')))
+                    AND (job.retry_deadline_ms = 0 OR job.retry_deadline_ms > json_extract($1, '$.now_ms'))
+                    AND job.not_before_ms <= json_extract($1, '$.now_ms')
+                    AND interest.state = 'pending' AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract($1, '$.now_ms'))
+                    AND (job.kind != 'fragment_index_build' OR (
+                        interest.not_before_ms <= json_extract($1, '$.now_ms')
+                        AND (interest.retry_deadline_ms = 0 OR interest.retry_deadline_ms > json_extract($1, '$.now_ms'))
+                        AND interest.failed_attempts + CASE WHEN job.state = 'running'
+                          AND interest.participation_fence = job.fence THEN 1 ELSE 0 END < interest.attempt_limit))
+                GROUP BY job.id
+            ), ranked AS (
+                SELECT job.*, eligible.scope_last_claim_ms, selection.selected_at_ms, fairness.fairness_floor,
+                    CASE WHEN job.priority = 3 THEN 6 WHEN job.priority < fairness.fairness_floor THEN 5
+                        ELSE job.priority * 2 END AS selection_rank
+                FROM background_jobs job JOIN eligible ON eligible.id = job.id CROSS JOIN fairness CROSS JOIN selection
+            )
+            SELECT json_object('job', {JOB_JSON}, 'scope_last_claim_ms', scope_last_claim_ms,
+                'selected_at_ms', selected_at_ms, 'fairness_floor', fairness_floor) AS result_json FROM ranked
+            WHERE json_extract($1, '$.after') IS NULL
+                OR selection_rank < CASE WHEN json_extract($1, '$.after.priority') = 3 THEN 6
+                    WHEN json_extract($1, '$.after.priority') < fairness_floor THEN 5 ELSE json_extract($1, '$.after.priority') * 2 END
+                OR (selection_rank = CASE WHEN json_extract($1, '$.after.priority') = 3 THEN 6
+                    WHEN json_extract($1, '$.after.priority') < fairness_floor THEN 5 ELSE json_extract($1, '$.after.priority') * 2 END
+                  AND (scope_last_claim_ms, created_at_ms, id) > (json_extract($1, '$.after.scope_last_claim_ms'),
+                    json_extract($1, '$.after.created_at_ms'), json_extract($1, '$.after.id')))
+            ORDER BY selection_rank DESC, scope_last_claim_ms, created_at_ms, id LIMIT json_extract($1, '$.limit') + 1"#
         ), encode(&query)?, false, false).await?;
-        let mut jobs: Vec<BackgroundJob> = rows
+        #[derive(Deserialize)]
+        struct Candidate {
+            job: BackgroundJob,
+            scope_last_claim_ms: i64,
+            selected_at_ms: i64,
+            fairness_floor: u8,
+        }
+        let mut candidates: Vec<Candidate> = rows
             .iter()
             .map(|row| decode(row))
             .collect::<Result<_, _>>()?;
-        let more = jobs.len() > query.limit;
-        jobs.truncate(query.limit);
+        let more = candidates.len() > query.limit;
+        candidates.truncate(query.limit);
         let next = more
             .then(|| {
-                jobs.last().map(|job| CandidateCursor {
-                    priority: job.priority,
-                    created_at_ms: job.created_at_ms,
-                    id: job.id.clone(),
+                candidates.last().map(|candidate| CandidateCursor {
+                    selected_at_ms: candidate.selected_at_ms,
+                    fairness_floor: candidate.fairness_floor,
+                    scope_last_claim_ms: candidate.scope_last_claim_ms,
+                    priority: candidate.job.priority,
+                    created_at_ms: candidate.job.created_at_ms,
+                    id: candidate.job.id.clone(),
                 })
             })
             .flatten();
-        Ok(CandidatePage { jobs, next })
+        Ok(CandidatePage {
+            jobs: candidates
+                .into_iter()
+                .map(|candidate| candidate.job)
+                .collect(),
+            next,
+        })
     }
 
     async fn cancel_waiter(

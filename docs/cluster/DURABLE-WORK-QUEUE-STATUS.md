@@ -233,3 +233,11 @@ implementation is claimed; “compiled” does not mean tests passed.
   or every historical target. The Activity button retains its UUID on transport
   failure; replays return the same request. Source generation checks remain
   atomic at admission. Current tests are written/compiled, not executed.
+
+- 2026-09-25: preparation, indexing and hydration now share an explicit
+  one-heavy-worker permit on each node, held alongside real CPU/GPU admission
+  until the child joins. Candidate selection is read-only: per-worker-kind
+  completion history offers a lower-class turn after eight higher completions,
+  always below priority 3. User/library scopes rotate within the selected class;
+  keyset cursors retain the fairness window across pages. Added backend
+  ordering/pagination and physical admission guard contracts (not yet run).

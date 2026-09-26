@@ -11868,11 +11868,13 @@ pub struct PretranscodeFence {
 
 pub(crate) struct FragmentAdmission {
     threads: usize,
+    _heavy: tokio::sync::OwnedSemaphorePermit,
     _permit: crate::admission::TranscodePermit,
 }
 
 pub(crate) struct PretranscodeAdmission {
     encoder: Encoder,
+    _heavy: tokio::sync::OwnedSemaphorePermit,
     threads: usize,
     _permit: crate::admission::TranscodePermit,
 }
@@ -13354,6 +13356,9 @@ pub struct TranscodeManager {
     /// offline request asks speculative work to stop at its next published
     /// segment boundary, then takes this gate before resuming its own claim.
     background_producer: Mutex<()>,
+    /// Shared by every heavy durable worker, independently of CPU/GPU cost.
+    /// The owned guard follows the physical child through cancellation/join.
+    background_heavy: Arc<tokio::sync::Semaphore>,
     offline_waiting: AtomicBool,
     /// Whether this daemon's ffmpeg can strip a Dolby Vision configuration —
     /// probed at boot ([`crate::ffmpeg::has_dovi_rpu`]).
@@ -13785,6 +13790,7 @@ impl TranscodeManager {
             requests: std::sync::Mutex::new(HashMap::new()),
             producer: ProducerTuning::default(),
             background_producer: Mutex::new(()),
+            background_heavy: Arc::new(tokio::sync::Semaphore::new(1)),
             offline_waiting: AtomicBool::new(false),
             dv_strippable: false,
             dv_convertible: false,
@@ -14563,6 +14569,9 @@ impl TranscodeManager {
         if !self.pretranscode_worker_idle() {
             return Ok(None);
         }
+        let Ok(heavy) = Arc::clone(&self.background_heavy).try_acquire_owned() else {
+            return Ok(None);
+        };
         let policy = self
             .try_pretranscode_policy_snapshot()
             .await
@@ -14586,6 +14595,7 @@ impl TranscodeManager {
                 Priority::Background,
             )
             .map(|permit| PretranscodeAdmission {
+                _heavy: heavy,
                 encoder,
                 threads,
                 _permit: permit,
@@ -14596,6 +14606,9 @@ impl TranscodeManager {
         if !self.pretranscode_worker_idle() {
             return None;
         }
+        let heavy = Arc::clone(&self.background_heavy)
+            .try_acquire_owned()
+            .ok()?;
         // Copy indexing can still run CPU transforms. Reserve the available
         // software budget conservatively until a per-pipeline estimate exists.
         let threads = self.software_budget().await.max(1);
@@ -14611,6 +14624,7 @@ impl TranscodeManager {
                 Priority::Background,
             )
             .map(|permit| FragmentAdmission {
+                _heavy: heavy,
                 threads,
                 _permit: permit,
             })
