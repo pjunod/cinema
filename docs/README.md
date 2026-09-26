@@ -257,6 +257,9 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [M5-VERIFICATION-PROMPT.md](streaming/M5-VERIFICATION-PROMPT.md) | Fleet verification: the first converted stream a browser ever plays. | open |
 | [ANDROID-DV-CONVERSION-RCA-AND-FIX.md](streaming/ANDROID-DV-CONVERSION-RCA-AND-FIX.md) | Why a capable Lenovo received the HDR base instead of converted Profile 8.1, and the bounded repair. | open |
 | [ANDROID-DV-CONVERSION-IMPLEMENTATION.md](streaming/ANDROID-DV-CONVERSION-IMPLEMENTATION.md) | Live build and acceptance record for request-scoped Profile 7 conversion, native-DV progressive packaging, and Android HLS retention. | open |
+| [HEVC-COLOR-FIX-STATUS.html](streaming/HEVC-COLOR-FIX-STATUS.html) | Current implementation, decision, review and merge status for the HEVC color repair. | open |
+| [HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md](streaming/HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md) | Why copied HEVC turns pink and green, the matched-pixel reproduction, and the implemented proof-before-stripping containment with an unrestricted Developer override. | open |
+| [HEVC-COLOR-CORRUPTION-REVIEW.md](streaming/HEVC-COLOR-CORRUPTION-REVIEW.md) | Independent adversarial review of the HEVC color diagnosis and implementation, with objections, amendments and remaining delivery gates. | open |
 | [DV-DELIVERY-FINDINGS.md](streaming/DV-DELIVERY-FINDINGS.md) | Why Dolby Vision titles arrive as HDR10 or lower. | open |
 | [DV-DISK-CONVERSION-DIAGNOSIS.md](streaming/DV-DISK-CONVERSION-DIAGNOSIS.md) | Why the on-disk conversion never completes, and a proposal. | open |
 | [QUEUE-REPAIR-VERIFICATION-PROMPT.md](streaming/QUEUE-REPAIR-VERIFICATION-PROMPT.md) | Did the fragment-index queue come back, and stay back? | open |

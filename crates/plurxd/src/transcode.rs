@@ -628,6 +628,14 @@ impl LiveRecoveryReason {
 }
 
 /// The reason labels, in `live_recovery_snapshot()` order.
+pub(crate) async fn unverified_hevc_copy_enabled(store: &dyn Store) -> Result<bool, String> {
+    let value = store
+        .get_setting(plurx_core::store::keys::HEVC_UNVERIFIED_COPY)
+        .await
+        .map_err(|error| format!("reading HEVC copy preference: {error}"))?;
+    Ok(plurx_core::store::stored_switch(value.as_deref(), false))
+}
+
 pub(crate) const LIVE_RECOVERY_LABELS: [&str; 5] = LiveRecoveryReason::LABELS;
 
 fn record_live_recovery(reason: LiveRecoveryReason) {

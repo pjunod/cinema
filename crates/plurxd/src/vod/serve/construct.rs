@@ -377,7 +377,7 @@ impl VodServe {
             .cluster_index_root
             .as_deref()
             .ok_or_else(|| "this process has no cluster index cache root".to_owned())?;
-        let object_version = crate::fragment_index_cluster::inspect_source(file).await?;
+        let object_version = crate::fragment_index_cluster::inspect_copy_source(file).await?;
         let Some(observation) = self
             .shared
             .store
@@ -443,7 +443,7 @@ impl VodServe {
             &artifact,
         )
         .await?;
-        let Some(index) = index else {
+        let Some(mut index) = index else {
             let repair = repair_job_for_artifact(repair, &artifact);
             // Lost work: without this transition the exact artifact remains
             // permanently complete even though no verified holder can serve it.
@@ -458,6 +458,13 @@ impl VodServe {
             );
             return Err("no verified holder could supply the v2 artifact".to_owned());
         };
+        let object_version =
+            crate::fragment_index_cluster::local_object_version(&object_version).to_owned();
+        if let Some(proof) = index.promotion.hevc_configuration.as_mut() {
+            if !proof.bind_equivalent_source(&observation.source_sha256, node_id, &object_version) {
+                return Err("HEVC artifact is not bound to the fully attested source".into());
+            }
+        }
         Ok(Some((index, object_version, artifact.cache_key)))
     }
 
