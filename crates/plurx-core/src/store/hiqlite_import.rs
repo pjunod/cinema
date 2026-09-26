@@ -1374,7 +1374,7 @@ const TABLES: &[TablePlan] = &[
         name: "live_tv_resource_records",
         columns: &["id", "kind", "user_id", "live", "expires_at_ms", "body"],
         order_by: "id",
-        minimum_schema: 70,
+        minimum_schema: 71,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,

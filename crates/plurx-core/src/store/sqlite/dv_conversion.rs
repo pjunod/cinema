@@ -1433,7 +1433,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 26] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 27] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1482,7 +1482,11 @@ mod tests {
             // publication and durable repair ledgers. Both tables and their
             // triggers are dropped by the fixtures above.
             "CREATE TABLE IF NOT EXISTS subtitle_source_repair_epochs",
-            // v70 adds the claim ledger and DVR revision triggers; both fixtures drop all four.
+            // v70's K-05 M5 read indexes. Nothing to drop: every statement is
+            // `CREATE INDEX IF NOT EXISTS` on v2's `items`, so the replay after
+            // either wind-back finds them standing and does nothing.
+            "CREATE INDEX IF NOT EXISTS idx_items_top_level_title",
+            // v71 adds the claim ledger and DVR revision triggers; both fixtures drop all four.
             "CREATE TABLE IF NOT EXISTS live_tv_resource_records",
         ];
 

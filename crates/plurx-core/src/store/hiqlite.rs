@@ -111,7 +111,11 @@ const FILE_GRANTS_SCHEMA_VERSION: i64 = 46;
 const FILE_GRANTS_SCHEMA_MIGRATION_SOURCE: i64 = DOWNLOADED_SUBTITLES_SCHEMA_VERSION;
 const SUBTITLE_SOURCE_SCHEMA_VERSION: i64 = 47;
 const SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE: i64 = FILE_GRANTS_SCHEMA_VERSION;
-const LIVE_TV_RESOURCE_SCHEMA_VERSION: i64 = 48;
+/// K-05 M5: the catalogue read indexes (`sql_source::ITEM_READ_INDEXES`).
+const ITEM_READ_INDEXES_SCHEMA_VERSION: i64 = 48;
+const ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE: i64 = SUBTITLE_SOURCE_SCHEMA_VERSION;
+const LIVE_TV_RESOURCE_SCHEMA_VERSION: i64 = 49;
+const LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE: i64 = ITEM_READ_INDEXES_SCHEMA_VERSION;
 pub const AUTH_SCHEMA_VERSION: i64 = LIVE_TV_RESOURCE_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
@@ -1525,6 +1529,12 @@ impl HiqliteAuthStore {
         for result in results {
             result.map_err(database_error)?;
         }
+        // Bootstrap stamps `AUTH_SCHEMA_VERSION` below without running the
+        // migration chain, so these installs are a second copy of every
+        // `MigrateFrom` step in `migrate_schema`. A step added there must be
+        // installed here too: the store contract
+        // `fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree`
+        // compares the two object for object and fails when they drift.
         super::hiqlite_catalog::install_schema(&client).await?;
         super::hiqlite_durable::install_schema(&client).await?;
         super::hiqlite_dv_conversion::install_schema(&client).await?;
@@ -2722,16 +2732,50 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
-                SchemaMigrationAction::MigrateFrom(SUBTITLE_SOURCE_SCHEMA_VERSION) => {
+                SchemaMigrationAction::MigrateFrom(ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE) => {
+                    // Indexes only, all `IF NOT EXISTS`: one small Raft entry
+                    // (the DDL text, never index pages) that every voter
+                    // applies by building the indexes from its own `items`
+                    // table. The build holds that voter's state-machine writer
+                    // for its duration (measured in the K-05 evidence: tens of
+                    // milliseconds for 75,600 items); reads keep their WAL
+                    // snapshot throughout.
+                    let now = self.now()?;
+                    let mut statements = Vec::new();
+                    for sql in super::sql_source::item_read_index_statements() {
+                        validate_sql(sql)?;
+                        statements.push((sql.to_owned(), params!()));
+                    }
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            ITEM_READ_INDEXES_SCHEMA_VERSION,
+                            now,
+                            ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
                     let mut statements = super::hiqlite_live_tv_resource::schema_statements();
                     statements.push((
                         "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
-                        params!(LIVE_TV_RESOURCE_SCHEMA_VERSION,now,SUBTITLE_SOURCE_SCHEMA_VERSION),
+                        params!(LIVE_TV_RESOURCE_SCHEMA_VERSION,now,LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE),
                     ));
                     let attempt = self.client().txn(statements).await;
-                    self.settle_migration_attempt(SUBTITLE_SOURCE_SCHEMA_VERSION, attempt)
-                        .await?;
+                    self.settle_migration_attempt(
+                        LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
@@ -4694,7 +4738,8 @@ fn schema_migration_action(
         | DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE
         | FILE_GRANTS_SCHEMA_MIGRATION_SOURCE
         | SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE
-        | SUBTITLE_SOURCE_SCHEMA_VERSION => {
+        | ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE
+        | LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -6706,14 +6751,23 @@ mod tests {
             "v46 must advance exactly one step to the subtitle-source schema"
         );
         assert_eq!(
-            SUBTITLE_SOURCE_SCHEMA_VERSION + 1,
-            LIVE_TV_RESOURCE_SCHEMA_VERSION,
-            "v47 must advance exactly one step to the Live TV resource schema"
+            ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE, SUBTITLE_SOURCE_SCHEMA_VERSION,
+            "the read-index migration must start from the exact v47 shape"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 43,
+            ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE + 1,
+            ITEM_READ_INDEXES_SCHEMA_VERSION,
+            "v47 must advance exactly one step to the read-index schema"
+        );
+        assert_eq!(
+            ITEM_READ_INDEXES_SCHEMA_VERSION + 1,
+            LIVE_TV_RESOURCE_SCHEMA_VERSION,
+            "v48 must advance exactly one step to the Live TV resource schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 44,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v48 step"
+            "this implementation contains every additive v5→v49 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

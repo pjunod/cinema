@@ -1202,6 +1202,12 @@ fn identity_for_transform(
     transform: Option<&str>,
 ) -> SourceIdentity {
     let mut recipe = transcode::copy_video_args(file, video);
+    if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
+        recipe.push(format!(
+            "--plurx-hevc-proof={}",
+            plurx_core::hevc_configuration::REVISION
+        ));
+    }
     if let (true, Some(transform)) = (video.converts_dolby_vision(), transform) {
         recipe.push(format!("--plurx-output-transform={transform}"));
     }
@@ -1790,7 +1796,10 @@ async fn build_with_args(
     }
     #[cfg(not(windows))]
     let _ = source_handoff;
-    let (mut child, _child_job) = match crate::process_control::spawn_job_owned(&mut command) {
+    let (mut child, _child_job) = match crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::background("fragment index"),
+    ) {
         Ok(owned) => owned,
         Err(error) => {
             let transient = matches!(
@@ -1824,10 +1833,13 @@ async fn build_with_args(
     // diagnostic tail and, when the pass rides along, the full-stream scan
     // for per-slave failures.
     let stderr_scan = ride_along.as_ref().map(RideAlongPlan::stderr_scan);
-    let stderr_task = child
-        .stderr
-        .take()
-        .map(|stderr| tokio::spawn(read_stderr_tail(stderr, stderr_scan)));
+    let stderr_task = child.stderr.take().map(|stderr| {
+        tokio::spawn(read_stderr_tail(
+            stderr,
+            stderr_scan,
+            matches!(file.video_codec.as_deref(), Some("hevc" | "h265")),
+        ))
+    });
     let observed = Arc::new(std::sync::Mutex::new((0_u64, 0_i64, 0_usize)));
     let observed_for_progress = Arc::clone(&observed);
     let caller_progress = progress.clone();
@@ -1951,18 +1963,24 @@ async fn build_with_args(
     };
     // `scan` is `None` unless the reader ran to the end of the stream: a
     // scan that did not finish cannot vouch that no slave failed.
-    let (stderr_tail, scan) = match stderr_task {
+    let (stderr_tail, scan, hevc_trace) = match stderr_task {
         Some(mut task) => match tokio::time::timeout(Duration::from_secs(5), &mut task).await {
-            Ok(Ok((lines, scan))) => (lines, scan),
-            Ok(Err(error)) => (vec![format!("stderr task failed: {error}")], None),
+            Ok(Ok((lines, scan, trace))) => (lines, scan, trace),
+            Ok(Err(error)) => (vec![format!("stderr task failed: {error}")], None, None),
             Err(_) => {
                 task.abort();
                 let _ = task.await;
-                (Vec::new(), None)
+                (Vec::new(), None, None)
             }
         },
-        None => (Vec::new(), None),
+        None => (Vec::new(), None, None),
     };
+    finish_header_scan(
+        &mut outcome,
+        matches!(file.video_codec.as_deref(), Some("hevc" | "h265")),
+        hevc_trace,
+        &expectation,
+    );
     if let IndexOutcome::Failed(failure) = &mut outcome {
         let (output_bytes, covered_ms, rows) =
             observed.lock().map(|value| *value).unwrap_or_default();
@@ -2010,13 +2028,46 @@ async fn build_with_args(
     }
 }
 
+fn finish_header_scan(
+    outcome: &mut IndexOutcome,
+    hevc: bool,
+    trace: Option<plurx_core::hevc_configuration::Trace>,
+    expectation: &VideoCompletionExpectation,
+) {
+    if let IndexOutcome::Built(index) = outcome {
+        if hevc && trace.is_none() {
+            *outcome = IndexOutcome::Failed(Box::new(
+                IndexFailure::new(
+                    IndexFailureCode::IndexProcessFailed,
+                    "HEVC header scan did not reach stderr EOF; no proof can be published",
+                    index.rows.len(),
+                )
+                .transient(true),
+            ));
+        } else {
+            index.promotion.hevc_configuration = trace.map(|trace| {
+                trace.finish(
+                    expectation.source_object_version.clone(),
+                    expectation.stream_index,
+                )
+            });
+        }
+    }
+}
+
 /// Drain the index child's stderr: a bounded tail for diagnostics and, when
 /// `scan` is given, every line fed to it. The scan comes back only when the
 /// stream was read to its end; a read error leaves it unfinished, so `None`.
 async fn read_stderr_tail(
     mut input: impl AsyncRead + Unpin,
     mut scan: Option<StderrScan>,
-) -> (Vec<String>, Option<StderrScan>) {
+    hevc: bool,
+) -> (
+    Vec<String>,
+    Option<StderrScan>,
+    Option<plurx_core::hevc_configuration::Trace>,
+) {
+    let mut trace = hevc.then(plurx_core::hevc_configuration::Trace::default);
     use plurx_core::content_analysis::{MAX_INDEX_STDERR_BYTES, MAX_INDEX_STDERR_LINES};
 
     let mut tail = VecDeque::with_capacity(MAX_INDEX_STDERR_BYTES);
@@ -2030,6 +2081,9 @@ async fn read_stderr_tail(
                 break;
             }
             Ok(read) => {
+                if let Some(trace) = trace.as_mut() {
+                    trace.feed(&chunk[..read]);
+                }
                 if let Some(scan) = scan.as_mut() {
                     scan.feed(&chunk[..read]);
                 }
@@ -2055,7 +2109,7 @@ async fn read_stderr_tail(
         scan.finish();
         scan
     });
-    (lines, scan)
+    (lines, scan, trace.filter(|_| complete))
 }
 
 fn hex(bytes: impl AsRef<[u8]>) -> String {
@@ -2326,6 +2380,195 @@ mod tests {
             Ok(false),
             "the former container-duration predicate rejects this valid video-only output"
         );
+    }
+
+    #[tokio::test]
+    async fn hevc_incomplete_stderr_cannot_publish_a_proofless_index() {
+        struct FailedRead;
+        impl tokio::io::AsyncRead for FailedRead {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                _: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Err(std::io::Error::other("failed stderr")))
+            }
+        }
+        let (_, _, trace) = read_stderr_tail(FailedRead, None, true).await;
+        assert!(trace.is_none());
+        let mut outcome = IndexOutcome::Built(Box::new(FragmentIndex::new(
+            90_000,
+            vec![],
+            "init",
+            identity(),
+        )));
+        let expectation = VideoCompletionExpectation {
+            stream_index: 0,
+            duration_num: 1,
+            duration_den: 1,
+            provenance: CompletionProvenance::StreamSeconds,
+            source_object_version: "source".into(),
+        };
+        finish_header_scan(&mut outcome, true, trace, &expectation);
+        assert!(matches!(outcome, IndexOutcome::Failed(_)));
+    }
+
+    /// A real encode, rather than fabricated PromotionInputs: the second
+    /// portion redefines PPS 0 while keeping the same source/container track.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hevc_original_header_scan_rejects_changed_pps_before_stripping() {
+        use std::process::Command;
+        testfixtures::require_ffmpeg();
+        let temp = crate::test_tempdir().expect("tempdir");
+        for (name, cb, cr) in [("first", -6, -8), ("second", -1, -2)] {
+            let mut encode = Command::new(testfixtures::ffmpeg());
+            encode.args(["-y", "-v", "error", "-f", "lavfi", "-i",
+                "testsrc2=size=160x96:rate=24:duration=2", "-c:v", "libx265",
+                "-preset", "ultrafast", "-x265-params"])
+                .arg(format!("keyint=24:min-keyint=24:open-gop=0:bframes=0:repeat-headers=1:scenecut=0:cbqpoffs={cb}:crqpoffs={cr}:log-level=none:pools=1"))
+                .arg(temp.path().join(format!("{name}.mkv")));
+            testfixtures::run(&mut encode);
+        }
+        let concat = temp.path().join("concat.txt");
+        std::fs::write(&concat, "file 'first.mkv'\nfile 'second.mkv'\n")
+            .expect("HEVC regression fixture");
+        let changing = temp.path().join("changing.mkv");
+        let mut mux = Command::new(testfixtures::ffmpeg());
+        mux.args(["-y", "-v", "error", "-f", "concat", "-safe", "0", "-i"])
+            .arg(&concat)
+            .args(["-c", "copy"])
+            .arg(&changing);
+        testfixtures::run(&mut mux);
+        for (path, verified) in [
+            (temp.path().join("first.mkv"), true),
+            (changing.clone(), false),
+        ] {
+            let source = std::fs::File::open(&path).expect("HEVC regression fixture");
+            let mut file = hevc_file(None, None);
+            file.path = path;
+            file.size = source.metadata().expect("HEVC regression fixture").len() as i64;
+            file.duration_ms = Some(if verified { 2000 } else { 4000 });
+            let result = build_from_attested_file(
+                &file,
+                &source,
+                "fixture-object",
+                transcode::CopyVideoOptions::new(false, false),
+                temp.path(),
+                Duration::from_secs(30),
+            )
+            .await;
+            let IndexOutcome::Built(index) = result else {
+                panic!("{result:?}")
+            };
+            let proof = index.promotion.hevc_configuration.expect("complete trace");
+            assert_eq!(proof.permits("fixture-object"), verified, "{proof:?}");
+            if !verified {
+                assert!(
+                    proof
+                        .refusal
+                        .as_deref()
+                        .expect("HEVC regression fixture")
+                        .contains("parameter sets change"),
+                    "{proof:?}"
+                );
+            }
+        }
+        // A/B on exactly the same encoded source. Retained headers decode to
+        // the source's pixels; deleting their updates changes the pixels.
+        let hashes = |path: &std::path::Path| {
+            let out = Command::new(testfixtures::ffmpeg())
+                .args(["-v", "error", "-i"])
+                .arg(path)
+                .args(["-map", "0:v:0", "-f", "framemd5", "-"])
+                .output()
+                .expect("HEVC regression fixture");
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout)
+                .expect("HEVC regression fixture")
+                .lines()
+                .filter(|line| !line.starts_with('#'))
+                .map(|line| {
+                    line.rsplit(',')
+                        .next()
+                        .expect("HEVC regression fixture")
+                        .trim()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        let stable_path = temp.path().join("first.mkv");
+        let mut stable_file = hevc_file(None, None);
+        stable_file.path = stable_path.clone();
+        let output = Command::new(testfixtures::ffmpeg())
+            .args(transcode::copy_index_pipe_args(
+                &stable_file,
+                transcode::CopyVideoOptions::new(false, false),
+            ))
+            .output()
+            .expect("HEVC regression fixture");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let production = temp.path().join("stable-production.mp4");
+        let with_rpus = testfixtures::with_dolby_vision_rpus(&output.stdout);
+        let dv_path = temp.path().join("stable-rpu.mp4");
+        std::fs::write(&dv_path, with_rpus).expect("HEVC regression fixture");
+        let dv_source = std::fs::File::open(&dv_path).expect("HEVC regression fixture");
+        let mut dv_file = stable_file.clone();
+        dv_file.path = dv_path;
+        dv_file.size = dv_source.metadata().expect("HEVC regression fixture").len() as i64;
+        dv_file.duration_ms = Some(2000);
+        let dv = build_from_attested_file(
+            &dv_file,
+            &dv_source,
+            "rpu-source",
+            transcode::CopyVideoOptions::new(false, true),
+            temp.path(),
+            Duration::from_secs(30),
+        )
+        .await;
+        let IndexOutcome::Built(dv_index) = dv else {
+            panic!("RPU fixture: {dv:?}")
+        };
+        assert!(
+            dv_index
+                .promotion
+                .hevc_configuration
+                .as_ref()
+                .expect("HEVC regression fixture")
+                .permits("rpu-source"),
+            "{:?}",
+            dv_index.promotion.hevc_configuration
+        );
+        std::fs::write(&production, output.stdout).expect("HEVC regression fixture");
+        assert_eq!(
+            hashes(&production),
+            hashes(&stable_path),
+            "production fMP4 must preserve every decoded pixel"
+        );
+        let original = hashes(&changing);
+        for (name, remove, matches) in [("kept", "62-63", true), ("stripped", "32-34|62-63", false)]
+        {
+            let path = temp.path().join(format!("{name}.mkv"));
+            let mut remux = Command::new(testfixtures::ffmpeg());
+            remux
+                .args(["-y", "-v", "error", "-i"])
+                .arg(&changing)
+                .args(["-map", "0:v:0", "-c:v", "copy", "-bsf:v"])
+                .arg(format!("filter_units=remove_types={remove}"))
+                .arg(&path);
+            testfixtures::run(&mut remux);
+            let result = hashes(&path);
+            assert_eq!(result.len(), original.len());
+            assert_eq!(result == original, matches);
+        }
     }
 
     fn hevc_file(hdr: Option<&str>, hdr_format: Option<&str>) -> MediaFile {
@@ -3068,12 +3311,14 @@ mod tests {
         // makes.
         use plurx_core::fmp4::PromotionInputs;
         let canonical = PromotionInputs {
+            hevc_configuration: None,
             strip_dolby_vision: false,
             dolby_vision: None,
             parameter_sets: vec![vec![0x40, 0x01, 0x0c]],
             hdr10_sei: Vec::new(),
         };
         let differing = PromotionInputs {
+            hevc_configuration: None,
             strip_dolby_vision: false,
             dolby_vision: None,
             parameter_sets: vec![vec![0x40, 0x01, 0x0d]],

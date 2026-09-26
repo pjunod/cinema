@@ -28,7 +28,7 @@ original problem analysis and review remain as the design history.
   the cluster ledger. A viewer does not necessarily consume another tuner.
 - **One indexed record store, one CAS revision.** The typed state machine is in
   [live_tv_resource.rs](../../crates/plurx-core/src/live_tv_resource.rs), with
-  SQLite v70 and replicated v48 adapters. Individually indexed records carry
+  SQLite v71 and replicated v49 adapters. Individually indexed records carry
   starts, ingests, capture/finalization claims, and compact legacy retire
   barriers. Only changed records enter transactions. Terminal-history counts
   do not require downloading response history on every renewal. DVR row

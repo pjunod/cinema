@@ -61,7 +61,12 @@ with one failure, and 2,911 daemon passes with fifteen failures. Corrections
 cover schema and SQL inventories, downgrade fixtures, protocol 4 and advisory
 settings expectations, durable-claim session fixtures, legacy duplicate
 recovery, guide-lease error accounting and a deterministic slow-sink check.
-Focused core and daemon reruns pass. The PR records subsequent validation
+Focused core and daemon reruns pass. Main `abb6fe647` is integrated; its
+catalogue migration precedes the Live TV schema at SQLite 71 / replicated 49.
+Android build 130 preserves main's tablet fullscreen fix. The merged schema
+and ledger checks pass, as do web settings and the task/timer inventory.
+The integration also fixes macOS-only warnings in main's new child-priority
+helper so pinned Clippy remains usable on this host. The PR records subsequent validation
 and the merge result without requiring a status-only source commit.
 
 Physical HDHomeRun and actual predecessor-binary runtime qualification remain

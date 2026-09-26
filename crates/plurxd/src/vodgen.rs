@@ -119,6 +119,14 @@ pub struct Generation {
     /// index built the other way describes media this generation never
     /// produces.
     pub convert_dolby_vision: bool,
+    /// Keep the video samples' in-band HEVC parameter sets when merging.
+    ///
+    /// The recipe's own answer, for the same reason as
+    /// `convert_dolby_vision`: the index this generation is matched against
+    /// was built by a pipe that kept them, so a segmenter that deleted them
+    /// would serve bytes the index never described — and pictures decoded
+    /// against the stale definitions the source redefined.
+    pub retain_hevc_parameter_sets: bool,
     /// Plan entry the spawner positioned this generation at (its `-ss` landed
     /// at or before this entry's start).
     pub start_entry: u32,
@@ -542,7 +550,9 @@ impl<S: Sink> GenerationRun<'_, S> {
             u64::from(start_entry),
             starts,
         ) {
-            Ok(segmenter) => segmenter,
+            Ok(segmenter) => {
+                segmenter.retaining_hevc_parameter_sets(self.generation.retain_hevc_parameter_sets)
+            }
             Err(error) => {
                 return Err(Outcome::Failed(Failure::Stream(format!(
                     "placing the generation against its plan: {error}"
@@ -1085,6 +1095,7 @@ mod tests {
     fn generation(film: &Film, start_entry: u32) -> Generation {
         Generation {
             convert_dolby_vision: false,
+            retain_hevc_parameter_sets: false,
             plan: film.plan.clone(),
             index: Some(film.index.clone()),
             encoded_audio_anchor: None,
@@ -1510,6 +1521,7 @@ mod tests {
             .expect("establishing identity");
         let generation = Generation {
             convert_dolby_vision: false,
+            retain_hevc_parameter_sets: false,
             plan: film.plan.clone(),
             index: Some(film.index.clone()),
             encoded_audio_anchor: None,

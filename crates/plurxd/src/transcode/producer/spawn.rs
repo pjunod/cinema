@@ -369,8 +369,10 @@ impl ObservedFfmpeg {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // the priority class joined seven existing inputs
 pub(super) fn spawn_ffmpeg(
     args: &[String],
+    work: crate::process_control::ChildWork,
     encoder_label: &'static str,
     session_id: &str,
     progress_observer: FfmpegProgressObserver,
@@ -393,6 +395,7 @@ pub(super) fn spawn_ffmpeg(
             // The muxer's uploads go to a loopback endpoint. An inherited
             // `http_proxy` would send them, token and all, to the proxy.
             env: &[("http_proxy", std::ffi::OsStr::new(""))],
+            work,
         },
     )?;
     // Built before the progress observer is moved into its own task: the sink
@@ -466,6 +469,7 @@ pub(super) fn spawn_ffmpeg(
 /// progress evidence.
 pub(super) fn spawn_ffmpeg_pipe(
     args: &[String],
+    work: crate::process_control::ChildWork,
     session_id: &str,
     progress_observer: FfmpegProgressObserver,
     runtime_cache: &std::path::Path,
@@ -485,6 +489,7 @@ pub(super) fn spawn_ffmpeg_pipe(
             progress: crate::producer_spawn::Progress::Stderr,
             descriptors,
             env: &[("http_proxy", std::ffi::OsStr::new(""))],
+            work,
         },
     )?;
     let reader = Some({

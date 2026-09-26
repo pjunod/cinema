@@ -109,7 +109,7 @@
                 .expect("store rendition plan");
         }
         let store: Arc<dyn Store> = sqlite.clone();
-        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let serve = local_serve(base.path().to_path_buf(), store);
 
         serve.maintain().await;
         assert_eq!(
@@ -260,7 +260,7 @@
         let video = copy_video_pipeline(&file, None, true, true, true);
         assert!(video.converts_dolby_vision());
 
-        let object_version = crate::fragment_index_cluster::inspect_source(&file)
+        let object_version = crate::fragment_index_cluster::inspect_copy_source(&file)
             .await
             .expect("source identity");
         let source_sha256 = "a".repeat(64);
@@ -369,7 +369,11 @@
             .expect("selected converting artifact hydrates")
             .expect("source is already attested");
         assert_eq!(hydrated_key, cache_key);
-        assert_eq!(hydrated_version, object_version);
+        assert_eq!(
+            hydrated_version,
+            crate::fragment_index_cluster::local_object_version(&object_version),
+            "hydration returns the local fence identity, not the full-attestation memo key"
+        );
         assert_eq!(hydrated.promotion.dolby_vision, Some(record));
         assert_eq!(hydrated.rows, index.rows);
 
@@ -399,13 +403,16 @@
     include!("../../vodencode_tests.rs");
 
     fn media_file_at(path: PathBuf, duration_ms: i64) -> MediaFile {
+        let metadata = std::fs::metadata(&path).ok();
+        let size = metadata.as_ref().map(|m| m.len() as i64).unwrap_or(1);
+        let mtime = metadata.and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|t| t.as_secs() as i64).unwrap_or(1);
         MediaFile {
             downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path,
-            size: 1,
-            mtime: 1,
+            size,
+            mtime,
             duration_ms: Some(duration_ms),
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
@@ -517,9 +524,10 @@
             Duration::from_secs(120),
         )
         .await;
-        let IndexOutcome::Built(index) = outcome else {
+        let IndexOutcome::Built(mut index) = outcome else {
             panic!("the fixture must index: {outcome:?}");
         };
+        if let Some(proof) = index.promotion.hevc_configuration.as_mut() { proof.source_node_id = "test-local".into(); }
         let store = SqliteStore::open_in_memory().expect("store");
         store
             .put_fragment_index(file.id, &index)
@@ -528,20 +536,49 @@
         (Arc::new(store) as Arc<dyn Store>, *index)
     }
 
+    fn local_serve(base: PathBuf, store: Arc<dyn Store>) -> Arc<VodServe> {
+        let cache = base.join("cluster-index");
+        VodServe::new_cluster(base, store, "test-local".into(), cache, None)
+    }
+
+    #[tokio::test]
+    async fn hevc_vod_checks_proof_before_reusing_a_cached_rendition() {
+        let file = fixture_file();
+        let (store, mut index) = store_with_index(&file).await;
+        let base = crate::test_tempdir().expect("HEVC regression fixture");
+        let serve = local_serve(base.path().to_path_buf(), Arc::clone(&store));
+        create(&serve, &file, "verified", "verified-play", &settings()).await;
+        let good = index.promotion.hevc_configuration.clone().expect("real trace proof");
+        for (name, proof, expected) in [
+            ("missing", None, "hevc_configuration_unverified"),
+            ("peer", Some(plurx_core::hevc_configuration::Proof { source_node_id: "another-node".into(), ..good.clone() }), "hevc_configuration_unverified"),
+            ("varying", Some(plurx_core::hevc_configuration::Proof { refusal: Some("changed PPS".into()), ..good }), "hevc_configuration_unsupported"),
+        ] {
+            index.promotion.hevc_configuration = proof;
+            store.put_fragment_index(file.id, &index).await.expect("HEVC regression fixture");
+            let error = serve.try_create(&request(name, 0.0), &file, &settings(),
+                VodAttribution { user_name: "user", item_title: "fixture", supersession_user: "user" }, name.into())
+                .await.expect_err("bad proof must refuse even with an existing rendition");
+            assert_eq!(crate::transcode::vod_refusal(&error).expect("HEVC regression fixture").0, expected);
+            assert!(!serve.owns(name).await);
+        }
+        serve.end("verified", Terminal::Deleted).await;
+    }
+
     async fn serve_on(base: &Path) -> (Arc<VodServe>, MediaFile) {
         serve_on_file(base, fixture_file()).await
     }
 
     async fn serve_on_file(base: &Path, file: MediaFile) -> (Arc<VodServe>, MediaFile) {
         let (store, _) = store_with_index(&file).await;
-        (VodServe::new(base.to_path_buf(), store), file)
+        (local_serve(base.to_path_buf(), store), file)
     }
 
     /// A `VodServe` with an empty store, for tests that drive internals
     /// directly against a hand-built rendition.
     fn bare_serve(base: &Path) -> Arc<VodServe> {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        VodServe::new(base.to_path_buf(), store)
+        local_serve(base.to_path_buf(), store)
     }
 
     async fn activate_control_route(store: &SqliteStore, session_id: &str, generation: &str) {
@@ -1092,7 +1129,7 @@
         assert!(hit
             .produced_range
             .is_some_and(|range| (range.first..=range.last).contains(&destination.target_entry)));
-        let serve = VodServe::new(
+        let serve = local_serve(
             base.path().join("marker-telemetry"),
             Arc::clone(&store) as Arc<dyn Store>,
         );
@@ -1939,7 +1976,7 @@
         let base = crate::test_tempdir().expect("base");
         let store: Arc<dyn Store> =
             Arc::new(SqliteStore::open_in_memory().expect("in-memory store"));
-        let serve = VodServe::new(base.path().join("serve"), store);
+        let serve = local_serve(base.path().join("serve"), store);
         let rendition = synthetic_rendition(base.path()).await;
         insert_control_session(
             &serve,

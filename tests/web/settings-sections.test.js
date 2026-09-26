@@ -378,11 +378,13 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       shippedSource("preparedHandoffEnabled"), shippedSource("liveTvSettingsCard"),
       shippedSource("liveTvEnableCard"),
       "const document={getElementById:()=>null};",
-      shippedSource("verifiedDecodeCard"), shippedSource("decodeRecoveryCard"),
+      shippedSource("verifiedDecodeCard"), shippedSource("decodeRecoveryCard"), shippedSource("hevcCopyCard"),
       // #309's sibling problem, twice over: a card or fragment `developerPanel`
       // calls has to be composed here or the panel throws on the name and this
       // whole gate reports one failure instead of checking anything.
       shippedSource("subtitleNotReadyCard"),
+      // The fifth time: #517 put the automatic playback-ranges card at the
+      // head of the stored-subtitle section without composing it here.
       shippedSource("subtitlePlaybackRangesCard"),
       shippedSource("subtitleStoredSourcesCard"),
       shippedSource("subtitleClusterSourcesCard"),
@@ -462,8 +464,18 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const html = renderComposedPanel(
     "developerPanel", () => panels.developerPanel(settings, readiness),
   );
-  for (const id of ["pabr", "pqh", "pdp", "dhqa", "adr", "sub503", "subsrc", "subcluster", "subbackfill", "chthumb", "dev-live-tv-enable"])
+  for (const id of ["dev-live-tv-enable", "hevc-unverified", "pabr", "pqh", "pdp", "dhqa", "adr", "sub503", "subsrc", "subcluster", "subbackfill", "chthumb"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
+  // Parallel playback ranges are automatic: the card explains them and reads
+  // peer reachability as advisory, and offers no switch of its own.
+  const ranges = /Parallel playback subtitle ranges[\s\S]*?(?=<div class="setsection"|TOG:subsrc)/.exec(html);
+  assert.ok(ranges, "Developer shows the automatic playback-ranges card");
+  assert.doesNotMatch(ranges[0], /TOG:/, "playback ranges have no enable switch");
+  const unverified = panels.developerPanel({...settings, hevc_unverified_copy:true,
+    hevc_header_trace_available:false, vod_index_cluster_cache:false, vod_index_mins:0}, readiness);
+  assert.match(unverified, /TOG:hevc-unverified\|[^|]*\|[^|]*\|checked=true\|/);
+  assert.match(unverified, /FOOT:saveHevcCopy/);
+  assert.match(unverified, /not configured/);
   assert.match(html, /FOOT:saveLiveTvEnable/);
   assert.match(html, /Readiness observations never disable the control/);
   // Absent from the settings document is on: chapter thumbnails default on.
@@ -1220,6 +1232,22 @@ test("the viewer's four appearance choices share one popover", () => {
   for (const fn of ["setTheme", "setAppearance", "setIconSize"])
     assert.match(shippedSource(fn), /repaintLookMenu\(\)/, `${fn} repaints the shared menu`);
   assert.match(shippedSource("sizeMenuHtml"), /Poster size/, "named as the mobile apps name it");
+});
+
+test("HEVC override saves either choice without consulting advisory readiness", async () => {
+  for (const enabled of [true, false]) {
+    const calls=[];
+    const err={textContent:""}, card={outerHTML:""};
+    const save = new Function("api","document","cacheSettings","hevcCopyCard","toast",
+      `${shippedSource("saveHevcCopy")}\nreturn saveHevcCopy;`)(
+      async (path, opts) => {calls.push([path,opts.body]);return {hevc_unverified_copy:enabled,hevc_header_trace_available:false};},
+      {getElementById:(id)=>id==="hevc-copy-error"?err:id==="hevc-copy-card"?card:{checked:enabled}},
+      ()=>{}, s=>`saved:${s.hevc_unverified_copy}`, ()=>{});
+    await save({disabled:false});
+    assert.deepEqual(calls, [["/settings",{hevc_unverified_copy:enabled}]]);
+    assert.equal(card.outerHTML, `saved:${enabled}`);
+    assert.equal(err.textContent, "");
+  }
 });
 
 main().then(() => {

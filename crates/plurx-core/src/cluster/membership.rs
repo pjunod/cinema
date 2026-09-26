@@ -36,6 +36,8 @@ use super::migration::status::{ReplicationMonitor, ReplicationStatus};
 use super::migration::ActivationMarker;
 use super::ClusterIdentity;
 
+pub mod lifecycle;
+
 /// What a node is called when nothing usable could be derived for it: no
 /// reported hostname, no advertised name, and no reverse lookup. It is a
 /// sentinel rather than a name, so callers that have a stable identifier of
@@ -2059,6 +2061,45 @@ fn admitted_learner_nodes_sql() -> &'static str {
     "SELECT learner.node_id FROM cluster_nodes AS learner \
      WHERE learner.role = 'learner' AND learner.removed_at IS NULL \
      ORDER BY learner.node_id"
+}
+
+/// A node is tombstoned once removal has started (the pending-removal fence)
+/// or finished (`removed_at`). `MembershipManager::node_is_tombstoned` counts
+/// this; `lifecycle::LifecycleView::is_tombstoned` is its projection.
+const NODE_TOMBSTONED_SQL: &str = "SELECT COUNT(*) AS count FROM cluster_nodes \
+                 WHERE node_id = $1 AND (removed_at IS NOT NULL OR EXISTS (\
+                   SELECT 1 FROM cluster_node_removals WHERE node_id = $1\
+                 ))";
+
+/// The node has a maintenance request, acknowledged or not. The target reads
+/// it to publish its local admission fence; `lifecycle::Maintenance` other
+/// than `None` is its projection.
+const NODE_MAINTENANCE_COUNT_SQL: &str =
+    "SELECT COUNT(*) AS count FROM cluster_node_maintenance WHERE node_id = $1";
+
+/// The node has a promotion audit row. A removal refuses while one exists;
+/// `lifecycle::Promotion` other than `None` is its projection. Production reads
+/// only this existence: nothing reads `barrier_index` back, so the projection's
+/// `Started` / `Barrier` / `Joint` split has no production reader.
+const NODE_PROMOTION_COUNT_SQL: &str =
+    "SELECT COUNT(*) AS count FROM cluster_node_promotions WHERE node_id = $1";
+
+/// The attempt a resumed removal adopts: the least attempt reference, or none.
+/// The first attempt of `lifecycle::Removal::InProgress` is its projection.
+const EXISTING_REMOVAL_ATTEMPT_SQL: &str = "SELECT attempt_id FROM cluster_node_removal_attempts \
+                 WHERE node_id = $1 ORDER BY attempt_id LIMIT 1";
+
+/// The committed voter ids `MembershipManager::local_node_is_committed_voter`
+/// decides on, read from a Raft metrics `membership_config`
+/// (`openraft::StoredMembership`): `voter_ids()`, the union over a joint
+/// configuration. A macro rather than a function because `openraft` is not a
+/// normal dependency of this crate, so production code cannot name the type;
+/// the lifecycle agreement test applies the same read to the stored
+/// memberships it builds.
+macro_rules! committed_voter_ids {
+    ($membership_config:expr) => {
+        $membership_config.voter_ids()
+    };
 }
 
 /// "Every active node proves `capability` with the binary it is running now."
@@ -4518,7 +4559,7 @@ impl MembershipManager {
         let requested = inner
             .client
             .query_map::<CountRow, _>(
-                "SELECT COUNT(*) AS count FROM cluster_node_maintenance WHERE node_id = $1",
+                NODE_MAINTENANCE_COUNT_SQL,
                 params!(inner.identity.node_id.as_str()),
             )
             .await?
@@ -5061,7 +5102,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<CountRow, _>(
-                "SELECT COUNT(*) AS count FROM cluster_node_maintenance WHERE node_id = $1",
+                NODE_MAINTENANCE_COUNT_SQL,
                 params!(inner.identity.node_id.as_str()),
             )
             .await?;
@@ -5073,10 +5114,10 @@ impl MembershipManager {
     pub async fn local_node_is_committed_voter(&self) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
         let metrics = inner.client.metrics_db().await?;
-        Ok(metrics
-            .membership_config
-            .voter_ids()
-            .any(|raft_id| raft_id == inner.identity.raft_id))
+        Ok(lifecycle::committed_voter(
+            committed_voter_ids!(metrics.membership_config),
+            inner.identity.raft_id,
+        ))
     }
 
     /// Whether committed membership still lists this node at all.
@@ -7812,8 +7853,7 @@ impl MembershipManager {
         inner
             .client
             .query_consistent_map::<RemovalAttemptRow, _>(
-                "SELECT attempt_id FROM cluster_node_removal_attempts \
-                 WHERE node_id = $1 ORDER BY attempt_id LIMIT 1",
+                EXISTING_REMOVAL_ATTEMPT_SQL,
                 params!(node_id),
             )
             .await?
@@ -8260,10 +8300,7 @@ impl MembershipManager {
             }
             let promotions = inner
                 .client
-                .query_consistent_map::<CountRow, _>(
-                    "SELECT COUNT(*) AS count FROM cluster_node_promotions WHERE node_id = $1",
-                    params!(node_id),
-                )
+                .query_consistent_map::<CountRow, _>(NODE_PROMOTION_COUNT_SQL, params!(node_id))
                 .await?;
             if promotions.first().is_some_and(|row| row.count > 0) {
                 return Err(MembershipError::LearnerLifecyclePending(node_id.to_owned()));
@@ -8949,13 +8986,7 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         let rows = inner
             .client
-            .query_consistent_map::<CountRow, _>(
-                "SELECT COUNT(*) AS count FROM cluster_nodes \
-                 WHERE node_id = $1 AND (removed_at IS NOT NULL OR EXISTS (\
-                   SELECT 1 FROM cluster_node_removals WHERE node_id = $1\
-                 ))",
-                params!(node_id),
-            )
+            .query_consistent_map::<CountRow, _>(NODE_TOMBSTONED_SQL, params!(node_id))
             .await?;
         Ok(rows.first().is_some_and(|row| row.count == 1))
     }
@@ -17165,5 +17196,699 @@ mod tests {
             b"{}"
         )
         .is_none());
+    }
+
+    /// M7 of TRANSCODE-DECOMPOSITION-PLAN (§3.8): the `NodeLifecycle`
+    /// projection agrees with the predicates production decides on.
+    ///
+    /// Each fixture writes one subject node's rows into the production table
+    /// definitions (`MEMBERSHIP_SCHEMA`'s tables plus the additive columns; its
+    /// triggers are left out because they need the coordinator's intent rows),
+    /// reads them back as the projection's row types, and checks:
+    /// `capability_unready_node_predicate` per node and
+    /// `capability_ready_predicate` over the roster against
+    /// `holds_back`/`capability_ready`; `NODE_TOMBSTONED_SQL` (what
+    /// `node_is_tombstoned` counts) against `is_tombstoned`;
+    /// `admitted_learner_nodes_sql` against `is_admitted_learner`;
+    /// `NODE_MAINTENANCE_COUNT_SQL` against a maintenance request and
+    /// `EXIT_MAINTENANCE_SQL` (run in a rolled-back savepoint with its other
+    /// preconditions made true) against `Acknowledged` on an active node; the
+    /// removal attempt set against `ROLLBACK_REMOVAL_FENCE_SQL` (empty),
+    /// `BEGIN_REMOVAL_INTENT_SQL` (membership, for every attempt id the
+    /// fixtures write and one they never write) and
+    /// `EXISTING_REMOVAL_ATTEMPT_SQL` (least attempt);
+    /// `NODE_PROMOTION_COUNT_SQL` against a promotion row; and, over real
+    /// `openraft::Membership` values including both joint shapes,
+    /// `committed_voter_ids!` applied to a `StoredMembership` (the read
+    /// `local_node_is_committed_voter` makes of Raft metrics) against
+    /// `is_committed_voter`, plus a hand-written membership table. The
+    /// promotion `Started`/`Barrier`/`Joint` split has no production reader,
+    /// so it is checked against §3.8's specification only. The fixture space is the product of every value the existing
+    /// membership tests write into those columns: role NULL, 'learner' or
+    /// 'voter'; removed or not; staged or not; the capability current, stale
+    /// or missing (and the anchor node's current or stale); no removal fence
+    /// or one with zero, one or two attempt references; no maintenance row,
+    /// requested or acknowledged; no promotion row, one without a barrier or
+    /// one with a barrier.
+    #[test]
+    fn lifecycle_projection_agrees() {
+        use lifecycle::{
+            capability_ready, committed_voter, observed_lifecycle, CapabilityRow, ClusterNodeRow,
+            Maintenance, MaintenanceRow, Membership, NodeRows, Promotion, PromotionRow,
+            RaftMembershipView, Removal, RemovalRow,
+        };
+        use rusqlite::OptionalExtension;
+
+        const SUBJECT: &str = "subject";
+        const ANCHOR: &str = "anchor";
+        const SUBJECT_RAFT_ID: u64 = 2;
+        const CAPABILITY_A: &str = LIVE_TV_CAPABILITY;
+        const CAPABILITY_B: &str = REMOVAL_ATTEMPT_CAPABILITY;
+        const TABLES: [&str; 7] = [
+            "cluster_nodes",
+            "cluster_node_capabilities",
+            "cluster_node_join_staging",
+            "cluster_node_removals",
+            "cluster_node_removal_attempts",
+            "cluster_node_promotions",
+            "cluster_node_maintenance",
+        ];
+
+        #[derive(Clone, Copy, Debug)]
+        enum Proof {
+            Missing,
+            Current,
+            Stale,
+        }
+
+        let connection = rusqlite::Connection::open_in_memory().expect("sqlite");
+        let mut tables = 0;
+        for statement in MEMBERSHIP_SCHEMA
+            .iter()
+            .filter(|statement| statement.starts_with("CREATE TABLE"))
+        {
+            connection.execute(statement, []).expect("membership table");
+            tables += 1;
+        }
+        for column in MEMBERSHIP_ADDITIVE_COLUMNS {
+            connection
+                .execute(column.statement, [])
+                .expect("additive column");
+        }
+        assert!(tables >= TABLES.len(), "the schema scan found no tables");
+        // `EXIT_MAINTENANCE_SQL` also refuses while the node owns an active
+        // media session. That table belongs to the store schema, not this
+        // module's; an empty stand-in with the three columns the statement
+        // reads keeps that clause true, so the statement's verdict is the
+        // maintenance row's.
+        connection
+            .execute(
+                "CREATE TABLE media_sessions (owner_node_id TEXT, state TEXT, \
+                 lease_expires_at_ms INTEGER)",
+                [],
+            )
+            .expect("media session stand-in");
+
+        let read_rows = |node_id: &str| {
+            let node = connection
+                .query_row(
+                    "SELECT node_id, raft_id, last_seen_at, removed_at, role \
+                     FROM cluster_nodes WHERE node_id = ?1",
+                    [node_id],
+                    |row| {
+                        Ok(ClusterNodeRow {
+                            node_id: row.get(0)?,
+                            raft_id: row.get::<_, i64>(1)? as u64,
+                            last_seen_at: row.get(2)?,
+                            removed_at: row.get(3)?,
+                            role: row.get(4)?,
+                        })
+                    },
+                )
+                .expect("node row");
+            let mut statement = connection
+                .prepare(
+                    "SELECT capability, last_seen_at FROM cluster_node_capabilities \
+                     WHERE node_id = ?1 ORDER BY capability",
+                )
+                .expect("capability read");
+            let capabilities = statement
+                .query_map([node_id], |row| {
+                    Ok(CapabilityRow {
+                        capability: row.get(0)?,
+                        last_seen_at: row.get(1)?,
+                    })
+                })
+                .expect("capabilities")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("capability rows");
+            let staged = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM cluster_node_join_staging WHERE node_id = ?1",
+                    [node_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("staging")
+                == 1;
+            let removal = connection
+                .query_row(
+                    "SELECT started_at FROM cluster_node_removals WHERE node_id = ?1",
+                    [node_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .expect("removal")
+                .map(|started_at| {
+                    let mut statement = connection
+                        .prepare(
+                            "SELECT attempt_id FROM cluster_node_removal_attempts \
+                             WHERE node_id = ?1 ORDER BY attempt_id",
+                        )
+                        .expect("attempt read");
+                    let attempt_ids = statement
+                        .query_map([node_id], |row| row.get::<_, String>(0))
+                        .expect("attempts")
+                        .collect::<Result<Vec<_>, _>>()
+                        .expect("attempt rows");
+                    RemovalRow {
+                        started_at,
+                        attempt_ids,
+                    }
+                });
+            let promotion = connection
+                .query_row(
+                    "SELECT attempt_id, barrier_index FROM cluster_node_promotions \
+                     WHERE node_id = ?1",
+                    [node_id],
+                    |row| {
+                        Ok(PromotionRow {
+                            attempt_id: row.get(0)?,
+                            barrier_index: row.get(1)?,
+                        })
+                    },
+                )
+                .optional()
+                .expect("promotion");
+            let maintenance = connection
+                .query_row(
+                    "SELECT requested_at, acknowledged_at FROM cluster_node_maintenance \
+                     WHERE node_id = ?1",
+                    [node_id],
+                    |row| {
+                        Ok(MaintenanceRow {
+                            requested_at: row.get(0)?,
+                            acknowledged_at: row.get(1)?,
+                        })
+                    },
+                )
+                .optional()
+                .expect("maintenance");
+            (node, capabilities, staged, removal, promotion, maintenance)
+        };
+        let node_holds_back = |node_id: &str, capability: &str| -> bool {
+            connection
+                .query_row(
+                    &format!(
+                        "SELECT EXISTS (SELECT 1 FROM cluster_nodes AS active \
+                         WHERE active.node_id = ?1 AND {})",
+                        capability_unready_node_predicate(capability)
+                    ),
+                    [node_id],
+                    |row| row.get(0),
+                )
+                .expect("per-node readiness verdict")
+        };
+        let cluster_ready = |capability: &str| -> bool {
+            connection
+                .query_row(
+                    &format!("SELECT {}", capability_ready_predicate(capability)),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("cluster readiness verdict")
+        };
+        let tombstoned = |node_id: &str| -> bool {
+            connection
+                .query_row(NODE_TOMBSTONED_SQL, [node_id], |row| row.get::<_, i64>(0))
+                .expect("tombstone count")
+                == 1
+        };
+        let learner_roster = || -> BTreeSet<String> {
+            let mut statement = connection
+                .prepare(admitted_learner_nodes_sql())
+                .expect("learner roster");
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .expect("roster")
+                .collect::<Result<BTreeSet<_>, _>>()
+                .expect("roster rows")
+        };
+        // Production writes that decide on maintenance and on the removal
+        // attempt set, run as production runs them, inside a savepoint that is
+        // always rolled back so the fixture is unchanged. Each returns whether
+        // the statement changed a row.
+        let rolled_back = |write: &dyn Fn() -> usize| -> bool {
+            connection
+                .execute_batch("SAVEPOINT probe")
+                .expect("savepoint");
+            let changed = write();
+            connection
+                .execute_batch("ROLLBACK TO probe; RELEASE probe")
+                .expect("roll the probe back");
+            changed == 1
+        };
+        // `EXIT_MAINTENANCE_SQL` deletes only an acknowledged request
+        // (`acknowledged_at IS NOT NULL`) of an active node. Every other
+        // precondition it checks (fresh heartbeat and progress, zero apply
+        // lag, the maintenance capability proven by the running binary, no
+        // active media session) is made true first, so the delete answers
+        // "acknowledged and active" and nothing else.
+        let exit_maintenance_deletes = |node_id: &str| -> bool {
+            rolled_back(&|| {
+                connection
+                    .execute(
+                        "INSERT INTO cluster_node_progress (node_id, current_term, \
+                         apply_lag_entries, bounded_read_ready, voter_storage_ready, \
+                         voter_role_persisted, observed_at) VALUES (?1, 1, 0, 1, 1, 1, 0)",
+                        [node_id],
+                    )
+                    .expect("progress row");
+                connection
+                    .execute(
+                        "INSERT INTO cluster_node_capabilities (node_id, capability, \
+                         last_seen_at) SELECT node_id, ?2, last_seen_at FROM cluster_nodes \
+                         WHERE node_id = ?1",
+                        rusqlite::params![node_id, NODE_MAINTENANCE_CAPABILITY],
+                    )
+                    .expect("maintenance capability");
+                connection
+                    .execute(
+                        EXIT_MAINTENANCE_SQL,
+                        rusqlite::params![node_id, 0_i64, NODE_MAINTENANCE_CAPABILITY, 0_i64],
+                    )
+                    .expect("exit maintenance")
+            })
+        };
+        let maintenance_requested = |node_id: &str| -> bool {
+            connection
+                .query_row(NODE_MAINTENANCE_COUNT_SQL, [node_id], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("maintenance count")
+                == 1
+        };
+        // `ROLLBACK_REMOVAL_FENCE_SQL` drops the fence only when no attempt
+        // reference remains: the empty-set read.
+        let fence_rolls_back = |node_id: &str| -> bool {
+            rolled_back(&|| {
+                connection
+                    .execute(ROLLBACK_REMOVAL_FENCE_SQL, [node_id])
+                    .expect("fence rollback")
+            })
+        };
+        // `BEGIN_REMOVAL_INTENT_SQL` records an intent only for an attempt the
+        // set holds: the membership read.
+        let intent_admits = |node_id: &str, attempt: &str| -> bool {
+            rolled_back(&|| {
+                connection
+                    .execute(
+                        BEGIN_REMOVAL_INTENT_SQL,
+                        rusqlite::params![node_id, attempt],
+                    )
+                    .expect("removal intent")
+            })
+        };
+        let existing_attempt = |node_id: &str| -> Option<String> {
+            connection
+                .query_row(EXISTING_REMOVAL_ATTEMPT_SQL, [node_id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .expect("existing attempt")
+        };
+        let promotion_present = |node_id: &str| -> bool {
+            connection
+                .query_row(NODE_PROMOTION_COUNT_SQL, [node_id], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("promotion count")
+                > 0
+        };
+
+        // Committed Raft configurations the subject (raft id 2) can be in,
+        // built with openraft's own constructor, with the membership each
+        // must project to.
+        let raft_shapes: Vec<(&str, openraft::Membership<u64, Node>, Membership)> = vec![
+            (
+                "absent",
+                openraft::Membership::new(vec![BTreeSet::from([1])], ()),
+                Membership::Absent,
+            ),
+            (
+                "learner",
+                openraft::Membership::new(
+                    vec![BTreeSet::from([1])],
+                    BTreeSet::from([SUBJECT_RAFT_ID]),
+                ),
+                Membership::Learner,
+            ),
+            (
+                "voter",
+                openraft::Membership::new(vec![BTreeSet::from([1, SUBJECT_RAFT_ID])], ()),
+                Membership::Voter,
+            ),
+            (
+                "joint, entering",
+                openraft::Membership::new(
+                    vec![BTreeSet::from([1]), BTreeSet::from([1, SUBJECT_RAFT_ID])],
+                    (),
+                ),
+                Membership::Voter,
+            ),
+            (
+                "joint, leaving",
+                openraft::Membership::new(
+                    vec![BTreeSet::from([1, SUBJECT_RAFT_ID]), BTreeSet::from([1])],
+                    (),
+                ),
+                Membership::Voter,
+            ),
+        ];
+
+        let mut fixtures = 0usize;
+        let mut seen_tombstoned = [false; 2];
+        let mut seen_holds_back = [false; 2];
+        let mut seen_learner = [false; 2];
+        let mut seen_acknowledged = [false; 2];
+        let mut seen_fence_rollback = [false; 2];
+        let mut seen_attempt_admitted = [false; 2];
+        let mut seen_promotion = [false; 2];
+        for role in [None, Some("learner"), Some("voter")] {
+            for removed_at in [None, Some(9_i64)] {
+                for staged in [false, true] {
+                    for subject_proof in [Proof::Missing, Proof::Current, Proof::Stale] {
+                        for anchor_proof in [Proof::Current, Proof::Stale] {
+                            for attempts in [None, Some(0), Some(1), Some(2)] {
+                                for maintenance in [None, Some(None), Some(Some(8_i64))] {
+                                    for barrier in [None, Some(None), Some(Some(7_i64))] {
+                                        for table in TABLES {
+                                            connection
+                                                .execute(&format!("DELETE FROM {table}"), [])
+                                                .expect("reset fixture");
+                                        }
+                                        connection
+                                            .execute(
+                                                "INSERT INTO cluster_nodes (node_id, raft_id, \
+                                                 raft_address, api_address, last_seen_at, \
+                                                 removed_at, role) VALUES \
+                                                 (?1, 1, 'r1', 'a1', 3, NULL, NULL), \
+                                                 (?2, ?3, 'r2', 'a2', 5, ?4, ?5)",
+                                                rusqlite::params![
+                                                    ANCHOR,
+                                                    SUBJECT,
+                                                    SUBJECT_RAFT_ID as i64,
+                                                    removed_at,
+                                                    role
+                                                ],
+                                            )
+                                            .expect("node rows");
+                                        let anchor_seen = match anchor_proof {
+                                            Proof::Current => 3,
+                                            _ => 2,
+                                        };
+                                        for capability in [CAPABILITY_A, CAPABILITY_B] {
+                                            connection
+                                                .execute(
+                                                    "INSERT INTO cluster_node_capabilities \
+                                                     VALUES (?1, ?2, ?3)",
+                                                    rusqlite::params![
+                                                        ANCHOR,
+                                                        capability,
+                                                        anchor_seen
+                                                    ],
+                                                )
+                                                .expect("anchor capability");
+                                        }
+                                        let subject_seen = match subject_proof {
+                                            Proof::Missing => None,
+                                            Proof::Current => Some(5),
+                                            Proof::Stale => Some(4),
+                                        };
+                                        if let Some(seen) = subject_seen {
+                                            connection
+                                                .execute(
+                                                    "INSERT INTO cluster_node_capabilities \
+                                                     VALUES (?1, ?2, ?3)",
+                                                    rusqlite::params![SUBJECT, CAPABILITY_A, seen],
+                                                )
+                                                .expect("subject capability");
+                                        }
+                                        if staged {
+                                            connection
+                                                .execute(
+                                                    "INSERT INTO cluster_node_join_staging \
+                                                     VALUES (?1)",
+                                                    [SUBJECT],
+                                                )
+                                                .expect("staging row");
+                                        }
+                                        if let Some(count) = attempts {
+                                            connection
+                                                .execute(
+                                                    "INSERT INTO cluster_node_removals \
+                                                     VALUES (?1, 6)",
+                                                    [SUBJECT],
+                                                )
+                                                .expect("removal fence");
+                                            for attempt in 0..count {
+                                                connection
+                                                    .execute(
+                                                        "INSERT INTO \
+                                                         cluster_node_removal_attempts \
+                                                         VALUES (?1, ?2)",
+                                                        rusqlite::params![
+                                                            SUBJECT,
+                                                            format!("attempt-{attempt}")
+                                                        ],
+                                                    )
+                                                    .expect("removal attempt");
+                                            }
+                                        }
+                                        if let Some(acknowledged_at) = maintenance {
+                                            connection
+                                                .execute(
+                                                    "INSERT INTO cluster_node_maintenance \
+                                                     VALUES (?1, 7, ?2)",
+                                                    rusqlite::params![SUBJECT, acknowledged_at],
+                                                )
+                                                .expect("maintenance row");
+                                        }
+                                        if let Some(barrier_index) = barrier {
+                                            connection
+                                                .execute(
+                                                    "INSERT INTO cluster_node_promotions \
+                                                     VALUES (?1, 'promotion', ?2, 6)",
+                                                    rusqlite::params![SUBJECT, barrier_index],
+                                                )
+                                                .expect("promotion row");
+                                        }
+
+                                        for (shape, raft, expected) in &raft_shapes {
+                                            let view = RaftMembershipView::new(
+                                                raft.voter_ids(),
+                                                raft.nodes().map(|(id, _)| *id),
+                                                raft.get_joint_config().len() > 1,
+                                            );
+                                            let project = |node_id: &str| {
+                                                let (
+                                                    node,
+                                                    capabilities,
+                                                    staged,
+                                                    removal,
+                                                    promotion,
+                                                    maintenance,
+                                                ) = read_rows(node_id);
+                                                observed_lifecycle(
+                                                    NodeRows {
+                                                        node: &node,
+                                                        capabilities: &capabilities,
+                                                        staged,
+                                                        removal: removal.as_ref(),
+                                                        promotion: promotion.as_ref(),
+                                                        maintenance: maintenance.as_ref(),
+                                                    },
+                                                    &view,
+                                                )
+                                            };
+                                            let views = [project(ANCHOR), project(SUBJECT)];
+                                            let context = format!(
+                                                "raft {shape}, role {role:?}, removed \
+                                                 {removed_at:?}, staged {staged}, subject \
+                                                 {subject_proof:?}, anchor {anchor_proof:?}, \
+                                                 attempts {attempts:?}, maintenance \
+                                                 {maintenance:?}, promotion {barrier:?}: {:?}",
+                                                views[1]
+                                            );
+                                            let roster = learner_roster();
+                                            for (index, lifecycle) in views.iter().enumerate() {
+                                                for capability in [CAPABILITY_A, CAPABILITY_B] {
+                                                    let holds = lifecycle.holds_back(capability);
+                                                    assert_eq!(
+                                                        holds,
+                                                        node_holds_back(
+                                                            &lifecycle.node_id,
+                                                            capability
+                                                        ),
+                                                        "{} holds back {capability}: {context}",
+                                                        lifecycle.node_id
+                                                    );
+                                                    seen_holds_back[usize::from(holds)] = true;
+                                                }
+                                                let dead = lifecycle.is_tombstoned();
+                                                assert_eq!(
+                                                    dead,
+                                                    tombstoned(&lifecycle.node_id),
+                                                    "{} tombstoned: {context}",
+                                                    lifecycle.node_id
+                                                );
+                                                seen_tombstoned[usize::from(dead)] = true;
+                                                let learner = lifecycle.is_admitted_learner();
+                                                assert_eq!(
+                                                    learner,
+                                                    roster.contains(&lifecycle.node_id),
+                                                    "{} admitted learner: {context}",
+                                                    lifecycle.node_id
+                                                );
+                                                if index == 1 {
+                                                    seen_learner[usize::from(learner)] = true;
+                                                }
+                                                let node_id = lifecycle.node_id.as_str();
+                                                assert_eq!(
+                                                    lifecycle.maintenance != Maintenance::None,
+                                                    maintenance_requested(node_id),
+                                                    "{node_id} maintenance requested: {context}"
+                                                );
+                                                let exits = lifecycle.maintenance
+                                                    == Maintenance::Acknowledged
+                                                    && lifecycle.removal != Removal::Tombstoned;
+                                                assert_eq!(
+                                                    exits,
+                                                    exit_maintenance_deletes(node_id),
+                                                    "{node_id} maintenance acknowledged: {context}"
+                                                );
+                                                seen_acknowledged[usize::from(exits)] = true;
+                                                // A tombstoned node's attempt references
+                                                // are left behind on purpose and no
+                                                // removal read consults them again, so
+                                                // `Tombstoned` carries no attempt set.
+                                                let attempts = match &lifecycle.removal {
+                                                    Removal::Tombstoned => None,
+                                                    Removal::None => Some((false, BTreeSet::new())),
+                                                    Removal::InProgress { attempts } => {
+                                                        Some((true, attempts.clone()))
+                                                    }
+                                                };
+                                                if let Some((fence, attempts)) = attempts {
+                                                    let rollback = fence && attempts.is_empty();
+                                                    assert_eq!(
+                                                        rollback,
+                                                        fence_rolls_back(node_id),
+                                                        "{node_id} removal fence rolls back: \
+                                                         {context}"
+                                                    );
+                                                    seen_fence_rollback[usize::from(rollback)] =
+                                                        true;
+                                                    for attempt in [
+                                                        "attempt-0",
+                                                        "attempt-1",
+                                                        "attempt-2",
+                                                        "attempt-never-written",
+                                                    ] {
+                                                        let held = attempts.contains(attempt);
+                                                        assert_eq!(
+                                                            held,
+                                                            intent_admits(node_id, attempt),
+                                                            "{node_id} holds {attempt}: {context}"
+                                                        );
+                                                        seen_attempt_admitted[usize::from(held)] =
+                                                            true;
+                                                    }
+                                                    assert_eq!(
+                                                        attempts.first().cloned(),
+                                                        existing_attempt(node_id),
+                                                        "{node_id} adopted attempt: {context}"
+                                                    );
+                                                }
+                                                let promoting =
+                                                    lifecycle.promotion != Promotion::None;
+                                                assert_eq!(
+                                                    promoting,
+                                                    promotion_present(node_id),
+                                                    "{node_id} promotion row: {context}"
+                                                );
+                                                seen_promotion[usize::from(promoting)] = true;
+                                            }
+                                            for capability in [CAPABILITY_A, CAPABILITY_B] {
+                                                assert_eq!(
+                                                    capability_ready(&views, capability),
+                                                    cluster_ready(capability),
+                                                    "cluster ready for {capability}: {context}"
+                                                );
+                                            }
+                                            let subject = &views[1];
+                                            assert_eq!(subject.membership, *expected, "{context}");
+                                            // The Raft read production decides on:
+                                            // `local_node_is_committed_voter` applies
+                                            // `committed_voter_ids!` to the metrics'
+                                            // `Arc<StoredMembership>`; the projection
+                                            // reads its own `RaftMembershipView`.
+                                            let stored = Arc::new(openraft::StoredMembership::new(
+                                                None,
+                                                raft.clone(),
+                                            ));
+                                            assert_eq!(
+                                                subject.is_committed_voter(),
+                                                committed_voter(
+                                                    committed_voter_ids!(stored),
+                                                    SUBJECT_RAFT_ID
+                                                ),
+                                                "committed voter as \
+                                                 local_node_is_committed_voter reads it: \
+                                                 {context}"
+                                            );
+                                            // `Started` / `Barrier` / `Joint` have no
+                                            // production reader (only the row's existence
+                                            // is read, checked above against
+                                            // `NODE_PROMOTION_COUNT_SQL`). This is §3.8's
+                                            // specification of the split, not an
+                                            // agreement with production.
+                                            let joint = raft.get_joint_config().len() > 1;
+                                            match barrier {
+                                                None => assert_eq!(
+                                                    subject.promotion,
+                                                    Promotion::None,
+                                                    "{context}"
+                                                ),
+                                                Some(_) if joint => assert_eq!(
+                                                    subject.promotion,
+                                                    Promotion::Joint,
+                                                    "the joint interval is never collapsed: \
+                                                     {context}"
+                                                ),
+                                                Some(None) => assert_eq!(
+                                                    subject.promotion,
+                                                    Promotion::Started,
+                                                    "{context}"
+                                                ),
+                                                Some(Some(index)) => assert_eq!(
+                                                    subject.promotion,
+                                                    Promotion::Barrier { index },
+                                                    "{context}"
+                                                ),
+                                            }
+                                            fixtures += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(fixtures, 3 * 2 * 2 * 3 * 2 * 4 * 3 * 3 * 5);
+        assert_eq!(
+            (
+                seen_holds_back,
+                seen_tombstoned,
+                seen_learner,
+                seen_acknowledged,
+                seen_fence_rollback,
+                seen_attempt_admitted,
+                seen_promotion,
+            ),
+            ([true; 2], [true; 2], [true; 2], [true; 2], [true; 2], [true; 2], [true; 2]),
+            "every verdict has to be reached both ways, or the agreement is vacuous"
+        );
     }
 }

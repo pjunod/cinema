@@ -639,6 +639,81 @@ pub(crate) async fn attest_source(
     memo: Option<&FragmentIndexSourceObservation>,
     progress: &(dyn Fn(u64) + Sync),
 ) -> Result<AttestedSource, String> {
+    attest_source_mode(node_id, file, memo, progress, false).await
+}
+
+/// Copy proofs may cross nodes only after every byte is attested. Keep this
+/// regime separate from subtitle/sample observations and their memo keys.
+pub(crate) async fn attest_copy_source(
+    node_id: &str,
+    file: &MediaFile,
+    memo: Option<&FragmentIndexSourceObservation>,
+    progress: &(dyn Fn(u64) + Sync),
+) -> Result<AttestedSource, String> {
+    attest_source_mode(node_id, file, memo, progress, is_hevc(file)).await
+}
+
+fn is_hevc(file: &MediaFile) -> bool {
+    matches!(file.video_codec.as_deref(), Some("hevc" | "h265"))
+}
+
+const FULL_COPY_PREFIX: &str = "hevc-full-v1:";
+
+pub(crate) fn local_object_version(version: &str) -> &str {
+    version.strip_prefix(FULL_COPY_PREFIX).unwrap_or(version)
+}
+
+pub(crate) async fn inspect_copy_source(file: &MediaFile) -> Result<String, String> {
+    let version = inspect_source(file).await?;
+    Ok(if is_hevc(file) {
+        format!("{FULL_COPY_PREFIX}{version}")
+    } else {
+        version
+    })
+}
+
+pub(crate) fn copy_attestation_read_bytes(file: &MediaFile) -> u64 {
+    let size = file.size.max(0) as u64;
+    if is_hevc(file) {
+        size
+    } else {
+        attestation_read_bytes(size)
+    }
+}
+
+async fn full_source_digest(
+    source: &mut tokio::fs::File,
+    size: u64,
+    progress: &(dyn Fn(u64) + Sync),
+) -> Result<String, String> {
+    let mut digest = Sha256::new();
+    digest.update(b"plurx/source-attestation/hevc-full-v1\0");
+    digest.update(size.to_be_bytes());
+    let mut buffer = vec![0; HASH_CHUNK];
+    let mut remaining = size;
+    while remaining > 0 {
+        let want = remaining.min(HASH_CHUNK as u64) as usize;
+        let read = source
+            .read(&mut buffer[..want])
+            .await
+            .map_err(|e| format!("hashing complete HEVC source: {e}"))?;
+        if read == 0 {
+            return Err("source ended before full attestation".into());
+        }
+        digest.update(&buffer[..read]);
+        remaining -= read as u64;
+        progress(size - remaining);
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
+async fn attest_source_mode(
+    node_id: &str,
+    file: &MediaFile,
+    memo: Option<&FragmentIndexSourceObservation>,
+    progress: &(dyn Fn(u64) + Sync),
+    full: bool,
+) -> Result<AttestedSource, String> {
     #[cfg(unix)]
     let mut source = tokio::fs::File::open(&file.path)
         .await
@@ -668,6 +743,11 @@ pub(crate) async fn attest_source(
     let version = object_version(&before)?;
     #[cfg(windows)]
     let version = windows_object_version(&source_handle)?;
+    let version = if full {
+        format!("{FULL_COPY_PREFIX}{version}")
+    } else {
+        version
+    };
     let source_sha256 = if let Some(memo) = memo.filter(|memo| {
         memo.node_id == node_id
             && memo.file_id == file.id
@@ -678,7 +758,11 @@ pub(crate) async fn attest_source(
     }) {
         memo.source_sha256.clone()
     } else {
-        let digest = sampled_source_digest(&mut source, before.len(), &file.path, progress).await?;
+        let digest = if full {
+            full_source_digest(&mut source, before.len(), progress).await?
+        } else {
+            sampled_source_digest(&mut source, before.len(), &file.path, progress).await?
+        };
         let after = source
             .metadata()
             .await
@@ -688,7 +772,7 @@ pub(crate) async fn attest_source(
         let after_version = object_version(&after)?;
         #[cfg(windows)]
         let after_version = windows_object_version(&source_handle)?;
-        if after_version != version {
+        if after_version != local_object_version(&version) {
             return Err("source changed while its digest was read".to_owned());
         }
         digest
@@ -752,7 +836,7 @@ pub(crate) fn source_still_matches(
     #[cfg(windows)]
     let version = windows_object_version(source)?;
     Ok(metadata.len() == observation.source_size.max(0) as u64
-        && version == observation.object_version)
+        && version == local_object_version(&observation.object_version))
 }
 
 fn scanner_identity_matches(metadata: &std::fs::Metadata, file: &MediaFile) -> Result<(), String> {
@@ -865,6 +949,12 @@ fn pipeline_digest_for_transform(
     transform: Option<&str>,
 ) -> String {
     let mut args = plurx_core::transcode::copy_index_pipe_args(file, video);
+    if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
+        args.push(format!(
+            "{{plurx-hevc-proof:{}}}",
+            plurx_core::hevc_configuration::REVISION
+        ));
+    }
     if let Some(input) = args
         .windows(2)
         .position(|window| window[0] == "-i")
@@ -1404,6 +1494,86 @@ mod tests {
             digest_of(&path).await,
             baseline,
             "size is in the preamble, so a file that grew changes digest"
+        );
+    }
+
+    #[tokio::test]
+    async fn hevc_full_attestation_observes_changes_outside_the_old_sample() {
+        let dir = tempfile::tempdir().expect("HEVC regression fixture");
+        let path = dir.path().join("copy-source.bin");
+        let size = 70 * 1024 * 1024;
+        tokio::fs::write(&path, filler(size))
+            .await
+            .expect("HEVC regression fixture");
+        let file = sampled_file(path.clone());
+        let sampled = attest_source("node", &file, None, &|_| {})
+            .await
+            .expect("HEVC regression fixture");
+        let progress = std::sync::atomic::AtomicU64::new(0);
+        let full = attest_copy_source("node", &file, Some(&sampled.observation), &|bytes| {
+            progress.store(bytes, std::sync::atomic::Ordering::Relaxed);
+        })
+        .await
+        .expect("HEVC regression fixture");
+        assert_eq!(
+            progress.load(std::sync::atomic::Ordering::Relaxed),
+            size as u64
+        );
+        assert_eq!(copy_attestation_read_bytes(&file), size as u64);
+        assert_ne!(
+            full.observation.source_sha256,
+            sampled.observation.source_sha256
+        );
+        assert_eq!(
+            full.observation.object_version,
+            inspect_copy_source(&file)
+                .await
+                .expect("HEVC regression fixture")
+        );
+        assert!(
+            source_still_matches(&full.handle, &full.observation).expect("HEVC regression fixture")
+        );
+        // A memo in the full regime is reused without another whole-file read.
+        let memo = attest_copy_source("node", &file, Some(&full.observation), &|_| {
+            panic!("memo must avoid I/O")
+        })
+        .await
+        .expect("HEVC regression fixture");
+        assert_eq!(
+            memo.observation.source_sha256,
+            full.observation.source_sha256
+        );
+        let offset = sampled_extents(size as u64)[0].1;
+        assert!(offset < sampled_extents(size as u64)[1].0);
+        use tokio::io::AsyncWriteExt;
+        let mut writer = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .await
+            .expect("HEVC regression fixture");
+        writer
+            .seek(SeekFrom::Start(offset))
+            .await
+            .expect("HEVC regression fixture");
+        writer
+            .write_all(&[0xff])
+            .await
+            .expect("HEVC regression fixture");
+        writer.flush().await.expect("HEVC regression fixture");
+        let changed = sampled_file(path.clone());
+        let sampled_after = attest_source("node", &changed, None, &|_| {})
+            .await
+            .expect("HEVC regression fixture");
+        let full_after = attest_copy_source("node", &changed, None, &|_| {})
+            .await
+            .expect("HEVC regression fixture");
+        assert_eq!(
+            sampled_after.observation.source_sha256,
+            sampled.observation.source_sha256
+        );
+        assert_ne!(
+            full_after.observation.source_sha256,
+            full.observation.source_sha256
         );
     }
 
