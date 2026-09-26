@@ -23,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -39,8 +40,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -133,19 +135,32 @@ fun PdfReaderScreen(fileId: Long, expectedSize: Long, onExit: () -> Unit) {
     BackHandler(onBack = onExit)
 
     var pageIndex by remember(fileId) { mutableIntStateOf(0) }
-    val page by produceState<Bitmap?>(null, pdf, pageIndex) {
+    val page by produceState<Result<Bitmap>?>(null, pdf, pageIndex) {
         val document = pdf ?: return@produceState
-        value = withContext(Dispatchers.IO) {
-            document.renderLock.withLock {
-                document.renderer.openPage(pageIndex).use { source ->
-                    val width = (source.width * 2).coerceIn(800, 2_048)
-                    val height = (source.height.toLong() * width / source.width)
-                        .coerceIn(1, 4_096).toInt()
-                    Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also {
-                        source.render(it, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+        value = try {
+            Result.success(withContext(Dispatchers.IO) {
+                document.renderLock.withLock {
+                    var bitmap: Bitmap? = null
+                    try {
+                        document.renderer.openPage(pageIndex).use { source ->
+                            val width = (source.width * 2).coerceIn(800, 2_048)
+                            val height = (source.height.toLong() * width / source.width)
+                                .coerceIn(1, 4_096).toInt()
+                            Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { rendered ->
+                                bitmap = rendered
+                                source.render(rendered, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                            }
+                        }
+                    } catch (failure: Exception) {
+                        bitmap?.recycle()
+                        throw failure
                     }
                 }
-            }
+            })
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            Result.failure(failure)
         }
     }
 
@@ -172,9 +187,20 @@ fun PdfReaderScreen(fileId: Long, expectedSize: Long, onExit: () -> Unit) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.Start) {
                     Button(onClick = { pageIndex-- }, enabled = pageIndex > 0) { Text("Previous") }
                 }
-                Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), contentAlignment = Alignment.TopCenter) {
-                    if (page == null) CircularProgressIndicator()
-                    else PdfPage(page!!, pageIndex)
+                key(pageIndex) {
+                    Box(
+                        Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                        contentAlignment = Alignment.TopCenter,
+                    ) {
+                        when {
+                            page == null -> CircularProgressIndicator()
+                            page?.isFailure == true -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("Cinema could not render this PDF page.", color = MaterialTheme.colorScheme.error)
+                                if (pageIndex > 0) Button(onClick = { pageIndex-- }) { Text("Previous page") }
+                            }
+                            else -> PdfPage(page!!.getOrThrow(), pageIndex)
+                        }
+                    }
                 }
             }
         }
