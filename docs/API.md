@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 231
+One binary serves everything on one port (`:32400` by default). plurx has 232
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -2063,8 +2063,8 @@ is `health.verdict == "dead"`, and the fix — once the underlying cause is gone
 ## 17. Live TV
 
 ```
- ADMIN                    ANY USER                     OWNER NODE
-   │ GET  /live-tv/readiness │                   (config.owner_node_id)
+ ADMIN                    ANY USER                  CHANNEL WORKER
+   │ GET  /live-tv/readiness │                   (durable channel assignment)
    │ POST /live-tv/readiness/refresh                        │
    ├────────────────────────────────────────────────────────▶ discover.json
    │◀── verdict + snapshot ─────────────────────────────────┤ lineup.json
@@ -2101,6 +2101,7 @@ is `health.verdict == "dead"`, and the fix — once the underlying cause is gone
 | GET | `/api/v1/live-tv/guide` | bearer | The cached programme guide, clipped to `?from=<unix>&hours=<1..336>`. Never triggers a fetch. Carries `next_refresh_at` so a client polls on the owner's clock |
 | POST | `/api/v1/live-tv/guide/refresh` | admin | Forces one guide refresh on the owner and returns the new document |
 | GET | `/api/v1/live-tv/guide/readiness` | admin | Advisory: what has to be true for the configured source to work, and whether it is |
+| POST | `/api/v1/live-tv/channels/{channel}/intents` | bearer | Persist a protocol 4 start intent before tuner admission; returns its ID, expiry and configuration generation |
 | POST | `/api/v1/live-tv/channels/{channel}/sessions` | bearer | Two-phase start; issues the capability |
 | GET | `/api/v1/live-tv/sessions/{capability}/master.m3u8` | **capability** | Caption-advertising master playlist returned by start and resume |
 | GET | `/api/v1/live-tv/sessions/{capability}/index.m3u8` | **capability** | Live media playlist referenced by the master |
@@ -2122,12 +2123,12 @@ precisely when the node is being worked on.
 
 ### 17.0 Recording
 
-The DVR mutation routes write intent; they do not open tuners or files. The
-owner loop reads those replicated rows and is the only writer of `recording`
-and terminal states. Runtime reads join the durable row to a bounded owner
-observation. `DELETE` on a live recording therefore answers `202 {pending:
-true}`: acceptance is visible as `Stop requested`, and closure is a later
-owner fact.
+The DVR mutation routes write intent; they do not open tuners or files.
+Serving workers compete for an atomic capture claim before opening either.
+Runtime reads aggregate current observations from all workers and match the
+durable recording attempt. Stop preserves useful bytes through independently
+claimed finalization. Delete prevents publication; file cleanup remains pending
+until a worker with the recording's storage identity removes its artifacts.
 
 | Method | Path | Auth | What it does |
 |---|---|---|---|
@@ -2171,72 +2172,74 @@ maintenance and on a non-voting learner while the lineup read and new starts
 do not — an in-flight viewer keeps playing through a maintenance window, and
 nobody new gets a tuner.
 
-### 17.1 The tuner is a singleton, and the capability names its owner
+### 17.1 Cluster device, temporary channel workers
 
-One node is the tuner owner. Every other node is an ingress that proxies
-start, activate, resource and stop over the internal RPC surface. The owner is
-named **inside** the capability:
+The network tuner has no permanent node owner. Any eligible serving node can
+reach it; replicated claims assign each channel ingest to a temporary worker.
+Viewers and recordings on that channel share the ingest. Capacity is counted
+across workers, including connections still draining. A lost worker affects
+its sessions; other workers can use available device capacity.
+
+A session capability still names its worker for routing:
 
 ```
-    ltv1.<base64url(owner_node_id)>.<uuid-v4>
+    ltv1.<base64url(worker_node_id)>.<uuid-v4>
 ```
 
-so any node can route any session without a lookup, and no node can serve a
-capability it does not own. The parser requires exactly three parts, the
-literal `ltv1`, a v4 UUID, and a middle segment that re-encodes to the
-identical string — there is exactly one spelling of any capability.
+The parser requires exactly three canonical parts. The worker additionally
+checks the current configuration, boot identity, claim epoch and lease. The
+legacy `owner_node_id` response field is compatibility metadata, not a device
+placement setting. Enablement lives in Settings → Developer; readiness never
+disables that control. Configuration changes increment the generation and
+fence old operations without a physical-fencing checkbox.
 
-Owner **change is a drain, not a takeover**: the new owner must obtain a
-signed acknowledgement from the old one, bound to a nonce, both node ids and
-the drain generation. Until that lands, the `owner_transition` readiness check
-is red and nothing starts. There is deliberately no timeout-based takeover,
-because elapsed time cannot prove the old ffmpeg closed its tuner socket.
+Protocol 4 clients first POST the playback envelope to the channel's
+`intents` route. The response is `{request_id, admission_expires_at_ms,
+config_generation}`. Persist `request_id` before POSTing the same playback
+envelope and ID to `sessions`; replay must retain the same envelope.
+`v4_` IDs contain 32 lowercase hexadecimal digits and have a five-minute
+admission window. Retirement is durable even before admission, and an unknown
+protocol 4 ID can never fall back to legacy admission. Legacy 32-hex IDs retain
+a bounded 24-hour retire guarantee. User-scoped recovery routes resolve the
+same durable assignment through any ingress.
 
-### 17.2 Readiness
+### 17.2 Advisory readiness
 
-`GET` reads cached device state; `POST …/refresh` bypasses the snapshot cache
-and ignores the graph probe's 6-hour TTL. A forced refresh takes one of 8
-permits; a ninth concurrent caller gets `device_unavailable`.
+`GET` reads cached device state; `POST …/refresh` requests fresh device and
+encoder observations. The body remains `{ready, enabled, owner_node_id,
+generation, checks[], snapshot?}`, with `{id, ready, message}` checks.
 
-The body is `{ready, enabled, owner_node_id, generation, checks[], snapshot?}`
-where each check is `{id, ready, message}`. The checks run in a fixed order,
-and the first four are unconditional — if `configuration`, `serving_authority`
-or `owner_transition` fails, the response has those four and nothing else, and
-**the device was never contacted**, so the absence of `owner_network` is not
-evidence about the tuner.
-
-| Check | Red means |
+| Check | Observation |
 |---|---|
-| `configuration` | A saved setting is invalid — session limit outside 1–4, output height not 720 or 1080, a blank owner, a half-written owner-transition barrier, or an HDHomeRun address that is not private or link-local unicast IPv4. plurx will not be pointed at a routable or cloud-metadata address |
-| `cluster_protocol` | A node in the cluster runs a build without the live-TV protocol. It is named. This check does *not* short-circuit the device probe |
-| `serving_authority` | The node you are asking has lost quorum serving authority. Nothing media-related will start here |
-| `owner_transition` | The previous tuner owner has not acknowledged cleanup. Bring it back, or perform the explicit physical-fencing attestation in Live TV settings |
-| `owner_network` | The owner could not reach the device, or is not a reachable committed voter, or the device answered something invalid. Messages never contain the device URL by construction |
-| `lineup` | The lineup is empty (scan on the device), or it is `Stale` — the fetch failed and the owner is serving a projection up to 5 minutes old |
-| `session_limit` | plurx is configured to lease more tuners than the device reports |
-| `ffmpeg_graph` | This owner's ffmpeg cannot produce the required output. No channel will start until it is green. "Never probed" is its own message, not a failure |
-| `drm_boundary` | Never red. It states the product boundary and is excluded from the verdict, so it can never be the reason |
+| `configuration` | Address format, policy capacity and output settings; an empty address may be saved, but playback needs a private/link-local device address |
+| `cluster_protocol` | Legacy protocol publication by active serving nodes |
+| `start_recovery` | Negotiated recovery protocol support |
+| `cluster_resource` | A reachable worker advertises protocol 4 durable intents |
+| `worker_observations` | Per-node device identity, capacity, protocol and encoder results; timeouts remain explicit |
+| `clock_sync` | Clock synchronization and shared storage identity require operator verification |
+| `serving_authority` | Current quorum serving authority |
+| `owner_network` | A reachable eligible worker can read the configured device |
+| `lineup` | Fresh sanitized channels are available |
+| `session_limit` | Configured capacity compared with reported hardware capacity |
+| `ffmpeg_graph` | Encoder graph observation on the selected worker |
+| `drm_boundary` | Protected channels remain unsupported |
 
-**How to read it:** read `ready` last. It is a conjunction, so one `false`
-anywhere sets it, and the useful information is *which*. Walk `checks` from
-the top and stop at the first red — the order runs from cheapest and most
-local to most remote, so the earliest red is nearly always the cause and the
-rest are consequences. `enabled` is independent in both directions:
-`enabled: false, ready: true` is a correctly configured server waiting to be
-switched on, and `enabled: true, ready: false` is a server that will refuse
-every start for the reason named. When every check is green and playback still
-fails, the verdict has done its job — the next surface is the per-session
-`status`.
+Read each observation rather than treating the aggregate `ready` value as
+permission. `enabled` is an independent operator choice. Individual operations
+still require authentication, valid device data and current claims. Upgrade
+all serving workers before broad use: old binaries do not participate in the
+new admission protocol. Older binaries refuse the newer on-disk schemas on
+restart; a running predecessor and physical tuner behavior require separate
+rollout qualification.
 
 ### 17.3 The lineup
 
-`GET /api/v1/live-tv/channels` refuses twice before any device work: 503
-`live_tv_disabled`, and 503 `live_tv_protocol_unready` when any cluster node
-lacks the protocol. It never forces a device fetch and never exercises the
-encoder.
+`GET /api/v1/live-tv/channels` requires Live TV to be enabled and serves a
+sanitized snapshot from an eligible reachable worker. It does not gate the
+feature on an all-node protocol attestation or probe the encoder.
 
 The response is `{freshness, age_seconds, last_success_at, refresh_error?,
-channels[]}`, where `freshness` is `fresh` (fetched within 30 s) or `stale`
+protocols[], channels[]}`, where `freshness` is `fresh` (fetched within 30 s) or `stale`
 (the refresh failed and this is the last good projection, up to 5 minutes
 old). Each channel is `{id, guide_number, guide_name, favorite, drm, support,
 hd?, video_codec?, audio_codec?}` where `support` is `ready` or
