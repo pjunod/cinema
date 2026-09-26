@@ -5,7 +5,7 @@
 //! command says nothing either way about whether they survive. This module
 //! answers that from bytes instead:
 //!
-//! * a generated fixture — 10 s of 1080i MPEG-2 with B-frames, CC1 pop-on
+//! * generated 1080i and 720p MPEG-2 fixtures with B-frames, CC1 pop-on
 //!   captions and one CEA-708 service-1 window per caption, `cc_data`
 //!   injected in display order exactly where a broadcaster puts it — whose
 //!   ground truth is known by construction;
@@ -29,9 +29,10 @@ use super::*;
 use crate::live_tv_delivery::resolve_live_delivery;
 use std::collections::BTreeMap;
 
-/// 10 s at 30000/1001: 300 coded frame pictures.
+/// 10 s at 30000/1001 or 5 s at 60000/1001: 300 coded frame pictures.
 const FIXTURE_FRAMES: usize = 300;
 const FIXTURE_FRAME_SECONDS: f64 = 1001.0 / 30000.0;
+const PROGRESSIVE_FIXTURE_FRAME_SECONDS: f64 = 1001.0 / 60000.0;
 /// ATSC A/53 `cc_count` for 29.97 Hz frame pictures: 9600 bit/s of
 /// `cc_data`, twenty constructs per frame.
 const CC_COUNT: usize = 20;
@@ -228,15 +229,19 @@ fn inject_a53(elementary: &[u8]) -> Vec<u8> {
     out
 }
 
-fn fixture_truth() -> (Vec<CaptionCue>, Vec<CaptionCue>) {
+fn fixture_truth_at(frame_seconds: f64) -> (Vec<CaptionCue>, Vec<CaptionCue>) {
     let cue = |(frame, text): (usize, &str)| CaptionCue {
-        at: frame as f64 * FIXTURE_FRAME_SECONDS,
+        at: frame as f64 * frame_seconds,
         text: text.to_owned(),
     };
     (
         cc1_pairs().1.into_iter().map(cue).collect(),
         service1_packets().1.into_iter().map(cue).collect(),
     )
+}
+
+fn fixture_truth() -> (Vec<CaptionCue>, Vec<CaptionCue>) {
+    fixture_truth_at(FIXTURE_FRAME_SECONDS)
 }
 
 async fn media_command(command: &mut tokio::process::Command) -> std::process::Output {
@@ -264,9 +269,30 @@ fn movie_safe(path: &Path) -> &str {
     text
 }
 
-/// The captioned fixture, as an ATSC 1.0 transport stream: 1080i MPEG-2 with
-/// B-frames and AC-3.
+/// The captioned interlaced fixture, as an ATSC 1.0 transport stream: 1080i
+/// MPEG-2 with B-frames and AC-3.
 async fn captioned_fixture(system: &SystemInfo, directory: &Path) -> PathBuf {
+    captioned_fixture_with_scan(system, directory, true).await
+}
+
+/// A 720p ATSC source takes a different graph: it has no deinterlacer. Its
+/// caption proof cannot be borrowed from the 1080i fixture.
+async fn captioned_progressive_fixture(system: &SystemInfo, directory: &Path) -> PathBuf {
+    captioned_fixture_with_scan(system, directory, false).await
+}
+
+async fn captioned_fixture_with_scan(
+    system: &SystemInfo,
+    directory: &Path,
+    interlaced: bool,
+) -> PathBuf {
+    let suffix = if interlaced { "1080i" } else { "720p" };
+    let mux_rate = if interlaced {
+        "30000/1001"
+    } else {
+        "60000/1001"
+    };
+    let duration = if interlaced { "10" } else { "5" };
     let mut generate = tokio::process::Command::new(&system.ffmpeg);
     generate.args([
         "-hide_banner",
@@ -275,13 +301,23 @@ async fn captioned_fixture(system: &SystemInfo, directory: &Path) -> PathBuf {
         "-f",
         "lavfi",
         "-i",
-        "testsrc2=size=1920x1080:rate=60000/1001",
+        if interlaced {
+            "testsrc2=size=1920x1080:rate=60000/1001"
+        } else {
+            "testsrc2=size=1280x720:rate=60000/1001"
+        },
         "-t",
-        "10",
-        "-vf",
-        "tinterlace=mode=interleave_top",
-        "-flags",
-        "+ilme+ildct",
+        duration,
+    ]);
+    if interlaced {
+        generate.args([
+            "-vf",
+            "tinterlace=mode=interleave_top",
+            "-flags",
+            "+ilme+ildct",
+        ]);
+    }
+    generate.args([
         "-c:v",
         "mpeg2video",
         "-b:v",
@@ -295,11 +331,11 @@ async fn captioned_fixture(system: &SystemInfo, directory: &Path) -> PathBuf {
         "pipe:1",
     ]);
     let elementary = media_command(&mut generate).await.stdout;
-    let elementary_path = directory.join("captioned.m2v");
+    let elementary_path = directory.join(format!("captioned-{suffix}.m2v"));
     tokio::fs::write(&elementary_path, inject_a53(&elementary))
         .await
         .expect("captioned elementary stream");
-    let fixture = directory.join("captioned-608-708.ts");
+    let fixture = directory.join(format!("captioned-{suffix}-608-708.ts"));
     let mut mux = tokio::process::Command::new(&system.ffmpeg);
     mux.args([
         "-hide_banner",
@@ -308,7 +344,7 @@ async fn captioned_fixture(system: &SystemInfo, directory: &Path) -> PathBuf {
         "-fflags",
         "+genpts",
         "-r",
-        "30000/1001",
+        mux_rate,
         "-f",
         "mpegvideo",
         "-i",
@@ -320,7 +356,7 @@ async fn captioned_fixture(system: &SystemInfo, directory: &Path) -> PathBuf {
         "-i",
         "sine=frequency=440:sample_rate=48000",
         "-t",
-        "10",
+        duration,
         "-c:v",
         "copy",
         "-c:a",
@@ -608,6 +644,7 @@ struct GraphCase {
 
 struct GraphRun {
     status: std::process::ExitStatus,
+    deinterlace_output: Option<LiveDeinterlaceOutput>,
     diagnostic: Option<&'static str>,
     /// The last lines FFmpeg wrote, kept only when it failed: an audit run on
     /// someone else's node has to say why a graph did not run, not only that.
@@ -730,6 +767,7 @@ async fn run_live_graph(
             .collect();
         return GraphRun {
             status: finished.status,
+            deinterlace_output: plan.delivery.deinterlace_output,
             diagnostic,
             failure: Some(lines[lines.len().saturating_sub(3)..].join(" / ")),
             argv,
@@ -774,6 +812,7 @@ async fn run_live_graph(
     let track = caption_track(&system, &media).await;
     GraphRun {
         status: finished.status,
+        deinterlace_output: plan.delivery.deinterlace_output,
         diagnostic,
         failure: None,
         argv,
@@ -788,15 +827,19 @@ async fn run_live_graph(
 pub(super) struct CaptionProof {
     pub(super) encoder: String,
     pub(super) packaging: LivePackaging,
-    pub(super) deinterlace: LiveDeinterlaceOutput,
+    pub(super) deinterlace: Option<LiveDeinterlaceOutput>,
+    pub(super) source_height: u16,
     pub(super) output_height: u16,
     pub(super) services: Vec<&'static str>,
 }
 
 pub(super) async fn probe_available_graphs(system: Arc<SystemInfo>) -> Vec<CaptionProof> {
     let root = tempfile::tempdir().expect("caption probe root");
-    let fixture = captioned_fixture(&system, root.path()).await;
+    let interlaced = captioned_fixture(&system, root.path()).await;
+    let progressive = captioned_progressive_fixture(&system, root.path()).await;
     let (cc1_truth, service1_truth) = fixture_truth();
+    let (progressive_cc1_truth, progressive_service1_truth) =
+        fixture_truth_at(PROGRESSIVE_FIXTURE_FRAME_SECONDS);
     let mut proofs = Vec::new();
     for encoder in [
         Encoder::Software,
@@ -809,16 +852,28 @@ pub(super) async fn probe_available_graphs(system: Arc<SystemInfo>) -> Vec<Capti
             continue;
         }
         for packaging in [LivePackaging::Mpegts, LivePackaging::Fmp4] {
-            for deinterlace in [LiveDeinterlaceOutput::Field, LiveDeinterlaceOutput::Frame] {
-                for output_height in [720, 1080] {
+            // The 720p broadcast path omits bwdif entirely. A proof from the
+            // 1080i fixture must never advertise captions for that graph.
+            for deinterlace in [
+                Some(LiveDeinterlaceOutput::Field),
+                Some(LiveDeinterlaceOutput::Frame),
+                None,
+            ] {
+                let (fixture, source_height, output_heights): (&Path, u16, &[u16]) =
+                    if deinterlace.is_some() {
+                        (&interlaced, 1080, &[720, 1080])
+                    } else {
+                        (&progressive, 720, &[720])
+                    };
+                for &output_height in output_heights {
                     let case = GraphCase {
                         encoder: Some(encoder),
                         packaging,
-                        deinterlace,
+                        deinterlace: deinterlace.unwrap_or_default(),
                         max_height: output_height,
                     };
                     let system = Arc::clone(&system);
-                    let fixture = fixture.clone();
+                    let fixture = fixture.to_path_buf();
                     let result =
                         tokio::spawn(
                             async move { run_live_graph(&system, &fixture, case, None).await },
@@ -834,18 +889,28 @@ pub(super) async fn probe_available_graphs(system: Arc<SystemInfo>) -> Vec<Capti
                         );
                         continue;
                     };
+                    if run.deinterlace_output != deinterlace {
+                        tracing::warn!(?encoder, ?packaging, ?deinterlace, observed_deinterlace = ?run.deinterlace_output, output_height, "caption fixture selected an unexpected graph");
+                        continue;
+                    }
                     let Some(track) = run.track else {
                         tracing::warn!(?encoder, ?packaging, ?deinterlace, output_height, diagnostic = ?run.diagnostic, failure = ?run.failure, "caption graph did not publish decodable output");
                         continue;
                     };
-                    let cc1 = verdict(&track.cc1, &cc1_truth);
-                    let service1 = verdict(&track.service1, &service1_truth);
+                    let (cc1_truth, service1_truth) = if deinterlace.is_some() {
+                        (&cc1_truth, &service1_truth)
+                    } else {
+                        (&progressive_cc1_truth, &progressive_service1_truth)
+                    };
+                    let cc1 = verdict(&track.cc1, cc1_truth);
+                    let service1 = verdict(&track.service1, service1_truth);
                     tracing::info!(?encoder, ?packaging, ?deinterlace, output_height, frames_with_cc = track.frames_with_cc, exit = %run.status, argv = %run.argv.join(" "), cc1 = cc1.as_str(), service1 = service1.as_str(), "caption graph proof");
                     if cc1 == CaptionVerdict::Preserved && service1 == CaptionVerdict::Preserved {
                         proofs.push(CaptionProof {
                             encoder: encoder.label().to_owned(),
                             packaging,
                             deinterlace,
+                            source_height,
                             output_height,
                             services: vec!["CC1", "SERVICE1"],
                         });
@@ -1074,6 +1139,98 @@ async fn the_software_live_graph_carries_608_and_708_through_both_deinterlace_mo
             (CaptionVerdict::Preserved, CaptionVerdict::Preserved)
         );
     }
+}
+
+/// A 720p59.94 broadcaster bypasses bwdif. The startup proof must exercise
+/// that graph and only advertise the matching progressive source and output.
+#[tokio::test]
+async fn the_progressive_live_graph_proves_and_advertises_608_and_708() {
+    plurx_core::testfixtures::require_ffmpeg();
+    let system = test_system();
+    let root = crate::test_tempdir().expect("fixture root");
+    let fixture = captioned_progressive_fixture(&system, root.path()).await;
+    let (cc1_truth, service1_truth) = fixture_truth_at(PROGRESSIVE_FIXTURE_FRAME_SECONDS);
+    let source_track = caption_track(&system, &fixture).await;
+    assert_eq!(source_track.frames_with_cc, FIXTURE_FRAMES);
+    assert_eq!(
+        verdict(&source_track.cc1, &cc1_truth),
+        CaptionVerdict::Preserved
+    );
+    assert_eq!(
+        verdict(&source_track.service1, &service1_truth),
+        CaptionVerdict::Preserved
+    );
+    let case = GraphCase {
+        encoder: Some(Encoder::Software),
+        packaging: LivePackaging::Mpegts,
+        deinterlace: LiveDeinterlaceOutput::Field,
+        max_height: 720,
+    };
+    let run = run_live_graph(&system, &fixture, case, None).await;
+    assert!(run.status.success(), "{}", run.argv.join(" "));
+    assert_eq!(run.deinterlace_output, None);
+    let track = run.track.expect("progressive HLS captions");
+    assert_eq!(verdict(&track.cc1, &cc1_truth), CaptionVerdict::Preserved);
+    assert_eq!(
+        verdict(&track.service1, &service1_truth),
+        CaptionVerdict::Preserved
+    );
+
+    let bytes = tokio::fs::read(&fixture).await.expect("fixture bytes");
+    let source = probe_live_source(
+        &system,
+        root.path(),
+        &bytes[..bytes.len().min(SOURCE_PREFIX_BYTES)],
+    )
+    .await
+    .expect("source facts");
+    assert_eq!(source.height, Some(720));
+    let mut delivery = resolve_live_delivery(
+        &source,
+        None,
+        &LiveQualityPolicy {
+            max_height: Some(720),
+            max_bitrate_bps: None,
+            deinterlace_output: case.deinterlace,
+        },
+        &LiveExecutionSupport {
+            video_encode: true,
+            audio_encode: true,
+            tone_map: false,
+        },
+    )
+    .expect("progressive delivery");
+    delivery.packaging = case.packaging;
+    assert_eq!(delivery.deinterlace_output, None);
+    let proof = CaptionProof {
+        encoder: Encoder::Software.label().to_owned(),
+        packaging: delivery.packaging,
+        deinterlace: None,
+        source_height: 720,
+        output_height: delivery.output.height,
+        services: vec!["CC1", "SERVICE1"],
+    };
+    let advertised = advertise_proven_captions(
+        std::slice::from_ref(&proof),
+        &source,
+        delivery.clone(),
+        Some(Encoder::Software.label()),
+    );
+    assert!(advertised.reasons.iter().any(|reason| {
+        reason.code == "captions_advertised" && reason.explanation == "CC1,SERVICE1"
+    }));
+    let mut other_source = source;
+    other_source.height = Some(1080);
+    let not_advertised = advertise_proven_captions(
+        &[proof],
+        &other_source,
+        delivery,
+        Some(Encoder::Software.label()),
+    );
+    assert!(!not_advertised
+        .reasons
+        .iter()
+        .any(|reason| reason.code == "captions_advertised"));
 }
 
 /// A copied H.264 video stream carries its SEI untouched; checked rather than

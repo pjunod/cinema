@@ -5,6 +5,8 @@ import tomllib
 import unittest
 from pathlib import Path
 
+from validation.rust_modules import module_source, split_children
+
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "tests/playback/rolling-producer-owners.toml"
@@ -204,7 +206,8 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.catalog = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
         cls.source_path = ROOT / cls.catalog["source"]
-        cls.source = cls.source_path.read_text(encoding="utf-8")
+        cls.source = module_source(cls.source_path)
+        cls.source_children = split_children(cls.source_path)
         cls.module_roots = tuple(cls.catalog["module_roots"])
         cls.module_paths = tuple(
             path
@@ -218,15 +221,22 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
 
     @classmethod
     def read_scope(cls, relative_path: str) -> str:
-        """Read one scope path: a single file, or every `*.rs` under a directory."""
+        """Read one scope path: a single file, or every `*.rs` under a directory.
+
+        A file is read with its S-14 split children expanded in place
+        (`validation.rust_modules`). A directory skips the files `source`
+        already expanded, so a row whose `also_in` names the directory those
+        children live in counts each occurrence once.
+        """
 
         path = ROOT / relative_path
         if path.is_dir():
             return "\n".join(
                 child.read_text(encoding="utf-8")
                 for child in sorted(path.rglob("*.rs"))
+                if child.resolve() not in cls.source_children
             )
-        return path.read_text(encoding="utf-8")
+        return module_source(path)
 
     @classmethod
     def symbol_scope(cls, row: dict) -> tuple[str, str]:

@@ -2407,3 +2407,31 @@
             "and the state agrees with the gate rather than contradicting it",
         );
     }
+
+    /// A split child logs under its parent's target. The scanner moved to
+    /// `vod/discovery.rs`, a `#[path]` child whose default target is
+    /// `plurxd::vodserve::discovery`; the console, journald and the log view
+    /// label the line with the target, and a move does not change a log line.
+    #[test]
+    fn a_line_logged_by_a_vod_child_keeps_the_vodserve_target() {
+        use tracing_subscriber::prelude::*;
+        let base = crate::test_tempdir().expect("base");
+        // A plain file where the directory should be: `read_dir` fails with
+        // something other than `NotFound`, which is the logged branch.
+        let not_a_directory = base.path().join("not-a-directory");
+        std::fs::write(&not_a_directory, b"").expect("a plain file");
+        let logs = Arc::new(crate::logbuf::LogBuffer::new(8));
+        let guard = crate::test_tracing_default(
+            tracing_subscriber::registry().with(crate::logbuf::BufferLayer(Arc::clone(&logs))),
+        );
+        let found =
+            EncodedGenerationScanner::new(not_a_directory).discover("process", 1, 1, &HashSet::new());
+        drop(guard);
+        assert!(found.is_empty());
+        let refused = logs
+            .tail("trace", 8)
+            .into_iter()
+            .find(|entry| entry.message.contains("cannot discover obsolete encoded VOD generations"))
+            .expect("the failed discovery is logged");
+        assert_eq!(refused.target, "plurxd::vodserve");
+    }

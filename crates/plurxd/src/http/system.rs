@@ -5736,17 +5736,41 @@ mod tests {
     #[test]
     fn the_roster_reader_has_exactly_these_callers() {
         let http = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/http");
-        let mut found: Vec<(String, String)> = Vec::new();
-        for entry in std::fs::read_dir(&http).expect("the http module directory") {
-            let path = entry.expect("a directory entry").path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
-                continue;
+        // Every module under `http/`, child modules included: a split moves a
+        // route into `http/<parent>/<child>.rs`, and a scan of the top level
+        // alone would stop seeing it without failing. Test children
+        // (`tests.rs`, `tests/`) quote call sites as literals and are skipped
+        // for the same reason the inline test module is split off below.
+        let mut modules = Vec::new();
+        let mut directories = vec![http.clone()];
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(&directory).expect("an http module directory") {
+                let path = entry.expect("a directory entry").path();
+                let stem = path.file_stem().and_then(|stem| stem.to_str());
+                if stem == Some("tests") {
+                    continue;
+                }
+                if path.is_dir() {
+                    directories.push(path);
+                } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                    modules.push(path);
+                }
             }
+        }
+        assert!(
+            modules
+                .iter()
+                .any(|path| path.parent() != Some(http.as_path())),
+            "the walk no longer reaches the child modules under http/"
+        );
+        let mut found: Vec<(String, String)> = Vec::new();
+        for path in modules {
             let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .expect("a file name")
-                .to_owned();
+                .strip_prefix(&http)
+                .expect("a module under http/")
+                .to_str()
+                .expect("a UTF-8 module path")
+                .replace('\\', "/");
             let source = std::fs::read_to_string(&path).expect("a readable module");
             // Production halves only: the test modules quote these call sites
             // as string literals, and a test is not a route. Split on the test

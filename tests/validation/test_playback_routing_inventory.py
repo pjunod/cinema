@@ -5,6 +5,8 @@ import tomllib
 import unittest
 from pathlib import Path
 
+from validation.rust_modules import module_source
+
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "tests/playback/routing-decisions.toml"
@@ -56,7 +58,7 @@ class PlaybackRoutingInventoryTest(unittest.TestCase):
                 ):
                     path = ROOT / entry[path_key]
                     self.assertTrue(path.is_file(), f"missing {path_key}: {path}")
-                    contents = path.read_text(encoding="utf-8")
+                    contents = module_source(path)
                     self.assertIn(
                         entry[anchor_key],
                         contents,
@@ -96,7 +98,7 @@ class PlaybackRoutingInventoryTest(unittest.TestCase):
                     self.assertTrue(path.is_file(), f"missing {path_key}: {path}")
                     self.assertIn(
                         entry[anchor_key],
-                        path.read_text(encoding="utf-8"),
+                        module_source(path),
                         f"{entry['id']} lost {anchor_key} in {entry[path_key]}",
                     )
 

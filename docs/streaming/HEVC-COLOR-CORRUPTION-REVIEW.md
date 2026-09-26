@@ -93,8 +93,8 @@ merge boundary. They are retained as history, not a second final approval.
 | Rolling/progressive paths lack equivalent retry/source binding. | Refuse by default; latest operator instruction adds an unrestricted, explicitly advised Developer override. |
 | Old workers could bypass admission. | Bump media protocol to 7 and document required ingress/session draining. |
 
-The final candidate review, disposition and fast-lane receipt will be recorded
-here after the batched PR is ready. No final approval is claimed yet.
+The final candidate review and disposition are recorded below. The live status
+page and PR carry the current fast-lane receipt.
 
 ## 6. Final batched PR review — PR #535
 
@@ -133,3 +133,13 @@ preparation respects the shared-analysis switch so an inactive queue is not
 filled with requests that its disabled resolver cannot consume. A refusal now
 reports the actual preparation state, while the Developer override still bypasses
 proof admission. These are validation-phase corrections, not another agent review.
+
+### Integration with current main
+
+Fast lane #3147 passed every selected build and test job on `be778fc8e`, but
+the final promotion check refused because main advanced during the run. Main
+`2b6cb21e6` includes the S-14 playback module split. The same reviewed HEVC
+behavior now lives in `http/hls/create.rs`, `transcode/manager/start.rs`,
+`vod/serve/construct.rs`, `vod/serve/create.rs` and `vod/plan.rs`. The tracing
+helper is retained because main added new consumers. The current combined tree
+requires a fresh fast-lane receipt; the older green jobs are historical evidence.

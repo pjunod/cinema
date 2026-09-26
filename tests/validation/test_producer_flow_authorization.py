@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 import unittest
 from pathlib import Path
+from validation.rust_modules import module_source
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -75,7 +76,7 @@ def function_body(source: str, signature: str) -> str:
 class ProducerFlowAuthorizationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.transcode = TRANSCODE.read_text(encoding="utf-8")
+        cls.transcode = module_source(TRANSCODE)
         cls.control = CONTROL.read_text(encoding="utf-8")
         cls.flow = function_body(cls.transcode, FLOW_FN)
 
