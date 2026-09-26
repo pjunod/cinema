@@ -232,7 +232,7 @@ labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
 # guests are Lima VMs registered by hand rather than by ansible, and they are
 # the required `ci-arm64` packaging pool: `macb` is primary, `maca` is backup.
 [[runners]]
-name = "gha-mbp-apple-01"
+name = "gha-macb-apple-01"
 host = "macb"
 os = "macOS"
 arch = "ARM64"

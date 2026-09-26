@@ -469,7 +469,7 @@ A successful job publishes a small JSON manifest as a workflow artifact:
   "workflow_sha": "...",
   "head_sha": "...",
   "base_sha": "...",
-  "runner": "gha-mbp-apple-01/xcode-27.0",
+  "runner": "gha-macb-apple-01/xcode-27.0",
   "image_version": "...",
   "tests": 196,
   "result": "passed"
