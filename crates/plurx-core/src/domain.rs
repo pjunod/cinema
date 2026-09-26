@@ -936,10 +936,9 @@ pub struct NewPretranscodeJob {
     pub created_at_ms: i64,
 }
 
-/// A claimed distributed speculative-transcode job.
-///
-/// `fence` advances on every takeover. Renewals keep the same fence and move
-/// only the expiry; every settlement checks id + owner + fence + live expiry.
+/// Media-facing projection of a durable whole-title preparation job.
+/// Ownership fields are observations; only the common queue's complete
+/// JobToken can authorize renewal, settlement or publication.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PretranscodeJob {
     pub id: String,

@@ -159,6 +159,13 @@ pub struct SqliteTransactionSite {
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     SqliteTransactionSite {
+        module: "background_jobs.rs",
+        method: "queue_transaction",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
+    SqliteTransactionSite {
         module: "dvr.rs",
         method: "put_dvr_rule",
         is_async: true,
@@ -507,20 +514,6 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         shape: TransactionShape::ReadBranchWrite,
     },
     SqliteTransactionSite {
-        module: "pretranscode.rs",
-        method: "claim_pretranscode_job",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteImmediateTransaction,
-        shape: TransactionShape::ReadBranchWrite,
-    },
-    SqliteTransactionSite {
-        module: "pretranscode.rs",
-        method: "complete_pretranscode_job",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::ReadBranchWrite,
-    },
-    SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
         method: "enqueue_or_promote_subtitle_source",
         is_async: true,
@@ -610,27 +603,6 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::BranchOnRowsAffected,
-    },
-    SqliteTransactionSite {
-        module: "fragment_index_cluster.rs",
-        method: "claim_cluster_fragment_index",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::ReadBranchWrite,
-    },
-    SqliteTransactionSite {
-        module: "fragment_index_cluster.rs",
-        method: "complete_cluster_fragment_index",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::ReadBranchWrite,
-    },
-    SqliteTransactionSite {
-        module: "fragment_index_cluster.rs",
-        method: "complete_cluster_fragment_index_by_hydration",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::ReadBranchWrite,
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
@@ -889,13 +861,6 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
-        method: "fail_cluster_fragment_index_typed",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::ReadBranchWrite,
-    },
-    SqliteTransactionSite {
-        module: "fragment_index_cluster.rs",
         method: "apply_analysis_index_repair",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
@@ -1046,6 +1011,10 @@ mod tests {
         ("mod.rs", include_str!("sqlite/mod.rs")),
         ("offline.rs", include_str!("sqlite/offline.rs")),
         ("outbox.rs", include_str!("sqlite/outbox.rs")),
+        (
+            "background_jobs.rs",
+            include_str!("sqlite/background_jobs.rs"),
+        ),
         ("pretranscode.rs", include_str!("sqlite/pretranscode.rs")),
         ("publication.rs", include_str!("sqlite/publication.rs")),
         ("reading.rs", include_str!("sqlite/reading.rs")),

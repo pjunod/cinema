@@ -1,4 +1,6 @@
 
+#[cfg(test)]
+use crate::queue_fixture::QueueFixture;
     #[tokio::test]
     async fn cancelled_copy_registration_rejection_keeps_exact_cleanup_ownership() {
         use plurx_core::store::SqliteStore;
@@ -687,7 +689,7 @@
         })
         .expect("requirements");
         assert!(store
-            .enqueue_pretranscode_job(
+            .fixture_enqueue_pretranscode_job(
                 &NewPretranscodeJob {
                     id: job_id.to_owned(),
                     dedupe_key: "transcode-manifest-session".to_owned(),
@@ -710,7 +712,7 @@
             .await
             .expect("enqueue manifest session"));
         let claimed = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 NODE,
                 &PretranscodeWorkerCapabilities {
                     version: PretranscodeRequirements::VERSION,
@@ -730,7 +732,7 @@
             .expect("claim manifest session")
             .expect("manifest session job");
         assert!(store
-            .complete_pretranscode_job(
+            .fixture_complete_pretranscode_job(
                 &claimed,
                 recipe,
                 CACHE_RECIPE_VERSION,

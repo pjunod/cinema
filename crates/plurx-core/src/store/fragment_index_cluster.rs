@@ -1288,18 +1288,6 @@ pub struct ClusterFragmentIndexJob {
     pub index_diagnostic_json: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClusterFragmentIndexFailure {
-    pub cache_key: String,
-    pub target_node_id: String,
-    pub node_id: String,
-    pub fence: i64,
-    pub code: crate::content_analysis::IndexFailureCode,
-    pub transient_allowlisted: bool,
-    pub diagnostic: crate::content_analysis::IndexDiagnostic,
-    pub now_ms: i64,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewAnalysisRequest {
     pub request_id: String,
@@ -2032,94 +2020,6 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     async fn requeue_cluster_fragment_index(
         &self,
         replacement: &NewClusterFragmentIndexJob,
-    ) -> Result<bool, StoreError>;
-
-    async fn claim_cluster_fragment_index(
-        &self,
-        node_id: &str,
-        excluded_cache_keys: &[String],
-        now_ms: i64,
-        lease_expires_ms: i64,
-    ) -> Result<Option<ClusterFragmentIndexJob>, StoreError>;
-
-    async fn renew_cluster_fragment_index(
-        &self,
-        cache_key: &str,
-        target_node_id: &str,
-        node_id: &str,
-        fence: i64,
-        now_ms: i64,
-        lease_expires_ms: i64,
-    ) -> Result<bool, StoreError>;
-
-    /// Return a claim this node cannot execute without charging the shared
-    /// retry budget. Used for node-local path/mount refusals; the worker stops
-    /// its pass after yielding so it cannot immediately reclaim the same row.
-    async fn yield_cluster_fragment_index(
-        &self,
-        cache_key: &str,
-        target_node_id: &str,
-        node_id: &str,
-        fence: i64,
-        now_ms: i64,
-        retry_at_ms: i64,
-    ) -> Result<bool, StoreError>;
-
-    async fn complete_cluster_fragment_index(
-        &self,
-        job: &ClusterFragmentIndexJob,
-        artifact: &ClusterFragmentIndexArtifact,
-        location: &ClusterFragmentIndexLocation,
-        now_ms: i64,
-    ) -> Result<bool, StoreError>;
-
-    /// Settle a claimed job from an artifact another node already built.
-    ///
-    /// Discovery on each voter targets itself, so four voters queue four jobs
-    /// for one `cache_key` and, on a healthy queue, four full passes over the
-    /// same file produce one artifact. Once any of them has published it, the
-    /// rest need only the bytes and a location row.
-    ///
-    /// This exists rather than reusing [`ClusterFragmentIndexStore::complete_cluster_fragment_index`]
-    /// because that one requires `artifact.built_by_node_id == job.owner_node_id`
-    /// — correct, for a build. Relabelling a hydrated artifact to get past it
-    /// would appear to work only because the artifact insert is
-    /// `ON CONFLICT DO NOTHING`, which is a trick and not a contract: the
-    /// stored row would keep its real builder while the caller lied about it.
-    ///
-    /// So the artifact here is required to already exist, byte for byte, and
-    /// is never written. Every other guard is the build path's: the same
-    /// running/owner/fence/lease check, the same source-identity check, the
-    /// same head advance. Settling from inside the claimed job is what keeps
-    /// the request fence intact — the reason the older comment gave for
-    /// submitting an ordinary worker instead of hydrating.
-    async fn complete_cluster_fragment_index_by_hydration(
-        &self,
-        job: &ClusterFragmentIndexJob,
-        artifact: &ClusterFragmentIndexArtifact,
-        location: &ClusterFragmentIndexLocation,
-        now_ms: i64,
-    ) -> Result<bool, StoreError>;
-
-    #[allow(clippy::too_many_arguments)]
-    async fn fail_cluster_fragment_index(
-        &self,
-        cache_key: &str,
-        target_node_id: &str,
-        node_id: &str,
-        fence: i64,
-        error_code: &str,
-        retryable: bool,
-        now_ms: i64,
-        retry_at_ms: i64,
-    ) -> Result<bool, StoreError>;
-
-    /// Apply one typed index failure under the live job fence. The Store owns
-    /// attempt limits, the fixed retry deadline, next-attempt time, terminal
-    /// code, and the diagnostic write so state and evidence cannot diverge.
-    async fn fail_cluster_fragment_index_typed(
-        &self,
-        failure: &ClusterFragmentIndexFailure,
     ) -> Result<bool, StoreError>;
 
     async fn put_cluster_fragment_index_location(

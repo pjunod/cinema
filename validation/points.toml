@@ -449,6 +449,7 @@ paths = [
   "crates/plurx-core/src/store/renditionplan.rs",
   "crates/plurx-core/tests/store_contract.rs",
   "crates/plurx-core/tests/store_contract/background_jobs.rs",
+  "crates/plurx-core/tests/support/queue_fixture.rs",
   "spikes/hiqlite-m0/{Cargo.toml,Cargo.lock,src/lib.rs,tests/hiqlite_m0.rs}",
   "rust-toolchain.toml",
 ]
@@ -527,6 +528,7 @@ paths = [
   "crates/plurx-core/tests/rustls_single_provider.rs",
   "crates/plurx-core/tests/store_contract.rs",
   "crates/plurx-core/tests/store_contract/background_jobs.rs",
+  "crates/plurx-core/tests/support/queue_fixture.rs",
   "tests/validation/test_store_shard.py",
   "validation/store_shard.py",
   "crates/plurxd/src/{cachekeep,job_lease,main,manifest_cache,serving_fence,state,transcode}.rs",
@@ -624,6 +626,7 @@ paths = [
   "crates/plurx-core/src/store/sqlite/offline.rs",
   "crates/plurx-core/tests/store_contract.rs",
   "crates/plurx-core/tests/store_contract/background_jobs.rs",
+  "crates/plurx-core/tests/support/queue_fixture.rs",
   "crates/plurx-cluster-check/tests/page_latency_schema.rs",
   "crates/plurxd/tests/cluster_activity.rs",
   "crates/plurxd/src/http/browse.rs",

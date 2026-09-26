@@ -902,17 +902,17 @@ pub use fragment_index_cluster::{
     AnalysisAttempt, AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter,
     AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisIndexRepairCandidate,
     AnalysisIndexRepairResult, AnalysisRequest, AnalysisStatusSummary,
-    ClusterFragmentIndexArtifact, ClusterFragmentIndexFailure, ClusterFragmentIndexJob,
-    ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
-    NewAnalysisRequest, NewClusterFragmentIndexJob, SubtitleBackfillCandidate,
-    SubtitleBackfillDiagnostics, SubtitleSourcePublication, SubtitleSourceStamp,
-    CONTENT_ANALYSIS_REPAIR_HEADROOM, CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
-    CONTENT_ANALYSIS_REPAIR_REVISION, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
-    DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
-    DEFAULT_SUBTITLE_WINDOW_SECS, MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS,
-    MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS,
-    MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES, MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS,
-    SUBTITLE_SOURCE_REPAIR_LIMIT, SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
+    ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
+    ClusterFragmentIndexStore, FragmentIndexSourceObservation, NewAnalysisRequest,
+    NewClusterFragmentIndexJob, SubtitleBackfillCandidate, SubtitleBackfillDiagnostics,
+    SubtitleSourcePublication, SubtitleSourceStamp, CONTENT_ANALYSIS_REPAIR_HEADROOM,
+    CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES, CONTENT_ANALYSIS_REPAIR_REVISION,
+    DEFAULT_ANALYSIS_BACKOFF_BASE_SECS, DEFAULT_ANALYSIS_BACKOFF_MAX_SECS,
+    DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS, DEFAULT_SUBTITLE_WINDOW_SECS,
+    MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS,
+    MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
+    MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT,
+    SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
 };
 pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{prometheus_sqlite_health, SqliteStore, SQLITE_SCHEMA_VERSION};
@@ -927,11 +927,10 @@ use crate::domain::{
     MediaSessionActivationSettlement, MediaSessionProjectionCompletion, MediaSessionRenewal,
     MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch,
     NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
-    NewPretranscodeJob, OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome,
-    OfflinePackage, OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport,
-    OwnedMediaSessionLease, PlaybackEvent, PlaybackEventQuery, PretranscodeJob,
-    PretranscodeWorkerCapabilities, ProbeResult, ReadingState, ReadingStateWrite, RecentItem,
-    SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
+    OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage,
+    OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease,
+    PlaybackEvent, PlaybackEventQuery, PretranscodeJob, ProbeResult, ReadingState,
+    ReadingStateWrite, RecentItem, SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
@@ -3830,98 +3829,14 @@ pub trait SharedCacheStore: Send + Sync + 'static {
     ) -> Result<Option<Lease>, StoreError>;
 }
 
-/// Durable distributed work for speculative whole-title transcodes.
-///
-/// Candidate generation is a singleton, but execution is deliberately not:
-/// every compatible node competes for rows through this boundary. Ownership
-/// is a queue-row fence rather than a generic scheduler lease so a worker can
-/// renew, yield, and settle independently of the next candidate pass.
+/// Domain history and staging retention for whole-title preparation.
+/// Execution ownership belongs exclusively to [`BackgroundJobStore`].
 #[async_trait]
 pub trait PretranscodeJobStore: Send + Sync + 'static {
-    /// Read one row for bounded diagnostics and lifecycle verification.
+    /// Common execution view, or sealed legacy history before import.
     async fn pretranscode_job(&self, id: &str) -> Result<Option<PretranscodeJob>, StoreError>;
-
-    /// Insert one active generation unless an equivalent active/terminal job
-    /// or still-verifiable ready location already satisfies it. A ready row
-    /// whose last location was evicted is deliberately eligible again.
-    async fn enqueue_pretranscode_job(
-        &self,
-        job: &NewPretranscodeJob,
-        lease: &Lease,
-        replacement: &Lease,
-    ) -> Result<bool, StoreError>;
-
-    /// Claim the highest-priority compatible due row. Expired running rows are
-    /// eligible for takeover and advance their monotone fence.
-    async fn claim_pretranscode_job(
-        &self,
-        node_id: &str,
-        capabilities: &PretranscodeWorkerCapabilities,
-        // Bounded process-local refusals (for example, sources this node
-        // cannot mount). Other nodes remain eligible immediately.
-        excluded_job_ids: &[String],
-        now_unix_ms: i64,
-        lease_expires_ms: i64,
-    ) -> Result<Option<PretranscodeJob>, StoreError>;
-
-    /// Active queue rows whose resumable part directories belong to this
-    /// node. Housekeeping uses the ids as a fail-closed keep-list without
-    /// publishing an incomplete cache location.
+    /// Legacy staging references retained until import and retirement.
     async fn pretranscode_staging_jobs(&self, node_id: &str) -> Result<Vec<String>, StoreError>;
-
-    /// Complete bounded active-id universe for pruning node-local source
-    /// refusals. The queue schema caps active rows at 4,096.
-    async fn active_pretranscode_job_ids(&self) -> Result<Vec<String>, StoreError>;
-
-    async fn renew_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        now_unix_ms: i64,
-        lease_expires_ms: i64,
-    ) -> Result<Option<PretranscodeJob>, StoreError>;
-
-    /// Capacity/preemption is not a failed encode. Return the row to the due
-    /// queue without incrementing attempts.
-    async fn yield_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        now_unix_ms: i64,
-        not_before_ms: i64,
-    ) -> Result<bool, StoreError>;
-
-    /// Record one stable failure code. The fifth failure is terminal; earlier
-    /// failures return to the queue at the caller's bounded backoff deadline.
-    async fn fail_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        error_code: &str,
-        now_unix_ms: i64,
-        not_before_ms: i64,
-    ) -> Result<bool, StoreError>;
-
-    /// Permanently cancel a claimed source generation that no longer exists
-    /// or no longer matches its snapshotted bytes.
-    async fn cancel_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        error_code: &str,
-        now_unix_ms: i64,
-    ) -> Result<bool, StoreError>;
-
-    /// Publish the node-local cache location and ready job state in one fenced
-    /// transaction after the filesystem generation has been renamed.
-    #[allow(clippy::too_many_arguments)]
-    async fn complete_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        recipe_hash: &str,
-        recipe_version: i64,
-        relative_dir: &str,
-        bytes: i64,
-        expected_previous_bytes: Option<i64>,
-        manifest_digest: &str,
-        now_unix_ms: i64,
-    ) -> Result<bool, StoreError>;
 }
 
 /// Durable app-managed offline packages and their one renewable capability.

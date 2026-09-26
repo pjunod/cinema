@@ -195,3 +195,17 @@ implementation is claimed; “compiled” does not mean tests passed.
   Wrote duplicate-target/restart and 4,100-request overflow regression fixtures;
   no tests executed. Removal of old ownership APIs and further migration fault
   cases remain before this draft is ready for its final adversarial review.
+
+- 2026-09-25: bounded migration committed and pushed as `5b740b9f7`; the
+  normal pinned hook passed. Removed both backends' legacy pre-transcode and
+  fragment claim, renew, yield, failure and completion implementations. Domain
+  histories and staging keep-lists remain readable; production execution uses
+  the common JobToken contract exclusively. Existing cache/offline/history
+  fixtures now construct artifacts through the common queue, with a test-only
+  helper shared across their test crates. Old queue-specific timing/capacity
+  assertions still require reconciliation with the shared queue contract.
+
+- Remaining first-release work: bounded repair when artifact holders are
+  unavailable, offline demand joining, explicit admin retry, fairness/metrics,
+  advisory Developer observations and final fault-injection evidence. No final
+  review or tests have run, and PR #532 remains a draft.

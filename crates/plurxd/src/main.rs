@@ -1,5 +1,9 @@
 mod admission;
 use plurx_core::process::bounded as bounded_process;
+#[cfg(test)]
+#[path = "../../plurx-core/tests/support/queue_fixture.rs"]
+mod queue_fixture;
+
 mod background_jobs;
 mod backup;
 mod cachekeep;

@@ -1007,22 +1007,6 @@ impl<'a> PublicationStore<'a> {
         })
         .await
     }
-
-    /// Enqueue one speculative generation under the singleton candidate-pass
-    /// lease. Worker ownership is allocated later by the queue row itself.
-    pub async fn enqueue_pretranscode_job(
-        &self,
-        job: &NewPretranscodeJob,
-    ) -> Result<bool, StoreError> {
-        self.fenced_call(move |lease, replacement| {
-            Box::pin(async move {
-                self.store
-                    .enqueue_pretranscode_job(job, &lease, &replacement)
-                    .await
-            })
-        })
-        .await
-    }
 }
 
 impl Deref for PublicationStore<'_> {

@@ -7,6 +7,12 @@
 //! openraft + SQLite) behind the same trait. Nothing outside this crate may
 //! assume which backend is in play. See `docs/ARCHITECTURE.md` §2.
 
+#[cfg(test)]
+extern crate self as plurx_core;
+#[cfg(test)]
+#[path = "../tests/support/queue_fixture.rs"]
+mod queue_fixture;
+
 pub mod auth;
 pub mod cluster;
 pub mod config;

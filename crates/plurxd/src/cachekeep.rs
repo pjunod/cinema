@@ -24,6 +24,8 @@
 //! is a *hit* — a viewer gets a playlist for a directory that no longer exists.
 //! This way the failure is an orphan directory, which step 3 collects.
 
+#[cfg(test)]
+use crate::queue_fixture::QueueFixture;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -593,12 +595,7 @@ async fn queue_staging_jobs(
     store: &Arc<dyn Store>,
     node_id: &str,
 ) -> Result<Vec<String>, plurx_core::error::StoreError> {
-    let mut jobs = store.background_staging_jobs(node_id).await?;
-    // Preserve sealed legacy staging during the bounded cutover import.
-    jobs.extend(store.pretranscode_staging_jobs(node_id).await?);
-    jobs.sort_unstable();
-    jobs.dedup();
-    Ok(jobs)
+    store.pretranscode_staging_jobs(node_id).await
 }
 
 async fn queue_job(
@@ -1867,7 +1864,7 @@ mod tests {
         })
         .expect("requirements");
         assert!(store
-            .enqueue_pretranscode_job(
+            .fixture_enqueue_pretranscode_job(
                 &NewPretranscodeJob {
                     id: job_id.to_owned(),
                     dedupe_key: format!("cachekeep-scrub-{job_id}"),
@@ -1900,7 +1897,7 @@ mod tests {
             scratch_bytes: 2,
         };
         let claimed = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 NODE,
                 &capabilities,
                 &[],
@@ -1912,7 +1909,7 @@ mod tests {
             .expect("scrub fixture job");
         assert_eq!(claimed.id, job_id);
         assert!(store
-            .complete_pretranscode_job(
+            .fixture_complete_pretranscode_job(
                 &claimed,
                 recipe,
                 1,
@@ -2407,7 +2404,7 @@ mod tests {
         .expect("requirements");
         let job_id = "00000000-0000-4000-8000-000000000201";
         assert!(store
-            .enqueue_pretranscode_job(
+            .fixture_enqueue_pretranscode_job(
                 &NewPretranscodeJob {
                     id: job_id.to_owned(),
                     dedupe_key: "cachekeep-queue-job".to_owned(),
@@ -2440,7 +2437,7 @@ mod tests {
             scratch_bytes: i64::MAX,
         };
         let first = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 NODE,
                 &capabilities,
                 &[],
@@ -2463,14 +2460,14 @@ mod tests {
             .expect("checkpoint");
         let first_resume_at = lease_now_ms().saturating_add(1_000);
         assert!(store
-            .yield_pretranscode_job(&first, first_resume_at, first_resume_at)
+            .fixture_yield_pretranscode_job(&first, first_resume_at, first_resume_at)
             .await
             .expect("yield"));
         sweep(&store, root.path(), NODE, unix_now()).await;
         assert!(staging.exists(), "a yielded local checkpoint was swept");
 
         let resumed = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 NODE,
                 &capabilities,
                 &[],
@@ -2502,11 +2499,11 @@ mod tests {
 
         let second_resume_at = lease_now_ms().saturating_add(1_000);
         assert!(store
-            .yield_pretranscode_job(&resumed, second_resume_at, second_resume_at)
+            .fixture_yield_pretranscode_job(&resumed, second_resume_at, second_resume_at)
             .await
             .expect("second yield"));
         let resumed_again = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 NODE,
                 &capabilities,
                 &[],
@@ -2531,7 +2528,7 @@ mod tests {
 
         let takeover_at = resumed_again.lease_expires_ms.saturating_add(1);
         let successor = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 "node-b",
                 &capabilities,
                 &[],
