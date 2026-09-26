@@ -140,7 +140,7 @@ id = "web-static"
 title = "Embedded JavaScript and theme contrast"
 command = "make web-check"
 profiles = ["commit", "ci", "full", "nightly"]
-requires = ["node", "python3"]
+requires = ["node", "npm", "python3"]
 missing = "fail"
 timeout_seconds = 120
 
@@ -242,7 +242,7 @@ timeout_seconds = 3600
 
 [[checks]]
 id = "container-runtime"
-title = "Release container startup, health, and restart smoke"
+title = "Release container startup, health, restart, and backup/restore smoke"
 command = "mkdir -p target/validation/buildx && BUILDX_CONFIG=target/validation/buildx make container-smoke"
 profiles = ["full", "nightly"]
 platforms = ["darwin", "linux"]
@@ -468,7 +468,7 @@ depends_on = ["core.media"]
 [[points]]
 id = "cluster.auth"
 title = "Replicated durable state"
-contract = "The shared Store suite passes on SQLite and three voters; backend-neutral cluster leases have one fenced winner, monotone revisions, exact stale-token rejection, and expiry takeover across both stores; live media-session requests are bounded and idempotent, owners activate only after a worker starts, exact owner epochs renew or self-fence, missing, ended, and expired routes enter a bounded single-flight cache only as negative answers, activation immediately supersedes a cached miss, and any previously validated media route stops authorizing within its one-second monotonic TTL, and membership removal refuses nodes that still own sessions; singleton scan, repair, provider, genre, and candidate passes admit one owner across simultaneous scheduler ticks, renew or self-fence, and validate every durable scan/metadata publication in the mutation transaction; the real-process harness compiles the production lease heartbeat, stops a follower owner past the authoritative TTL, makes both survivors contest takeover without changing leader or term, admits exactly one higher-fence successor while the loser observes that fence, makes exactly two provider calls, rejects the resumed token through the atomic successor-generation transaction independently of wall-clock expiry, and includes that rejection in an eight-entry post-baseline budget even if the resumed follower legitimately starts an election; a distinct serving process retains its proxy boundary across two cut/recovery cycles, fences readiness and every media path from a monotonic quorum generation, reaps old and newly admitted children without Store access or response-body polling, and observes the majority write from every voter's local replica; separate compatible clients claim distinct whole-title queue rows, bounded keyset pages pass incompatible work, takeover advances a row-local fence and staging owner, stale workers cannot publish, and ready state plus a node-local cache location and authoritative manifest digest commit atomically; queue history has hard active/total bounds and prunes evicted ready generations plus old terminal tombstones; exact v8-to-v9 migration and populated current imports cover queue/cache parity; manifest scrub cursor batches consume one transaction/consensus entry, exact location invalidation rejects stale identity, offline integrity transitions only the exact ready recipe, and unsafe generation paths cannot name filesystem deletion targets; membership removal atomically invalidates the departing node's job tokens and permanently refuses that identity new leases; populated v14 and current SQLite backups reach exact imported-table parity; replicated path metadata retains its named owner while bytes and playback telemetry stay node-local; local FTS rebuilds from replicated items; identity/state guards survive follower and leader loss; quorum loss fails readiness; incompatible candidates are refused; the production progress coalescer's deterministic five-second/ten-second load stays within 64 physical commits per stream and 512 compacted bytes per incoming beat after production-threshold compaction, while an uncoalesced control violates both budgets."
+contract = "The shared Store suite passes on SQLite and three voters; backend-neutral cluster leases have one fenced winner, monotone revisions, exact stale-token rejection, and expiry takeover across both stores; live media-session requests are bounded and idempotent, owners activate only after a worker starts, exact owner epochs renew or self-fence, missing, ended, and expired routes enter a bounded single-flight cache only as negative answers, activation immediately supersedes a cached miss, and any previously validated media route stops authorizing within its one-second monotonic TTL, and membership removal refuses nodes that still own sessions; singleton scan, repair, provider, genre, and candidate passes admit one owner across simultaneous scheduler ticks, renew or self-fence, and validate every durable scan/metadata publication in the mutation transaction; the real-process harness compiles the production lease heartbeat, stops a follower owner past the authoritative TTL, makes both survivors contest takeover without changing leader or term, admits exactly one higher-fence successor while the loser observes that fence, makes exactly two provider calls, rejects the resumed token through the atomic successor-generation transaction independently of wall-clock expiry, and includes that rejection in an eight-entry post-baseline budget even if the resumed follower legitimately starts an election; a distinct serving process retains its proxy boundary across two cut/recovery cycles, fences readiness and every media path from a monotonic quorum generation, reaps old and newly admitted children without Store access or response-body polling, and observes the majority write from every voter's local replica; separate compatible clients claim distinct whole-title queue rows, bounded keyset pages pass incompatible work, takeover advances a row-local fence and staging owner, stale workers cannot publish, and ready state plus a node-local cache location and authoritative manifest digest commit atomically; queue history has hard active/total bounds and prunes evicted ready generations plus old terminal tombstones; exact v8-to-v9 migration and populated current imports cover queue/cache parity; manifest scrub cursor batches consume one transaction/consensus entry, exact location invalidation rejects stale identity, offline integrity transitions only the exact ready recipe, and unsafe generation paths cannot name filesystem deletion targets; membership removal atomically invalidates the departing node's job tokens and permanently refuses that identity new leases; populated v14 and current SQLite backups reach exact imported-table parity; replicated path metadata retains its named owner while bytes and playback telemetry stay node-local; local FTS rebuilds from replicated items; identity/state guards survive follower and leader loss; quorum loss fails readiness; incompatible candidates are refused; the production progress coalescer's deterministic five-second/ten-second load stays within 64 physical commits per stream and 512 compacted bytes per incoming beat after production-threshold compaction, while an uncoalesced control violates both budgets; and a fresh three-voter bootstrap agrees object for object (tables, columns, constraints, foreign keys, indexes, triggers and views) with a frozen schema-42 tree brought current by the real replicated migration chain."
 paths = [
   "Dockerfile.store-shard",
   "benchmarks/cluster-named-runner.Dockerfile",
@@ -518,6 +518,7 @@ paths = [
   "crates/plurx-core/tests/hiqlite_tls_provider.rs",
   "crates/plurx-core/tests/rustls_single_provider.rs",
   "crates/plurx-core/tests/store_contract.rs",
+  "crates/plurx-core/tests/fixtures/hiqlite-schema-v42.sql",
   "tests/validation/test_store_shard.py",
   "validation/store_shard.py",
   "crates/plurxd/src/{cachekeep,job_lease,main,manifest_cache,serving_fence,state,transcode}.rs",
@@ -546,6 +547,7 @@ title = "Cluster membership lifecycle and node health"
 contract = "An admin issues an encrypted single-use join token whose cleartext is absent from status, logs, configuration, and redemption/finalization requests; those requests carry only its SHA-256 digest, and stable refusal codes distinguish expired, reused, reserved, and invalid or tampered tokens. A fresh daemon refuses an existing SQLite install, resumes its own staged join, ignores a foreign token on a healthy voter, and joins as a voter without changing instance.id, growing one voter to three. Never-joined voters keep cluster listeners on loopback; an opted-in sole voter crash-safely commits its advertised address from a metadata-reset snapshot, while remote listeners use TLS and refuse later host or port drift. Node activity snapshots use cluster-scoped authentication, expose privacy-safe fields only, preserve a live-voter query on every admitted legacy request, bound cold-key and verified-sender admission independently, publish process-only refusal counters, and return bounded typed peer outcomes that distinguish a missing Activity origin, authentication refusal, HTTP failure, transport failure, timeout, and invalid content. Follower removal preserves quorum or refuses a leader and a quorum-losing change; graceful local leave observes a surviving leader from odd voter sets and lets an even-set leader commit its own delta before draining, including four-to-three removal with one survivor down. Two voters remain degraded reconfiguration rather than healthy HA. Membership changes fail closed during rolling upgrades: a replicated attempt-intent guard rejects legacy coordinators before proposal, leader-side deltas serialize with join promotion, concurrent and ambiguous attempts retain shared fences, and the roster exposes a pending removal until an operator finishes upgrading and retries. Removing a node resolves the offline work it owns before the membership change commits: a queued or preparing package is requeued only on a survivor that answered a source probe by actually reading the snapshotted bytes, and anything else — including every ready package, whose bytes lived only on the departing node — fails with the stable node_removed code and releases its reservation. Silent reassignment stays forbidden, the old producer is fenced out of work a survivor has taken over, and removal still refuses an in-flight transfer with an operator-visible reason. Planned maintenance is a single-node replicated and restart-persistent fence: every active binary must prove capability, a leader hands off before the row commits, the target acknowledges only after local HTTP and singleton-job admission is fenced, media placement refuses it, existing sessions drain, readiness is false, two-voter rolling maintenance is refused, and resume requires a fresh zero-lag target. Force election requires a reachable majority, a caught-up voter, and no lifecycle operation; it can recover a leaderless quorum but never bypass lost quorum. Status explicitly distinguishes leaderless quorum from lost-majority recovery, and permanent-majority force reconfiguration remains unsupported. Replicated node records expose only node identity, actual short hostname, advertised host without its listener port (localhost for loopback), leadership, role, reachability, last-seen, pending-removal and maintenance state, active media-session count, and apply lag, remain readable during quorum loss, preserve removed-node tombstones, and consume the canonical replication projection for lag. Membership, Hiqlite, and Raft detail has its own bounded admin log ring instead of evicting general diagnostics, while cluster warnings and errors remain on the console. SQLite reports membership unavailable."
 paths = [
   "crates/plurx-core/src/cluster/membership.rs",
+  "crates/plurx-core/src/cluster/membership/**",
   "crates/plurxd/src/http/cluster.rs",
   "crates/plurxd/src/http/mod.rs",
   "crates/plurxd/src/http/internal_activity.rs",
@@ -690,6 +692,7 @@ contract = "Catalogue text and explicit channel rules work without an inference 
 paths = [
   "crates/plurx-core/src/metadata/classification.rs",
   "crates/plurx-core/src/store/classification.rs",
+  "crates/plurx-core/src/store/classification_schedule.rs",
   "crates/plurx-core/src/store/hiqlite_classification.rs",
   "crates/plurx-core/src/store/sqlite/classification.rs",
   "crates/plurxd/src/library_search.rs",
@@ -735,6 +738,7 @@ title = "Playback decision, delivery, and presentation"
 contract = "Every supported source reaches a client through the intended direct, remux, copy, or transcode path, follows its durable cluster owner through a streamed relay, and keeps presenting media; a rolling writer advertises only cumulative playback consumption plus its bounded reserve, preserves the segment covering the viewer's protected back buffer, and cannot turn a faster producer into a forward position discontinuity; a seek storm leaves one playback with one local subtitle-window owner carrying the settled destination and at most two bounded speculative peer ranges, with abandoned requester futures publishing nothing and remembering nothing."
 paths = [
   "crates/plurx-core/src/fmp4.rs",
+  "crates/plurx-core/src/hevc_configuration.rs",
   "crates/plurx-core/src/mediafacts.rs",
   "crates/plurx-core/src/process/**",
   "crates/plurx-core/src/playback/**",
@@ -748,7 +752,7 @@ paths = [
   "scripts/fuzz-seeds",
   "vendor/dolby_vision/**",
   "vendor/bitvec_helpers/**",
-  "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fragindex,fragment_index_cluster,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,producer_spawn,progressive,renditiondir,scratch_ledger,scratch_put,subtitle_ride_along,subtitle_ranges,subtitle_source,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
+  "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fragindex,fragment_index_cluster,hevc_census,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,producer_spawn,progressive,renditiondir,scratch_ledger,scratch_put,subtitle_ride_along,subtitle_ranges,subtitle_source,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
   "crates/plurxd/src/transcode/**",
   "crates/plurxd/src/vod/**",
   "crates/plurxd/src/online_subtitles.rs",
@@ -766,6 +770,7 @@ paths = [
   "docs/playback-control/**",
   "docs/streaming/PLAYBACK-CAPS-V2-*.md",
   "docs/streaming/STUTTER-4K.md",
+  "docs/streaming/HEVC-IN-BAND-PARAMETER-SETS.md",
   "docs/streaming/SEEK-SCRATCH-RESERVATIONS-*.md",
   "docs/streaming/SEEK-SCRATCH-RESERVATIONS-STATUS.html",
   "docs/streaming/APPLE-TV-FORWARD-SKIPS-STATUS.md",
@@ -895,6 +900,8 @@ id = "offline.viewing"
 title = "App-managed offline viewing"
 contract = "Authenticated users can prepare one portable VOD package, transfer it through a stable scoped lease, and play only app-owned local bytes while disconnected."
 paths = [
+  "crates/plurx-core/src/store/offline_claim.rs",
+  "crates/plurx-core/src/store/offline_expiry.rs",
   "crates/plurx-core/src/store/sqlite/offline.rs",
   "crates/plurxd/src/offline.rs",
   "crates/plurxd/src/http/offline.rs",
@@ -953,6 +960,8 @@ paths = [
   "scripts/web-hls-startup-browser-check",
   "scripts/subtitle-readiness-browser-check",
   "scripts/js-check",
+  "scripts/web-jsconfig",
+  "scripts/web-types",
   "scripts/reader-browser",
   "scripts/themes-proposed.json",
   "scripts/ui-baseline",
@@ -962,6 +971,9 @@ paths = [
   # (THIRD-PARTY-NOTICES §7).
   "tests/vendor/**",
   "tests/web/**",
+  # TypeScript, pinned by lockfile for scripts/web-types and installed by it;
+  # dev-only, never served or shipped (THIRD-PARTY-NOTICES §7).
+  "tools/web-types/**",
 ]
 checks = ["rust-gate", "rust-gate-ci", "web-static", "player-input-fence", "playback-surface-fence", "web-membership", "reader-browser", "web-layout", "playback-smoke", "playback-exhaustive"]
 depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichment", "playback.pipeline"]
@@ -1032,6 +1044,7 @@ paths = [
   "scripts/package-windows",
   "scripts/{bench,dv-evidence,gop-census,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-n2-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
   "scripts/container-smoke",
+  "scripts/container-restore-smoke",
   "scripts/windows-smoke.ps1",
   "scripts/decoder-diagnostic-qualification",
   "scripts/validate-docker-startup-budget",

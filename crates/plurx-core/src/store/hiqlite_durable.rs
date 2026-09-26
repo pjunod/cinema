@@ -2208,6 +2208,21 @@ impl OfflinePackageStore for HiqliteAuthStore {
         Ok(one_package(rows))
     }
 
+    async fn offline_queue_hint(&self, node_id: &str) -> Result<bool, StoreError> {
+        // `query_map` reads this node's replica: no leader round trip and no
+        // proposal. See the trait method for why a stale answer is safe.
+        let rows = self
+            .client()
+            .query_map::<ScalarRow, _>(
+                "SELECT 1 AS value FROM offline_packages \
+                 WHERE node_id = $1 AND state = 'queued' LIMIT 1",
+                params!(node_id),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(!rows.is_empty())
+    }
+
     async fn requeue_offline_package(
         &self,
         package_id: &str,
@@ -2774,6 +2789,20 @@ impl OfflinePackageStore for HiqliteAuthStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
         Ok(results.get(1).copied().unwrap_or_default() == 1)
+    }
+
+    async fn offline_expiry_hint(&self, now: i64) -> Result<bool, StoreError> {
+        // `query_map` reads this node's replica: no leader round trip and no
+        // proposal. See the trait method for why a stale answer is safe.
+        let rows = self
+            .client()
+            .query_map::<ScalarRow, _>(
+                "SELECT 1 AS value FROM offline_packages WHERE expires_at <= $1 LIMIT 1",
+                params!(now),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(!rows.is_empty())
     }
 
     async fn expire_offline_packages(&self, now: i64) -> Result<u64, StoreError> {

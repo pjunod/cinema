@@ -518,8 +518,13 @@ function setLiveTvStatsMode(mode){
   const backdrop=document.getElementById("live-tv-stats-backdrop");if(backdrop)backdrop.hidden=mode==="mini";
   updateLiveTvStats();
 }
+function liveTvHasAttachedMedia(){
+  const video=/** @type {HTMLVideoElement|null} */ (document.getElementById("live-tv-video"));
+  return !!LIVE_TV_LEASE.current&&!!video&&!!(video.currentSrc||video.src);
+}
 function openLiveTvStats(){
   closeLiveTvStats(false);
+  if(!liveTvHasAttachedMedia()) return;
   LIVE_TV_STATS_OPENER=document.activeElement;
   const panel=document.createElement("section");
   panel.id="live-tv-stats"; panel.className="statsov on live-stats"; panel.dataset.mode="standard";
@@ -546,6 +551,7 @@ function closeLiveTvStats(restore=true){
   LIVE_TV_STATS_OPENER=null;
 }
 function updateLiveTvStats(){
+  if(!liveTvHasAttachedMedia()){ closeLiveTvStats(false); return; }
   const panel=document.getElementById("live-tv-stats");if(!panel)return;
   const mode=panel.dataset.mode,t=liveTvStatsTelemetry(),body=panel.querySelector(".statsbody");
   const rows=playbackInfoRows(mode,t);
@@ -625,6 +631,7 @@ function liveTvNowBar(channel){
   const at=liveTvProgramme(channel.id);
   const pct=at.progress===null?0:Math.round(at.progress*100);
   const playing=!!LIVE_TV_LEASE.current;
+  const transport=liveTvTransportState();
   const left=at.now?Math.max(0,Math.round((at.now.end-liveTvNowSeconds())/60)):null;
   const muted=!!document.getElementById("live-tv-video")?.muted;
   const muteLabel=muted?"Unmute":"Mute";
@@ -635,15 +642,14 @@ function liveTvNowBar(channel){
       <br><span class="muted">${esc(channel.guide_number)} · ${esc(channel.guide_name)}${at.now?" · "+esc(liveTvClock(at.now.start))+"–"+esc(liveTvClock(at.now.end)):""}${left!==null?" · "+left+" min left":""}${at.next?" · Next: "+esc(at.next.title):""}</span>
     </span>
     <span class="lt-mini" style="width:120px"><i style="width:${pct}%"></i></span>
-    <button type="button" onclick="resumeLiveTv()" title="Play" aria-label="Play">▶</button>
-    <button type="button" onclick="pauseLiveTv()" title="Pause" aria-label="Pause">⏸</button>
+    <button type="button" id="live-tv-transport" onclick="toggleLiveTvPlayback()" title="${transport.label}" aria-label="${transport.label}" ${transport.hidden?"hidden disabled":""}>${transport.icon}</button>
     <label class="lt-captions" hidden>Captions <select data-live-tv-captions aria-label="Live TV captions" onchange="liveTvSelectCaption(this.value)" onblur="liveTvCaptionBlur()"><option value="off">Off</option></select></label>
     <button type="button" onclick="liveTvTogglePlayerSize()" title="${wide?"Use compact player":"Use original-size player"}" aria-label="${wide?"Use compact player":"Use original-size player"}">${wide?"⤡ Smaller":"⤢ Larger"}</button>
     <button type="button" data-live-tv-mute onclick="muteLiveTv()" title="${muteLabel}" aria-label="${muteLabel}">${muted?"🔊":"🔇"}</button>
     ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture (P)" aria-label="Picture-in-picture">⧉</button>':""}
     <button type="button" onclick="fullscreenLiveTv()" title="Fullscreen (F)" aria-label="Fullscreen">⛶</button>
     <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop">■</button>
-    <button type="button" data-live-info-opener onclick="openLiveTvStats()">Playback info</button>
+    <button type="button" id="live-tv-info" data-live-info-opener onclick="openLiveTvStats()" ${transport.hidden?"disabled":""}>Playback info</button>
     <div class="lt-nowtech" data-live-tv-technical>${liveTvTechnicalDetails(channel,LIVE_TV.status)}</div>
   </div>`;
 }

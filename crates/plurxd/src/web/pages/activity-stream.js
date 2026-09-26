@@ -286,6 +286,7 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
       ? `<table><thead><tr><th>Title</th><th>Profile</th><th>Work</th><th>Progress</th><th>Requested</th><th></th></tr></thead><tbody>${offlineRows}</tbody></table>`
       : ""}
     ${d.scans.length? `<h2 class="section">Library scans</h2><table><tbody>${scans}</tbody></table>` : ""}
+    ${activityProcessesHtml(d.processes)}
     <div class="activity-idle">${[!d.scans.length?"No scans running":"",!p?"No media preparation running":"",!offline.length?"No downloads in progress":""].filter(Boolean).join(" · ")}</div>
     <h2 class="section">Trakt</h2>
     <div class="card">${trakt}</div>`;
@@ -410,6 +411,41 @@ async function loadMoreActivityDvr(){
 function stopDvrRecording(id){
   const row=ACTIVITY_DVR.rows.find(row=>(row.recording_id||row.id)===id);
   return liveTvStopRecording(id,row&&row.title);
+}
+
+// Every child process this node is running (plan P-02 §3.2): what it is for,
+// why it runs at the priority it does, what the kernel reports, and a stop.
+// Anything that uses real hardware is visible here. The server sends the
+// list to admins only; for everyone else the field is absent and nothing is
+// drawn.
+function activityProcessesHtml(rows){
+  if(!Array.isArray(rows)) return "";
+  if(!rows.length) return `<h2 class="section">Processes</h2><div class="empty">No child processes running on this server.</div>`;
+  const body=rows.map(row=>{
+    const seen=row.observed||{};
+    const oom=seen.oom_score_adj;
+    const levels=[
+      seen.nice!=null?`nice ${seen.nice}`:"",
+      seen.io_level!=null?`I/O ${seen.io_level}`:"",
+      oom!=null?`OOM ${oom>0?"+":""}${oom}`:"",
+    ].filter(Boolean).join(" · ");
+    const kind=row.class==="realtime"?"Playback":"Background";
+    const refused=row.applied===false?` <span class="pill warn">priority not applied</span>`:"";
+    const pid=String(row.pid);
+    return `<tr data-process="${esc(pid)}">
+      <td><b>${esc(row.purpose)}</b><div class="muted" style="font-size:12px">${esc(row.reason)}</div></td>
+      <td>${esc(row.program)} <span class="muted">· pid ${esc(pid)}</span></td>
+      <td>${kind}${levels?` <span class="muted">· ${esc(levels)}</span>`:""}${refused}</td>
+      <td class="muted">${fmtAgo(Math.floor(row.started_at_ms/1000))}</td>
+      <td style="text-align:right">${row.stoppable?`<button class="ghost sm" onclick="stopProcess(${esc(pid)},${esc(JSON.stringify(row.purpose))})">Stop</button>`:""}</td></tr>`;
+  }).join("");
+  return `<h2 class="section">Processes</h2><table><thead><tr><th>What</th><th>Program</th><th>Priority</th><th>Started</th><th></th></tr></thead><tbody>${body}</tbody></table>`;
+}
+
+async function stopProcess(pid,purpose){
+  if(!confirm(`Stop ${purpose} (pid ${pid})?\n\nThe process is killed now. Whatever started it sees it exit: a stream reports a failed encoder, a background job records a failed step.`)) return;
+  try{ await api(`/activity/processes/${pid}`,{method:"DELETE"}); toast("Process stopped"); renderActivityBody(); }
+  catch(e){ toast(e.message); }
 }
 
 async function stopSession(id){

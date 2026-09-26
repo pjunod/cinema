@@ -416,8 +416,11 @@ async fn generate_thumb_with(
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
 
-    match cmd.spawn() {
-        Ok(mut child) => {
+    match crate::process::spawn_job_owned(
+        &mut cmd,
+        crate::process::ChildWork::background("library scan thumbnail"),
+    ) {
+        Ok((mut child, _job)) => {
             use tokio::io::AsyncReadExt;
             let mut bytes = Vec::new();
             let read = match child.stdout.take() {

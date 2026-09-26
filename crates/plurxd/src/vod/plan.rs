@@ -19,6 +19,18 @@ pub(super) fn rendition_key(recipe: &Recipe, identity: &SourceIdentity) -> Strin
     hasher.update(identity.size.to_le_bytes());
     hasher.update(identity.mtime_ms.to_le_bytes());
     hasher.update(identity.argv_fingerprint.as_bytes());
+    if matches!(recipe.file.video_codec.as_deref(), Some("hevc" | "h265"))
+        && recipe.encoding.is_none()
+    {
+        hasher.update(b"hevc-source-object\0");
+        hasher.update(
+            recipe
+                .source_object_version
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+    }
     hasher.update(recipe.audio_index.unwrap_or(-1).to_le_bytes());
     hasher.update([
         u8::from(recipe.aac),

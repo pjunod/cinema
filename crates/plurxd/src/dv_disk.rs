@@ -222,7 +222,10 @@ async fn bounded_tool_probe(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command)?;
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::background("Dolby Vision tool probe"),
+    )?;
     let stdout = child
         .stdout
         .take()
@@ -1589,8 +1592,11 @@ async fn probe_bound_with(
             Ok(())
         });
     }
-    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command)
-        .map_err(|error| format!("starting ffprobe for {role}: {error}"))?;
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::background("Dolby Vision conversion source probe"),
+    )
+    .map_err(|error| format!("starting ffprobe for {role}: {error}"))?;
     let stdout = child
         .stdout
         .take()
@@ -1670,8 +1676,11 @@ async fn probe_bound(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command)
-        .map_err(|error| format!("starting ffprobe for {role}: {error}"))?;
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::background("Dolby Vision conversion source probe"),
+    )
+    .map_err(|error| format!("starting ffprobe for {role}: {error}"))?;
     let stdout = child
         .stdout
         .take()
@@ -5882,8 +5891,11 @@ async fn run_tool_command_with_timeout(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command)
-        .map_err(|error| format!("starting {program}: {error}"))?;
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::background("Dolby Vision conversion"),
+    )
+    .map_err(|error| format!("starting {program}: {error}"))?;
     let stdout = child
         .stdout
         .take()

@@ -165,6 +165,9 @@ pub(crate) struct SpawnOptions<'a> {
     pub(crate) progress: Progress,
     pub(crate) descriptors: Descriptors,
     pub(crate) env: &'a [(&'a str, &'a OsStr)],
+    /// Who is waiting on this producer: a viewer's session, or nobody (the
+    /// pre-transcode pass). Sets the child's priority class.
+    pub(crate) work: crate::process_control::ChildWork,
 }
 
 pub(crate) struct Spawned {
@@ -192,8 +195,9 @@ pub(crate) fn spawn(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let (mut child, child_job) = crate::process_control::spawn_job_owned(&mut command)
-        .map_err(|error| format!("spawning job-owned producer: {error}"))?;
+    let (mut child, child_job) =
+        crate::process_control::spawn_job_owned(&mut command, options.work)
+            .map_err(|error| format!("spawning job-owned producer: {error}"))?;
     let stdout = child.stdout.take().ok_or_else(|| {
         let _ = child.start_kill();
         "producer started without a stdout pipe".to_owned()
@@ -319,6 +323,7 @@ mod tests {
                 progress: Progress::None,
                 descriptors: Descriptors::default(),
                 env: &[("PLURX_PRODUCER_CHILD_MODE", OsStr::new("hold"))],
+                work: crate::process_control::ChildWork::background("producer test"),
             },
         )
         .expect("spawn holding child");
@@ -389,6 +394,7 @@ mod tests {
                     ("PLURX_PRODUCER_CHILD_MODE", OsStr::new("environment")),
                     ("PLURX_CALLER_ENV", caller),
                 ],
+                work: crate::process_control::ChildWork::background("producer test"),
             },
         )
         .expect("spawn child");
@@ -429,6 +435,7 @@ mod tests {
                 progress: Progress::None,
                 descriptors: Descriptors::default(),
                 env: &[("PLURX_PRODUCER_CHILD_MODE", OsStr::new("pipes"))],
+                work: crate::process_control::ChildWork::background("producer test"),
             },
         )
         .expect("spawn child");
@@ -497,6 +504,7 @@ mod tests {
                     false,
                 ),
                 env: &[("PLURX_PRODUCER_CHILD_MODE", OsStr::new("descriptors"))],
+                work: crate::process_control::ChildWork::background("producer test"),
             },
         )
         .expect("spawn child");
@@ -551,6 +559,7 @@ mod tests {
                         false,
                     ),
                     env: &[("PLURX_PRODUCER_CHILD_MODE", OsStr::new("descriptors"))],
+                    work: crate::process_control::ChildWork::background("producer test"),
                 },
             )
             .expect("spawn low-fd child");

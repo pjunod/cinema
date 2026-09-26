@@ -1,0 +1,8 @@
+{
+  "name": "plurx-web-types",
+  "private": true,
+  "description": "Dev-only type checker for the web shell (scripts/web-types). Not shipped.",
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

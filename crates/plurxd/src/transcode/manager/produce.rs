@@ -129,7 +129,11 @@ impl TranscodeManager {
         playback_file.audio_offset_ms = 0;
         let file = &playback_file;
         let encoder = self
-            .encoder_for_file_with_preference(file, &policy.requested_encoder)
+            .encoder_for_file_with_preference(
+                file,
+                &policy.requested_encoder,
+                crate::process_control::ChildClass::Background,
+            )
             .await?;
         if !policy
             .acceptable_encoder_families()
@@ -312,7 +316,9 @@ impl TranscodeManager {
         if cancelled.is_cancelled() {
             return Ok(OfflineProduceOutcome::Yielded);
         }
-        let encoder = self.encoder_for_file(file).await?;
+        let encoder = self
+            .encoder_for_file(file, crate::process_control::ChildClass::Background)
+            .await?;
         let subtitle_burn = match spec.subtitle {
             OfflineSubtitle::Burn(index) => {
                 let stream = file
@@ -550,8 +556,16 @@ impl TranscodeManager {
                         .await,
                 );
                 let stored = self.subtitle_source_access();
-                crate::subtitles::ensure_vtt_with_store(&self.subtitle_cache, file, index, &stored)
-                    .await?;
+                crate::subtitles::ensure_vtt_with_store(
+                    &self.subtitle_cache,
+                    file,
+                    index,
+                    &stored,
+                    crate::process_control::ChildWork::background(
+                        "subtitle track for an offline package",
+                    ),
+                )
+                .await?;
             }
         }
         Ok(outcome)
@@ -911,7 +925,13 @@ impl TranscodeManager {
             return Ok(OfflineProduceOutcome::Yielded);
         }
         let subtitle_handle = self
-            .ensure_text_subtitle(file, opts.subtitle_burn.as_ref())
+            .ensure_text_subtitle(
+                file,
+                opts.subtitle_burn.as_ref(),
+                crate::process_control::ChildWork::background(
+                    "text subtitle for an offline package",
+                ),
+            )
             .await?;
         if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             return Ok(OfflineProduceOutcome::Yielded);
@@ -1685,6 +1705,7 @@ impl TranscodeManager {
             let generation = progress.begin_attempt();
             let (mut child, _child_job, diagnostics) = spawn_ffmpeg(
                 &args,
+                crate::process_control::ChildWork::background("pre-transcode cache producer"),
                 encoder.label(),
                 hash,
                 FfmpegProgressObserver::offline(Arc::clone(&progress), generation),

@@ -2279,11 +2279,23 @@ pub fn encode_cluster_fragment_index_blob(
             "invalid cluster fragment-index artifact".to_owned(),
         ));
     }
+    // Portable artifacts contain content-bound proof, never a worker-local
+    // inode stamp. The reader binds it to its own fully attested source.
+    let mut promotion = index.promotion.clone();
+    if let Some(proof) = promotion.hevc_configuration.as_mut() {
+        if proof.source_sha256.as_deref() != Some(source_sha256) {
+            return Err(StoreError::Task(
+                "HEVC proof lacks full source attestation".into(),
+            ));
+        }
+        proof.source_object_version.clear();
+        proof.source_node_id.clear();
+    }
     let header = serde_json::to_vec(&BlobHeader {
         segplan_version: index.version,
         timescale: index.timescale,
         init_sha256: index.init_sha256.clone(),
-        promotion: index.promotion.clone(),
+        promotion,
         parameter_sets_constant: index.parameter_sets_constant,
         source_sha256: source_sha256.to_ascii_lowercase(),
         pipeline_sha256: pipeline_sha256.to_ascii_lowercase(),
@@ -2569,6 +2581,64 @@ mod tests {
                 .is_err(),
             "a truncated artifact must not supply substitute fragment metadata"
         );
+    }
+
+    #[test]
+    fn hevc_portable_proof_is_content_bound_and_node_independent() {
+        let source = digest('a');
+        let pipeline = digest('b');
+        let mut index = FragmentIndex::new(
+            90_000,
+            vec![IndexRow {
+                dts: 0,
+                duration: 90000,
+                bytes: 100,
+                video_bytes: 90,
+                class: CutClass::CleanIdr,
+            }],
+            digest('c'),
+            SourceIdentity::new(100, 1, "argv"),
+        );
+        index.promotion.hevc_configuration = Some(crate::hevc_configuration::Proof {
+            revision: crate::hevc_configuration::REVISION,
+            source_node_id: "one".into(),
+            source_object_version: "object-one".into(),
+            source_sha256: Some(source.clone()),
+            stream_index: 0,
+            slices: 24,
+            refusal: None,
+        });
+        let first = encode_cluster_fragment_index_blob(&index, &source, &pipeline)
+            .expect("HEVC regression fixture");
+        let proof = index
+            .promotion
+            .hevc_configuration
+            .as_mut()
+            .expect("HEVC regression fixture");
+        proof.source_node_id = "two".into();
+        proof.source_object_version = "object-two".into();
+        assert_eq!(
+            first,
+            encode_cluster_fragment_index_blob(&index, &source, &pipeline)
+                .expect("HEVC regression fixture")
+        );
+        let mut decoded = decode_cluster_fragment_index_blob(&first, &source, &pipeline)
+            .expect("HEVC regression fixture");
+        let proof = decoded
+            .promotion
+            .hevc_configuration
+            .as_mut()
+            .expect("HEVC regression fixture");
+        assert!(!proof.permits_on_node("object-two", "two"));
+        assert!(proof.bind_equivalent_source(&source, "two", "object-two"));
+        assert!(proof.permits_on_node("object-two", "two"));
+        index
+            .promotion
+            .hevc_configuration
+            .as_mut()
+            .expect("HEVC regression fixture")
+            .source_sha256 = None;
+        assert!(encode_cluster_fragment_index_blob(&index, &source, &pipeline).is_err());
     }
 
     #[test]

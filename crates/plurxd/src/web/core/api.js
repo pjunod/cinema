@@ -126,7 +126,7 @@ function refreshClientErrorReporterAuth(){
 // throws, never blocks playback; auto-fills context from the active PLAYER.
 function clientLog(ev){
   try{
-    const p=PLAYER||{}, s=p.source||{};
+    const p=/** @type {Player} */(PLAYER||{}), s=p.source||{};
     const body=Object.assign({
       ua:browserLabel(),
       method:p.method||null,

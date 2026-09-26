@@ -29,6 +29,10 @@
 //! cargo run -p plurx-core --example init-promotion-probe -- <file.mkv>...
 //! ```
 
+// A example, never a daemon child: the launcher rule in clippy.toml is for
+// production code.
+#![allow(clippy::disallowed_methods)]
+
 use std::process::{Command, Stdio};
 
 use plurx_core::fmp4::{

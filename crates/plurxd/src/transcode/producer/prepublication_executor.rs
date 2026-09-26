@@ -208,6 +208,7 @@ pub(super) async fn execute_prepublication_transcode_retry(
             .spawn_and_install_prepublication_child(producer_attempt, || {
                 spawn_ffmpeg(
                     retry.args.as_ref(),
+                    crate::process_control::ChildWork::realtime("playback transcode"),
                     retry.encoder.label(),
                     sid,
                     FfmpegProgressObserver::rolling(
@@ -361,6 +362,7 @@ async fn execute_prepublication_copy_retry(
             .spawn_and_install_prepublication_child(producer_attempt, || {
                 spawn_ffmpeg(
                     retry.args.as_ref(),
+                    crate::process_control::ChildWork::realtime("playback copy HLS"),
                     "copy",
                     sid,
                     FfmpegProgressObserver::rolling(

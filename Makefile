@@ -1485,6 +1485,8 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/page-read-budget.test.js
 	@node tests/web/theme-family.test.js
 	@node tests/web/activity-node-names.test.js
+	# Every child process is listed with its priority class and a stop (P-02 §3.2).
+	@node tests/web/activity-processes.test.js
 	@node tests/web/analysis-node-names.test.js
 	@node tests/web/settings-sections.test.js
 	@node --test tests/web/subtitle-downloads.test.js
@@ -1503,6 +1505,13 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/asset-load.test.js
 	@node tests/web/asset-layout.test.js
 	@scripts/js-check
+	# Shape, not order: TypeScript's checker (tsc, checkJs) over the same rows,
+	# against a per-file baseline that only shrinks. The file list is generated
+	# from the shell, so a new row is read the day it is served.
+	# docs/clients/WEB-TYPE-CHECKING-AND-PLAYER-DECOMPOSITION.md §3.
+	@node tests/web/jsconfig-generated.test.js
+	@scripts/web-types
+	@node tests/web/player-typedef.test.js
 	@scripts/contrast-check --from-index crates/plurxd/src/web/core/theme.js \
 		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
 		--allow scripts/contrast-allow.txt
@@ -1525,8 +1534,9 @@ docker: ## Build the container image
 	docker build --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" -t plurx/plurxd:latest .
 
 .PHONY: container-smoke
-container-smoke: docker ## Build, start, probe, restart, and re-probe the container
+container-smoke: docker ## Build, start, probe, restart, re-probe, then back up and restore the container
 	@scripts/container-smoke plurx/plurxd:latest
+	@scripts/container-restore-smoke plurx/plurxd:latest
 
 # The Compose deploy, as one command that cannot forget the stamp.
 #

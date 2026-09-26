@@ -1656,6 +1656,8 @@
         let cases = [
             ("vod_disabled", StatusCode::SERVICE_UNAVAILABLE),
             ("vod_index_pending", StatusCode::SERVICE_UNAVAILABLE),
+            ("hevc_configuration_unverified", StatusCode::CONFLICT),
+            ("hevc_configuration_unsupported", StatusCode::UNPROCESSABLE_ENTITY),
             ("vod_transcode_unavailable", StatusCode::NOT_IMPLEMENTED),
             ("vod_subtitle_burn_unavailable", StatusCode::NOT_IMPLEMENTED),
             ("vod_source_unsupported", StatusCode::UNPROCESSABLE_ENTITY),
