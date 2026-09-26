@@ -745,15 +745,21 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # Terminal at every caller: a cancelled queue job with a code that is
         # not one of the re-enqueueable ones, and a failed package.
         self.assertIn('cancel_job(self.store.as_ref(), "health_refused"', state)
-        # And the code it cancels with is not one the queue treats as
-        # provisional, which is the difference between a terminal refusal and a
-        # title re-encoded on every discovery pass.
-        enqueue = (ROOT / "crates/plurx-core/src/store/sqlite/pretranscode.rs").read_text(
+        # Durable admission resolves a repeated request to its existing receipt,
+        # including terminal receipts, before considering new work. The automatic
+        # request identity is the recipe dedupe key; discovery cannot invent a
+        # fresh request to bypass a refusal on its next pass.
+        queue = (ROOT / "crates/plurx-core/src/store/background_jobs.rs").read_text(
             encoding="utf-8"
         )
-        suppression = enqueue.split("fn enqueue_pretranscode_job", 1)[1][:8000]
-        self.assertIn("policy_changed", suppression)
+        suppression = queue.split("const ENQUEUE_SQL", 1)[1].split('"#;', 1)[0]
+        self.assertIn("WHEN prior_job IS NOT NULL THEN 'existing'", suppression)
         self.assertNotIn("health_refused", suppression)
+        adapter = (
+            ROOT / "crates/plurx-core/src/store/background_jobs_pretranscode.rs"
+        ).read_text(encoding="utf-8")
+        self.assertIn('scope: "automatic:transcode".into()', adapter)
+        self.assertIn("request_id: job.dedupe_key.clone()", adapter)
         self.assertIn('"decode_unhealthy"', offline)
         # With its own metric label: the encoder did not fail, and an operator
         # cannot see that if it is bucketed as `other`.

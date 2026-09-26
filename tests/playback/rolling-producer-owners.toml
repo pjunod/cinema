@@ -1578,6 +1578,10 @@ expected_occurrences = 9
 
 [[module_structures]]
 id = "namespaced-task-spawn"
+# Durable queue: background_jobs.rs adds one ActiveJob-owned heartbeat (joined
+# before retirement), plus two joined race/process fixtures; ffmpeg.rs adds a
+# joined cancellation fixture. main.rs starts the daemon-owned consumer loop.
+# state.rs removes two domain heartbeats and adds guarded upkeep (-1 net).
 pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # 348 since M2: the Dolby Vision facts backfill is spawned from the per-tick
 # maintenance block beside the genre backfill. It is a leased catalogue job
@@ -2145,7 +2149,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # 641 + K-10 M4 -> 643 (measured by zeroing this row) on the merge of main
 # into #556: S-14 M8's two test-only sites and K-10 M4's two test-only
 # offline worker spawns coexist unchanged; the merge adds no new site.
-expected_occurrences = 643
+expected_occurrences = 647
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2154,6 +2158,8 @@ expected_occurrences = 643
 
 [[module_structures]]
 id = "method-spawn"
+# Durable queue removes the state.rs fragment JoinSet launcher. The common
+# consumer now awaits each admitted execution and owns its fence through reap.
 pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # +4 M5b: the JoinSet-owned leased file worker and three bounded subprocess or
 # blocking-I/O owners. Each is awaited, cancellation-bound, or deliberately
@@ -2253,7 +2259,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # aborted at the census budget and dropped (aborting any stragglers) when it
 # returns. Each task awaits one bounded, ChildWork-launched ffmpeg that is
 # killed on drop. No rolling-producer owner.
-expected_occurrences = 47
+expected_occurrences = 46
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2270,6 +2276,14 @@ expected_occurrences = 10
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Durable queue: background_jobs.rs adds four claim/heartbeat lease timers and
+# three bounded fixture waits (+7); ffmpeg replaces timeout with sleep and adds
+# three fixture waits (+3); fragindex removes two outer waits in favor of the
+# cancellable collector and awaited reap (-2). Developer observations add two
+# bounded read timeouts (+2). state replaces two heartbeat timers with two
+# consumer pacing sleeps and one cancellation poll (+1). produce adds one
+# offline join poll bounded by its existing deadline (+1). No recovery owner
+# is added: ActiveJob owns leases and the existing producer owns media.
 pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
 # 503 since settle_producer_flow_signal_before joined
 # request_producer_flow_before: two tokio::time::timeout_at calls, each
@@ -3043,7 +3057,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 1010 + K-10 M4 -> 1013 (measured by zeroing this row) on the merge of
 # main into #556: S-14 M8's one test-only timeout and K-10 M4's three
 # virtual-clock test waits coexist unchanged; the merge adds no new site.
-expected_occurrences = 1013
+expected_occurrences = 1025
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3052,11 +3066,16 @@ expected_occurrences = 1
 
 [[module_structures]]
 id = "tokio-time-import"
+# Durable queue imports Instant in background_jobs.rs for the monotonic claim
+# deadline. It does not introduce a separate timer or recovery authority.
 pattern = "use\\s+tokio::time"
-expected_occurrences = 1
+expected_occurrences = 2
 
 [[module_structures]]
 id = "process-command-construction"
+# Durable queue adds two test-only shell children, in background_jobs.rs and
+# ffmpeg.rs. Both run through the production cancellable collector; tests await
+# the collector and verify ESRCH before releasing their retained admission.
 pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # +2: the two HDR10 boot probes in `ffmpeg.rs`
 # (`has_hdr10_passthrough`, `has_hdr10_passthrough_qsv`). Both are one-shot
@@ -3319,10 +3338,12 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # x265 fixture encode, its concat mux, the framemd5 decode and the production
 # copy pipe. Each is collected by testfixtures::run or Command::output before
 # its temporary directory drops. No detached owner.
-expected_occurrences = 188
+expected_occurrences = 190
 
 [[module_structures]]
 id = "process-capable-launch-method"
+# Durable queue removes state.rs JoinSet.spawn for the fragment worker. This
+# is the same removed task counted by method-spawn, not an OS child.
 pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +2 for the Android-DV boundary regressions: one test-only finite FFmpeg
 # `.output()` described by the command-construction entry, plus one Axum
@@ -3714,7 +3735,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Command::output calls (framemd5 decode, production copy pipe) that collect
 # finite fixture children. The census's own ffmpeg starts through
 # process::bounded::output with ChildWork::realtime.
-expected_occurrences = 389
+expected_occurrences = 388
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3728,6 +3749,9 @@ expected_occurrences = 0
 
 [[module_structures]]
 id = "process-lifecycle-method"
+# Durable queue adds start_kill and an awaited wait to the ffmpeg collector.
+# Cancellation/expiry retains the child job and caller admission until reap;
+# the normal completion wait remains. There is no second process owner.
 pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # +3: the bounded chapter probe kills and reaps oversized output, and reaps
 # ordinary completion. Cancellation/deadline drops the kill-on-drop child.
@@ -3892,10 +3916,13 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # (four). Their bounded replacement (`SupervisorPause::hold` /
 # `wait_reached` and a release guard) waits through `Condvar::wait_timeout_while`,
 # which this pattern does not match. No production lifecycle call changed.
-expected_occurrences = 397
+expected_occurrences = 399
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
+# Durable queue adds two test-only libc::kill(pid, 0) observations, one in
+# background_jobs.rs and one in ffmpeg.rs. They send no signal; ESRCH proves
+# the production collector reaped the child before returning capacity.
 pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe)|(?<![:.\\w])(?:kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe))\\s*\\("
 # 32 -> 33 with M1: `libc::kill` targets the negative process-group id on
 # cancellation or timeout so descendants inheriting the held media descriptor
@@ -3936,7 +3963,7 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # `libc::execv` from inside a `pre_exec`, which reproduces the decode-fact
 # probe's exec-from-`pre_exec` to show that a priority registered after it
 # never runs. The child is owned by `spawn_job_owned` and killed on drop.
-expected_occurrences = 50
+expected_occurrences = 52
 
 [[module_structures]]
 id = "kill-on-drop-construction"

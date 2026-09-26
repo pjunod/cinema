@@ -1,8 +1,8 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 local validation complete; starting fast lane · **Updated:** 2026-09-26 ·
+**Status:** M1–M3 fast lane: preflight repairs complete · **Updated:** 2026-09-26 ·
 **Branch:** `codex/durable-cluster-work` ·
-**Base:** `e680849fb` · **PR:** [#532 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/532)
+**Base:** `e680849fb` · **PR:** [#532 — ready](http://192.168.4.7:3000/noirr/plurx/pulls/532)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -22,7 +22,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
 | Final adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
-| Fast lane | Ready to start | Local fixes and focused regressions passed; remote required lane remains blocking |
+| Fast lane | Restart pending | Run 3282 preflight contracts repaired; validation and changed API/docs checks pass. Required remote lane remains blocking |
 | Merge / cleanup | Not started | Green required lane before merge |
 
 ## Decisions and unresolved policy
@@ -406,3 +406,19 @@ The failing replicated test is being rerun before the main fast lane starts.
   focused rerun passed (one test, 0.14 seconds). Production recovery logic is
   unchanged. All focused failures are resolved. Marking PR #532 ready is next;
   merge remains blocked on its exact candidate's fast lane.
+
+- 2026-09-26: ready PR #532 fast-lane run 3282 stopped in Python preflight,
+  before compiler jobs. Reviewed all eight changed task/timer/process counts
+  against the main diff and recorded ownership in the existing ledger. Updated
+  the terminal health-refusal contract to assert durable request receipts and
+  stable automatic request identity, replacing an assertion against the removed
+  enqueue API. The two affected static suites passed (21 + 7 tests). No second
+  adversarial review and no production deployment.
+
+- Preflight follow-up: all 247 validation tests passed across the batch and the
+  permission-enabled runner rerun (69 tests, one platform skip). The initial
+  sandbox denied process inspection in six cleanup cases. Operations checked
+  551 cases: repaired the jobs-list API table path and route count (236). API
+  (3), docs (4), and eight loopback cases passed focused reruns. Three unrelated
+  Linux-fixture failures remain local-only: this Mac has no `/bin/true` or GNU
+  `timeout`. The Linux fast lane is authoritative for those unchanged fixtures.
