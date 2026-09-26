@@ -141,6 +141,20 @@ impl CoordinationStore for SqliteStore {
         })
         .await
     }
+
+    async fn lease_expiry_hint(&self, resource: &str) -> Result<Option<i64>, StoreError> {
+        let resource = resource.to_owned();
+        self.with_read(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT expires_at_ms FROM job_leases WHERE resource = ?1",
+                    params![resource],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        })
+        .await
+    }
 }
 
 fn sql_fence(fence: u64) -> Result<i64, StoreError> {
