@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 final validation; fixing test failures · **Updated:** 2026-09-26 ·
+**Status:** M1–M3 local validation complete; starting fast lane · **Updated:** 2026-09-26 ·
 **Branch:** `codex/durable-cluster-work` ·
 **Base:** `e680849fb` · **PR:** [#532 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/532)
 
@@ -14,15 +14,15 @@ implementation is claimed; “compiled” does not mean tests passed.
 |---|---|---|
 | Isolated clone | Complete | Agent-owned `/private/tmp/plurx-durable-work-agent`; original checkout untouched |
 | Compiler | Ready | Rust 1.97.1; core + Hiqlite all-target compile and baseline daemon compile passed |
-| M1 durable queue and pre-transcode | Implemented; validation pending | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; local exact-recipe offline joining and scheduling implemented; lost-reply and process-expiry regressions written; cross-node transcode convergence belongs to E1 |
-| M2 fragment analysis and hydration | Implemented; validation pending | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
-| M3 UI, recovery and migration | Implemented; validation pending | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
+| M1 durable queue and pre-transcode | Implemented; focused validation passed | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; local exact-recipe offline joining and scheduling implemented; lost-reply and process-expiry regressions written; cross-node transcode convergence belongs to E1 |
+| M2 fragment analysis and hydration | Implemented; focused validation passed | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
+| M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
 | E0 subtitle and library workers | Planned | Reuse newly landed subtitle extraction implementation |
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
 | Final adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
-| Fast lane | Not run | After review findings are addressed |
+| Fast lane | Ready to start | Local fixes and focused regressions passed; remote required lane remains blocking |
 | Merge / cleanup | Not started | Green required lane before merge |
 
 ## Decisions and unresolved policy
@@ -397,3 +397,12 @@ The failing replicated test is being rerun before the main fast lane starts.
   surface is web Live TV session controls; the durable queue changes do not
   overlap those files. The normal commit hook and corrective-history audit
   passed for the repaired queue batch (`4df68184b`).
+
+- Daemon lifecycle batch: 9/10 passed, including real-child expiry and probe
+  cancellation, lost publication/renewal acknowledgements, retirement, and
+  heterogeneous worker dispatch. The remaining lost-claim fixture incorrectly
+  dated dispatch in the future while resolution used real time. It now records
+  real dispatch time while advancing only the synthetic queue clock; its
+  focused rerun passed (one test, 0.14 seconds). Production recovery logic is
+  unchanged. All focused failures are resolved. Marking PR #532 ready is next;
+  merge remains blocked on its exact candidate's fast lane.

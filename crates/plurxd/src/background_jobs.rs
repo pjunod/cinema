@@ -1338,7 +1338,9 @@ mod tests {
             kind: JobKind::FragmentIndexBuild,
             payload_version: 1,
             now_ms,
-            dispatched_at_ms: now_ms,
+            // The queue clock jumps past the predecessor lease; resolution
+            // still runs on the real clock, so dispatch must be real too.
+            dispatched_at_ms: unix_ms().expect("dispatch clock"),
         };
         let (result, dropped) = faults::dropping(
             faults::CLAIM,
