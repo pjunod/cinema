@@ -27,6 +27,8 @@ candle-core = { version = "=0.11.0", default-features = false }
 candle-nn = { version = "=0.11.0", default-features = false }
 candle-transformers = { version = "=0.11.0", default-features = false }
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+# The embedder's own bounded inference pool (library_search::semantic).
+rayon = "1.12"
 toml = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
