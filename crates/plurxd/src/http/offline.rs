@@ -2946,7 +2946,7 @@ mod tests {
     #[tokio::test]
     async fn offline_reuse_rejects_corrupt_fenced_bytes_and_settles_the_ready_package() {
         let fixture = fixture().await;
-        let package = ready_package(&fixture, "fenced-corrupt", "none", None).await;
+        let package = ready_package(&fixture, &"c".repeat(64), "none", None).await;
         fence_ready_package_manifest(&fixture, &package).await;
         let token = "f".repeat(64);
         assert_eq!(

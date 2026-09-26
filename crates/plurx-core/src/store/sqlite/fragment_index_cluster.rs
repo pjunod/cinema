@@ -2571,57 +2571,23 @@ mod tests {
     const MAX_ACTIVE_JOBS: i64 = 4_096;
     const QUEUE_ELIGIBILITY_MS: i64 = 6 * 60 * 60 * 1_000;
 
-    /// No statement may reset `attempts` without resetting `attempt_errors`
-    /// on exactly the same conditions.
-    ///
-    /// Three upserts reopen a job row, each with its own reset conditions. A
-    /// reset that misses the history leaves a row carrying the codes of a
-    /// budget it no longer has — a history that disagrees with the count
-    /// printed beside it. Two of the three are reachable from the
-    /// backend-neutral Store contract; the forced hand-off is not, because
-    /// reaching it twice needs two active forced requests for one identity,
-    /// which a unique index forbids. So the rule is asserted on the
-    /// statements themselves, by deriving the history reset from the budget
-    /// reset it has to mirror.
+    /// Domain adapters no longer reopen execution rows. The shared queue's
+    /// per-interest ledger supplies both counters and history; runtime coverage
+    /// is `background_jobs_fragment_retry_keeps_its_window_history_and_configured_limit`.
     #[test]
     fn every_attempts_reset_resets_the_attempt_history() {
         const SOURCE: &str = include_str!("fragment_index_cluster.rs");
         let production = SOURCE
             .split_once("\n#[cfg(test)]")
-            .map_or(SOURCE, |(source, _)| source);
-        let squeeze = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-        const CLOSE: &str = "cluster_fragment_index_jobs.attempts END";
-        let mut resets = 0;
-        // Keyed on the close, not the open: `attempts = CASE` also appears on
-        // `analysis_requests`, which has no history to keep.
-        for (close, _) in production.match_indices(CLOSE) {
-            let open = production[..close]
-                .rfind("attempts = CASE")
-                .expect("every reset of this column opens a CASE");
-            let budget = &production[open..close + CLOSE.len()];
-            // The history reset is the budget reset with the reset column and
-            // the reset values swapped. The conditions are left alone: they
-            // test the budget, which is the column `attempt_errors` mirrors,
-            // not the column it is. Rewriting `attempts` everywhere demanded
-            // `attempt_errors = 0` inside a condition — a TEXT history column
-            // compared against an integer, which is not SQL anybody wrote.
-            let expected = squeeze(budget)
-                .replacen("attempts = CASE", "attempt_errors = CASE", 1)
-                .replace("THEN 0", "THEN ''")
-                .replace(
-                    "ELSE cluster_fragment_index_jobs.attempts END",
-                    "ELSE cluster_fragment_index_jobs.attempt_errors END",
-                );
-            let tail = &production[open..(close + CLOSE.len() + 900).min(production.len())];
-            let window = squeeze(tail);
-            assert!(
-                window.contains(&expected),
-                "an `attempts` reset without the matching `attempt_errors` reset:\n  \
-                 wanted {expected}"
-            );
-            resets += 1;
-        }
-        assert_eq!(resets, 3, "three upserts reopen a job row");
+            .expect("test boundary")
+            .0;
+        assert!(
+            !production.contains("cluster_fragment_index_jobs.attempts END"),
+            "a domain adapter must not reset the common execution budget"
+        );
+        let shared = include_str!("../background_jobs_schema.sql");
+        assert!(shared.contains("SELECT MAX(interest.failed_attempts"));
+        assert!(shared.contains("SELECT interest.attempt_errors"));
     }
 
     use std::collections::HashSet;
@@ -4236,6 +4202,10 @@ mod tests {
 
     #[tokio::test]
     async fn failed_repair_cannot_bypass_the_active_queue_cap() {
+        // Repair is automatic work and cannot consume the foreground reserve.
+        const MAX_ACTIVE_JOBS: i64 = (crate::store::background_jobs::MAX_ACTIVE_JOBS
+            - crate::store::background_jobs::FOREGROUND_RESERVED_JOBS)
+            as i64;
         let store = SqliteStore::open_in_memory().expect("store");
         seed_files(&store).await;
         let mut repair = job(2, 20, 100);
@@ -4284,17 +4254,19 @@ mod tests {
                     ],
                 )?;
                 let mut insert = conn.prepare(
-                    "INSERT INTO cluster_fragment_index_jobs
-                      (cache_key, file_id, source_size, source_mtime, source_sha256,
-                       pipeline_sha256, state, fence, attempts, not_before_ms,
-                       created_at_ms, updated_at_ms)
-                     VALUES (?1, 1, 100, 10, ?2, ?3, 'queued', 0, 0, 100, 100, 100)",
+                    "INSERT INTO background_jobs
+                      (id, kind, payload_version, payload_json, dedupe_key, priority,
+                       state, not_before_ms, created_at_ms, updated_at_ms)
+                     VALUES (?1, 'fragment_index_build', 1, ?2, ?3, 0, 'queued', 100, 100, 100)",
                 )?;
                 for sequence in 0_i64..MAX_ACTIVE_JOBS {
                     insert.execute(params![
-                        format!("{sequence:064x}"),
-                        format!("{:064x}", sequence.saturating_add(1)),
-                        "b".repeat(64),
+                        uuid::Uuid::from_u128(sequence as u128 + 1).to_string(),
+                        serde_json::json!({"kind": "fragment_index_build", "file_id": 1,
+                            "source_generation": "fixture:1", "source_size": 100, "source_mtime": 10,
+                            "source_sha256": "a".repeat(64), "cache_key": format!("{sequence:064x}"),
+                            "pipeline_digest": "b".repeat(64)}).to_string(),
+                        format!("capacity:{sequence}"),
                     ])?;
                 }
                 Ok(())
@@ -4309,7 +4281,7 @@ mod tests {
         let active = store
             .with_read(|conn| {
                 conn.query_row(
-                    "SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                    "SELECT COUNT(*) FROM background_jobs
                       WHERE state IN ('queued', 'running')",
                     [],
                     |row| row.get::<_, i64>(0),
@@ -4323,9 +4295,9 @@ mod tests {
         store
             .with_conn(|conn| {
                 conn.execute(
-                    "UPDATE cluster_fragment_index_jobs SET state = 'failed'
-                      WHERE cache_key = ?1",
-                    params!["0".repeat(64)],
+                    "UPDATE background_jobs SET state = 'failed'
+                      WHERE id = ?1",
+                    params![uuid::Uuid::from_u128(1).to_string()],
                 )?;
                 Ok(())
             })

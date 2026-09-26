@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 fast lane: preflight repairs complete · **Updated:** 2026-09-26 ·
+**Status:** M1–M3 fast lane running; E0 construction · **Updated:** 2026-09-26 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` ·
 **Base:** `116559cb8` · **PR:** [#532 — ready](http://192.168.4.7:3000/noirr/plurx/pulls/532)
 
@@ -17,12 +17,12 @@ implementation is claimed; “compiled” does not mean tests passed.
 | M1 durable queue and pre-transcode | Implemented; focused validation passed | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; local exact-recipe offline joining and scheduling implemented; lost-reply and process-expiry regressions written; cross-node transcode convergence belongs to E1 |
 | M2 fragment analysis and hydration | Implemented; focused validation passed | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
 | M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
-| E0 subtitle and library workers | Building | Catalogue/queue ownership binding implemented; durable admission and handlers remain. Reuse newly landed subtitle extraction implementation |
+| E0 subtitle and library workers | Foundation compiled on follow-on branch | Durable library intents, per-request results and joint queue/domain publication ownership committed on `codex/cluster-work-adapters`; production dispatch, budgets, subtitles and learner permissions remain open |
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
 | Final adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
-| Fast lane | Restart pending | Run 3282 preflight contracts repaired; validation and changed API/docs checks pass. Required remote lane remains blocking |
+| Fast lane | Running on core `22b620c7b` | All 18 failures from run 3289 and two related census checks pass focused reruns. Required remote lane remains blocking |
 | Merge / cleanup | Not started | Green required lane before merge |
 
 ## Decisions and unresolved policy
@@ -447,3 +447,16 @@ The failing replicated test is being rerun before the main fast lane starts.
   results explicitly rather than silently truncate item IDs. The all-target
   core compile passed. These APIs are not yet connected to scan entry points;
   regression execution is deferred to the follow-on review.
+
+- 2026-09-26: fast-lane run 3289 passed preflight, Windows compilation and web
+  checks. Rust compilation and Clippy passed, then unit execution found stale
+  adapter ownership inventories, downgrade fixtures retaining common-queue
+  triggers, invalid publication fixtures, and unobserved cancellation results.
+  Repaired the inventories and common-queue downgrade cleanup. The repair-cap
+  regression now fills the common queue and preserves its foreground reserve.
+  Thirteen focused core cases and both failed migration contracts pass.
+  Daemon fixtures now use valid recipe identities and inject unsafe database
+  paths only after valid publication; cancellation errors receive bounded
+  accounting. All five failed daemon cases pass (four in the batch, scrub
+  after correcting its deliberate corruption fixture). Docs index passes. Main remains
+  `116559cb8`; no production deployment has occurred.

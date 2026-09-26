@@ -880,7 +880,9 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // `?1`-`?3` site with it, as `recently_added` did. `list_top_items_in_genre`'s
 // count and page moved into `library_page_statements` in the same file and
 // bind exactly as before, so their sites are unchanged.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 96;
+// Common queue execution removes three legacy prepared/bound SQL sites.
+// The new bridge uses one JSON argument rather than per-field binding lists.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 93;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {

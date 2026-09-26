@@ -15539,6 +15539,7 @@ fn make_trakt_fixture_row_cleartext(path: &std::path::Path) {
 fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     let path = populated_current_import_fixture(data_dir);
     let connection = rusqlite::Connection::open(&path).expect("open current SQLite fixture");
+    queue_fixture::remove_common_queue_schema(&connection);
     // Recreate the exact post-v14 schema differences so this is also a valid
     // input to ordinary SQLite startup migration, not merely a current-schema
     // database carrying an older user_version. The activation coordinator now
@@ -18638,26 +18639,14 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
     .await;
 }
 
-/// Every reopen that resets the retry budget resets the history with it.
-///
-/// Three statements reset `attempts`, and each one had to learn about the
-/// history separately: the request hand-off (a forced rebuild), the ordinary
-/// enqueue, and the artifact requeue. A reset that misses one leaves a job
-/// carrying the codes of a budget it no longer has, which is worse than no
-/// history at all — it is a history that disagrees with the count beside it.
+/// Reopened domain projections reflect their new durable interest's budget.
+/// The common queue owns retry counts and histories; independent interests
+/// cannot inherit a previous interest's exhausted budget.
 #[tokio::test]
 async fn fragment_index_attempt_history_resets_wherever_the_budget_does() {
     for_each_backend(|store, backend| async move {
         let (_, file_id) = seed_file(&store, "history-reset").await;
         let source_sha256 = "a".repeat(64);
-
-        // The forced hand-off's reset is not reachable from here: it only
-        // applies to a *generation* cache key, which only
-        // `submit_fragment_index_analysis` can create, and reaching it twice
-        // needs two forced requests for one identity — which
-        // `analysis_requests_one_active_forced_successor` exists to forbid.
-        // `every_attempts_reset_resets_the_attempt_history` pins that
-        // statement's shape instead.
 
         // 2. The artifact requeue. It reopens a `ready` row whose holders
         //    could not supply the blob, and that is a fresh budget too.
@@ -33465,6 +33454,7 @@ async fn sqlite_v70_migration_adds_the_read_indexes_and_keeps_the_catalogue() {
         .expect("count read indexes")
     };
     let conn = rusqlite::Connection::open(&path).expect("open downgrade fixture");
+    queue_fixture::remove_common_queue_schema(&conn);
     assert_eq!(
         count_indexes(&conn),
         3,
@@ -33487,7 +33477,10 @@ async fn sqlite_v70_migration_adds_the_read_indexes_and_keeps_the_catalogue() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("user_version");
     assert_eq!(version, plurx_core::store::SQLITE_SCHEMA_VERSION);
-    assert_eq!(version, 70);
+    assert!(
+        version >= 70,
+        "the read-index migration and every later step ran"
+    );
     drop(conn);
     SqliteStore::open(&path).expect("a current database reopens without replaying v70");
 }
@@ -33639,6 +33632,7 @@ async fn sqlite_v69_migration_from_v68_preserves_file_grants_and_live_analysis_r
     drop(store);
 
     let conn = rusqlite::Connection::open(&path).expect("open downgrade fixture");
+    queue_fixture::remove_common_queue_schema(&conn);
     let current_table: String = conn
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='analysis_requests'",

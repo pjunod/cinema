@@ -44,11 +44,11 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_durable.rs", 29),
     ("hiqlite_dv_conversion.rs", 13),
     ("hiqlite_dvr.rs", 19),
-    ("hiqlite_fragment_index_cluster.rs", 32),
+    ("hiqlite_fragment_index_cluster.rs", 31),
     ("hiqlite_import.rs", 3),
     ("hiqlite_library_channels.rs", 13),
     ("hiqlite_media.rs", 67),
-    ("hiqlite_pretranscode.rs", 4),
+    ("hiqlite_pretranscode.rs", 2),
     ("hiqlite_publication.rs", 5),
     ("hiqlite_reading.rs", 2),
     ("hiqlite_sessions.rs", 18),
@@ -64,7 +64,9 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
 /// statement standing in for two per request), and `watch_query`'s own
 /// dispatch site. Consolidating watch reads lowers reads per request, not
 /// sites in the source.
-const UNANNOTATED_CEILING: usize = 241;
+// Durable queue removes three unannotated legacy execution reads. Its
+// authority bridge is separately inventoried and carries its reason.
+const UNANNOTATED_CEILING: usize = 238;
 
 const SITE: &str = "query_consistent";
 const REASON: &str = "// authority:";

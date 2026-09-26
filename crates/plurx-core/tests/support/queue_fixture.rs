@@ -521,3 +521,25 @@ pub(crate) trait QueueFixture: Store {
     }
 }
 impl<T: Store + ?Sized> QueueFixture for T {}
+
+/// Wind a current test database back across the durable-queue introduction.
+/// This touches only the common queue namespace, never production migration.
+#[allow(dead_code)]
+pub(crate) fn remove_common_queue_schema(connection: &rusqlite::Connection) {
+    for kind in ["trigger", "table"] {
+        let names: Vec<String> = connection.prepare(
+            "SELECT name FROM sqlite_master WHERE type = ?1 AND name GLOB 'background_*' ORDER BY name"
+        ).expect("queue schema objects").query_map([kind], |row| row.get(0))
+            .expect("queue schema query").collect::<Result<_, _>>().expect("queue schema names");
+        for name in names {
+            let quoted = name.replace('"', "\"\"");
+            connection
+                .execute_batch(&format!(
+                    "DROP {} \"{}\"",
+                    kind.to_ascii_uppercase(),
+                    quoted
+                ))
+                .expect("drop common queue fixture object");
+        }
+    }
+}

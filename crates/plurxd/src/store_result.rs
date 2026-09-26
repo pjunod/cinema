@@ -55,6 +55,9 @@ macro_rules! operations {
 }
 
 operations! {
+    CancelTranscodeSourceChanged => "cancel_transcode_source_changed",
+    CancelTranscodePolicyChanged => "cancel_transcode_policy_changed",
+    CancelTranscodeHealthRefused => "cancel_transcode_health_refused",
     ForgetCorruptLocalIndex => "forget_corrupt_local_index",
     ForgetMissingPeerIndex => "forget_missing_peer_index",
     ForgetCorruptPeerIndex => "forget_corrupt_peer_index",
@@ -412,7 +415,7 @@ mod tests {
 
     #[test]
     fn every_classified_failure_has_a_bounded_metric_row() {
-        assert_eq!(Operation::ALL.len(), 42, "one fixed label per audited site");
+        assert_eq!(Operation::ALL.len(), 43, "one fixed label per audited site");
         let metrics = Metrics::default();
         for operation in Operation::ALL {
             for severity in Discard::ALL {

@@ -393,8 +393,10 @@ use crate::queue_fixture::QueueFixture;
             .expect("read repair job")
             .expect("the no-holder arm retains a repair job");
         assert_eq!(repair.state, "queued");
-        assert_eq!(repair.priority, "foreground");
-        assert_eq!(repair.trigger, "foreground");
+        // The failed viewer request is no longer a live waiter. Its bounded
+        // automatic repair must leave foreground capacity for active viewers.
+        assert_eq!(repair.priority, "normal");
+        assert_eq!(repair.trigger, "background");
     }
 
     fn fixture_file() -> MediaFile {

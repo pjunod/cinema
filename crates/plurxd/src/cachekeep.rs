@@ -1770,7 +1770,10 @@ mod tests {
     const NODE: &str = "node-a";
 
     async fn store() -> (Arc<dyn Store>, i64) {
-        let store = SqliteStore::open_in_memory().expect("store");
+        seed_store(SqliteStore::open_in_memory().expect("store")).await
+    }
+
+    async fn seed_store(store: SqliteStore) -> (Arc<dyn Store>, i64) {
         let lib = store
             .create_library(&NewLibrary {
                 name: "M".into(),
@@ -2646,8 +2649,9 @@ mod tests {
 
     #[tokio::test]
     async fn manifest_scrub_invalidates_unsafe_rows_without_leaving_the_cache_root() {
-        let (store, file) = store().await;
         let sandbox = root();
+        let database = sandbox.path().join("plurx.db");
+        let (store, file) = seed_store(SqliteStore::open(&database).expect("store")).await;
         let cache_root = sandbox.path().join("cache");
         let outside = sandbox.path().join("outside");
         tokio::fs::create_dir_all(&cache_root)
@@ -2666,7 +2670,7 @@ mod tests {
             file,
             "00000000-0000-4000-8000-000000000402",
             recipes[0],
-            "../outside",
+            "valid/first",
             1,
             &"b".repeat(64),
         )
@@ -2676,11 +2680,44 @@ mod tests {
             file,
             "00000000-0000-4000-8000-000000000403",
             recipes[1],
-            &outside.to_string_lossy(),
+            "valid/second",
             1,
             &"c".repeat(64),
         )
         .await;
+
+        // Publication now rejects unsafe paths. Model an existing corrupt row
+        // after a valid fenced publication, without weakening that boundary.
+        let connection = rusqlite::Connection::open(&database).expect("corrupt fixture");
+        let guard: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'cache_publication_generation_guard'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("publication guard");
+        connection
+            .execute_batch("DROP TRIGGER cache_publication_generation_guard")
+            .expect("permit fixture corruption");
+        for (recipe, unsafe_path) in [
+            (recipes[0], "../outside".to_owned()),
+            (recipes[1], outside.to_string_lossy().into_owned()),
+        ] {
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE transcode_cache_locations SET relative_dir = ?1,
+                 publication_generation = publication_generation + 1 WHERE recipe_hash = ?2",
+                        rusqlite::params![unsafe_path, recipe],
+                    )
+                    .expect("inject unsafe path"),
+                1
+            );
+        }
+        connection
+            .execute_batch(&guard)
+            .expect("restore publication guard");
+        drop(connection);
 
         let swept = sweep_with_readers(
             &store,
