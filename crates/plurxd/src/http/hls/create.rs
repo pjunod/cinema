@@ -1179,7 +1179,7 @@ pub(super) async fn validate_hevc_copy_transport(
     if caps.progressive_hevc_sample_entries.is_none() {
         return Ok(());
     }
-    let probe_json = state.store.get_file_probe_json(source.id).await?;
+    let probe_json = crate::hevc_census::probe_json_for_copy(state.store.as_ref(), source).await?;
     let promotes =
         plurx_core::transcode::hevc_parameter_set_promotion_required(source, probe_json.as_deref());
     let Some(actual) =

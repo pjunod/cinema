@@ -183,12 +183,14 @@ impl VodServe {
             ));
         };
         let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
-        let probe_json = self
-            .shared
-            .store
-            .get_file_probe_json(file.id)
-            .await
-            .map_err(|error| format!("reading the file probe: {error}"))?;
+        // An encoded rendition never carries the source's parameter sets, so
+        // only a copy waits on the census.
+        let probe_json = if prepared.encoding.is_none() {
+            crate::hevc_census::probe_json_for_copy(self.shared.store.as_ref(), file).await
+        } else {
+            self.shared.store.get_file_probe_json(file.id).await
+        }
+        .map_err(|error| format!("reading the file probe: {error}"))?;
         let video = copy_video_pipeline(
             file,
             probe_json.as_deref(),
@@ -262,8 +264,11 @@ impl VodServe {
         // HEVC safety is established on original headers, before filters can
         // hide updates. Bind the proof to this node's current source object;
         // a peer's filesystem identity is not a local attestation.
+        // A copy that keeps its in-band parameter sets cannot decode against
+        // stale definitions, so it needs no proof that deleting them is safe.
         let source_object_version = if prepared.encoding.is_none()
             && matches!(file.video_codec.as_deref(), Some("hevc" | "h265"))
+            && !video.retains_hevc_parameter_sets()
             && !crate::transcode::unverified_hevc_copy_enabled(self.shared.store.as_ref()).await?
         {
             let current = crate::fragment_index_cluster::inspect_source(file)

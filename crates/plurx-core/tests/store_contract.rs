@@ -404,6 +404,7 @@ const MEDIA_METHODS: &[&str] = &[
     "get_file_probe_json",
     "get_file_probe_chapters_json",
     "merge_file_probe_chapters",
+    "merge_file_probe_hevc_parameter_sets",
     "files_missing_probe",
     "library_file_paths",
     "ensure_library_root_fingerprint",
@@ -16762,7 +16763,13 @@ fn contract_inventory_matches_every_store_method() {
     // Both are non-consensus reads that decide only whether to ask the
     // authority; `watched_outbox_and_lease_hints_follow_the_authority_locally`
     // covers them on both backends. No new trait or supertrait of `Store`.
-    assert_eq!(declared.len(), 392, "review the Store method count");
+    //
+    // 392 -> 393 for the one `MediaStore` method the HEVC parameter-set
+    // census adds, `merge_file_probe_hevc_parameter_sets`, a fenced graft onto
+    // the stored probe beside `merge_file_probe_chapters`. Named in
+    // `MEDIA_METHODS` above and exercised on every backend by the media
+    // lifecycle scenario; no new trait or supertrait.
+    assert_eq!(declared.len(), 393, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -24727,6 +24734,59 @@ async fn media_contract_runs_through_dyn_store() {
             .merge_file_probe_chapters(movie_file, r#"[{"start_time":"0.0","end_time":"10.0"}]"#)
             .await
             .expect("merge chapters");
+        // The HEVC census graft is fenced to the revision it measured.
+        let measured = store
+            .get_file(movie_file)
+            .await
+            .expect("census file")
+            .expect("census file");
+        let census =
+            r#"{"revision":1,"verdict":"varying","size":0,"mtime":0,"samples":7,"differing":7}"#;
+        assert!(!store
+            .merge_file_probe_hevc_parameter_sets(
+                movie_file,
+                measured.size + 1,
+                measured.mtime,
+                census,
+            )
+            .await
+            .expect("fenced census"));
+        assert!(!store
+            .merge_file_probe_hevc_parameter_sets(
+                movie_file,
+                measured.size,
+                measured.mtime + 1,
+                census,
+            )
+            .await
+            .expect("mtime-fenced census"));
+        assert!(!store
+            .get_file_probe_json(movie_file)
+            .await
+            .expect("probe JSON")
+            .expect("probe JSON")
+            .contains("plurx_hevc_parameter_sets"));
+        assert!(store
+            .merge_file_probe_hevc_parameter_sets(movie_file, measured.size, measured.mtime, census)
+            .await
+            .expect("census"));
+        let grafted: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(movie_file)
+                .await
+                .expect("probe JSON")
+                .expect("probe JSON"),
+        )
+        .expect("probe JSON parses");
+        assert_eq!(grafted["plurx_hevc_parameter_sets"]["verdict"], "varying");
+        assert!(
+            grafted.get("chapters").is_some(),
+            "the graft keeps the rest of the probe"
+        );
+        assert!(!store
+            .merge_file_probe_hevc_parameter_sets(empty_file, 2_000, 20, census)
+            .await
+            .expect("unprobed census"));
         assert!(store
             .get_file_probe_json(movie_file)
             .await

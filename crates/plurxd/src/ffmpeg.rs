@@ -713,6 +713,13 @@ async fn held_source_probe_json_with_limits(
 fn normalized_probe_document(raw: &str) -> Result<serde_json::Value, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(raw).map_err(|error| format!("invalid ffprobe JSON: {error}"))?;
+    if let Some(document) = value.as_object_mut() {
+        // plurx's own record of a measurement it made from the stored probe's
+        // source revision (`transcode::hevc_census`), grafted after the scan.
+        // A fresh probe never carries it, and its presence says nothing about
+        // whether the bytes changed.
+        document.remove(plurx_core::transcode::hevc_census::PROBE_KEY);
+    }
     if let Some(format) = value
         .get_mut("format")
         .and_then(serde_json::Value::as_object_mut)
@@ -3524,6 +3531,35 @@ mod tests {
         current["streams"][1]["tags"]["name"] = serde_json::json!("GROUP DDP5.1 Atmos");
         plurx_core::scan::probe::stamp_reporter(&mut current, "ffprobe version 8.1.2-Jellyfin");
         current
+    }
+
+    /// A stored probe carrying the HEVC parameter-set census still describes
+    /// the bytes a fresh probe of the same file reads. Without this every
+    /// encoded session of a censused HEVC title was refused as
+    /// `vod_source_rescan_required`, and a reanalysis only earned it a new
+    /// census and the same refusal.
+    #[test]
+    fn a_recorded_hevc_census_is_not_a_change_in_the_source() {
+        let held = current_reporter_probe();
+        let mut stored = held.clone();
+        stored[plurx_core::transcode::hevc_census::PROBE_KEY] = serde_json::json!({
+            "revision": 1, "verdict": "varying", "size": 1, "mtime": 1,
+            "samples": 7, "differing": 7,
+        });
+        let comparison = super::compare_probe_documents(&stored.to_string(), &held.to_string())
+            .expect("compare");
+        assert!(comparison.same, "{:?}", comparison.differences);
+        assert!(
+            !comparison.admitted_on_reporter_drift,
+            "one build on both sides compares the whole document"
+        );
+        // Still a real comparison: a changed fact beside the record refuses.
+        stored["streams"][0]["width"] = serde_json::json!(1920);
+        assert!(
+            !super::compare_probe_documents(&stored.to_string(), &held.to_string())
+                .expect("compare")
+                .same
+        );
     }
 
     /// The production failure this exists to stop: three refusals on `media1`

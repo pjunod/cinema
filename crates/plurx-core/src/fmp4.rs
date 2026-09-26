@@ -927,6 +927,17 @@ impl PromotionInputs {
         let Some(sample) = first_video_sample(fragment, video) else {
             return PromotionInputs::default();
         };
+        // A type the sample entry already configures is never promoted —
+        // `promote_hevc_parameter_sets_from` skips it — so it is not a
+        // promotion input. Counting it would make a film whose redefinitions
+        // travel in band (`CopyVideoOptions::retains_hevc_parameter_sets`)
+        // look like one whose clean starts disagree about their init, when
+        // every one of them promotes to the same init.
+        let configured = locate_hvcc(&init.bytes)
+            .ok()
+            .flatten()
+            .and_then(|location| hvcc_nal_array_types(&init.bytes[location.payload]).ok())
+            .unwrap_or_default();
         PromotionInputs {
             hevc_configuration: None,
             // Never from a fragment: a fragment has no record and no facts to
@@ -936,6 +947,7 @@ impl PromotionInputs {
             strip_dolby_vision: false,
             parameter_sets: hevc_parameter_set_nals(sample, video.nal_length_size)
                 .into_iter()
+                .filter(|nal| hevc_nal_type(nal).is_some_and(|kind| !configured.contains(&kind)))
                 .map(<[u8]>::to_vec)
                 .collect(),
             hdr10_sei: hdr10_prefix_sei_nals(sample, video.nal_length_size)
@@ -2286,6 +2298,121 @@ pub fn validate_hevc_sample_description_reference(
 
 pub fn validate_hevc_decoder_configuration(init: &Init) -> Result<(), Fmp4Error> {
     validate_hevc_sample_entries(init).map(|_| ())
+}
+
+/// How one fragment's in-band HEVC parameter sets relate to its sample entry.
+///
+/// The measurement behind `transcode::hevc_census`: whether deleting the
+/// in-band sets, as every historical copy does, loses a definition the
+/// decoder needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InBandParameterSets {
+    /// No video sample carried a parameter set of a type the sample entry
+    /// configures.
+    Absent,
+    /// Every one carried repeats a definition the sample entry holds.
+    MatchSampleEntry,
+    /// At least one redefines what the sample entry says.
+    DifferFromSampleEntry,
+}
+
+/// Compare every in-band VPS/SPS/PPS in `fragment`'s video samples with the
+/// definitions in the sample entry's `hvcC`.
+///
+/// Byte comparison of the NAL units, ignoring trailing zero bytes (which a
+/// muxer may pad or trim without changing a definition). A type the record
+/// does not configure is not compared: filling a missing array is what
+/// promotion is for, and that path already keeps what it needs.
+pub fn compare_in_band_parameter_sets(
+    init: &Init,
+    fragment: &Fragment,
+) -> Result<InBandParameterSets, Fmp4Error> {
+    let Some(video) = init.video() else {
+        return Ok(InBandParameterSets::Absent);
+    };
+    if video.codec != Some(VideoCodec::Hevc) || video.nal_length_size == 0 {
+        return Ok(InBandParameterSets::Absent);
+    }
+    let Some(location) = locate_hvcc(&init.bytes)? else {
+        return Ok(InBandParameterSets::Absent);
+    };
+    let configured = hvcc_parameter_set_nals(&init.bytes[location.payload])?;
+    let Some(track) = fragment.track(video.id) else {
+        return Ok(InBandParameterSets::Absent);
+    };
+    let mut seen = false;
+    for run in &track.runs {
+        let mut start = run.data_offset;
+        for sample in &run.samples {
+            let end = start
+                .checked_add(sample.size as usize)
+                .filter(|end| *end <= fragment.bytes.len())
+                .ok_or_else(|| {
+                    Fmp4Error::Malformed("a sample points past the end of its fragment".into())
+                })?;
+            for nal in hevc_parameter_set_nals(&fragment.bytes[start..end], video.nal_length_size) {
+                let kind = hevc_nal_type(nal);
+                if !configured.iter().any(|known| hevc_nal_type(known) == kind) {
+                    continue;
+                }
+                seen = true;
+                let nal = without_trailing_zero_bytes(nal);
+                if !configured
+                    .iter()
+                    .any(|known| without_trailing_zero_bytes(known) == nal)
+                {
+                    return Ok(InBandParameterSets::DifferFromSampleEntry);
+                }
+            }
+            start = end;
+        }
+    }
+    Ok(if seen {
+        InBandParameterSets::MatchSampleEntry
+    } else {
+        InBandParameterSets::Absent
+    })
+}
+
+fn without_trailing_zero_bytes(nal: &[u8]) -> &[u8] {
+    let end = nal
+        .iter()
+        .rposition(|byte| *byte != 0)
+        .map_or(0, |at| at + 1);
+    &nal[..end]
+}
+
+/// The VPS/SPS/PPS NAL units an `hvcC` record carries, in record order.
+fn hvcc_parameter_set_nals(record: &[u8]) -> Result<Vec<&[u8]>, Fmp4Error> {
+    if record.len() < 23 {
+        return malformed("hvcC too short for its NAL arrays");
+    }
+    let mut found = Vec::new();
+    let mut pos = 23usize;
+    for _ in 0..record[22] {
+        if pos + 3 > record.len() {
+            return malformed("hvcC NAL array header runs past the record");
+        }
+        let count = u16::from_be_bytes([record[pos + 1], record[pos + 2]]) as usize;
+        pos += 3;
+        for _ in 0..count {
+            if pos + 2 > record.len() {
+                return malformed("hvcC NAL length runs past the record");
+            }
+            let len = u16::from_be_bytes([record[pos], record[pos + 1]]) as usize;
+            pos += 2;
+            let end = pos
+                .checked_add(len)
+                .filter(|end| *end <= record.len())
+                .ok_or_else(|| Fmp4Error::Malformed("hvcC NAL runs past the record".into()))?;
+            let nal = &record[pos..end];
+            if matches!(hevc_nal_type(nal), Some(32..=34)) {
+                found.push(nal);
+            }
+            pos = end;
+        }
+    }
+    Ok(found)
 }
 
 fn hevc_parameter_set_nals(sample: &[u8], length_size: u8) -> Vec<&[u8]> {
@@ -3790,12 +3917,34 @@ fn write_hevc_sample_without_parameter_sets(
 /// most-exercised path in every MP4 parser there is — and it keeps the
 /// default-value and first-sample-flags ladders confined to the reader.
 pub fn merge(fragments: &[Fragment], init: &Init, sequence: u32) -> Result<Segment, Fmp4Error> {
+    merge_retaining(fragments, init, sequence, false)
+}
+
+/// [`merge`], told whether the video samples' in-band HEVC parameter sets must
+/// survive it.
+///
+/// `true` for a source whose in-band sets redefine the sample entry's record
+/// (`CopyVideoOptions::retains_hevc_parameter_sets`): those definitions are
+/// the only correct ones for the pictures that follow them, so the
+/// out-of-band-only normalization above would reintroduce exactly the
+/// corruption the copy's bitstream filter was told to avoid. Every sample is
+/// then copied byte for byte, as it already is for `hev1`/`dvhe`.
+pub fn merge_retaining(
+    fragments: &[Fragment],
+    init: &Init,
+    sequence: u32,
+    retain_parameter_sets: bool,
+) -> Result<Segment, Fmp4Error> {
     if fragments.is_empty() {
         return malformed("nothing to merge");
     }
     let mut stats = MergeStats::default();
     let strip_hevc_track = match init.video() {
-        Some(video) if video.codec == Some(VideoCodec::Hevc) && video.nal_length_size != 0 => {
+        Some(video)
+            if !retain_parameter_sets
+                && video.codec == Some(VideoCodec::Hevc)
+                && video.nal_length_size != 0 =>
+        {
             locate_hvcc(&init.bytes)?
                 .filter(|location| !location.parameter_sets_in_band)
                 .map(|_| (video.id, video.nal_length_size))
@@ -4281,6 +4430,7 @@ pub struct Segmenter {
     media_time: Option<MediaTime>,
     boundaries: Option<Boundaries>,
     counts: SegmentCounts,
+    retain_hevc_parameter_sets: bool,
 }
 
 impl Segmenter {
@@ -4297,7 +4447,18 @@ impl Segmenter {
             media_time: None,
             boundaries: None,
             counts: SegmentCounts::default(),
+            retain_hevc_parameter_sets: false,
         }
+    }
+
+    /// Keep every video sample's in-band HEVC parameter sets when merging.
+    ///
+    /// Set from the copy's own `CopyVideoOptions::retains_hevc_parameter_sets`,
+    /// so a segmenter can never delete what the copy's bitstream filter was
+    /// built to keep. See [`merge_retaining`].
+    pub fn retaining_hevc_parameter_sets(mut self, retain: bool) -> Segmenter {
+        self.retain_hevc_parameter_sets = retain;
+        self
     }
 
     /// A segmenter that cuts where a plan already decided, rather than
@@ -4589,7 +4750,12 @@ impl Segmenter {
                     )));
                 }
             }
-            let segment = merge(fragments, &self.init, index as u32 + 1)?;
+            let segment = merge_retaining(
+                fragments,
+                &self.init,
+                index as u32 + 1,
+                self.retain_hevc_parameter_sets,
+            )?;
             published.push(Published {
                 index,
                 segment,
@@ -4886,7 +5052,12 @@ impl Segmenter {
     fn flush(&mut self, reason: CutReason) -> Result<Published, Fmp4Error> {
         let index = self.next_index;
         let seconds = self.seconds_for(&self.pending, reason);
-        let segment = merge(&self.pending, &self.init, index as u32 + 1)?;
+        let segment = merge_retaining(
+            &self.pending,
+            &self.init,
+            index as u32 + 1,
+            self.retain_hevc_parameter_sets,
+        )?;
         self.pending.clear();
         self.pending_bytes = 0;
         self.pending_ticks = 0;

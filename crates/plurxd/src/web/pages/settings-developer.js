@@ -541,13 +541,13 @@ function hevcCopyCard(settings){
   const enabled=!!settings.hevc_unverified_copy;
   const trace=settings.hevc_header_trace_available;
   const indexing=!!settings.vod_index_cluster_cache||Number(settings.vod_index_mins)>0;
-  return setCard(`${cardHead("Unverified HEVC copy","Allow copied video before its configuration is proved, including progressive and rolling playback.",`<span class="pill${enabled?" warn":""}">${enabled?"Enabled":"Verified VOD only"}</span>`)}
-    ${togRow("hevc-unverified","Enable unverified HEVC copy","Applies to new playback starts without a restart. This also allows files whose configuration scan found changes. It can restore playback, but the reported pink/green corruption can return.",enabled)}
+  return setCard(`${cardHead("Unverified HEVC copy","Allow a VOD copy to delete in-band parameter sets before the film's configuration is proved. Rolling and progressive copies keep them and never need this.",`<span class="pill${enabled?" warn":""}">${enabled?"Enabled":"Verified VOD only"}</span>`)}
+    ${togRow("hevc-unverified","Enable unverified HEVC copy","Applies to new playback starts without a restart. Files whose parameter sets change are already copied with them kept; enabling this lets an unproved file be copied with them deleted, which can bring the pink/green corruption back.",enabled)}
     <details class="setdetails" open><summary>Requirements for safe use — advisory only</summary><div class="setdetails-body">
     ${devStaticReq("Original-header analysis",trace===true?"met":trace===false?"not met":"not observable",trace===true?"This node’s FFmpeg reports trace_headers. A complete scan of each title is still required.":"This node has not confirmed the trace_headers filter; enabling remains available.",trace===true?"ok":"warn")}
     ${devStaticReq("Background preparation",indexing?"configured":"not configured","Enable Content analysis indexing to prepare title-specific proofs. A configured worker does not mean every title has finished.",indexing?"ok":"warn")}
     ${devStaticReq("This title’s decoder configuration","not observable here","A complete scan must find one unchanged VPS/SPS/PPS configuration. A scan that finds changes means header-stripping copy can alter the decoded picture.","")}
-    ${devStaticReq("Source held through playback and retries","VOD only","Verified VOD holds the source it analyzed. Rolling and progressive HEVC copy do not yet have equivalent proof binding.","warn")}
+    ${devStaticReq("Source held through playback and retries","VOD only","Verified VOD holds the source it analyzed. Rolling and progressive HEVC copies keep their in-band parameter sets, so they need no proof.","warn")}
     ${devStaticReq("Every worker updated","not observable here","Deploy the fix on all serving nodes and drain older sessions. This build uses media-worker protocol 7; a local settings page cannot certify every public ingress.","")}
     <p class="devcheck-note">These observations never disable the checkbox or reject its save. Turning the override off requires verified VOD for new HEVC copy starts; running sessions keep their existing policy.</p>
     </div></details><div class="err" id="hevc-copy-error" role="alert"></div>${setCardFoot("saveHevcCopy")}`,{id:"hevc-copy-card"});

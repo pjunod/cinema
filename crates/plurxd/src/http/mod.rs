@@ -14216,36 +14216,9 @@ mod tests {
         assert_eq!(hls["delivery"]["requires_hls"], true, "{hls}");
         assert_eq!(hls["delivered_dolby_vision_profile"], 8, "{hls}");
 
-        // The new default refuses unverified HEVC transport; the explicit
-        // override restores the existing DV narrowing contract below.
-        for transports in [json!(["progressive"]), json!([])] {
-            let (status, blocked) = call(
-                &app,
-                post(
-                    &decision_path,
-                    Some(&admin),
-                    json!({"caps":caps(transports)}),
-                ),
-            )
-            .await;
-            assert_eq!(status, StatusCode::CONFLICT, "{blocked}");
-            assert_eq!(blocked["code"], "hevc_configuration_unverified");
-        }
-        let (status, blocked) = call(
-            &app,
-            get(
-                &format!("/api/v1/files/{file}/stream.mp4?hdr=1&hdr10t=1"),
-                Some(&admin),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CONFLICT, "{blocked}");
-        assert_eq!(blocked["code"], "hevc_configuration_unverified");
-        state
-            .store
-            .put_setting(plurx_core::store::keys::HEVC_UNVERIFIED_COPY, "1")
-            .await
-            .expect("explicitly enable the unverified progressive route");
+        // A progressive HEVC copy keeps its in-band parameter sets, so it needs
+        // no header proof and no Developer override: the DV narrowing
+        // contract below holds on the default settings.
 
         for transports in [json!(["progressive"]), json!([])] {
             let (status, narrowed) = call(

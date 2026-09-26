@@ -645,7 +645,7 @@
     }
 
     #[tokio::test]
-    async fn hevc_rolling_copy_refuses_before_spawning_even_for_dv_conversion() {
+    async fn hevc_rolling_copy_keeps_its_parameter_sets_instead_of_refusing() {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("HEVC regression fixture"));
         let media = crate::test_tempdir().expect("HEVC regression fixture");
@@ -656,23 +656,30 @@
         }).await;
         let work = crate::test_tempdir().expect("HEVC regression fixture");
         let mgr = TranscodeManager::new(store.clone(), work.path().to_path_buf(), EncoderCaps::default(), Pipeline::Cpu);
-        for convert in [false, true] {
-            let error = mgr.start_copy(file_id, 0.0, None, CopySessionOptions {
-                transcode_audio: false, preserve_dolby_vision: true, convert_dolby_vision: convert,
-            }, "user", "playback").await.err().expect("unfenced copy must refuse");
-            let (code, _) = vod_refusal(&error).expect("typed refusal");
-            assert_eq!(code, "hevc_configuration_unverified");
-            assert!(LiveRecoveryReason::from_refusal(code).is_none());
-            assert_eq!(mgr.active_sessions().await, 0);
-        }
-        assert!(LiveRecoveryReason::from_refusal("hevc_configuration_unsupported").is_none());
-        store.put_setting(plurx_core::store::keys::HEVC_UNVERIFIED_COPY, "1")
-            .await.expect("enable without readiness");
-        let enabled = mgr.start_copy(file_id, 0.0, None, CopySessionOptions {
+        // No proof and no Developer override: the rolling copy starts,
+        // because it keeps the definitions its pictures need.
+        let started = mgr.start_copy(file_id, 0.0, None, CopySessionOptions {
             transcode_audio: false, preserve_dolby_vision: false, convert_dolby_vision: false,
-        }, "user", "override").await.expect("explicit override admits unverified rolling copy");
-        assert!(mgr.stop_session(&enabled.session_id, "test cleanup").await);
+        }, "user", "playback").await.expect("a retaining rolling copy needs no proof");
+        assert!(mgr.stop_session(&started.session_id, "test cleanup").await);
+        assert!(LiveRecoveryReason::from_refusal("hevc_configuration_unverified").is_none());
+        assert!(LiveRecoveryReason::from_refusal("hevc_configuration_unsupported").is_none());
 
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        for (preserve, convert) in [(false, false), (true, false), (true, true)] {
+            let options = super::manager_start::rolling_copy_video_options(&file, None, true, preserve, convert);
+            assert!(options.retains_hevc_parameter_sets(), "preserve={preserve} convert={convert}");
+            assert!(
+                plurx_core::transcode::copy_video_args(&file, options)
+                    .iter()
+                    .all(|arg| !arg.contains("32-34")),
+                "a rolling HEVC copy never deletes types 32-34"
+            );
+        }
+        let mut h264 = file.clone();
+        h264.video_codec = Some("h264".into());
+        assert!(!super::manager_start::rolling_copy_video_options(&h264, None, true, false, false)
+            .retains_hevc_parameter_sets());
     }
 
 
