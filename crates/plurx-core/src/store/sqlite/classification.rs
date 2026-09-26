@@ -35,6 +35,17 @@ impl ClassificationStore for SqliteStore {
         })
         .await
     }
+    async fn classification_hint(&self, now_unix: i64) -> Result<bool, StoreError> {
+        self.with_read(move |conn| {
+            let due: i64 = conn.query_row(
+                &hint_sql(),
+                params![crate::metadata::classification::VERSION, now_unix],
+                |r| r.get(0),
+            )?;
+            Ok(due != 0)
+        })
+        .await
+    }
 }
 
 #[cfg(test)]

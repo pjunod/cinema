@@ -113,6 +113,17 @@ Decisions made without blocking on the owner:
 - Keep native clients on their existing exact-search API; the semantic API is
   additive, and legacy shipped channel preset text maps to local selectors.
 
+## Pass scheduling
+
+The classification worker walks the library in passes, one 32-entry page a
+second, holding the cluster lease `metadata-classification` for the whole
+pass. A pass starts only when a local, non-consensus read shows an entry the
+pass would act on (no record, unindexed, a changed source or rules version,
+or a provider re-check due), at least every 30 minutes regardless, or once
+after a restart; a node that sees a peer holding the lease leaves it alone.
+`plurx_classification_ticks_total{outcome}` counts the decisions
+([REPLICATED-WRITE-RATE-HYGIENE-II.md](../cluster/REPLICATED-WRITE-RATE-HYGIENE-II.md) §3.2).
+
 ## Final review disposition
 
 The single adversarial review identified two P2 issues. Both are addressed:

@@ -341,7 +341,11 @@ const LIBRARY_CHANNEL_METHODS: &[&str] = &[
     "complete_library_channel_build_without_publication",
     "read_library_channel_generation",
 ];
-const CLASSIFICATION_METHODS: &[&str] = &["classification_page", "write_classification"];
+const CLASSIFICATION_METHODS: &[&str] = &[
+    "classification_page",
+    "write_classification",
+    "classification_hint",
+];
 const MEDIA_METHODS: &[&str] = &[
     "add_downloaded_subtitle",
     "subtitle_candidate_file_ids",
@@ -517,6 +521,7 @@ const OFFLINE_METHODS: &[&str] = &[
     "offline_package_stats",
     "reset_interrupted_offline_packages",
     "claim_next_offline_package",
+    "offline_queue_hint",
     "offline_package_claim_is_current",
     "requeue_offline_package",
     "set_offline_package_recipe",
@@ -16769,7 +16774,13 @@ fn contract_inventory_matches_every_store_method() {
     // the stored probe beside `merge_file_probe_chapters`. Named in
     // `MEDIA_METHODS` above and exercised on every backend by the media
     // lifecycle scenario; no new trait or supertrait.
-    assert_eq!(declared.len(), 393, "review the Store method count");
+    // 393 -> 395 for K-10's two local hints, `offline_queue_hint` on
+    // `OfflinePackageStore` and `classification_hint` on
+    // `ClassificationStore`. Both are non-consensus reads that decide only
+    // whether to ask the authority; `offline_queue_hint_follows_the_authority_locally`
+    // and `classification_hint_fires_for_exactly_what_a_pass_acts_on` cover
+    // them on both backends. No new trait or supertrait of `Store`.
+    assert_eq!(declared.len(), 395, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -33183,5 +33194,526 @@ async fn a_lease_expiry_hint_proposes_nothing_on_three_voters() {
         store.validation_operation_counts().write_calls,
         1,
         "the acquire it replaces is a proposal even when the lease is held"
+    );
+}
+
+/// Wait (boundedly) until a local hint agrees with the authority. The
+/// replicated backend answers from whichever replica the client reads, so a
+/// write is not assumed visible to it at once; that lag is exactly why every
+/// caller treats these reads as hints.
+async fn k10_eventually(
+    backend: &str,
+    what: &str,
+    mut probe: impl FnMut() -> std::pin::Pin<Box<dyn Future<Output = bool> + Send>>,
+) {
+    for _ in 0..200 {
+        if probe().await {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("{backend}: {what} never became visible to the local hint");
+}
+
+async fn k10_classification_hint_is(
+    store: &Arc<dyn Store>,
+    backend: &str,
+    now_unix: i64,
+    expected: bool,
+    what: &str,
+) {
+    let probed = Arc::clone(store);
+    k10_eventually(backend, what, move || {
+        let store = Arc::clone(&probed);
+        Box::pin(async move {
+            store
+                .classification_hint(now_unix)
+                .await
+                .is_ok_and(|due| due == expected)
+        })
+    })
+    .await;
+}
+
+/// Classify every item the way the worker does with no provider configured,
+/// optionally stamping the provider fields, and return how many were written.
+async fn k10_classify_all(
+    store: &Arc<dyn Store>,
+    stamp: impl Fn(&mut plurx_core::metadata::classification::Classification),
+) -> usize {
+    use plurx_core::{metadata::classification, store::classification::Record};
+    let mut written = 0;
+    for entry in store.classification_page(0, 256).await.expect("page") {
+        let input = entry.input().expect("input");
+        let mut result = classification::classify(&input.metadata(), Vec::new());
+        stamp(&mut result);
+        let record = Record {
+            source_json: entry.source_json.clone(),
+            classification: result,
+            overrides: Default::default(),
+            revision: entry.record.as_ref().map_or(0, |r| r.revision),
+        };
+        if store
+            .write_classification(input.id, &record)
+            .await
+            .expect("write")
+        {
+            written += 1;
+        }
+    }
+    written
+}
+
+async fn k10_seed_items(store: &Arc<dyn Store>, name: &str, count: usize) -> Vec<i64> {
+    let library = store
+        .create_library(&NewLibrary {
+            name: name.into(),
+            kind: LibraryKind::Movies,
+            paths: vec![],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let mut ids = Vec::new();
+    for index in 0..count {
+        ids.push(
+            store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: format!("{name} {index}"),
+                    year: Some(2000),
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item"),
+        );
+    }
+    ids
+}
+
+/// K-10 §3.1: the offline queue hint is a local read that agrees with the
+/// authority once it has applied, on both backends, and only for the node
+/// the package is queued on.
+#[tokio::test]
+async fn offline_queue_hint_follows_the_authority_locally() {
+    for_each_backend(|store, backend| async move {
+        assert!(
+            !store
+                .offline_queue_hint("offline-node")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: empty hint: {error}")),
+            "{backend}: an empty queue must not hint"
+        );
+        let (user_id, file_id) = seed_file(&store, "k10-offline-hint").await;
+        let OfflineCreateOutcome::Created(_) = store
+            .create_offline_package(
+                &offline_request("k10-package", "k10-request", user_id, file_id),
+                10,
+                100_000,
+                100_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create: {error}"))
+        else {
+            panic!("{backend}: the package must be created");
+        };
+        let hinted = Arc::clone(&store);
+        k10_eventually(backend, "a queued package", move || {
+            let store = Arc::clone(&hinted);
+            Box::pin(async move {
+                store
+                    .offline_queue_hint("offline-node")
+                    .await
+                    .unwrap_or(false)
+            })
+        })
+        .await;
+        assert!(
+            !store
+                .offline_queue_hint("another-node")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: other node: {error}")),
+            "{backend}: a package queued for one node must not hint another"
+        );
+        let claimed = store
+            .claim_next_offline_package("offline-node")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"));
+        assert!(claimed.is_some(), "{backend}");
+        let quiet = Arc::clone(&store);
+        k10_eventually(backend, "a claimed package leaving the hint", move || {
+            let store = Arc::clone(&quiet);
+            Box::pin(async move {
+                !store
+                    .offline_queue_hint("offline-node")
+                    .await
+                    .unwrap_or(true)
+            })
+        })
+        .await;
+    })
+    .await;
+}
+
+/// K-10 §3.2: the classification hint fires for exactly the entries the
+/// worker's pass would write or re-check, on both backends.
+///
+/// Each condition in the worker's `unchanged` test and its provider rule is
+/// taken in turn — no record, unindexed, a changed source, an older rules
+/// version, a provider check due after success and after an error — and the
+/// hint must fire for it and fall silent once the entry is current. A
+/// condition added to the worker and not to `hint_sql` would leave an entry
+/// waiting for the forced pass; this is where that shows.
+#[tokio::test]
+async fn classification_hint_fires_for_exactly_what_a_pass_acts_on() {
+    use plurx_core::metadata::classification::VERSION;
+    use plurx_core::store::classification::{PROVIDER_REFRESH_SECS, PROVIDER_RETRY_SECS};
+    const NOW: i64 = 2_000_000_000;
+    for_each_backend(|store, backend| async move {
+        k10_classification_hint_is(&store, backend, NOW, false, "an empty library").await;
+        let ids = k10_seed_items(&store, "K10 hint", 2).await;
+        k10_classification_hint_is(&store, backend, NOW, true, "an unclassified item").await;
+        assert_eq!(k10_classify_all(&store, |_| {}).await, 2, "{backend}");
+        k10_classification_hint_is(&store, backend, NOW, false, "a classified library").await;
+
+        // A changed source.
+        store
+            .apply_metadata(
+                ids[0],
+                &MetadataPatch {
+                    overview: Some("Changed".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("edit");
+        k10_classification_hint_is(&store, backend, NOW, true, "a changed source").await;
+        assert_eq!(k10_classify_all(&store, |_| {}).await, 2, "{backend}");
+        k10_classification_hint_is(&store, backend, NOW, false, "a reclassified item").await;
+
+        // Unindexed alone: an edit and its revert leave the source equal to
+        // the record's but drop the search row, which only a pass restores.
+        for overview in ["Temporary", "Changed"] {
+            store
+                .apply_metadata(
+                    ids[0],
+                    &MetadataPatch {
+                        overview: Some(overview.into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("edit and revert");
+        }
+        k10_classification_hint_is(&store, backend, NOW, true, "an unindexed item").await;
+        assert_eq!(k10_classify_all(&store, |_| {}).await, 2, "{backend}");
+        k10_classification_hint_is(&store, backend, NOW, false, "a reindexed item").await;
+
+        // An older rules version.
+        k10_classify_all(&store, |c| c.version = "metadata-rules-v0".into()).await;
+        k10_classification_hint_is(&store, backend, NOW, true, "an older rules version").await;
+        k10_classify_all(&store, |c| c.version = VERSION.into()).await;
+        k10_classification_hint_is(&store, backend, NOW, false, "the current version").await;
+
+        // Provider checks: only with a key, only for an identified movie or
+        // show, and only once the refresh (or, after an error, retry) age
+        // has passed.
+        store
+            .apply_metadata(
+                ids[1],
+                &MetadataPatch {
+                    tmdb_id: Some(42),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("identify");
+        k10_classify_all(&store, |c| {
+            c.provider_checked_at = NOW - PROVIDER_REFRESH_SECS - 1
+        })
+        .await;
+        k10_classification_hint_is(&store, backend, NOW, false, "no provider key").await;
+        store
+            .put_setting(plurx_core::store::keys::TMDB_API_KEY, "key")
+            .await
+            .expect("key");
+        k10_classification_hint_is(&store, backend, NOW, true, "a stale provider check").await;
+        k10_classify_all(&store, |c| c.provider_checked_at = NOW - 60).await;
+        k10_classification_hint_is(&store, backend, NOW, false, "a fresh provider check").await;
+        k10_classify_all(&store, |c| {
+            c.provider_checked_at = NOW - PROVIDER_RETRY_SECS - 1;
+            c.provider_error = Some("unreachable".into());
+        })
+        .await;
+        k10_classification_hint_is(&store, backend, NOW, true, "a failed check to retry").await;
+        k10_classify_all(&store, |c| {
+            c.provider_checked_at = NOW - 60;
+            c.provider_error = Some("unreachable".into());
+        })
+        .await;
+        k10_classification_hint_is(&store, backend, NOW, false, "a recent failed check").await;
+        store
+            .put_setting(plurx_core::store::keys::TMDB_API_KEY, "")
+            .await
+            .expect("clear key");
+    })
+    .await;
+}
+
+/// K-10 M1 on three real voters: an idle offline worker proposes only its
+/// forced claims.
+///
+/// The minute before is measured, not recalled: the worker's old loop made
+/// the replicated claim every 2 s whatever the queue held, and thirty of them
+/// are thirty proposals. The policy's minute over the same empty queue makes
+/// the forced claims at 0 s and 30 s and nothing else, reads nothing on the
+/// authority, and pays one local read per pass. A worker that ignores its
+/// hint fails the write count.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn an_idle_offline_worker_proposes_only_its_forced_claims_on_three_voters() {
+    use plurx_core::store::offline_claim::{ClaimOutcome, OfflineClaimPolicy, HINT_FORCE_INTERVAL};
+
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated contract state");
+
+    // Before: the old loop's minute, one blind claim every 2 s.
+    store.validation_reset_operation_counts();
+    for _ in 0..30 {
+        assert!(store
+            .claim_next_offline_package("offline-node")
+            .await
+            .expect("blind claim")
+            .is_none());
+    }
+    let before = store.validation_operation_counts();
+    assert_eq!(before.write_calls, 30, "the old idle minute");
+
+    // After: the policy's minute, driven at the delays it chooses.
+    let mut policy = OfflineClaimPolicy::new();
+    let start = std::time::Instant::now();
+    let mut offset = std::time::Duration::ZERO;
+    let mut outcomes = Vec::new();
+    store.validation_reset_operation_counts();
+    while offset < std::time::Duration::from_secs(60) {
+        let (outcome, package) = policy
+            .pass(&store, "offline-node", start + offset)
+            .await
+            .expect("idle pass");
+        assert!(package.is_none());
+        outcomes.push(outcome);
+        offset += policy.delay();
+    }
+    let after = store.validation_operation_counts();
+    assert_eq!(
+        after.write_calls,
+        60 / HINT_FORCE_INTERVAL.as_secs(),
+        "an idle minute may propose only the forced claims at 0 s and 30 s: {outcomes:?}"
+    );
+    assert_eq!(
+        after.consistent_query_calls, 0,
+        "nothing read on the authority"
+    );
+    assert_eq!(
+        after.non_consistent_query_calls,
+        outcomes.len() as u64,
+        "one local hint per pass"
+    );
+    eprintln!(
+        "K-10 offline idle minute on three voters: before {} proposals, after {} ({} passes)",
+        before.write_calls,
+        after.write_calls,
+        outcomes.len()
+    );
+
+    // Work still flows: a local enqueue wakes the worker, and the very next
+    // pass claims the package on the authority whatever the replica shows.
+    let store: Arc<dyn Store> = Arc::new(store);
+    let (user_id, file_id) = seed_file(&store, "k10-offline-wake").await;
+    let OfflineCreateOutcome::Created(_) = store
+        .create_offline_package(
+            &offline_request("k10-woken", "k10-woken-request", user_id, file_id),
+            10,
+            100_000,
+            100_000,
+        )
+        .await
+        .expect("create")
+    else {
+        panic!("the package must be created");
+    };
+    policy.wake();
+    let (outcome, package) = policy
+        .pass(store.as_ref(), "offline-node", start + offset)
+        .await
+        .expect("woken pass");
+    assert_eq!(outcome, ClaimOutcome::Claimed);
+    assert_eq!(package.expect("claimed").id, "k10-woken");
+}
+
+/// K-10 M2 on three real voters: the classification lease is no longer a
+/// once-a-second proposal loop.
+///
+/// Before is measured with the old worker's per-second body (acquire the
+/// lease, read one page, release it) over an idle, fully classified library:
+/// two proposals a second from the winner. After, the schedule over the same
+/// library, once a pass has run, proposes nothing in a minute and reads
+/// nothing on the authority — two local reads per decision. A node facing a
+/// lease a peer holds reads the lease row locally every 15 s where a blind
+/// contest is a proposal per try. A schedule that ignores either hint fails
+/// the write count.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn an_idle_classification_schedule_proposes_nothing_on_three_voters() {
+    use plurx_core::store::classification_schedule::{
+        ClassificationSchedule, Decision, ScheduleOutcome, LEASE_RETRY, RESOURCE,
+    };
+
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let hiqlite = open_contract_hiqlite_store(&cluster).await;
+    hiqlite
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated contract state");
+    let hiqlite = Arc::new(hiqlite);
+    let store: Arc<dyn Store> = hiqlite.clone();
+    k10_seed_items(&store, "K10 idle", 40).await;
+    assert_eq!(k10_classify_all(&store, |_| {}).await, 40);
+    k10_classification_hint_is(
+        &store,
+        "hiqlite-3-voter",
+        10_000,
+        false,
+        "a classified library",
+    )
+    .await;
+
+    let mut now: i64 = 10_000_000;
+    let schedule_start = now;
+
+    // Before: the old worker's idle minute, one page per second under a lease
+    // taken and released around it.
+    hiqlite.validation_reset_operation_counts();
+    for _ in 0..60 {
+        let LeaseClaim::Acquired(lease) = store
+            .acquire_lease(RESOURCE, "legacy-worker", now, now + 120_000)
+            .await
+            .expect("legacy acquire")
+        else {
+            panic!("an idle, released lease must be acquired");
+        };
+        let _ = store.classification_page(0, 32).await.expect("legacy page");
+        assert!(store.release_lease(&lease, now).await.expect("release"));
+        now += 1_000;
+    }
+    let before = hiqlite.validation_operation_counts();
+    assert_eq!(before.write_calls, 120, "the old idle minute");
+
+    // A pass has just run and released the lease (its row now records when).
+    let LeaseClaim::Acquired(pass) = store
+        .acquire_lease(RESOURCE, "node-a", now, now + 90_000)
+        .await
+        .expect("pass acquire")
+    else {
+        panic!("the pass lease");
+    };
+    now += 5_000;
+    assert!(store.release_lease(&pass, now).await.expect("pass release"));
+    let released_at = now;
+    let leased = Arc::clone(&store);
+    k10_eventually("hiqlite-3-voter", "the released lease row", move || {
+        let store = Arc::clone(&leased);
+        Box::pin(async move {
+            store.lease_expiry_hint(RESOURCE).await.ok().flatten() == Some(released_at)
+        })
+    })
+    .await;
+
+    // After: every node's schedule over the next minute.
+    let mut schedule = ClassificationSchedule::new(schedule_start);
+    let mut decisions = Vec::new();
+    let end = now + 60_000;
+    hiqlite.validation_reset_operation_counts();
+    while now < end {
+        let decision = schedule.decide(store.as_ref(), now).await;
+        let Decision::Wait(wait, outcome) = decision else {
+            panic!("an idle library must not start a pass: {decision:?}");
+        };
+        decisions.push(outcome);
+        now += i64::try_from(wait.as_millis()).expect("wait");
+    }
+    let after = hiqlite.validation_operation_counts();
+    assert_eq!(
+        after.write_calls, 0,
+        "an idle minute proposes nothing: {decisions:?}"
+    );
+    assert_eq!(after.consistent_query_calls, 0);
+    assert_eq!(
+        after.non_consistent_query_calls,
+        2 * decisions.len() as u64,
+        "a lease read and a pass hint per decision"
+    );
+    eprintln!(
+        "K-10 classification idle minute on three voters: before {} proposals, after {} ({} decisions)",
+        before.write_calls,
+        after.write_calls,
+        decisions.len()
+    );
+
+    // A peer holds the lease for a pass: this node reads the row locally
+    // every LEASE_RETRY and proposes nothing, where a blind contest is one
+    // proposal per try.
+    let LeaseClaim::Acquired(_held) = store
+        .acquire_lease(RESOURCE, "node-a", now, now + 3_600_000)
+        .await
+        .expect("peer acquire")
+    else {
+        panic!("the peer's lease");
+    };
+    let held_until = now + 3_600_000;
+    let leased = Arc::clone(&store);
+    k10_eventually("hiqlite-3-voter", "the peer's live lease", move || {
+        let store = Arc::clone(&leased);
+        Box::pin(async move {
+            store.lease_expiry_hint(RESOURCE).await.ok().flatten() == Some(held_until)
+        })
+    })
+    .await;
+    let mut peer = ClassificationSchedule::new(now);
+    let end = now + 60_000;
+    let mut looks = 0;
+    hiqlite.validation_reset_operation_counts();
+    while now < end {
+        assert_eq!(
+            peer.decide(store.as_ref(), now).await,
+            Decision::Wait(LEASE_RETRY, ScheduleOutcome::NotOwner)
+        );
+        looks += 1;
+        now += i64::try_from(LEASE_RETRY.as_millis()).expect("retry");
+    }
+    let facing = hiqlite.validation_operation_counts();
+    assert_eq!(facing.write_calls, 0, "a held lease is not contested");
+    assert_eq!(facing.non_consistent_query_calls, looks);
+    hiqlite.validation_reset_operation_counts();
+    assert!(matches!(
+        store
+            .acquire_lease(RESOURCE, "node-b", now, now + 90_000)
+            .await
+            .expect("blind contest"),
+        LeaseClaim::Held { .. }
+    ));
+    assert_eq!(
+        hiqlite.validation_operation_counts().write_calls,
+        1,
+        "the contest it replaces is a proposal even when it loses"
     );
 }

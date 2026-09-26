@@ -2084,7 +2084,26 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # is the whole merged tree, measured by zeroing this row after the merge:
 # 629, which is main's 625 plus exactly the four K-03 test-only spawns
 # reviewed above.
-expected_occurrences = 629
+# +8 with K-10 (replicated write-rate hygiene II), all test-only and
+# measured by zeroing this row after merging `plan/K-03` at `e3687722b`. In `library_search::tests`: the classification
+# worker under test in the one-pass, idle-library and dead-peer tests (one
+# each) and the two workers of the walk-once test; each is stopped by its
+# cancellation token and joined before its test returns. In
+# `offline::tests`: the offline worker loop under test in the three `claim_`
+# tests, each aborted before its test returns. The production spawns of both
+# workers in `main.rs` are unchanged. None owns a producer, a process or a
+# recipe decision.
+# The merged value is 637: K-03's 629 plus exactly these eight.
+# 637 -> 638 with the #540 review round (finding 1), measured by zeroing
+# this row, test-only: the classification worker under test in
+# `library_search::tests::classification_a_change_after_idle_forced_passes_waits_only_the_idle_ceiling`,
+# stopped by its cancellation token and joined before the test returns. No
+# production spawn; it owns no producer, process or recipe decision.
+# 638 -> 639 with the same round (finding 2), measured by zeroing this row,
+# test-only: the offline worker loop under test in
+# `offline::tests::claim_a_wake_claims_what_the_local_replica_does_not_show_yet`,
+# aborted before the test returns. No production spawn.
+expected_occurrences = 639
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2939,7 +2958,36 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # repair's shapes reviewed above, measured by zeroing this row after the merge.
 # +1 with the HEVC parameter-set census: the one tokio::time::Instant::now()
 # that fixes its budget deadline. Bounded, per census, no producer timer.
-expected_occurrences = 997
+# +7 with K-10, measured by zeroing this row after merging `plan/K-03` at
+# `e3687722b`. Shipped, net -3: the
+# offline worker's five fixed `tokio::time::sleep(IDLE_POLL)` exits became one
+# `tokio::time::sleep(delay)` whose length its claim policy chooses (2 s
+# working, backing off to 10 s idle, never past the 30 s forced claim or the
+# next expiry sweep, cut short by a local package creation); the
+# classification worker's one fixed between-page sleep became a
+# `tokio::time::sleep(delay)` chosen by its pass schedule plus the unchanged
+# 1 s `tokio::time::sleep(schedule::PAGE_TICK)` between pages inside a pass.
+# Neither decides anything about playback; both only pace a background poll.
+# Test-only, +10: in `offline::tests` the 600 s, 65 s and 61 s idle waits and
+# the 50 ms claim poll (virtual clock); in `library_search::tests` the 100 ms
+# pass poll, the 600 s idle and walk-once waits, the 250 ms classification
+# poll, and the dead-peer test's 1.2 s observation window and 50 ms poll.
+# The merged value is 999: K-03's 992 plus exactly these seven.
+# Merged with main at `42ea7a9af` (K-10 branch, review round of #540): the
+# value is the whole merged tree, measured by zeroing this row after the
+# merge: 1004, which is main's 997 plus exactly the seven K-10 shapes
+# reviewed above.
+# 1004 -> 1007 with the #540 review round (finding 1), measured by zeroing
+# this row, all test-only (virtual clock) in `library_search::tests`: the six
+# idle hours, the 60 s wait after the last forced pass and the 250 ms
+# classification poll. No production timer; none paces or bounds a producer.
+# 1007 -> 1009 with the same round (finding 2), measured by zeroing this row,
+# both test-only: the 65 s idle wait (virtual clock) of
+# `offline::tests::claim_a_wake_claims_what_the_local_replica_does_not_show_yet`,
+# and the zero-length `tokio::time::timeout` in the `#[cfg(test)]`
+# `OfflineManager::take_wake` probe, which only asks whether a wake permit is
+# stored. No production timer.
+expected_occurrences = 1009
 
 [[module_structures]]
 id = "bare-time-constructor"
