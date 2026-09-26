@@ -962,8 +962,7 @@ impl TranscodeManager {
             handoff_wait: std::sync::atomic::AtomicBool::new(false),
             last_refusal: std::sync::Mutex::new(None),
             handoff_claim: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            admission_pause: std::sync::Mutex::new(None),
+            hooks: Box::new(crate::vodencode::NoopEncodingHooks),
         })))
     }
 

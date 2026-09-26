@@ -973,7 +973,13 @@ pattern = "ServingAuthority"
 # re-probe case and the full-rate prefix case, each passed to
 # `pump_tuner_fanout` exactly as the M1 fan-out cases do. No production
 # authority is added or projected differently.
-expected_occurrences = 34
+# 34 -> 35 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: the `authority: ServingAuthority` parameter of
+# `VodServingAdmission::with_hooks`, the production constructor `new` now
+# delegates to. It carries the same authority into the same struct field; no
+# new projection reader.
+expected_occurrences = 35
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -981,7 +987,12 @@ pattern = "commit_guard_before"
 # 13 -> 14 with M6's acknowledgement settlement. The new guard bounds the
 # exact commit-or-abort Store mutation authorized by the actor; it is held only
 # across the bounded executor call and never across worker teardown.
-expected_occurrences = 15
+# 15 -> 17 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: the two calls in `vod_serving_admission_shipped_shape`,
+# which ask the production-built admission for its commit guard before and
+# after serving is lost. Test-only; no new commit site.
+expected_occurrences = 17
 
 [[module_symbols]]
 id = "m4-serving-authority-admission-token"
@@ -1526,7 +1537,14 @@ pattern = "TerminalCleanup"
 # one that never completes, and that fixture constructs it. Both are test
 # scaffolding for the maintenance bound; neither adds a cleanup owner to the
 # production graph, which still mints exactly one per tombstoned session.
-expected_occurrences = 20
+# 20 -> 22 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: the race test builds its cleanup through
+# `TerminalCleanup::with_hooks` (was `new` plus a field write, same count),
+# `terminal_cleanup_shipped_shape` builds one through `new`, and
+# `seam_census_of_the_workspace` names the owner as a string. Test-only; the
+# production graph still mints exactly one cleanup per tombstoned session.
+expected_occurrences = 22
 
 [[module_symbols]]
 id = "m4-vod-terminal-rendition-compaction"
@@ -2145,7 +2163,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # 641 + K-10 M4 -> 643 (measured by zeroing this row) on the merge of main
 # into #556: S-14 M8's two test-only sites and K-10 M4's two test-only
 # offline worker spawns coexist unchanged; the merge adds no new site.
-expected_occurrences = 643
+# 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: +7 in `seam_hooks.rs` (the two
+# `std::thread::spawn` wall-clock bound timers of the test-only `AsyncPause`,
+# which only sleep and then flip a watch value, and five `tokio::spawn`s in
+# its own tests, each joined or finished before the test returns) and -3 in
+# `vod/tests/chunk_03.rs` (the three spawned `Barrier` observers the
+# `Encoding` admission tests no longer need). Test-only; none owns a producer,
+# a process or a recipe decision.
+expected_occurrences = 647
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2253,7 +2280,11 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # aborted at the census budget and dropped (aborting any stragglers) when it
 # returns. Each task awaits one bounded, ChildWork-launched ffmpeg that is
 # killed on drop. No rolling-producer owner.
-expected_occurrences = 47
+# 47 -> 48 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: the `sleep 60` child `head_child_owner_shipped_shape`
+# starts so the production `HeadChildOwner::new` has a process to reap.
+expected_occurrences = 48
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -3043,7 +3074,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 1010 + K-10 M4 -> 1013 (measured by zeroing this row) on the merge of
 # main into #556: S-14 M8's one test-only timeout and K-10 M4's three
 # virtual-clock test waits coexist unchanged; the merge adds no new site.
-expected_occurrences = 1013
+# 1013 -> 1021 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: +4 `tokio::time::timeout`s bounding the shipped-shape
+# tests (`encoding_shipped_shape`, `head_child_owner_shipped_shape`,
+# `vod_serving_admission_shipped_shape` twice), -3 bounds the old barrier
+# observers needed, and +7 in `seam_hooks.rs` (the two `std::thread::sleep`
+# bound timers of the test-only `AsyncPause` and five bounds and one paused-
+# clock sleep in its own tests). Test-only; no production timer.
+expected_occurrences = 1021
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3319,7 +3358,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # x265 fixture encode, its concat mux, the framemd5 decode and the production
 # copy pipe. Each is collected by testfixtures::run or Command::output before
 # its temporary directory drops. No detached owner.
-expected_occurrences = 188
+# 188 -> 189 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: the `sleep 60` child of
+# `head_child_owner_shipped_shape`; test-only, reaped by the owner under test.
+expected_occurrences = 189
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3714,7 +3757,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Command::output calls (framemd5 decode, production copy pipe) that collect
 # finite fixture children. The census's own ffmpeg starts through
 # process::bounded::output with ChildWork::realtime.
-expected_occurrences = 389
+# 389 -> 390 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: the `.spawn()` of that same test child.
+expected_occurrences = 390
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3892,7 +3938,13 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # (four). Their bounded replacement (`SupervisorPause::hold` /
 # `wait_reached` and a release guard) waits through `Condvar::wait_timeout_while`,
 # which this pattern does not match. No production lifecycle call changed.
-expected_occurrences = 397
+# 397 -> 373 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: -24, the `Barrier::wait` calls the five
+# seams and their race tests made (two per seam in production code, the rest
+# in the tests); the pauses are now `AsyncPause::hold`/`reached`. No process
+# lifecycle call was added or removed.
+expected_occurrences = 373
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -3936,7 +3988,12 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # `libc::execv` from inside a `pre_exec`, which reproduces the decode-fact
 # probe's exec-from-`pre_exec` to show that a priority registered after it
 # never runs. The child is owned by `spawn_job_owned` and killed on drop.
-expected_occurrences = 50
+# 50 -> 51 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: the `libc::kill(pid, 0)` in
+# `head_child_owner_shipped_shape` that proves the production reaper reaped
+# its child (signal 0 sends nothing).
+expected_occurrences = 51
 
 [[module_structures]]
 id = "kill-on-drop-construction"
@@ -4034,7 +4091,10 @@ pattern = "kill_on_drop\\s*\\("
 # 87 -> 89 with P-02 M3 (measured). Test-only: the priority tests' re-exec
 # sleeper and the Activity HTTP test's `sleep 300` child are `kill_on_drop`,
 # so a failed assertion cannot strand either.
-expected_occurrences = 89
+# 89 -> 90 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: the `kill_on_drop(true)` of that same test child.
+expected_occurrences = 90
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

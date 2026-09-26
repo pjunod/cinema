@@ -9,6 +9,10 @@ use plurx_core::transcode::{
 };
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+use crate::seam_hooks::AsyncPause;
+use crate::seam_hooks::{HookFuture, HookReady};
+
 use crate::admission::{
     Admissions, HwSlot, LiveWait, PoolSnapshot, Priority, SwPermit, TranscodeResourceEstimate,
 };
@@ -45,8 +49,59 @@ pub(crate) struct Encoding {
     /// The pool reservation a yielding predecessor made for this successor.
     /// Only this rendition's admission can claim it.
     pub handoff_claim: Mutex<Option<u64>>,
-    #[cfg(test)]
-    pub admission_pause: Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// The admission point a race test can pause at; production installs
+    /// [`NoopEncodingHooks`] (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
+    pub hooks: Box<dyn EncodingHooks>,
+}
+
+/// The points of an encoding's admission that a test can pause at
+/// (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
+///
+/// Every [`Encoding`] holds one of these in every build, so its layout and the
+/// await points of [`Encoding::try_permit`] are the same in the test and
+/// release binaries. The hooks are chosen where the encoding is built:
+/// production (`TranscodeManager::prepare_vod_encoding`) installs
+/// [`NoopEncodingHooks`], and the test fixtures, which build their own
+/// encodings, install `EncodingAdmissionPause`. A paused hook's timing is still
+/// a test artefact: what this makes identical is the struct and the set of
+/// await points, not scheduling.
+///
+/// `Any` is a supertrait only so a test can reach the pause it installed on an
+/// encoding it handed to a rendition.
+pub(crate) trait EncodingHooks: std::any::Any + Send + Sync {
+    /// A producer start asked for an encoder permit, before admission reads
+    /// the node's pool policy.
+    fn before_admission(&self) -> HookFuture<'_>;
+}
+
+/// What production installs: the admission point is already ready.
+pub(crate) struct NoopEncodingHooks;
+
+impl EncodingHooks for NoopEncodingHooks {
+    fn before_admission(&self) -> HookFuture<'_> {
+        Box::pin(HookReady)
+    }
+}
+
+/// What the test fixtures install: nothing pauses until a test arms the next
+/// admission with [`Encoding::pause_next_admission`]; the armed pause is taken
+/// by that one admission.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct EncodingAdmissionPause {
+    armed: Mutex<Option<Arc<AsyncPause>>>,
+}
+
+#[cfg(test)]
+impl EncodingHooks for EncodingAdmissionPause {
+    fn before_admission(&self) -> HookFuture<'_> {
+        let pause = self.armed.lock().expect("admission test pause").take();
+        Box::pin(async move {
+            if let Some(pause) = pause {
+                pause.hold().await;
+            }
+        })
+    }
 }
 
 impl std::fmt::Debug for Encoding {
@@ -111,8 +166,21 @@ impl Encoding {
             handoff_wait: std::sync::atomic::AtomicBool::new(false),
             last_refusal: Mutex::new(None),
             handoff_claim: Mutex::new(None),
-            admission_pause: Mutex::new(None),
+            hooks: Box::new(EncodingAdmissionPause::default()),
         })
+    }
+
+    /// Arm a pause at this encoding's next admission, before it reads the pool
+    /// policy. Only test-built encodings carry the pausing hooks.
+    #[cfg(test)]
+    pub(crate) fn pause_next_admission(&self) -> Arc<AsyncPause> {
+        let hooks: &dyn std::any::Any = &*self.hooks;
+        let pauses = hooks
+            .downcast_ref::<EncodingAdmissionPause>()
+            .expect("test encodings install EncodingAdmissionPause");
+        let pause = AsyncPause::new("encoding admission");
+        *pauses.armed.lock().expect("admission test pause") = Some(Arc::clone(&pause));
+        pause
     }
 
     pub(crate) fn mark_speculative(&self) {
@@ -138,17 +206,7 @@ impl Encoding {
     }
 
     pub async fn try_permit(&self) -> Option<EncodePermit> {
-        #[cfg(test)]
-        let pause = self
-            .admission_pause
-            .lock()
-            .expect("admission test seam")
-            .take();
-        #[cfg(test)]
-        if let Some(pause) = pause {
-            pause.wait().await;
-            pause.wait().await;
-        }
+        self.hooks.before_admission().await;
         self.try_permit_after(self.store.get_setting_pair(
             plurx_core::store::keys::MAX_HW_SESSIONS,
             plurx_core::store::keys::SW_POOL_THREADS,
