@@ -1,0 +1,5 @@
+# `spikes/tokenizer-backends` is a separate Cargo workspace: the K-08 M4
+# tokenizer comparison, not daemon code. Clippy reads the nearest
+# clippy.toml, so without this file it would take the root one, whose
+# `disallowed-methods` (plan P-02 §3.2) hold every daemon child to
+# `plurx_core::process::spawn_job_owned`. Nothing is configured here.

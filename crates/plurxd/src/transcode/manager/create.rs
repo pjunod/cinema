@@ -743,14 +743,15 @@ impl TranscodeManager {
             .map_err(|error| {
                 start_infrastructure_error(format!("reading the stored source probe: {error}"))
             })?;
-        let held_probe = crate::ffmpeg::held_source_probe_json(&source.handle)
-            .await
-            .map_err(|error| {
-                vod_refusal_error(
-                    "vod_source_rescan_required",
-                    format!("the held source could not be verified against its scan: {error}"),
-                )
-            })?;
+        let held_probe =
+            crate::ffmpeg::held_source_probe_json(&source.handle, VOD_START_HELD_PROBE)
+                .await
+                .map_err(|error| {
+                    vod_refusal_error(
+                        "vod_source_rescan_required",
+                        format!("the held source could not be verified against its scan: {error}"),
+                    )
+                })?;
         let comparison = probe
             .as_deref()
             .map(|stored| crate::ffmpeg::compare_probe_documents(stored, &held_probe))
@@ -841,6 +842,7 @@ impl TranscodeManager {
                     Some(&source_object_version),
                     crate::subtitles::SIDECAR_JOIN_BUDGET,
                     &stored,
+                    SESSION_START_CLASS,
                 )
                 .await?
                 {
@@ -906,20 +908,9 @@ impl TranscodeManager {
                 format!("the held source could not be retained for decoder planning: {error}"),
             )
         })?;
-        let plan = BoundPlanCaller::Vod.finish(
-            self.resolve_held_movie_plan(
-                file,
-                &options,
-                encoder,
-                crate::decode_facts::DecodeFactSource::new(
-                    held_plan_handle,
-                    Arc::new(tokio::sync::Semaphore::new(1)),
-                ),
-                Instant::now() + DECODE_PLAN_PROBE_BUDGET,
-                None,
-            )
-            .await,
-        )?;
+        let plan = self
+            .resolve_vod_movie_plan(file, &options, encoder, held_plan_handle)
+            .await?;
         let resources = TranscodeResourceEstimate::of(&plan, &Workload::of(file, target_height));
         if !source.unchanged() {
             return Err(vod_refusal_error(

@@ -4,6 +4,10 @@
 //! modes. With `hiqlite-contract-tests`, the same scenarios also run through a
 //! remote client backed by three separate voter processes.
 
+// A test, never a daemon child: the launcher rule in clippy.toml is for
+// production code.
+#![allow(clippy::disallowed_methods)]
+
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -404,6 +408,7 @@ const MEDIA_METHODS: &[&str] = &[
     "get_file_probe_json",
     "get_file_probe_chapters_json",
     "merge_file_probe_chapters",
+    "merge_file_probe_hevc_parameter_sets",
     "files_missing_probe",
     "library_file_paths",
     "ensure_library_root_fingerprint",
@@ -16764,13 +16769,18 @@ fn contract_inventory_matches_every_store_method() {
     // authority; `watched_outbox_and_lease_hints_follow_the_authority_locally`
     // covers them on both backends. No new trait or supertrait of `Store`.
     //
-    // 392 -> 394 for K-10's two local hints, `offline_queue_hint` on
+    // 392 -> 393 for the one `MediaStore` method the HEVC parameter-set
+    // census adds, `merge_file_probe_hevc_parameter_sets`, a fenced graft onto
+    // the stored probe beside `merge_file_probe_chapters`. Named in
+    // `MEDIA_METHODS` above and exercised on every backend by the media
+    // lifecycle scenario; no new trait or supertrait.
+    // 393 -> 395 for K-10's two local hints, `offline_queue_hint` on
     // `OfflinePackageStore` and `classification_hint` on
     // `ClassificationStore`. Both are non-consensus reads that decide only
     // whether to ask the authority; `offline_queue_hint_follows_the_authority_locally`
     // and `classification_hint_fires_for_exactly_what_a_pass_acts_on` cover
     // them on both backends. No new trait or supertrait of `Store`.
-    assert_eq!(declared.len(), 394, "review the Store method count");
+    assert_eq!(declared.len(), 395, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -24735,6 +24745,59 @@ async fn media_contract_runs_through_dyn_store() {
             .merge_file_probe_chapters(movie_file, r#"[{"start_time":"0.0","end_time":"10.0"}]"#)
             .await
             .expect("merge chapters");
+        // The HEVC census graft is fenced to the revision it measured.
+        let measured = store
+            .get_file(movie_file)
+            .await
+            .expect("census file")
+            .expect("census file");
+        let census =
+            r#"{"revision":1,"verdict":"varying","size":0,"mtime":0,"samples":7,"differing":7}"#;
+        assert!(!store
+            .merge_file_probe_hevc_parameter_sets(
+                movie_file,
+                measured.size + 1,
+                measured.mtime,
+                census,
+            )
+            .await
+            .expect("fenced census"));
+        assert!(!store
+            .merge_file_probe_hevc_parameter_sets(
+                movie_file,
+                measured.size,
+                measured.mtime + 1,
+                census,
+            )
+            .await
+            .expect("mtime-fenced census"));
+        assert!(!store
+            .get_file_probe_json(movie_file)
+            .await
+            .expect("probe JSON")
+            .expect("probe JSON")
+            .contains("plurx_hevc_parameter_sets"));
+        assert!(store
+            .merge_file_probe_hevc_parameter_sets(movie_file, measured.size, measured.mtime, census)
+            .await
+            .expect("census"));
+        let grafted: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(movie_file)
+                .await
+                .expect("probe JSON")
+                .expect("probe JSON"),
+        )
+        .expect("probe JSON parses");
+        assert_eq!(grafted["plurx_hevc_parameter_sets"]["verdict"], "varying");
+        assert!(
+            grafted.get("chapters").is_some(),
+            "the graft keeps the rest of the probe"
+        );
+        assert!(!store
+            .merge_file_probe_hevc_parameter_sets(empty_file, 2_000, 20, census)
+            .await
+            .expect("unprobed census"));
         assert!(store
             .get_file_probe_json(movie_file)
             .await
@@ -32614,6 +32677,58 @@ async fn sqlite_v69_migration_from_v68_preserves_file_grants_and_live_analysis_r
         .expect("v69 accepts subtitle source")
         .expect("new request");
     assert_eq!(fresh.component, "subtitle_source");
+}
+
+#[tokio::test]
+async fn hevc_full_attestation_survives_sampled_memos_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let mut observation = plurx_core::store::FragmentIndexSourceObservation {
+            node_id: "proof-node".into(),
+            file_id: 41,
+            object_version: "hevc-full-v1:s1:object-a".into(),
+            source_size: 100,
+            source_mtime: 1,
+            source_sha256: "a".repeat(64),
+            observed_at_ms: 1,
+        };
+        store
+            .record_fragment_index_source(&observation)
+            .await
+            .expect(backend);
+        observation.object_version = "s1:object-a".into();
+        observation.source_sha256 = "b".repeat(64);
+        store
+            .record_fragment_index_source(&observation)
+            .await
+            .expect(backend);
+        let retained = store
+            .fragment_index_source("proof-node", 41, "hevc-full-v1:s1:object-a")
+            .await
+            .expect(backend)
+            .expect("full proof memo survives sample of identical object");
+        assert_eq!(retained.source_sha256, "a".repeat(64), "{backend}");
+        observation.object_version = "s1:object-b".into();
+        store
+            .record_fragment_index_source(&observation)
+            .await
+            .expect(backend);
+        assert!(store
+            .fragment_index_source("proof-node", 41, "s1:object-b")
+            .await
+            .expect(backend)
+            .is_some());
+        observation.object_version = "hevc-full-v1:s1:object-b".into();
+        store
+            .record_fragment_index_source(&observation)
+            .await
+            .expect(backend);
+        assert!(store
+            .fragment_index_source("proof-node", 41, &observation.object_version)
+            .await
+            .expect(backend)
+            .is_some());
+    })
+    .await;
 }
 
 /// The outbox hint and the lease-expiry hint are local reads that agree with

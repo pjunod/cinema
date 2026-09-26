@@ -1898,6 +1898,9 @@ pub mod keys {
     /// request: missing diagnostic contracts are reported as advisory facts
     /// and never override an explicit enable.
     pub const AUTOMATIC_DECODER_RECOVERY: &str = "playback.automatic_decoder_recovery";
+    /// Operator override for HEVC copy without configuration/source proof.
+    /// Off by default. Readiness is advisory and never prevents saving it.
+    pub const HEVC_UNVERIFIED_COPY: &str = "playback.hevc_unverified_copy";
     /// Ask this node to plan into the health-qualified artifact identity, so a
     /// transcode may only be reused when its producer's own receipt says the
     /// decode was clean.
@@ -3104,6 +3107,20 @@ pub trait MediaStore: Send + Sync + 'static {
         file_id: i64,
         chapters_json: &str,
     ) -> Result<(), StoreError>;
+    /// Graft the HEVC parameter-set census (`transcode::hevc_census`) onto a
+    /// file's stored probe JSON, under its `PROBE_KEY`.
+    ///
+    /// Fenced to the source revision measured: the row must still have that
+    /// size and mtime, and a probe to graft onto, or nothing is written and
+    /// the answer is `false`. A rescan that replaced the file replaces the
+    /// probe too, so a census can never outlive the bytes it described.
+    async fn merge_file_probe_hevc_parameter_sets(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        census_json: &str,
+    ) -> Result<bool, StoreError>;
     /// Files whose probe never succeeded (`probe_json IS NULL`), oldest scan
     /// first. `library_id` narrows to one library; `None` is server-wide. These
     /// are the records the retry job and the scan's repair pass exist for —

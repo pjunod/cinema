@@ -215,6 +215,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [CONTENT-ANALYSIS-FAILURES-RCA-AND-FIX.md](streaming/CONTENT-ANALYSIS-FAILURES-RCA-AND-FIX.md) | Why complete video indexes were labelled incomplete: fleet evidence, selected-stream duration, timeout policy, and recovery constraints. | open |
 | [CONTENT-ANALYSIS-FAILURES-ADVERSARIAL-REVIEW.md](streaming/CONTENT-ANALYSIS-FAILURES-ADVERSARIAL-REVIEW.md) | Independent design review that found retry expiry and lost video identity before implementation. | done |
 | [CONTENT-ANALYSIS-FAILURES-IMPLEMENTATION.md](streaming/CONTENT-ANALYSIS-FAILURES-IMPLEMENTATION.md) | Build contract for selected-video completion, typed diagnostics, bounded retry cycles, exact-identity recovery, migrations, tests, and rollout. | open |
+| [HEVC-IN-BAND-PARAMETER-SETS.md](streaming/HEVC-IN-BAND-PARAMETER-SETS.md) | Why a chunk-encoded WEB-DL copies with pink and green blotches, why PR #535 never shipped, and the per-file census that keeps redefined parameter sets in band. | open |
 | [HEVC-SAMPLE-ENTRY-STATUS.md](streaming/HEVC-SAMPLE-ENTRY-STATUS.md) | Live execution ledger for the HEVC sample-entry admission repair: implementation, evidence, review, and promotion state. | open |
 | [SAFARI-DIAGNOSIS-AND-FIX.md](streaming/SAFARI-DIAGNOSIS-AND-FIX.md) | Why HEVC-in-MP4 admission fails on Safari, the decoder evidence behind the repair, and the accepted review findings. | open |
 | [HEVC-SAMPLE-ENTRY-IMPLEMENTATION.md](streaming/HEVC-SAMPLE-ENTRY-IMPLEMENTATION.md) | Executable contract for source sample-entry facts, compatible packaging, client admission, downgrade safety, and focused acceptance. | open |
@@ -257,6 +258,9 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [M5-VERIFICATION-PROMPT.md](streaming/M5-VERIFICATION-PROMPT.md) | Fleet verification: the first converted stream a browser ever plays. | open |
 | [ANDROID-DV-CONVERSION-RCA-AND-FIX.md](streaming/ANDROID-DV-CONVERSION-RCA-AND-FIX.md) | Why a capable Lenovo received the HDR base instead of converted Profile 8.1, and the bounded repair. | open |
 | [ANDROID-DV-CONVERSION-IMPLEMENTATION.md](streaming/ANDROID-DV-CONVERSION-IMPLEMENTATION.md) | Live build and acceptance record for request-scoped Profile 7 conversion, native-DV progressive packaging, and Android HLS retention. | open |
+| [HEVC-COLOR-FIX-STATUS.html](streaming/HEVC-COLOR-FIX-STATUS.html) | Current implementation, decision, review and merge status for the HEVC color repair. | open |
+| [HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md](streaming/HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md) | Why copied HEVC turns pink and green, the matched-pixel reproduction, and the implemented proof-before-stripping containment with an unrestricted Developer override. | open |
+| [HEVC-COLOR-CORRUPTION-REVIEW.md](streaming/HEVC-COLOR-CORRUPTION-REVIEW.md) | Independent adversarial review of the HEVC color diagnosis and implementation, with objections, amendments and remaining delivery gates. | open |
 | [DV-DELIVERY-FINDINGS.md](streaming/DV-DELIVERY-FINDINGS.md) | Why Dolby Vision titles arrive as HDR10 or lower. | open |
 | [DV-DISK-CONVERSION-DIAGNOSIS.md](streaming/DV-DISK-CONVERSION-DIAGNOSIS.md) | Why the on-disk conversion never completes, and a proposal. | open |
 | [QUEUE-REPAIR-VERIFICATION-PROMPT.md](streaming/QUEUE-REPAIR-VERIFICATION-PROMPT.md) | Did the fragment-index queue come back, and stay back? | open |

@@ -801,8 +801,11 @@ async fn generate_derivative_with_bin(
         extension,
         codec,
     );
-    let child = crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(&mut command)
-        .map_err(|error| error.to_string())?;
+    let child = crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(
+        &mut command,
+        crate::process_control::ChildWork::background("artwork derivative"),
+    )
+    .map_err(|error| error.to_string())?;
     let generated = tokio::time::timeout(
         DERIVATIVE_TIMEOUT,
         child.output_to_bounded_file(&temporary_path, MAX_ARTWORK_BYTES),

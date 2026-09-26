@@ -1536,6 +1536,9 @@ pub async fn subtitle(
                     &file,
                     index,
                     &state.subtitle_source_access(),
+                    crate::process_control::ChildWork::background(
+                        "subtitle track for an offline package",
+                    ),
                 )
                 .await
                 .map_err(|message| {
