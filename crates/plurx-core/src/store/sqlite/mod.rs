@@ -2835,9 +2835,10 @@ mod tests {
         // earlier entry moved; the list stays append-only. v67 adds durable
         // downloaded captions to files. v68 adds external-reader file grants;
         // v69 adds the cluster subtitle-source queue and publication metadata;
-        // v70 adds K-05 M5's catalogue read indexes.
+        // v70 adds K-05 M5's catalogue read indexes; v71 adds the durable
+        // Live TV cluster-resource ledger and its revision guard.
         assert_eq!(
-            version, 70,
+            version, 71,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

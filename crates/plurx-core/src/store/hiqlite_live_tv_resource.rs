@@ -19,6 +19,7 @@ impl Backend for HiqliteAuthStore {
     async fn read_ledger(&self, user_id: i64, key: &str, now: i64) -> Result<Snapshot, StoreError> {
         let rows = self
             .client()
+            // authority: admission and lease transitions must use the committed ledger revision.
             .query_consistent_map::<Payload, _>(SNAPSHOT_SQL, params!(user_id, key, now))
             .await?;
         let payload = rows
