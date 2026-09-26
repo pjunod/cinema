@@ -14,9 +14,9 @@ implementation is claimed; “compiled” does not mean tests passed.
 |---|---|---|
 | Isolated clone | Complete | Agent-owned `/private/tmp/plurx-durable-work-agent`; original checkout untouched |
 | Compiler | Ready | Rust 1.97.1; core + Hiqlite all-target compile and baseline daemon compile passed |
-| M1 durable queue and pre-transcode | In progress | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Legacy cutover and fault-injection coverage remain |
-| M2 fragment analysis and hydration | In progress | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Repair and legacy cutover remain |
-| M3 UI, recovery and migration | In progress | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; retry, metrics and legacy execution removal remain |
+| M1 durable queue and pre-transcode | In progress | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; offline joining, scheduling and fault-injection coverage remain |
+| M2 fragment analysis and hydration | In progress | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
+| M3 UI, recovery and migration | In progress | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and Developer controls remain |
 | E0 subtitle and library workers | Planned | Reuse newly landed subtitle extraction implementation |
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
@@ -219,3 +219,9 @@ implementation is claimed; “compiled” does not mean tests passed.
   not cancel that independently visible repair; the repair job can itself be
   cancelled in Activity. This bounds background repair after transient demand.
   Completed repair receipts no longer suppress later loss for seven days.
+
+- 2026-09-25: bounded queue counts and oldest age by closed kind/state labels,
+  active source-I/O reservations and legacy backlog now travel in the existing
+  single Store aggregate and atomic metrics cache. Prometheus scrapes still do
+  no Store reads; stale/failed sample reporting is unchanged. Extended the
+  backend publication contract and snapshot renderer checks; tests remain unrun.

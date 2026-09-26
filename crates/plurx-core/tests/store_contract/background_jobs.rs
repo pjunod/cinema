@@ -71,6 +71,26 @@ async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_f
             let ClaimOutcome::Claimed { job } = claim else {
                 panic!("{backend}: claimed")
             };
+            if scenario == "published" {
+                let metrics = store
+                    .prometheus_store_snapshot("node-a", 2)
+                    .await
+                    .expect("metrics");
+                let slot = JOB_METRIC_STATES
+                    .iter()
+                    .position(|state| *state == "running")
+                    .expect("state");
+                assert_eq!(metrics.background_jobs.counts[slot], 1, "{backend}");
+                assert_eq!(
+                    metrics.background_jobs.oldest_age_seconds[slot], 1,
+                    "{backend}"
+                );
+                assert_eq!(
+                    metrics.background_jobs.source_io_reservations, 1,
+                    "{backend}"
+                );
+                assert_eq!(metrics.background_jobs.legacy_pending, 0, "{backend}");
+            }
             let publication = PublishTranscodeJob {
                 token: job.token.expect("token"),
                 output: TranscodeJobOutput {

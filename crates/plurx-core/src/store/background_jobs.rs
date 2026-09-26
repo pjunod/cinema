@@ -16,7 +16,10 @@ pub use super::background_jobs_fragment::{FragmentJobFailure, PublishFragmentJob
 pub use super::background_jobs_fragment_admission::EnqueueFragmentJob;
 use super::background_jobs_maintenance::{CANCEL_WAITER_SQL, MAINTENANCE_NEEDED, MAINTENANCE_SQL};
 pub use super::background_jobs_migration::JobMigrationStatus;
-pub use super::background_jobs_observation::{JobAttemptObservation, JobCount, JobLabel};
+pub use super::background_jobs_observation::{
+    BackgroundJobMetrics, JobAttemptObservation, JobCount, JobLabel, JOB_METRIC_KINDS,
+    JOB_METRIC_SLOTS, JOB_METRIC_STATES,
+};
 use super::background_jobs_observation::{ATTEMPTS_SQL, COUNTS_SQL, LABELS_SQL};
 use super::background_jobs_publication::PUBLISH_TRANSCODE_SQL;
 pub use super::background_jobs_publication::{

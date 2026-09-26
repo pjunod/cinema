@@ -1076,6 +1076,7 @@ pub struct PrometheusStoreSnapshot {
     pub offline: OfflinePackageStats,
     pub watched_outbox: (i64, i64, i64),
     pub analysis: AnalysisStoreMetrics,
+    pub background_jobs: background_jobs::BackgroundJobMetrics,
 }
 
 pub const ANALYSIS_METRIC_COMPONENTS: [&str; 3] =

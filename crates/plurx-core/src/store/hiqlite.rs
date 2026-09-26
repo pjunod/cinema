@@ -3673,7 +3673,15 @@ impl MetricsStore for HiqliteAuthStore {
                       WHERE state = 'running' \
                         AND COALESCE(lease_expires_ms, 0) < $2 * 1000) AS analysis_running_past_lease, \
                     (SELECT COALESCE(MAX(updated_at_ms), 0) FROM cluster_fragment_index_jobs \
-                      WHERE state = 'ready') AS analysis_last_ready_at_ms \
+                      WHERE state = 'ready') AS analysis_last_ready_at_ms, \
+                    (SELECT json_object('jobs', json((SELECT COALESCE(json_group_array(json_object( \
+                        'kind', grouped.kind, 'state', grouped.state, 'count', grouped.count, \
+                        'oldest_age_ms', MAX(0, $2 * 1000 - grouped.created))), '[]') \
+                        FROM (SELECT kind, state, COUNT(*) AS count, MIN(created_at_ms) AS created \
+                            FROM background_jobs GROUP BY kind, state LIMIT 128) grouped)), \
+                        'source_io_reservations', (SELECT COUNT(*) FROM background_job_reservations \
+                            WHERE resource_key = 'source_io' AND expires_at_ms > $2 * 1000), \
+                        'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))) AS background_jobs_json \
                  FROM offline_packages WHERE node_id = $1",
                 params!(node_id, now),
             )
@@ -3681,7 +3689,7 @@ impl MetricsStore for HiqliteAuthStore {
             .into_iter()
             .next()
             .ok_or_else(|| StoreError::Database("Prometheus snapshot returned no row".to_owned()))?;
-        Ok(row.into())
+        row.try_into()
     }
 }
 
@@ -4829,6 +4837,7 @@ struct PrometheusStoreRow {
     analysis_claimable: i64,
     analysis_running_past_lease: i64,
     analysis_last_ready_at_ms: i64,
+    background_jobs_json: String,
 }
 
 impl From<&mut Row<'_>> for PrometheusStoreRow {
@@ -4858,13 +4867,18 @@ impl From<&mut Row<'_>> for PrometheusStoreRow {
             analysis_claimable: row.get("analysis_claimable"),
             analysis_running_past_lease: row.get("analysis_running_past_lease"),
             analysis_last_ready_at_ms: row.get("analysis_last_ready_at_ms"),
+            background_jobs_json: row.get("background_jobs_json"),
         }
     }
 }
 
-impl From<PrometheusStoreRow> for PrometheusStoreSnapshot {
-    fn from(row: PrometheusStoreRow) -> Self {
-        Self {
+impl TryFrom<PrometheusStoreRow> for PrometheusStoreSnapshot {
+    type Error = StoreError;
+    fn try_from(row: PrometheusStoreRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            background_jobs: super::background_jobs_observation::background_job_metrics(
+                &row.background_jobs_json,
+            )?,
             libraries: row.libraries,
             users: row.users,
             offline: OfflinePackageStats {
@@ -4893,7 +4907,7 @@ impl From<PrometheusStoreRow> for PrometheusStoreSnapshot {
                     last_ready_at_ms: row.analysis_last_ready_at_ms,
                 },
             ),
-        }
+        })
     }
 }
 

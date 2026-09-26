@@ -204,6 +204,10 @@ struct StoreMetricsAtomics {
     outbox_pending: AtomicI64,
     outbox_ok: AtomicI64,
     outbox_failed: AtomicI64,
+    background_job_counts: [AtomicI64; plurx_core::store::background_jobs::JOB_METRIC_SLOTS],
+    background_job_oldest_age: [AtomicI64; plurx_core::store::background_jobs::JOB_METRIC_SLOTS],
+    background_source_io: AtomicI64,
+    background_legacy_pending: AtomicI64,
     analysis_queue_depth: [AtomicI64; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
     analysis_queue_oldest_age_seconds: [AtomicI64; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
     analysis_lifecycle_counts: [AtomicI64; plurx_core::store::ANALYSIS_LIFECYCLE_METRIC_SLOTS],
@@ -248,6 +252,10 @@ impl Default for StoreMetricsAtomics {
             outbox_pending: AtomicI64::new(0),
             outbox_ok: AtomicI64::new(0),
             outbox_failed: AtomicI64::new(0),
+            background_job_counts: std::array::from_fn(|_| AtomicI64::new(0)),
+            background_job_oldest_age: std::array::from_fn(|_| AtomicI64::new(0)),
+            background_source_io: AtomicI64::new(0),
+            background_legacy_pending: AtomicI64::new(0),
             analysis_queue_depth: std::array::from_fn(|_| AtomicI64::new(0)),
             analysis_queue_oldest_age_seconds: std::array::from_fn(|_| AtomicI64::new(0)),
             analysis_lifecycle_counts: std::array::from_fn(|_| AtomicI64::new(0)),
@@ -395,6 +403,16 @@ impl StoreMetricsCache {
                     self.inner.outbox_ok.load(Ordering::Relaxed),
                     self.inner.outbox_failed.load(Ordering::Relaxed),
                 ),
+                background_jobs: plurx_core::store::background_jobs::BackgroundJobMetrics {
+                    counts: std::array::from_fn(|slot| {
+                        self.inner.background_job_counts[slot].load(Ordering::Relaxed)
+                    }),
+                    oldest_age_seconds: std::array::from_fn(|slot| {
+                        self.inner.background_job_oldest_age[slot].load(Ordering::Relaxed)
+                    }),
+                    source_io_reservations: self.inner.background_source_io.load(Ordering::Relaxed),
+                    legacy_pending: self.inner.background_legacy_pending.load(Ordering::Relaxed),
+                },
                 analysis: plurx_core::store::AnalysisStoreMetrics {
                     queue_depth: std::array::from_fn(|slot| {
                         self.inner.analysis_queue_depth[slot].load(Ordering::Relaxed)
@@ -569,6 +587,29 @@ impl StoreMetricsCache {
         {
             target.store(value, Ordering::Relaxed);
         }
+        for (target, value) in self
+            .inner
+            .background_job_counts
+            .iter()
+            .zip(sample.background_jobs.counts)
+        {
+            target.store(value, Ordering::Relaxed);
+        }
+        for (target, value) in self
+            .inner
+            .background_job_oldest_age
+            .iter()
+            .zip(sample.background_jobs.oldest_age_seconds)
+        {
+            target.store(value, Ordering::Relaxed);
+        }
+        self.inner.background_source_io.store(
+            sample.background_jobs.source_io_reservations,
+            Ordering::Relaxed,
+        );
+        self.inner
+            .background_legacy_pending
+            .store(sample.background_jobs.legacy_pending, Ordering::Relaxed);
         let health = sample.analysis.health;
         self.inner
             .analysis_ready_24h
@@ -11068,6 +11109,12 @@ mod tests {
                 pinned_bytes: value,
             },
             watched_outbox: (value, value, value),
+            background_jobs: plurx_core::store::background_jobs::BackgroundJobMetrics {
+                counts: [value; plurx_core::store::background_jobs::JOB_METRIC_SLOTS],
+                oldest_age_seconds: [value; plurx_core::store::background_jobs::JOB_METRIC_SLOTS],
+                source_io_reservations: value,
+                legacy_pending: value,
+            },
             analysis: plurx_core::store::AnalysisStoreMetrics {
                 queue_depth: [value; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
                 queue_oldest_age_seconds: [value; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
