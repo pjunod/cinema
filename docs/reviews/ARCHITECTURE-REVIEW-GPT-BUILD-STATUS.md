@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — current main is `b4b488556ce3` after cluster #532 merged. A-04 PR #527 targets Android 131 and Apple 188. Internal PDF/EPUB physical acceptance, A-04 D3, current-main fleet rollout and duration evidence remain open. The separate external-reader exchange remains refused pending authorization. · **Updated:** 2026-09-26 23:13 UTC · **Main:** `b4b488556ce3`
+**Status:** open — current main is `d95503c25230` after docs-only #563 merged. A-04 PR #527 targets Android 131 and Apple 188. Internal PDF/EPUB physical acceptance, A-04 D3, current-main fleet rollout and duration evidence remain open. The separate external-reader exchange remains refused pending authorization. · **Updated:** 2026-09-26 23:18 UTC · **Main:** `d95503c25230`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
@@ -39,7 +39,7 @@ head; only the web typedef omission failed. Another exact-head gate is owed. Thi
 Chrome D3 measurement or its unchanged 100 ms gap criterion; Firefox, Safari,
 HDR, and physical native traces remain owed.
 
-Main advanced from `116559cb8761` to `b4b488556ce3` through cluster PR #532 while corrected fast lane #3300 was running. That run no longer qualifies the candidate for promotion. A-04 merged the new main without conflicts at `90f11dbac`; pinned Rust 1.97.1 check, Clippy, formatting, history audit, web TypeScript, Player typedef and all 34 focused Developer Settings cases passed on that tree. One exact-base gate is pending. The 100 ms D3 limit and open evidence matrix are unchanged. The new-base Developer Settings contract exposed stale Chrome advisory wording; it now reports the final-code 133.30/166.70 ms miss as not met, and Firefox shows the latest failed source-exact gaps. The enable switch remains selectable and advisory rows do not gate it; all 34 focused settings cases pass.
+Main advanced from `116559cb8761` to `b4b488556ce3` through cluster PR #532 while corrected fast lane #3300 was running. That run no longer qualifies the candidate for promotion. A-04 merged the new main without conflicts at `90f11dbac`; pinned Rust 1.97.1 check, Clippy, formatting, history audit, web TypeScript, Player typedef and all 34 focused Developer Settings cases passed on that tree. One exact-base gate is pending. The 100 ms D3 limit and open evidence matrix are unchanged. The new-base Developer Settings contract exposed stale Chrome advisory wording; it now reports the final-code 133.30/166.70 ms miss as not met, and Firefox shows the latest failed source-exact gaps. The enable switch remains selectable and advisory rows do not gate it; all 34 focused settings cases pass. Main then advanced again by docs-only PR #563 to `d95503c25230` during gate #3305. Its plans were merged without conflict at `3d546475d`; #3305 cannot qualify the new base. The exact-branch pinned checks are rerunning before the next gate.
 
 ## Sole adversarial review and fast lane
 
