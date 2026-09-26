@@ -1022,7 +1022,7 @@ jobs:
     name: Apple iOS + tvOS tests
     needs: [scope, preflight]
     if: needs.scope.outputs.apple == 'true'
-    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-26]
+    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27]
     concurrency:
       group: plurx-apple-silicon-heavy
       cancel-in-progress: false
@@ -1040,10 +1040,10 @@ jobs:
       - name: Verify the pinned Apple toolchain
         run: |
           xcode_version="$(xcodebuild -version)"
-          grep -Fxq "Xcode 26.6" <<< "$xcode_version"
-          grep -Fxq "Build version 17F113" <<< "$xcode_version"
-          test "$(xcrun --sdk iphoneos --show-sdk-version)" = "26.5"
-          test "$(xcrun --sdk appletvos --show-sdk-version)" = "26.5"
+          grep -Fxq "Xcode 27.0" <<< "$xcode_version"
+          grep -Fxq "Build version 27A266a" <<< "$xcode_version"
+          test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.0"
+          test "$(xcrun --sdk appletvos --show-sdk-version)" = "27.0"
           test "$(xcodegen --version)" = "Version: 2.46.0"
           simulator_runtimes="$(xcrun simctl list runtimes)"
           grep -Fq "iOS 26.5 (26.5 - 23F77)" <<< "$simulator_runtimes"
