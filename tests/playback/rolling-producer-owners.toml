@@ -181,7 +181,15 @@ also_in = ["crates/plurxd/src/transcode"]
 # `new_with_job` registrations, the production registration inside
 # `install_replacement_child`, and the `#[cfg(test)]`
 # `test_session_with_control` helper.
-expected_occurrences = 22
+# 22 -> 23 with S-14 M8 (seam migration, `AttemptChild`), measured by zeroing
+# this row: the one new occurrence is `AttemptChild::new_with_job(` in the
+# test-only `attempt_child_shipped_shape` (`transcode/tests/chunk_02.rs`), which
+# registers a supervisor over the `long_running_child()` fixture it spawned,
+# suspends and resumes it, requests termination and waits for the published
+# reap before returning. It registers no shipped producer. The migration's own
+# constructor split (`new` and `new_with_job` both delegating to the private
+# `new_with_hooks`) adds no `new(`/`new_with_job(` call.
+expected_occurrences = 23
 kind = "process_owner"
 replacement = "retained as the sole OS-child supervisor, registered before publication"
 
@@ -2110,7 +2118,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # test-only: the offline worker loop under test in
 # `offline::tests::claim_a_wake_claims_what_the_local_replica_does_not_show_yet`,
 # aborted before the test returns. No production spawn.
-expected_occurrences = 639
+# 639 -> 640 with S-14 M8 (`AttemptChild`), measured by zeroing this row:
+# `crate::playback_control::RollingControlHandle::spawn(` in the test-only
+# `attempt_child_shipped_shape`, the ordinary test-actor shape counted many
+# times above. The handle it returns is the test's only owner; the test drops
+# it on return, which closes the actor's sender and ends its run loop. It owns
+# no producer; the test reaps its own fixture child before returning.
+expected_occurrences = 640
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2994,7 +3008,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # and the zero-length `tokio::time::timeout` in the `#[cfg(test)]`
 # `OfflineManager::take_wake` probe, which only asks whether a wake permit is
 # stored. No production timer.
-expected_occurrences = 1009
+# 1009 -> 1010 with S-14 M8 (`AttemptChild`), measured by zeroing this row:
+# one `tokio::time::timeout(` in the test-only `attempt_child_shipped_shape`,
+# bounding (5 s) the wait for the supervisor to publish the reap after the
+# termination request. It is awaited by the test, which fails on expiry.
+expected_occurrences = 1010
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3985,7 +4003,11 @@ pattern = "AttemptChild::new(?:_with_job)?\\s*\\("
 # the same two test-only predecessor children.
 # The Windows constructor variant is included because it is the same exact
 # attempt supervisor with an additional retained Job Object guard.
-expected_occurrences = 22
+# 22 -> 23 with S-14 M8 (`AttemptChild`), measured by zeroing this row: the
+# module-wide twin of `supervisor-registration`, and the same one test-only
+# `new_with_job(` in `attempt_child_shipped_shape`, which reaps its own fixture
+# child before returning.
+expected_occurrences = 23
 
 [[module_structures]]
 id = "forbidden-timer-or-task-alias"

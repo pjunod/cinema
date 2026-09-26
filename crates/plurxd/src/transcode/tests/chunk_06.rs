@@ -553,15 +553,13 @@
         session.first_media_handoff_applied.store(true, Release);
         reserve_test_admissions(&session, &admissions);
         let reap_pause = Arc::new(LifecycleTestPause::new());
-        *session
+        session
             .child
             .lock()
             .await
             .as_ref()
             .expect("attempt child")
-            .terminate_before_reap_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&reap_pause));
+            .pause_terminate_before_reap(Arc::clone(&reap_pause));
 
         let settlement = spawn_published_failure_cleanup_owner(
             &session,
@@ -1373,15 +1371,13 @@
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&owner_pause));
         let reap_pause = Arc::new(LifecycleTestPause::new());
-        *session
+        session
             .child
             .lock()
             .await
             .as_ref()
             .expect("attempt child")
-            .terminate_before_reap_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&reap_pause));
+            .pause_terminate_before_reap(Arc::clone(&reap_pause));
         manager
             .sessions
             .lock()
@@ -1446,15 +1442,13 @@
             watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
         reserve_test_admissions(&session, &admissions);
         let reap_pause = Arc::new(LifecycleTestPause::new());
-        *session
+        session
             .child
             .lock()
             .await
             .as_ref()
             .expect("attempt child")
-            .terminate_before_reap_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&reap_pause));
+            .pause_terminate_before_reap(Arc::clone(&reap_pause));
         manager
             .sessions
             .lock()

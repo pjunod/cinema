@@ -2274,6 +2274,62 @@
         child.kill().await.expect("reap stopped child");
     }
 
+    /// M8's shipped-shape test for the attempt child: the production
+    /// constructor (`new_with_job`, no-op hooks) runs each of the three hook
+    /// points the race tests pause at to completion. A suspend passes the
+    /// authorization and flow-reservation points and publishes the held flow;
+    /// a resume does the same for running; a termination request passes the
+    /// before-reap point and the supervisor publishes the terminal. Acceptance
+    /// runs it in the release profile
+    /// (`cargo test --release -p plurxd attempt_child_shipped_shape`), where the
+    /// child has the layout and await points the daemon ships.
+    #[tokio::test]
+    async fn attempt_child_shipped_shape() {
+        let control = crate::playback_control::RollingControlHandle::spawn("attempt-shipped-shape");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("producer attempt");
+        let process = long_running_child();
+        let job = crate::process_control::ChildJob::attach(&process).ok();
+        let child = AttemptChild::new_with_job(attempt, process, job, control.clone(), None);
+        assert!(child.id().is_some(), "the producer is running");
+
+        assert!(
+            child
+                .signal(crate::process_control::ProcessSignal::Suspend)
+                .await
+                .expect("suspend verdict"),
+            "the authorized suspend reaches the process"
+        );
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, true)),
+            "the suspend publishes the held flow for its attempt"
+        );
+        assert!(
+            child
+                .signal(crate::process_control::ProcessSignal::Resume)
+                .await
+                .expect("resume verdict"),
+            "the authorized resume reaches the process"
+        );
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, false)),
+            "the resume publishes the running flow for its attempt"
+        );
+
+        child
+            .request_termination()
+            .expect("termination request reaches the supervisor");
+        tokio::time::timeout(Duration::from_secs(5), child.wait_for_terminal())
+            .await
+            .expect("the supervisor passes the before-reap point and publishes the reap")
+            .expect("terminal wait result");
+        assert!(child.id().is_none(), "a reaped attempt exposes no pid");
+    }
+
     #[tokio::test]
     async fn dropping_process_owner_terminates_and_reaps_without_a_pid_side_channel() {
         let control = crate::playback_control::RollingControlHandle::spawn("supervisor-drop");

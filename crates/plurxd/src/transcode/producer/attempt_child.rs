@@ -164,6 +164,101 @@ impl LifecycleTestPause {
     }
 }
 
+/// The points of an attempt child's process supervisor that a test can pause
+/// at (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
+///
+/// The child holds one of these in every build and its supervisor task runs
+/// through a clone of it, so the child's layout and the supervisor's await
+/// points are the same in the test and release binaries. Production installs
+/// [`NoopAttemptChildHooks`]; the test constructor installs
+/// [`AttemptChildPauses`]. A paused hook's timing is still a test artefact:
+/// what this makes identical is the struct and the set of await points, not
+/// scheduling.
+///
+/// `Any` is a supertrait only so a test can reach the pauses it installed on
+/// a child it did not construct itself.
+pub(super) trait AttemptChildHooks: std::any::Any + Send + Sync {
+    /// A signal command has re-authorized its exact attempt under the producer
+    /// transition fence, before a flow signal reserves its applied slot. The
+    /// fence is held here, so the point is synchronous in every build: it is
+    /// not an await point in either.
+    fn after_signal_authorization(&self);
+
+    /// A flow signal (suspend or resume) holds its reserved applied slot, before
+    /// the syscall. The fence is held, so this point is synchronous too.
+    fn after_flow_reservation(&self);
+
+    /// The exact attempt was sent its termination signal, before the
+    /// supervisor can observe and publish the reap.
+    fn before_reap_after_terminate(&self) -> HookFuture<'_>;
+}
+
+/// What production installs: every point does nothing, and the one
+/// asynchronous point is already ready.
+pub(super) struct NoopAttemptChildHooks;
+
+impl AttemptChildHooks for NoopAttemptChildHooks {
+    fn after_signal_authorization(&self) {}
+
+    fn after_flow_reservation(&self) {}
+
+    fn before_reap_after_terminate(&self) -> HookFuture<'_> {
+        Box::pin(HookReady)
+    }
+}
+
+/// The pauses the attempt-child race tests install: each point takes its slot
+/// once, so only the first supervisor to reach it meets the test.
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct AttemptChildPauses {
+    signal_after_authorization: std::sync::Mutex<Option<Arc<std::sync::Barrier>>>,
+    signal_after_flow_reservation: std::sync::Mutex<Option<Arc<std::sync::Barrier>>>,
+    terminate_before_reap: std::sync::Mutex<Option<Arc<LifecycleTestPause>>>,
+}
+
+#[cfg(test)]
+impl AttemptChildPauses {
+    fn take<T>(slot: &std::sync::Mutex<Option<T>>) -> Option<T> {
+        slot.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    fn install<T>(slot: &std::sync::Mutex<Option<T>>, pause: T) {
+        *slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    }
+}
+
+#[cfg(test)]
+impl AttemptChildHooks for AttemptChildPauses {
+    fn after_signal_authorization(&self) {
+        if let Some(pause) = Self::take(&self.signal_after_authorization) {
+            pause.wait();
+            pause.wait();
+        }
+    }
+
+    fn after_flow_reservation(&self) {
+        if let Some(pause) = Self::take(&self.signal_after_flow_reservation) {
+            pause.wait();
+            pause.wait();
+        }
+    }
+
+    fn before_reap_after_terminate(&self) -> HookFuture<'_> {
+        let pause = Self::take(&self.terminate_before_reap);
+        Box::pin(async move {
+            if let Some(pause) = pause {
+                pause.reached.notify_one();
+                pause.release.notified().await;
+            }
+        })
+    }
+}
+
 pub(super) struct AttemptChild {
     pub(super) producer_attempt: u64,
     pid: Option<u32>,
@@ -175,14 +270,9 @@ pub(super) struct AttemptChild {
     terminal: Arc<std::sync::Mutex<Option<AttemptChildTerminal>>>,
     terminal_notify: Arc<tokio::sync::Notify>,
     commands: tokio::sync::mpsc::UnboundedSender<AttemptChildCommand>,
-    #[cfg(test)]
-    signal_after_authorization_pause: Arc<std::sync::Mutex<Option<Arc<std::sync::Barrier>>>>,
-    #[cfg(test)]
-    signal_after_flow_reservation_pause: Arc<std::sync::Mutex<Option<Arc<std::sync::Barrier>>>>,
-    /// Test-only seam after exact-attempt termination has been requested but
-    /// before the supervisor can observe and publish the terminal wait.
-    #[cfg(test)]
-    pub(super) terminate_before_reap_pause: Arc<std::sync::Mutex<Option<Arc<LifecycleTestPause>>>>,
+    /// The supervisor's pause points; see [`AttemptChildHooks`]. The supervisor
+    /// task runs through a clone of this one.
+    hooks: Arc<dyn AttemptChildHooks>,
 }
 
 #[derive(Clone)]
@@ -237,15 +327,40 @@ impl AttemptChild {
                 None
             }
         };
-        Self::new_with_job(producer_attempt, child, child_job, control, diagnostics)
+        Self::new_with_hooks(
+            producer_attempt,
+            child,
+            child_job,
+            control,
+            diagnostics,
+            Arc::new(AttemptChildPauses::default()),
+        )
     }
 
     pub(super) fn new_with_job(
+        producer_attempt: u64,
+        child: Child,
+        child_job: Option<crate::process_control::ChildJob>,
+        control: crate::playback_control::RollingControlHandle,
+        diagnostics: Option<crate::decoder_health::ObservedDiagnostics>,
+    ) -> Self {
+        Self::new_with_hooks(
+            producer_attempt,
+            child,
+            child_job,
+            control,
+            diagnostics,
+            Arc::new(NoopAttemptChildHooks),
+        )
+    }
+
+    fn new_with_hooks(
         producer_attempt: u64,
         mut child: Child,
         child_job: Option<crate::process_control::ChildJob>,
         control: crate::playback_control::RollingControlHandle,
         diagnostics: Option<crate::decoder_health::ObservedDiagnostics>,
+        hooks: Arc<dyn AttemptChildHooks>,
     ) -> Self {
         let pid = child.id();
         // Owned by the supervisor alone. Nothing else may take it: two owners
@@ -258,21 +373,15 @@ impl AttemptChild {
         let (commands, mut command_receiver) = tokio::sync::mpsc::unbounded_channel();
         let supervisor_terminal = Arc::clone(&terminal);
         let supervisor_terminal_notify = Arc::clone(&terminal_notify);
-        #[cfg(test)]
-        let signal_after_authorization_pause =
-            Arc::new(std::sync::Mutex::new(None::<Arc<std::sync::Barrier>>));
-        #[cfg(test)]
-        let supervisor_signal_pause = Arc::clone(&signal_after_authorization_pause);
-        #[cfg(test)]
-        let signal_after_flow_reservation_pause =
-            Arc::new(std::sync::Mutex::new(None::<Arc<std::sync::Barrier>>));
-        #[cfg(test)]
-        let supervisor_flow_reservation_pause = Arc::clone(&signal_after_flow_reservation_pause);
-        #[cfg(test)]
-        let terminate_before_reap_pause =
-            Arc::new(std::sync::Mutex::new(None::<Arc<LifecycleTestPause>>));
-        #[cfg(test)]
-        let supervisor_terminate_pause = Arc::clone(&terminate_before_reap_pause);
+        let this = Self {
+            producer_attempt,
+            pid,
+            terminal,
+            terminal_notify,
+            commands,
+            hooks,
+        };
+        let supervisor_hooks = Arc::clone(&this.hooks);
         tokio::spawn(async move {
             let _child_job = child_job;
             let mut command_open = true;
@@ -311,15 +420,7 @@ impl AttemptChild {
                                         {
                                             break Ok(false);
                                         }
-                                        #[cfg(test)]
-                                        if let Some(pause) = supervisor_signal_pause
-                                            .lock()
-                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                            .take()
-                                        {
-                                            pause.wait();
-                                            pause.wait();
-                                        }
+                                        supervisor_hooks.after_signal_authorization();
                                         if flow_signal
                                             && !control.reserve_producer_flow_applied(
                                                 &transition,
@@ -332,16 +433,8 @@ impl AttemptChild {
                                             // means only bounded capacity.
                                             true
                                         } else {
-                                            #[cfg(test)]
                                             if flow_signal {
-                                                if let Some(pause) = supervisor_flow_reservation_pause
-                                                    .lock()
-                                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                                    .take()
-                                                {
-                                                    pause.wait();
-                                                    pause.wait();
-                                                }
+                                                supervisor_hooks.after_flow_reservation();
                                             }
                                             // The syscall and successful
                                             // acknowledgement publication are
@@ -384,16 +477,7 @@ impl AttemptChild {
                                         if let Some(reply) = reply {
                                             terminate_replies.push(reply);
                                         }
-                                        #[cfg(test)]
-                                        let pause = supervisor_terminate_pause
-                                            .lock()
-                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                            .take();
-                                        #[cfg(test)]
-                                        if let Some(pause) = pause {
-                                            pause.reached.notify_one();
-                                            pause.release.notified().await;
-                                        }
+                                        supervisor_hooks.before_reap_after_terminate().await;
                                     }
                                     Err(error) => {
                                         if let Some(reply) = reply {
@@ -442,19 +526,7 @@ impl AttemptChild {
                 supervisor_control.observe_producer_diagnostics_complete(producer_attempt, receipt);
             }
         });
-        Self {
-            producer_attempt,
-            pid,
-            terminal,
-            terminal_notify,
-            commands,
-            #[cfg(test)]
-            signal_after_authorization_pause,
-            #[cfg(test)]
-            signal_after_flow_reservation_pause,
-            #[cfg(test)]
-            terminate_before_reap_pause,
-        }
+        this
     }
 
     /// How this attempt's process ended, in the receipt's vocabulary.
@@ -544,20 +616,30 @@ impl AttemptChild {
             .flatten()
     }
 
+    /// The pauses [`AttemptChild::new`] installed on this child.
+    #[cfg(test)]
+    fn pauses(&self) -> &AttemptChildPauses {
+        let hooks: &dyn std::any::Any = &*self.hooks;
+        hooks
+            .downcast_ref()
+            .expect("AttemptChild::new installs AttemptChildPauses")
+    }
+
     #[cfg(test)]
     pub(super) fn pause_signal_after_authorization(&self, pause: Arc<std::sync::Barrier>) {
-        *self
-            .signal_after_authorization_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+        AttemptChildPauses::install(&self.pauses().signal_after_authorization, pause);
     }
 
     #[cfg(test)]
     pub(super) fn pause_signal_after_flow_reservation(&self, pause: Arc<std::sync::Barrier>) {
-        *self
-            .signal_after_flow_reservation_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+        AttemptChildPauses::install(&self.pauses().signal_after_flow_reservation, pause);
+    }
+
+    /// Pause the supervisor after exact-attempt termination has been
+    /// requested but before it can observe and publish the terminal wait.
+    #[cfg(test)]
+    pub(super) fn pause_terminate_before_reap(&self, pause: Arc<LifecycleTestPause>) {
+        AttemptChildPauses::install(&self.pauses().terminate_before_reap, pause);
     }
 
     pub(super) async fn signal(
