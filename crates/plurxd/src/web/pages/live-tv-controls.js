@@ -3,6 +3,7 @@
 // start is pending or the viewer has navigated to another page.
 function liveTvPlaybackState(state,message,actions={}){
   LIVE_TV.playbackState=state;
+  liveTvSyncTransportButtons();
   if(message) liveTvMessage(message);
   const surface=document.getElementById("live-tv-status");
   if(!surface) return;
@@ -285,6 +286,29 @@ function liveTvWatchChannel(id){
 }
 function retryLiveTv(){
   if(LIVE_TV.selected) liveTvWatchChannel(LIVE_TV.selected);
+}
+// Use the same lifecycle state as the on-picture feedback. A selected channel
+// alone is not an attached player, and buffering is not a request to press Play.
+function liveTvTransportState(){
+  const state=LIVE_TV.playbackState;
+  const active=!!LIVE_TV_LEASE.current&&["playing","buffering","paused","blocked"].includes(state);
+  const resume=state==="paused"||state==="blocked";
+  return {hidden:!active,label:resume?"Resume live":"Pause",icon:resume?"▶":"⏸",resume};
+}
+function liveTvSyncTransportButtons(){
+  const state=liveTvTransportState();
+  const info=document.getElementById("live-tv-info"); if(info) info.disabled=state.hidden;
+  const button=document.getElementById("live-tv-transport"); if(!button) return;
+  button.hidden=state.hidden;
+  button.disabled=state.hidden;
+  button.textContent=state.icon;
+  button.title=state.label;
+  button.setAttribute("aria-label",state.label);
+}
+function toggleLiveTvPlayback(){
+  const state=liveTvTransportState();
+  if(state.hidden) return;
+  if(state.resume) resumeLiveTv(); else pauseLiveTv();
 }
 function resumeLiveTv(){
   const video=document.getElementById("live-tv-video"),serial=LIVE_TV.serial;
