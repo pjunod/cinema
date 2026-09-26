@@ -7,8 +7,10 @@ Android SDK or Gradle toolchain runs in this suite: these cases cannot tell a
 working build from a broken one, but each one fails the moment the exposure it
 describes is reintroduced, which is the property the plan asks for.
 
-Three exposures, three sections:
+Four boundaries, four sections:
 
+* the mobile book buttons must keep account URLs inside Plurx rather than
+  putting them in an external reader's history;
 * the account bearer in Google's backup and in a device-to-device transfer
   (`§3.2`), pinned against both rule files *and* against the store that
   actually holds the token, so moving the token out from under `datastore/`
@@ -51,6 +53,8 @@ SIGNING_VARIABLES = (
     "PLURX_ANDROID_RELEASE_CERT_SHA256",
 )
 SETTINGS_STORE = ANDROID / "app/src/main/java/tv/plurx/app/data/SettingsStore.kt"
+ANDROID_DETAIL = ANDROID / "app/src/main/java/tv/plurx/app/ui/DetailScreen.kt"
+APPLE_DETAIL = ROOT / "clients/apple/Sources/DetailView.swift"
 
 # The directory the Preferences DataStore writes under the app's `file`
 # backup domain. `preferencesDataStore(name = "plurx")` produces
@@ -62,6 +66,18 @@ CREDENTIAL_DIR = "datastore/"
 # `cloud-backup` alone leaves device-to-device transfer free to copy the same
 # credential to a new handset (F-android-7).
 TRANSFER_SECTIONS = ("cloud-backup", "device-transfer")
+
+
+class BookReaderCredentialBoundaryCase(unittest.TestCase):
+    """A future book button must not reinstate the account-URL export."""
+
+    def test_mobile_book_actions_keep_account_urls_inside_plurx(self) -> None:
+        android = ANDROID_DETAIL.read_text(encoding="utf-8")
+        apple = APPLE_DETAIL.read_text(encoding="utf-8")
+        self.assertNotIn("Session.mediaUrl(", android)
+        self.assertNotIn("Intent.ACTION_VIEW", android)
+        self.assertNotIn("Session.shared.mediaURL(", apple)
+        self.assertNotIn("openBookExternally", apple)
 
 
 def _excluded_file_paths(element: ET.Element) -> set[str]:
