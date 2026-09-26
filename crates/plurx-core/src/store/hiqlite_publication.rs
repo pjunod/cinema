@@ -47,6 +47,14 @@ pub(super) fn atomic_renewal_statement(
           WHERE resource = $4 AND owner_node_id = $5
             AND fence = $6 AND revision = $7 AND expires_at_ms = $8
             AND expires_at_ms > $9
+            AND NOT EXISTS (SELECT 1 FROM background_job_domain_leases binding
+                WHERE binding.resource = job_leases.resource AND binding.domain_fence = job_leases.fence
+                AND NOT EXISTS (SELECT 1 FROM background_jobs job WHERE job.id = binding.job_id
+                    AND job.fence = binding.job_fence AND job.owner_node_id = binding.node_id
+                    AND job.owner_boot_id = binding.boot_id AND job.claim_id = binding.claim_id
+                    AND job.state = 'running' AND job.lease_expires_ms > $9
+                    AND NOT EXISTS (SELECT 1 FROM settings WHERE key =
+                        'internal.cluster_job_owner_removed.' || job.owner_node_id)))
           RETURNING resource, owner_node_id, fence, revision, expires_at_ms"
             .to_owned(),
         params!(

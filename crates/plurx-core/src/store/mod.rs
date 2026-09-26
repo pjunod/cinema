@@ -99,6 +99,7 @@ mod consistent_read_census;
 pub mod background_jobs;
 pub use background_jobs::BackgroundJobStore;
 mod background_jobs_delivery;
+pub mod background_jobs_domain;
 mod background_jobs_fragment;
 pub mod background_jobs_fragment_admission;
 mod background_jobs_maintenance;

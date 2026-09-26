@@ -116,7 +116,9 @@ const ITEM_READ_INDEXES_SCHEMA_VERSION: i64 = 48;
 const ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE: i64 = SUBTITLE_SOURCE_SCHEMA_VERSION;
 const BACKGROUND_JOBS_SCHEMA_VERSION: i64 = 49;
 const BACKGROUND_JOBS_SCHEMA_MIGRATION_SOURCE: i64 = ITEM_READ_INDEXES_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = BACKGROUND_JOBS_SCHEMA_VERSION;
+const LIBRARY_JOBS_SCHEMA_VERSION: i64 = 50;
+const LIBRARY_JOBS_SCHEMA_MIGRATION_SOURCE: i64 = BACKGROUND_JOBS_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = LIBRARY_JOBS_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -2772,6 +2774,21 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(BACKGROUND_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(LIBRARY_JOBS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_domain::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(LIBRARY_JOBS_SCHEMA_VERSION, now, LIBRARY_JOBS_SCHEMA_MIGRATION_SOURCE),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(LIBRARY_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -2971,6 +2988,10 @@ impl HiqliteAuthStore {
                 params!(),
             ),
             ("DELETE FROM background_job_attempts".to_owned(), params!()),
+            (
+                "DELETE FROM background_job_domain_leases".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM background_jobs".to_owned(), params!()),
             (
                 "DELETE FROM analysis_lifecycle_counters".to_owned(),
@@ -4755,7 +4776,8 @@ fn schema_migration_action(
         | FILE_GRANTS_SCHEMA_MIGRATION_SOURCE
         | SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE
         | ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE
-        | BACKGROUND_JOBS_SCHEMA_MIGRATION_SOURCE => {
+        | BACKGROUND_JOBS_SCHEMA_MIGRATION_SOURCE
+        | LIBRARY_JOBS_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(

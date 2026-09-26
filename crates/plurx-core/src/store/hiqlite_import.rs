@@ -1576,6 +1576,23 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "background_job_domain_leases",
+        columns: &[
+            "resource",
+            "domain_fence",
+            "job_id",
+            "job_fence",
+            "node_id",
+            "boot_id",
+            "claim_id",
+        ],
+        order_by: "resource",
+        minimum_schema: super::background_jobs_domain::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "job_leases",
         columns: &[
             "resource",

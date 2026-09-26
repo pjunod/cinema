@@ -1154,6 +1154,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::sql_source::ITEM_READ_INDEXES,
     // v71: common durable background work identities and ownership.
     super::background_jobs::SCHEMA,
+    // v72: durable library execution binds the existing catalogue lease.
+    super::background_jobs_domain::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1697,7 +1699,15 @@ impl SqliteStore {
                     SET revision = ?6, expires_at_ms = ?7, updated_at_ms = ?8
                   WHERE resource = ?1 AND owner_node_id = ?2
                     AND fence = ?3 AND revision = ?4
-                    AND expires_at_ms = ?5 AND expires_at_ms > ?8",
+                    AND expires_at_ms = ?5 AND expires_at_ms > ?8
+                    AND NOT EXISTS (SELECT 1 FROM background_job_domain_leases binding
+                        WHERE binding.resource = job_leases.resource AND binding.domain_fence = job_leases.fence
+                        AND NOT EXISTS (SELECT 1 FROM background_jobs job WHERE job.id = binding.job_id
+                            AND job.fence = binding.job_fence AND job.owner_node_id = binding.node_id
+                            AND job.owner_boot_id = binding.boot_id AND job.claim_id = binding.claim_id
+                            AND job.state = 'running' AND job.lease_expires_ms > ?8
+                            AND NOT EXISTS (SELECT 1 FROM settings WHERE key =
+                                'internal.cluster_job_owner_removed.' || job.owner_node_id)))",
                 params![
                     &lease.resource,
                     &lease.owner_node_id,

@@ -11,6 +11,7 @@ pub use super::background_jobs_delivery::{
     DeliveryIntent, JobWaiter, WaiterCursor, WaiterPage, WaiterQuery,
 };
 use super::background_jobs_delivery::{DELIVERIES_SQL, WAITERS_SQL};
+pub use super::background_jobs_domain::BindLibraryJob;
 use super::background_jobs_fragment::PUBLISH_FRAGMENT_SQL;
 pub use super::background_jobs_fragment::{FragmentJobFailure, PublishFragmentJob};
 pub use super::background_jobs_fragment_admission::EnqueueFragmentJob;
@@ -909,6 +910,7 @@ pub struct CancelWaiterOutcome {
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    async fn bind_library_job(&self, request: BindLibraryJob) -> Result<bool, StoreError>;
     async fn bind_transcode_job_recipe(
         &self,
         token: JobToken,
@@ -1021,6 +1023,9 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn bind_library_job(&self, request: BindLibraryJob) -> Result<bool, StoreError> {
+        super::background_jobs_domain::bind(self, request).await
+    }
     async fn bind_transcode_job_recipe(
         &self,
         token: JobToken,

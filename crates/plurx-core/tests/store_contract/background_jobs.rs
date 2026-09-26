@@ -1160,3 +1160,186 @@ async fn background_jobs_v70_backup_import_seals_legacy_work() {
             > 0
     );
 }
+
+#[tokio::test]
+async fn background_library_publication_requires_both_live_owners() {
+    use super::{acquired, publication_successor};
+    for_each_backend(|store, backend| async move {
+        for scenario in ["live", "cancelled", "expired", "taken_over"] {
+            let (_, file_id) = seed_file(&store, &format!("dual-owner-{scenario}")).await;
+            let file = store
+                .get_file(file_id)
+                .await
+                .expect("file read")
+                .expect("file");
+            let library_id = store
+                .get_item(file.item_id)
+                .await
+                .expect("item read")
+                .expect("item")
+                .library_id;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_millis() as i64;
+            let claim_time = if scenario == "expired" {
+                now - 31_000
+            } else {
+                now
+            };
+            let id = uuid::Uuid::new_v4().to_string();
+            let admitted = store
+                .enqueue_job(EnqueueJob {
+                    id: id.clone(),
+                    payload: JobPayload::LibraryScan {
+                        library_id,
+                        generation: "full-v1".into(),
+                    },
+                    dedupe_key: format!("scan:{library_id}"),
+                    priority: 2,
+                    not_before_ms: claim_time,
+                    now_ms: claim_time,
+                    request: JobRequest {
+                        scope: "library".into(),
+                        request_id: id.clone(),
+                        request_digest: "a".repeat(64),
+                        consumer_kind: "library_scan".into(),
+                        consumer_ref: library_id.to_string(),
+                        target_node_id: None,
+                        deadline_ms: None,
+                        retain_identity: false,
+                    },
+                })
+                .await
+                .expect("admission");
+            assert!(
+                matches!(admitted, EnqueueOutcome::Accepted { .. }),
+                "{backend}"
+            );
+            let ClaimOutcome::Claimed { job } = store
+                .claim_job(ClaimJob {
+                    job_id: id.clone(),
+                    expected_revision: 0,
+                    node_id: "node-a".into(),
+                    boot_id: uuid::Uuid::new_v4().to_string(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::LibraryScan,
+                    payload_version: 1,
+                    now_ms: claim_time,
+                    dispatched_at_ms: claim_time,
+                })
+                .await
+                .expect("claim")
+            else {
+                panic!("{backend}: claim refused");
+            };
+            let token = job.token.expect("token");
+            let lease = acquired(
+                store
+                    .acquire_lease(
+                        &format!("scan:library:{library_id}"),
+                        "node-a",
+                        now,
+                        now + 90_000,
+                    )
+                    .await
+                    .expect("domain lease"),
+                backend,
+            );
+            let binding = BindLibraryJob {
+                token: token.clone(),
+                lease: lease.clone(),
+                now_ms: claim_time,
+            };
+            assert!(
+                store.bind_library_job(binding.clone()).await.expect("bind"),
+                "{backend}"
+            );
+            assert!(
+                store
+                    .bind_library_job(binding)
+                    .await
+                    .expect("binding replay"),
+                "{backend}"
+            );
+            if scenario == "cancelled" {
+                store
+                    .cancel_job(CancelJob {
+                        job_id: id.clone(),
+                        now_ms: now + 1,
+                    })
+                    .await
+                    .expect("cancel");
+            } else if scenario == "taken_over" {
+                let takeover = store
+                    .claim_job(ClaimJob {
+                        job_id: id.clone(),
+                        expected_revision: token.revision,
+                        node_id: "node-b".into(),
+                        boot_id: uuid::Uuid::new_v4().to_string(),
+                        claim_id: uuid::Uuid::new_v4().to_string(),
+                        kind: JobKind::LibraryScan,
+                        payload_version: 1,
+                        now_ms: token.lease_expires_ms + 1,
+                        dispatched_at_ms: token.lease_expires_ms + 1,
+                    })
+                    .await
+                    .expect("takeover");
+                assert!(
+                    matches!(takeover, ClaimOutcome::Claimed { .. }),
+                    "{backend}"
+                );
+            }
+            let replacement = publication_successor(&lease);
+            let result = store
+                .put_setting_fenced(
+                    &format!("dual-owner:{scenario}"),
+                    "published",
+                    &lease,
+                    &replacement,
+                )
+                .await;
+            if scenario == "live" {
+                result.expect("both owners live");
+                // A domain publication advances its revision independently of
+                // queue renewal. The stable binding must still authorize it.
+                store
+                    .put_setting_fenced(
+                        &format!("dual-owner:{scenario}"),
+                        "second",
+                        &replacement,
+                        &publication_successor(&replacement),
+                    )
+                    .await
+                    .expect("domain revision advanced");
+                store
+                    .cancel_job(CancelJob {
+                        job_id: id,
+                        now_ms: now + 1,
+                    })
+                    .await
+                    .expect("cleanup");
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(plurx_core::error::StoreError::FenceRejected { .. })
+                    ),
+                    "{backend}: {scenario}: {result:?}"
+                );
+                assert!(
+                    store
+                        .get_setting(&format!("dual-owner:{scenario}"))
+                        .await
+                        .expect("read")
+                        .is_none(),
+                    "{backend}"
+                );
+            }
+            // Release expired reservations between scenarios without rewriting
+            // or removing the binding: retirement must not restore authority.
+            store.maintain_jobs(now + 120_000).await.expect("upkeep");
+        }
+    })
+    .await;
+}
