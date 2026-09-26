@@ -51,7 +51,7 @@ enum PDFReaderError: Error, LocalizedError {
         case .invalidRevision:
             return "Cinema could not verify this PDF edition. Refresh the book and try again."
         case .tooLarge:
-            return "This PDF is larger than Cinema's 1 GiB in-app safety limit. Use Open in… instead."
+            return "This PDF is larger than Cinema's 1 GiB reader limit."
         case .invalidResponse(let status):
             return "The server returned HTTP \(status) while downloading this PDF."
         case .incompleteDownload:
@@ -61,7 +61,7 @@ enum PDFReaderError: Error, LocalizedError {
         case .locked:
             return "This PDF is password-protected. Cinema does not remove document protection."
         case .accessibilityRestricted:
-            return "This PDF forbids accessibility access. Use Open in… with an appropriate PDF app."
+            return "This PDF forbids accessibility access. Cinema cannot open it."
         case .empty:
             return "This PDF does not contain any pages."
         }
@@ -195,6 +195,8 @@ struct PDFReaderView: View {
     @State private var closing = false
     @State private var generation = 0
     @State private var saveTask: Task<Void, Never>?
+    @State private var sourceOrigin: String?
+    @State private var sourceToken: String?
 
     var body: some View {
         NavigationStack {
@@ -255,6 +257,8 @@ struct PDFReaderView: View {
             saveTask?.cancel()
             payload?.remove()
             payload = nil
+            sourceOrigin = nil
+            sourceToken = nil
         }
     }
 
@@ -342,12 +346,22 @@ struct PDFReaderView: View {
         loading = true
         searchText = ""
         searchResults = []
+        sourceOrigin = nil
+        sourceToken = nil
 
-        guard let revision = context.revision else {
+        let credentials = Session.shared.credentials
+        guard credentials.origin == model.origin, credentials.token != nil else {
+            errorMessage = "Sign in before reading this PDF."
+            loading = false
+            return
+        }
+
+        guard let size = context.revision?.size ?? context.expectedSize, size > 0 else {
             errorMessage = PDFReaderError.invalidRevision.localizedDescription
             loading = false
             return
         }
+        let downloadRevision = context.revision ?? ReadingRevision(size: size, mtime: 0)
         let api = PlurxAPI(origin: model.origin)
         guard let session = PDFReaderTransport.session(origin: model.origin) else {
             errorMessage = APIError.badURL.localizedDescription
@@ -357,22 +371,39 @@ struct PDFReaderView: View {
         defer { session.finishTasksAndInvalidate() }
 
         do {
-            let saved = try? await api.readingState(itemId: context.itemId, fileId: context.fileId)
+            var saved: ReadingStateResponse?
+            if context.revision != nil {
+                saved = try? await api.readingState(itemId: context.itemId, fileId: context.fileId)
+            }
+            let beforeDownload = Session.shared.credentials
+            guard beforeDownload.origin == credentials.origin,
+                  beforeDownload.token == credentials.token else {
+                dismiss()
+                return
+            }
             let request = try api.bookContentRequest(fileId: context.fileId, accept: "application/pdf")
             let loaded = try await PDFReaderLoader.download(
                 request: request,
-                revision: revision,
+                revision: downloadRevision,
                 session: session
             )
             guard !Task.isCancelled else {
                 loaded.remove()
                 return
             }
+            let current = Session.shared.credentials
+            guard current.origin == credentials.origin, current.token == credentials.token else {
+                loaded.remove()
+                dismiss()
+                return
+            }
             let state = saved?.state
-            let initial = state?.revision == revision && state?.completed != true
+            let initial = context.revision != nil && state?.revision == context.revision && state?.completed != true
                 ? PDFPageLocator.pageIndex(from: state?.locator, pageCount: loaded.document.pageCount) ?? 0
                 : 0
             payload = loaded
+            sourceOrigin = credentials.origin
+            sourceToken = credentials.token
             currentPage = initial
             requestedPage = initial
             loading = false
@@ -408,6 +439,9 @@ struct PDFReaderView: View {
 
     private func save(page: Int, completed: Bool) async {
         guard let revision = context.revision, let pageCount = payload?.document.pageCount else { return }
+        let credentials = Session.shared.credentials
+        guard credentials.origin == sourceOrigin, credentials.token == sourceToken,
+              credentials.token != nil else { return }
         let progression = PDFPageLocator.progression(pageIndex: page, pageCount: pageCount)
         let state = PutReadingStateRequest(
             fileId: context.fileId,
@@ -523,9 +557,8 @@ private struct PDFReaderCanvas: UIViewRepresentable {
             return document.page(at: min(max(0, index), document.pageCount - 1))
         }
 
-        // PDF links and remote-document actions never escape the reader
-        // implicitly. The user can deliberately export the original from the
-        // detail screen's Open in… action.
+        // PDF links and remote-document actions stay inside the reader.
+        // External book handoff is not authorized for this client.
         func pdfViewWillClick(onLink sender: PDFView, with url: URL) {}
         func pdfViewOpenPDF(_ sender: PDFView, forRemoteGoToAction action: PDFActionRemoteGoTo) {}
 
