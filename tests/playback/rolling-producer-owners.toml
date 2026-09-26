@@ -3008,7 +3008,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # worker's one `tokio::time::sleep(delay)`, now never sleeping past the next
 # 60 s expiry pass on Tokio's clock. No production timer; none paces or
 # bounds a producer.
-expected_occurrences = 1012
+# 1012 -> 1014 with C-08 M5 row 4 (start outcomes), measured from the
+# validation unittests' actual count, both test-only in `http::tests`: the
+# 5 ms `tokio::time::sleep` that polls for `note_playback_started`'s
+# detached task to open the attempt, and the 20 ms sleep that separates the
+# attempt's open from the progress beat that must refresh it. No production
+# timer: the start ledger's deadline is swept from `Instant` comparisons on
+# ledger operations and on the /metrics scrape, never by a timer.
+expected_occurrences = 1014
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3679,7 +3686,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Command::output calls (framemd5 decode, production copy pipe) that collect
 # finite fixture children. The census's own ffmpeg starts through
 # process::bounded::output with ChildWork::realtime.
-expected_occurrences = 389
+# 389 -> 396 with C-08 M5 row 4 (start outcomes), measured from the
+# validation unittests' actual count: seven `Response::status()` reads in
+# the three start-outcome handler tests (`http::tests`), HTTP status codes on
+# in-process `oneshot` responses. No child process, no producer, nothing to
+# own.
+expected_occurrences = 396
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
