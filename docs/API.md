@@ -2574,6 +2574,10 @@ Every route is admin unless the row says otherwise. `/cluster/status` and
 | POST | `/api/v1/cluster/learner/join/{redeem,finalize}` | **learner token digest** | The same on the learner path |
 | GET | `/api/v1/cluster/artwork/{filename}` | **cluster HMAC** | Serves node-local artwork to a peer |
 
+A fragment job retry retains its exact copy-video variant. If the source or
+pipeline changed so that variant cannot be resolved, it returns conflict; use
+the media detail analysis action to request a new current generation.
+
 `GET /api/v1/cluster/ingress` is the one route here any signed-in user may
 call: it returns reachable peer **origins** a client can retry a media
 capability against, and never node ids, Raft addresses or private ports.

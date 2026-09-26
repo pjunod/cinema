@@ -304,3 +304,16 @@ implementation is claimed; “compiled” does not mean tests passed.
   analysis-settlement/pruning writes; it reads candidates/delivery intents and
   writes only when there is actual work. Missing delivery metadata now settles
   the exact unused claim explicitly instead of spending a crash timeout.
+
+- 2026-09-26: migration contracts now inject a failure on the second mapping
+  inside a page, verify that jobs/receipts/target mappings/cursor all roll back,
+  and reopen the database before replay. Another contract preserves the old
+  transcode staging identity and charges an interrupted owner exactly once
+  across restart. The implementation document's milestone prose now matches
+  the already-authorized batched-PR directive instead of repeating its old
+  three-task-PR wording. These new contracts have not been executed.
+
+- 2026-09-26: explicit fragment retries now resolve and retain the original
+  copy-video variant instead of passing an empty “whichever identity is next”
+  selector. A changed source/pipeline requires a new media-analysis request,
+  preventing a retry click from silently rebuilding another Dolby Vision variant.

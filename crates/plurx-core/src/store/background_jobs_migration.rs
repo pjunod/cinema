@@ -405,4 +405,126 @@ mod tests {
             (4_100, 4_100, 0, 0)
         );
     }
+    #[tokio::test]
+    async fn migration_page_failure_rolls_back_jobs_receipts_and_cursor_together() {
+        let (_directory, path, connection) = legacy_database();
+        fragment(&connection, 1, "node-a", 0, 0);
+        fragment(&connection, 2, "node-b", 0, 0);
+        seal(&connection);
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_second_legacy_mapping
+            BEFORE UPDATE OF state ON background_job_legacy
+            WHEN NEW.state = 'materialized' AND EXISTS (
+                SELECT 1 FROM background_job_legacy WHERE state = 'materialized')
+            BEGIN SELECT RAISE(ABORT, 'injected mid-page failure'); END;",
+            )
+            .expect("fault trigger");
+        drop(connection);
+        let store = SqliteStore::open(&path).expect("store");
+        assert!(store.import_legacy_jobs(1_000).await.is_err());
+        let status = store
+            .job_migration_status()
+            .await
+            .expect("status after failure");
+        assert_eq!(
+            (status.accepted, status.materialized, status.awaiting_import),
+            (2, 0, 2)
+        );
+        assert!(store
+            .list_jobs(JobQuery {
+                state: None,
+                kind: None,
+                after_id: None,
+                limit: 100
+            })
+            .await
+            .expect("jobs")
+            .jobs
+            .is_empty());
+        drop(store);
+        let connection = rusqlite::Connection::open(&path).expect("inspect committed state");
+        for table in [
+            "background_job_waiters",
+            "background_fragment_targets",
+            "background_job_commands",
+        ] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("rolled back table");
+            assert_eq!(count, 0, "{table}");
+        }
+        connection
+            .execute_batch("DROP TRIGGER fail_second_legacy_mapping")
+            .expect("clear injected fault");
+        drop(connection);
+        let restarted = SqliteStore::open(&path).expect("restart");
+        assert!(restarted
+            .import_legacy_jobs(2_000)
+            .await
+            .expect("replay page"));
+        assert!(!restarted
+            .import_legacy_jobs(3_000)
+            .await
+            .expect("idempotent replay"));
+        let status = restarted
+            .job_migration_status()
+            .await
+            .expect("recovered status");
+        assert_eq!(
+            (status.accepted, status.materialized, status.awaiting_import),
+            (2, 2, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_charges_stopped_transcode_once_and_preserves_staging_identity() {
+        let (_directory, path, connection) = legacy_database();
+        let id = uuid::Uuid::new_v4().to_string();
+        connection.execute("INSERT INTO pretranscode_jobs
+            (id, dedupe_key, file_id, source_size, source_mtime, target_height, policy_generation,
+             requirements_json, reason, priority, state, owner_node_id, staging_node_id, fence,
+             lease_expires_ms, attempts, not_before_ms, created_at_ms, updated_at_ms)
+            VALUES (?1, 'legacy-resume', 1, 100, 1, 720, 'policy:1', ?2, 'recent', 0,
+                'running', 'old-worker', 'old-worker', 7, 9000, 2, 0, 100, 100)",
+            rusqlite::params![id, json!({"version":1,"decoder":"h264","acceptable_encoder_families":["software"],
+                "output_contract":"hls-v1","tone_map":false,"output_grade":"sdr","scratch_bytes":1024}).to_string()]
+        ).expect("legacy running producer");
+        seal(&connection);
+        drop(connection);
+        let store = SqliteStore::open(&path).expect("store");
+        assert!(store.import_legacy_jobs(1000).await.expect("import"));
+        let imported = store
+            .background_job(&id)
+            .await
+            .expect("job")
+            .expect("preserved id");
+        assert_eq!(
+            imported.state,
+            crate::store::background_jobs::JobState::Queued
+        );
+        assert_eq!(imported.failed_attempts, 3);
+        assert!(
+            imported.token.is_none(),
+            "legacy ownership must never authorize publication"
+        );
+        let checkpoint = imported.checkpoint.expect("staging checkpoint");
+        assert_eq!(checkpoint["staging_node_id"], "old-worker");
+        assert_eq!(checkpoint["legacy_job_id"], id);
+        assert_eq!(checkpoint["prefer_until_ms"], 31_000);
+        drop(store);
+        let restarted = SqliteStore::open(&path).expect("restart");
+        assert!(!restarted.import_legacy_jobs(2000).await.expect("replay"));
+        assert_eq!(
+            restarted
+                .background_job(&id)
+                .await
+                .expect("job")
+                .expect("job")
+                .failed_attempts,
+            3
+        );
+    }
 }

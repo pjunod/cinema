@@ -182,6 +182,7 @@ pub async fn retry(
         file_id,
         source_size,
         source_mtime,
+        pipeline_digest,
         ..
     } = payload
     {
@@ -199,6 +200,38 @@ pub async fn retry(
                 json!({"outcome":"existing", "analysis_request_id":existing.request_id, "state":existing.state}),
             ));
         }
+        let file = state
+            .store
+            .get_file(file_id)
+            .await?
+            .filter(|file| file.size == source_size && file.mtime == source_mtime)
+            .ok_or_else(|| {
+                ApiError::Conflict(
+                    "the source changed; request analysis of its current generation".into(),
+                )
+            })?;
+        let engine = crate::ffmpeg::fragment_index_engine_digest().await;
+        let identities = crate::state::fragment_index_video_identity_options(
+            state.store.as_ref(),
+            &file,
+            state.transcode.dv_strippable(),
+            state.transcode.dv_convert_enabled().await,
+        )
+        .await?;
+        let mut matching = identities.into_iter().filter(|(video, _)| {
+            crate::fragment_index_cluster::pipeline_digest(&file, &engine, *video)
+                == pipeline_digest
+        });
+        let Some((_, video_identity)) = matching.next() else {
+            return Err(ApiError::Conflict(
+                "this pipeline changed; request a new analysis from the media detail page".into(),
+            ));
+        };
+        if matching.next().is_some() {
+            return Err(ApiError::Conflict(
+                "the original video identity is ambiguous; request a specific analysis".into(),
+            ));
+        }
         let request = state
             .store
             .enqueue_analysis_request(&plurx_core::store::NewAnalysisRequest {
@@ -207,8 +240,8 @@ pub async fn retry(
                 source_size,
                 source_mtime,
                 component: "fragment_index".into(),
-                pipeline_version: crate::ffmpeg::fragment_index_engine_digest().await,
-                video_identity: String::new(),
+                pipeline_version: engine,
+                video_identity,
                 requested_generation: request_id.clone(),
                 priority: "forced".into(),
                 trigger: "admin".into(),

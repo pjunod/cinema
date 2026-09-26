@@ -52,12 +52,11 @@ viewer's encoder or flooding shared storage.
 | E2 | Shared semantic embeddings, bounded probe work, integrity/repair scheduling | Expensive batch work uses idle workers without duplicate computation |
 | E3 | Better media placement and shared Live TV ingest | Spare encoding capacity and tuner sharing improve concurrent playback |
 
-M1–M3 are one effort with three intended task PRs. A milestone may take one
-small additional integration PR if needed to keep its migration reviewable;
-three is a planning bound, not a demand for oversized diffs. Do not split every
-table, endpoint, and test into a separate milestone. E0–E3 follow the first
-release; each is independently useful and can be finished without the next. Keep this document as the execution ledger (§12), not a new
-plan/status/handoff document set for each adapter.
+M1–M3 ship as one batched PR under the 2026-09-25 build directive above.
+Use normal focused commits within it. E0–E3 follow that first release as
+substantial, independently useful PRs. Keep this document and its linked
+status page as the execution record; do not create a new plan/status/handoff
+set for each adapter.
 
 ### 1.2 What this effort does not build
 
