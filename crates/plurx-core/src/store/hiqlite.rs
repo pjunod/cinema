@@ -1527,6 +1527,12 @@ impl HiqliteAuthStore {
         for result in results {
             result.map_err(database_error)?;
         }
+        // Bootstrap stamps `AUTH_SCHEMA_VERSION` below without running the
+        // migration chain, so these installs are a second copy of every
+        // `MigrateFrom` step in `migrate_schema`. A step added there must be
+        // installed here too: the store contract
+        // `fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree`
+        // compares the two object for object and fails when they drift.
         super::hiqlite_catalog::install_schema(&client).await?;
         super::hiqlite_durable::install_schema(&client).await?;
         super::hiqlite_dv_conversion::install_schema(&client).await?;
