@@ -5,12 +5,20 @@
 # second container with an empty volume that then serves the same instance,
 # users, credentials and libraries. This is the §3.6 "isolated instance
 # first" drill, run against a disposable loopback-only pair of containers.
+#
+# Passwords and bearer tokens never appear on any command line: not on
+# curl's, not on the host `docker` client's, and not in a `docker exec`
+# environment, where `ps` and `docker inspect` would show them. They live in
+# owner-only files under a private directory and reach curl as `@file`
+# arguments and the container over stdin.
 set -eu
 
 image="${1:-plurx/plurxd:latest}"
 source_name="plurx-restore-source-$$"
 restored_name="plurx-restore-target-$$"
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/plurx-restore-smoke.XXXXXX")"
+secrets="$(mktemp -d "${TMPDIR:-/tmp}/plurx-restore-secrets.XXXXXX")"
+chmod 0700 "$secrets"
 started_at="$(date +%s)"
 admin_user="restore-admin"
 admin_password="restore-smoke-admin-$$"
@@ -34,6 +42,9 @@ cleanup() {
     -c 'chmod -R a+rwX /scratch' >/dev/null 2>&1 || true
   case "$scratch" in
     */plurx-restore-smoke.*) rm -rf -- "$scratch" ;;
+  esac
+  case "$secrets" in
+    */plurx-restore-secrets.*) rm -rf -- "$secrets" ;;
   esac
 }
 trap cleanup EXIT HUP INT TERM
@@ -69,15 +80,41 @@ json_string() {
   sed -n "s/.*\"$1\" *: *\"\([^\"]*\)\".*/\1/p" | head -n 1
 }
 
+# Write stdin to an owner-only file in the private secrets directory.
+secret_file() {
+  (umask 077 && cat > "$secrets/$1")
+}
+
+# $1 names a secrets file holding one bearer token; write the matching
+# owner-only header file for curl's `-H @file`.
+bearer_header() {
+  (umask 077 && sed 's/^/authorization: Bearer /' "$secrets/$1.token" > "$secrets/$1.header")
+}
+
 post_json() {
-  # $1 url, $2 bearer token or "-", $3 body
+  # $1 url, $2 bearer name (see bearer_header) or "-", $3 body file name
   if [ "$2" = "-" ]; then
-    curl -fsS -H 'content-type: application/json' --data "$3" "$1"
+    curl -fsS -H 'content-type: application/json' \
+      --data-binary "@$secrets/$3" "$1"
   else
     curl -fsS -H 'content-type: application/json' \
-      -H "authorization: Bearer $2" --data "$3" "$1"
+      -H "@$secrets/$2.header" --data-binary "@$secrets/$3" "$1"
   fi
 }
+
+get_json() {
+  # $1 url, $2 bearer name (see bearer_header)
+  curl -fsS -H "@$secrets/$2.header" "$1"
+}
+
+# The request bodies that carry passwords, built with the shell's printf
+# builtin, so no password is ever an argument to a separate process.
+printf '{"username":"%s","password":"%s"}' "$admin_user" "$admin_password" \
+  | secret_file admin-login.json
+printf '{"username":"%s","password":"%s"}' "$viewer_user" "$viewer_password" \
+  | secret_file viewer-login.json
+printf '{"name":"%s","kind":"movies","paths":["/var/lib/plurx/media/movies"]}' \
+  "$library_name" | secret_file library.json
 
 start_instance() {
   docker create \
@@ -95,23 +132,23 @@ wait_ready "$source_base" "source instance"
 instance_source="$(curl -fsS "$source_base/api/v1/server" | json_string instance_id)"
 test -n "$instance_source" || fail "source instance reported no instance_id"
 
-admin_token="$(post_json "$source_base/api/v1/setup" - \
-  "{\"username\":\"$admin_user\",\"password\":\"$admin_password\"}" | json_string token)"
-test -n "$admin_token" || fail "first-run setup returned no admin token"
-post_json "$source_base/api/v1/users" "$admin_token" \
-  "{\"username\":\"$viewer_user\",\"password\":\"$viewer_password\"}" >/dev/null \
+post_json "$source_base/api/v1/setup" - admin-login.json | json_string token \
+  | secret_file admin.token
+test -s "$secrets/admin.token" || fail "first-run setup returned no admin token"
+bearer_header admin
+post_json "$source_base/api/v1/users" admin viewer-login.json >/dev/null \
   || fail "creating the ordinary user failed"
 docker exec "$source_name" mkdir -p /var/lib/plurx/media/movies /var/lib/plurx/backups
-post_json "$source_base/api/v1/libraries" "$admin_token" \
-  "{\"name\":\"$library_name\",\"kind\":\"movies\",\"paths\":[\"/var/lib/plurx/media/movies\"]}" \
+post_json "$source_base/api/v1/libraries" admin library.json \
   >/dev/null || fail "creating the library failed"
-curl -fsS -H "authorization: Bearer $admin_token" "$source_base/api/v1/libraries" \
+get_json "$source_base/api/v1/libraries" admin \
   | grep -F "\"$library_name\"" >/dev/null || fail "source instance does not list the new library"
 
 # 2. The operator CLI asks the running voter for one artefact now. The token
-# travels only through an owner-only file inside the container, never argv.
-docker exec -e PLURX_SMOKE_TOKEN="$admin_token" "$source_name" \
-  sh -c 'umask 077 && printf %s "$PLURX_SMOKE_TOKEN" > /tmp/restore-smoke.token'
+# reaches an owner-only file inside the container over stdin, so it is on no
+# command line and in no exec environment, and plurxd reads it from that file.
+docker exec -i "$source_name" sh -c 'umask 077 && cat > /tmp/restore-smoke.token' \
+  < "$secrets/admin.token" || fail "could not hand the admin token to the container"
 backup_report="$(docker exec "$source_name" plurxd cluster backup \
   --server http://127.0.0.1:32400 \
   --token-file /tmp/restore-smoke.token \
@@ -156,16 +193,17 @@ wait_ready "$restored_base" "restored instance"
 instance_restored="$(curl -fsS "$restored_base/api/v1/server" | json_string instance_id)"
 test "$instance_source" = "$instance_restored" \
   || fail "restored instance_id '$instance_restored' differs from '$instance_source'"
-curl -fsS -H "authorization: Bearer $admin_token" "$restored_base/api/v1/libraries" \
+get_json "$restored_base/api/v1/libraries" admin \
   | grep -F "\"$library_name\"" >/dev/null \
   || fail "the pre-loss admin token cannot list the restored library"
-viewer_token="$(post_json "$restored_base/api/v1/auth/login" - \
-  "{\"username\":\"$viewer_user\",\"password\":\"$viewer_password\"}" | json_string token)"
-test -n "$viewer_token" || fail "the ordinary user cannot log in to the restored instance"
-relogin_token="$(post_json "$restored_base/api/v1/auth/login" - \
-  "{\"username\":\"$admin_user\",\"password\":\"$admin_password\"}" | json_string token)"
-test -n "$relogin_token" || fail "the admin cannot log in to the restored instance"
-curl -fsS -H "authorization: Bearer $relogin_token" "$restored_base/api/v1/libraries" \
+post_json "$restored_base/api/v1/auth/login" - viewer-login.json | json_string token \
+  | secret_file viewer.token
+test -s "$secrets/viewer.token" || fail "the ordinary user cannot log in to the restored instance"
+post_json "$restored_base/api/v1/auth/login" - admin-login.json | json_string token \
+  | secret_file relogin.token
+test -s "$secrets/relogin.token" || fail "the admin cannot log in to the restored instance"
+bearer_header relogin
+get_json "$restored_base/api/v1/libraries" relogin \
   | grep -F "\"$library_name\"" >/dev/null \
   || fail "a fresh admin login cannot list the restored library"
 

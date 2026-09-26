@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import runpy
 import subprocess
+import sys
 import tempfile
 import textwrap
 import tomllib
@@ -3720,6 +3721,8 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("--token-file /tmp/restore-smoke.token", drill)
         self.assertIn("umask 077", drill)
         self.assertNotIn("--token ", drill)
+        self.assertNotIn("docker exec -e", drill)
+        self.assertNotIn("Bearer $", drill)
         self.assertIn('restore --verify --archive "/backups/$archive"', drill)
         self.assertIn(
             'restore --archive "/backups/$archive" --data-dir /var/lib/plurx', drill
@@ -3741,6 +3744,136 @@ assert.equal(context.ACT_TIMER, null);
             package.index('scripts/container-smoke "$IMAGE"'),
             package.index('run: scripts/container-restore-smoke "$IMAGE"'),
         )
+
+    def test_container_restore_smoke_keeps_secrets_off_every_command_line(self):
+        # K-01 M4 review of #542: the drill's passwords and bearer tokens must
+        # not appear in any process's argv (curl, the host `docker` client, or a
+        # `docker exec -e` environment, which is argv to the client and is
+        # recorded on the exec instance). Run the real script against recording
+        # `docker` and `curl` stand-ins that emulate just enough of the image
+        # and the API, and inspect every argv they were given.
+        admin_token = "SECRET-admin-token-4b1d"
+        tokens = {
+            "admin": admin_token,
+            "viewer": "SECRET-viewer-token-77c2",
+            "relogin": "SECRET-relogin-token-90ae",
+        }
+        stub = textwrap.dedent(
+            f"""\
+            #!{sys.executable}
+            import json, os, pathlib, sys
+            state = pathlib.Path(os.environ["RESTORE_SMOKE_STUB_STATE"])
+            name = pathlib.Path(sys.argv[0]).name
+            args = sys.argv[1:]
+            with open(state / "argv.jsonl", "a") as log:
+                log.write(json.dumps([name, *args]) + "\\n")
+            TOKENS = {json.dumps(tokens)}
+
+            def docker():
+                verb = args[0]
+                if verb == "port":
+                    print("127.0.0.1:4" + ("1" if "source" in args[1] else "2") + "000")
+                elif verb == "exec" and "-i" in args:
+                    (state / "exec-stdin").write_bytes(sys.stdin.buffer.read())
+                elif verb == "exec" and "cluster" in args and "backup" in args:
+                    delivered = (state / "exec-stdin").read_text().strip()
+                    if "--token-file" not in args or delivered != TOKENS["admin"]:
+                        sys.exit(2)
+                    print('{{"status": "ok", "path": '
+                          '"/var/lib/plurx/backups/plurx-backup-20260926T000000Z-stub",'
+                          ' "manifest": {{"cluster_id": "stub"}}}}')
+                elif verb == "run" and "--data-dir" in args:
+                    marker = state / "restored"
+                    if marker.exists():
+                        sys.exit(1)
+                    marker.touch()
+
+            def curl():
+                headers, body, url, it = [], None, None, iter(args)
+                for arg in it:
+                    if arg == "-H":
+                        value = next(it)
+                        if value.startswith("@"):
+                            headers += pathlib.Path(value[1:]).read_text().splitlines()
+                        else:
+                            headers.append(value)
+                    elif arg in ("--data", "--data-binary", "-d"):
+                        value = next(it)
+                        body = (pathlib.Path(value[1:]).read_text()
+                                if value.startswith("@") else value)
+                    elif not arg.startswith("-"):
+                        url = arg
+                path = "/" + url.split("/", 3)[3]
+                bearer = {{h.split("Bearer ", 1)[1].strip() for h in headers
+                          if h.lower().startswith("authorization: bearer ")}}
+                admin = {{TOKENS["admin"], TOKENS["relogin"]}}
+                if path == "/readyz":
+                    print("ok")
+                elif path == "/api/v1/server":
+                    print('{{"instance_id": "stub-instance"}}')
+                elif path == "/api/v1/setup":
+                    print(json.dumps({{"token": TOKENS["admin"]}}))
+                elif path == "/api/v1/auth/login":
+                    user = json.loads(body)
+                    if not user.get("password"):
+                        sys.exit(22)
+                    key = "viewer" if user["username"] == "restore-viewer" else "relogin"
+                    print(json.dumps({{"token": TOKENS[key]}}))
+                elif path in ("/api/v1/users", "/api/v1/libraries"):
+                    if not bearer & admin:
+                        sys.exit(22)
+                    print('[{{"name": "Restore Smoke Movies"}}]' if body is None else "{{}}")
+                else:
+                    sys.exit(22)
+
+            docker() if name == "docker" else curl()
+            """
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            stubs = temporary_path / "bin"
+            state = temporary_path / "state"
+            scratch = temporary_path / "tmp"
+            for directory in (stubs, state, scratch):
+                directory.mkdir()
+            for name in ("docker", "curl"):
+                (stubs / name).write_text(stub)
+                (stubs / name).chmod(0o755)
+            result = subprocess.run(
+                ["sh", str(ROOT / "scripts/container-restore-smoke"), "stub-image"],
+                cwd=ROOT,
+                env=dict(
+                    os.environ,
+                    PATH=f"{stubs}:{os.environ['PATH']}",
+                    TMPDIR=str(scratch),
+                    RESTORE_SMOKE_STUB_STATE=str(state),
+                ),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=60,
+            )
+            invocations = [
+                json.loads(line)
+                for line in (state / "argv.jsonl").read_text().splitlines()
+            ]
+            secrets = [*tokens.values(), "restore-smoke-admin-", "restore-smoke-viewer-"]
+            leaks = [
+                " ".join(argv)
+                for argv in invocations
+                if any(secret in arg for arg in argv for secret in secrets)
+            ]
+            self.assertEqual([], leaks, "a secret reached a command line")
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("container restore smoke passed", result.stdout)
+            # The stand-ins only answer authenticated calls when the bearer
+            # arrived through a header file, and the in-container token file
+            # received exactly the admin token over stdin.
+            self.assertEqual(admin_token, (state / "exec-stdin").read_text().strip())
+            self.assertTrue(
+                any(argv[:2] == ["docker", "exec"] and "backup" in argv for argv in invocations)
+            )
+            self.assertEqual([], list(scratch.iterdir()), "the drill left scratch state")
 
     def test_perf_report_counts_copy_video_as_a_real_session(self):
         namespace = runpy.run_path(str(ROOT / "scripts/perf-report"))
