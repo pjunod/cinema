@@ -204,6 +204,12 @@ struct SettingsView: View {
                 LabeledContent("App version", value: AppBuildInfo.current)
             }
         }
+        #if os(tvOS)
+        // The default Form picker pushes a choice list through the stack that
+        // wraps the whole tab bar. On Apple TV that destination can be empty;
+        // keep every settings choice in a focusable menu on this screen.
+        .pickerStyle(.menu)
+        #endif
         .navigationTitle("Settings")
         .tint(Palette.accent)
         .background(Palette.bg)
