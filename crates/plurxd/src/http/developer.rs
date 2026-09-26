@@ -40,9 +40,8 @@ use crate::state::AppState;
 
 /// What the server can see of this prerequisite right now.
 ///
-/// Deliberately three values. Two would force every fact the daemon cannot
-/// reach into either a false `Met` or a misleading `Unmet`, and both of those
-/// are worse than saying so.
+/// Separate an unmet requirement from unknown evidence and unavailable reads.
+/// Older cards retain `Unobservable` for their existing API contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RequirementStatus {
@@ -53,6 +52,10 @@ pub(crate) enum RequirementStatus {
     /// Not answerable from a running daemon, or answerable only in part.
     /// `evidence` says what was read, what was not, and where the rest lives.
     Unobservable,
+    /// No observation proves the requirement for the pending work.
+    Unknown,
+    /// The observation could not be obtained.
+    Unavailable,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,6 +99,7 @@ pub(crate) struct DeveloperEnableItem {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct DeveloperReadiness {
+    pub observed_at_ms: i64,
     /// Nothing here is cached between requests. Most rows are read when the
     /// request arrives; three of them (`recovery_receipt`, `fleet_receipt`,
     /// `server_preparation_is_real`) are statements about an artifact or about
@@ -206,7 +210,9 @@ pub(crate) async fn readiness(
         .await?;
 
     Ok(Json(DeveloperReadiness {
+        observed_at_ms: crate::state::clock_ms(),
         items: vec![
+            durable_cluster_work(&state).await,
             cluster_backup(
                 &state,
                 settings.get(plurx_core::store::keys::BACKUP_DESTINATION),
@@ -251,6 +257,51 @@ pub(crate) async fn readiness(
             source_probe_comparison().await,
         ],
     }))
+}
+
+/// Facts only: these observations are never consulted by settings updates.
+async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
+    use RequirementStatus::{Met, Unavailable, Unknown, Unmet};
+    let (queue_status, queue_evidence) = match tokio::time::timeout(
+        std::time::Duration::from_secs(3), state.store.job_migration_status()
+    ).await {
+        Ok(Ok(migration)) => (Met, format!(
+            "The durable Store responded; {} sealed legacy interests await import and {} are mapped. This is a current read, not a future quorum guarantee.",
+            migration.awaiting_import, migration.materialized)),
+        Ok(Err(error)) => (Unavailable, format!("The durable queue observation failed: {error}")),
+        Err(_) => (Unavailable, "The durable queue did not answer within the three-second observation budget.".into()),
+    };
+    let capabilities = state.transcode.pretranscode_capabilities();
+    let inventory_status = if capabilities.decoders.is_empty() {
+        Unknown
+    } else {
+        Met
+    };
+    let capacity_idle = state.transcode.pretranscode_worker_idle();
+    let (peer_status, peer_evidence) = match tokio::time::timeout(
+        std::time::Duration::from_secs(3), state.membership.media_peers()
+    ).await {
+        Ok(Ok(peers)) => (Unknown, format!(
+            "{} reachable media peers are reported. Reachability does not prove each job's payload version, source access or encoder recipe; workers check those individually.",
+            peers.iter().filter(|peer| peer.reachable).count())),
+        Ok(Err(error)) => (Unavailable, format!("The peer directory could not be observed: {error}")),
+        Err(_) => (Unavailable, "The peer directory did not answer within the three-second observation budget.".into()),
+    };
+    DeveloperEnableItem {
+        id: "durable_cluster_work", title: "Durable cluster work", enabled: None, setting: None,
+        requirements: vec![
+            DeveloperRequirement { id: "durable_store", title: "Durable queue storage", status: queue_status, evidence: queue_evidence },
+            DeveloperRequirement { id: "durable_tools", title: "Worker tool inventory", status: inventory_status,
+                evidence: format!("This worker reports {} boot-probed decoders and {} encoder families. Each job still needs its exact pipeline and output recipe.", capabilities.decoders.len(), capabilities.encoder_families.len()) },
+            DeveloperRequirement { id: "durable_capacity", title: "Spare processing capacity", status: if capacity_idle { Met } else { Unmet },
+                evidence: if capacity_idle { "No foreground or offline encoder reservation currently blocks background admission. This observation does not reserve a slot." } else { "Foreground, offline or background work currently occupies the media pool; queued work waits for actual admission." }.into() },
+            DeveloperRequirement { id: "durable_scratch", title: "Fresh cache headroom", status: if capabilities.scratch_bytes > 0 { Met } else { Unknown },
+                evidence: format!("The current scratch sampler reports {} usable bytes. Zero can mean no fresh sample; actual jobs also check their own size, cache budget and writable destination.", capabilities.scratch_bytes) },
+            DeveloperRequirement { id: "durable_sources", title: "Source access on a worker", status: Unknown,
+                evidence: "This page does not scan library mounts. Each claimed job checks its source generation and readable descriptor on the chosen worker.".into() },
+            DeveloperRequirement { id: "durable_peers", title: "Compatible peers", status: peer_status, evidence: peer_evidence },
+        ],
+    }
 }
 
 /// Readiness is a report about this node and the peers it can currently see.
