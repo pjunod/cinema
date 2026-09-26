@@ -172,7 +172,9 @@ against acorn's 245 KB, which is the trade the notice refused. Reason for
 a subdirectory: nothing at the root starts treating the repo as an npm
 project. CI: the node job already has `setup-node`; add the `npm ci` step
 with the lockfile cached by hash. **This is the one decision Paul should
-confirm before 5.1 starts** (§7.1).
+confirm before 5.1 starts** (§7.1). *Confirmed 2026-09-25 — see §7 Q1 for the
+answer and for what the build changed (TypeScript only, no ESLint; no
+separate CI cache step).*
 
 ### 3.2 `jsconfig.json`, generated from the shell
 
@@ -491,6 +493,30 @@ exactly twice.
    proposes the scoped npm directory (§3.1). If Paul prefers no npm
    anywhere, the alternative is vendoring `typescript/lib/tsc.js` (~9 MB)
    and `eslint`'s far larger tree, which the plan recommends against.
+
+   **Answered by Paul, 2026-09-25:** TypeScript's own checker — `tsc` in
+   checkJs mode over JSDoc types ("a duh obviously type thing"). Built in
+   5.1-5.3 (branch `plan/W-02-3`) as §3.1 proposed: `tools/web-types/`
+   holds `package.json` + `package-lock.json` pinning **typescript 6.0.3**
+   exactly as a devDependency with no dependencies of its own;
+   `scripts/web-types` runs `npm ci` there when the installed copy is
+   missing or not the locked version; `node_modules/` is git-ignored;
+   nothing is served, bundled or shipped. Decisions the build took, each
+   reversible in one small diff:
+   - **6.0.3, not 7.x.** `typescript@latest` is 7.0.2, the native port,
+     which ships twenty per-platform binaries as optional dependencies; 6.0.3
+     is the newest release that is still one platform-neutral JavaScript
+     package, so one lockfile serves the Linux runners and the Mac alike.
+   - **No ESLint.** The answer names the type checker, and `tsc` already
+     reports the one class `no-undef` was to add: a call-time reference to a
+     name no row declares is `TS2304 Cannot find name` (the 5.2 bite proof
+     below is exactly that). A second tool, dependency tree and baseline
+     would add nothing the checker does not already fail on;
+     `shell-globals.json` and `eslint-baseline.tsv` are therefore not
+     written.
+   - **No CI cache step.** `npm ci` of one 24 MB tarball comes from the
+     runner's `~/.npm` cache in about a second; the fast lane's web job runs
+     `scripts/web-types` directly.
 2. **Baseline key granularity.** `path + code` is drift-proof but coarse:
    fixing one TS2339 and introducing another in the same file nets to
    zero. The alternative (`path + code + message text`) catches that and
@@ -498,7 +524,9 @@ exactly twice.
    coarse and can tighten per file once the counts are small.
 3. **Should `@ts-check` per file replace project-wide `checkJs`** once the
    baseline is under ~50 keys? Per-file opt-in makes the remaining rows
-   explicit. Decide at 5.3 from the numbers.
+   explicit. Decide at 5.3 from the numbers. **Decided at 5.3:** not yet —
+   the baseline is 546 diagnostics in 86 keys, well above the ~50-key
+   threshold, so project-wide `checkJs` stays; revisit when it is under 50.
 4. **The heartbeat's other readers** — Trakt scrobbling and the watched
    coalescer read the same POST. §3.6 item 3 keeps every beat that changes
    position and every direct-play beat; a reader that depends on the
@@ -525,3 +553,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | 5.4, 5.5 — **not implemented** | — | Neither milestone's stated acceptance can be produced in this session. 5.4 requires `scripts/web-hls-startup-browser-check` green and 5.5 `scripts/subtitle-readiness-browser-check` green; both print `SKIP  playwright is not installed` on the Mac and Playwright is absent from nuc3 as well. Both also require `scripts/web-types` to report the baseline unchanged, which does not exist for the reason in the row above — and §3.5 orders the split after 5.1-5.3 precisely so the checker sees the moved code. Splitting 401 lines of closure-sharing hls.js attach code with neither proof available, on the strength of node tests the same commit would edit, is the shape of change this campaign refuses. Recorded for whoever picks it up: `attachHls` is `player/player.js:521-921` today (the plan's `:499-876` is from `88a3957a`), and three harnesses reconstruct it by slicing the served source — `web-policy.test.js` (six sites), `web-control.test.js` (two) and `web-media-recovery.test.js` (one) — so the split must compose the new functions in each; `web-control.test.js:1938`, `web-policy.test.js:6181` and `web-media-recovery.test.js:49` assert on the text of the slice and would move to `onHlsError`; and the `reason` prose of `validation/regressions.d/3dd6d187-web-lines-that-survived-deletion.toml` and `3d63b5ac-web-media-recovery-fence.toml` names `attachHls` as the function holding lines that would move, so both must be rewritten in the same commit or they become false. |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | 5.6, 5.7 — the one adversarial review (PR #459 comment 4106) | [PR #459](http://192.168.4.7:3000/noirr/plurx/pulls/459) | `origin/main` (`99d4abf8c`) merged in `95affd1ae`; one conflict in `tests/web/settings-sections.test.js`, where main composed `clusterBackupCard` relying on its slice bleeding into `DEV_READINESS_LABEL` and this branch composes both constants explicitly with the card already further down the list (30/30). **Finding 1 (P1), fixed in `f7a172617`:** the 5.7 row above and the PR body said MediaSession `play`/`pause` were "separate idempotent handlers"; they branched on the element's `paused`, so during a pending open or a reattach a headset `play` flipped the viewer's intent to pause. Both handlers and the OS `playbackState` now read `playerWantsPlayback` (the pending open's intent, else `PLAYER.wantsPlayback`), pinned in `tests/playback/web-control.test.js` through the real `togglePlay`. **Finding 2, fixed in the same commit:** the handlers now route through `watchRouteInput(playerInputState(), …)` like the keys, pinned in `tests/web/player-dom.test.js` state by state. **Finding 3, fixed in the same commit:** "`nexttrack` is offered only while autoplay-next is on" was false (registered unconditionally, no-op inside); `syncPlayerNextTrack` now registers it only while autoplay-next is on and the title is not known to be a non-episode, and `setAutoNext` re-syncs it. **Finding 4, `9dca9bcec`:** the paged-library case did not bite on the `LIB_PER` guard; it now pages after the load, and filter, scope and find each narrow and clear — deleting any of the four guards fails its case. **Finding 5, `52df3766d`:** the claim that the pause-edge beat is what carries the stop position was false — the repeat guard only drops a paused beat at the last accepted position, which was taken while playing — so the edge beat is prompt, not load-bearing; both comments reworded and a case added. Ledger: `validation/regressions.d/f7a17261-web-media-session-intent.toml`. 5.1–5.3 stay not done (open question 1 is still Paul's); 5.4–5.5 unchanged. No browser, device or fleet evidence was produced. |
 | 2026-09-24 | gpt-6-astra | agent:/root/web_recon | 5.4 and 5.5, implementation pending acceptance | [draft PR #506](http://192.168.4.7:3000/noirr/plurx/pulls/506) · `8907b9cf5`, `cb7042ea2`, `858c8bc01` | `attachHls` is a 15-line orchestrator over six same-file phases; `play()` is a 24-line orchestrator over nine named helpers. The follow-up preserves same-turn direct/progressive attach finalization. Source-slicing harnesses, source assertions and regression-ledger reasons moved with the code. JavaScript syntax passed; the 5.1-5.3 type baseline, Playwright browser checks, final unit lane and the one adversarial review remain unrun, so neither milestone is accepted yet. The playback-lab readiness fix `2a6fbc855` permits a real Chrome shaped-network trace but that trace fails A-04 recovery. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | 5.1, 5.2, 5.3 — built after Paul answered §7 Q1 (2026-09-25: `tsc` checkJs over JSDoc) | draft PR on `plan/W-02-3` (see the board row) | **5.1** `b8ca90d2e`: `tools/web-types` pins typescript 6.0.3 by lockfile; `scripts/web-jsconfig` generates `crates/plurxd/src/web/jsconfig.json` (the 64 served head+body rows in served order, minus the six UMD sidecars and `hls.min.js`, plus `types/globals.d.ts`); `tests/web/jsconfig-generated.test.js` refuses drift. `scripts/web-jsconfig --check` exit 0; the raw run printed **632** diagnostics in 86 `path+code` keys, 2.0 s on nuc3. **5.2** `c6ffdaf99`: `scripts/web-types` with the §3.3 ratchet (per `path+code` counts; `--update` only lowers; `--accept-increase` needs a reason and records it), wired into `make web-check` and the fast lane's web job; `web-static` now requires `npm`; `ci_scope` selects the web job for the gate's files. Baseline accepted at 632. No `@ts-nocheck` anywhere: the largest file (`player/stats.js`, 118) is under §3.3's 200. Bite proof: `undefinedFn();` inside `watchLine` in `core/cards.js` → `scripts/web-types` exit 1 naming `crates/plurxd/src/web/core/cards.js:20:3 TS2304 Cannot find name 'undefinedFn'`, and `make web-check` exit 2 at that line with every earlier gate (asset-order, asset-load, js-check) passing; removed → `scripts/web-types --update` prints `nothing shrank — … not written`, exit 0. `tests/operations/test_web_types.py` (12 cases) pins the ratchet on recorded tsc output; deleting the rise comparison fails 9, ignoring non-file tsc output fails 1. `tests/validation/test_runner.py` pins the job selection (dropping the two `ci_scope` entries fails it). **5.3** `9a8a3628c`: `@typedef Player` with **141** `@property` lines; `let PLAYER` is `@type {Player}`, `buildPlayer()` is `@returns {Player}`, so a new literal field must be named first (adding `brandNewField:1` → `TS2353`, gate exit 1). **Deviation from 5.3's acceptance:** the typedef moved no `player.js`/`decode-tiers.js` count — before it, `PLAYER`'s idle initialiser was an open ("expando") object in a JS file, so a misspelled field reported nothing rather than something; what the typedef adds is the error class, pinned by `tests/web/player-typedef.test.js` (`PLAYER.sesionId` and an alias's `wantsPlaybak` are TS2551; with the typedef removed both report nothing and the test fails). The shrink came from four `PLAYER\|\|{}` aliases typed `Player \| {}`, cast with `/** @type {Player} */(…)` (no runtime change): baseline **632 → 546** (`stats.js` TS2339 114→53, `measurements.js` 21→7, `api.js` 15→9, `decode-margin.js` 11→6). Gates on the branch head: `make web-check` 0 (the two Playwright browser checks print their pre-existing SKIP), `player-input-contract` 0, `web-policy` 0, `web-control` 0, `player-dom` 0, `history-check` 0, `validation-lint` 0, validation unittests 0, `operations-check` 0, `spike-lock-check` 0. No Rust source changed. **Findings the checker surfaced, not acted on here** (each is in the baseline, none is changed by this PR): `core/auth.js` reads the login form's `u`/`p`/`p2` inputs as window named-element globals (TS2304 ×10), and calls `nativeReaderPost` with an argument its declaration does not take (TS2554 ×3); `pages/analysis.js:66` compares a narrowed `visibilityState` with `"hidden"` (TS2367). No device or fleet evidence is needed: nothing served changes behaviour (JSDoc comments and parenthesised casts only). |
