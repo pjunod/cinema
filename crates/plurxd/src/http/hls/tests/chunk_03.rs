@@ -255,7 +255,7 @@
         assert_eq!(announced_session_id, &staged_route.session_id);
         assert_eq!(media_origin_ms, &staged_route.media_origin_ms);
         let start = control_start_response(&staged_route).expect("staged response");
-        assert_eq!(control, &start.control,
+        assert_eq!(control.as_deref(), start.control.as_ref(),
             "the next reporter must use the staged successor's own control identity");
         let recipe = serde_json::from_str::<RemoteStartRequest>(&staged_route.recipe_json)
             .expect("staged recipe");

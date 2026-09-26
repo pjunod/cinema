@@ -1777,7 +1777,7 @@ pub(crate) enum ControlAction {
         /// The staged session's own reporter identity. The incumbent reporter
         /// carries the commit, then this one renews the successor's lease.
         #[serde(skip_serializing_if = "Option::is_none")]
-        control: Option<ControlBootstrap>,
+        control: Option<Box<ControlBootstrap>>,
         /// Exact source position the successor's session-relative zero maps
         /// to. Without it a client cannot align the second timeline with the
         /// first, and the commit boundary is expressed in film time.
@@ -1807,7 +1807,7 @@ pub(crate) struct PreparedSuccessorAction {
     pub deadline_ms: i64,
     pub session_id: String,
     pub playlist_url: String,
-    pub control: Option<ControlBootstrap>,
+    pub control: Option<Box<ControlBootstrap>>,
     pub media_origin_ms: i64,
     pub effective_selection: EffectiveSelection,
 }
