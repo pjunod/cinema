@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 fast lane running; E0 construction · **Updated:** 2026-09-26 ·
+**Status:** M1–M3 Rust lane running; E0 library dispatch implemented · **Updated:** 2026-09-26 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` ·
 **Base:** `116559cb8` · **PR:** [#532 — ready](http://192.168.4.7:3000/noirr/plurx/pulls/532)
 
@@ -17,12 +17,12 @@ implementation is claimed; “compiled” does not mean tests passed.
 | M1 durable queue and pre-transcode | Implemented; focused validation passed | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; local exact-recipe offline joining and scheduling implemented; lost-reply and process-expiry regressions written; cross-node transcode convergence belongs to E1 |
 | M2 fragment analysis and hydration | Implemented; focused validation passed | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
 | M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
-| E0 subtitle and library workers | Foundation compiled on follow-on branch | Durable library intents, per-request results and joint queue/domain publication ownership committed on `codex/cluster-work-adapters`; production dispatch, budgets, subtitles and learner permissions remain open |
+| E0 subtitle and library workers | Library dispatch implemented; construction checks running | Durable admission replaces the in-memory queue and request ring; scans share physical capacity and preserve coalesced hints. Provider/storage budgets, subtitles and learner permissions remain open |
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
 | Final adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
-| Fast lane | Running on core `22b620c7b` | All 18 failures from run 3289 and two related census checks pass focused reruns. Required remote lane remains blocking |
+| Fast lane | Run 3296 on core `3784d5ec5` | Preflight, Windows and web passed; Rust remains running. All prior failures have focused passing evidence |
 | Merge / cleanup | Not started | Green required lane before merge |
 
 ## Decisions and unresolved policy
@@ -460,3 +460,18 @@ The failing replicated test is being rerun before the main fast lane starts.
   accounting. All five failed daemon cases pass (four in the batch, scrub
   after correcting its deliberate corruption fixture). Docs index passes. Main remains
   `116559cb8`; no production deployment has occurred.
+
+- E0 library dispatch: full, startup, scheduled and targeted entry points now
+  persist their accepted intent. A source-readable voter claims the common
+  job and existing library lease, binds both owners, and keeps physical
+  admission through cooperative cancellation and process/walker joins. Busy
+  library leases yield without charging retries. Per-request results survive
+  manager restart and a late arrival cannot be completed by an earlier pass.
+  Recent status comes from durable receipts; live local counters overlay it.
+  New targeted requests normally return the existing 202 response. Oversized
+  results produce an explicit failed receipt rather than truncated item IDs.
+  Old process-local pending queues, retry tasks and result rings are removed.
+  All-target compilation passed before the final thumbnail/fixture changes;
+  the final Rust 1.97.1 workspace Clippy with all targets and denied warnings
+  passed. New ownership sites are recorded in the static inventory. No
+  follow-on test has been executed.

@@ -806,6 +806,9 @@ async fn enrich_library_for_targets_inner(
     };
 
     for item in items {
+        if crate::process::bounded::check_cancellation().is_err() {
+            break;
+        }
         let deadline_title = match item.year {
             Some(year) => format!("{} ({year})", item.title),
             None => item.title.clone(),
@@ -1186,6 +1189,9 @@ async fn enrich_anime_library_inner(
     };
 
     for item in items {
+        if crate::process::bounded::check_cancellation().is_err() {
+            break;
+        }
         if item.kind != ItemKind::Show {
             continue;
         }
@@ -1435,6 +1441,9 @@ async fn enrich_episodes(
 
     let mut complete = true;
     for (season_number, locals) in by_season {
+        if crate::process::bounded::check_cancellation().is_err() {
+            return false;
+        }
         let remote = match tmdb.season_detail(show_tmdb_id, season_number).await {
             Ok(detail) => detail,
             Err(e) => {

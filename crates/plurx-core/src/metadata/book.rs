@@ -486,6 +486,9 @@ pub async fn enrich_library_with_publication(
         return report;
     }
     for item in items {
+        if crate::process::bounded::check_cancellation().is_err() {
+            break;
+        }
         if item.kind != ItemKind::Book && item.kind != ItemKind::Audiobook {
             continue;
         }

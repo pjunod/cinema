@@ -436,6 +436,38 @@ impl JobFence {
         Ok(result)
     }
 
+    pub(crate) async fn bind_library(
+        &self,
+        publisher: &plurx_core::store::PublicationStore<'_>,
+    ) -> Result<bool, StoreError> {
+        let state = self.0.state.lock().await;
+        if !self.0.authority.may_run_cluster_jobs().await || !self.may_publish() {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        publisher.bind_library_job(token, unix_ms()?).await
+    }
+
+    pub(crate) async fn complete_library(
+        &self,
+        publisher: &plurx_core::store::PublicationStore<'_>,
+        request_id: String,
+        result: plurx_core::store::background_jobs_library::LibraryWorkResult,
+    ) -> Result<bool, StoreError> {
+        let state = self.0.state.lock().await;
+        if !self.0.authority.may_run_cluster_jobs().await || !self.may_publish() {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        publisher
+            .complete_library_work(token, request_id, result, unix_ms()?)
+            .await
+    }
+
     pub(crate) async fn bind_transcode_recipe(
         &self,
         recipe_hash: &str,
@@ -964,6 +996,123 @@ pub(crate) async fn claim_fragment(
                 kind,
             )?;
             return Ok(Some((projection, active, admission)));
+        }
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(None)
+}
+
+/// Library coordinators share the same physical heavy-work admission as
+/// preparation/indexing. Source checks happen before claiming; domain-lease
+/// contention is resolved by the caller through an uncharged yield.
+pub(crate) async fn claim_library(
+    store: Arc<dyn Store>,
+    authority: Arc<dyn ClusterJobAuthority>,
+    transcode: &crate::transcode::TranscodeManager,
+    node: &str,
+    library_filter: Option<i64>,
+) -> Result<
+    Option<(
+        BackgroundJob,
+        ActiveBackgroundJob,
+        crate::transcode::FragmentAdmission,
+    )>,
+    StoreError,
+> {
+    use plurx_core::store::background_jobs::{
+        CandidateQuery, JobKind, JobPayload, MAX_ACTIVE_JOBS, MAX_PAGE_SIZE,
+    };
+    static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
+    if !authority.may_run_cluster_jobs().await {
+        return Ok(None);
+    }
+    let mut cursor = None;
+    for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
+        let page = store
+            .job_candidates(CandidateQuery {
+                node_id: node.into(),
+                kinds: vec![JobKind::LibraryScan, JobKind::MetadataRefresh],
+                after: cursor,
+                now_ms: unix_ms()?,
+                limit: MAX_PAGE_SIZE,
+            })
+            .await?;
+        for candidate in page.jobs {
+            let Ok(payload) = candidate.supported_payload() else {
+                continue;
+            };
+            let kind = payload.kind();
+            let library_id = match payload {
+                JobPayload::LibraryScan {
+                    library_id,
+                    generation,
+                }
+                | JobPayload::MetadataRefresh {
+                    library_id,
+                    generation,
+                } if generation == "library-work-v1" => library_id,
+                _ => continue,
+            };
+            if library_filter.is_some_and(|wanted| wanted != library_id) {
+                continue;
+            }
+            let library = store.get_library(library_id).await?;
+            // A deleted library still needs its accepted requests settled.
+            let mut readable = library
+                .as_ref()
+                .is_none_or(|library| !library.paths.is_empty());
+            for path in library.iter().flat_map(|library| &library.paths) {
+                if !tokio::fs::metadata(path)
+                    .await
+                    .is_ok_and(|metadata| metadata.is_dir())
+                {
+                    readable = false;
+                    break;
+                }
+            }
+            if !readable {
+                continue;
+            }
+            let Some(admission) = transcode.admit_fragment().await else {
+                return Ok(None);
+            };
+            if !authority.may_run_cluster_jobs().await {
+                return Ok(None);
+            }
+            let now_ms = unix_ms()?;
+            let Some((job, deadline)) = claim_with_resolution(
+                store.as_ref(),
+                &candidate,
+                ClaimJob {
+                    job_id: candidate.id.clone(),
+                    expected_revision: candidate.revision,
+                    node_id: node.into(),
+                    boot_id: boot.clone(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind,
+                    payload_version: 1,
+                    now_ms,
+                    dispatched_at_ms: now_ms,
+                },
+            )
+            .await?
+            else {
+                continue;
+            };
+            let active = ActiveBackgroundJob::start(
+                Arc::clone(&store),
+                Arc::clone(&authority),
+                job.token
+                    .clone()
+                    .ok_or_else(|| StoreError::Task("library claim has no owner".into()))?,
+                deadline,
+                kind,
+            )?;
+            return Ok(Some((job, active, admission)));
         }
         cursor = page.next;
         if cursor.is_none() {
