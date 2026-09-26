@@ -737,13 +737,15 @@
         // fails under a loaded one, which is the flake this loop removes.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         let argv = loop {
-            if let Some(line) = logs
+            if let Some(entry) = logs
                 .tail("trace", 8192)
                 .into_iter()
-                .map(|entry| entry.message)
-                .find(|message| message.contains("copy-video HLS ffmpeg args"))
+                .find(|entry| entry.message.contains("copy-video HLS ffmpeg args"))
             {
-                break line;
+                // Logged from `transcode/manager/start.rs`: the split must not
+                // relabel it with the child's own module path.
+                assert_eq!(entry.target, "plurxd::transcode");
+                break entry.message;
             }
             assert!(
                 tokio::time::Instant::now() < deadline,

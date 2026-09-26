@@ -34,8 +34,8 @@ impl ClusterJobAuthority for AdmittedRoleJobAuthority {
     }
 }
 
-const JOB_LEASE_TTL: Duration = Duration::from_secs(90);
-const JOB_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
+pub(crate) const JOB_LEASE_TTL: Duration = Duration::from_secs(90);
+pub(crate) const JOB_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
 const RELEASE_ATTEMPTS: usize = 5;
 const RELEASE_RETRY_DELAY: Duration = Duration::from_millis(100);
 
@@ -48,10 +48,6 @@ pub(crate) struct ActiveJobLease {
 }
 
 impl ActiveJobLease {
-    fn start(coordinator: StoreCoordinator, lease: Lease) -> Result<Self, StoreError> {
-        Self::start_with_policy(coordinator, lease, JOB_LEASE_TTL, JOB_LEASE_HEARTBEAT)
-    }
-
     pub(crate) fn start_with_policy(
         coordinator: StoreCoordinator,
         lease: Lease,
@@ -263,6 +259,26 @@ pub(crate) async fn acquire_cluster_job(
     authority: &dyn ClusterJobAuthority,
     resource: String,
 ) -> Result<Option<ActiveJobLease>, StoreError> {
+    acquire_cluster_job_with_policy(
+        coordinator,
+        authority,
+        resource,
+        JOB_LEASE_TTL,
+        JOB_LEASE_HEARTBEAT,
+    )
+    .await
+}
+
+/// [`acquire_cluster_job`] with an explicit TTL and heartbeat. The same
+/// gate, the same lease; only the timing is the caller's. The watched-outbox
+/// drain passes the production values and its failover test shorter ones.
+pub(crate) async fn acquire_cluster_job_with_policy(
+    coordinator: &StoreCoordinator,
+    authority: &dyn ClusterJobAuthority,
+    resource: String,
+    ttl: Duration,
+    heartbeat: Duration,
+) -> Result<Option<ActiveJobLease>, StoreError> {
     if !authority.may_run_cluster_jobs().await {
         tracing::debug!(
             resource,
@@ -270,8 +286,10 @@ pub(crate) async fn acquire_cluster_job(
         );
         return Ok(None);
     }
-    match coordinator.acquire(&resource, JOB_LEASE_TTL).await? {
-        LeaseClaim::Acquired(lease) => ActiveJobLease::start(coordinator.clone(), lease).map(Some),
+    match coordinator.acquire(&resource, ttl).await? {
+        LeaseClaim::Acquired(lease) => {
+            ActiveJobLease::start_with_policy(coordinator.clone(), lease, ttl, heartbeat).map(Some)
+        }
         LeaseClaim::Held {
             owner_node_id,
             fence,

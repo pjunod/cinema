@@ -2067,7 +2067,21 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # and joins its owner and observes the speculative future's Drop. Production
 # run_ranges joins current and ahead futures inside the existing session
 # owner, and starts no independent task or rolling-producer election.
-expected_occurrences = 625
+# 615 -> 619 with K-03 (replicated write-rate hygiene), all test-only. In
+# `watched::tests`: the drain loop under test in the local-delivery test, and
+# the two drains (`runner_a`, `runner_b`) of the singleton failover test; each
+# is aborted before its test returns. In `media_sessions::takeover_gate_tests`:
+# one task that flips the takeover switch after 3 virtual seconds and exits.
+# The production spawn of the watched drain in `main.rs` changed its argument
+# only. None owns a producer, a process or a recipe decision.
+# Merged with main at `b47c5ff88` (K-03 branch): the value is the whole
+# merged tree, measured by zeroing this row after the merge: 626, which is
+# main's 622 plus exactly the four K-03 test-only spawns reviewed above.
+# Merged with main at `3c89ad2ee` (K-03 branch, second merge): the value
+# is the whole merged tree, measured by zeroing this row after the merge:
+# 629, which is main's 625 plus exactly the four K-03 test-only spawns
+# reviewed above.
+expected_occurrences = 629
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2864,7 +2878,24 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +3 rolling publication-trap fix: the two test-only sleeps reviewed under
 # `all-async-sleeps` and the two-second `tokio::time::timeout` that bounds the
 # resume-event poll in the same test. No production timer is added.
-expected_occurrences = 977
+# 945 -> 960 with K-03. Shipped, net +1: the watched drain's fixed 1 s
+# `tokio::time::interval` became a `tokio::time::sleep(delay)` whose length
+# the drain policy chooses (1 s working, backing off to 10 s idle, never past
+# the 30 s forced claim), and the takeover loop gains one idle
+# `tokio::time::sleep` of up to 8 s while its switches are off, cut short by a
+# local switch write. Neither decides anything about playback; both only pace
+# a background poll. Test-only, +14: the takeover gate tests' 2 s interval and
+# 3 s flip delay (virtual clock), and in `watched::tests` the 4 s settle, the
+# 1.5 s non-owner observation window, five bounded waits (3 s and 5 s
+# timeouts that assert rather than hang) and their five 20 ms polls.
+# Merged with main at `b47c5ff88` (K-03 branch): the value is the whole
+# merged tree, measured by zeroing this row after the merge: 984, which is
+# main's 969 plus exactly the fifteen K-03 shapes reviewed above.
+# Merged with main at `3c89ad2ee` (K-03 branch, second merge): the value
+# is the whole merged tree, measured by zeroing this row after the merge:
+# 992, which is main's 977 plus exactly the fifteen K-03 shapes reviewed
+# above.
+expected_occurrences = 992
 
 [[module_structures]]
 id = "bare-time-constructor"
