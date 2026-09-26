@@ -959,8 +959,13 @@ impl<T: QueueSql> BackgroundJobStore for T {
     ) -> Result<EnqueueOutcome, StoreError> {
         let (request, logical_key) = super::background_jobs_fragment_admission::prepare(&input)?;
         let mut body = enqueue_body(self, &request).await?;
+        let mut domain = input.job;
+        if input.repair {
+            domain.priority = "normal".into();
+            domain.trigger = "background".into();
+        }
         body["fragment_domain"] =
-            serde_json::to_value(input.job).map_err(|error| invalid(&error.to_string()))?;
+            serde_json::to_value(domain).map_err(|error| invalid(&error.to_string()))?;
         body["logical_key"] = logical_key.into();
         body["fragment_repair"] = input.repair.into();
         if let Some(analysis) = input.analysis_request {

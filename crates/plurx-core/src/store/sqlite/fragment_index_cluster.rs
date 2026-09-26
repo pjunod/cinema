@@ -2285,14 +2285,22 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 },
             )
             .await?;
-        Ok(matches!(
-            result,
-            EnqueueOutcome::Accepted { .. }
-                | EnqueueOutcome::Existing {
-                    cancelled: false,
-                    ..
-                }
-        ))
+        let job_id = match result {
+            EnqueueOutcome::Accepted { job_id, .. }
+            | EnqueueOutcome::Existing {
+                job_id,
+                cancelled: false,
+                ..
+            } => job_id,
+            _ => return Ok(false),
+        };
+        Ok(self.background_job(&job_id).await?.is_some_and(|job| {
+            matches!(
+                job.state,
+                crate::store::background_jobs::JobState::Queued
+                    | crate::store::background_jobs::JobState::Running
+            )
+        }))
     }
 
     async fn put_cluster_fragment_index_location(

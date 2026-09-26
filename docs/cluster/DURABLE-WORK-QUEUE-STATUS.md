@@ -209,3 +209,13 @@ implementation is claimed; “compiled” does not mean tests passed.
   unavailable, offline demand joining, explicit admin retry, fairness/metrics,
   advisory Developer observations and final fault-injection evidence. No final
   review or tests have run, and PR #532 remains a draft.
+
+- 2026-09-25: legacy-execution removal committed and pushed as `58df786bb`;
+  pinned workspace Clippy and the normal hook passed. No tests executed.
+  Hydration now schedules a canonical repair when holders cannot provide the
+  artifact, yielding permits while that repair is pending. Repair is a separate
+  automatic cache-maintenance interest at normal priority, with a one-hour
+  deadline and one request cycle per target/hour. Cancelling a delivery does
+  not cancel that independently visible repair; the repair job can itself be
+  cancelled in Activity. This bounds background repair after transient demand.
+  Completed repair receipts no longer suppress later loss for seven days.

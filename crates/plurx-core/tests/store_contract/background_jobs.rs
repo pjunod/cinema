@@ -347,6 +347,82 @@ async fn background_jobs_one_fragment_build_keeps_remote_delivery_durable() {
             artifact,
             "hydration preserves the original builder: {backend}"
         );
+        // Losing a repaired copy in a later rate window must not be hidden
+        // behind the previous repair's seven-day receipt.
+        let mut prior_repair = None;
+        for now_ms in [2_000, 3_602_000] {
+            store
+                .forget_cluster_fragment_index_location(&cache_key, "node-a")
+                .await
+                .expect("lose local holder");
+            let replacement = plurx_core::store::NewClusterFragmentIndexJob {
+                cache_key: cache_key.clone(),
+                file_id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                source_sha256: artifact.source_sha256.clone(),
+                pipeline_sha256: artifact.pipeline_sha256.clone(),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                target_node_id: "node-a".into(),
+                not_before_ms: now_ms,
+                created_at_ms: now_ms,
+            };
+            let input = EnqueueFragmentJob {
+                job: replacement.clone(),
+                analysis_request: None,
+                repair: true,
+                now_ms,
+            };
+            let EnqueueOutcome::Accepted { job_id, .. } = store
+                .enqueue_fragment_job(input.clone())
+                .await
+                .expect("repair admission")
+            else {
+                panic!("{backend}: a new repair window was suppressed");
+            };
+            assert_ne!(prior_repair.as_ref(), Some(&job_id));
+            assert!(matches!(
+                store
+                    .enqueue_fragment_job(input)
+                    .await
+                    .expect("same window replay"),
+                EnqueueOutcome::Existing { .. }
+            ));
+            let ClaimOutcome::Claimed { job } = store
+                .claim_job(ClaimJob {
+                    job_id: job_id.clone(),
+                    expected_revision: 0,
+                    node_id: "node-a".into(),
+                    boot_id: uuid::Uuid::new_v4().to_string(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::FragmentIndexBuild,
+                    payload_version: 1,
+                    now_ms,
+                    dispatched_at_ms: now_ms,
+                })
+                .await
+                .expect("repair claim")
+            else {
+                panic!("{backend}: repair was not claimable");
+            };
+            assert!(matches!(
+                store
+                    .publish_fragment_job(PublishFragmentJob {
+                        token: job.token.expect("repair token"),
+                        artifact: artifact.clone(),
+                        now_ms: now_ms + 1,
+                    })
+                    .await
+                    .expect("repair publication"),
+                JobPublishOutcome::Published { .. }
+            ));
+            assert!(!store
+                .requeue_cluster_fragment_index(&replacement)
+                .await
+                .expect("completed receipt is not pending work"));
+            prior_repair = Some(job_id);
+        }
     })
     .await;
 }

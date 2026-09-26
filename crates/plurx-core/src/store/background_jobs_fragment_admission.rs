@@ -87,7 +87,14 @@ pub(super) fn prepare(input: &EnqueueFragmentJob) -> Result<(EnqueueJob, String)
                 if input.repair { "repair" } else { "automatic" },
                 job.target_node_id
             ),
-            job.cache_key.clone(),
+            if input.repair {
+                // A successful repair receipt must not suppress a later loss
+                // of the same immutable bytes for the full receipt lifetime.
+                // One automatic repair cycle per target/hour bounds churn.
+                format!("{}:{}", job.cache_key, input.now_ms / 3_600_000)
+            } else {
+                job.cache_key.clone()
+            },
             false,
         ),
     };
@@ -95,10 +102,14 @@ pub(super) fn prepare(input: &EnqueueFragmentJob) -> Result<(EnqueueJob, String)
         id: uuid::Uuid::new_v4().to_string(),
         payload,
         dedupe_key: format!("fragment:{}", job.cache_key),
-        priority: match job.priority.as_str() {
-            "foreground" => 3,
-            "forced" => 2,
-            _ => 1,
+        priority: if input.repair {
+            1
+        } else {
+            match job.priority.as_str() {
+                "foreground" => 3,
+                "forced" => 2,
+                _ => 1,
+            }
         },
         not_before_ms: job.not_before_ms.max(input.now_ms),
         now_ms: input.now_ms,
@@ -106,11 +117,18 @@ pub(super) fn prepare(input: &EnqueueFragmentJob) -> Result<(EnqueueJob, String)
             scope,
             request_id: request_id.clone(),
             request_digest,
-            consumer_kind: "fragment_analysis".into(),
+            consumer_kind: if input.repair {
+                "artifact_repair"
+            } else {
+                "fragment_analysis"
+            }
+            .into(),
             consumer_ref: request_id,
             target_node_id: (!job.target_node_id.is_empty()).then(|| job.target_node_id.clone()),
             deadline_ms: if retain_identity {
                 None
+            } else if input.repair {
+                Some(input.now_ms.saturating_add(3_600_000))
             } else {
                 Some(input.now_ms.saturating_add(86_400_000))
             },

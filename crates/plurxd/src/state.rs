@@ -9352,6 +9352,71 @@ impl JobManager {
         }
         if !job.target_node_id.is_empty() {
             let now = clock_ms();
+            // Hydration never silently becomes another full-file build on
+            // the receiving node. A source-readable worker owns one canonical
+            // repair, while this delivery yields its local/global permits.
+            if published.is_some() {
+                use plurx_core::store::background_jobs::{
+                    EnqueueFragmentJob, EnqueueOutcome, JobState,
+                };
+                let repair = self
+                    .store
+                    .enqueue_fragment_job(EnqueueFragmentJob {
+                        job: plurx_core::store::NewClusterFragmentIndexJob {
+                            cache_key: job.cache_key.clone(),
+                            file_id: job.file_id,
+                            source_size: job.source_size,
+                            source_mtime: job.source_mtime,
+                            source_sha256: job.source_sha256.clone(),
+                            pipeline_sha256: job.pipeline_sha256.clone(),
+                            priority: job.priority.clone(),
+                            trigger: "background".into(),
+                            target_node_id: String::new(),
+                            not_before_ms: now,
+                            created_at_ms: now,
+                        },
+                        analysis_request: None,
+                        repair: true,
+                        now_ms: now,
+                    })
+                    .await;
+                let waiting = match repair {
+                    Ok(
+                        EnqueueOutcome::Accepted { .. }
+                        | EnqueueOutcome::QueueFull
+                        | EnqueueOutcome::JobCancelling { .. },
+                    ) => true,
+                    Ok(EnqueueOutcome::Existing {
+                        job_id,
+                        cancelled: false,
+                        ..
+                    }) => self
+                        .store
+                        .background_job(&job_id)
+                        .await
+                        .map(|row| {
+                            row.is_some_and(|job| {
+                                matches!(job.state, JobState::Queued | JobState::Running)
+                            })
+                        })
+                        .unwrap_or(true),
+                    Err(error) => {
+                        tracing::debug!(%error, "fragment repair admission unavailable");
+                        true
+                    }
+                    _ => false,
+                };
+                if waiting {
+                    self.yield_fragment_index_job(
+                        &fence,
+                        &job,
+                        "awaiting_artifact_repair",
+                        now.saturating_add(30_000),
+                    )
+                    .await;
+                    return false;
+                }
+            }
             self.fail_fragment_index_job(
                 &fence,
                 &job,
