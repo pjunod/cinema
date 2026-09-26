@@ -1,5 +1,7 @@
 //! App-managed offline package API and scoped HLS capability routes.
 
+#[cfg(test)]
+use crate::queue_fixture::QueueFixture;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -2031,7 +2033,7 @@ mod tests {
         assert!(fixture
             .state
             .store
-            .enqueue_pretranscode_job(
+            .fixture_enqueue_pretranscode_job(
                 &NewPretranscodeJob {
                     id: job_id.clone(),
                     dedupe_key: format!("offline-manifest-adoption:{}", package.id),
@@ -2056,7 +2058,7 @@ mod tests {
         let claimed = fixture
             .state
             .store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 "test-node",
                 &PretranscodeWorkerCapabilities {
                     version: PretranscodeRequirements::VERSION,
@@ -2079,7 +2081,7 @@ mod tests {
         assert!(fixture
             .state
             .store
-            .complete_pretranscode_job(
+            .fixture_complete_pretranscode_job(
                 &claimed,
                 recipe,
                 7,
@@ -2944,7 +2946,7 @@ mod tests {
     #[tokio::test]
     async fn offline_reuse_rejects_corrupt_fenced_bytes_and_settles_the_ready_package() {
         let fixture = fixture().await;
-        let package = ready_package(&fixture, "fenced-corrupt", "none", None).await;
+        let package = ready_package(&fixture, &"c".repeat(64), "none", None).await;
         fence_ready_package_manifest(&fixture, &package).await;
         let token = "f".repeat(64);
         assert_eq!(

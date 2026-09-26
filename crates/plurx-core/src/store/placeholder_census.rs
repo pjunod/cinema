@@ -32,6 +32,10 @@ use super::hiqlite::validate_sql;
 /// fails if a new `hiqlite*.rs` appears without being added here.
 pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
     ("hiqlite.rs", include_str!("hiqlite.rs")),
+    (
+        "hiqlite_background_jobs.rs",
+        include_str!("hiqlite_background_jobs.rs"),
+    ),
     ("hiqlite_catalog.rs", include_str!("hiqlite_catalog.rs")),
     (
         "hiqlite_classification.rs",
@@ -84,6 +88,10 @@ pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
 /// makes adding a module without adding its SQL to the census impossible.
 const SQLITE_SOURCES: &[(&str, &str)] = &[
     ("apikeys.rs", include_str!("sqlite/apikeys.rs")),
+    (
+        "background_jobs.rs",
+        include_str!("sqlite/background_jobs.rs"),
+    ),
     ("cache.rs", include_str!("sqlite/cache.rs")),
     (
         "classification.rs",
@@ -872,7 +880,9 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // `?1`-`?3` site with it, as `recently_added` did. `list_top_items_in_genre`'s
 // count and page moved into `library_page_statements` in the same file and
 // bind exactly as before, so their sites are unchanged.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 96;
+// Common queue execution removes three legacy prepared/bound SQL sites.
+// The new bridge uses one JSON argument rather than per-field binding lists.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 93;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {

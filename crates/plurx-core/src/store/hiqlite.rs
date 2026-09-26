@@ -114,7 +114,9 @@ const SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE: i64 = FILE_GRANTS_SCHEMA_VERSION;
 /// K-05 M5: the catalogue read indexes (`sql_source::ITEM_READ_INDEXES`).
 const ITEM_READ_INDEXES_SCHEMA_VERSION: i64 = 48;
 const ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE: i64 = SUBTITLE_SOURCE_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = ITEM_READ_INDEXES_SCHEMA_VERSION;
+const BACKGROUND_JOBS_SCHEMA_VERSION: i64 = 49;
+const BACKGROUND_JOBS_SCHEMA_MIGRATION_SOURCE: i64 = ITEM_READ_INDEXES_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = BACKGROUND_JOBS_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -1541,6 +1543,7 @@ impl HiqliteAuthStore {
         super::hiqlite_shared_cache::install_schema(&client).await?;
         super::hiqlite_timeline_annotations::install_schema(&client).await?;
         super::hiqlite_fragment_index_cluster::install_schema(&client).await?;
+        super::hiqlite_background_jobs::install_schema(&client).await?;
         super::hiqlite_library_channels::install_schema(&client).await?;
         super::hiqlite_dvr::install_schema(&client).await?;
         client
@@ -2754,6 +2757,21 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(BACKGROUND_JOBS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(BACKGROUND_JOBS_SCHEMA_VERSION, now, BACKGROUND_JOBS_SCHEMA_MIGRATION_SOURCE),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(BACKGROUND_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -2940,6 +2958,20 @@ impl HiqliteAuthStore {
     pub async fn validation_reset_contract_state(&self) -> Result<(), StoreError> {
         self.telemetry.clear().await?;
         let statements = vec![
+            ("DELETE FROM background_job_commands".to_owned(), params!()),
+            ("DELETE FROM background_job_legacy".to_owned(), params!()),
+            ("DELETE FROM background_job_migration".to_owned(), params!()),
+            (
+                "DELETE FROM background_fragment_targets".to_owned(),
+                params!(),
+            ),
+            ("DELETE FROM background_job_waiters".to_owned(), params!()),
+            (
+                "DELETE FROM background_job_reservations".to_owned(),
+                params!(),
+            ),
+            ("DELETE FROM background_job_attempts".to_owned(), params!()),
+            ("DELETE FROM background_jobs".to_owned(), params!()),
             (
                 "DELETE FROM analysis_lifecycle_counters".to_owned(),
                 params!(),
@@ -3681,7 +3713,15 @@ impl MetricsStore for HiqliteAuthStore {
                       WHERE state = 'running' \
                         AND COALESCE(lease_expires_ms, 0) < $2 * 1000) AS analysis_running_past_lease, \
                     (SELECT COALESCE(MAX(updated_at_ms), 0) FROM cluster_fragment_index_jobs \
-                      WHERE state = 'ready') AS analysis_last_ready_at_ms \
+                      WHERE state = 'ready') AS analysis_last_ready_at_ms, \
+                    (SELECT json_object('jobs', json((SELECT COALESCE(json_group_array(json_object( \
+                        'kind', grouped.kind, 'state', grouped.state, 'count', grouped.count, \
+                        'oldest_age_ms', MAX(0, $2 * 1000 - grouped.created))), '[]') \
+                        FROM (SELECT kind, state, COUNT(*) AS count, MIN(created_at_ms) AS created \
+                            FROM background_jobs GROUP BY kind, state LIMIT 128) grouped)), \
+                        'source_io_reservations', (SELECT COUNT(*) FROM background_job_reservations \
+                            WHERE resource_key = 'source_io' AND expires_at_ms > $2 * 1000), \
+                        'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))) AS background_jobs_json \
                  FROM offline_packages WHERE node_id = $1",
                 params!(node_id, now),
             )
@@ -3689,7 +3729,7 @@ impl MetricsStore for HiqliteAuthStore {
             .into_iter()
             .next()
             .ok_or_else(|| StoreError::Database("Prometheus snapshot returned no row".to_owned()))?;
-        Ok(row.into())
+        row.try_into()
     }
 }
 
@@ -4714,7 +4754,8 @@ fn schema_migration_action(
         | DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE
         | FILE_GRANTS_SCHEMA_MIGRATION_SOURCE
         | SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE
-        | ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE => {
+        | ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE
+        | BACKGROUND_JOBS_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -4837,6 +4878,7 @@ struct PrometheusStoreRow {
     analysis_claimable: i64,
     analysis_running_past_lease: i64,
     analysis_last_ready_at_ms: i64,
+    background_jobs_json: String,
 }
 
 impl From<&mut Row<'_>> for PrometheusStoreRow {
@@ -4866,13 +4908,18 @@ impl From<&mut Row<'_>> for PrometheusStoreRow {
             analysis_claimable: row.get("analysis_claimable"),
             analysis_running_past_lease: row.get("analysis_running_past_lease"),
             analysis_last_ready_at_ms: row.get("analysis_last_ready_at_ms"),
+            background_jobs_json: row.get("background_jobs_json"),
         }
     }
 }
 
-impl From<PrometheusStoreRow> for PrometheusStoreSnapshot {
-    fn from(row: PrometheusStoreRow) -> Self {
-        Self {
+impl TryFrom<PrometheusStoreRow> for PrometheusStoreSnapshot {
+    type Error = StoreError;
+    fn try_from(row: PrometheusStoreRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            background_jobs: super::background_jobs_observation::background_job_metrics(
+                &row.background_jobs_json,
+            )?,
             libraries: row.libraries,
             users: row.users,
             offline: OfflinePackageStats {
@@ -4901,7 +4948,7 @@ impl From<PrometheusStoreRow> for PrometheusStoreSnapshot {
                     last_ready_at_ms: row.analysis_last_ready_at_ms,
                 },
             ),
-        }
+        })
     }
 }
 
@@ -6735,9 +6782,9 @@ mod tests {
             "v47 must advance exactly one step to the read-index schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 43,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 44,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v48 step"
+            "this implementation contains every additive v5→v49 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

@@ -5263,6 +5263,31 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
         offline.active_leases,
         offline.pinned_bytes,
     ));
+    use plurx_core::store::background_jobs::{JOB_METRIC_KINDS, JOB_METRIC_STATES};
+    out.push_str("# HELP plurx_background_jobs Retained durable computations by kind and state.\n\
+        # TYPE plurx_background_jobs gauge\n\
+        # HELP plurx_background_job_oldest_age_seconds Age of the oldest retained computation in each class.\n\
+        # TYPE plurx_background_job_oldest_age_seconds gauge\n");
+    for (kind_index, kind) in JOB_METRIC_KINDS.iter().enumerate() {
+        for (state_index, state) in JOB_METRIC_STATES.iter().enumerate() {
+            let slot = kind_index * JOB_METRIC_STATES.len() + state_index;
+            out.push_str(&format!(
+                "plurx_background_jobs{{kind=\"{kind}\",state=\"{state}\"}} {}\n\
+                 plurx_background_job_oldest_age_seconds{{kind=\"{kind}\",state=\"{state}\"}} {}\n",
+                sample.background_jobs.counts[slot],
+                sample.background_jobs.oldest_age_seconds[slot]
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "# HELP plurx_background_resource_reservations Unexpired shared admission reservations.\n\
+         # TYPE plurx_background_resource_reservations gauge\n\
+         plurx_background_resource_reservations{{resource_class=\"source_io\"}} {}\n\
+         # HELP plurx_background_legacy_pending Sealed legacy interests awaiting bounded import.\n\
+         # TYPE plurx_background_legacy_pending gauge\n\
+         plurx_background_legacy_pending {}\n",
+        sample.background_jobs.source_io_reservations, sample.background_jobs.legacy_pending,
+    ));
     let analysis = sample.analysis;
     out.push_str(
         "# HELP plurx_analysis_queue_depth Durable analysis jobs by state, component, priority, and trigger.\n\
@@ -5422,7 +5447,7 @@ pub(crate) async fn metrics(
         super::prometheus_http_request_metrics(),
         crate::panics::prometheus_panics(),
         crate::state::fragment_index_validation_prometheus(),
-        crate::subtitle_source::prometheus(),
+        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
     let live_tv_metrics = state.live_tv.prometheus() + &state.live_tv_peers.prometheus();
@@ -6000,6 +6025,11 @@ mod tests {
         });
         assert!(stale.contains("plurx_store_metrics_sample_valid 0"));
         assert!(stale.contains("plurx_store_metrics_sample_age_seconds 121"));
+        assert!(
+            stale.contains("plurx_background_jobs{kind=\"transcode_prepare\",state=\"queued\"} 0")
+        );
+        assert!(stale
+            .contains("plurx_background_resource_reservations{resource_class=\"source_io\"} 0"));
         assert!(stale.contains("plurx_libraries_total 3"));
         assert!(stale.contains("plurx_users_total 4"));
         // The whole verdict family is absent, not zero, until a sample lands.
