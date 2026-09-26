@@ -207,13 +207,131 @@ impl AttemptChildHooks for NoopAttemptChildHooks {
     }
 }
 
+/// How long either side of a [`SupervisorPause`] waits for the other before
+/// giving up. Every race test meets its pause within milliseconds; the bound
+/// only decides how long a broken one takes to report.
+#[cfg(test)]
+const SUPERVISOR_PAUSE_BOUND: Duration = Duration::from_secs(10);
+
+/// A synchronous rendezvous between a race test and a supervisor held at one
+/// of the fence points, where the transition fence is held and there is no
+/// await point to park on.
+///
+/// The supervisor blocks a runtime worker thread here, which a runtime drop
+/// cannot cancel, so both sides are bounded: a test that fails an assertion
+/// while the supervisor is held must report that assertion rather than leave
+/// the binary waiting forever on a thread nobody will release (PR #556
+/// review). The test side releases through a [`SupervisorPauseHeld`] guard,
+/// whose drop also runs while the test unwinds; the supervisor side lets
+/// itself go after [`SUPERVISOR_PAUSE_BOUND`] in case the test never arrives.
+#[cfg(test)]
+pub(super) struct SupervisorPause {
+    point: &'static str,
+    bound: Duration,
+    state: std::sync::Mutex<SupervisorPauseState>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct SupervisorPauseState {
+    reached: bool,
+    released: bool,
+}
+
+/// The test's hold on a supervisor that reached its [`SupervisorPause`]. The
+/// supervisor stays paused until this is released or dropped.
+#[cfg(test)]
+#[must_use = "dropping the hold releases the supervisor at once"]
+pub(super) struct SupervisorPauseHeld<'a>(&'a SupervisorPause);
+
+#[cfg(test)]
+impl SupervisorPause {
+    pub(super) fn new(point: &'static str) -> Arc<Self> {
+        Self::with_bound(point, SUPERVISOR_PAUSE_BOUND)
+    }
+
+    pub(super) fn with_bound(point: &'static str, bound: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            point,
+            bound,
+            state: std::sync::Mutex::new(SupervisorPauseState::default()),
+            changed: std::sync::Condvar::new(),
+        })
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, SupervisorPauseState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The supervisor's side: announce the point, then wait to be released.
+    /// Returns whether the test released it, as opposed to the bound running
+    /// out.
+    pub(super) fn hold(&self) -> bool {
+        let mut state = self.state();
+        state.reached = true;
+        self.changed.notify_all();
+        let (state, wait) = self
+            .changed
+            .wait_timeout_while(state, self.bound, |state| !state.released)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if wait.timed_out() {
+            eprintln!(
+                "attempt-child supervisor left the {} pause after {:?}: the test never released it",
+                self.point, self.bound
+            );
+        }
+        state.released
+    }
+
+    /// The test's side: wait until the supervisor holds this pause, and hold
+    /// it there until the returned guard is released or dropped. Panics, so
+    /// the test fails with the point's name, when the supervisor does not
+    /// arrive within the bound.
+    pub(super) fn wait_reached(&self) -> SupervisorPauseHeld<'_> {
+        let state = self.state();
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, self.bound, |state| !state.reached)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let reached = state.reached;
+        drop(state);
+        assert!(
+            reached,
+            "the attempt-child supervisor did not reach the {} pause within {:?}",
+            self.point, self.bound
+        );
+        SupervisorPauseHeld(self)
+    }
+
+    fn release(&self) {
+        self.state().released = true;
+        self.changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+impl SupervisorPauseHeld<'_> {
+    /// Let the held supervisor continue.
+    pub(super) fn release(self) {}
+}
+
+#[cfg(test)]
+impl Drop for SupervisorPauseHeld<'_> {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
 /// The pauses the attempt-child race tests install: each point takes its slot
 /// once, so only the first supervisor to reach it meets the test.
 #[cfg(test)]
 #[derive(Default)]
 pub(super) struct AttemptChildPauses {
-    signal_after_authorization: std::sync::Mutex<Option<Arc<std::sync::Barrier>>>,
-    signal_after_flow_reservation: std::sync::Mutex<Option<Arc<std::sync::Barrier>>>,
+    signal_after_authorization: std::sync::Mutex<Option<Arc<SupervisorPause>>>,
+    signal_after_flow_reservation: std::sync::Mutex<Option<Arc<SupervisorPause>>>,
     terminate_before_reap: std::sync::Mutex<Option<Arc<LifecycleTestPause>>>,
 }
 
@@ -236,15 +354,13 @@ impl AttemptChildPauses {
 impl AttemptChildHooks for AttemptChildPauses {
     fn after_signal_authorization(&self) {
         if let Some(pause) = Self::take(&self.signal_after_authorization) {
-            pause.wait();
-            pause.wait();
+            pause.hold();
         }
     }
 
     fn after_flow_reservation(&self) {
         if let Some(pause) = Self::take(&self.signal_after_flow_reservation) {
-            pause.wait();
-            pause.wait();
+            pause.hold();
         }
     }
 
@@ -626,12 +742,12 @@ impl AttemptChild {
     }
 
     #[cfg(test)]
-    pub(super) fn pause_signal_after_authorization(&self, pause: Arc<std::sync::Barrier>) {
+    pub(super) fn pause_signal_after_authorization(&self, pause: Arc<SupervisorPause>) {
         AttemptChildPauses::install(&self.pauses().signal_after_authorization, pause);
     }
 
     #[cfg(test)]
-    pub(super) fn pause_signal_after_flow_reservation(&self, pause: Arc<std::sync::Barrier>) {
+    pub(super) fn pause_signal_after_flow_reservation(&self, pause: Arc<SupervisorPause>) {
         AttemptChildPauses::install(&self.pauses().signal_after_flow_reservation, pause);
     }
 

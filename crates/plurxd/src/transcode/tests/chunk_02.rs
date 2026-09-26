@@ -2139,7 +2139,7 @@
             control.clone(),
             None,
         ));
-        let pause = Arc::new(std::sync::Barrier::new(2));
+        let pause = SupervisorPause::new("after-flow-reservation");
         child.pause_signal_after_flow_reservation(Arc::clone(&pause));
         let signal = {
             let child = Arc::clone(&child);
@@ -2150,7 +2150,10 @@
             })
         };
 
-        pause.wait();
+        // Held until released below, or until this test unwinds: a failed
+        // assertion here must report itself, not leave the supervisor
+        // blocking a worker thread the runtime cannot drop.
+        let held = pause.wait_reached();
         assert!(
             control.producer_transition_guard_is_held_for_test(),
             "the reserved signal owns the transition fence before its syscall"
@@ -2161,7 +2164,7 @@
             !control.is_retired(),
             "actor-exit retirement waits behind the already-authorized signal"
         );
-        pause.wait();
+        held.release();
         assert!(signal
             .await
             .expect("reserved signal task")
@@ -2202,7 +2205,7 @@
             control.clone(),
             None,
         ));
-        let pause = Arc::new(std::sync::Barrier::new(2));
+        let pause = SupervisorPause::new("after-signal-authorization");
         child.pause_signal_after_authorization(Arc::clone(&pause));
         let signal = {
             let child = Arc::clone(&child);
@@ -2214,8 +2217,9 @@
         };
 
         // The supervisor has authorized the exact attempt and still owns the
-        // transition guard immediately before the syscall.
-        pause.wait();
+        // transition guard immediately before the syscall. It stays held
+        // until released below, or until this test unwinds.
+        let held = pause.wait_reached();
         assert!(
             control.producer_transition_guard_is_held_for_test(),
             "the paused supervisor must own the transition guard"
@@ -2237,7 +2241,7 @@
             observed.recv_timeout(Duration::from_millis(50)).is_err(),
             "retirement cannot linearize between authorization and signal"
         );
-        pause.wait();
+        held.release();
         assert!(signal
             .await
             .expect("signal task")
@@ -2272,6 +2276,75 @@
 
         let mut child = Arc::try_unwrap(child).unwrap_or_else(|_| panic!("sole child owner"));
         child.kill().await.expect("reap stopped child");
+    }
+
+    /// The two fence-point race tests above hold the supervisor on a runtime
+    /// worker thread. When one of their assertions fails while it is held,
+    /// the unwinding test must let the supervisor go at once, so the runtime
+    /// can drop and the harness reports the assertion (PR #556 review: with
+    /// an unbounded barrier the binary waited forever instead). The bound is
+    /// far longer than the check, so only the guard's drop can pass it.
+    #[test]
+    fn supervisor_pause_releases_its_supervisor_when_the_test_unwinds() {
+        let pause = SupervisorPause::with_bound("unwind", Duration::from_secs(30));
+        let supervisor = {
+            let pause = Arc::clone(&pause);
+            std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                (pause.hold(), started.elapsed())
+            })
+        };
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = pause.wait_reached();
+            panic!("a race-test assertion failed while the supervisor was held");
+        }));
+        assert!(unwound.is_err(), "the held test body panicked");
+        let (released_by_test, held_for) = supervisor.join().expect("supervisor thread");
+        assert!(
+            released_by_test,
+            "the unwinding test released the supervisor; it did not wait out the bound"
+        );
+        assert!(
+            held_for < Duration::from_secs(5),
+            "the supervisor was released promptly, not after {held_for:?}"
+        );
+    }
+
+    /// A supervisor that never reaches its pause fails the test by name
+    /// within the bound, rather than leaving it waiting.
+    #[test]
+    fn supervisor_pause_names_a_point_the_supervisor_never_reaches() {
+        let pause = SupervisorPause::with_bound("never-reached", Duration::from_millis(100));
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = pause.wait_reached();
+        }));
+        let message = unwound.expect_err("an absent supervisor fails the wait");
+        let message = message
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| message.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        assert!(
+            message.contains("never-reached"),
+            "the failure names the pause point: {message}"
+        );
+    }
+
+    /// A supervisor whose test never arrives lets itself go after the bound,
+    /// so a test that failed before reaching its pause cannot wedge the
+    /// runtime either.
+    #[test]
+    fn supervisor_pause_lets_the_supervisor_go_when_the_test_never_arrives() {
+        let pause = SupervisorPause::with_bound("absent-test", Duration::from_millis(100));
+        let started = std::time::Instant::now();
+        assert!(
+            !pause.hold(),
+            "the bound, not a test, released the supervisor"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the supervisor left within its bound"
+        );
     }
 
     /// M8's shipped-shape test for the attempt child: the production
