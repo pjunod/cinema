@@ -8120,7 +8120,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             .expect("contract clock after epoch")
             .as_millis()
             .min(i64::MAX as u128) as i64;
-        let queue_time = |tick: i64| queue_clock.saturating_add(tick.saturating_mul(1_000));
+        let queue_time = |tick: i64| queue_clock.saturating_add(tick.saturating_mul(100));
         let first_candidate_lease = acquired(
             store
                 .acquire_lease(
@@ -8249,16 +8249,14 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 queue_time(500)
             ),
         );
-        let claimed = [
+        let mut claimed = [
             ("node-a", claim_a),
             ("node-b", claim_b),
             ("node-c", claim_c),
         ]
         .into_iter()
-        .map(|(node, result)| {
-            result
-                .unwrap_or_else(|error| panic!("{backend}: claim for {node}: {error}"))
-                .unwrap_or_else(|| panic!("{backend}: no job for {node}"))
+        .filter_map(|(node, result)| {
+            result.unwrap_or_else(|error| panic!("{backend}: claim for {node}: {error}"))
         })
         .collect::<Vec<_>>();
         assert_eq!(
@@ -8267,8 +8265,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 .map(|job| job.id.as_str())
                 .collect::<BTreeSet<_>>()
                 .len(),
-            3,
-            "{backend}: workers must claim distinct rows"
+            2,
+            "{backend}: distinct claims must respect the two shared source-I/O slots"
         );
         for job in &claimed {
             let staging = store
@@ -8282,7 +8280,10 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         }
         assert!(
             store
-                .cache_hit("contract-recipe-a", "node-a")
+                .cache_hit(
+                    "359cf2152e3ccdf96d41a0e108bdcf728469888ed79b7de4075a65b180a8568f",
+                    "node-a"
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: pre-publication cache lookup: {error}"))
                 .is_none(),
@@ -8297,7 +8298,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         assert!(store
             .fixture_complete_pretranscode_job(
                 &claimed[1],
-                "contract-recipe-b",
+                "e881e043708591eb06d15977455356b7f060fbc35b1f988ec4f816753fb635a2",
                 1,
                 "contract/pretranscode/b",
                 4_096,
@@ -8311,7 +8312,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             !store
                 .fixture_complete_pretranscode_job(
                     &claimed[1],
-                    "contract-recipe-b",
+                    "e881e043708591eb06d15977455356b7f060fbc35b1f988ec4f816753fb635a2",
                     1,
                     "contract/pretranscode/b",
                     4_096,
@@ -8322,6 +8323,27 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: replay completion: {error}")),
             "{backend}: a terminal queue token replayed successfully"
+        );
+        claimed.push(
+            store
+                .fixture_claim_pretranscode_job(
+                    "node-third",
+                    &capable,
+                    &[],
+                    queue_time(262),
+                    queue_time(562),
+                )
+                .await
+                .expect("claim after one producer completes")
+                .expect("released source-I/O slot"),
+        );
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|job| &job.id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            3
         );
         assert_eq!(
             store
@@ -8335,7 +8357,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             !store
                 .fixture_complete_pretranscode_job(
                     &claimed[2],
-                    "contract-recipe-c",
+                    "f26b73dec7d37c4bd8099a2db575c5a0991a9e3557d9680d62146d1bfc144179",
                     1,
                     "contract/pretranscode/c",
                     4_096,
@@ -8381,7 +8403,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             !store
                 .fixture_complete_pretranscode_job(
                     &renewed_a,
-                    "contract-recipe-a",
+                    "359cf2152e3ccdf96d41a0e108bdcf728469888ed79b7de4075a65b180a8568f",
                     1,
                     "contract/pretranscode/stale-a",
                     8_192,
@@ -8395,7 +8417,10 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
         assert!(
             store
-                .cache_hit("contract-recipe-a", "node-a")
+                .cache_hit(
+                    "359cf2152e3ccdf96d41a0e108bdcf728469888ed79b7de4075a65b180a8568f",
+                    "node-a"
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: stale cache lookup: {error}"))
                 .is_none(),
@@ -8405,7 +8430,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             store
                 .fixture_complete_pretranscode_job(
                     &successor,
-                    "contract-recipe-a",
+                    "359cf2152e3ccdf96d41a0e108bdcf728469888ed79b7de4075a65b180a8568f",
                     1,
                     "contract/pretranscode/d",
                     8_192,
@@ -8418,7 +8443,10 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             "{backend}: current worker could not publish"
         );
         let ready = store
-            .cache_hit("contract-recipe-a", "node-d")
+            .cache_hit(
+                "359cf2152e3ccdf96d41a0e108bdcf728469888ed79b7de4075a65b180a8568f",
+                "node-d",
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: atomic cache lookup: {error}"))
             .unwrap_or_else(|| panic!("{backend}: ready job has no cache location"));
@@ -8431,7 +8459,11 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
 
         store
-            .forget_cache_entry("contract-recipe-a", "node-d", "local")
+            .forget_cache_entry(
+                "359cf2152e3ccdf96d41a0e108bdcf728469888ed79b7de4075a65b180a8568f",
+                "node-d",
+                "local",
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: evict ready cache: {error}"));
         let retry = NewPretranscodeJob {
@@ -8595,7 +8627,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             "{backend}: claim did not preserve highest-compatible ordering across pages"
         );
 
-        let legacy_recipe = "contract-legacy-cache-reuse";
+        let legacy_recipe = "1bd16d960c43953936740e772bc422612303862b77966f2e0a884bc581064078";
         assert!(store
             .claim_cache_entry(
                 legacy_recipe,
@@ -8685,8 +8717,14 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         assert_eq!(compact_ready.state, "ready", "{backend}");
         assert!(compact_ready.owner_node_id.is_empty(), "{backend}");
         assert_eq!(compact_ready.lease_expires_ms, 0, "{backend}");
-        assert!(compact_ready.policy_generation.is_empty(), "{backend}");
-        assert_eq!(compact_ready.requirements_json, "{}", "{backend}");
+        assert_eq!(
+            compact_ready.policy_generation, "legacy-upgrade-v1",
+            "{backend}"
+        );
+        assert_eq!(
+            compact_ready.requirements_json, requirements,
+            "{backend}: terminal payload remains available for audited retry"
+        );
 
         let wrong_digest = "f".repeat(64);
         let wrong_check = CacheManifestCheck {
@@ -8768,7 +8806,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: invalidated cache lookup: {error}"))
             .is_none());
 
-        let conflicting_recipe = "contract-recipe-identity-collision";
+        let conflicting_recipe = "8492b189aab437a50afc38df0390ed3211702f18794b2fcfa9f7dbb0bc239823";
         assert!(store
             .claim_cache_entry(
                 conflicting_recipe,
@@ -9100,20 +9138,31 @@ async fn assert_distinct_pretranscode_claims_from_separate_handles(
             ),
             claim(Arc::clone(&stores[2]), format!("separate-c-{round}"), start),
         );
-        for result in [a, b, c] {
-            let id = result
-                .unwrap_or_else(|error| panic!("{backend}: separate claim: {error}"))
-                .unwrap_or_else(|| panic!("{backend}: separate claimant found no work"))
-                .id;
+        let claims = [a, b, c]
+            .into_iter()
+            .filter_map(|result| {
+                result.unwrap_or_else(|error| panic!("{backend}: separate claim: {error}"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            claims.len(),
+            2,
+            "{backend}: shared I/O cap across independent handles"
+        );
+        for job in claims {
             assert!(
-                ids.insert(id),
+                ids.insert(job.id.clone()),
                 "{backend}: separate clients duplicated a claim"
             );
+            assert!(seed
+                .fixture_cancel_pretranscode_job(&job, "fixture_done", 201 + round)
+                .await
+                .expect("release fixture source-I/O reservation"));
         }
     }
     assert_eq!(
         ids.len(),
-        (ROUNDS * 3) as usize,
+        (ROUNDS * 2) as usize,
         "{backend}: separate clients duplicated a claim"
     );
 }
@@ -9348,13 +9397,13 @@ async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
     let fixtures = [
         (
             "00000000-0000-4000-8000-000000000501",
-            "manifest-cursor-a",
+            "57df5e2c8acdaaf2af123892af4313ae46f5def616aa10db950abb9176f2d32f",
             "ma/manifest-cursor-a",
             "a".repeat(64),
         ),
         (
             "00000000-0000-4000-8000-000000000502",
-            "manifest-cursor-b",
+            "7371917bda373a76b04d82d9a7be032f925c7b8c1259d86e2b00493a8946e2ff",
             "mb/manifest-cursor-b",
             "b".repeat(64),
         ),
@@ -9909,7 +9958,7 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
     let replacement = publication_successor(&lease);
     assert!(store
         .claim_cache_entry_fenced(
-            "fenced-cache-clock-recipe",
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
             file_id,
             1,
             "clock-node",
@@ -9924,7 +9973,11 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
         .execute(
             "UPDATE transcode_cache_locations SET last_used_at = $1, last_seen_at = $1 \
              WHERE recipe_hash = $2 AND node_id = $3",
-            hiqlite::params!(9_000_i64, "fenced-cache-clock-recipe", "clock-node"),
+            hiqlite::params!(
+                9_000_i64,
+                "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
+                "clock-node"
+            ),
         )
         .await
         .expect("advance cache timestamps ahead of the store clock");
@@ -9932,7 +9985,7 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
     let replacement = publication_successor(&lease);
     assert!(store
         .claim_cache_entry_fenced(
-            "fenced-cache-clock-recipe",
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
             file_id,
             1,
             "clock-node",
@@ -9944,7 +9997,12 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
         .expect("repeat fenced cache claim after clock rollback"));
     lease = replacement;
     assert_eq!(
-        contract_cache_touch_times(&client, "fenced-cache-clock-recipe", "clock-node").await,
+        contract_cache_touch_times(
+            &client,
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
+            "clock-node"
+        )
+        .await,
         CacheTouchTimes {
             last_used_at: 9_000,
             last_seen_at: 9_000,
@@ -9955,7 +10013,7 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
     let replacement = publication_successor(&lease);
     store
         .touch_cache_claim_fenced(
-            "fenced-cache-clock-recipe",
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
             "clock-node",
             &lease,
             &replacement,
@@ -9966,7 +10024,7 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
     let replacement = publication_successor(&lease);
     store
         .complete_cache_entry_fenced(
-            "fenced-cache-clock-recipe",
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
             "clock-node",
             "fc/fenced-cache-clock-recipe",
             4_096,
@@ -9978,7 +10036,12 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
         .expect("complete fenced cache entry after clock rollback");
     lease = replacement;
     assert_eq!(
-        contract_cache_touch_times(&client, "fenced-cache-clock-recipe", "clock-node").await,
+        contract_cache_touch_times(
+            &client,
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
+            "clock-node"
+        )
+        .await,
         CacheTouchTimes {
             last_used_at: 9_000,
             last_seen_at: 9_000,
@@ -10031,7 +10094,7 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
     assert!(store
         .fixture_complete_pretranscode_job(
             &claimed,
-            "fenced-cache-clock-recipe",
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
             1,
             "fc/fenced-cache-clock-recipe",
             4_096,
@@ -10042,7 +10105,12 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
         .await
         .expect("complete fixed-clock pretranscode publication"));
     assert_eq!(
-        contract_cache_touch_times(&client, "fenced-cache-clock-recipe", "clock-node").await,
+        contract_cache_touch_times(
+            &client,
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
+            "clock-node"
+        )
+        .await,
         CacheTouchTimes {
             last_used_at: 9_000,
             last_seen_at: 9_000,
@@ -18138,13 +18206,13 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
             "backend {backend}: the owner's renewal must move the lease"
         );
         let renewed = read_lease_job(&store, &cache_key, &job.target_node_id, backend).await;
-        assert_eq!(renewed.lease_expires_ms, 2_020, "backend {backend}");
+        assert_eq!(renewed.lease_expires_ms, 30_020, "backend {backend}");
         assert_eq!(renewed.state, "running", "backend {backend}");
         assert_eq!(renewed.attempts, 1, "backend {backend}");
 
-        // The reorder must not have loosened any predicate: a stale fence, a
-        // different owner, a different target and an expired lease each still
-        // refuse.
+        // Delivery target is now an independent waiter identity. Stale
+        // execution fences, other owners and expired leases still refuse;
+        // full boot/claim/revision fencing is covered by the queue contracts.
         for (label, target, owner, fence, now) in [
             (
                 "stale fence",
@@ -18161,18 +18229,11 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
                 21,
             ),
             (
-                "other target",
-                "other-target",
-                claimed.owner_node_id.as_str(),
-                claimed.fence,
-                21,
-            ),
-            (
                 "expired lease",
                 claimed.target_node_id.as_str(),
                 claimed.owner_node_id.as_str(),
                 claimed.fence,
-                3_000,
+                30_021,
             ),
         ] {
             assert!(
@@ -18210,9 +18271,9 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
         assert_eq!(yielded.state, "queued", "backend {backend}");
         assert_eq!(yielded.attempts, 0, "backend {backend}");
         assert_eq!(yielded.owner_node_id, "", "backend {backend}");
-        assert_eq!(
-            yielded.last_error_code, "node_local_refusal",
-            "backend {backend}"
+        assert!(
+            yielded.last_error_code.is_empty(),
+            "{backend}: a yield does not invent a failure"
         );
         assert_eq!(yielded.not_before_ms, 40, "backend {backend}");
 

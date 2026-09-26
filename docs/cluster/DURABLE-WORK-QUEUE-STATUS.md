@@ -280,3 +280,11 @@ implementation is claimed; “compiled” does not mean tests passed.
   counters reset with the process and describe acknowledged events, so a lost
   reply may undercount; replicated job/attempt history remains authoritative.
   Histogram boundary contracts are written, not executed.
+
+- 2026-09-26: porting prior domain regressions to the common queue: concurrent
+  independent handles now assert two shared source-I/O slots and release them
+  between rounds; transcode clocks stay within 30-second leases before takeover;
+  cache publication fixtures use digest identities. Terminal payload assertions
+  preserve audited-retry inputs. Fragment renewal checks retain owner/fence/
+  expiry coverage while treating delivery target as an independent interest.
+  These are source updates, not a claim that the regressions have passed.

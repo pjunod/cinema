@@ -43,12 +43,26 @@ pub(crate) trait QueueFixture: Store {
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<bool, StoreError> {
-        let request = plurx_core::store::background_jobs_pretranscode::enqueue_request(job)?;
-        Ok(matches!(
-            self.enqueue_job_fenced(request, lease.clone(), replacement.clone())
-                .await?,
-            EnqueueOutcome::Accepted { .. }
-        ))
+        let mut request = plurx_core::store::background_jobs_pretranscode::enqueue_request(job)?;
+        // These domain fixtures often use synthetic claim clocks. Producer
+        // publication itself uses wall time, so its demand must remain live.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| StoreError::Task(error.to_string()))?
+            .as_millis() as i64;
+        request.request.deadline_ms = Some(now.saturating_add(86_400_000));
+        match self
+            .enqueue_job_fenced(request, lease.clone(), replacement.clone())
+            .await?
+        {
+            EnqueueOutcome::Accepted { .. } => Ok(true),
+            EnqueueOutcome::ProducerFenced => Err(StoreError::FenceRejected {
+                resource: lease.resource.clone(),
+                owner_node_id: lease.owner_node_id.clone(),
+                fence: lease.fence,
+            }),
+            _ => Ok(false),
+        }
     }
     async fn fixture_claim_pretranscode_job(
         &self,
@@ -58,6 +72,9 @@ pub(crate) trait QueueFixture: Store {
         now_ms: i64,
         _old_lease_expiry: i64,
     ) -> Result<Option<PretranscodeJob>, StoreError> {
+        if !caps.validate() {
+            return Err(StoreError::Task("invalid worker capabilities".into()));
+        }
         let mut after = None;
         loop {
             let page = self
