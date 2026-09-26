@@ -591,7 +591,15 @@ The core needs one conservative cluster-wide source-I/O domain, defaulting to
 two heavy background readers. Its reservation rows use the same claim/expiry
 transaction; there is no storage-domain configuration project in M1–M3.
 E0 adds a replicated storage-domain ID to library roots so aliases of one NAS
-share a limit, with the global domain as the unmapped fallback. It also adapts
+share a limit, with the global domain as the unmapped fallback. Developer
+settings accepts up to 256 named root mappings (64 KiB total). A job reserves
+all domains of its library conservatively, including file-specific jobs: this
+avoids interpreting platform-specific path prefixes inside the replicated SQL.
+Changing mappings requires an interval without live queue reservations so an
+active lease never changes resource identity underneath its worker. This
+configuration constraint does not gate any feature enable setting. Library
+jobs also reserve two shared slots per metadata provider; unused provider
+slots may therefore reduce concurrency for local-only libraries initially. It also adapts
 the existing provider rate policy into a global allowance rather than multiplying
 it by node count. Concurrency leases are not rate limits: E0 adds a bounded
 token/refill record when the provider needs a time-based quota. Provider/scanner

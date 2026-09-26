@@ -109,6 +109,7 @@ mod background_jobs_observation;
 mod background_jobs_offline;
 pub mod background_jobs_pretranscode;
 mod background_jobs_publication;
+pub mod background_jobs_resources;
 #[cfg(test)]
 mod background_jobs_tests;
 pub mod classification_schedule;

@@ -287,9 +287,10 @@ WHERE id = json_extract($1, '$.job_id')
   AND fence < 9223372036854775807 AND revision < 9223372036854775807
   AND NOT EXISTS (SELECT 1 FROM background_job_attempts WHERE claim_id = json_extract($1, '$.claim_id'))
   AND (SELECT COUNT(*) FROM background_job_attempts) < 40000
-  AND (SELECT COUNT(*) FROM background_job_reservations
-    WHERE resource_key = 'source_io' AND expires_at_ms > json_extract($1, '$.now_ms')
-      AND job_id != json_extract($1, '$.job_id')) < 2
+  AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
+    WHERE required.job_id = background_jobs.id AND (SELECT COUNT(*) FROM background_job_reservations held
+      WHERE held.resource_key = required.resource_key AND held.expires_at_ms > json_extract($1, '$.now_ms')
+        AND held.job_id != json_extract($1, '$.job_id')) >= 2)
 "#;
 
 const RENEW_SQL: &str = r#"
@@ -918,6 +919,14 @@ pub struct CancelWaiterOutcome {
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    async fn storage_domains(
+        &self,
+    ) -> Result<Vec<super::background_jobs_resources::StorageDomainMapping>, StoreError>;
+    async fn replace_storage_domains(
+        &self,
+        mappings: Vec<super::background_jobs_resources::StorageDomainMapping>,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
     async fn enqueue_library_work(
         &self,
         request: NewLibraryWork,
@@ -1042,6 +1051,18 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn storage_domains(
+        &self,
+    ) -> Result<Vec<super::background_jobs_resources::StorageDomainMapping>, StoreError> {
+        super::background_jobs_resources::list(self).await
+    }
+    async fn replace_storage_domains(
+        &self,
+        mappings: Vec<super::background_jobs_resources::StorageDomainMapping>,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::replace(self, mappings, now_ms).await
+    }
     async fn enqueue_library_work(
         &self,
         request: NewLibraryWork,

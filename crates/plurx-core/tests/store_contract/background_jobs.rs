@@ -1470,3 +1470,265 @@ async fn background_library_accepted_intent_survives_database_reopen() {
         EnqueueOutcome::Existing { .. }
     ));
 }
+
+#[tokio::test]
+async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
+    use plurx_core::store::background_jobs_resources::StorageDomainMapping;
+    for_each_backend(|store, backend| async move {
+        let mut files = Vec::new();
+        let mut mappings = Vec::new();
+        for (index, domain) in ["nas", "nas", "nas", "other"].into_iter().enumerate() {
+            let prefix = format!("storage-domain-{index}");
+            let (_, file_id) = seed_file(&store, &prefix).await;
+            let file = store.get_file(file_id).await.expect("file").expect("file");
+            let item = store
+                .get_item(file.item_id)
+                .await
+                .expect("item")
+                .expect("item");
+            mappings.push(StorageDomainMapping {
+                library_id: item.library_id,
+                root_path: format!("/{prefix}"),
+                domain_id: domain.into(),
+            });
+            files.push(file_id);
+        }
+        assert!(
+            store
+                .replace_storage_domains(mappings.clone(), 1_000)
+                .await
+                .expect("map"),
+            "{backend}"
+        );
+        assert_eq!(
+            store.storage_domains().await.expect("mappings"),
+            mappings,
+            "{backend}"
+        );
+        let mut claims = Vec::new();
+        for (index, file_id) in files.into_iter().enumerate() {
+            let id = uuid::Uuid::new_v4().to_string();
+            store
+                .enqueue_job(EnqueueJob {
+                    id: id.clone(),
+                    payload: JobPayload::MediaProbe {
+                        file_id,
+                        source_generation: "source:1".into(),
+                        probe_digest: "a".repeat(64),
+                    },
+                    dedupe_key: format!("storage-probe:{index}"),
+                    priority: 1,
+                    not_before_ms: 1_000,
+                    now_ms: 1_000,
+                    request: JobRequest {
+                        scope: "storage-test".into(),
+                        request_id: id.clone(),
+                        request_digest: "b".repeat(64),
+                        consumer_kind: "probe".into(),
+                        consumer_ref: id.clone(),
+                        target_node_id: None,
+                        deadline_ms: None,
+                        retain_identity: false,
+                    },
+                })
+                .await
+                .expect("enqueue");
+            let claim = ClaimJob {
+                job_id: id.clone(),
+                expected_revision: 0,
+                node_id: format!("node-{index}"),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::MediaProbe,
+                payload_version: 1,
+                now_ms: 1_000,
+                dispatched_at_ms: 1_000,
+            };
+            let outcome = store.claim_job(claim.clone()).await.expect("claim");
+            assert_eq!(
+                matches!(outcome, ClaimOutcome::Claimed { .. }),
+                index != 2,
+                "{backend}: alias {index}"
+            );
+            if index == 2 {
+                assert!(
+                    store.job_attempts(&id).await.expect("attempts").is_empty(),
+                    "{backend}: contention must not create an attempt"
+                );
+            }
+            claims.push(claim);
+        }
+        assert!(
+            !store
+                .replace_storage_domains(vec![], 1_001)
+                .await
+                .expect("busy remap"),
+            "{backend}"
+        );
+        assert_eq!(
+            store.storage_domains().await.expect("unchanged"),
+            mappings,
+            "{backend}"
+        );
+        let job = store
+            .background_job(&claims[0].job_id)
+            .await
+            .expect("job")
+            .expect("job");
+        store
+            .settle_job(SettleJob {
+                token: job.token.expect("token"),
+                now_ms: 1_002,
+                settlement: JobSettlement::Yield {
+                    checkpoint: None,
+                    not_before_ms: 5_000,
+                },
+            })
+            .await
+            .expect("yield");
+        assert!(
+            matches!(
+                store
+                    .claim_job(ClaimJob {
+                        now_ms: 1_003,
+                        dispatched_at_ms: 1_003,
+                        ..claims[2].clone()
+                    })
+                    .await
+                    .expect("freed alias slot"),
+                ClaimOutcome::Claimed { .. }
+            ),
+            "{backend}"
+        );
+        assert!(
+            store
+                .replace_storage_domains(vec![], 100_000)
+                .await
+                .expect("expired owners no longer block remap"),
+            "{backend}"
+        );
+        assert!(store.storage_domains().await.expect("cleared").is_empty());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn background_provider_contention_does_not_reserve_independent_storage() {
+    use plurx_core::store::background_jobs_library::{LibraryTrigger, LibraryWorkInput};
+    use plurx_core::store::background_jobs_resources::StorageDomainMapping;
+    for_each_backend(|store, backend| async move {
+        let mut libraries = Vec::new();
+        let mut files = Vec::new();
+        let mut mappings = Vec::new();
+        for index in 0..3 {
+            let prefix = format!("provider-slot-{index}");
+            let (_, file_id) = seed_file(&store, &prefix).await;
+            let file = store.get_file(file_id).await.expect("file").expect("file");
+            let library_id = store
+                .get_item(file.item_id)
+                .await
+                .expect("item")
+                .expect("item")
+                .library_id;
+            mappings.push(StorageDomainMapping {
+                library_id,
+                root_path: format!("/{prefix}"),
+                domain_id: prefix,
+            });
+            libraries.push(library_id);
+            files.push(file_id);
+        }
+        assert!(store
+            .replace_storage_domains(mappings, 1_000)
+            .await
+            .expect("map"));
+        for (index, library_id) in libraries.into_iter().enumerate() {
+            let request_id = format!("provider-work-{index}");
+            let EnqueueOutcome::Accepted { job_id, .. } = store
+                .enqueue_library_work(NewLibraryWork {
+                    request_id,
+                    library_id,
+                    now_ms: 1_000,
+                    input: LibraryWorkInput::Full {
+                        refresh: true,
+                        trigger: LibraryTrigger::Manual,
+                    },
+                })
+                .await
+                .expect("enqueue")
+            else {
+                panic!("{backend}: refused");
+            };
+            let result = store
+                .claim_job(ClaimJob {
+                    job_id,
+                    expected_revision: 0,
+                    node_id: format!("node-{index}"),
+                    boot_id: uuid::Uuid::new_v4().to_string(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::MetadataRefresh,
+                    payload_version: 1,
+                    now_ms: 1_000,
+                    dispatched_at_ms: 1_000,
+                })
+                .await
+                .expect("claim");
+            assert_eq!(
+                matches!(result, ClaimOutcome::Claimed { .. }),
+                index < 2,
+                "{backend}"
+            );
+        }
+        // Both independent storage slots must remain available after the third
+        // metadata claim lost provider contention in its all-or-none transaction.
+        for index in 0..2 {
+            let id = uuid::Uuid::new_v4().to_string();
+            store
+                .enqueue_job(EnqueueJob {
+                    id: id.clone(),
+                    payload: JobPayload::MediaProbe {
+                        file_id: files[2],
+                        source_generation: "source:1".into(),
+                        probe_digest: "c".repeat(64),
+                    },
+                    dedupe_key: format!("provider-probe:{index}"),
+                    priority: 1,
+                    not_before_ms: 1_000,
+                    now_ms: 1_000,
+                    request: JobRequest {
+                        scope: "provider-test".into(),
+                        request_id: id.clone(),
+                        request_digest: "d".repeat(64),
+                        consumer_kind: "probe".into(),
+                        consumer_ref: id.clone(),
+                        target_node_id: None,
+                        deadline_ms: None,
+                        retain_identity: false,
+                    },
+                })
+                .await
+                .expect("probe enqueue");
+            assert!(
+                matches!(
+                    store
+                        .claim_job(ClaimJob {
+                            job_id: id,
+                            expected_revision: 0,
+                            node_id: format!("probe-{index}"),
+                            boot_id: uuid::Uuid::new_v4().to_string(),
+                            claim_id: uuid::Uuid::new_v4().to_string(),
+                            kind: JobKind::MediaProbe,
+                            payload_version: 1,
+                            now_ms: 1_000,
+                            dispatched_at_ms: 1_000
+                        })
+                        .await
+                        .expect("probe claim"),
+                    ClaimOutcome::Claimed { .. }
+                ),
+                "{backend}"
+            );
+        }
+    })
+    .await;
+}

@@ -484,3 +484,14 @@ The failing replicated test is being rerun before the main fast lane starts.
 - Core PR #532 merged after all required fast-lane gates passed on the reviewed
   candidate. Merge `b4b488556` preserves the regression declarations. The
   follow-on branch now includes current main; no production deployment occurred.
+
+- E0 storage/provider concurrency: appended SQLite 74 / Hiqlite 52. Root
+  aliases map to replicated storage domains; unmapped work uses the existing
+  global fallback. Claims reserve every library domain and both provider
+  concurrency slots atomically, and normal renewal/settlement owns their
+  lifetime. Administrator API and Developer settings expose the mapping.
+  Changing identities while live reservations exist returns conflict; feature
+  enable switches remain independent. Contracts for aliases, independent
+  domains and all-or-none provider contention are written, not executed.
+  Rust 1.97.1 workspace/all-target compilation and Clippy with Hiqlite passed.
+  Provider rate pacing, subtitles and learner authority remain unfinished.

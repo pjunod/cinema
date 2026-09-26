@@ -304,3 +304,31 @@ pub async fn retry(
         )),
     }
 }
+
+/// Administrator-only: source paths are deliberately excluded from job lists.
+pub async fn storage_domains(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
+    let (mappings, libraries) =
+        tokio::try_join!(state.store.storage_domains(), state.store.list_libraries())?;
+    Ok(Json(json!({"mappings": mappings, "libraries": libraries,
+        "slots_per_domain": 2, "provider_slots": 2})))
+}
+
+pub async fn replace_storage_domains(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Json(mappings): Json<Vec<plurx_core::store::background_jobs_resources::StorageDomainMapping>>,
+) -> Result<Json<Value>, ApiError> {
+    plurx_core::store::background_jobs_resources::validate(&mappings)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    if !state
+        .store
+        .replace_storage_domains(mappings, crate::state::clock_ms())
+        .await?
+    {
+        return Err(ApiError::Conflict("Storage identities cannot change while background work owns live reservations, or when a root no longer exists. Retry after the active jobs finish and reload the library roots.".into()));
+    }
+    Ok(Json(json!({"saved": true})))
+}

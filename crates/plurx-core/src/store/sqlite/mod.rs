@@ -1158,6 +1158,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs_domain::SCHEMA,
     // v73: durable library requests and their independent results.
     super::background_jobs_library::SCHEMA,
+    // v74: named storage domains and atomic provider/storage reservations.
+    super::background_jobs_resources::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1929,7 +1931,7 @@ impl MetricsStore for SqliteStore {
                         FROM (SELECT kind, state, COUNT(*) AS count, MIN(created_at_ms) AS created
                             FROM background_jobs GROUP BY kind, state LIMIT 128) grouped)),
                         'source_io_reservations', (SELECT COUNT(*) FROM background_job_reservations
-                            WHERE resource_key = 'source_io' AND expires_at_ms > ?2 * 1000),
+                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000),
                         'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import')))
                  FROM offline_packages WHERE node_id = ?1",
                 params![node_id, now],

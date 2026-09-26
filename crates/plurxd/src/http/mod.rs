@@ -1349,6 +1349,10 @@ pub fn router(state: AppState) -> Router {
         .route("/cluster/nodes", get(cluster::nodes))
         .route("/cluster/status", get(cluster_operations::aggregate))
         .route("/cluster/jobs", get(background_jobs::list))
+        .route(
+            "/cluster/work/storage-domains",
+            get(background_jobs::storage_domains),
+        )
         .route("/cluster/jobs/{id}", get(background_jobs::detail))
         .route("/cluster/ingress", get(cluster::ingress))
         .route("/cluster/media", get(internal_media::directory))
@@ -1504,6 +1508,10 @@ pub fn router(state: AppState) -> Router {
             post(cluster::enter_maintenance).delete(cluster::exit_maintenance),
         )
         .route("/cluster/election", post(cluster::force_election))
+        .route(
+            "/cluster/work/storage-domains",
+            put(background_jobs::replace_storage_domains),
+        )
         .route("/cluster/jobs/{id}/cancel", post(background_jobs::cancel))
         .route("/cluster/jobs/{id}/retry", post(background_jobs::retry))
         .route("/cluster/backups", post(crate::backup::create))
