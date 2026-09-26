@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# K-08 M0/M5 build-cost measurement. Plan:
+# docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md §5.1 (M0) and §5.6 (M5).
+#
+# Measurement only: nothing here gates a merge, and the workflow that runs it
+# (.github/workflows/k08-build-measure.yml) is dispatch-only. Every "cold"
+# number is a fresh CARGO_TARGET_DIR with the registry already fetched, so it
+# measures compilation rather than downloads; every "warm" number is the same
+# command repeated immediately against that target directory.
+#
+#   scripts/k08-build-measure parallel   # §5.1 items 1-6 (+ semantic-search sides)
+#   scripts/k08-build-measure serial     # §5.1's CARGO_BUILD_JOBS=1 repeat of 2
+set -euo pipefail
+
+mode="${1:-parallel}"
+out="${K08_MEASURE_OUT:-$PWD/k08-measure}"
+scratch="${K08_MEASURE_SCRATCH:-${RUNNER_TEMP:-/tmp}/k08-measure-target}"
+mkdir -p "$out"
+: > "$out/table.md"
+export CARGO_INCREMENTAL=0
+unset CARGO_TARGET_DIR
+
+has_feature=false
+if grep -q '^semantic-search = ' crates/plurxd/Cargo.toml; then
+  has_feature=true
+fi
+
+log() { printf '%s\n' "$*" | tee -a "$out/table.md"; }
+
+# timed <label> <cmd...>: runs cmd against $scratch and records wall seconds.
+timed() {
+  local label="$1"
+  shift
+  local start end
+  start=$(date +%s.%N)
+  if ! CARGO_TARGET_DIR="$scratch" "$@" > "$out/$label.log" 2>&1; then
+    tail -n 80 "$out/$label.log"
+    echo "k08-build-measure: $label failed" >&2
+    exit 1
+  fi
+  end=$(date +%s.%N)
+  local secs
+  secs=$(awk -v a="$start" -v b="$end" 'BEGIN { printf "%.1f", b - a }')
+  log "| $label | ${secs} s | \`$*\` |"
+}
+
+cold() { rm -rf "$scratch"; timed "$@"; }
+
+size() { log "| $1 target size | $(du -sh "$scratch" | cut -f1) | \`du -sh\` |"; }
+
+# The candle/tokenizers subtree: packages the workspace resolves only through
+# plurxd's four inference dependencies. Summed from a --timings report.
+subtree_report() {
+  local report="$1"
+  cargo metadata --locked --format-version 1 > "$out/metadata.json"
+  python3 - "$out/metadata.json" "$report" <<'PY' | tee -a "$out/table.md"
+import json, sys
+meta = json.load(open(sys.argv[1]))
+html = open(sys.argv[2]).read()
+units, _ = json.JSONDecoder().raw_decode(html, html.index("const UNIT_DATA = ") + len("const UNIT_DATA = "))
+pkgs = {p["id"]: p for p in meta["packages"]}
+members = set(meta["workspace_members"])
+nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
+cut = {"candle-core", "candle-nn", "candle-transformers", "tokenizers"}
+
+def reach(skip_inference):
+    seen, stack = set(), list(members)
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        for dep in nodes[node]["deps"]:
+            kinds = {k["kind"] for k in dep["dep_kinds"]}
+            if node not in members and kinds <= {"dev"}:
+                continue
+            name = pkgs[dep["pkg"]]["name"]
+            if skip_inference and pkgs[node]["name"] == "plurxd" and name in cut:
+                continue
+            stack.append(dep["pkg"])
+    return {(pkgs[i]["name"], pkgs[i]["version"]) for i in seen}
+
+full, lean = reach(False), reach(True)
+only = full - lean
+total = sum(u["duration"] for u in units)
+mine = [u for u in units if (u["name"], u["version"]) in only]
+sub = sum(u["duration"] for u in mine)
+print(f"| packages resolved (workspace) | {len(full)} | cargo metadata |")
+print(f"| packages only via candle/tokenizers | {len(only)} | {', '.join(sorted(n for n, _ in only))} |")
+print(f"| summed unit time, all | {total:.1f} s | --timings, {len(units)} units |")
+print(f"| summed unit time, candle/tokenizers subtree | {sub:.1f} s ({100 * sub / total:.1f}%) | {len(mine)} units |")
+for u in sorted(units, key=lambda u: -u["duration"])[:12]:
+    tag = " (subtree)" if (u["name"], u["version"]) in only else ""
+    print(f"| slowest unit | {u['duration']:.1f} s | {u['name']} {u['version']}{u['target']}{tag} |")
+PY
+}
+
+log "| measure | value | command |"
+log "|---|---|---|"
+log "| mode | $mode | runner $(hostname) · nproc $(nproc) · $(rustc -V) |"
+log "| head | $(git rev-parse HEAD) | semantic-search feature present: $has_feature |"
+cargo fetch --locked > "$out/fetch.log" 2>&1
+
+case "$mode" in
+  parallel)
+    log "| duplicate rows | $(cargo tree -d --workspace --locked | grep -cE '^[a-z]') | \`cargo tree -d --workspace\` |"
+    if $has_feature; then
+      log "| duplicate rows, shipped features | $(cargo tree -d --workspace --locked --features plurxd/semantic-search | grep -cE '^[a-z]') | \`cargo tree -d --workspace --features plurxd/semantic-search\` |"
+    fi
+    cold workspace-check-cold cargo check --workspace --locked --all-targets --timings
+    cp "$scratch/cargo-timings/cargo-timing.html" "$out/workspace-check-timing.html"
+    timed workspace-check-warm cargo check --workspace --locked --all-targets
+    size workspace-check
+    cold plurxd-lean-check-cold cargo check --locked -p plurxd --no-default-features
+    timed plurxd-lean-check-warm cargo check --locked -p plurxd --no-default-features
+    size plurxd-lean-check
+    if $has_feature; then
+      cold workspace-shipped-check-cold cargo check --workspace --locked --all-targets --features plurxd/semantic-search
+      timed workspace-shipped-check-warm cargo check --workspace --locked --all-targets --features plurxd/semantic-search
+      size workspace-shipped-check
+      cold plurxd-shipped-check-cold cargo check --locked -p plurxd --features semantic-search
+      size plurxd-shipped-check
+      cold plurxd-shipped-build-cold cargo build --locked -p plurxd --features semantic-search
+      size plurxd-shipped-build
+    fi
+    cold plurxd-build-cold cargo build --locked -p plurxd
+    size plurxd-build
+    subtree_report "$out/workspace-check-timing.html"
+    ;;
+  serial)
+    export CARGO_BUILD_JOBS=1
+    cold workspace-check-serial-cold cargo check --workspace --locked --all-targets --timings
+    cp "$scratch/cargo-timings/cargo-timing.html" "$out/workspace-check-serial-timing.html"
+    timed workspace-check-serial-warm cargo check --workspace --locked --all-targets
+    subtree_report "$out/workspace-check-serial-timing.html"
+    ;;
+  *)
+    echo "usage: $0 parallel|serial" >&2
+    exit 2
+    ;;
+esac
+rm -rf "$scratch"
+echo "k08-build-measure: done"
