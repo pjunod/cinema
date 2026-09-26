@@ -1100,9 +1100,17 @@ CREATE TRIGGER IF NOT EXISTS background_offline_interest_retired
 AFTER UPDATE OF state ON background_job_waiters
 WHEN NEW.consumer_kind = 'offline_preparation' AND OLD.state = 'pending' AND NEW.state != 'pending'
 BEGIN
-    UPDATE background_jobs SET target_node_id = NULL WHERE id = NEW.job_id AND kind = 'transcode_prepare'
-        AND NOT EXISTS (SELECT 1 FROM background_job_waiters WHERE job_id = NEW.job_id
-            AND consumer_kind = 'offline_preparation' AND state = 'pending');
+    UPDATE background_jobs SET target_node_id = CASE WHEN EXISTS (
+            SELECT 1 FROM background_job_waiters WHERE job_id = NEW.job_id
+                AND consumer_kind = 'offline_preparation' AND state = 'pending') THEN target_node_id ELSE NULL END,
+        priority = COALESCE((SELECT MAX(priority) FROM background_job_waiters
+            WHERE job_id = NEW.job_id AND state = 'pending'), 0)
+    WHERE id = NEW.job_id AND kind = 'transcode_prepare' AND state IN ('queued','running');
+    UPDATE background_jobs SET state = CASE state WHEN 'running' THEN 'cancelling' ELSE 'cancelled' END,
+        revision = revision + 1, updated_at_ms = MAX(updated_at_ms, NEW.updated_at_ms)
+    WHERE id = NEW.job_id AND kind = 'transcode_prepare' AND state IN ('queued','running')
+        AND revision < 9223372036854775807
+        AND NOT EXISTS (SELECT 1 FROM background_job_waiters WHERE job_id = NEW.job_id AND state = 'pending');
 END;
 -- next statement
 CREATE TRIGGER IF NOT EXISTS background_offline_package_changed

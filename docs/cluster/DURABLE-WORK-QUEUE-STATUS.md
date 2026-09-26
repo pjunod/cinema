@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 implemented; addressing adversarial findings · **Updated:** 2026-09-26 ·
+**Status:** M1–M3 final validation; fixing test failures · **Updated:** 2026-09-26 ·
 **Branch:** `codex/durable-cluster-work` ·
 **Base:** `2ab0cd497` · **PR:** [#532 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/532)
 
@@ -21,7 +21,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
-| Final adversarial review | Complete; fixes in progress | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
+| Final adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
 | Fast lane | Not run | After review findings are addressed |
 | Merge / cleanup | Not started | Green required lane before merge |
 
@@ -350,4 +350,11 @@ Independent review of `f05f664b8` requested four corrections before testing:
 | P1: 40,000 retained attempts deadlock pending work | Bounded pressure compaction preserves newest attempt, reconciliation window and counters | 2,500 queued jobs × 16 yields; next claim progresses after upkeep |
 | P2: ordinary legacy receipts never release capacity | Only analysis-history interests retain identity indefinitely; sealed mapping prevents reimport | Terminal legacy receipts expire after seven days without replay |
 
-Fixes are being compiled. These regressions have not yet run.
+Fixes committed as `b15899175`; normal pinned Clippy/hook passed. The first
+focused core run passed all 24 tests (93 seconds execution). Seven of eight
+replicated contracts passed; the remaining offline-sharing regression exposed
+missing priority recomputation on package deletion. That transition now also
+retires a producer when its final interest disappears. Activity fixture coverage
+was updated to execute the queue renderer; all 28 checks pass. Developer settings
+passed 34 checks, docs index passed four, and the process UI contract passed.
+The failing replicated test is being rerun before the main fast lane starts.
