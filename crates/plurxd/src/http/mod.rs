@@ -431,6 +431,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/cluster/jobs"
         | "/api/v1/cluster/jobs/{id}"
         | "/api/v1/cluster/jobs/{id}/cancel"
+        | "/api/v1/cluster/jobs/{id}/retry"
         | "/api/v1/cluster/backups"
         | "/api/v1/cluster/ingress"
         | "/api/v1/cluster/media"
@@ -1499,6 +1500,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/cluster/election", post(cluster::force_election))
         .route("/cluster/jobs/{id}/cancel", post(background_jobs::cancel))
+        .route("/cluster/jobs/{id}/retry", post(background_jobs::retry))
         .route("/cluster/backups", post(crate::backup::create))
         .route("/cluster/leave", post(cluster::leave))
         .route(
@@ -9025,11 +9027,22 @@ mod tests {
         let id = uuid::Uuid::new_v4().to_string();
         let detail = format!("/api/v1/cluster/jobs/{id}");
         let cancel = format!("{detail}/cancel");
+        let retry = format!("{detail}/retry");
         for path in ["/api/v1/cluster/jobs", &detail] {
             let (status, _) = call(&app, get(path, Some(viewer))).await;
             assert_eq!(status, StatusCode::FORBIDDEN);
         }
         let (status, _) = call(&app, post(&cancel, Some(viewer), json!({}))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = call(
+            &app,
+            post(
+                &retry,
+                Some(viewer),
+                json!({"request_id":uuid::Uuid::new_v4().to_string()}),
+            ),
+        )
+        .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         let now_ms = crate::state::clock_ms();
         state
@@ -9090,6 +9103,16 @@ mod tests {
                 );
             }
         }
+        let (status, _) = call(
+            &app,
+            post(
+                &retry,
+                Some(&admin),
+                json!({"request_id":uuid::Uuid::new_v4().to_string()}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
         for _ in 0..2 {
             let (status, body) = call(&app, post(&cancel, Some(&admin), json!({}))).await;
             assert_eq!(status, StatusCode::OK, "{body}");

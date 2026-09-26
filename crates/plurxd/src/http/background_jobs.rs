@@ -5,7 +5,7 @@ use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use plurx_core::store::background_jobs::{
-    BackgroundJob, CancelJob, JobKind, JobQuery, JobState, WaiterQuery,
+    BackgroundJob, CancelJob, EnqueueOutcome, JobKind, JobPayload, JobQuery, JobState, WaiterQuery,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -42,6 +42,9 @@ fn summary(job: &BackgroundJob, now_ms: i64) -> Value {
         "abandoned_count": job.abandoned_count, "error_code": job.last_error_code,
         "payload_version": job.payload_version, "supported": job.supported_payload().is_ok(),
         "retry_deadline_ms": job.retry_deadline_ms,
+        "retry_supported": matches!(job.state, JobState::Failed | JobState::Cancelled)
+            && matches!(job.supported_payload(), Ok(JobPayload::TranscodePrepare { .. }
+                | JobPayload::FragmentIndexBuild { .. } | JobPayload::ArtifactHydrate { .. })),
         "observation": "durable_state", "observed_at_ms": now_ms,
     })
 }
@@ -143,4 +146,128 @@ pub async fn cancel(
             .ok_or(ApiError::NotFound("background job"))?,
     };
     Ok(Json(summary(&job, now_ms)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetryBody {
+    /// Retained by the client across transport retries of the same click.
+    request_id: String,
+}
+
+pub async fn retry(
+    AdminUser(admin): AdminUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<RetryBody>,
+) -> Result<Json<Value>, ApiError> {
+    use sha2::{Digest, Sha256};
+    valid_id(&id)?;
+    valid_id(&body.request_id)?;
+    let job = state
+        .store
+        .background_job(&id)
+        .await?
+        .ok_or(ApiError::NotFound("background job"))?;
+    if !matches!(job.state, JobState::Failed | JobState::Cancelled) {
+        return Err(ApiError::Conflict(
+            "only failed or cancelled work can be retried".into(),
+        ));
+    }
+    let payload = job
+        .supported_payload()
+        .map_err(|_| ApiError::Conflict("this payload requires a compatible worker".into()))?;
+    let now_ms = crate::state::clock_ms();
+    if let JobPayload::FragmentIndexBuild {
+        file_id,
+        source_size,
+        source_mtime,
+        ..
+    } = payload
+    {
+        // One deliberate request on this node; do not recreate another
+        // consumer's cancelled delivery or renew all historical interests.
+        let digest = Sha256::digest(format!(
+            "fragment-retry:{}:{id}:{}",
+            admin.id, body.request_id
+        ));
+        let request_id = uuid::Uuid::from_slice(&digest[..16])
+            .expect("digest UUID")
+            .to_string();
+        if let Some(existing) = state.store.analysis_request(&request_id).await? {
+            return Ok(Json(
+                json!({"outcome":"existing", "analysis_request_id":existing.request_id, "state":existing.state}),
+            ));
+        }
+        let request = state
+            .store
+            .enqueue_analysis_request(&plurx_core::store::NewAnalysisRequest {
+                request_id: request_id.clone(),
+                file_id,
+                source_size,
+                source_mtime,
+                component: "fragment_index".into(),
+                pipeline_version: crate::ffmpeg::fragment_index_engine_digest().await,
+                video_identity: String::new(),
+                requested_generation: request_id.clone(),
+                priority: "forced".into(),
+                trigger: "admin".into(),
+                force_rebuild: true,
+                target_node_id: state.node_id.clone(),
+                not_before_ms: now_ms,
+                created_at_ms: now_ms,
+            })
+            .await?;
+        if request.request_id != request_id {
+            return Err(ApiError::Conflict(
+                "another explicit generation is already pending; follow its analysis request"
+                    .into(),
+            ));
+        }
+        super::analysis::kick_analysis_queue(&state);
+        tracing::info!(
+            job_id = id,
+            user_id = admin.id,
+            successor_id = request_id,
+            "durable fragment work explicitly retried"
+        );
+        return Ok(Json(
+            json!({"outcome":"accepted", "analysis_request_id":request_id, "state":request.state}),
+        ));
+    }
+    if !matches!(
+        payload,
+        JobPayload::TranscodePrepare { .. } | JobPayload::ArtifactHydrate { .. }
+    ) {
+        return Err(ApiError::Conflict(
+            "this job requires its domain retry action".into(),
+        ));
+    }
+    let outcome = state
+        .store
+        .retry_background_job(&id, &body.request_id, admin.id, now_ms)
+        .await?
+        .ok_or(ApiError::NotFound("background job"))?;
+    match outcome {
+        EnqueueOutcome::Accepted { .. } | EnqueueOutcome::Existing { .. } => {
+            tracing::info!(
+                job_id = id,
+                user_id = admin.id,
+                request_id = body.request_id,
+                "durable work explicitly retried"
+            );
+            Ok(Json(serde_json::to_value(outcome).map_err(|error| {
+                ApiError::BadRequest(error.to_string())
+            })?))
+        }
+        EnqueueOutcome::SourceChanged => Err(ApiError::Conflict(
+            "source changed or artifact retired; request new work from the file".into(),
+        )),
+        EnqueueOutcome::QueueFull => Err(ApiError::Conflict(
+            "durable queue is full; retry later".into(),
+        )),
+        _ => Err(ApiError::Conflict(
+            "retry conflicts with the current work or request identity".into(),
+        )),
+    }
 }

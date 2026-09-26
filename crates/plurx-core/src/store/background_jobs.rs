@@ -103,6 +103,24 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
     ) THEN 'producer_fenced'
     WHEN prior_job IS NOT NULL AND prior_digest != json_extract(body, '$.request.request_digest') THEN 'conflict'
     WHEN prior_job IS NOT NULL THEN 'existing'
+    WHEN json_type(body, '$.retry_of') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM background_jobs original WHERE original.id = json_extract(body, '$.retry_of')
+        AND original.state IN ('failed','cancelled') AND original.payload_version = 1
+        AND original.kind IN ('transcode_prepare','artifact_hydrate')
+        AND original.dedupe_key = json_extract(body, '$.dedupe_key')
+    ) THEN 'conflict'
+    WHEN json_type(body, '$.retry_of') IS NOT NULL
+      AND json_extract(body, '$.payload.kind') = 'transcode_prepare' AND NOT EXISTS (
+        SELECT 1 FROM files WHERE id = json_extract(body, '$.payload.file_id')
+          AND size = json_extract(body, '$.payload.source_size')
+          AND mtime = json_extract(body, '$.payload.source_mtime')
+    ) THEN 'source_changed'
+    WHEN json_type(body, '$.retry_of') IS NOT NULL
+      AND json_extract(body, '$.payload.kind') = 'artifact_hydrate' AND NOT EXISTS (
+        SELECT 1 FROM cluster_fragment_index_artifacts artifact JOIN files file ON file.id = artifact.file_id
+          AND file.size = artifact.source_size AND file.mtime = artifact.source_mtime
+        WHERE 'fragment:' || artifact.cache_key = json_extract(body, '$.payload.artifact_key')
+    ) THEN 'source_changed'
     WHEN json_type(body, '$.delivery_parent') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM background_job_waiters WHERE job_id = json_extract(body, '$.delivery_parent')
         AND target_node_id = json_extract(body, '$.payload.target_node_id') AND state = 'awaiting_hydration'
@@ -862,6 +880,15 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn background_job(&self, id: &str) -> Result<Option<BackgroundJob>, StoreError>;
     async fn background_staging_jobs(&self, node_id: &str) -> Result<Vec<String>, StoreError>;
     async fn enqueue_job(&self, request: EnqueueJob) -> Result<EnqueueOutcome, StoreError>;
+    /// A fresh administrator interest, never resurrection of old consumers.
+    /// Fragment builds use the domain analysis generation path instead.
+    async fn retry_background_job(
+        &self,
+        job_id: &str,
+        request_id: &str,
+        user_id: i64,
+        now_ms: i64,
+    ) -> Result<Option<EnqueueOutcome>, StoreError>;
     /// Atomically advance the discovery lease with the admission verdict.
     async fn enqueue_job_fenced(
         &self,
@@ -1480,6 +1507,67 @@ impl<T: QueueSql> BackgroundJobStore for T {
             .first()
             .ok_or_else(|| invalid("background admission returned no verdict"))?;
         decode(row)
+    }
+
+    async fn retry_background_job(
+        &self,
+        job_id: &str,
+        request_id: &str,
+        user_id: i64,
+        now_ms: i64,
+    ) -> Result<Option<EnqueueOutcome>, StoreError> {
+        use sha2::{Digest, Sha256};
+        if uuid::Uuid::parse_str(job_id).is_err()
+            || uuid::Uuid::parse_str(request_id).is_err()
+            || user_id <= 0
+        {
+            return Err(invalid("invalid administrator retry identity"));
+        }
+        let Some(original) = self.background_job(job_id).await? else {
+            return Ok(None);
+        };
+        if !matches!(original.state, JobState::Failed | JobState::Cancelled) {
+            return Ok(Some(EnqueueOutcome::Conflict));
+        }
+        let payload = original.supported_payload()?;
+        if !matches!(
+            payload,
+            JobPayload::TranscodePrepare { .. } | JobPayload::ArtifactHydrate { .. }
+        ) {
+            return Err(invalid("retry requires a domain generation adapter"));
+        }
+        let target = match &payload {
+            JobPayload::ArtifactHydrate { target_node_id, .. } => Some(target_node_id.clone()),
+            _ => None,
+        };
+        let request = EnqueueJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            payload,
+            dedupe_key: original.dedupe_key,
+            priority: 2,
+            not_before_ms: now_ms,
+            now_ms,
+            request: JobRequest {
+                scope: format!("user:{user_id}"),
+                request_id: request_id.into(),
+                request_digest: hex::encode(Sha256::digest(format!("background-retry:{job_id}"))),
+                consumer_kind: "admin_retry".into(),
+                consumer_ref: job_id.into(),
+                target_node_id: target,
+                deadline_ms: Some(now_ms.saturating_add(24 * 60 * 60 * 1000)),
+                retain_identity: false,
+            },
+        };
+        request.validate()?;
+        let mut body = enqueue_body(self, &request).await?;
+        body["retry_of"] = job_id.into();
+        let rows = self
+            .queue_sql(ENQUEUE_SQL.into(), encode(&body)?, true, true)
+            .await?;
+        Ok(Some(decode(
+            rows.first()
+                .ok_or_else(|| invalid("missing retry verdict"))?,
+        )?))
     }
 
     async fn enqueue_job_fenced(

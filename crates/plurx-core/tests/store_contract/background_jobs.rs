@@ -541,3 +541,44 @@ async fn background_jobs_fragment_targets_share_claims_and_keep_domain_history()
     })
     .await;
 }
+
+#[tokio::test]
+async fn background_retry_is_new_audited_interest_idempotent_and_source_fenced() {
+    for_each_backend(|store, backend| async move {
+        let (user_id, file_id) = seed_file(&store, "background-retry").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let original_id = uuid::Uuid::new_v4().to_string();
+        let input = plurx_core::store::background_jobs_pretranscode::enqueue_request(
+            &plurx_core::domain::NewPretranscodeJob {
+                id: original_id.clone(), dedupe_key: "a".repeat(64), file_id,
+                source_size: file.size, source_mtime: file.mtime, target_height: 720,
+                policy_generation: "policy:1".into(),
+                requirements_json: serde_json::to_string(&PretranscodeRequirements {
+                    version: 1, decoder: "h264".into(), acceptable_encoder_families: vec!["software".into()],
+                    output_contract: "hls-v1".into(), tone_map: false, output_grade: "sdr".into(), scratch_bytes: 1024,
+                }).expect("requirements"),
+                reason: "recent".into(), priority: 0, not_before_ms: 1000, created_at_ms: 1000,
+            }
+        ).expect("request");
+        store.enqueue_job(input.clone()).await.expect("enqueue");
+        let request_id = uuid::Uuid::new_v4().to_string();
+        assert!(matches!(store.retry_background_job(&original_id, &request_id, user_id, 1001).await.expect("active conflict"), Some(EnqueueOutcome::Conflict)), "{backend}");
+        store.cancel_job(CancelJob { job_id: original_id.clone(), now_ms: 1002 }).await.expect("cancel");
+        let result = store.retry_background_job(&original_id, &request_id, user_id, 1003).await.expect("retry");
+        let Some(EnqueueOutcome::Accepted { job_id, .. }) = result else { panic!("{backend}: retry: {result:?}"); };
+        assert_ne!(job_id, original_id);
+        let retried = store.background_job(&job_id).await.expect("read").expect("new job");
+        assert_eq!(retried.priority, 2);
+        assert_eq!(retried.failed_attempts, 0);
+        assert_eq!(store.background_job(&original_id).await.expect("original").expect("original").state, JobState::Cancelled);
+        assert!(matches!(store.retry_background_job(&original_id, &request_id, user_id, 1004).await.expect("replay"), Some(EnqueueOutcome::Existing { job_id: replay, .. }) if replay == job_id));
+        let waiters = store.job_waiters(WaiterQuery { job_id: job_id.clone(), after: None, limit: 100 }).await.expect("audit");
+        assert_eq!(waiters.waiters.len(), 1);
+        assert_eq!(waiters.waiters[0].consumer_ref, original_id);
+        assert_eq!(waiters.waiters[0].scope, format!("user:{user_id}"));
+        store.upsert_file(file.item_id, file.path.to_str().expect("path"), file.size + 1, file.mtime + 1, &Default::default()).await.expect("replace source");
+        assert!(matches!(store.retry_background_job(&original_id, &uuid::Uuid::new_v4().to_string(), user_id, 1005).await.expect("source refusal"), Some(EnqueueOutcome::SourceChanged)), "{backend}");
+        // The original retry receipt is still stable after replacement.
+        assert!(matches!(store.retry_background_job(&original_id, &request_id, user_id, 1006).await.expect("replay after replacement"), Some(EnqueueOutcome::Existing { job_id: replay, .. }) if replay == job_id));
+    }).await;
+}

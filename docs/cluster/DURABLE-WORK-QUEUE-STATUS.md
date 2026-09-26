@@ -225,3 +225,11 @@ implementation is claimed; “compiled” does not mean tests passed.
   single Store aggregate and atomic metrics cache. Prometheus scrapes still do
   no Store reads; stale/failed sample reporting is unchanged. Extended the
   backend publication contract and snapshot renderer checks; tests remain unrun.
+
+- 2026-09-25: explicit Retry now preserves terminal history and creates a fresh
+  administrator interest (priority 2, 24-hour deadline) for preparation or
+  hydration. Fragment Retry creates a forced analysis generation on the node
+  receiving the request. It does not resurrect other users' cancelled interests
+  or every historical target. The Activity button retains its UUID on transport
+  failure; replays return the same request. Source generation checks remain
+  atomic at admission. Current tests are written/compiled, not executed.

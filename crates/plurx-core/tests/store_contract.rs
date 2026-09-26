@@ -509,6 +509,7 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "background_staging_jobs",
     "enqueue_job",
     "enqueue_job_fenced",
+    "retry_background_job",
     "claim_job",
     "resolve_claim",
     "job_labels",
@@ -16830,7 +16831,7 @@ fn contract_inventory_matches_every_store_method() {
     // `watch_summary_and_progress_rails_match_the_separate_reads_on_every_backend`;
     // no new trait or supertrait.
     // Retire eight legacy execution methods and audit 25 shared queue methods.
-    assert_eq!(declared.len(), 407, "review the Store method count");
+    assert_eq!(declared.len(), 408, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

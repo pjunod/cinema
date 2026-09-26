@@ -22,7 +22,7 @@ async function viewActivity(generation=++PAGE_RENDER_GENERATION){
 
 // Durable status is separate from node-local progress and has its own bounded
 // refresh. A slow queue read never holds up the live Activity overview.
-const DURABLE_ACTIVITY={state:"queued",cursor:null,next:null,rows:[],counts:[],observed:0,error:null,busy:false,epoch:0,detail:null};
+const DURABLE_ACTIVITY={state:"queued",cursor:null,next:null,rows:[],counts:[],observed:0,error:null,busy:false,epoch:0,detail:null,retries:new Map()};
 function durableQueueHtml(){
   if(!ME||!ME.is_admin)return "";
   const q=DURABLE_ACTIVITY;
@@ -32,7 +32,7 @@ function durableQueueHtml(){
     <td>${esc(job.state)}${job.not_before_ms>q.observed?`<small> · retry ${esc(new Date(job.not_before_ms).toLocaleString())}</small>`:""}</td>
     <td>${esc(job.owner_node_id||"Awaiting worker")}</td><td>${esc(job.priority)}</td>
     <td>${esc(Math.floor(job.age_ms/60000))} min</td><td>${esc(job.error_code||(!job.supported?"Requires a worker that understands this payload":""))}</td>
-    <td>${["queued","running"].includes(job.state)?`<button class="ghost sm" data-durable-focus="cancel-${esc(job.id)}" onclick="cancelDurableJob(${esc(JSON.stringify(job.id))},this)">Cancel</button>`:""}</td></tr>`).join("");
+    <td>${["queued","running"].includes(job.state)?`<button class="ghost sm" data-durable-focus="cancel-${esc(job.id)}" onclick="cancelDurableJob(${esc(JSON.stringify(job.id))},this)">Cancel</button>`:job.retry_supported?`<button class="ghost sm" data-durable-focus="retry-${esc(job.id)}" onclick="retryDurableJob(${esc(JSON.stringify(job.id))},this)">Retry</button>`:""}</td></tr>`).join("");
   return `<h2 class="section">Durable cluster work</h2><div class="card">
     <div class="row"><label>State <select aria-label="Durable job state" onchange="filterDurableJobs(this.value)">${states.map(state=>`<option value="${state}"${q.state===state?" selected":""}>${state} (${count(state)})</option>`).join("")}</select></label>
     <button class="ghost sm" onclick="refreshDurableActivity(true)">Refresh</button></div>
@@ -76,4 +76,17 @@ async function cancelDurableJob(id,button){
   button.disabled=true;
   try{await api(`/cluster/jobs/${encodeURIComponent(id)}/cancel`,{method:"POST"});toast("Cancellation requested");DURABLE_ACTIVITY.epoch++;DURABLE_ACTIVITY.observed=0;DURABLE_ACTIVITY.detail=null;await refreshDurableActivity(true);}
   catch(error){toast(error.message||String(error));button.disabled=false;}
+}
+
+async function retryDurableJob(id,button){
+  button.disabled=true;
+  const q=DURABLE_ACTIVITY;
+  if(!q.retries.has(id))q.retries.set(id,crypto.randomUUID());
+  try{
+    const result=await api(`/cluster/jobs/${encodeURIComponent(id)}/retry`,{method:"POST",body:JSON.stringify({request_id:q.retries.get(id)})});
+    q.retries.delete(id);
+    toast(result.analysis_request_id?"New analysis generation requested":"New durable retry requested");
+    q.epoch++;q.observed=0;q.detail=null;
+    await refreshDurableActivity(true);
+  }catch(error){toast(error.message||String(error));button.disabled=false;}
 }
