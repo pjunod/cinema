@@ -1210,7 +1210,14 @@ expected_occurrences = 3
 [[module_symbols]]
 id = "m4-exact-rolling-retirement-settlement"
 pattern = "RollingRetirementSettlement"
-expected_occurrences = 7
+# 7 -> 8 with S-14 M8 (seam migration, first owner), measured by zeroing this
+# row: the one new occurrence is the production constructor call
+# `RollingRetirementSettlement::new("ended")` in the test-only
+# `rolling_retirement_settlement_shipped_shape`, which polls one waiter by hand
+# and completes the settlement. The race test's construction changed from
+# `::new` to `::with_hooks` (same count). The settlement is still created only
+# by the retirement path in `rolling/retirement.rs`; no new owner.
+expected_occurrences = 8
 
 [[module_symbols]]
 id = "m4-exact-rolling-scratch-owner-latch"
@@ -3819,7 +3826,15 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # +1 with the review round of P-02 M3 (#518, finding 1), test-only: the
 # `child.wait()` that reaps that same `true` child. No production lifecycle
 # call is added.
-expected_occurrences = 404
+# +1 with S-14 M8, measured by zeroing this row: one test-only
+# `settlement.wait()` in `rolling_retirement_settlement_shipped_shape`, an
+# in-process settlement future polled by hand, not a child-process call. The
+# two barrier `wait` calls that moved from `RollingRetirementSettlement::wait`
+# into the test's pausing hook are the same two calls (count unchanged).
+# 405 measured by zeroing this row after merging `origin/main` at
+# `4b112204b` into S-14 M8 (#543): main's 404, reviewed above, plus this
+# branch's one reviewed test-only call.
+expected_occurrences = 405
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
