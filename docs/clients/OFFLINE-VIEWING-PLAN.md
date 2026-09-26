@@ -1149,6 +1149,7 @@ plurx_offline_quota_rejections_total{reason="registry|user_bytes|global_bytes"}
 plurx_offline_active_leases
 plurx_offline_failures_total{code="source_unavailable|invalid_track|encoder_failed|subtitle_failed|other"}
 plurx_offline_claim_ticks_total{outcome="skipped_hint|gated|claimed|empty_claim"}
+plurx_offline_expiry_ticks_total{outcome="skipped_hint|swept|empty_sweep"}
 plurx_cache_pinned_bytes{reason="offline"}
 ```
 

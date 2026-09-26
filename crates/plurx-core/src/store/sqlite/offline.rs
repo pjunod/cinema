@@ -990,6 +990,18 @@ impl OfflinePackageStore for SqliteStore {
         .await
     }
 
+    async fn offline_expiry_hint(&self, now: i64) -> Result<bool, StoreError> {
+        self.with_read(move |conn| {
+            let lapsed: i64 = conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM offline_packages WHERE expires_at <= ?1)",
+                [now],
+                |row| row.get(0),
+            )?;
+            Ok(lapsed != 0)
+        })
+        .await
+    }
+
     async fn expire_offline_packages(&self, now: i64) -> Result<u64, StoreError> {
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
