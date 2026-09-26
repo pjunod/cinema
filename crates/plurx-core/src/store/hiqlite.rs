@@ -111,7 +111,10 @@ const FILE_GRANTS_SCHEMA_VERSION: i64 = 46;
 const FILE_GRANTS_SCHEMA_MIGRATION_SOURCE: i64 = DOWNLOADED_SUBTITLES_SCHEMA_VERSION;
 const SUBTITLE_SOURCE_SCHEMA_VERSION: i64 = 47;
 const SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE: i64 = FILE_GRANTS_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = SUBTITLE_SOURCE_SCHEMA_VERSION;
+/// K-05 M5: the catalogue read indexes (`sql_source::ITEM_READ_INDEXES`).
+const ITEM_READ_INDEXES_SCHEMA_VERSION: i64 = 48;
+const ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE: i64 = SUBTITLE_SOURCE_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = ITEM_READ_INDEXES_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -2714,6 +2717,37 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE) => {
+                    // Indexes only, all `IF NOT EXISTS`: one small Raft entry
+                    // (the DDL text, never index pages) that every voter
+                    // applies by building the indexes from its own `items`
+                    // table. The build holds that voter's state-machine writer
+                    // for its duration (measured in the K-05 evidence: tens of
+                    // milliseconds for 75,600 items); reads keep their WAL
+                    // snapshot throughout.
+                    let now = self.now()?;
+                    let mut statements = Vec::new();
+                    for sql in super::sql_source::item_read_index_statements() {
+                        validate_sql(sql)?;
+                        statements.push((sql.to_owned(), params!()));
+                    }
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            ITEM_READ_INDEXES_SCHEMA_VERSION,
+                            now,
+                            ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -4673,7 +4707,8 @@ fn schema_migration_action(
         | LUMINANCE_SCHEMA_MIGRATION_SOURCE
         | DOWNLOADED_SUBTITLES_SCHEMA_MIGRATION_SOURCE
         | FILE_GRANTS_SCHEMA_MIGRATION_SOURCE
-        | SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE => {
+        | SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE
+        | ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -6685,9 +6720,18 @@ mod tests {
             "v46 must advance exactly one step to the subtitle-source schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 42,
+            ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE, SUBTITLE_SOURCE_SCHEMA_VERSION,
+            "the read-index migration must start from the exact v47 shape"
+        );
+        assert_eq!(
+            ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE + 1,
+            ITEM_READ_INDEXES_SCHEMA_VERSION,
+            "v47 must advance exactly one step to the read-index schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 43,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v47 step"
+            "this implementation contains every additive v5→v48 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

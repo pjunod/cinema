@@ -582,6 +582,57 @@ those rows in place, then take the backup again and re-run the import. Nobody
 has to reconnect the Trakt account. The refusal happens before any row is
 submitted, so a refused import leaves no partial replicated state to clean up.
 
+### Catalogue read indexes: SQLite v70, replicated schema v48
+
+K-05 M5 adds three indexes on `items` and nothing else — no column, no row
+change: `idx_items_tmdb` and `idx_items_imdb` (the coming-soon rail's
+per-entry external-id lookup, which scanned every item once per entry) and
+`idx_items_top_level_title` (a library's movies, shows, books and top-level
+home items in title order: the default Title grid reads it in order, and every
+sort's item count reads only those entries instead of every season and
+episode). The measured before and after plans are in
+[query-plans-m5-f782fc24.md](../benchmarks/evidence/query-plans-m5-f782fc24.md).
+
+**Standalone SQLite** applies v70 at open, before the HTTP listener binds, in
+one transaction. Nothing to do beyond the ordinary redeploy.
+
+**An activated cluster** takes it as one more replicated schema step, so the
+procedure is the one above for every such step: stop application traffic and
+update every voter as one maintenance operation, voters before learners. The
+first v48 daemon that reaches quorum commits the step and the new marker in
+one Raft transaction before it starts producers or binds HTTP. What that step
+costs:
+
+- **The Raft entry is the DDL text** (a few hundred bytes), not index pages.
+  Each voter builds the indexes from its own `items` table when it applies the
+  entry, and a snapshot taken afterwards carries them, so a learner or a
+  restored voter receives them with the snapshot.
+- **The build holds that voter's state-machine writer** for its duration.
+  Measured on the 75,600-item K-05 fixture on nuc3: about 60 ms for all three
+  (median of five, 63 ms cold and 59 ms warm; the evidence file has the
+  per-statement numbers). It grows with the
+  item count (a sort of the indexed rows, n log n), so a library ten times
+  that size is still well under a second. While it runs, reads on that voter
+  keep their WAL snapshot; consistent reads and writes wait for the entry to
+  apply, which is why traffic is stopped for the window anyway.
+- **Every statement is `IF NOT EXISTS`.** A second voter racing the step, or
+  a marker rewound under a shape that already has the indexes, finds them
+  standing and only moves the marker.
+- **Disk:** the three indexes are 688 KiB on the fixture, about half of
+  `idx_items_library_kind`; nothing is rewritten.
+- **Statistics:** the Hiqlite state machine runs `PRAGMA optimize` when it
+  opens a connection and after each snapshot, so each voter collects the new
+  indexes' statistics locally at its next snapshot. The plans in the evidence
+  file were taken both without statistics and with the statistics that pragma
+  produces; they choose the new indexes either way.
+
+**Rolling back** is the existing newer-schema refusal: a v47 binary will not
+open a v48 cluster, and a v69 SQLite build will not open a v70 `plurx.db`.
+The indexes are harmless to an older reader, but the marker is not, so do not
+restart an older binary after v48 commits; roll a failed node forward instead,
+exactly as for any other step. On standalone SQLite, the pre-deploy snapshot
+under `<PLURX_DATA>/backups/` is a v69 file an older build can open.
+
 ### M2 activation and crash recovery
 
 The first `plurxd run` against a legacy data directory imports into
