@@ -550,13 +550,6 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
-        method: "submit_fragment_index_analysis",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::ReadBranchWrite,
-    },
-    SqliteTransactionSite {
-        module: "fragment_index_cluster.rs",
         method: "retry_analysis_request_admin",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
@@ -1187,7 +1180,9 @@ mod tests {
         // transaction boundary has to be a deliberate edit here. That is the
         // point of the assertion: two of the sites above reached main without
         // one, and ten more did before this correction.
-        assert_eq!(methods.len(), 101);
+        // Seven legacy execution boundaries now use the one common queue
+        // transaction bridge: six claim/publication methods and submission.
+        assert_eq!(methods.len(), 95);
     }
 
     #[test]

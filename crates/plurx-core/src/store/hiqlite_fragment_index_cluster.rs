@@ -3777,53 +3777,23 @@ mod tests {
         }
     }
 
-    /// No statement may reset `attempts` without resetting `attempt_errors`
-    /// on exactly the same conditions.
-    ///
-    /// Three upserts reopen a job row, each with its own reset conditions. A
-    /// reset that misses the history leaves a row carrying the codes of a
-    /// budget it no longer has — a history that disagrees with the count
-    /// printed beside it. Two of the three are reachable from the
-    /// backend-neutral Store contract; the forced hand-off is not, because
-    /// reaching it twice needs two active forced requests for one identity,
-    /// which a unique index forbids. So the rule is asserted on the
-    /// statements themselves, by deriving the history reset from the budget
-    /// reset it has to mirror.
+    /// Domain adapters no longer reopen execution rows. The shared queue's
+    /// per-interest ledger supplies both counters and history; runtime coverage
+    /// is `background_jobs_fragment_retry_keeps_its_window_history_and_configured_limit`.
     #[test]
     fn every_attempts_reset_resets_the_attempt_history() {
         const SOURCE: &str = include_str!("hiqlite_fragment_index_cluster.rs");
         let production = SOURCE
             .split_once("\n#[cfg(test)]")
-            .map_or(SOURCE, |(source, _)| source);
-        let squeeze = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-        const CLOSE: &str = "cluster_fragment_index_jobs.attempts END";
-        let mut resets = 0;
-        // Keyed on the close, not the open: `attempts = CASE` also appears on
-        // `analysis_requests`, which has no history to keep.
-        for (close, _) in production.match_indices(CLOSE) {
-            let open = production[..close]
-                .rfind("attempts = CASE")
-                .expect("every reset of this column opens a CASE");
-            let budget = &production[open..close + CLOSE.len()];
-            // The history reset is the budget reset with the column and the
-            // reset value swapped. Anything else is a different rule.
-            let expected = squeeze(budget)
-                .replacen("attempts = CASE", "attempt_errors = CASE", 1)
-                .replace("THEN 0", "THEN ''")
-                .replace(
-                    "ELSE cluster_fragment_index_jobs.attempts END",
-                    "ELSE cluster_fragment_index_jobs.attempt_errors END",
-                );
-            let tail = &production[open..(close + CLOSE.len() + 900).min(production.len())];
-            let window = squeeze(tail);
-            assert!(
-                window.contains(&expected),
-                "an `attempts` reset without the matching `attempt_errors` reset:\n  \
-                 wanted {expected}"
-            );
-            resets += 1;
-        }
-        assert_eq!(resets, 3, "three upserts reopen a job row");
+            .expect("test boundary")
+            .0;
+        assert!(
+            !production.contains("cluster_fragment_index_jobs.attempts END"),
+            "a domain adapter must not reset the common execution budget"
+        );
+        let shared = include_str!("background_jobs_schema.sql");
+        assert!(shared.contains("SELECT MAX(interest.failed_attempts"));
+        assert!(shared.contains("SELECT interest.attempt_errors"));
     }
 
     use rusqlite::Connection;

@@ -10202,9 +10202,13 @@ impl JobManager {
                     file
                 }
                 Ok(Some(_)) | Ok(None) => {
-                    let _ = fence
-                        .cancel_job(self.store.as_ref(), "source_changed", clock_ms())
-                        .await;
+                    crate::store_result::observe(
+                        crate::store_result::Operation::CancelTranscodeSourceChanged,
+                        crate::store_result::Discard::Cancelled,
+                        fence
+                            .cancel_job(self.store.as_ref(), "source_changed", clock_ms())
+                            .await,
+                    );
                     active.finish().await;
                     skipped += 1;
                     *reasons.entry("source_changed").or_default() += 1;
@@ -10340,17 +10344,25 @@ impl JobManager {
                 }
                 Ok(PretranscodeProduceOutcome::PolicyChanged) => {
                     let now_unix_ms = clock_ms();
-                    let _ = fence
-                        .cancel_job(self.store.as_ref(), "policy_changed", now_unix_ms)
-                        .await;
+                    crate::store_result::observe(
+                        crate::store_result::Operation::CancelTranscodePolicyChanged,
+                        crate::store_result::Discard::Cancelled,
+                        fence
+                            .cancel_job(self.store.as_ref(), "policy_changed", now_unix_ms)
+                            .await,
+                    );
                     skipped += 1;
                     *reasons.entry("policy_changed").or_default() += 1;
                 }
                 Ok(PretranscodeProduceOutcome::SourceChanged) => {
                     let now_unix_ms = clock_ms();
-                    let _ = fence
-                        .cancel_job(self.store.as_ref(), "source_changed", now_unix_ms)
-                        .await;
+                    crate::store_result::observe(
+                        crate::store_result::Operation::CancelTranscodeSourceChanged,
+                        crate::store_result::Discard::Cancelled,
+                        fence
+                            .cancel_job(self.store.as_ref(), "source_changed", now_unix_ms)
+                            .await,
+                    );
                     skipped += 1;
                     *reasons.entry("source_changed").or_default() += 1;
                 }
@@ -10361,9 +10373,13 @@ impl JobManager {
                     // refused receipt, so a job that retried this would
                     // re-encode the title on every discovery pass forever.
                     let now_unix_ms = clock_ms();
-                    let _ = fence
-                        .cancel_job(self.store.as_ref(), "health_refused", now_unix_ms)
-                        .await;
+                    crate::store_result::observe(
+                        crate::store_result::Operation::CancelTranscodeHealthRefused,
+                        crate::store_result::Discard::Cancelled,
+                        fence
+                            .cancel_job(self.store.as_ref(), "health_refused", now_unix_ms)
+                            .await,
+                    );
                     skipped += 1;
                     *reasons.entry("health_refused").or_default() += 1;
                 }
