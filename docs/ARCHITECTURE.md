@@ -198,6 +198,39 @@ playlist.
 Scanner and metadata-refresh jobs are leader-scheduled singletons (distributed
 lock), so three nodes don't triple-hit TMDB or thrash shared storage.
 
+### 2.4 Durable preparation — shared intent, fenced publication
+
+Whole-title preparation and fragment-index construction use the common
+`BackgroundJobStore` on SQLite and Hiqlite. Independent interests share one
+computation identity; cancelling an interest leaves other consumers intact.
+Fragment delivery is a separate node-targeted hydration job, so a builder can
+finish before every consumer is online. Existing offline work can join an
+already-running preparation on the same node when its resolved source and
+recipe match. Cross-node transcode delivery remains a follow-on extension.
+
+Workers reserve physical capacity before claiming and retain it until child
+processes are reaped. The shared claim carries node, boot, claim, fence,
+revision and expiry; renewal cannot transfer ownership. The production lease
+monitor cancels execution at its confirmed monotonic deadline. Publication
+checks the exact claim and current source, then commits domain metadata,
+waiter outcomes and delivery intents atomically. Immutable bytes are renamed
+before that transaction; an uncommitted orphan cannot become a current result.
+
+The queue bounds active work, request receipts and attempt history. Its SQL
+contract and numerical limits live in
+[`background_jobs.rs`](../crates/plurx-core/src/store/background_jobs.rs).
+Idle consumers poll with local jitter and make no empty-queue writes. Metrics
+read cached observations; Activity exposes paged work and attempt history.
+Developer prerequisites are advisory and never veto saving enable preferences.
+
+Cutover seals old accepted requests in a finite backlog, drains bounded pages
+without losing capacity-refused work, and removes the old execution APIs.
+Operators must quiesce old workers before conversion; mixed old/new execution
+is not a supported rolling migration. See
+[OPERATIONS.md](OPERATIONS.md#distributed-speculative-transcode) for operation
+and [the queue contract](cluster/DURABLE-WORK-QUEUE-IMPLEMENTATION.md) for
+failure recovery, retention and extension boundaries.
+
 ## 3. Playback pipeline — get out of the way first
 
 The whole pipeline is built around one belief: the server's best move is to send

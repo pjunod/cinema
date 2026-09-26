@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** M1/M2 worker integration in progress · **Updated:** 2026-09-26 ·
+**Status:** M1–M3 implemented; adversarial review next · **Updated:** 2026-09-26 ·
 **Branch:** `codex/durable-cluster-work` ·
 **Base:** `2ab0cd497` · **PR:** [#532 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/532)
 
@@ -14,9 +14,9 @@ implementation is claimed; “compiled” does not mean tests passed.
 |---|---|---|
 | Isolated clone | Complete | Agent-owned `/private/tmp/plurx-durable-work-agent`; original checkout untouched |
 | Compiler | Ready | Rust 1.97.1; core + Hiqlite all-target compile and baseline daemon compile passed |
-| M1 durable queue and pre-transcode | In progress | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; local exact-recipe offline joining and scheduling implemented; cross-node convergence and fault-injection coverage remain |
-| M2 fragment analysis and hydration | In progress | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
-| M3 UI, recovery and migration | In progress | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
+| M1 durable queue and pre-transcode | Implemented; validation pending | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; local exact-recipe offline joining and scheduling implemented; lost-reply and process-expiry regressions written; cross-node transcode convergence belongs to E1 |
+| M2 fragment analysis and hydration | Implemented; validation pending | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
+| M3 UI, recovery and migration | Implemented; validation pending | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
 | E0 subtitle and library workers | Planned | Reuse newly landed subtitle extraction implementation |
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
