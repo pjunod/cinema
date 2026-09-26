@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — main advanced to `b4b488556ce` with cluster worker PR #532 after #534. A 21:31 UTC read-only fleet probe found all four checkouts at `abb6fe647` and all four running OCI/binaries at `42ea7a9af`; health, readyz, quorum, leader and lag were good, but neither SHA is current main and checkout differs from runtime. The prior `8ae8cab1e136` exact-build hour remains historical evidence. A-04 browser observations remain unmerged candidate evidence. Final serial rollout waits for #527 to requalify on this moved main and for the evidence PR to merge. · **Updated:** 2026-09-26 23:09 UTC · **Main:** `b4b488556ce`
+**Status:** open — main advanced to `d95503c2523` after cluster worker PR #532 and independent Silo plan PR #563. A 21:31 UTC read-only fleet probe found all four checkouts at `abb6fe647` and all four running OCI/binaries at `42ea7a9af`; health, readyz, quorum, leader and lag were good, but neither SHA is current main and checkout differs from runtime. The prior `8ae8cab1e136` exact-build hour remains historical evidence. A-04 browser observations remain unmerged candidate evidence. Final serial rollout waits for #527 to requalify on this moved main and for the evidence PR to merge. · **Updated:** 2026-09-26 23:18 UTC · **Main:** `d95503c2523`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
