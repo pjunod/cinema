@@ -1179,7 +1179,7 @@ pub(super) async fn validate_hevc_copy_transport(
     if caps.progressive_hevc_sample_entries.is_none() {
         return Ok(());
     }
-    let probe_json = state.store.get_file_probe_json(source.id).await?;
+    let probe_json = crate::hevc_census::probe_json_for_copy(state.store.as_ref(), source).await?;
     let promotes =
         plurx_core::transcode::hevc_parameter_set_promotion_required(source, probe_json.as_deref());
     let Some(actual) =
@@ -3458,6 +3458,13 @@ pub(super) fn session_start_error(file_id: i64, error: String) -> ApiError {
         let (status, code) = match code {
             "vod_disabled" => (StatusCode::SERVICE_UNAVAILABLE, "vod_disabled"),
             "vod_index_pending" => (StatusCode::SERVICE_UNAVAILABLE, "vod_index_pending"),
+            "hevc_configuration_unverified" => {
+                (StatusCode::CONFLICT, "hevc_configuration_unverified")
+            }
+            "hevc_configuration_unsupported" => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "hevc_configuration_unsupported",
+            ),
             "vod_transcode_unavailable" => {
                 (StatusCode::NOT_IMPLEMENTED, "vod_transcode_unavailable")
             }

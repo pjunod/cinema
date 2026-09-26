@@ -1,3 +1,6 @@
+// A test, never a daemon child: the launcher rule in clippy.toml is for
+// production code.
+#![allow(clippy::disallowed_methods)]
 use std::process::{Command, Stdio};
 
 use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};

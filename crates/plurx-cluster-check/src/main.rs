@@ -5,6 +5,10 @@
 //! plurx-cluster-check -- check` behaves exactly as it did when the same code
 //! was a single binary target.
 
+// A harness that starts plurxd processes on purpose; it is never a
+// daemon child, so the launcher rule in clippy.toml does not apply.
+#![allow(clippy::disallowed_methods)]
+
 use anyhow::Result;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]

@@ -387,7 +387,10 @@ impl TranscodeManager {
         &self,
         file: &plurx_core::domain::MediaFile,
     ) -> Result<EffectiveRateControl, String> {
-        Ok(self.effective_rate_control(self.encoder_for_file(file).await?))
+        Ok(self.effective_rate_control(
+            self.encoder_for_file(file, crate::process_control::ChildClass::Background)
+                .await?,
+        ))
     }
 
     #[cfg(test)]
@@ -876,7 +879,7 @@ impl TranscodeManager {
         // otherwise — not unconditionally by the software rung.
         let encoder = match file {
             Some(file) if Self::needs_dovi_reshape(file) == Ok(true) => self
-                .encoder_for_file(file)
+                .encoder_for_file(file, crate::process_control::ChildClass::Background)
                 .await
                 .unwrap_or(Encoder::Software),
             _ => self.encoder().await,

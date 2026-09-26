@@ -2,7 +2,12 @@
 //! daemon's own inherited limits on how many descriptors it may hold.
 
 pub mod bounded;
+#[cfg(test)]
+mod census;
+pub mod priority;
 pub mod rlimit;
+
+pub use priority::{ChildClass, ChildWork};
 
 use std::io;
 
@@ -16,23 +21,39 @@ pub enum ProcessSignal {
 pub struct ChildJob {
     #[cfg(windows)]
     handle: windows_sys::Win32::Foundation::HANDLE,
+    /// The child's row in [`priority::running`]; it leaves the list when the
+    /// owner drops this job.
+    _registration: Option<priority::Registration>,
 }
 
+/// The one launcher every production child goes through.
+///
 /// Spawn without giving the child a chance to create descendants before its
 /// lifetime is tied to the daemon. On Unix the setup calls are no-ops; on
 /// Windows the child starts suspended, enters a kill-on-close Job Object, and
 /// only then resumes.
+///
+/// `work` names the child's [`ChildClass`] and purpose: the child lowers its
+/// own CPU, I/O and OOM priority to the class's policy before `exec`
+/// ([`priority::apply`]; a failure there never fails the spawn), and it is
+/// listed in [`priority::running`] until the returned job is dropped.
+/// `process::census::every_production_spawn_goes_through_the_launcher` fails
+/// on any production spawn that does not come through here.
 pub fn spawn_job_owned(
     command: &mut tokio::process::Command,
+    work: ChildWork,
 ) -> io::Result<(tokio::process::Child, ChildJob)> {
+    priority::apply(command, work.class);
     configure_suspended(command);
+    #[allow(clippy::disallowed_methods)] // the launcher itself
     let mut child = command.spawn()?;
-    let job = ChildJob::attach(&child).inspect_err(|_| {
+    let mut job = ChildJob::attach(&child).inspect_err(|_| {
         let _ = child.start_kill();
     })?;
     resume_suspended(&child).inspect_err(|_| {
         let _ = child.start_kill();
     })?;
+    job._registration = priority::register(child.id(), command.as_std().get_program(), work);
     Ok((child, job))
 }
 
@@ -49,6 +70,8 @@ pub fn spawn_job_owned(
 /// | `transcode.rs` | 1 | stdout and stderr |
 /// | `subtitles.rs` | 1 | whole-track status and stderr |
 /// | `live_tv.rs` | 1 | status and stderr |
+/// | `live_tv/caption_audit_tests.rs` | 1 | status, stdout and stderr |
+/// | `subtitle_ride_along.rs` | 1 | status, stdout and stderr |
 ///
 /// Subtitle window extraction uses the bounded diagnostic child instead of
 /// this helper, so its VTT pipe and diagnostics have explicit byte limits.
@@ -59,26 +82,63 @@ pub fn spawn_job_owned(
 /// captured output; callers with that contract use the bounded primitive.
 pub async fn output_job_owned(
     command: &mut tokio::process::Command,
+    work: ChildWork,
 ) -> io::Result<std::process::Output> {
     command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let (child, _job) = spawn_job_owned(command)?;
+    let (child, _job) = spawn_job_owned(command, work)?;
     child.wait_with_output().await
 }
 
 pub async fn status_job_owned(
     command: &mut tokio::process::Command,
+    work: ChildWork,
 ) -> io::Result<std::process::ExitStatus> {
-    let (mut child, _job) = spawn_job_owned(command)?;
+    let (mut child, _job) = spawn_job_owned(command, work)?;
     child.wait().await
+}
+
+/// [`output_job_owned`] for synchronous code that already runs off the async
+/// runtime (inside `spawn_blocking`): the same class, the same Activity row,
+/// both streams captured. The child is attached to its job right after the
+/// spawn rather than created suspended, which is the contract for a probe
+/// that starts no descendants of its own.
+pub fn output_job_owned_blocking(
+    command: &mut std::process::Command,
+    work: ChildWork,
+) -> io::Result<std::process::Output> {
+    priority::apply_policy(command, work.class.policy());
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[allow(clippy::disallowed_methods)] // the blocking launcher itself
+    let mut child = command.spawn()?;
+    let mut job = match ChildJob::attach_pid(child.id()) {
+        Ok(job) => job,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    job._registration = priority::register(Some(child.id()), command.get_program(), work);
+    let output = child.wait_with_output();
+    drop(job);
+    output
 }
 
 #[cfg(unix)]
 impl ChildJob {
     pub fn attach(_child: &tokio::process::Child) -> io::Result<Self> {
-        Ok(Self {})
+        Self::attach_pid(0)
+    }
+
+    pub(crate) fn attach_pid(_pid: u32) -> io::Result<Self> {
+        Ok(Self {
+            _registration: None,
+        })
     }
 }
 
@@ -122,6 +182,13 @@ impl Drop for ChildJob {
 #[cfg(windows)]
 impl ChildJob {
     pub fn attach(child: &tokio::process::Child) -> io::Result<Self> {
+        let pid = child
+            .id()
+            .ok_or_else(|| io::Error::other("child has no process identifier"))?;
+        Self::attach_pid(pid)
+    }
+
+    pub(crate) fn attach_pid(pid: u32) -> io::Result<Self> {
         use windows_sys::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
             SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -150,10 +217,6 @@ impl ChildJob {
             unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
             return Err(error);
         }
-        let pid = child.id().ok_or_else(|| {
-            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
-            io::Error::other("child has no process identifier")
-        })?;
         let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
         if process.is_null() {
             let error = io::Error::last_os_error();
@@ -167,7 +230,10 @@ impl ChildJob {
             unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
             return Err(error);
         }
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            _registration: None,
+        })
     }
 }
 
@@ -200,6 +266,8 @@ mod tests {
     use std::io::Write as _;
     use std::path::Path;
     use std::time::Duration;
+
+    const TEST_WORK: ChildWork = ChildWork::background("process test");
 
     /// Re-exec the portable test binary instead of relying on a platform shell.
     fn child(mode: &str) -> tokio::process::Command {
@@ -234,7 +302,7 @@ mod tests {
 
     #[tokio::test]
     async fn both_streams_are_captured() {
-        let output = output_job_owned(&mut child("echo"))
+        let output = output_job_owned(&mut child("echo"), TEST_WORK)
             .await
             .expect("child output");
         assert!(output.status.success());
@@ -244,7 +312,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_child_reports_status_and_stderr() {
-        let output = output_job_owned(&mut child("fail"))
+        let output = output_job_owned(&mut child("fail"), TEST_WORK)
             .await
             .expect("child output");
         assert_eq!(output.status.code(), Some(3));
@@ -255,7 +323,9 @@ mod tests {
     async fn a_caller_that_configured_inherit_still_gets_bytes() {
         let mut command = child("echo");
         command.stdout(std::process::Stdio::inherit());
-        let output = output_job_owned(&mut command).await.expect("child output");
+        let output = output_job_owned(&mut command, TEST_WORK)
+            .await
+            .expect("child output");
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("out-bytes"));
     }
@@ -267,8 +337,11 @@ mod tests {
         let mut command = child("sleep");
         command.env("PLURX_CHILD_PID_FILE", &pid_file);
 
-        let result =
-            tokio::time::timeout(Duration::from_millis(200), output_job_owned(&mut command)).await;
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            output_job_owned(&mut command, TEST_WORK),
+        )
+        .await;
         assert!(result.is_err(), "sleeping child exceeded the deadline");
         let pid: u32 = std::fs::read_to_string(&pid_file)
             .expect("sleeping child published its pid")
@@ -319,7 +392,9 @@ mod tests {
         let expected = BTreeMap::from([
             ("ffmpeg.rs".to_owned(), 4),
             ("live_tv.rs".to_owned(), 1),
+            ("live_tv/caption_audit_tests.rs".to_owned(), 1),
             ("pipeprobe.rs".to_owned(), 2),
+            ("subtitle_ride_along.rs".to_owned(), 1),
             ("subtitles.rs".to_owned(), 1),
             ("transcode.rs".to_owned(), 1),
         ]);

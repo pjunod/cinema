@@ -244,12 +244,19 @@ fn fixture_truth() -> (Vec<CaptionCue>, Vec<CaptionCue>) {
     fixture_truth_at(FIXTURE_FRAME_SECONDS)
 }
 
+/// The boot caption probe runs these children; nobody is waiting on them.
+const CAPTION_PROBE: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::background("Live TV caption probe");
+
 async fn media_command(command: &mut tokio::process::Command) -> std::process::Output {
     command.kill_on_drop(true);
-    let output = tokio::time::timeout(Duration::from_secs(180), command.output())
-        .await
-        .expect("media command deadline")
-        .expect("media command started");
+    let output = tokio::time::timeout(
+        Duration::from_secs(180),
+        crate::process_control::output_job_owned(command, CAPTION_PROBE),
+    )
+    .await
+    .expect("media command deadline")
+    .expect("media command started");
     assert!(
         output.status.success(),
         "{command:?}: {}",
@@ -743,7 +750,9 @@ async fn run_live_graph(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let mut child = command.spawn().expect("live FFmpeg started");
+    let (mut child, _child_job) =
+        crate::process_control::spawn_job_owned(&mut command, CAPTION_PROBE)
+            .expect("live FFmpeg started");
     let mut stdin = child.stdin.take().expect("live FFmpeg stdin");
     let feed = async move {
         // A graph that dies early closes its stdin; that is its exit status's

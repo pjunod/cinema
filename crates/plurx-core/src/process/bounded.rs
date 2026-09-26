@@ -89,6 +89,7 @@ pub async fn output<P, A>(
     args: &[A],
     wall_time: Duration,
     max_output_bytes: usize,
+    work: super::ChildWork,
 ) -> io::Result<Output>
 where
     P: AsRef<OsStr>,
@@ -121,7 +122,7 @@ where
     #[cfg(unix)]
     command.process_group(0);
 
-    let (mut child, job) = super::spawn_job_owned(&mut command)?;
+    let (mut child, job) = super::spawn_job_owned(&mut command, work)?;
     let stdout = child
         .stdout
         .take()
@@ -191,6 +192,8 @@ async fn drain_capped(
 mod tests {
     use super::*;
 
+    const TEST_WORK: super::super::ChildWork = super::super::ChildWork::background("bounded test");
+
     #[tokio::test]
     async fn excessive_output_is_drained_and_retained_at_the_cap() {
         let output = output(
@@ -198,6 +201,7 @@ mod tests {
             &["-c", "yes x | head -c 131072"],
             Duration::from_secs(5),
             1024,
+            TEST_WORK,
         )
         .await
         .expect("bounded output");
@@ -213,6 +217,7 @@ mod tests {
             &["-c", "sleep 300"],
             Duration::from_millis(50),
             1024,
+            TEST_WORK,
         )
         .await
         .expect_err("hanging process must time out");
@@ -228,6 +233,7 @@ mod tests {
             &["-c", "sleep 300 & exit 0"],
             Duration::from_millis(50),
             1024,
+            TEST_WORK,
         )
         .await
         .expect("the leader exit must reap its background process group");

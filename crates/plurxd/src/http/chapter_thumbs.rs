@@ -298,8 +298,11 @@ async fn extract(
     let mut command = extract_command(ffmpeg_bin, source, seek_ms, runtime_cache);
     // `kill_on_drop` on the child means a cancelled request also ends its
     // ffmpeg, so the two-at-a-time bound holds across cancellations.
-    let child = crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(&mut command)
-        .map_err(|error| error.to_string())?;
+    let child = crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(
+        &mut command,
+        crate::process_control::ChildWork::background("chapter thumbnail"),
+    )
+    .map_err(|error| error.to_string())?;
     let generated = tokio::time::timeout(
         EXTRACT_TIMEOUT,
         child.output_to_bounded_file(&temporary, MAX_THUMB_BYTES),

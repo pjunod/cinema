@@ -2617,8 +2617,29 @@ pub(crate) async fn enqueue_copy_preparation(
     file: &MediaFile,
     video: plurx_core::transcode::CopyVideoOptions,
 ) -> Result<AnalysisRequest, StoreError> {
+    enqueue_copy_preparation_for_object(store, node_id, file, video, None).await
+}
+
+pub(crate) async fn enqueue_copy_preparation_for_object(
+    store: &dyn Store,
+    node_id: &str,
+    file: &MediaFile,
+    video: plurx_core::transcode::CopyVideoOptions,
+    object_version: Option<&str>,
+) -> Result<AnalysisRequest, StoreError> {
     let pipeline_version = crate::ffmpeg::fragment_index_engine_digest().await;
     let video_identity = crate::fragindex::identity_for(file, video).argv_fingerprint;
+    let base = analysis_request_generation(
+        file,
+        "fragment_index",
+        &pipeline_version,
+        &video_identity,
+        false,
+    );
+    let requested_generation = match object_version {
+        Some(version) => plurx_core::segplan::argv_fingerprint(&[base, version.to_owned()]),
+        None => base,
+    };
     let now = clock_ms();
     store
         .enqueue_analysis_request(&NewAnalysisRequest {
@@ -2627,13 +2648,7 @@ pub(crate) async fn enqueue_copy_preparation(
             source_size: file.size,
             source_mtime: file.mtime,
             component: "fragment_index".to_owned(),
-            requested_generation: analysis_request_generation(
-                file,
-                "fragment_index",
-                &pipeline_version,
-                &video_identity,
-                false,
-            ),
+            requested_generation,
             pipeline_version,
             video_identity,
             priority: "normal".to_owned(),
@@ -2749,13 +2764,14 @@ async fn run_subtitle_source_pass(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let (mut child, _child_job) =
-        crate::process_control::spawn_job_owned(&mut command).map_err(|_| {
-            AnalysisResolutionError::Retry {
-                code: "source_process_failed",
-                charge_attempt: true,
-            }
-        })?;
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::background("subtitle source extraction"),
+    )
+    .map_err(|_| AnalysisResolutionError::Retry {
+        code: "source_process_failed",
+        charge_attempt: true,
+    })?;
     let mut stderr = child.stderr.take().ok_or(AnalysisResolutionError::Retry {
         code: "source_process_failed",
         charge_attempt: true,
@@ -3210,6 +3226,24 @@ impl JobManager {
         resource: String,
     ) -> Result<Option<ActiveJobLease>, StoreError> {
         acquire_cluster_job(&self.coordinator, self.job_authority.as_ref(), resource).await
+    }
+
+    /// [`Self::acquire_job`] with an explicit TTL and heartbeat: the same gate
+    /// and the same lease, for a job whose failover test shortens them.
+    pub(crate) async fn acquire_job_with_policy(
+        &self,
+        resource: String,
+        ttl: std::time::Duration,
+        heartbeat: std::time::Duration,
+    ) -> Result<Option<ActiveJobLease>, StoreError> {
+        crate::job_lease::acquire_cluster_job_with_policy(
+            &self.coordinator,
+            self.job_authority.as_ref(),
+            resource,
+            ttl,
+            heartbeat,
+        )
+        .await
     }
 
     pub(crate) async fn apply_identity_repair(
@@ -7643,8 +7677,29 @@ impl JobManager {
                 }
                 let identity = crate::fragindex::identity_for(&file, video);
                 match self.store.fragment_index(file_id, &identity).await {
-                    // Already current for this file and this pipeline.
-                    Ok(Some(_)) => continue,
+                    Ok(Some(index)) => {
+                        if !matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
+                            continue;
+                        }
+                        // Size/mtime alone miss inode/ctime-only replacement.
+                        // The local pass must refresh such proofs even when
+                        // the cluster request resolver is disabled. A current
+                        // refusal is already analyzed and must not rescan.
+                        match crate::fragment_index_cluster::inspect_source(&file).await {
+                            Ok(object)
+                                if index.promotion.hevc_configuration.as_ref().is_some_and(
+                                    |proof| proof.current_on_node(&object, &node_id),
+                                ) =>
+                            {
+                                continue
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                tracing::debug!(file_id, %error, "local HEVC index source unavailable");
+                                break;
+                            }
+                        }
+                    }
                     Ok(None) => {}
                     Err(error) => {
                         // The sidecar is failing reads. Give up on the whole
@@ -7709,7 +7764,13 @@ impl JobManager {
                 )
                 .await;
                 let refusal = match outcome {
-                    crate::fragindex::IndexOutcome::Built(index) => {
+                    crate::fragindex::IndexOutcome::Built(mut index) => {
+                        if !source_unchanged {
+                            continue;
+                        }
+                        if let Some(proof) = index.promotion.hevc_configuration.as_mut() {
+                            proof.source_node_id = node_id.clone();
+                        }
                         if let Err(error) = self.store.put_fragment_index(file_id, &index).await {
                             tracing::warn!(file_id, error = %error, "storing a fragment index");
                         } else {
@@ -8206,9 +8267,9 @@ impl JobManager {
 
     async fn resolve_analysis_requests(self: &Arc<Self>, transcode: Arc<TranscodeManager>) {
         const MAX_REQUESTS_PER_PASS: usize = 2;
-        /// A deadline on a hung mount, not a bound on file size. Attestation
-        /// samples at most 64 MiB whatever the source weighs, so ten minutes
-        /// is reached only when the filesystem has stopped answering.
+        /// Hard background I/O budget. HEVC copy proof hashes the full source;
+        /// other consumers still sample. Large/slow files may exhaust this
+        /// budget and remain unverified, with bounded charged retries.
         const ATTEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
         if !self.cluster_fragment_index_enabled().await || !transcode.pretranscode_worker_idle() {
@@ -9007,7 +9068,7 @@ impl JobManager {
                 })
             }
         };
-        let object_version = crate::fragment_index_cluster::inspect_source(&file)
+        let object_version = crate::fragment_index_cluster::inspect_copy_source(&file)
             .await
             .map_err(|_| AnalysisResolutionError::Retry {
                 code: "source_unavailable",
@@ -9037,15 +9098,12 @@ impl JobManager {
             0,
             0,
         );
-        // Verification reads a bounded sample, not the file, so the bar and
-        // the ETA have to be denominated in what it will actually read.
-        // Otherwise a 43 GB source shows a tenth of a percent and a
-        // twenty-minute estimate for an operation that finishes in two
-        // seconds. The build stage sets the totals back to the whole file.
+        // HEVC copy reads every source byte; other codecs retain sampling.
+        // Progress and ETA must describe the selected attestation regime.
         self.set_analysis_progress_totals(
             &request.request_id,
             &request.target_node_id,
-            crate::fragment_index_cluster::attestation_read_bytes(file.size.max(0) as u64),
+            crate::fragment_index_cluster::copy_attestation_read_bytes(&file),
             file.duration_ms.unwrap_or_default(),
         );
         // Bound to a local rather than passed inline: the callback outlives
@@ -9061,7 +9119,7 @@ impl JobManager {
             );
         };
         let attested = tokio::select! {
-            result = crate::fragment_index_cluster::attest_source(
+            result = crate::fragment_index_cluster::attest_copy_source(
                 node_id,
                 &file,
                 memo.as_ref(),
@@ -9082,17 +9140,8 @@ impl JobManager {
                 });
             }
             () = wait_analysis_deadline(attest_timeout) => {
-                // Charged, and deliberately so. Before sampling, this deadline
-                // measured file size and turned large-but-healthy sources into
-                // permanent failures; now the read it bounds is 64 MiB, so
-                // reaching it means the mount has stopped answering, which is
-                // a real fault worth an attempt. Charging is also what bounds
-                // the retry: an uncharged retry is *refunded* (`attempts - 1`),
-                // which pins `attempts` at one, and the backoff shifts by
-                // `attempts - 1` — so a refunded timeout would re-queue at the
-                // base delay forever, never escalate, never go terminal, and
-                // quietly fill the 4,096-row active-request budget that every
-                // other file needs in order to be enqueued at all.
+                // Charge timeout attempts so large/slow or unavailable sources
+                // back off and eventually stop instead of retrying forever.
                 return Err(AnalysisResolutionError::Retry {
                     code: "source_attestation_timeout",
                     charge_attempt: true,
@@ -9490,9 +9539,9 @@ impl JobManager {
         // queue at eight refusals per minute. Discovery removes an exclusion
         // immediately when the exact source becomes readable again.
         const LOCAL_REFUSAL_MS: i64 = 24 * 60 * 60_000;
-        /// A deadline on a hung mount, not a bound on file size. Attestation
-        /// samples at most 64 MiB whatever the source weighs, so ten minutes
-        /// is reached only when the filesystem has stopped answering.
+        /// Hard background I/O budget. HEVC copy proof hashes the full source;
+        /// other consumers still sample. Large/slow files may exhaust this
+        /// budget and remain unverified, with bounded charged retries.
         const ATTEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
         let _progress = self.start_analysis_progress(
@@ -9618,7 +9667,7 @@ impl JobManager {
                 return false;
             }
         };
-        let object_version = match crate::fragment_index_cluster::inspect_source(&file).await {
+        let object_version = match crate::fragment_index_cluster::inspect_copy_source(&file).await {
             Ok(version) => version,
             Err(error) => {
                 tracing::debug!(file_id = file.id, %error, "claimed index source is not local");
@@ -9665,7 +9714,7 @@ impl JobManager {
         self.set_analysis_progress_totals(
             &job.cache_key,
             &job.target_node_id,
-            crate::fragment_index_cluster::attestation_read_bytes(file.size.max(0) as u64),
+            crate::fragment_index_cluster::copy_attestation_read_bytes(&file),
             file.duration_ms.unwrap_or_default(),
         );
         let report_progress = |bytes: u64| {
@@ -9679,7 +9728,7 @@ impl JobManager {
             );
         };
         let attestation = tokio::select! {
-            result = crate::fragment_index_cluster::attest_source(
+            result = crate::fragment_index_cluster::attest_copy_source(
                 &node_id,
                 &file,
                 memo.as_ref(),
@@ -10037,7 +10086,7 @@ impl JobManager {
             // already for a source that moved.
             self.settle_ride_along(&file, pending, true).await;
         }
-        let index = match outcome {
+        let mut index = match outcome {
             crate::fragindex::IndexOutcome::Built(index) => index,
             // The node-local row is recorded here too, so a clustered node's
             // own operator surface and its background pass both know what this
@@ -10111,6 +10160,14 @@ impl JobManager {
             file.duration_ms.unwrap_or_default(),
             index.rows.len(),
         );
+        if let Some(proof) = index.promotion.hevc_configuration.as_mut() {
+            proof.source_node_id = node_id.clone();
+            proof.source_object_version = crate::fragment_index_cluster::local_object_version(
+                &attested.observation.object_version,
+            )
+            .to_owned();
+            proof.source_sha256 = Some(attested.observation.source_sha256.clone());
+        }
         let blob = match encode_cluster_fragment_index_blob(
             &index,
             &job.source_sha256,
@@ -10993,6 +11050,23 @@ mod tests {
         let other = enqueue_copy_preparation(&store, "node-a", &file, strip)
             .await
             .expect("different recipe");
+        let bound =
+            enqueue_copy_preparation_for_object(&store, "node-a", &file, convert, Some("object-a"))
+                .await
+                .expect("bound request");
+        let repeated =
+            enqueue_copy_preparation_for_object(&store, "node-a", &file, convert, Some("object-a"))
+                .await
+                .expect("joined bound request");
+        let moved =
+            enqueue_copy_preparation_for_object(&store, "node-a", &file, convert, Some("object-b"))
+                .await
+                .expect("new object request");
+        assert_eq!(bound.request_id, repeated.request_id);
+        assert_ne!(
+            bound.request_id, moved.request_id,
+            "same catalog size/mtime cannot hide an object change"
+        );
         assert_eq!(first.request_id, retry.request_id);
         assert_ne!(first.request_id, other.request_id);
         assert_eq!(first.state, "queued");
@@ -11005,7 +11079,7 @@ mod tests {
         assert!(!first.force_rebuild);
         assert_eq!(
             store.analysis_requests(10).await.expect("requests").len(),
-            2
+            4
         );
         assert_eq!(
             store
@@ -12623,6 +12697,7 @@ mod tests {
         "repair:probe",
         "candidate:pretranscode",
         "watched:outbox",
+        "metadata-classification",
     ];
 
     /// Leases that are singletons but not *cluster* singletons, named so this
@@ -13498,6 +13573,124 @@ mod tests {
         assert_eq!(
             row.pgs_tracks, 1,
             "the row names the track it kept: {row:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_hevc_index_refreshes_object_proof_without_cluster_queue() {
+        use plurx_core::store::FragmentIndexStore as _;
+        let media = crate::test_tempdir().expect("media");
+        let source = media.path().join("source.mp4");
+        std::fs::copy(plurx_core::testfixtures::source("closed-gop"), &source)
+            .expect("copy HEVC fixture");
+        let metadata = std::fs::metadata(&source).expect("stat");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store
+            .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "0")
+            .await
+            .expect("local indexing");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "HEVC proof refresh".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![media.path().to_owned()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "HEVC".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let probe = ProbeResult {
+            video_codec: Some("hevc".into()),
+            duration_ms: Some(12000),
+            ..Default::default()
+        };
+        let id = store
+            .upsert_file(
+                item,
+                &source.to_string_lossy(),
+                metadata.len() as i64,
+                metadata
+                    .modified()
+                    .expect("mtime")
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("epoch")
+                    .as_secs() as i64,
+                &probe,
+            )
+            .await
+            .expect("file");
+        let file = store.get_file(id).await.expect("read").expect("file");
+        let identity = crate::fragindex::identity_for(
+            &file,
+            plurx_core::transcode::CopyVideoOptions::new(false, false),
+        );
+        let work = crate::test_tempdir().expect("work");
+        let jobs = manager(store.clone(), work.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            work.path().join("transcode"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        jobs.clone().build_fragment_indexes(transcode.clone()).await;
+        let mut index = store
+            .fragment_index(id, &identity)
+            .await
+            .expect("read")
+            .expect("initial index");
+        let object = crate::fragment_index_cluster::inspect_source(&file)
+            .await
+            .expect("object");
+        let proof = index
+            .promotion
+            .hevc_configuration
+            .as_mut()
+            .expect("original proof");
+        assert!(proof.current_on_node(&object, jobs.coordinator.node_id()));
+        // Model a prior object's proof with the same catalog size/mtime.
+        proof.source_object_version = "stale-same-size-and-mtime".into();
+        store
+            .put_fragment_index(id, &index)
+            .await
+            .expect("stale row");
+        jobs.clone().build_fragment_indexes(transcode.clone()).await;
+        let mut rebuilt = store
+            .fragment_index(id, &identity)
+            .await
+            .expect("read")
+            .expect("rebuilt index");
+        assert!(rebuilt
+            .promotion
+            .hevc_configuration
+            .as_ref()
+            .expect("refreshed proof")
+            .current_on_node(&object, jobs.coordinator.node_id()));
+        // A completed refusal on this exact object must remain untouched.
+        rebuilt
+            .promotion
+            .hevc_configuration
+            .as_mut()
+            .expect("proof")
+            .refusal = Some("completed unsupported configuration".into());
+        store
+            .put_fragment_index(id, &rebuilt)
+            .await
+            .expect("refused row");
+        jobs.clone().build_fragment_indexes(transcode.clone()).await;
+        assert_eq!(
+            store.fragment_index(id, &identity).await.expect("read"),
+            Some(rebuilt)
         );
     }
 
