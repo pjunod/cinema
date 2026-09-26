@@ -530,12 +530,12 @@ reproduced here so the numbers in §2.6 can be re-run):
 import collections, pathlib, re, sys
 ROOT = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".")
 CLASSES = [
-    ("module", re.compile(r"^\s*(pub(\(crate\))?\s+)?mod\s+\w+\s*[;{]")),
-    ("use", re.compile(r"^\s*(pub(\(crate\))?\s+)?use\s")),
-    ("type", re.compile(r"^\s*(pub(\(crate\))?\s+)?(struct|enum|type|trait|const|static)\s")),
+    ("module", re.compile(r"^\s*(pub(\([^)]*\))?\s+)?mod\s+\w+\s*[;{]")),
+    ("use", re.compile(r"^\s*(pub(\([^)]*\))?\s+)?use\s")),
+    ("type", re.compile(r"^\s*(pub(\([^)]*\))?\s+)?(struct|enum|type|trait|const|static)\s")),
     ("impl", re.compile(r"^\s*impl\b")),
-    ("fn", re.compile(r"^\s*(pub(\(crate\))?\s+)?(async\s+)?fn\s")),
-    ("field", re.compile(r"^\s*(pub(\(crate\))?\s+)?\w+\s*:\s*[^=]")),
+    ("fn", re.compile(r"^\s*(pub(\([^)]*\))?\s+)?(async\s+)?fn\s")),
+    ("field", re.compile(r"^\s*(pub(\([^)]*\))?\s+)?\w+\s*:\s*[^=]")),
     ("statement", re.compile(r"^\s*(let|if|match|for|while|loop|return|\w+[\.\(]|\{|\*)")),
 ]
 def classify(line):
@@ -580,7 +580,21 @@ no-op future is `Ready` and costs one poll. **As built (M8's first owner,
 `NoopRetirementSettlementHooks`), not one shared `Hooks` behind an `Arc`.
 The owners' points do not overlap, and boxing the zero-sized no-op
 allocates nothing. Later owners follow the per-owner shape unless their PR
-records why not. Where a seam is not a pause
+records why not. **As built ([#556](http://192.168.4.7:3000/noirr/plurx/pulls/556)):** `AttemptChild` holds
+`Arc<dyn AttemptChildHooks>` and `DecodeFactSource` holds
+`Arc<dyn DecodeFactSourceHooks>` — `Arc`, not `Box`, because the child and
+its supervisor task both hold the hooks and the source is `Clone`. Two of
+`AttemptChild`'s three points (`after_signal_authorization`,
+`after_flow_reservation`) are synchronous methods: they sit inside the
+producer transition fence, where the old seams blocked on a
+`std::sync::Barrier` and neither build has an await point. The hook trait
+has `Any` as a supertrait so a test can reach the pauses installed on a
+child it did not construct (the test-only `AttemptChild::new` installs
+them; production `new_with_job` installs the no-op). `DecodeFactSource`'s
+`#[cfg(not(test))]` getter twins are gone: both builds read the delay from
+the hook. The census script above now accepts any `pub(...)` restriction;
+it matched only `pub(crate)`, so `pub(super) fn` lines were counted as
+statements. Where a seam is not a pause
 but an *alternate implementation* (`#[cfg(not(test))]` twins), the
 production body becomes the only body and the test variant becomes a
 hook return value. The `fail` crate is the alternative for statements
@@ -738,7 +752,10 @@ changed.
 Order: `RollingRetirementSettlement` (1 field, 1 statement pair) →
 `AttemptChild` (3 fields) → `Encoding.admission_pause` →
 `DecodeFactSource` delays → the `playback_control.rs` seams → the
-`hls.rs` fault helpers. One owner per PR; each PR migrates the seam,
+`hls.rs` fault helpers. **Done:** `RollingRetirementSettlement` (#543),
+`AttemptChild` and `DecodeFactSource` (#556; `DecodeFactSource` taken ahead
+of `Encoding`, whose design question is in the execution log). One owner
+per PR; each PR migrates the seam,
 keeps the race test through the hook, and adds a release-profile
 integration test running the same scenario with `NoopHooks`. The §7 Q3
 `syn` pass is owed by the `AttemptChild` PR, not the first one (see §7).
@@ -774,17 +791,48 @@ still pass; `cargo test --release -p plurxd <owner>_shipped_shape` green;
    wrong owner; if not, T12 stops at `manager.rs` as one file and the
    further cut becomes its own PR.
 3. How many of the 153 `statement` seams are pauses (hook candidates)
-   versus one-shot faults (`fail` candidates). **Still open.** The plan
-   gave the answer to M8's first PR; that PR (#543,
-   `RollingRetirementSettlement`) did not run the `syn` pass. Its owner's
-   seams were one field and one statement pair, all an ordering pause
-   (a `Barrier` awaited before `settled.await`), classified by reading, so
-   it took the trait without needing the answer. The pass moves to the
-   `AttemptChild` PR, the first owner whose `statement` seams
-   (`producer/attempt_child.rs` carries 16 in the census) may be one-shot
-   faults rather than pauses; that PR runs it before migrating anything,
-   records the pause/fault split here, and the split of the remaining M8
-   PRs follows the answer.
+   versus one-shot faults (`fail` candidates). **Answered 2026-09-26
+   ([#556](http://192.168.4.7:3000/noirr/plurx/pulls/556)).** The `syn` pass is
+   `crates/plurxd/src/transcode/tests/seam_census.rs`;
+   `cargo test -p plurxd --bin plurxd seam_census -- --nocapture` prints
+   the table. (#543's one owner, a single `Barrier` pause, was classified
+   by reading.) It parses every production file under `crates/*/src`, skips
+   files reached only through a `#[cfg(test)]` module or `include!`, and
+   `#[cfg(test)]`/`#[test]` items, and classifies each gated statement in a
+   shipping function by what it does (`#[cfg(all(test, ..))]` counts as
+   gated). After this PR's two migrations, of the
+   158 gated statements: **48 pause** (a wait on a rendezvous or a
+   delay: `wait`, `notified`, `recv`, `acquire`, `sleep`, or awaiting a
+   held receiver), **17 fault** (an injected `Err`, `?` on a
+   test-only call, `panic!` or a `pending()` hang), 15 override (a
+   substituted value or an early `return` of a test-supplied result, an
+   alternate implementation rather than a fault), 34 record (counters,
+   pushes, notifications with no wait) and 44 plumbing (a `let` that
+   carries a slot to one of the others). Beside them: 97 gated struct fields
+   and enum variants, 104 struct-literal initialisers and 19 `match`
+   arms, each counted against its owner. (The line census's 153 was never
+   this population: it counts every literal `#[cfg(test)]` line, including
+   test-only files, initialisers and arms.)
+
+   **What follows for the remaining M8 PRs.** Pauses dominate, so the
+   per-owner hook trait stays the default shape. The one-shot faults are
+   concentrated: 7 of the 17 are `dv_disk.rs`'s injected filesystem
+   failures, one in each filesystem step of the Dolby Vision disk
+   replacement (link, rename, unlink, restore, scratch removal) — one
+   module, and the natural candidate for the `fail`-style cargo feature on
+   the `scratch-fault-injection` precedent rather than a trait; the rest are single sites spread over `live_tv.rs`,
+   `decode_facts.rs`, `http/hls/{control,release}.rs`, `offline.rs`,
+   `transcode/manager/produce.rs` and `cluster/migration.rs` (beside its
+   existing `PLURX_CLUSTER_ACTIVATION_FAILPOINT` env failpoint), each
+   migrated with its owner. The
+   `playback_control.rs` owners are mostly plumbing and arms around a few
+   pauses, so they are trait migrations; the `hls.rs` "fault helpers"
+   named in §5.9 are `fn`-class helpers whose consuming statements are
+   mostly pauses (`release_session`, `settle_preparation_control`) with one
+   fault each in `control_local_with_settlement_capacity` and
+   `end_media_session_for_release`. The override and record classes are
+   not lifecycle seams by §3.9's rule unless their owner's layout matters;
+   they are left to their owners' PRs.
 4. Whether Paul wants the §3.6 registry evaluation written at all this
    quarter, or the duplication documented as intentional now.
 
@@ -817,3 +865,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M8 / `RollingRetirementSettlement` | [#543](http://192.168.4.7:3000/noirr/plurx/pulls/543) | First owner migrated. Its `#[cfg(test)] wait_before_await_pause` field, the field's initialiser and the two `#[cfg(test)]` statements in `wait()` became one `hooks: Box<dyn RetirementSettlementHooks>` in every build, with `before_await_settled()` awaited where the pause was. Production installs `NoopRetirementSettlementHooks`, whose future is a zero-sized ready future (boxing it allocates nothing; awaiting it is one poll). **Deviation from §3.9's shape, recorded:** one small trait per owner, named for that owner's points, held as `Box<dyn>` rather than one shared `Hooks` trait behind an `Arc`: the owners' points do not overlap, and the box of the zero-sized no-op does not allocate. Census (`validation/cfg_test_census.py`): the owner's `field` 1 → 0 and `statement` 3 → 0 (whole tree `field` 186 → 185, `statement` 252 → 249); the rest of `rolling/retirement.rs`'s `#[cfg(test)]` lines belong to `spawn_rolling_scratch_cleanup_owner` and other owners. `retirement_settlement_registers_notify_before_the_wait_gap` keeps its barrier pause through a test hook; `rolling_retirement_settlement_shipped_shape` runs the same scenario with the production constructor, polling one waiter by hand (no task, no timer). Debug run of both: exit 0. Mutations, each run: taking the `Notify` interest after the wait gap fails the race test (exit 101); a production hook that never becomes ready fails the shipped-shape test (exit 101). Release profile: `cargo test --release --locked -p plurxd --bin plurxd rolling_retirement_settlement_shipped_shape` on nuc3 exit 0 (release build 7 m 58 s; 1 passed); the release artefacts were deleted afterwards (disk under 20 GB). `tests/playback/rolling-producer-owners.toml`, measured by zeroing each row: `m4-exact-rolling-retirement-settlement` 7 → 8 and `process-lifecycle-method` 399 → 400, both the shipped-shape test's one constructor call and one `wait()`, reviewed in the file. **Not done:** the remaining owners in §5.9's order (`AttemptChild` next, then `Encoding.admission_pause`, `DecodeFactSource`, the `playback_control.rs` seams, the `hls.rs` fault helpers), and §7 Q3 (the `syn` pass that splits the 153 `statement` seams into pauses and one-shot faults) is not answered here; this owner was a pause, so it took the trait. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 remainder | [#543](http://192.168.4.7:3000/noirr/plurx/pulls/543) | Not attempted. The declarations-only move of `StartInfo`, `probe_media_origin` and the ~30 shared helpers out of `transcode.rs` (M3 row above) is still a follow-up move PR with its own identity recipe. |
 | 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Review of #543 | [#543](http://192.168.4.7:3000/noirr/plurx/pulls/543) | Answers the single adversarial review ([comment 5261](http://192.168.4.7:3000/noirr/plurx/pulls/543#issuecomment-5261)); disposition in the PR thread. **Main merge:** `acc6a6b1e` merges `main` @ `4b112204b`; the one conflict was `tests/playback/rolling-producer-owners.toml`'s `process-lifecycle-method` row, re-measured by zeroing it: 405 (main's 404 plus this branch's one). **Finding 1:** the M7 row above claimed each dimension was checked; `maintenance` and the removal attempt set were not asserted, and the committed-voter check compared the projection with its own rule. `lifecycle_projection_agrees` now agrees `maintenance` with `NODE_MAINTENANCE_COUNT_SQL` and `EXIT_MAINTENANCE_SQL`, the attempt set with `ROLLBACK_REMOVAL_FENCE_SQL`, `BEGIN_REMOVAL_INTENT_SQL` and `EXISTING_REMOVAL_ATTEMPT_SQL`, promotion existence with `NODE_PROMOTION_COUNT_SQL`, and `membership` with `committed_voter_ids!` (the read `local_node_is_committed_voter` makes); the `Started`/`Barrier`/`Joint` split is recorded as having no production reader (§3.8). Mutations, each run: acknowledged-for-unacknowledged maintenance, an emptied attempt set, both together (the reviewer's pair), and `committed_voter_ids!` reading only the last joint configuration each fail the test. **Finding 2:** §7 Q3 moved to the `AttemptChild` PR and §3.9 records the per-owner `Box<dyn …Hooks>` shape as built. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M8 / `AttemptChild` | [#556](http://192.168.4.7:3000/noirr/plurx/pulls/556) | `f83df478d`. **Premise re-verified:** `transcode/producer/attempt_child.rs` held the three `#[cfg(test)]` pause fields (`:178-185` at base `91f363154`), six `#[cfg(test)]` clones of them (`:261-275`), three gated pause blocks in the supervisor (authorization `:314-322` and flow reservation `:335-345`, both inside the producer transition fence and blocking on a `std::sync::Barrier`; before-reap `:387-395`, an awaited `Notify` pair) and the gated initialisers (`:451-456`); every test construction went through the test-only `AttemptChild::new`, and the pauses were installed after construction (`pause_signal_after_*`, and the `terminate_before_reap_pause` field in three `chunk_06.rs` tests). All three seams are ordering pauses. **Built:** one `Arc<dyn AttemptChildHooks>` held by the child in every build, the supervisor running through a clone taken from it; production `new_with_job` installs `NoopAttemptChildHooks`, the test-only `new` installs `AttemptChildPauses` (reached by `Any` upcasting). The two fence points are synchronous hook methods (no await point there in either build, as before); the before-reap point is an awaited `HookFuture` whose no-op is the zero-sized `HookReady` #543 introduced, now shared. **Deviations, recorded:** `Arc` instead of #543's `Box` (two holders), and two owners in one PR (§5.9 says one per PR; each owner is its own commit). Census (`validation/cfg_test_census.py`, pattern corrected in `f8337377b` to accept `pub(super)`; base re-measured with the corrected script): `attempt_child.rs` `field` 3 → 0, `statement` 10 → 0 (under the old pattern: 2 → 0 and 16 → 7, the 7 being `pub(super) fn`/`struct` lines it mis-filed). Race tests kept through the hooks and green: `producer_signal_and_retirement_share_one_authorization_linearization`, `actor_task_exit_fences_a_reserved_signal_and_cleanup_still_progresses`, `published_failure_cleanup_survives_waiter_cancellation_and_retains_media`, `prepublication_retirement_holds_admissions_until_confirmed_reap`, `first_media_settlement_gap_keeps_confirmed_reap_ownership`. Shipped shape: `attempt_child_shipped_shape` runs `new_with_job` through all three points (suspend and resume publish the held and running flow for the attempt; a termination request reaches the published reap within 5 s). Mutations, each run: the production before-reap hook never ready fails the shipped-shape test (exit 101); the authorization hook moved outside the transition fence makes the linearization race test never complete (it reported running over 60 s and was killed, exit 101) — a hang, not a clean assertion, because the test's own `std::sync::Barrier` is what the moved hook no longer meets. `tests/playback/rolling-producer-owners.toml`, measured by zeroing each row: `supervisor-registration` and `rolling-supervisor-construction` 22 → 23, `namespaced-task-spawn` 639 → 640, `namespaced-time-constructor` 1009 → 1010, all the shipped-shape test's, reviewed in the file. No fleet or device step (§6). |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | §7 Q3 (`syn` pass) | [#556](http://192.168.4.7:3000/noirr/plurx/pulls/556) | `f8337377b`: `crates/plurxd/src/transcode/tests/seam_census.rs`, run with `cargo test -p plurxd --bin plurxd seam_census -- --nocapture`. Answer recorded in §7 Q3: after this PR, 158 gated statements in shipping functions — 48 pause, 17 fault (7 of them `dv_disk.rs`), 15 override, 34 record, 44 plumbing — plus 97 gated fields and variants, 104 initialisers and 19 arms, over 310 production files (33 test-only files skipped). Two fixture tests pin the classifier (every class, `#[cfg(all(test, ..))]`, and test items ignored) and the test-file resolution (`#[cfg(test)] mod`, `#[path]`, `include!` from a test file); `seam_census_of_the_workspace` asserts the migrated owners (`AttemptChild`, `RollingRetirementSettlement`, `DecodeFactSource`) keep no gated sites. The fixture spells `cfg(TEST)` and swaps it before parsing so the line census does not count fixture text. `m4-exact-rolling-retirement-settlement` 8 → 9 (the owner name as a string in that assertion), measured and reviewed. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M8 / `DecodeFactSource` | [#556](http://192.168.4.7:3000/noirr/plurx/pulls/556) | `bc1c632ee`. **Premise re-verified:** `decode_facts.rs` held `#[cfg(test)] initial_identity_delay` / `final_identity_delay` fields (`:640-643` at base), their gated initialisers (`:656-659`) and `#[cfg(test)]`/`#[cfg(not(test))]` getter twins (`:684-702`) read at the two identity observations (`:3400`, `:3496`), which hand the delay to the blocking syscall owner that sleeps only when it is non-zero. Delays installed by consuming test builders on a source the test holds, so the hook is chosen before use. **Built:** `Arc<dyn DecodeFactSourceHooks>` (the source is `Clone`), production `NoopDecodeFactSourceHooks` (both zero), test `IdentityDelays` installed by `with_identity_delay` / `with_final_identity_delay`, each keeping the delay it does not set; the twins are gone. Census: `decode_facts.rs` `field` 8 → 4 (the owner's two fields and two initialisers; the four left belong to other owners in the file), `statement` 13 unchanged (other owners). Race test `blocked_source_identity_returns_deadline_without_releasing_probe_ownership` kept, and the manager tests that use `with_final_identity_delay` (`source_change_refuses_bound_plan`, `prepared_plan_keeps_producer_execution_out_of_the_probe_lane`) pass in the full suite. Shipped shape: `decode_fact_source_shipped_shape`, the race test's scenario with `DecodeFactSource::new`, returns the fixture probe's `InvalidJson` inside the 100 ms budget with the probe lane free. Mutations, each run (exit 101): a production initial delay of 1 s fails the shipped-shape test; a getter ignoring the hook fails the race test. **Taken ahead of `Encoding.admission_pause`:** that owner's race tests (`vod/tests/chunk_03.rs` ×3, `vodencode_tests.rs`) install the pause after construction on `Encoding`s production code builds (`transcode/manager/create.rs:966`, reached through the VOD recipe fixtures), and on one specific `Encoding` of a predecessor/successor pair. A hook held by an `Encoding` cannot be replaced once it is inside its `Arc`, so the options are a test-build constructor twin (what M8 removes) or a hook factory held by `TranscodeManager` (itself an owner with eight test-only fields) that can target one rendition — a design choice for the `Encoding` PR, not guessed here. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Gates for #556 | [#556](http://192.168.4.7:3000/noirr/plurx/pulls/556) | On nuc3 in `~/work/hc4` at `bc1c632ee` (base `91f363154`; `main` has since gained only #552's one-line K-09 board edit): `cargo fmt --all -- --check` exit 0; `cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0; `cargo test --locked --no-fail-fast -p plurxd` exit 0 (2,957 passed, 14 ignored, compiled from this worktree); `cargo test --release --locked -p plurxd --bin plurxd -- attempt_child_shipped_shape decode_fact_source_shipped_shape rolling_retirement_settlement_shipped_shape` exit 0 (release build 10 m 10 s, 3 passed), release artefacts deleted afterwards (disk under 20 GB); `make history-check` 0, `make validation-lint` 0, validation unittests 0 (528), `make operations-check` 0, `make spike-lock-check` 0. **Remaining M8 owners:** `Encoding.admission_pause` (design question above), the `playback_control.rs` owners, the `http/hls/` sites, the `dv_disk.rs` faults (a `fail`-feature candidate, §7 Q3), and the owners the census lists that §5.9 does not name (`TranscodeManager`, `Session`, `LiveTvManager`, `JobManager`, VOD `Shared`/`Rendition`). |
