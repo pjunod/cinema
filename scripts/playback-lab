@@ -1951,7 +1951,13 @@ class FirefoxDriver {
   }
 
   exec(script, args = []) {
-    return this.wd("POST", `/session/${this.sessionId}/execute/sync`, { script, args });
+    // Firefox WebDriver evaluates in an isolated realm, where top-level `let`
+    // bindings such as CAPS_Q are invisible. window.eval enters the page realm.
+    const source = `(function(){${script}\n}).apply(null,${JSON.stringify(args)})`;
+    return this.wd("POST", `/session/${this.sessionId}/execute/sync`, {
+      script: "return window.eval(arguments[0]);",
+      args: [source],
+    });
   }
 
   eval(expression) {
@@ -2078,7 +2084,14 @@ async function prepareBrowser(driver, token) {
   // `play` and `CAPS_Q` live in decode-tiers.js, ten rows before the watch
   // presentation declares the bindings that play() reads. A shaped proxy can
   // still be delivering those later rows after the early functions exist.
-  await waitFor(() => driver.eval("document.readyState === 'complete' && typeof play === 'function' && typeof CAPS_Q === 'string' && typeof watchPrepare === 'function' && typeof render === 'function'"), 30_000, "complete player code");
+  try {
+    await waitFor(() => driver.eval("document.readyState === 'complete' && typeof play === 'function' && typeof CAPS_Q === 'string' && typeof watchPrepare === 'function' && typeof render === 'function'"), 30_000, "complete player code");
+  } catch (error) {
+    const state = await driver.eval(`({ready:document.readyState,
+      play:typeof play,caps:typeof CAPS_Q,prepare:typeof watchPrepare,
+      render:typeof render,scripts:document.scripts.length})`).catch(() => null);
+    throw new Error(`${error.message}; browser state ${JSON.stringify(state)}`);
+  }
   return driver.eval(`({browser:browserLabel(),user_agent:navigator.userAgent,caps:PLAY_CAPS,caps_q:CAPS_Q,
     native_hls:useNativeHls(document.getElementById('video')),mse:!!(window.MediaSource&&window.Hls&&Hls.isSupported())})`);
 }
