@@ -765,6 +765,16 @@ expressions would be a guess. This repo has no `package.json` and no
 of vendored source. It is not in `WEB_ASSETS`, never reaches a browser, and
 never reaches the binary.
 
+One dev-only npm tool is pinned but **not** checked in: TypeScript
+([Apache-2.0](https://github.com/microsoft/TypeScript/blob/main/LICENSE.txt),
+Copyright (c) Microsoft Corporation), whose checker `scripts/web-types` runs
+over the web shell. `tools/web-types/package.json` and its `package-lock.json`
+pin one exact version with no dependencies; `npm ci` installs it into
+`tools/web-types/node_modules/`, which is git-ignored. Vendoring it would add
+about 24 MB of JavaScript to every clone — the trade the acorn paragraph above
+refuses — and a scoped directory keeps the repository root from becoming an npm
+project. Like acorn, it never reaches a browser, the binary, or a native client.
+
 ---
 
 ## Keeping this file honest
