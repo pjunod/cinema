@@ -691,18 +691,14 @@ async fn a_capture_whose_frozen_faces_diverge_is_refused() {
     assert_eq!(environments_left(&fixture).await, Vec::<PathBuf>::new());
 }
 
-/// Finding 3: the system `fc-*` tools prove nothing about the libfontconfig
-/// the producer's ffmpeg links. A producer whose library ignores
-/// `FONTCONFIG_SYSROOT` (older than 2.13.1) reads the live root
-/// configuration by its original path, and the capture must refuse it.
-#[tokio::test]
-async fn a_producer_library_that_ignores_the_sysroot_is_refused() {
-    let fixture = fixture();
-    let program = fixture.base.path().join("ffmpeg-without-sysroot");
+/// Install a stand-in encoder for the producer-library proof: `prelude` (a
+/// shell fragment) runs, then the host's real encoder with the same arguments.
+fn stand_in(fixture: &Fixture, name: &str, prelude: &str) {
+    let program = fixture.base.path().join(name);
     std::fs::write(
         &program,
         format!(
-            "#!/bin/sh\nunset FONTCONFIG_SYSROOT\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\n{prelude}\nexec '{}' \"$@\"\n",
             crate::ffmpeg::encoder_executable_path()
                 .expect("an encoder on this host")
                 .display()
@@ -722,12 +718,97 @@ async fn a_producer_library_that_ignores_the_sysroot_is_refused() {
             ..Default::default()
         },
     );
+}
+
+/// Finding 3: the system `fc-*` tools prove nothing about the libfontconfig
+/// the producer's ffmpeg links. A producer whose library ignores
+/// `FONTCONFIG_SYSROOT` (older than 2.13.1) reads the live root
+/// configuration by its original path, and the capture must refuse it. Such
+/// a library cannot read the cache a 2.13+ `fc-list` writes (an older cache
+/// version), so it scans cold; the stand-in drops the live cache to be that
+/// library rather than one that happens to find a warm cache and stay silent.
+#[tokio::test]
+async fn a_producer_library_that_ignores_the_sysroot_is_refused() {
+    let fixture = fixture();
+    stand_in(
+        &fixture,
+        "ffmpeg-without-sysroot",
+        &format!(
+            "unset FONTCONFIG_SYSROOT\nrm -rf '{}'",
+            fixture.base.path().join("system-cache").display()
+        ),
+    );
     let error = refused(&fixture).await;
     assert!(
         error.contains("does not honour FONTCONFIG_SYSROOT"),
         "refused by the producer-library proof: {error}"
     );
     assert_eq!(environments_left(&fixture).await, Vec::<PathBuf>::new());
+}
+
+/// PR #553's fast lane: Fontconfig before 2.17 traces its configuration only
+/// on a cold load, and the lane's `fc-list` had warmed the environment's
+/// cache before the producer probe ran, so a 2.15 producer printed nothing.
+/// The probe must run on the new root before any cache exists in it, on
+/// every host. The stand-in refuses to render if Fontconfig has written a
+/// cache anywhere under the sysroot; the capture then succeeds only if the
+/// probe went first, and the probe's scan leaves the cache later launches
+/// read.
+#[tokio::test]
+async fn the_producer_probe_is_a_cold_load() {
+    let fixture = fixture();
+    stand_in(
+        &fixture,
+        "ffmpeg-requiring-a-cold-cache",
+        "if [ -n \"$(find \"$FONTCONFIG_SYSROOT\" -name '*.cache-*' -print)\" ]; then\n  \
+         echo 'a Fontconfig cache already exists under the sysroot' >&2\n  exit 3\nfi",
+    );
+    let engine = capture(&fixture).await;
+    let caches: Vec<PathBuf> = walk(environment(&engine).root())
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains(".cache-"))
+        })
+        .collect();
+    assert!(
+        !caches.is_empty(),
+        "the probe's scan left a cache in the environment for later launches"
+    );
+}
+
+/// A producer that traces nothing even on a cold load proves nothing about
+/// which configuration it renders under: the capture refuses the burn, it
+/// never skips the proof.
+#[tokio::test]
+async fn a_producer_that_traces_nothing_is_refused() {
+    let fixture = fixture();
+    stand_in(&fixture, "ffmpeg-without-trace", "unset FC_DEBUG");
+    let error = refused(&fixture).await;
+    assert!(
+        error.contains("traced no Fontconfig configuration"),
+        "refused by the producer-library proof: {error}"
+    );
+    assert_eq!(environments_left(&fixture).await, Vec::<PathBuf>::new());
+}
+
+/// Every file under `dir`, not following links.
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next).expect("readable environment") {
+            let entry = entry.expect("directory entry");
+            let kind = entry.file_type().expect("entry type");
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else {
+                found.push(entry.path());
+            }
+        }
+    }
+    found
 }
 
 /// The trace as the production image's bundled Fontconfig prints it

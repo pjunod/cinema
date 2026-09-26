@@ -70,7 +70,8 @@ const RULE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 /// The script the capture burns once under the producer's own ffmpeg, beside
 /// (not inside) the sysroot. One event, so libass resolves a face and the
-/// producer library's first scan builds the cache every later launch reads.
+/// producer library's first scan — on the new root's empty cache — builds the
+/// cache every later launch reads.
 const PROBE_SCRIPT_NAME: &str = "probe.ass";
 const PROBE_SCRIPT: &str = "[Script Info]\nScriptType: v4.00+\nPlayResX: 64\nPlayResY: 64\n\n\
      [V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, \
@@ -409,37 +410,21 @@ async fn build(
         }
     };
 
-    // Parity under the system library. No `fc-cache` first: `fc-list` builds
-    // the system library's cache as it lists, and that cache is only the
-    // producer's if the two libraries share a cache version.
-    let (loaded, elapsed) = probe(
-        command(Path::new("fc-conflist")),
-        "listing the frozen rules",
-    )
-    .await;
-    cost.spawn += elapsed;
-    rules_match(
-        &layout.root,
-        sources.rules,
-        &String::from_utf8_lossy(&loaded?),
-    )?;
-    let mut list = command(Path::new("fc-list"));
-    list.arg(FONT_LISTING_FORMAT);
-    let (listed, elapsed) = probe(list, "listing the frozen fonts").await;
-    cost.spawn += elapsed;
-    faces_match(
-        &layout.root,
-        sources.listing,
-        &String::from_utf8_lossy(&listed?),
-    )?;
-
-    // Parity under the producer's library. libass links whatever
-    // libfontconfig the ffmpeg build bundles (Jellyfin FFmpeg ships its own
-    // beside an older system one), so one burn under the child's exact
-    // environment, with Fontconfig tracing what it loads, is the only proof
-    // that *this* library resolves inside the sysroot. Its first scan also
-    // writes the cache in that library's own format, so no producer launch
-    // pays one.
+    // The producer's own library runs first, before anything else has read
+    // or written this environment. libass links whatever libfontconfig the
+    // ffmpeg build bundles (Jellyfin FFmpeg ships its own beside an older
+    // system one), so one burn under the child's exact environment, with
+    // Fontconfig tracing what it loads, is the only proof that *this*
+    // library resolves inside the sysroot. That trace must not depend on
+    // cache warmth: before 2.17 a library prints it only when it has no
+    // valid cache to read (it reaches `FcInitDebug` through the default
+    // configuration a cold scan loads, never through libass's own parse),
+    // and the `fc-list` below would otherwise have built one in the same
+    // format. Under a sysroot Fontconfig resolves every `<cachedir>` —
+    // absolute, `~` or `prefix="xdg"` — inside the sysroot, so this brand-new
+    // root is itself the probe's own empty cache and every probe is a cold
+    // load. Its scan then leaves the cache, in the producer library's own
+    // format, that every later launch of the recipe reads.
     let program = producer_program(runtime_cache)?;
     let mut render = command(&program);
     crate::producer_spawn::configure_ffmpeg_runtime(&mut render, runtime_cache);
@@ -461,6 +446,31 @@ async fn build(
         .args(["-frames:v", "1", "-f", "null", "-"]);
     let (traced, elapsed) = probe(render, "rendering under the frozen environment").await;
     cost.spawn += elapsed;
+
+    // Parity under the system library, judged before the producer's trace:
+    // a closure the freeze cannot reproduce is named as such, whatever the
+    // producer then made of it.
+    let (loaded, elapsed) = probe(
+        command(Path::new("fc-conflist")),
+        "listing the frozen rules",
+    )
+    .await;
+    cost.spawn += elapsed;
+    rules_match(
+        &layout.root,
+        sources.rules,
+        &String::from_utf8_lossy(&loaded?),
+    )?;
+    let mut list = command(Path::new("fc-list"));
+    list.arg(FONT_LISTING_FORMAT);
+    let (listed, elapsed) = probe(list, "listing the frozen fonts").await;
+    cost.spawn += elapsed;
+    faces_match(
+        &layout.root,
+        sources.listing,
+        &String::from_utf8_lossy(&listed?),
+    )?;
+    // A cold probe that still traced nothing is refused here, never skipped.
     library_loads_match(
         &layout.root,
         sources.rules,
