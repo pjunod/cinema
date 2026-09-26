@@ -2067,7 +2067,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # and joins its owner and observes the speculative future's Drop. Production
 # run_ranges joins current and ahead futures inside the existing session
 # owner, and starts no independent task or rolling-producer election.
-expected_occurrences = 625
+# PR #537: +1 guide_replica_loop spawn in main. It belongs to the existing
+# background shutdown token, copies sanitized guide state, and starts no
+# media process or tuner transport. Reviewed with the cluster resource change.
+expected_occurrences = 626
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2864,7 +2867,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +3 rolling publication-trap fix: the two test-only sleeps reviewed under
 # `all-async-sleeps` and the two-second `tokio::time::timeout` that bounds the
 # resume-event poll in the same test. No production timer is added.
-expected_occurrences = 977
+# PR #537: +13 bounded transport/finalizer lease waits, guide replica polling
+# and release, worker readiness/snapshot bounds. Transport/finalizer futures
+# belong to the operation's cancellation scope; replica polling ends on the
+# daemon shutdown token. None independently selects or starts a producer.
+expected_occurrences = 990
 
 [[module_structures]]
 id = "bare-time-constructor"
