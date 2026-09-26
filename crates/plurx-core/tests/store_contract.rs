@@ -11034,6 +11034,86 @@ async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
     }
 }
 
+/// Bootstrap stamps `AUTH_SCHEMA_VERSION` without running the migration
+/// chain, so it has to install every step's objects itself: the migrator
+/// never reruns a step the stamped version says has happened. v47's
+/// subtitle-source step was once missing from bootstrap, so every fresh
+/// cluster (a SQLite activation, a new install, each contract cluster) was
+/// stamped 47 with no publication ledger, no repair epochs, and an
+/// `analysis_requests` whose CHECK refused `subtitle_source`.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect fresh-bootstrap schema client");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("fresh-bootstrap-subtitle-source-telemetry.db");
+    let checks: [(&str, i64); 6] = [
+        (
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            AUTH_SCHEMA_VERSION,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name IN ('subtitle_source_publications', 'subtitle_source_repair_epochs')",
+            2,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
+             AND name IN ('subtitle_source_publications_stamp', \
+                          'subtitle_source_publications_node')",
+            2,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'trigger' \
+             AND name IN ('subtitle_source_publications_delete_source', \
+                          'subtitle_source_publications_supersede_source', \
+                          'subtitle_source_repair_epochs_advance', \
+                          'subtitle_source_repair_epochs_delete_source', \
+                          'subtitle_source_repair_epochs_supersede_source')",
+            5,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name = 'analysis_requests' AND sql LIKE '%''subtitle_source''%'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name IN ('analysis_attempts_v47_backup', 'analysis_requests_v46')",
+            0,
+        ),
+    ];
+    // Twice: the second bootstrap is the retry a cancelled client future
+    // makes, and it must neither fail nor replay the table rebuild.
+    for round in ["first", "retried"] {
+        let store = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+            .await
+            .unwrap_or_else(|error| panic!("{round} bootstrap: {error}"));
+        drop(store);
+        for (sql, expected) in checks {
+            let rows: Vec<I64Value> = client
+                .query_consistent_map(sql, hiqlite::params!())
+                .await
+                .expect("inspect bootstrapped schema");
+            assert_eq!(rows.len(), 1, "{round}: {sql}");
+            assert_eq!(rows[0].value, expected, "{round}: {sql}");
+        }
+    }
+}
+
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v23_store_migrates_the_conversion_ledger_on_daemon_open() {
