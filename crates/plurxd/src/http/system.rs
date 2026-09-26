@@ -1696,6 +1696,10 @@ pub struct SettingsDto {
     /// request would tell an operator their node is enforcing something it is
     /// not.
     pub decoder_health_qualified_artifacts: bool,
+    /// Explicit operator override, applied to new copy starts.
+    pub hevc_unverified_copy: bool,
+    /// Advisory engine observation, never used to authorize a settings save.
+    pub hevc_header_trace_available: Option<bool>,
     /// What this node measured about itself, and the identity it therefore
     /// plans into. Read-only.
     pub decoder_health_qualification: DecoderHealthQualification,
@@ -2123,6 +2127,11 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             false,
         ),
         decoder_health_qualified_artifacts: decoder_health_requested,
+        hevc_unverified_copy: plurx_core::store::stored_switch(
+            setting(keys::HEVC_UNVERIFIED_COPY).as_deref(),
+            false,
+        ),
+        hevc_header_trace_available: crate::ffmpeg::hevc_header_trace_available().await,
         decoder_health_qualification: DecoderHealthQualification::of(
             &state.transcode.published_artifact_qualification(),
             decoder_health_requested,
@@ -2400,6 +2409,7 @@ pub struct UpdateSettings {
     pub prepared_quality_handoff: Option<bool>,
     pub automatic_decoder_recovery: Option<bool>,
     pub decoder_health_qualified_artifacts: Option<bool>,
+    pub hevc_unverified_copy: Option<bool>,
     pub pgs_overlay: Option<bool>,
     pub dolby_vision_convert: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
@@ -2564,6 +2574,7 @@ impl UpdateSettings {
             || self.prepared_quality_handoff.is_some()
             || self.automatic_decoder_recovery.is_some()
             || self.decoder_health_qualified_artifacts.is_some()
+            || self.hevc_unverified_copy.is_some()
             || self.pgs_overlay.is_some()
             || self.dolby_vision_convert.is_some()
             || self.vod_working_set_bytes.is_some()
@@ -3621,6 +3632,14 @@ pub async fn update_settings(
             .put_setting(keys::AUTOMATIC_DECODER_RECOVERY, if on { "1" } else { "0" })
             .await?;
         state.transcode.set_automatic_decoder_recovery(on);
+    }
+    if let Some(on) = req.hevc_unverified_copy {
+        // The saved preference is authoritative. No readiness condition is
+        // consulted here, including on a node without trace_headers.
+        state
+            .store
+            .put_setting(keys::HEVC_UNVERIFIED_COPY, if on { "1" } else { "0" })
+            .await?;
     }
     if let Some(on) = req.decoder_health_qualified_artifacts {
         state
@@ -4818,7 +4837,39 @@ pub async fn activity_detail(
             }
         };
     }
+    // Every child process this node is running, with its priority class, what
+    // it is for and whether the kernel honoured the class (plan P-02 §3.2):
+    // hardware in use is visible here with a stop beside it. Operator-only,
+    // like the analysis block, and this node's own children only.
+    if user.0.is_admin {
+        response["processes"] = serde_json::to_value(plurx_core::process::priority::running())
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+    }
     Ok(Json(response))
+}
+
+/// DELETE /api/v1/activity/processes/{pid} (admin) — kill one child process
+/// the Activity page lists.
+///
+/// Only a pid the launcher registered can be named, and the kill goes
+/// through the pidfd taken at spawn, so a number that has since been reused
+/// by an unrelated process cannot be hit. The child's owner sees an ordinary
+/// exit: a playback producer's session reports it as it reports a crashed
+/// encoder, a background probe records a failed probe.
+pub async fn stop_process(
+    _admin: AdminUser,
+    axum::extract::Path(pid): axum::extract::Path<u32>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    match plurx_core::process::priority::stop(pid) {
+        Ok(true) => Ok(Json(
+            serde_json::json!({ "ok": true, "note": "stopped; its owner sees the process exit" }),
+        )),
+        Ok(false) => Err(ApiError::NotFound("process")),
+        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+            Err(ApiError::Conflict(error.to_string()))
+        }
+        Err(error) => Err(ApiError::Internal(error.to_string())),
+    }
 }
 
 /// DELETE /api/v1/activity/producer (admin) — stop the pre-transcode pass.
@@ -5212,6 +5263,31 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
         offline.active_leases,
         offline.pinned_bytes,
     ));
+    use plurx_core::store::background_jobs::{JOB_METRIC_KINDS, JOB_METRIC_STATES};
+    out.push_str("# HELP plurx_background_jobs Retained durable computations by kind and state.\n\
+        # TYPE plurx_background_jobs gauge\n\
+        # HELP plurx_background_job_oldest_age_seconds Age of the oldest retained computation in each class.\n\
+        # TYPE plurx_background_job_oldest_age_seconds gauge\n");
+    for (kind_index, kind) in JOB_METRIC_KINDS.iter().enumerate() {
+        for (state_index, state) in JOB_METRIC_STATES.iter().enumerate() {
+            let slot = kind_index * JOB_METRIC_STATES.len() + state_index;
+            out.push_str(&format!(
+                "plurx_background_jobs{{kind=\"{kind}\",state=\"{state}\"}} {}\n\
+                 plurx_background_job_oldest_age_seconds{{kind=\"{kind}\",state=\"{state}\"}} {}\n",
+                sample.background_jobs.counts[slot],
+                sample.background_jobs.oldest_age_seconds[slot]
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "# HELP plurx_background_resource_reservations Unexpired shared admission reservations.\n\
+         # TYPE plurx_background_resource_reservations gauge\n\
+         plurx_background_resource_reservations{{resource_class=\"source_io\"}} {}\n\
+         # HELP plurx_background_legacy_pending Sealed legacy interests awaiting bounded import.\n\
+         # TYPE plurx_background_legacy_pending gauge\n\
+         plurx_background_legacy_pending {}\n",
+        sample.background_jobs.source_io_reservations, sample.background_jobs.legacy_pending,
+    ));
     let analysis = sample.analysis;
     out.push_str(
         "# HELP plurx_analysis_queue_depth Durable analysis jobs by state, component, priority, and trigger.\n\
@@ -5345,9 +5421,13 @@ pub(crate) async fn metrics(
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
-         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         state.offline.prometheus(),
         crate::watched::prometheus(),
+        crate::library_search::prometheus(),
+        // Every child by priority class (plan P-02 §3.2): what this node's
+        // hardware is being spent on, and whether the kernel honoured it.
+        plurx_core::process::priority::prometheus(),
         plurx_core::store::prometheus_store_operations(),
         plurx_core::store::prometheus_sqlite_health(),
         crate::store_result::prometheus(),
@@ -5367,7 +5447,7 @@ pub(crate) async fn metrics(
         super::prometheus_http_request_metrics(),
         crate::panics::prometheus_panics(),
         crate::state::fragment_index_validation_prometheus(),
-        crate::subtitle_source::prometheus(),
+        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
     let live_tv_metrics = state.live_tv.prometheus() + &state.live_tv_peers.prometheus();
@@ -5945,6 +6025,11 @@ mod tests {
         });
         assert!(stale.contains("plurx_store_metrics_sample_valid 0"));
         assert!(stale.contains("plurx_store_metrics_sample_age_seconds 121"));
+        assert!(
+            stale.contains("plurx_background_jobs{kind=\"transcode_prepare\",state=\"queued\"} 0")
+        );
+        assert!(stale
+            .contains("plurx_background_resource_reservations{resource_class=\"source_io\"} 0"));
         assert!(stale.contains("plurx_libraries_total 3"));
         assert!(stale.contains("plurx_users_total 4"));
         // The whole verdict family is absent, not zero, until a sample lands.

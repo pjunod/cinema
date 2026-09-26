@@ -281,6 +281,8 @@ enum PlaybackQuality: String, CaseIterable, Identifiable {
     case p720 = "720"
     case p480 = "480"
     case p360 = "360"
+    case p240 = "240"
+    case p144 = "144"
 
     var id: String { rawValue }
     var label: String {
@@ -293,6 +295,8 @@ enum PlaybackQuality: String, CaseIterable, Identifiable {
         case .p720: return "720p"
         case .p480: return "480p"
         case .p360: return "360p"
+        case .p240: return "240p"
+        case .p144: return "144p"
         }
     }
 
@@ -441,9 +445,15 @@ struct ReaderCapability: Codable, Equatable {
 enum BookReaderPolicy {
     static func canRead(_ file: MediaFile, onTelevision: Bool) -> Bool {
         guard !onTelevision, file.available != false else { return false }
+        // PDFKit can open the file locally even when an older server's
+        // registry still describes this client as external-reader-only.
+        // An edition revision is needed for synced progress, not for reading.
+        if file.reader?.format == "pdf" || file.container?.lowercased() == "pdf"
+            || file.filename?.lowercased().hasSuffix(".pdf") == true {
+            return (file.readerRevision?.size ?? file.size ?? 0) > 0
+        }
         if let reader = file.reader {
-            guard reader.apple.online == .read else { return false }
-            return reader.format != "pdf" || file.readerRevision != nil
+            return reader.apple.online == .read
         }
         return file.isEpub
     }
@@ -622,12 +632,6 @@ struct OpenPublicationResponse: Codable, Hashable {
     let revision: ReadingRevision
     let publication: PublicationManifest
     let limits: PublicationLimits
-}
-
-struct FileGrantResponse: Codable, Hashable {
-    let url: String
-    let expiresAt: Int
-    let grantId: String
 }
 
 struct ReadingState: Codable, Hashable {

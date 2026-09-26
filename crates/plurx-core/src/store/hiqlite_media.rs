@@ -1675,12 +1675,7 @@ impl MediaStore for HiqliteAuthStore {
         if tmdb_id.is_none() && imdb_id.is_none() {
             return Ok(None);
         }
-        let sql = format!(
-            "SELECT {ITEM_COLS} FROM items WHERE kind = $1 \
-             AND (($2 IS NOT NULL AND tmdb_id = $2) \
-             OR ($3 IS NOT NULL AND imdb_id = $3 COLLATE NOCASE)) \
-             ORDER BY ($2 IS NOT NULL AND tmdb_id = $2) DESC, id LIMIT 1"
-        );
+        let sql = super::sql_source::item_by_external_id(ITEM_COLS).hiqlite();
         trace_statement("item_by_external_id", &sql);
         one_item(
             self.client()
@@ -3420,6 +3415,26 @@ impl MediaStore for HiqliteAuthStore {
         )
         .await?;
         Ok(())
+    }
+
+    async fn merge_file_probe_hevc_parameter_sets(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        census_json: &str,
+    ) -> Result<bool, StoreError> {
+        let changed = self
+            .client()
+            .execute(
+                "UPDATE files \
+                    SET probe_json = json_set(probe_json, '$.plurx_hevc_parameter_sets', json($1)) \
+                  WHERE id = $2 AND size = $3 AND mtime = $4 AND probe_json IS NOT NULL",
+                params!(census_json, file_id, size, mtime),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(changed == 1)
     }
 
     async fn files_missing_probe(

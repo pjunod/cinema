@@ -51,6 +51,8 @@ mod hiqlite;
 #[doc(hidden)]
 pub use hiqlite::validation_time_http_store_operation;
 #[cfg(feature = "hiqlite-store")]
+mod hiqlite_background_jobs;
+#[cfg(feature = "hiqlite-store")]
 mod hiqlite_catalog;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_coordination;
@@ -94,6 +96,22 @@ mod placeholder_census;
 #[cfg(all(test, feature = "hiqlite-store"))]
 mod consistent_read_census;
 
+pub mod background_jobs;
+pub use background_jobs::BackgroundJobStore;
+mod background_jobs_delivery;
+mod background_jobs_fragment;
+pub mod background_jobs_fragment_admission;
+mod background_jobs_maintenance;
+mod background_jobs_migration;
+mod background_jobs_observation;
+mod background_jobs_offline;
+pub mod background_jobs_pretranscode;
+mod background_jobs_publication;
+#[cfg(test)]
+mod background_jobs_tests;
+pub mod classification_schedule;
+pub mod offline_claim;
+pub mod offline_expiry;
 pub mod replicated;
 pub mod watched_drain;
 
@@ -889,17 +907,17 @@ pub use fragment_index_cluster::{
     AnalysisAttempt, AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter,
     AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisIndexRepairCandidate,
     AnalysisIndexRepairResult, AnalysisRequest, AnalysisStatusSummary,
-    ClusterFragmentIndexArtifact, ClusterFragmentIndexFailure, ClusterFragmentIndexJob,
-    ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
-    NewAnalysisRequest, NewClusterFragmentIndexJob, SubtitleBackfillCandidate,
-    SubtitleBackfillDiagnostics, SubtitleSourcePublication, SubtitleSourceStamp,
-    CONTENT_ANALYSIS_REPAIR_HEADROOM, CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
-    CONTENT_ANALYSIS_REPAIR_REVISION, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
-    DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
-    DEFAULT_SUBTITLE_WINDOW_SECS, MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS,
-    MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS,
-    MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES, MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS,
-    SUBTITLE_SOURCE_REPAIR_LIMIT, SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
+    ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
+    ClusterFragmentIndexStore, FragmentIndexSourceObservation, NewAnalysisRequest,
+    NewClusterFragmentIndexJob, SubtitleBackfillCandidate, SubtitleBackfillDiagnostics,
+    SubtitleSourcePublication, SubtitleSourceStamp, CONTENT_ANALYSIS_REPAIR_HEADROOM,
+    CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES, CONTENT_ANALYSIS_REPAIR_REVISION,
+    DEFAULT_ANALYSIS_BACKOFF_BASE_SECS, DEFAULT_ANALYSIS_BACKOFF_MAX_SECS,
+    DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS, DEFAULT_SUBTITLE_WINDOW_SECS,
+    MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS,
+    MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
+    MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT,
+    SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
 };
 pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{prometheus_sqlite_health, SqliteStore, SQLITE_SCHEMA_VERSION};
@@ -914,11 +932,10 @@ use crate::domain::{
     MediaSessionActivationSettlement, MediaSessionProjectionCompletion, MediaSessionRenewal,
     MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch,
     NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
-    NewPretranscodeJob, OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome,
-    OfflinePackage, OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport,
-    OwnedMediaSessionLease, PlaybackEvent, PlaybackEventQuery, PretranscodeJob,
-    PretranscodeWorkerCapabilities, ProbeResult, ReadingState, ReadingStateWrite, RecentItem,
-    SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
+    OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage,
+    OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease,
+    PlaybackEvent, PlaybackEventQuery, PretranscodeJob, ProbeResult, ReadingState,
+    ReadingStateWrite, RecentItem, SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
@@ -1064,6 +1081,7 @@ pub struct PrometheusStoreSnapshot {
     pub offline: OfflinePackageStats,
     pub watched_outbox: (i64, i64, i64),
     pub analysis: AnalysisStoreMetrics,
+    pub background_jobs: background_jobs::BackgroundJobMetrics,
 }
 
 pub const ANALYSIS_METRIC_COMPONENTS: [&str; 3] =
@@ -1896,6 +1914,9 @@ pub mod keys {
     /// request: missing diagnostic contracts are reported as advisory facts
     /// and never override an explicit enable.
     pub const AUTOMATIC_DECODER_RECOVERY: &str = "playback.automatic_decoder_recovery";
+    /// Operator override for HEVC copy without configuration/source proof.
+    /// Off by default. Readiness is advisory and never prevents saving it.
+    pub const HEVC_UNVERIFIED_COPY: &str = "playback.hevc_unverified_copy";
     /// Ask this node to plan into the health-qualified artifact identity, so a
     /// transcode may only be reused when its producer's own receipt says the
     /// decode was clean.
@@ -3102,6 +3123,20 @@ pub trait MediaStore: Send + Sync + 'static {
         file_id: i64,
         chapters_json: &str,
     ) -> Result<(), StoreError>;
+    /// Graft the HEVC parameter-set census (`transcode::hevc_census`) onto a
+    /// file's stored probe JSON, under its `PROBE_KEY`.
+    ///
+    /// Fenced to the source revision measured: the row must still have that
+    /// size and mtime, and a probe to graft onto, or nothing is written and
+    /// the answer is `false`. A rescan that replaced the file replaces the
+    /// probe too, so a census can never outlive the bytes it described.
+    async fn merge_file_probe_hevc_parameter_sets(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        census_json: &str,
+    ) -> Result<bool, StoreError>;
     /// Files whose probe never succeeded (`probe_json IS NULL`), oldest scan
     /// first. `library_id` narrows to one library; `None` is server-wide. These
     /// are the records the retry job and the scan's repair pass exist for —
@@ -3827,98 +3862,14 @@ pub trait SharedCacheStore: Send + Sync + 'static {
     ) -> Result<Option<Lease>, StoreError>;
 }
 
-/// Durable distributed work for speculative whole-title transcodes.
-///
-/// Candidate generation is a singleton, but execution is deliberately not:
-/// every compatible node competes for rows through this boundary. Ownership
-/// is a queue-row fence rather than a generic scheduler lease so a worker can
-/// renew, yield, and settle independently of the next candidate pass.
+/// Domain history and staging retention for whole-title preparation.
+/// Execution ownership belongs exclusively to [`BackgroundJobStore`].
 #[async_trait]
 pub trait PretranscodeJobStore: Send + Sync + 'static {
-    /// Read one row for bounded diagnostics and lifecycle verification.
+    /// Common execution view, or sealed legacy history before import.
     async fn pretranscode_job(&self, id: &str) -> Result<Option<PretranscodeJob>, StoreError>;
-
-    /// Insert one active generation unless an equivalent active/terminal job
-    /// or still-verifiable ready location already satisfies it. A ready row
-    /// whose last location was evicted is deliberately eligible again.
-    async fn enqueue_pretranscode_job(
-        &self,
-        job: &NewPretranscodeJob,
-        lease: &Lease,
-        replacement: &Lease,
-    ) -> Result<bool, StoreError>;
-
-    /// Claim the highest-priority compatible due row. Expired running rows are
-    /// eligible for takeover and advance their monotone fence.
-    async fn claim_pretranscode_job(
-        &self,
-        node_id: &str,
-        capabilities: &PretranscodeWorkerCapabilities,
-        // Bounded process-local refusals (for example, sources this node
-        // cannot mount). Other nodes remain eligible immediately.
-        excluded_job_ids: &[String],
-        now_unix_ms: i64,
-        lease_expires_ms: i64,
-    ) -> Result<Option<PretranscodeJob>, StoreError>;
-
-    /// Active queue rows whose resumable part directories belong to this
-    /// node. Housekeeping uses the ids as a fail-closed keep-list without
-    /// publishing an incomplete cache location.
+    /// Legacy staging references retained until import and retirement.
     async fn pretranscode_staging_jobs(&self, node_id: &str) -> Result<Vec<String>, StoreError>;
-
-    /// Complete bounded active-id universe for pruning node-local source
-    /// refusals. The queue schema caps active rows at 4,096.
-    async fn active_pretranscode_job_ids(&self) -> Result<Vec<String>, StoreError>;
-
-    async fn renew_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        now_unix_ms: i64,
-        lease_expires_ms: i64,
-    ) -> Result<Option<PretranscodeJob>, StoreError>;
-
-    /// Capacity/preemption is not a failed encode. Return the row to the due
-    /// queue without incrementing attempts.
-    async fn yield_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        now_unix_ms: i64,
-        not_before_ms: i64,
-    ) -> Result<bool, StoreError>;
-
-    /// Record one stable failure code. The fifth failure is terminal; earlier
-    /// failures return to the queue at the caller's bounded backoff deadline.
-    async fn fail_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        error_code: &str,
-        now_unix_ms: i64,
-        not_before_ms: i64,
-    ) -> Result<bool, StoreError>;
-
-    /// Permanently cancel a claimed source generation that no longer exists
-    /// or no longer matches its snapshotted bytes.
-    async fn cancel_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        error_code: &str,
-        now_unix_ms: i64,
-    ) -> Result<bool, StoreError>;
-
-    /// Publish the node-local cache location and ready job state in one fenced
-    /// transaction after the filesystem generation has been renamed.
-    #[allow(clippy::too_many_arguments)]
-    async fn complete_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        recipe_hash: &str,
-        recipe_version: i64,
-        relative_dir: &str,
-        bytes: i64,
-        expected_previous_bytes: Option<i64>,
-        manifest_digest: &str,
-        now_unix_ms: i64,
-    ) -> Result<bool, StoreError>;
 }
 
 /// Durable app-managed offline packages and their one renewable capability.
@@ -3981,6 +3932,18 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
         &self,
         node_id: &str,
     ) -> Result<Option<OfflinePackage>, StoreError>;
+
+    /// Whether any package *may* be queued for `node_id`, read from this
+    /// node's local replica without consensus and without a Raft proposal.
+    ///
+    /// A hint in both directions and never an authorization: `false` can be
+    /// a replica that has not applied a re-home or a re-enable yet, `true`
+    /// can be a package this node has since claimed. The offline worker uses
+    /// it only to decide whether to ask the authority at all;
+    /// [`claim_next_offline_package`](Self::claim_next_offline_package)'s
+    /// replicated claim stays the only thing that binds a package to a
+    /// producer (docs/cluster/REPLICATED-WRITE-RATE-HYGIENE-II.md §3.1).
+    async fn offline_queue_hint(&self, node_id: &str) -> Result<bool, StoreError>;
 
     /// Node and claim generation fence the yield to the exact current worker.
     /// A re-homed package, or one reclaimed by the same node, must not be
@@ -4119,6 +4082,19 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
     ) -> Result<bool, StoreError>;
 
     async fn expire_offline_packages(&self, now: i64) -> Result<u64, StoreError>;
+
+    /// Whether any package *may* have lapsed by `now` (`expires_at <= now`,
+    /// the predicate of [`expire_offline_packages`](Self::expire_offline_packages)),
+    /// read from this node's local replica without consensus and without a
+    /// Raft proposal.
+    ///
+    /// A hint in both directions and never an authorization: `true` can be a
+    /// replica that has not applied a renewal yet, `false` a replica that has
+    /// not applied a package at all. The expiry sweep uses it only to decide
+    /// whether to ask the authority, and the replicated sweep's own predicate
+    /// stays the only thing that deletes a package
+    /// (docs/cluster/REPLICATED-WRITE-RATE-HYGIENE-II.md §3.4).
+    async fn offline_expiry_hint(&self, now: i64) -> Result<bool, StoreError>;
 
     // --- Node removal (`CLUSTERING-PLAN.md` §6.7) -------------------------
     //
@@ -5256,6 +5232,7 @@ pub trait TimelineAnnotationStore: Send + Sync + 'static {
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
     SettingsStore
+    + BackgroundJobStore
     + DvConversionStore
     + MetricsStore
     + UserStore
@@ -5291,6 +5268,7 @@ pub trait Store:
 
 impl<T> Store for T where
     T: SettingsStore
+        + BackgroundJobStore
         + DvConversionStore
         + MetricsStore
         + UserStore

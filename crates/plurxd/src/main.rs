@@ -1,5 +1,14 @@
+// Production children go through `process_control::spawn_job_owned`; see
+// clippy.toml.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod admission;
 use plurx_core::process::bounded as bounded_process;
+#[cfg(test)]
+#[path = "../../plurx-core/tests/support/queue_fixture.rs"]
+mod queue_fixture;
+
+mod background_jobs;
 mod backup;
 mod cachekeep;
 mod channel_subjects;
@@ -12,6 +21,7 @@ mod dvpipe;
 mod ffmpeg;
 mod fragindex;
 mod fragment_index_cluster;
+mod hevc_census;
 mod http;
 mod job_lease;
 mod library_search;
@@ -2730,6 +2740,11 @@ fn spawn_background_loops(
         std::sync::Arc::clone(&state.jobs).schedule_loop(std::sync::Arc::clone(&state.transcode)),
     );
 
+    tokio::spawn(
+        std::sync::Arc::clone(&state.jobs)
+            .background_work_loop(std::sync::Arc::clone(&state.transcode)),
+    );
+
     // Trakt: hourly (and on-demand) two-way sync + the scrobble-pause sweep.
     tokio::spawn(
         std::sync::Arc::clone(&state.trakt)
@@ -3524,9 +3539,15 @@ async fn install_decoder_diagnostic_policy(ffmpeg: &str) {
 /// First line of `ffmpeg -version` (e.g. "ffmpeg version 6.1.1 …"), if the
 /// binary runs at all. Purely informational, for the settings page.
 async fn ffmpeg_version(bin: &str) -> Option<String> {
-    let out = crate::bounded_process::output(bin, &["-version"], Duration::from_secs(5), 64 * 1024)
-        .await
-        .ok()?;
+    let out = crate::bounded_process::output(
+        bin,
+        &["-version"],
+        Duration::from_secs(5),
+        64 * 1024,
+        crate::process_control::ChildWork::background("ffmpeg version probe"),
+    )
+    .await
+    .ok()?;
     if !out.status.success() {
         return None;
     }

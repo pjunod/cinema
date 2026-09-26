@@ -872,6 +872,7 @@ function preparePlayOutgoing(attempt,decision){
   return {startSec,ladder,priorKbps,autoStartHeight,retireOutgoing,src,book,
     applied,wantSub,preBurn,outgoing};
 }
+/** @returns {Player} every field named in the typedef (player/player.js) */
 function buildPlayer(attempt,decided,prepared){
   const {decision,retestDecodeLimit,learnedLimitView}=decided;
   const {fileId,title,knownDurMs,meta,playerLastFocused,playerOpener,playerOpenerClick,
@@ -932,6 +933,7 @@ function buildPlayer(attempt,decided,prepared){
     abr:{lastSwitchAtMs:clickedAt,lastStallAtMs:null,mildSamples:0,
       upgradeSinceMs:null,previousRunway:null,stallEvents:{supply:[],decode:[]},
       recentEstimateKbps:null,recentEstimateAtMs:null,
+      recentEstimateSource:null,recentEstimateUrl:null,
       switches:[],switching:false,stableSinceMs:clickedAt,supplyRescued:false,
       // Rungs this playback has already failed to open. Per playback, not
       // persisted: a transient server failure must not cap quality forever.

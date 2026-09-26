@@ -37,6 +37,7 @@ use super::placeholder_census::STORE_SOURCES;
 /// Consistent-read call sites per replicated slice, production code only.
 const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite.rs", 26),
+    ("hiqlite_background_jobs.rs", 1),
     ("hiqlite_catalog.rs", 2),
     ("hiqlite_classification.rs", 1),
     ("hiqlite_coordination.rs", 2),
@@ -47,7 +48,7 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_import.rs", 3),
     ("hiqlite_library_channels.rs", 13),
     ("hiqlite_media.rs", 67),
-    ("hiqlite_pretranscode.rs", 4),
+    ("hiqlite_pretranscode.rs", 2),
     ("hiqlite_publication.rs", 5),
     ("hiqlite_reading.rs", 2),
     ("hiqlite_sessions.rs", 18),
@@ -63,7 +64,9 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
 /// statement standing in for two per request), and `watch_query`'s own
 /// dispatch site. Consolidating watch reads lowers reads per request, not
 /// sites in the source.
-const UNANNOTATED_CEILING: usize = 241;
+// Durable queue removes three unannotated legacy execution reads. Its
+// authority bridge is separately inventoried and carries its reason.
+const UNANNOTATED_CEILING: usize = 238;
 
 const SITE: &str = "query_consistent";
 const REASON: &str = "// authority:";

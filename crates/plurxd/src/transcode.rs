@@ -31,7 +31,7 @@ use plurx_core::transcode::{
 };
 use sha2::{Digest as _, Sha256};
 use tokio::process::Child;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use crate::admission::Admission;
 use crate::admission::TranscodeResourceEstimate;
@@ -287,7 +287,40 @@ enum BoundPlanCaller {
     Vod,
 }
 
+/// The class of what `encoder_and_grade_for` starts: every caller of it is a
+/// session start (VOD or streamed) or a peer's media offer for one.
+const SESSION_START_CLASS: crate::process_control::ChildClass =
+    crate::process_control::ChildClass::Realtime;
+
+/// The held source probe a VOD start runs under `ENGINE_PROBE_TIMEOUT`. A
+/// viewer waits on it and a miss answers `vod_source_rescan_required`, so it
+/// is realtime (plan P-02 §3.2.2).
+const VOD_START_HELD_PROBE: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::realtime("held source probe for a session start");
+
 impl BoundPlanCaller {
+    /// The class and purpose of the decode-fact probes this caller waits on.
+    /// A VOD start waits up to `DECODE_PLAN_PROBE_BUDGET` with a viewer in
+    /// front of it; the pre-transcode pass has nobody waiting.
+    const fn decode_fact_work(self) -> crate::process_control::ChildWork {
+        match self {
+            Self::Pretranscode => crate::process_control::ChildWork::background(
+                "decode-fact probe for the pre-transcode pass",
+            ),
+            Self::Vod => {
+                crate::process_control::ChildWork::realtime("decode-fact probe for a session start")
+            }
+        }
+    }
+
+    fn decode_fact_source(
+        self,
+        handle: Arc<std::fs::File>,
+        offset_gate: Arc<tokio::sync::Semaphore>,
+    ) -> crate::decode_facts::DecodeFactSource {
+        crate::decode_facts::DecodeFactSource::new(handle, offset_gate, self.decode_fact_work())
+    }
+
     fn finish(
         self,
         result: Result<ResolvedTranscode, String>,
@@ -308,7 +341,7 @@ const AUTO_SOFTWARE_HEIGHT: i64 = 720;
 /// sources may follow validated hardware encoders to [`MAX_HEIGHT`].
 const AUTO_HARDWARE_PROBED_HEIGHT: i64 = 1080;
 /// Floor for any requested rung. Below this there is no picture worth the
-/// session; the adaptive ladder itself bottoms out at 360p.
+/// session; the adaptive ladder itself bottoms out here.
 pub const MIN_HEIGHT: i64 = 144;
 /// Ceiling for any requested or resolved rung. Hardware-backed SDR Auto and
 /// explicit quality/source promises may reach it.
@@ -595,6 +628,14 @@ impl LiveRecoveryReason {
 }
 
 /// The reason labels, in `live_recovery_snapshot()` order.
+pub(crate) async fn unverified_hevc_copy_enabled(store: &dyn Store) -> Result<bool, String> {
+    let value = store
+        .get_setting(plurx_core::store::keys::HEVC_UNVERIFIED_COPY)
+        .await
+        .map_err(|error| format!("reading HEVC copy preference: {error}"))?;
+    Ok(plurx_core::store::stored_switch(value.as_deref(), false))
+}
+
 pub(crate) const LIVE_RECOVERY_LABELS: [&str; 5] = LiveRecoveryReason::LABELS;
 
 fn record_live_recovery(reason: LiveRecoveryReason) {
@@ -1071,7 +1112,10 @@ pub(crate) async fn probe_media_origin(source_path: &std::path::Path, start_seco
         tracing::warn!(start_seconds, %error, "media-origin source changed before probe");
         return start_seconds;
     }
-    let probe = crate::process_control::output_job_owned(&mut command);
+    let probe = crate::process_control::output_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::realtime("playback start media probe"),
+    );
     let Ok(Ok(out)) = tokio::time::timeout(MEDIA_ORIGIN_PROBE_TIMEOUT, probe).await else {
         tracing::warn!(
             start_seconds,
@@ -1432,6 +1476,9 @@ pub struct TranscodeManager {
     /// offline request asks speculative work to stop at its next published
     /// segment boundary, then takes this gate before resuming its own claim.
     background_producer: Mutex<()>,
+    /// Shared by every heavy durable worker, independently of CPU/GPU cost.
+    /// The owned guard follows the physical child through cancellation/join.
+    background_heavy: Arc<tokio::sync::Semaphore>,
     offline_waiting: AtomicBool,
     /// Whether this daemon's ffmpeg can strip a Dolby Vision configuration —
     /// probed at boot ([`crate::ffmpeg::has_dovi_rpu`]).

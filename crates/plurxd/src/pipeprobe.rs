@@ -200,9 +200,12 @@ impl Tools for Spawn {
                 Stdout::Capture => std::process::Stdio::piped(),
             })
             .stderr(std::process::Stdio::piped());
-        crate::process_control::output_job_owned(&mut command)
-            .await
-            .map_err(|e| format!("could not run ffmpeg: {e}"))
+        crate::process_control::output_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::background("tone-map pipeline probe"),
+        )
+        .await
+        .map_err(|e| format!("could not run ffmpeg: {e}"))
     }
 
     async fn ffprobe(&self, args: Vec<String>) -> Result<std::process::Output, String> {
@@ -221,9 +224,12 @@ impl Tools for Spawn {
             // not run".
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        crate::process_control::output_job_owned(&mut command)
-            .await
-            .map_err(|e| format!("could not run ffprobe: {e}"))
+        crate::process_control::output_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::background("tone-map pipeline probe"),
+        )
+        .await
+        .map_err(|e| format!("could not run ffprobe: {e}"))
     }
 }
 

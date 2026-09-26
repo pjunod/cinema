@@ -1,6 +1,41 @@
 version = 1
 enforce_after = "e8a910f"
 
+# D-03's internal reader corrections need a durable source-to-test bridge.
+# The Android PDF checks below are source contracts; simulator/device behavior
+# remains separate acceptance evidence on the D-03 workboard.
+[[fixes]]
+id = "clients.book-actions-stay-inside-plurx"
+commits = ["c5396c1c7"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/DetailScreen.kt"
+source_anchor = "onReadPdf(playable.id, playable.size)"
+test = "tests/operations/test_android_credential_exposure.py"
+test_anchor = "test_mobile_book_actions_keep_account_urls_inside_plurx"
+
+[[fixes]]
+id = "android.pdf-selected-size-and-profile"
+commits = ["269f7c39b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/PdfReaderScreen.kt"
+source_anchor = "if (temporary.length() != expectedSize)"
+test = "tests/operations/test_android_credential_exposure.py"
+test_anchor = "test_pdf_download_checks_selected_size_and_profile"
+
+[[fixes]]
+id = "android.pdf-page-failure-and-scroll-reset"
+commits = ["53c450b81"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/PdfReaderScreen.kt"
+source_anchor = "bitmap?.recycle()"
+test = "tests/operations/test_android_credential_exposure.py"
+test_anchor = "test_pdf_page_error_is_local_and_scroll_resets_per_page"
+
+[[fixes]]
+id = "apple.tvos-settings-picker-menu"
+commits = ["26f8749f7"]
+source = "clients/apple/Sources/SettingsView.swift"
+source_anchor = ".pickerStyle(.menu)"
+test = "clients/apple/UITests/TVPhysicalInputTests.swift"
+test_anchor = "func testSettingsChoicesOpenAsMenusOnAppleTV() throws"
+
 [[fixes]]
 id = "web.live-tv-picture-evidence"
 commits = ["148829768"]
@@ -2680,6 +2715,18 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackPolicy.k
 source_anchor = "internal fun audioSinkAction("
 test = "clients/android/app/src/test/java/tv/plurx/app/player/AudioSinkPolicyTest.kt"
 test_anchor = "changedRouteGetsOneNewDecisionBeforeAnyTranscodeRescue"
+
+[[fixes]]
+# The Live TV PlayerView is moved between the inline box and the fullscreen
+# box with movableContentOf; a moved View keeps its last measured size, so
+# on tablets the fullscreen picture stayed the inline strip in the top-left
+# corner. The surface forces a layout pass whenever its host box resizes.
+id = "android.live-tv-surface-relayout-on-host-resize"
+commits = ["a825be23", "b7c72861"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvSurfaceRelayout.kt"
+source_anchor = "fun hostResized(previousWidth: Int, previousHeight: Int, width: Int, height: Int): Boolean"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvSurfaceRelayoutTest.kt"
+test_anchor = "theSurfaceRelaysOutWhenItsHostBoxChangesSize"
 
 [[fixes]]
 # 2026-09-24: the watch slot's player host outranked the sticky header and

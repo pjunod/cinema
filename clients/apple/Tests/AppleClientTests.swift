@@ -968,7 +968,7 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(detail.reading?.locator.locations?.totalProgression, 0.55)
     }
 
-    func testBookReaderPolicyAcceptsOnlyAvailablePhoneAndTabletEpubs() {
+    func testBookReaderPolicyKeepsSupportedBooksInTheApp() {
         let epub = MediaFile(id: 90, filename: "Contract.EPUB", available: true)
         let pdf = MediaFile(id: 91, filename: "Contract.pdf", available: true)
         let missing = MediaFile(id: 92, filename: "Missing.epub", available: false)
@@ -1005,6 +1005,13 @@ final class AppleClientTests: XCTestCase {
             available: true,
             reader: pdfRead
         )
+        let localOnlyPDF = MediaFile(
+            id: 96,
+            filename: "Legacy.pdf",
+            size: 4_096,
+            available: true,
+            reader: serverHandoff
+        )
 
         XCTAssertTrue(BookReaderPolicy.canRead(epub, onTelevision: false))
         XCTAssertTrue(BookReaderPolicy.canDownload(epub, onTelevision: false))
@@ -1017,6 +1024,7 @@ final class AppleClientTests: XCTestCase {
         XCTAssertFalse(BookReaderPolicy.canDownload(nativePDF, onTelevision: false))
         XCTAssertFalse(BookReaderPolicy.canRead(nativePDF, onTelevision: true))
         XCTAssertFalse(BookReaderPolicy.canRead(unverifiablePDF, onTelevision: false))
+        XCTAssertTrue(BookReaderPolicy.canRead(localOnlyPDF, onTelevision: false))
     }
 
     #if os(iOS)
@@ -3740,8 +3748,39 @@ final class AppleClientTests: XCTestCase {
             String(source[setter.upperBound..<setterEnd.lowerBound]).contains(viewerStop),
             "the one explicit viewer stop belongs to the centralized intent setter"
         )
-        XCTAssertTrue(source.contains("self?.setPlaybackRequested(true)"))
-        XCTAssertTrue(source.contains("self?.setPlaybackRequested(false)"))
+        // The lock screen and remote controls reach the setter from inside
+        // their own command targets — past `RemoteCommandOwner`'s current-owner
+        // guard — rather than by a literal that could sit anywhere in the file.
+        for (command, requested) in [
+            ("commands.playCommand.addTarget", "true"),
+            ("commands.pauseCommand.addTarget", "false"),
+        ] {
+            let target = try XCTUnwrap(source.range(of: command), "remote command vanished: \(command)")
+            let targetEnd = try XCTUnwrap(
+                source.range(of: "remoteTargets.append", range: target.upperBound..<source.endIndex),
+                "\(command) is no longer followed by another registered target"
+            )
+            let slice = String(source[target.upperBound..<targetEnd.lowerBound])
+            let setterCall = slice.range(of: "self.setPlaybackRequested(\(requested))")
+            XCTAssertNotNil(
+                setterCall,
+                "\(command) no longer routes through the centralized intent setter"
+            )
+            // #506's ownership rule: a second or backgrounded controller must
+            // refuse lock-screen play/pause while another controller owns Now
+            // Playing. The guard has to sit in this target, ahead of the setter.
+            let ownerGuard = slice.range(of: "RemoteCommandOwner.shared.isCurrent(self.remoteOwnerToken)")
+            XCTAssertNotNil(
+                ownerGuard,
+                "\(command) acts without checking that this controller owns the remote commands"
+            )
+            if let ownerGuard, let setterCall {
+                XCTAssertLessThan(
+                    ownerGuard.lowerBound, setterCall.lowerBound,
+                    "\(command) reaches the intent setter before its current-owner guard"
+                )
+            }
+        }
         // Every remaining writer, named. One is the viewer, one is the end of
         // the film, one is teardown, one is the owner's single helper, and one
         // makes the visible intent agree after iOS ends an interruption without
@@ -4199,7 +4238,18 @@ final class AppleClientTests: XCTestCase {
             ("func stopAfterRepeatedEarlyEnd(", "source: \"repeated_early_end\""),
             ("guard !establishedHDRRetryAttempted, !unchangedRetryRuledOut else {", "source: \"owner_stopped\""),
             ("private func handleBlackFrameDecodeFailure(at position: Int) async {", "source: \"black_frame_ladder_spent\""),
+            ("private func expireResumeAttempt(at now: TimeInterval) {", "source: \"owner_exhausted\""),
+            ("private func raiseCreateRetryExhausted() {", "source: \"owner_exhausted\""),
         ]
+        // The census is closed: every `raiseOwnerFault(` call is one of the
+        // sites above or `handleItemFailure` below. A new raise site fails
+        // here until it is added to the census with its stop.
+        let declarations = source.components(separatedBy: "private func raiseOwnerFault(").count - 1
+        let raiseCalls = source.components(separatedBy: "raiseOwnerFault(").count - 1 - declarations
+        XCTAssertEqual(
+            raiseCalls, sites.count + 1,
+            "a raiseOwnerFault( call site is missing from this census"
+        )
         for (open, raise) in sites {
             let start = try XCTUnwrap(source.range(of: open), "site vanished: \(open)")
             let end = try XCTUnwrap(
@@ -4216,7 +4266,10 @@ final class AppleClientTests: XCTestCase {
         // usefully bound, so it is pinned on its own: the pause is the line the
         // ladder's last rung falls through to.
         let failureStart = try XCTUnwrap(
-            source.range(of: "private func handleItemFailure(_ item: AVPlayerItem) async {")
+            // Anchored on the name and first parameter only: the signature has
+            // grown a parameter before (the finite item stream's `fatalError`)
+            // and the pin is about the body, not the parameter list.
+            source.range(of: "private func handleItemFailure(_ item: AVPlayerItem")
         )
         let failureRaise = try XCTUnwrap(
             source.range(of: "Self.mediaFailureSurfaceSource(", range: failureStart.upperBound..<source.endIndex)
@@ -7113,15 +7166,15 @@ final class AppleClientTests: XCTestCase {
     func testPlaybackQualityChoicesMatchTheAndroidClientAndSpellTheDecisionOverride() {
         XCTAssertEqual(
             PlaybackQuality.allCases.map(\.rawValue),
-            ["auto", "original", "2160", "1440", "1080", "720", "480", "360"]
+            ["auto", "original", "2160", "1440", "1080", "720", "480", "360", "240", "144"]
         )
         XCTAssertEqual(
             PlaybackQuality.allCases.map(\.label),
-            ["Auto", "Original", "4K · 2160p", "1440p", "1080p", "720p", "480p", "360p"]
+            ["Auto", "Original", "4K · 2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p"]
         )
         XCTAssertEqual(
             PlaybackQuality.allCases.map(\.rungHeight),
-            [nil, nil, 2_160, 1_440, 1_080, 720, 480, 360]
+            [nil, nil, 2_160, 1_440, 1_080, 720, 480, 360, 240, 144]
         )
 
         XCTAssertNil(PlaybackQuality.auto.decisionForce)

@@ -18,7 +18,9 @@ function shipped(name) {
   assert.ok(end > start, `missing closing brace for ${name}`);
   const feedback=["stopLiveTv","watchLiveTv","liveTvAttachSession","resumeLiveTv","pauseLiveTv"].includes(name)
     ? shipped("liveTvPlaybackState")+"\n"+shipped("liveTvPlaybackFailure")+"\n" : "";
-  return feedback+shell.slice(start, end + 2);
+  const transport=name==="liveTvPlaybackState"
+    ? shipped("liveTvTransportState")+"\n"+shipped("liveTvSyncTransportButtons")+"\n" : "";
+  return transport+feedback+shell.slice(start, end + 2);
 }
 
 function test(name, run) {
@@ -86,6 +88,73 @@ function startupHarness(options={}) {
 }
 
 async function main() {
+  await test("live transport follows playback state instead of offering Play and Pause together", () => {
+    const state={},lease={current:null},actions=[];
+    const button={setAttribute(name,value){this[name]=value;}};
+    const document={getElementById:id=>id==="live-tv-transport"?button:null};
+    const controls=new Function("LIVE_TV","LIVE_TV_LEASE","document","actions",`
+      function liveTvMessage(){}
+      function resumeLiveTv(){actions.push("resume");}
+      function pauseLiveTv(){actions.push("pause");}
+      ${shipped("liveTvPlaybackState")}
+      ${shipped("toggleLiveTvPlayback")}
+      return {update:liveTvPlaybackState,toggle:toggleLiveTvPlayback};
+    `)(state,lease,document,actions);
+    for(const phase of ["idle","starting","error"]){
+      controls.update(phase,"");
+      assert.equal(button.hidden,true);
+      controls.toggle();
+    }
+    assert.deepEqual(actions,[]);
+    lease.current={session_id:"live"};
+    for(const phase of ["playing","buffering","paused","blocked","playing"]){
+      controls.update(phase,"");
+      const resume=phase==="paused"||phase==="blocked";
+      assert.equal(button.hidden,false);
+      assert.equal(button.disabled,false);
+      assert.equal(button["aria-label"],resume?"Resume live":"Pause");
+      assert.equal(button.textContent,resume?"▶":"⏸");
+      controls.toggle();
+    }
+    assert.deepEqual(actions,["pause","pause","resume","resume","pause"]);
+    controls.update("idle",""); // Stop hides controls before the async lease release.
+    assert.equal(button.hidden,true);
+    lease.current=null;
+    controls.update("paused","");
+    assert.equal(button.hidden,true,"an old pause cannot revive a detached control");
+    const markup=shipped("liveTvNowBar");
+    assert.equal((markup.match(/id="live-tv-transport"/g)||[]).length,1);
+    assert.doesNotMatch(markup,/onclick="(?:resume|pause)LiveTv\(\)"/);
+  });
+
+  await test("broadcast info cannot open or survive without its attached live session", () => {
+    const lease={current:null},video={src:"",currentSrc:""};
+    let panel={type:"stale live info"},closes=0;
+    const document={getElementById:id=>id==="live-tv-video"?video:panel,
+      createElement(){throw new Error("must not create an empty broadcast panel");}};
+    const controls=new Function("document","LIVE_TV_LEASE","closeLiveTvStats",`
+      ${shipped("liveTvHasAttachedMedia")}
+      ${shipped("openLiveTvStats")}
+      ${shipped("updateLiveTvStats")}
+      return {open:openLiveTvStats,update:updateLiveTvStats,attached:liveTvHasAttachedMedia};
+    `)(document,lease,()=>{panel=null;closes++;});
+    controls.open();
+    assert.equal(panel,null);
+    assert.equal(closes,1);
+    lease.current={session_id:"live"};
+    controls.open();
+    assert.equal(controls.attached(),false,"a capability without media is not an attached stream");
+    video.src="blob:live";
+    assert.equal(controls.attached(),true);
+    video.src="";video.currentSrc="blob:live";
+    assert.equal(controls.attached(),true,"the attached browser source also counts");
+    lease.current=null;
+    panel={type:"compact live info carried onto a movie page"};
+    controls.update();
+    assert.equal(panel,null,"a stale broadcast panel closes instead of rendering empty tuner fields");
+    assert.equal(closes,3);
+  });
+
   await test("picture facts keep broadcast, planned frame and browser display distinct", () => {
     const delivery = {
       source: {width: 704, height: 480, sample_aspect_ratio: "40:33", video_codec: "mpeg2video"},
@@ -335,7 +404,7 @@ async function main() {
     assert.match(now, /Smaller/);
     assert.match(grid, /liveTvFormatBadges/);
     assert.match(now, /liveTvTechnicalDetails/);
-    for(const control of ["pauseLiveTv", "muteLiveTv", "toggleLiveTvPip", "fullscreenLiveTv", "stopLiveTv"])
+    for(const control of ["toggleLiveTvPlayback", "muteLiveTv", "toggleLiveTvPip", "fullscreenLiveTv", "stopLiveTv"])
       assert.match(now, new RegExp(control));
     assert.match(shell, /\.lt-list\{[^}]*overflow:auto[^}]*height:var\(--live-tv-slot-height,64vh\)/s);
     assert.match(shell, /\.lt-gridwrap\{[^}]*height:var\(--live-tv-slot-height,64vh\)/s);

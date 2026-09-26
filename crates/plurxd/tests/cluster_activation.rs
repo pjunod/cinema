@@ -1,5 +1,9 @@
 //! Process-level proof that migration precedes every daemon side effect.
 
+// A test, never a daemon child: the launcher rule in clippy.toml is for
+// production code.
+#![allow(clippy::disallowed_methods)]
+
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};

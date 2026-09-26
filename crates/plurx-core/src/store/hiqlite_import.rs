@@ -378,6 +378,141 @@ async fn receive_source<T>(
 
 const TABLES: &[TablePlan] = &[
     TablePlan {
+        name: "background_jobs",
+        columns: &[
+            "id",
+            "kind",
+            "payload_version",
+            "payload_json",
+            "dedupe_key",
+            "priority",
+            "state",
+            "target_node_id",
+            "owner_node_id",
+            "owner_boot_id",
+            "claim_id",
+            "fence",
+            "revision",
+            "lease_expires_ms",
+            "failure_policy",
+            "failed_attempts",
+            "attempt_limit",
+            "retry_deadline_ms",
+            "attempt_errors",
+            "index_diagnostic_json",
+            "yield_count",
+            "abandoned_count",
+            "not_before_ms",
+            "checkpoint_json",
+            "result_ref",
+            "last_error_code",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "id",
+        minimum_schema: super::background_jobs::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_job_migration",
+        columns: &["singleton", "format_version", "source_count"],
+        order_by: "singleton",
+        minimum_schema: super::background_jobs::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_job_legacy",
+        columns: &[
+            "legacy_key",
+            "kind",
+            "snapshot_json",
+            "state",
+            "job_id",
+            "outcome",
+            "updated_at_ms",
+        ],
+        order_by: "legacy_key",
+        minimum_schema: super::background_jobs::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_fragment_targets",
+        columns: &["cache_key", "target_node_id", "job_id"],
+        order_by: "cache_key, target_node_id",
+        minimum_schema: super::background_jobs::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_job_waiters",
+        columns: &[
+            "request_scope",
+            "request_id",
+            "request_digest",
+            "job_id",
+            "consumer_kind",
+            "consumer_ref",
+            "priority",
+            "state",
+            "target_node_id",
+            "deadline_ms",
+            "receipt_expires_ms",
+            "retain_identity",
+            "result_ref",
+            "failed_attempts",
+            "attempt_limit",
+            "not_before_ms",
+            "retry_deadline_ms",
+            "participation_fence",
+            "attempt_errors",
+            "last_error_code",
+            "index_diagnostic_json",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "request_scope, request_id",
+        minimum_schema: super::background_jobs::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_job_attempts",
+        columns: &[
+            "job_id",
+            "fence",
+            "claim_id",
+            "owner_node_id",
+            "owner_boot_id",
+            "started_at_ms",
+            "resolve_until_ms",
+            "finished_at_ms",
+            "outcome",
+            "error_code",
+        ],
+        order_by: "job_id, fence",
+        minimum_schema: super::background_jobs::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_job_reservations",
+        columns: &["resource_key", "slot", "job_id", "fence", "expires_at_ms"],
+        order_by: "resource_key, slot",
+        minimum_schema: super::background_jobs::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "settings",
         columns: &["key", "value", "updated_at"],
         order_by: "key",
@@ -1655,6 +1790,14 @@ impl HiqliteAuthStore {
         self.refuse_unsealed_source_credentials(&source, schema_version)
             .await?;
         self.verify_empty_import_target().await?;
+        // A fresh queue schema has an empty seal marker. The backup supplies
+        // its own marker; older backups are sealed only after parity is proved.
+        self.client()
+            .execute(
+                "DELETE FROM background_job_migration WHERE source_count = 0",
+                params!(),
+            )
+            .await?;
         self.import_instance_setting(&metadata).await?;
 
         for table in TABLES {
@@ -1708,6 +1851,12 @@ impl HiqliteAuthStore {
             });
         }
 
+        if schema_version < super::background_jobs::SQLITE_INTRODUCED_SCHEMA {
+            // Triggers were installed at bootstrap; now capture the imported
+            // legacy rows in the same finite schema-defined snapshot.
+            super::hiqlite_background_jobs::seal_legacy(self.client()).await?;
+        }
+
         Ok(SqliteImportReport {
             source_schema_version: schema_version,
             backup_sha256: metadata.backup_sha256,
@@ -1758,7 +1907,16 @@ impl HiqliteAuthStore {
     async fn verify_empty_import_target(&self) -> Result<(), StoreError> {
         for table in TABLES {
             let filter = import_filter_sql(*table);
-            let rows = self.target_count(table.name, filter).await?;
+            let rows = self
+                .target_count(
+                    table.name,
+                    if table.name == "background_job_migration" {
+                        Some("source_count > 0".to_owned())
+                    } else {
+                        filter
+                    },
+                )
+                .await?;
             if rows != 0 {
                 return Err(import_error(format!(
                     "Hiqlite import target is not fresh: table {} already has {rows} application row(s)",
@@ -3084,7 +3242,7 @@ mod tests {
         assert!(names.contains(&"media_classifications"));
         assert!(names.contains(&"file_grants"));
         assert!(!names.contains(&"classification_fts"));
-        assert_eq!(names.len(), 53, "review every imported durable table");
+        assert_eq!(names.len(), 60, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its
@@ -3504,6 +3662,57 @@ mod tests {
                     .row_count,
                 1
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn background_jobs_import_distinguishes_v70_legacy_from_v71_queue() {
+        for version in [70, 71] {
+            let directory = tempfile::tempdir().expect("source directory");
+            let path = directory.path().join("source.db");
+            {
+                let connection = Connection::open(&path).expect("source");
+                crate::store::sqlite::SqliteStore::apply_migrations_for_test(&connection, version)
+                    .expect("literal schema");
+                connection.execute("INSERT INTO settings (key, value, updated_at) VALUES (?1, 'queue-import-fixture', 1)", [keys::INSTANCE_ID]).expect("instance");
+                if version == 71 {
+                    connection.execute_batch("INSERT INTO background_jobs
+                        (id, kind, payload_version, payload_json, dedupe_key, priority, state, not_before_ms, created_at_ms, updated_at_ms)
+                        VALUES ('fixture', 'artifact_hydrate', 1, '{}', 'fixture', 1, 'queued', 0, 0, 0);").expect("queued state");
+                }
+            }
+            let digest = sha256_file(&path).expect("source hash");
+            let (reader, _) = SourceReader::open(&path, &digest, version)
+                .await
+                .expect("reader");
+            for table in TABLES
+                .iter()
+                .copied()
+                .filter(|table| table.name.starts_with("background_"))
+            {
+                assert_eq!(table.minimum_schema, 71);
+                let rows = if version >= table.minimum_schema {
+                    reader
+                        .import_chunk(table, version, SourceChunk::Offset(0))
+                        .await
+                        .expect("queue table projection at source boundary")
+                } else {
+                    Vec::new()
+                };
+                let expected = i64::from(
+                    version == 71
+                        && matches!(table.name, "background_jobs" | "background_job_migration"),
+                );
+                assert_eq!(rows.len() as i64, expected, "v{version} {}", table.name);
+                assert_eq!(
+                    reader
+                        .digest(table, version)
+                        .await
+                        .expect("queue digest")
+                        .row_count as i64,
+                    expected
+                );
+            }
         }
     }
 

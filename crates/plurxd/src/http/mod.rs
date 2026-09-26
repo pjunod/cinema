@@ -7,6 +7,7 @@
 
 mod analysis;
 mod auth;
+mod background_jobs;
 pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
 mod chapter_thumbs;
@@ -395,6 +396,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/activity/sessions/{id}"
         | "/api/v1/activity/offline/{id}"
         | "/api/v1/activity/producer"
+        | "/api/v1/activity/processes/{pid}"
         | "/api/v1/trakt/status"
         | "/api/v1/trakt/link"
         | "/api/v1/trakt/sync"
@@ -427,6 +429,10 @@ fn http_route_group(path: &str) -> usize {
         // Cluster administration and authenticated internal transport.
         "/api/v1/cluster/nodes"
         | "/api/v1/cluster/status"
+        | "/api/v1/cluster/jobs"
+        | "/api/v1/cluster/jobs/{id}"
+        | "/api/v1/cluster/jobs/{id}/cancel"
+        | "/api/v1/cluster/jobs/{id}/retry"
         | "/api/v1/cluster/backups"
         | "/api/v1/cluster/ingress"
         | "/api/v1/cluster/media"
@@ -1332,12 +1338,18 @@ pub fn router(state: AppState) -> Router {
             "/activity/producer",
             axum::routing::delete(system::stop_producer),
         )
+        .route(
+            "/activity/processes/{pid}",
+            axum::routing::delete(system::stop_process),
+        )
         .route("/trakt/status", get(trakt::status))
         .route("/system", get(system::system_info))
         .route("/system/logs", get(system::logs))
         .route("/system/playback-events", get(system::playback_events))
         .route("/cluster/nodes", get(cluster::nodes))
         .route("/cluster/status", get(cluster_operations::aggregate))
+        .route("/cluster/jobs", get(background_jobs::list))
+        .route("/cluster/jobs/{id}", get(background_jobs::detail))
         .route("/cluster/ingress", get(cluster::ingress))
         .route("/cluster/media", get(internal_media::directory))
         // Any signed-in user can post a client-side playback error here so it
@@ -1492,6 +1504,8 @@ pub fn router(state: AppState) -> Router {
             post(cluster::enter_maintenance).delete(cluster::exit_maintenance),
         )
         .route("/cluster/election", post(cluster::force_election))
+        .route("/cluster/jobs/{id}/cancel", post(background_jobs::cancel))
+        .route("/cluster/jobs/{id}/retry", post(background_jobs::retry))
         .route("/cluster/backups", post(crate::backup::create))
         .route("/cluster/leave", post(cluster::leave))
         .route(
@@ -7333,6 +7347,46 @@ mod tests {
     /// test order. What is asserted is the shape — which is what the surface
     /// promises.
     #[tokio::test]
+    async fn hevc_copy_override_saves_without_readiness_and_controls_admission() {
+        use plurx_core::store::keys;
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        assert!(
+            !crate::transcode::unverified_hevc_copy_enabled(state.store.as_ref())
+                .await
+                .expect("default")
+        );
+        for enabled in [true, false] {
+            let (status, body) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({"hevc_unverified_copy": enabled}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["hevc_unverified_copy"], json!(enabled));
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(keys::HEVC_UNVERIFIED_COPY)
+                    .await
+                    .expect("saved setting")
+                    .as_deref(),
+                Some(if enabled { "1" } else { "0" })
+            );
+            assert_eq!(
+                crate::transcode::unverified_hevc_copy_enabled(state.store.as_ref())
+                    .await
+                    .expect("policy"),
+                enabled
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn the_verified_decode_request_is_stored_and_the_node_answers_it_separately() {
         use plurx_core::store::keys;
 
@@ -8987,6 +9041,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_job_api_is_admin_only_redacts_ownership_and_cancels_idempotently() {
+        use plurx_core::store::background_jobs::{
+            ClaimJob, EnqueueJob, JobKind, JobPayload, JobRequest,
+        };
+        let (app, state) = test_app_with_state();
+        let (status, _) = call(&app, get("/api/v1/cluster/jobs", None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let admin = setup_admin(&app).await;
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({"username":"viewer", "password":"longenough"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({"username":"viewer", "password":"longenough"}),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("viewer session");
+        let id = uuid::Uuid::new_v4().to_string();
+        let detail = format!("/api/v1/cluster/jobs/{id}");
+        let cancel = format!("{detail}/cancel");
+        let retry = format!("{detail}/retry");
+        for path in ["/api/v1/cluster/jobs", &detail] {
+            let (status, _) = call(&app, get(path, Some(viewer))).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+        let (status, _) = call(&app, post(&cancel, Some(viewer), json!({}))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = call(
+            &app,
+            post(
+                &retry,
+                Some(viewer),
+                json!({"request_id":uuid::Uuid::new_v4().to_string()}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let now_ms = crate::state::clock_ms();
+        state
+            .store
+            .enqueue_job(EnqueueJob {
+                id: id.clone(),
+                payload: JobPayload::LibraryScan {
+                    library_id: 1,
+                    generation: "private-source-marker".into(),
+                },
+                dedupe_key: "api-job".into(),
+                priority: 1,
+                not_before_ms: now_ms,
+                now_ms,
+                request: JobRequest {
+                    scope: "internal:api-test".into(),
+                    request_id: id.clone(),
+                    request_digest: "a".repeat(64),
+                    consumer_kind: "scan".into(),
+                    consumer_ref: "private-consumer-marker".into(),
+                    target_node_id: None,
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .expect("enqueue");
+        let boot = uuid::Uuid::new_v4().to_string();
+        let claim = uuid::Uuid::new_v4().to_string();
+        state
+            .store
+            .claim_job(ClaimJob {
+                job_id: id.clone(),
+                expected_revision: 0,
+                node_id: "node-a".into(),
+                boot_id: boot.clone(),
+                claim_id: claim.clone(),
+                kind: JobKind::LibraryScan,
+                payload_version: 1,
+                now_ms,
+                dispatched_at_ms: now_ms,
+            })
+            .await
+            .expect("claim");
+        for path in ["/api/v1/cluster/jobs?state=running", &detail] {
+            let (status, body) = call(&app, get(path, Some(&admin))).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let encoded = body.to_string();
+            for secret in [
+                &boot,
+                &claim,
+                "private-source-marker",
+                "private-consumer-marker",
+            ] {
+                assert!(
+                    !encoded.contains(secret),
+                    "operator projection leaked {secret}"
+                );
+            }
+        }
+        let (status, _) = call(
+            &app,
+            post(
+                &retry,
+                Some(&admin),
+                json!({"request_id":uuid::Uuid::new_v4().to_string()}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        for _ in 0..2 {
+            let (status, body) = call(&app, post(&cancel, Some(&admin), json!({}))).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["state"], "cancelling");
+        }
+        let (status, _) = call(
+            &app,
+            get("/api/v1/cluster/jobs?cursor=invalid", Some(&admin)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn user_management_lifecycle_and_lockout_guards() {
         let app = test_app();
         let admin = setup_admin(&app).await;
@@ -9113,6 +9298,7 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "durable_cluster_work",
                 "cluster_backup",
                 "windows_server",
                 // D-01 adds the Android TV display-mode card. Its one row is
@@ -9146,7 +9332,10 @@ mod tests {
                 let id = requirement["id"].as_str().expect("requirement id");
                 let status = requirement["status"].as_str().expect("requirement status");
                 assert!(
-                    matches!(status, "met" | "unmet" | "unobservable"),
+                    matches!(
+                        status,
+                        "met" | "unmet" | "unobservable" | "unknown" | "unavailable"
+                    ),
                     "{id} reported an unbounded status {status}"
                 );
                 let evidence = requirement["evidence"].as_str().expect("evidence");
@@ -9181,7 +9370,11 @@ mod tests {
             .filter(|id| {
                 !matches!(
                     *id,
-                    "probe_reporter_named"
+                    "durable_store"
+                        | "durable_tools"
+                        | "durable_capacity"
+                        | "durable_scratch"
+                        | "probe_reporter_named"
                         | "stored_source_self_test"
                         | "stored_source_local_cache"
                         | "stored_source_free_space"
@@ -10205,6 +10398,9 @@ mod tests {
                 "dvr",
                 "live_tv",
                 "offline",
+                // This node's own child processes, for an admin only (plan
+                // P-02 §3.2); node-local, so not a clustered-only field.
+                "processes",
                 "producing",
                 "scans",
                 "sessions",
@@ -10292,6 +10488,106 @@ mod tests {
         // And on the page that has a stop button next to it.
         let (_, page) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
         assert_eq!(page["producing"]["title"], "Willow");
+    }
+
+    /// Plan P-02 §3.2: every child is attributable from inside the product.
+    /// The Activity page lists it with its priority class, purpose and the
+    /// nice/I/O/OOM values the kernel reports; only an admin sees the list
+    /// and only an admin can stop a child from it; `/metrics` counts it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_activity_page_lists_each_child_with_its_class_and_an_admin_can_stop_it() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let (app, _state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("token").to_owned();
+
+        let mut command = tokio::process::Command::new("sleep");
+        command.arg("300").kill_on_drop(true);
+        let (mut child, _job) = crate::process_control::spawn_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::background("activity page test"),
+        )
+        .expect("spawn");
+        let pid = child.id().expect("running child");
+
+        let (status, page) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        let row = page["processes"]
+            .as_array()
+            .expect("admins get the process list")
+            .iter()
+            .find(|row| row["pid"] == pid)
+            .unwrap_or_else(|| panic!("child {pid} is listed: {page}"))
+            .clone();
+        assert_eq!(row["class"], "background");
+        assert_eq!(row["purpose"], "activity page test");
+        assert_eq!(row["program"], "sleep");
+        assert_eq!(
+            row["reason"],
+            "nobody is waiting on it, so it yields to playback"
+        );
+        assert_eq!(row["requested"]["nice"], 15);
+        assert_eq!(row["requested"]["io_level"], 7);
+        assert_eq!(row["requested"]["oom_score_adj"], 800);
+        assert!(row["observed"]["nice"].as_i64().expect("nice read back") >= 15);
+        assert_eq!(row["observed"]["io_class"], "best_effort");
+        assert_eq!(row["applied"], true);
+        assert_eq!(row["stoppable"], true);
+
+        let (_, metrics) = call_text(&app, get("/metrics", None)).await;
+        assert!(
+            metrics.contains("plurx_child_processes{class=\"background\"} ")
+                && metrics.contains("plurx_child_spawns_total{class=\"realtime\"} ")
+                && metrics.contains("plurx_child_priority_unapplied_total{class=\"background\"} "),
+            "{metrics}"
+        );
+
+        let (_, viewer_page) = call(&app, get("/api/v1/activity/detail", Some(&viewer))).await;
+        assert!(
+            viewer_page.get("processes").is_none(),
+            "machine processes are an operator view"
+        );
+        let stop = format!("/api/v1/activity/processes/{pid}");
+        let (status, _) = call(&app, delete(&stop, Some(&viewer))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = call(&app, delete(&stop, None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, body) = call(&app, delete(&stop, Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let exited = tokio::time::timeout(std::time::Duration::from_secs(10), child.wait())
+            .await
+            .expect("the stopped child exits")
+            .expect("wait");
+        assert_eq!(exited.signal(), Some(libc::SIGKILL));
+
+        drop(_job);
+        let (status, _) = call(&app, delete(&stop, Some(&admin))).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a pid the launcher no longer lists cannot be signalled"
+        );
     }
 
     #[tokio::test]
@@ -14068,6 +14364,10 @@ mod tests {
         assert_eq!(hls["delivery"]["requires_hls"], true, "{hls}");
         assert_eq!(hls["delivered_dolby_vision_profile"], 8, "{hls}");
 
+        // A progressive HEVC copy keeps its in-band parameter sets, so it needs
+        // no header proof and no Developer override: the DV narrowing
+        // contract below holds on the default settings.
+
         for transports in [json!(["progressive"]), json!([])] {
             let (status, narrowed) = call(
                 &app,
@@ -14165,9 +14465,12 @@ mod tests {
             .expect("fixture after Unix epoch")
             .as_secs() as i64;
         let held = std::fs::File::open(&path).expect("held fixture source");
-        let raw_json = crate::ffmpeg::held_source_probe_json(&held)
-            .await
-            .expect("exact fixture probe");
+        let raw_json = crate::ffmpeg::held_source_probe_json(
+            &held,
+            crate::process_control::ChildWork::background("test fixture probe"),
+        )
+        .await
+        .expect("exact fixture probe");
         let probe = plurx_core::domain::ProbeResult {
             duration_ms: Some(8_000),
             container: Some("mkv".into()),
@@ -14216,7 +14519,7 @@ mod tests {
             .collect();
         assert_eq!(
             heights,
-            vec![720, 480, 360],
+            vec![720, 480, 360, 240, 144],
             "source-filtered, top first: {body}"
         );
         assert_eq!(body["ladder"][0]["total_kbps"], 4_160, "{body}");
@@ -17214,9 +17517,12 @@ mod tests {
             .expect("file");
         write_real_av_fixture(&file.path, seconds);
         let held = std::fs::File::open(&file.path).expect("held fixture source");
-        let raw_json = crate::ffmpeg::held_source_probe_json(&held)
-            .await
-            .expect("exact fixture probe");
+        let raw_json = crate::ffmpeg::held_source_probe_json(
+            &held,
+            crate::process_control::ChildWork::background("test fixture probe"),
+        )
+        .await
+        .expect("exact fixture probe");
         let metadata = std::fs::metadata(&file.path).expect("fixture metadata");
         let size = i64::try_from(metadata.len()).expect("fixture size");
         let mtime = metadata
@@ -17369,6 +17675,11 @@ mod tests {
             .await
             .expect("file");
 
+        // The player is waiting on this extraction, so it starts at the
+        // realtime class (plan P-02 §3.2.2, review of #518 finding 1).
+        let viewer = super::stream::SUBTITLE_TRACK_FOR_A_VIEWER;
+        assert_eq!(viewer.class, crate::process_control::ChildClass::Realtime);
+        let realtime_before = crate::process_control::priority::spawns_of(viewer);
         let (status, body) = body_of(
             &app,
             get_q(&format!("/api/v1/files/{file}/subs/0.vtt?token={admin}")),
@@ -17378,6 +17689,10 @@ mod tests {
         let text = String::from_utf8_lossy(&body);
         assert!(text.contains("WEBVTT"), "{text}");
         assert!(text.contains("hello plurx"), "{text}");
+        assert!(
+            crate::process_control::priority::spawns_of(viewer) > realtime_before,
+            "the /subs extraction a viewer waits on must start at the realtime class"
+        );
 
         // Exactly one entry, keyed by (file, stream, size, mtime).
         let cached = state.subs_dir.join(format!("f{file}-s0-4242-7.vtt"));

@@ -501,6 +501,18 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
 
     // The control: the store taken away, the same request burns.
     std::fs::remove_dir_all(&dir).expect("empty the store");
+    // Every child this start waits on runs at the realtime class (plan P-02
+    // §3.2.2, review of #518 finding 1): the held source probe under its
+    // five-second bound, and the burn extraction it joins for
+    // `SIDECAR_JOIN_BUDGET`.
+    let spawns_of = crate::process_control::priority::spawns_of;
+    let realtime_burn = crate::process_control::ChildWork::realtime("burned-subtitle track extraction");
+    let held_before = spawns_of(super::VOD_START_HELD_PROBE);
+    let burn_before = spawns_of(realtime_burn);
+    assert_eq!(
+        super::VOD_START_HELD_PROBE.class,
+        crate::process_control::ChildClass::Realtime
+    );
     let burned = manager
         .prepare_vod_encoding(
             &SessionRequest {
@@ -514,6 +526,14 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
         .expect("an encoded recipe");
     assert!(burned.options.subtitle_burn.is_some());
     assert!(burned.subtitle.is_some());
+    assert!(
+        spawns_of(super::VOD_START_HELD_PROBE) > held_before,
+        "the start's held source probe was not started at the realtime class"
+    );
+    assert!(
+        spawns_of(realtime_burn) > burn_before,
+        "the burn extraction the start joined was not started at the realtime class"
+    );
     let burned_args = burned.args(&file, 0.0, 2.0);
     assert!(
         burned_args.iter().any(|arg| arg == "/dev/fd/5"),
@@ -623,5 +643,99 @@ async fn a_source_encoder_selection_refuses_is_refused_before_any_burn_extractio
         touched, 0,
         "a refused start must not have started a burn extraction in {}",
         cache.display()
+    );
+}
+
+/// A Profile 5 VOD start waits on the per-source Dolby Vision pixel proof
+/// (two FFmpeg probes, 30 s each, whose answer is memoized), so the proof runs
+/// at the realtime class; the same proof asked for by an offline package,
+/// which nobody watches start, runs at the background class (plan P-02
+/// §3.2.2, review of #518 finding 1). The fixture is not Dolby Vision, so the
+/// proof fails and the start is refused; the class is read from the spawns.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() {
+    use crate::process_control::{priority::spawns_of, ChildClass, ChildWork};
+    use plurx_core::store::SqliteStore;
+    let base = crate::test_tempdir().expect("manager fixture");
+    let source = plurx_core::testfixtures::source("h264");
+    let probe = plurx_core::scan::probe::probe(&source)
+        .await
+        .expect("real source probe");
+    let metadata = std::fs::metadata(&source).expect("source metadata");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let file_id =
+        seed_file_with_probe_at(&store, source.to_str().expect("path"), probe.clone()).await;
+    let seeded = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("seeded");
+    store
+        .upsert_file(
+            seeded.item_id,
+            source.to_str().expect("path"),
+            metadata.len() as i64,
+            crate::fragment_index_cluster::source_stamp(&metadata).mtime,
+            &probe,
+        )
+        .await
+        .expect("attested source metadata");
+    let mut file = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("attested");
+    file.hdr = Some("dolby_vision".into());
+    file.hdr_format = Some("Dolby Vision · Profile 5".into());
+    file.dolby_vision = Default::default();
+
+    let realtime = ChildWork::realtime("Dolby Vision pixel probe");
+    let background = ChildWork::background("Dolby Vision pixel probe");
+    let manager = TranscodeManager::new(
+        Arc::clone(&store),
+        base.path().join("start"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    )
+    .with_dovi_reshape(true);
+    let req = SessionRequest {
+        request_id: Some("profile5-proof-class".into()),
+        previous_session_id: None,
+        reopen_reason: None,
+        presentation: Presentation::Vod,
+        automatic: false,
+        start_seconds: 0.0,
+        kind: SessionKind::Transcode { height: 240 },
+        subtitle_burn: None,
+        ..reopen_request(file_id, "profile5-proof-class", "unused", "unused")
+    };
+    let before = spawns_of(realtime);
+    let refusal = match manager.prepare_vod_encoding(&req, &file).await {
+        Err(refusal) => refusal,
+        Ok(_) => panic!("a source that is not Dolby Vision cannot prove the Profile 5 renderer"),
+    };
+    assert!(refusal.contains("Dolby Vision"), "{refusal}");
+    assert!(
+        spawns_of(realtime) >= before + 2,
+        "the start's pixel proof did not run at the realtime class"
+    );
+    assert_eq!(realtime.class, ChildClass::Realtime);
+
+    let offline = TranscodeManager::new(
+        store,
+        base.path().join("offline"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    )
+    .with_dovi_reshape(true);
+    let before = spawns_of(background);
+    assert!(offline
+        .effective_rate_control_for_new_offline_package(&file)
+        .await
+        .is_err());
+    assert!(
+        spawns_of(background) >= before + 2,
+        "the offline package's pixel proof did not run at the background class"
     );
 }

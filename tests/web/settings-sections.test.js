@@ -365,6 +365,34 @@ function shippedDeclares(name) {
   return DECLARATIONS.some((kind) => SHIPPED_UI.includes(`${kind}${name}(`));
 }
 
+test("Durable work settings save while readiness is unavailable", async () => {
+  const writes=[];
+  const controls={"durable-setting-error":{textContent:""},"durable-analysis":{checked:true},
+    "durable-pretranscode":{checked:true},"durable-cadence":{value:"720"},"durable-queue-settings":null};
+  const save=new Function("document","api","cacheSettings","toast","DEVELOPER_READINESS",
+    `${shippedSource("saveDurableQueueSettings")}\nreturn saveDurableQueueSettings;`)(
+    {getElementById:id=>controls[id]},async(path,options)=>{writes.push({path,...options});return options.body;},
+    value=>value,()=>{},{unavailable:"observation timed out"});
+  await save({disabled:false});
+  assert.deepEqual(writes[0],{path:"/settings",method:"PUT",body:{vod_index_cluster_cache:true,cache_produce_mins:720}});
+  controls["durable-analysis"].checked=false;controls["durable-pretranscode"].checked=false;
+  await save({disabled:false});
+  assert.deepEqual(writes[1].body,{vod_index_cluster_cache:false,cache_produce_mins:0});
+});
+
+test("Durable retry preserves its UUID after a transport failure and sends an object body", async () => {
+  const writes=[],queue={retries:new Map(),epoch:0};
+  const retry=new Function("DURABLE_ACTIVITY","crypto","api","toast","refreshDurableActivity",
+    `${shippedSource("retryDurableJob")}\nreturn retryDurableJob;`)(queue,{randomUUID:()=>"retry-uuid"},
+    async(path,options)=>{writes.push({path,...options});if(writes.length===1)throw new Error("response lost");return {outcome:"existing"};},
+    ()=>{},async()=>{});
+  const button={disabled:false};
+  await retry("job",button);assert.equal(button.disabled,false);
+  await retry("job",button);
+  assert.deepEqual(writes.map(write=>write.body),[{request_id:"retry-uuid"},{request_id:"retry-uuid"}]);
+  assert.equal(queue.retries.size,0);
+});
+
 test("Developer keeps only experiments; everyday controls retain their saves and advisory readiness", () => {
   assert.doesNotMatch(
     shippedSource("playbackPanel"),
@@ -376,11 +404,14 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   // `//` comment and swallow whatever follows it.
   const composedBody = [
       shippedSource("preparedHandoffEnabled"), shippedSource("liveTvSettingsCard"),
-      shippedSource("verifiedDecodeCard"), shippedSource("decodeRecoveryCard"),
+      shippedSource("verifiedDecodeCard"), shippedSource("decodeRecoveryCard"), shippedSource("hevcCopyCard"),
       // #309's sibling problem, twice over: a card or fragment `developerPanel`
       // calls has to be composed here or the panel throws on the name and this
       // whole gate reports one failure instead of checking anything.
       shippedSource("subtitleNotReadyCard"),
+      // The fifth time: #517 put the automatic playback-ranges card at the
+      // head of the stored-subtitle section without composing it here.
+      shippedSource("subtitlePlaybackRangesCard"),
       shippedSource("subtitleStoredSourcesCard"),
       shippedSource("subtitleClusterSourcesCard"),
       shippedSource("subtitleBackfillCard"),
@@ -394,7 +425,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // The fourth time (see above): `clusterBackupCard` shipped with the
       // portable backup and fenced restore and reached `developerPanel`
       // without being composed here, so this whole gate died on its name.
-      shippedSource("clusterBackupCard"),
+      shippedSource("clusterBackupCard"), shippedSource("durableQueueCard"),
       shippedSource("autoQualityCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       shippedSource("libraryChannelsSettingsCard"),
       shippedSource("playbackProtocolCard"), shippedSource("liveHlsRecoveryCard"),
@@ -459,8 +490,18 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const html = renderComposedPanel(
     "developerPanel", () => panels.developerPanel(settings, readiness),
   );
-  for (const id of ["pabr", "pqh", "pdp", "dhqa", "adr", "sub503", "subsrc", "subcluster", "subbackfill", "chthumb"])
+  for (const id of ["hevc-unverified", "durable-analysis", "durable-pretranscode", "pabr", "pqh", "pdp", "dhqa", "adr", "sub503", "subsrc", "subcluster", "subbackfill", "chthumb"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
+  // Parallel playback ranges are automatic: the card explains them and reads
+  // peer reachability as advisory, and offers no switch of its own.
+  const ranges = /Parallel playback subtitle ranges[\s\S]*?(?=<div class="setsection"|TOG:subsrc)/.exec(html);
+  assert.ok(ranges, "Developer shows the automatic playback-ranges card");
+  assert.doesNotMatch(ranges[0], /TOG:/, "playback ranges have no enable switch");
+  const unverified = panels.developerPanel({...settings, hevc_unverified_copy:true,
+    hevc_header_trace_available:false, vod_index_cluster_cache:false, vod_index_mins:0}, readiness);
+  assert.match(unverified, /TOG:hevc-unverified\|[^|]*\|[^|]*\|checked=true\|/);
+  assert.match(unverified, /FOOT:saveHevcCopy/);
+  assert.match(unverified, /not configured/);
   // Absent from the settings document is on: chapter thumbnails default on.
   assert.match(html, /TOG:chthumb\|[^|]*\|[^|]*\|checked=true/);
   assert.match(html, /FOOT:saveChapterThumbnails/);
@@ -1209,6 +1250,22 @@ test("the viewer's four appearance choices share one popover", () => {
   for (const fn of ["setTheme", "setAppearance", "setIconSize"])
     assert.match(shippedSource(fn), /repaintLookMenu\(\)/, `${fn} repaints the shared menu`);
   assert.match(shippedSource("sizeMenuHtml"), /Poster size/, "named as the mobile apps name it");
+});
+
+test("HEVC override saves either choice without consulting advisory readiness", async () => {
+  for (const enabled of [true, false]) {
+    const calls=[];
+    const err={textContent:""}, card={outerHTML:""};
+    const save = new Function("api","document","cacheSettings","hevcCopyCard","toast",
+      `${shippedSource("saveHevcCopy")}\nreturn saveHevcCopy;`)(
+      async (path, opts) => {calls.push([path,opts.body]);return {hevc_unverified_copy:enabled,hevc_header_trace_available:false};},
+      {getElementById:(id)=>id==="hevc-copy-error"?err:id==="hevc-copy-card"?card:{checked:enabled}},
+      ()=>{}, s=>`saved:${s.hevc_unverified_copy}`, ()=>{});
+    await save({disabled:false});
+    assert.deepEqual(calls, [["/settings",{hevc_unverified_copy:enabled}]]);
+    assert.equal(card.outerHTML, `saved:${enabled}`);
+    assert.equal(err.textContent, "");
+  }
 });
 
 main().then(() => {

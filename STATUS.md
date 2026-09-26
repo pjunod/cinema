@@ -1,8 +1,44 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-25 · Kept current by the working agent in the same
+**Updated:** 2026-09-26 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## Silo comparison: two implementation plans and one device census, no code
+
+**Branch `docs/silo-comparison-plans`, [PR #563](http://192.168.4.7:3000/noirr/plurx/pulls/563), draft; not merged, nothing deployed.**
+Paul asked 2026-09-26 how plurx compares with Silo (github.com/Silo-Server),
+then for implementation docs on the two things worth taking and a census for
+the third. Both plans went through an adversarial agent review that pulled
+hyper's source and ran ffmpeg to check them; both came back *reject as
+written* and were rewritten — the write-stall guard now ships off by default
+because the web and Android progressive paths do not resume after a mid-body
+close, and the DV probe changed from "broken → transcode" to "broken → strip
+by unit type" once the review showed the failing unit is a malformed SEI,
+not the RPU. Round two: approve with changes, applied.
+[MEDIA-WRITE-STALL-GUARD.md](docs/streaming/MEDIA-WRITE-STALL-GUARD.md) ·
+[DV-STRIP-TRIAL-PROBE.md](docs/streaming/DV-STRIP-TRIAL-PROBE.md) ·
+[ANDROID-DV-LEVEL-CENSUS-PROMPT.md](docs/clients/ANDROID-DV-LEVEL-CENSUS-PROMPT.md).
+Next: Paul's call on the DV plan's Decision 1 and the stall guard's §8; the
+DV plan's M0 evidence step needs the media.
+
+## P-02 M3: a priority class for every child process
+
+**Branch `plan/P-02-m3`, draft pull request; not merged, nothing deployed.**
+Paul's go of 2026-09-25: every child starts through one launcher, playback,
+VOD and Live TV as realtime (nice 5) and scans, probes and extraction as
+background (nice 15), with Activity → Processes and a pidfd-safe Stop for
+admins, and `/metrics` counts children by class. A source census and
+clippy's `disallowed-methods` keep every spawn on the launcher. After the
+review (comment 4817) the class is the caller's: the probes and extractions
+a session start or a viewer's `/subs` request waits on (held source probe,
+decode-fact probes, the Profile 5 pixel proof, burn and text-track
+extraction) run realtime, the same work from warm-ups, offline packages and
+the pre-transcode pass background, and `/metrics` counts spawns by class and
+purpose; each `spikes/` workspace has its own `clippy.toml`. Outstanding:
+the realtime cadence measurement on a busy media host (post-merge), and M4
+(unit hardening plus `OOMScoreAdjust=-500`), whose steps are written.
+Record: §3.2.2 of [the P-02 plan](docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md).
 
 ## P-02: four parser fuzz targets, one of which found a way to abort plurxd; the release profile measured
 
@@ -282,43 +318,14 @@ copy session and misreports every retirement as a capacity problem; and 30
 titles carrying `watched = 1` below the threshold, which suppresses their
 resume outright.
 
-## An abandoned replacement held its player's key — reported, diagnosed, fixed
-
-`PR #437`, branch `fix/replacement-gate-supersession`, **merged, NOT deployed**.
-
-Reported from the Android client on the TCL tablet, 2026-09-21 ~18:50 ET,
-playing *Bad Boys: Ride or Die*: `transcode capacity is temporarily
-unavailable: another replacement for this player is still being committed`,
-over a Retry button that could not clear it.
-
-**Orphaned**, not a commit in flight. On m6 the cluster replacement gate for
-that player was held by the detached cleanup of a request that had answered
-the viewer 503 six seconds earlier, and nothing in the tree ages, expires or
-force-releases that registry. What wedged the hold inside the start was a
-402-second subtitle sidecar extraction awaited under the gate with no timeout.
-Node evidence, anchors and the mechanism:
-[docs/playback-control/REPLACEMENT-GATE-SUPERSESSION-RCA.md](docs/playback-control/REPLACEMENT-GATE-SUPERSESSION-RCA.md).
-
-A key is now reclaimed only from a hold that can be proved not to need it —
-one that has declared itself abandoned, or one past a 120 s ceiling — never on
-the cooperative window, because the work under this gate routinely takes tens
-of seconds and the client's retry ladder re-posts into it. The refusal itself
-became a typed, `Retry-After`-carrying 503 (`transcode_capacity_pending`) so
-the ladder all three clients already carry waits it out instead of showing a
-terminal overlay quoting an internal sentence.
-
-Still open, all in the RCA's §4: `ensure_burn_file` is still awaited under the
-gate unbounded; `Drop for StartedSessionGuard` still releases only after a full
-retirement rather than after the fence; and a hold wedged before it registers
-anything still has nothing to fence. Neither client half has run on hardware.
-
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24 and 2026-09-25
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25 and 2026-09-26
 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-09-21 | An abandoned replacement held its player's key — reported, diagnosed, fixed | [docs/playback-control/STATUS-HISTORY.md](docs/playback-control/STATUS-HISTORY.md) |
 | 2026-09-20 | Architecture review, revision 3 — Astra's review merged | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-20 | Implementation plans for the architecture review, and one work board for every vendor | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-20 | Architecture review, revision 2 — after the adversarial assessment | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
