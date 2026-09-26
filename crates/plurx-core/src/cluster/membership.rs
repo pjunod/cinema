@@ -2071,6 +2071,37 @@ const NODE_TOMBSTONED_SQL: &str = "SELECT COUNT(*) AS count FROM cluster_nodes \
                    SELECT 1 FROM cluster_node_removals WHERE node_id = $1\
                  ))";
 
+/// The node has a maintenance request, acknowledged or not. The target reads
+/// it to publish its local admission fence; `lifecycle::Maintenance` other
+/// than `None` is its projection.
+const NODE_MAINTENANCE_COUNT_SQL: &str =
+    "SELECT COUNT(*) AS count FROM cluster_node_maintenance WHERE node_id = $1";
+
+/// The node has a promotion audit row. A removal refuses while one exists;
+/// `lifecycle::Promotion` other than `None` is its projection. Production reads
+/// only this existence: nothing reads `barrier_index` back, so the projection's
+/// `Started` / `Barrier` / `Joint` split has no production reader.
+const NODE_PROMOTION_COUNT_SQL: &str =
+    "SELECT COUNT(*) AS count FROM cluster_node_promotions WHERE node_id = $1";
+
+/// The attempt a resumed removal adopts: the least attempt reference, or none.
+/// The first attempt of `lifecycle::Removal::InProgress` is its projection.
+const EXISTING_REMOVAL_ATTEMPT_SQL: &str = "SELECT attempt_id FROM cluster_node_removal_attempts \
+                 WHERE node_id = $1 ORDER BY attempt_id LIMIT 1";
+
+/// The committed voter ids `MembershipManager::local_node_is_committed_voter`
+/// decides on, read from a Raft metrics `membership_config`
+/// (`openraft::StoredMembership`): `voter_ids()`, the union over a joint
+/// configuration. A macro rather than a function because `openraft` is not a
+/// normal dependency of this crate, so production code cannot name the type;
+/// the lifecycle agreement test applies the same read to the stored
+/// memberships it builds.
+macro_rules! committed_voter_ids {
+    ($membership_config:expr) => {
+        $membership_config.voter_ids()
+    };
+}
+
 /// "Every active node proves `capability` with the binary it is running now."
 fn capability_ready_predicate(capability: &str) -> String {
     format!(
@@ -4528,7 +4559,7 @@ impl MembershipManager {
         let requested = inner
             .client
             .query_map::<CountRow, _>(
-                "SELECT COUNT(*) AS count FROM cluster_node_maintenance WHERE node_id = $1",
+                NODE_MAINTENANCE_COUNT_SQL,
                 params!(inner.identity.node_id.as_str()),
             )
             .await?
@@ -5071,7 +5102,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<CountRow, _>(
-                "SELECT COUNT(*) AS count FROM cluster_node_maintenance WHERE node_id = $1",
+                NODE_MAINTENANCE_COUNT_SQL,
                 params!(inner.identity.node_id.as_str()),
             )
             .await?;
@@ -5084,7 +5115,7 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         let metrics = inner.client.metrics_db().await?;
         Ok(lifecycle::committed_voter(
-            metrics.membership_config.voter_ids(),
+            committed_voter_ids!(metrics.membership_config),
             inner.identity.raft_id,
         ))
     }
@@ -7822,8 +7853,7 @@ impl MembershipManager {
         inner
             .client
             .query_consistent_map::<RemovalAttemptRow, _>(
-                "SELECT attempt_id FROM cluster_node_removal_attempts \
-                 WHERE node_id = $1 ORDER BY attempt_id LIMIT 1",
+                EXISTING_REMOVAL_ATTEMPT_SQL,
                 params!(node_id),
             )
             .await?
@@ -8270,10 +8300,7 @@ impl MembershipManager {
             }
             let promotions = inner
                 .client
-                .query_consistent_map::<CountRow, _>(
-                    "SELECT COUNT(*) AS count FROM cluster_node_promotions WHERE node_id = $1",
-                    params!(node_id),
-                )
+                .query_consistent_map::<CountRow, _>(NODE_PROMOTION_COUNT_SQL, params!(node_id))
                 .await?;
             if promotions.first().is_some_and(|row| row.count > 0) {
                 return Err(MembershipError::LearnerLifecyclePending(node_id.to_owned()));
@@ -17182,11 +17209,21 @@ mod tests {
     /// `capability_ready_predicate` over the roster against
     /// `holds_back`/`capability_ready`; `NODE_TOMBSTONED_SQL` (what
     /// `node_is_tombstoned` counts) against `is_tombstoned`;
-    /// `admitted_learner_nodes_sql` against `is_admitted_learner`; and, over
-    /// real `openraft::Membership` values including both joint shapes,
-    /// `committed_voter` (what `local_node_is_committed_voter` applies to Raft
-    /// metrics) against `is_committed_voter` plus a hand-written membership
-    /// table. The fixture space is the product of every value the existing
+    /// `admitted_learner_nodes_sql` against `is_admitted_learner`;
+    /// `NODE_MAINTENANCE_COUNT_SQL` against a maintenance request and
+    /// `EXIT_MAINTENANCE_SQL` (run in a rolled-back savepoint with its other
+    /// preconditions made true) against `Acknowledged` on an active node; the
+    /// removal attempt set against `ROLLBACK_REMOVAL_FENCE_SQL` (empty),
+    /// `BEGIN_REMOVAL_INTENT_SQL` (membership, for every attempt id the
+    /// fixtures write and one they never write) and
+    /// `EXISTING_REMOVAL_ATTEMPT_SQL` (least attempt);
+    /// `NODE_PROMOTION_COUNT_SQL` against a promotion row; and, over real
+    /// `openraft::Membership` values including both joint shapes,
+    /// `committed_voter_ids!` applied to a `StoredMembership` (the read
+    /// `local_node_is_committed_voter` makes of Raft metrics) against
+    /// `is_committed_voter`, plus a hand-written membership table. The
+    /// promotion `Started`/`Barrier`/`Joint` split has no production reader,
+    /// so it is checked against §3.8's specification only. The fixture space is the product of every value the existing
     /// membership tests write into those columns: role NULL, 'learner' or
     /// 'voter'; removed or not; staged or not; the capability current, stale
     /// or missing (and the anchor node's current or stale); no removal fence
@@ -17197,8 +17234,8 @@ mod tests {
     fn lifecycle_projection_agrees() {
         use lifecycle::{
             capability_ready, committed_voter, observed_lifecycle, CapabilityRow, ClusterNodeRow,
-            MaintenanceRow, Membership, NodeRows, Promotion, PromotionRow, RaftMembershipView,
-            RemovalRow,
+            Maintenance, MaintenanceRow, Membership, NodeRows, Promotion, PromotionRow,
+            RaftMembershipView, Removal, RemovalRow,
         };
         use rusqlite::OptionalExtension;
 
@@ -17239,6 +17276,18 @@ mod tests {
                 .expect("additive column");
         }
         assert!(tables >= TABLES.len(), "the schema scan found no tables");
+        // `EXIT_MAINTENANCE_SQL` also refuses while the node owns an active
+        // media session. That table belongs to the store schema, not this
+        // module's; an empty stand-in with the three columns the statement
+        // reads keeps that clause true, so the statement's verdict is the
+        // maintenance row's.
+        connection
+            .execute(
+                "CREATE TABLE media_sessions (owner_node_id TEXT, state TEXT, \
+                 lease_expires_at_ms INTEGER)",
+                [],
+            )
+            .expect("media session stand-in");
 
         let read_rows = |node_id: &str| {
             let node = connection
@@ -17374,6 +17423,97 @@ mod tests {
                 .collect::<Result<BTreeSet<_>, _>>()
                 .expect("roster rows")
         };
+        // Production writes that decide on maintenance and on the removal
+        // attempt set, run as production runs them, inside a savepoint that is
+        // always rolled back so the fixture is unchanged. Each returns whether
+        // the statement changed a row.
+        let rolled_back = |write: &dyn Fn() -> usize| -> bool {
+            connection
+                .execute_batch("SAVEPOINT probe")
+                .expect("savepoint");
+            let changed = write();
+            connection
+                .execute_batch("ROLLBACK TO probe; RELEASE probe")
+                .expect("roll the probe back");
+            changed == 1
+        };
+        // `EXIT_MAINTENANCE_SQL` deletes only an acknowledged request
+        // (`acknowledged_at IS NOT NULL`) of an active node. Every other
+        // precondition it checks (fresh heartbeat and progress, zero apply
+        // lag, the maintenance capability proven by the running binary, no
+        // active media session) is made true first, so the delete answers
+        // "acknowledged and active" and nothing else.
+        let exit_maintenance_deletes = |node_id: &str| -> bool {
+            rolled_back(&|| {
+                connection
+                    .execute(
+                        "INSERT INTO cluster_node_progress (node_id, current_term, \
+                         apply_lag_entries, bounded_read_ready, voter_storage_ready, \
+                         voter_role_persisted, observed_at) VALUES (?1, 1, 0, 1, 1, 1, 0)",
+                        [node_id],
+                    )
+                    .expect("progress row");
+                connection
+                    .execute(
+                        "INSERT INTO cluster_node_capabilities (node_id, capability, \
+                         last_seen_at) SELECT node_id, ?2, last_seen_at FROM cluster_nodes \
+                         WHERE node_id = ?1",
+                        rusqlite::params![node_id, NODE_MAINTENANCE_CAPABILITY],
+                    )
+                    .expect("maintenance capability");
+                connection
+                    .execute(
+                        EXIT_MAINTENANCE_SQL,
+                        rusqlite::params![node_id, 0_i64, NODE_MAINTENANCE_CAPABILITY, 0_i64],
+                    )
+                    .expect("exit maintenance")
+            })
+        };
+        let maintenance_requested = |node_id: &str| -> bool {
+            connection
+                .query_row(NODE_MAINTENANCE_COUNT_SQL, [node_id], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("maintenance count")
+                == 1
+        };
+        // `ROLLBACK_REMOVAL_FENCE_SQL` drops the fence only when no attempt
+        // reference remains: the empty-set read.
+        let fence_rolls_back = |node_id: &str| -> bool {
+            rolled_back(&|| {
+                connection
+                    .execute(ROLLBACK_REMOVAL_FENCE_SQL, [node_id])
+                    .expect("fence rollback")
+            })
+        };
+        // `BEGIN_REMOVAL_INTENT_SQL` records an intent only for an attempt the
+        // set holds: the membership read.
+        let intent_admits = |node_id: &str, attempt: &str| -> bool {
+            rolled_back(&|| {
+                connection
+                    .execute(
+                        BEGIN_REMOVAL_INTENT_SQL,
+                        rusqlite::params![node_id, attempt],
+                    )
+                    .expect("removal intent")
+            })
+        };
+        let existing_attempt = |node_id: &str| -> Option<String> {
+            connection
+                .query_row(EXISTING_REMOVAL_ATTEMPT_SQL, [node_id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .expect("existing attempt")
+        };
+        let promotion_present = |node_id: &str| -> bool {
+            connection
+                .query_row(NODE_PROMOTION_COUNT_SQL, [node_id], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("promotion count")
+                > 0
+        };
 
         // Committed Raft configurations the subject (raft id 2) can be in,
         // built with openraft's own constructor, with the membership each
@@ -17419,6 +17559,10 @@ mod tests {
         let mut seen_tombstoned = [false; 2];
         let mut seen_holds_back = [false; 2];
         let mut seen_learner = [false; 2];
+        let mut seen_acknowledged = [false; 2];
+        let mut seen_fence_rollback = [false; 2];
+        let mut seen_attempt_admitted = [false; 2];
+        let mut seen_promotion = [false; 2];
         for role in [None, Some("learner"), Some("voter")] {
             for removed_at in [None, Some(9_i64)] {
                 for staged in [false, true] {
@@ -17598,6 +17742,71 @@ mod tests {
                                                 if index == 1 {
                                                     seen_learner[usize::from(learner)] = true;
                                                 }
+                                                let node_id = lifecycle.node_id.as_str();
+                                                assert_eq!(
+                                                    lifecycle.maintenance != Maintenance::None,
+                                                    maintenance_requested(node_id),
+                                                    "{node_id} maintenance requested: {context}"
+                                                );
+                                                let exits = lifecycle.maintenance
+                                                    == Maintenance::Acknowledged
+                                                    && lifecycle.removal != Removal::Tombstoned;
+                                                assert_eq!(
+                                                    exits,
+                                                    exit_maintenance_deletes(node_id),
+                                                    "{node_id} maintenance acknowledged: {context}"
+                                                );
+                                                seen_acknowledged[usize::from(exits)] = true;
+                                                // A tombstoned node's attempt references
+                                                // are left behind on purpose and no
+                                                // removal read consults them again, so
+                                                // `Tombstoned` carries no attempt set.
+                                                let attempts = match &lifecycle.removal {
+                                                    Removal::Tombstoned => None,
+                                                    Removal::None => Some((false, BTreeSet::new())),
+                                                    Removal::InProgress { attempts } => {
+                                                        Some((true, attempts.clone()))
+                                                    }
+                                                };
+                                                if let Some((fence, attempts)) = attempts {
+                                                    let rollback = fence && attempts.is_empty();
+                                                    assert_eq!(
+                                                        rollback,
+                                                        fence_rolls_back(node_id),
+                                                        "{node_id} removal fence rolls back: \
+                                                         {context}"
+                                                    );
+                                                    seen_fence_rollback[usize::from(rollback)] =
+                                                        true;
+                                                    for attempt in [
+                                                        "attempt-0",
+                                                        "attempt-1",
+                                                        "attempt-2",
+                                                        "attempt-never-written",
+                                                    ] {
+                                                        let held = attempts.contains(attempt);
+                                                        assert_eq!(
+                                                            held,
+                                                            intent_admits(node_id, attempt),
+                                                            "{node_id} holds {attempt}: {context}"
+                                                        );
+                                                        seen_attempt_admitted[usize::from(held)] =
+                                                            true;
+                                                    }
+                                                    assert_eq!(
+                                                        attempts.first().cloned(),
+                                                        existing_attempt(node_id),
+                                                        "{node_id} adopted attempt: {context}"
+                                                    );
+                                                }
+                                                let promoting =
+                                                    lifecycle.promotion != Promotion::None;
+                                                assert_eq!(
+                                                    promoting,
+                                                    promotion_present(node_id),
+                                                    "{node_id} promotion row: {context}"
+                                                );
+                                                seen_promotion[usize::from(promoting)] = true;
                                             }
                                             for capability in [CAPABILITY_A, CAPABILITY_B] {
                                                 assert_eq!(
@@ -17608,11 +17817,31 @@ mod tests {
                                             }
                                             let subject = &views[1];
                                             assert_eq!(subject.membership, *expected, "{context}");
+                                            // The Raft read production decides on:
+                                            // `local_node_is_committed_voter` applies
+                                            // `committed_voter_ids!` to the metrics'
+                                            // `Arc<StoredMembership>`; the projection
+                                            // reads its own `RaftMembershipView`.
+                                            let stored = Arc::new(openraft::StoredMembership::new(
+                                                None,
+                                                raft.clone(),
+                                            ));
                                             assert_eq!(
                                                 subject.is_committed_voter(),
-                                                committed_voter(raft.voter_ids(), SUBJECT_RAFT_ID),
-                                                "committed voter: {context}"
+                                                committed_voter(
+                                                    committed_voter_ids!(stored),
+                                                    SUBJECT_RAFT_ID
+                                                ),
+                                                "committed voter as \
+                                                 local_node_is_committed_voter reads it: \
+                                                 {context}"
                                             );
+                                            // `Started` / `Barrier` / `Joint` have no
+                                            // production reader (only the row's existence
+                                            // is read, checked above against
+                                            // `NODE_PROMOTION_COUNT_SQL`). This is §3.8's
+                                            // specification of the split, not an
+                                            // agreement with production.
                                             let joint = raft.get_joint_config().len() > 1;
                                             match barrier {
                                                 None => assert_eq!(
@@ -17649,8 +17878,16 @@ mod tests {
         }
         assert_eq!(fixtures, 3 * 2 * 2 * 3 * 2 * 4 * 3 * 3 * 5);
         assert_eq!(
-            (seen_holds_back, seen_tombstoned, seen_learner),
-            ([true; 2], [true; 2], [true; 2]),
+            (
+                seen_holds_back,
+                seen_tombstoned,
+                seen_learner,
+                seen_acknowledged,
+                seen_fence_rollback,
+                seen_attempt_admitted,
+                seen_promotion,
+            ),
+            ([true; 2], [true; 2], [true; 2], [true; 2], [true; 2], [true; 2], [true; 2]),
             "every verdict has to be reached both ways, or the agreement is vacuous"
         );
     }

@@ -16,11 +16,35 @@
 //! a transition table: the assessment (F-sc-12) refused a flat enum as a
 //! proven product state, so the projection has to agree with the predicates
 //! first. `cluster::membership::tests::lifecycle_projection_agrees` loads every
-//! row shape into the production table definitions and checks each dimension
-//! against the SQL or Raft read that production uses. Nothing in the daemon
-//! reads this projection yet; a transition function is a later milestone,
-//! written only after the projection has agreed with production for a
-//! release.
+//! row shape into the production table definitions and checks the projection
+//! against the SQL statements and the Raft read production decides on, run
+//! as production runs them:
+//!
+//! - readiness and `join`: `capability_unready_node_predicate` per node and
+//!   `capability_ready_predicate` over the roster;
+//! - `removal`: `NODE_TOMBSTONED_SQL` for the tombstone; for a removal in
+//!   progress, the attempt set against the three reads production makes of
+//!   it (`ROLLBACK_REMOVAL_FENCE_SQL`, which needs it empty,
+//!   `BEGIN_REMOVAL_INTENT_SQL`, which needs one attempt in it, and
+//!   `EXISTING_REMOVAL_ATTEMPT_SQL`, its least attempt). `Tombstoned` carries
+//!   no attempt set: the references are left behind on purpose and no removal
+//!   read consults them again;
+//! - `durable_role`: `admitted_learner_nodes_sql`;
+//! - `maintenance`: `NODE_MAINTENANCE_COUNT_SQL` for a request, and
+//!   `EXIT_MAINTENANCE_SQL` (which deletes only an acknowledged request of an
+//!   active node) for `Acknowledged` on an active node. Production reads a
+//!   tombstoned node's acknowledgement nowhere, so it is not agreed there;
+//! - `membership`: `committed_voter_ids!`, the read
+//!   `local_node_is_committed_voter` applies to Raft metrics, over real
+//!   `openraft` memberships including both joint shapes;
+//! - `promotion`: only whether an audit row exists (`NODE_PROMOTION_COUNT_SQL`).
+//!   The `Started` / `Barrier` / `Joint` split has **no production reader**:
+//!   nothing reads `barrier_index` back. The test pins that split to §3.8's
+//!   specification, which is not an agreement with production.
+//!
+//! Nothing in the daemon reads this projection yet; a transition function is
+//! a later milestone, written only after the projection has agreed with
+//! production for a release.
 
 use std::collections::BTreeSet;
 
