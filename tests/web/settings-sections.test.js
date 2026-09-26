@@ -381,6 +381,9 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // calls has to be composed here or the panel throws on the name and this
       // whole gate reports one failure instead of checking anything.
       shippedSource("subtitleNotReadyCard"),
+      // The fifth time: #517 put the automatic playback-ranges card at the
+      // head of the stored-subtitle section without composing it here.
+      shippedSource("subtitlePlaybackRangesCard"),
       shippedSource("subtitleStoredSourcesCard"),
       shippedSource("subtitleClusterSourcesCard"),
       shippedSource("subtitleBackfillCard"),
@@ -461,6 +464,11 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   );
   for (const id of ["pabr", "pqh", "pdp", "dhqa", "adr", "sub503", "subsrc", "subcluster", "subbackfill", "chthumb"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
+  // Parallel playback ranges are automatic: the card explains them and reads
+  // peer reachability as advisory, and offers no switch of its own.
+  const ranges = /Parallel playback subtitle ranges[\s\S]*?(?=<div class="setsection"|TOG:subsrc)/.exec(html);
+  assert.ok(ranges, "Developer shows the automatic playback-ranges card");
+  assert.doesNotMatch(ranges[0], /TOG:/, "playback ranges have no enable switch");
   // Absent from the settings document is on: chapter thumbnails default on.
   assert.match(html, /TOG:chthumb\|[^|]*\|[^|]*\|checked=true/);
   assert.match(html, /FOOT:saveChapterThumbnails/);
