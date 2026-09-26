@@ -901,6 +901,7 @@ title = "App-managed offline viewing"
 contract = "Authenticated users can prepare one portable VOD package, transfer it through a stable scoped lease, and play only app-owned local bytes while disconnected."
 paths = [
   "crates/plurx-core/src/store/offline_claim.rs",
+  "crates/plurx-core/src/store/offline_expiry.rs",
   "crates/plurx-core/src/store/sqlite/offline.rs",
   "crates/plurxd/src/offline.rs",
   "crates/plurxd/src/http/offline.rs",
