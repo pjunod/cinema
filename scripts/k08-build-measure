@@ -48,6 +48,22 @@ cold() { rm -rf "$scratch"; timed "$@"; }
 
 size() { log "| $1 target size | $(du -sh "$scratch" | cut -f1) | \`du -sh\` |"; }
 
+# steady_state <label> [features...]: what a warm-cache PR pays. A cold debug
+# build of plurxd, then the same build after touching plurxd's own source (the
+# persistent-cache case: only plurxd recompiles and relinks), then the unit
+# lane's plurxd test binary, cold on those deps and again after a touch.
+steady_state() {
+  local label="$1"
+  shift
+  cold "$label-build-cold" cargo build --locked -p plurxd "$@"
+  touch crates/plurxd/src/main.rs
+  timed "$label-build-touched" cargo build --locked -p plurxd "$@"
+  timed "$label-test-build" cargo test --locked --no-run -p plurxd --bin plurxd "$@"
+  touch crates/plurxd/src/main.rs
+  timed "$label-test-build-touched" cargo test --locked --no-run -p plurxd --bin plurxd "$@"
+  size "$label-build"
+}
+
 # The candle/tokenizers subtree: packages the workspace resolves only through
 # plurxd's four inference dependencies. Summed from a --timings report.
 subtree_report() {
@@ -120,11 +136,11 @@ case "$mode" in
       size workspace-shipped-check
       cold plurxd-shipped-check-cold cargo check --locked -p plurxd --features semantic-search
       size plurxd-shipped-check
-      cold plurxd-shipped-build-cold cargo build --locked -p plurxd --features semantic-search
-      size plurxd-shipped-build
     fi
-    cold plurxd-build-cold cargo build --locked -p plurxd
-    size plurxd-build
+    steady_state plurxd
+    if $has_feature; then
+      steady_state plurxd-shipped --features semantic-search
+    fi
     subtree_report "$out/workspace-check-timing.html"
     ;;
   serial)
