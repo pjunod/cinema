@@ -1,8 +1,8 @@
 # HEVC in-band parameter sets — why UNABOMBER plays pink and green
 
-**Status:** open — built on `fix/hevc-inband-parameter-sets`; device qualification pending ·
-**Written:** 2026-09-26 · **Supersedes:** the containment in PR #535, which never
-reached `main`
+**Status:** open — built on `fix/hevc-inband-retention`, stacked on the #535
+re-land (PR #546); device qualification pending · **Written:** 2026-09-26 ·
+**Builds on:** [HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md](HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md)
 
 Companion to [STUTTER-4K.md](STUTTER-4K.md), whose parameter-set deletion this
 narrows. Read §1 for the cause, §3 for the fix, and §5 for what is still
@@ -40,11 +40,12 @@ replacement `hvcC`.
 
 Two independent reasons.
 
-1. **Its code never reached `main`.** It merged at 00:13 UTC on 2026-09-26 as
-   `70264bf7`. PR #538 merged seven minutes later as `71d1c1ec` with first
-   parent `ea215603` — the `main` from before #535 — so #535's change was
-   dropped. `git merge-base --is-ancestor b7f47c16 71d1c1ec` is false, and the
-   fleet was deployed from `71d1c1ec`.
+1. **Its code never reached `main`.** It merged at 00:13:40 UTC on 2026-09-26
+   as `70264bf7`, and two seconds later Forgejo's push mirror to GitHub,
+   finishing a sync of an older snapshot, wrote `main` back to `ea215603`
+   through its `fetch = +refs/*:refs/*` refspec (the bare repository's reflog
+   records it as `Gitea … update by push`). The same race had erased #225,
+   #460 and #509. The refspec is removed and PR #546 re-lands #535 and #509.
 2. **Even landed, it was containment.** For this title its own RCA states the
    expected outcome as "a clear refusal of unsafe copy". By default it also
    refused every HEVC copy without a full `trace_headers` proof, which a large
@@ -76,6 +77,24 @@ copy path and every node decides from the same replicated row:
 
 The `hvc1`/`dvh1` label is unchanged. Only the second row's files change at
 all, so there is no library re-index, no protocol bump and no refusal.
+
+**Composition with #535's proof.** #535 admits a VOD copy that deletes the
+in-band sets only when a full original-header trace proves them constant, and
+refuses rolling and progressive HEVC copy outright. A copy that keeps them
+cannot decode against stale definitions, so this change narrows #535 to the
+copies that actually delete something:
+
+| Copy | Parameter sets | Admission |
+|---|---|---|
+| VOD, census says they vary | kept | no proof needed |
+| VOD, census says they repeat the record | deleted (today's bytes) | #535's proof, or the Developer override |
+| Rolling (the fallback while a title is unproven) | always kept | no proof, no override |
+| Progressive `stream.mp4` | always kept | no proof, no override |
+
+So an unanalysed title plays with correct colour through the rolling
+fallback instead of being refused, UNABOMBER plays through VOD once its
+retaining index exists, and the Developer override now matters only for a
+VOD copy that would delete unproven parameter sets.
 
 **VOD stays available.** The index compares each clean fragment's promotion
 inputs to decide whether one init can describe the film. A type the record

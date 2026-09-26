@@ -680,20 +680,9 @@ fn remux_requires_hls(
     decision: &Decision,
     caps: Option<&playback::DeviceCaps>,
     promote_hevc_parameter_sets: bool,
-    allow_unverified: bool,
 ) -> Result<bool, ApiError> {
     if decision.method != playback::PlaybackMethod::Remux {
         return Ok(false);
-    }
-    if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) && !allow_unverified {
-        if caps.is_some_and(|caps| !caps.transports.iter().any(|transport| transport == "hls")) {
-            return Err(ApiError::typed(
-                StatusCode::CONFLICT,
-                "hevc_configuration_unverified",
-                "verified HEVC copy requires HLS; this client did not claim HLS",
-            ));
-        }
-        return Ok(true);
     }
     Ok(decision.convert_dolby_vision
         || caps
@@ -2312,9 +2301,6 @@ pub async fn decision(
         &decision,
         q.caps_v2.as_ref(),
         vod_video.promotes_parameter_sets(),
-        crate::transcode::unverified_hevc_copy_enabled(state.store.as_ref())
-            .await
-            .map_err(ApiError::Internal)?,
     )?;
 
     let caps_v2_version = q.caps_v2.as_ref().map(|caps| caps.v);
@@ -2806,17 +2792,6 @@ pub async fn stream_mp4(
     Query(q): Query<StreamQuery>,
 ) -> Result<Response, ApiError> {
     let mut file = load_file(&state, id).await?;
-    if matches!(file.video_codec.as_deref(), Some("hevc" | "h265"))
-        && !crate::transcode::unverified_hevc_copy_enabled(state.store.as_ref())
-            .await
-            .map_err(ApiError::Internal)?
-    {
-        return Err(ApiError::typed(
-            StatusCode::CONFLICT,
-            "hevc_configuration_unverified",
-            "HEVC progressive copy is unverified; use HLS or enable unverified HEVC copy in Settings → Developer",
-        ));
-    }
     file.audio_offset_ms = if file.audio_streams.is_empty() {
         0
     } else {
@@ -2843,11 +2818,9 @@ pub async fn stream_mp4(
     let probe_json = crate::hevc_census::probe_json_for_copy(state.store.as_ref(), &file).await?;
     let promote_hevc_parameter_sets =
         plurx_core::transcode::hevc_parameter_set_promotion_required(&file, probe_json.as_deref());
-    let retain_hevc_parameter_sets =
-        plurx_core::transcode::hevc_census::in_band_parameter_sets_vary(
-            &file,
-            probe_json.as_deref(),
-        );
+    // A progressive copy has no header proof either, so it keeps every HEVC
+    // source's in-band parameter sets, like the rolling copy.
+    let retain_hevc_parameter_sets = matches!(file.video_codec.as_deref(), Some("hevc" | "h265"));
     // Copy HEVC gets an `hvc1` tag so Safari's <video> accepts the fMP4 (an
     // `hev1`-tagged MKV copy otherwise plays audio-only / black in Safari).
     let hevc = matches!(file.video_codec.as_deref(), Some("hevc" | "h265"));
@@ -4250,10 +4223,8 @@ mod tests {
         );
         assert!(converted.convert_dolby_vision);
         assert!(converted.preserve_dolby_vision);
-        assert!(
-            remux_requires_hls(&source, &converted, Some(&hls), false, false)
-                .expect("copy HLS is admitted")
-        );
+        assert!(remux_requires_hls(&source, &converted, Some(&hls), false)
+            .expect("copy HLS is admitted"));
 
         let stripped = Caps {
             caps_v2: Some(progressive.clone()),
@@ -4283,7 +4254,7 @@ mod tests {
             NOW_MS,
         );
         assert!(legacy.convert_dolby_vision);
-        assert!(remux_requires_hls(&source, &legacy, None, false, false)
+        assert!(remux_requires_hls(&source, &legacy, None, false)
             .expect("legacy transport is not an explicit refusal"));
     }
 

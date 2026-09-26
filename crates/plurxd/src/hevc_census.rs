@@ -212,6 +212,8 @@ async fn sample(args: Vec<OsString>) -> Result<InBandParameterSets, String> {
         &args,
         SAMPLE_WALL_TIME,
         SAMPLE_MAX_BYTES,
+        // A viewer is waiting on the copy decision this answers.
+        plurx_core::process::ChildWork::realtime("HEVC parameter-set census"),
     )
     .await
     .map_err(|error| error.to_string())?;

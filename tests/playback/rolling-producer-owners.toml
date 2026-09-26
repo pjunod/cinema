@@ -2187,7 +2187,12 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # registers the child exactly as `spawn_job_owned` does and waits for it
 # before returning, so it creates no detached owner. The census test counts
 # exactly these two launcher spawns.
-expected_occurrences = 46
+# +1 with the HEVC parameter-set census (hevc_census::measure): one
+# JoinSet::spawn per sampled keyframe, owned by the JoinSet in that function,
+# aborted at the census budget and dropped (aborting any stragglers) when it
+# returns. Each task awaits one bounded, ChildWork-launched ffmpeg that is
+# killed on drop. No rolling-producer owner.
+expected_occurrences = 47
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2932,7 +2937,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Re-landed with main at `3dadc61cd` after the push-mirror rewind erased
 # #535's merge: the value is main's 997 -1 for the HEVC
 # repair's shapes reviewed above, measured by zeroing this row after the merge.
-expected_occurrences = 996
+# +1 with the HEVC parameter-set census: the one tokio::time::Instant::now()
+# that fixes its budget deadline. Bounded, per census, no producer timer.
+expected_occurrences = 997
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3204,7 +3211,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Re-landed with main at `3dadc61cd` after the push-mirror rewind erased
 # #535's merge: the value is main's 179 +5 for the HEVC
 # repair's shapes reviewed above, measured by zeroing this row after the merge.
-expected_occurrences = 184
+# +4 test-only with the HEVC parameter-set census (hevc_census::tests): the
+# x265 fixture encode, its concat mux, the framemd5 decode and the production
+# copy pipe. Each is collected by testfixtures::run or Command::output before
+# its temporary directory drops. No detached owner.
+expected_occurrences = 188
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3594,7 +3605,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Re-landed with main at `3dadc61cd` after the push-mirror rewind erased
 # #535's merge: the value is main's 384 +2 for the HEVC
 # repair's shapes reviewed above, measured by zeroing this row after the merge.
-expected_occurrences = 386
+# +3 with the HEVC parameter-set census: the JoinSet::spawn of each sample
+# task (a task, not a process; see method-spawn), and two test-only
+# Command::output calls (framemd5 decode, production copy pipe) that collect
+# finite fixture children. The census's own ffmpeg starts through
+# process::bounded::output with ChildWork::realtime.
+expected_occurrences = 389
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
