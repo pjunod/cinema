@@ -297,8 +297,10 @@ function liveTvTransportState(){
 }
 function liveTvSyncTransportButtons(){
   const state=liveTvTransportState();
-  const info=document.getElementById("live-tv-info"); if(info) info.disabled=state.hidden;
-  const button=document.getElementById("live-tv-transport"); if(!button) return;
+  const info=/** @type {HTMLButtonElement|null} */ (document.getElementById("live-tv-info"));
+  if(info) info.disabled=state.hidden;
+  const button=/** @type {HTMLButtonElement|null} */ (document.getElementById("live-tv-transport"));
+  if(!button) return;
   button.hidden=state.hidden;
   button.disabled=state.hidden;
   button.textContent=state.icon;

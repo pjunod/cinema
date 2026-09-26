@@ -519,7 +519,7 @@ function setLiveTvStatsMode(mode){
   updateLiveTvStats();
 }
 function liveTvHasAttachedMedia(){
-  const video=document.getElementById("live-tv-video");
+  const video=/** @type {HTMLVideoElement|null} */ (document.getElementById("live-tv-video"));
   return !!LIVE_TV_LEASE.current&&!!video&&!!(video.currentSrc||video.src);
 }
 function openLiveTvStats(){
