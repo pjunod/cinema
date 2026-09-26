@@ -359,8 +359,7 @@ pub(crate) struct EncodedExecutable {
 
 impl EncodedExecutable {
     pub async fn capture() -> Result<Self, String> {
-        let path = resolve_executable_path(&ffmpeg_bin())
-            .ok_or("cannot resolve the encoder executable")?;
+        let path = encoder_executable_path().ok_or("cannot resolve the encoder executable")?;
         Self::capture_at(path).await
     }
 
@@ -2725,6 +2724,13 @@ fn normalized_dependency_report(report: &[u8]) -> Vec<u8> {
         .collect::<Vec<_>>()
         .join("\n")
         .into_bytes()
+}
+
+/// The encoder every producer runs, as [`EncodedExecutable::capture`]
+/// attests it; a text burn's frozen environment is proved against the same
+/// program.
+pub(crate) fn encoder_executable_path() -> Option<std::path::PathBuf> {
+    resolve_executable_path(&ffmpeg_bin())
 }
 
 fn resolve_executable_path(bin: &str) -> Option<std::path::PathBuf> {

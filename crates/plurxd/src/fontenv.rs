@@ -32,14 +32,18 @@
 //!     <each loaded configuration file's path>   a byte copy
 //!     <each listed font file's path>            a symlink to that file
 //!     …                                        caches Fontconfig writes
+//!   probe.ass        the one-frame script the capture renders
 //!   manifest.json    what each copy and link came from, for an operator
 //! ```
 //!
-//! Two properties are proved at capture, not assumed: the frozen environment
-//! loads exactly the configuration files the live one does, in the same
-//! order, and lists exactly the same faces. A closure the freeze cannot
-//! reproduce fails one of them and the burn is refused rather than rendered
-//! with other fonts or rules.
+//! Three properties are proved at capture, not assumed: under the system
+//! `fc-*` tools the frozen environment loads exactly the configuration files
+//! the live one does, in the same order, and lists exactly the same faces;
+//! and the producer's own ffmpeg, whose libass links whatever libfontconfig
+//! that build bundles, loads only configuration inside the sysroot and the
+//! same set of files. A closure the freeze cannot reproduce, or a producer
+//! library that ignores the sysroot, fails one of them and the burn is
+//! refused rather than rendered with other fonts or rules.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read as _;
@@ -63,6 +67,21 @@ pub(crate) const FONT_LISTING_FORMAT: &str = "--format=%{file}\t%{index}\t%{fami
 
 /// A configuration file larger than this is not a Fontconfig rule file.
 const RULE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The script the capture burns once under the producer's own ffmpeg, beside
+/// (not inside) the sysroot. One event, so libass resolves a face and the
+/// producer library's first scan builds the cache every later launch reads.
+const PROBE_SCRIPT_NAME: &str = "probe.ass";
+const PROBE_SCRIPT: &str = "[Script Info]\nScriptType: v4.00+\nPlayResX: 64\nPlayResY: 64\n\n\
+     [V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, \
+     Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n\
+     Style: Default,sans-serif,20,&H00FFFFFF,&H00000000,&H00000000,0,0,1,1,0,2,0,0,0,1\n\n\
+     [Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
+     Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,Ag\n";
+
+/// Fontconfig's `FC_DBG_CONFIG`: the library prints every configuration file
+/// and directory it loads or scans to stdout.
+const FC_DEBUG_CONFIG: &str = "1024";
 
 /// What the live enumeration saw, in the shape freezing needs.
 pub(crate) struct FontSources<'a> {
@@ -127,23 +146,62 @@ impl FontEnvironment {
 
 impl Drop for FontEnvironment {
     fn drop(&mut self) {
-        let dir = std::mem::take(&mut self.dir);
-        let remove = move || {
-            if let Err(error) = std::fs::remove_dir_all(&dir) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(
-                        target: "plurxd::ffmpeg",
-                        path = %dir.display(),
-                        "could not remove a released font environment: {error}"
-                    );
-                }
+        release(std::mem::take(&mut self.dir));
+    }
+}
+
+/// Remove an environment's directory on the blocking pool. Called with the
+/// last recipe's release, which can be on a runtime worker, and when a
+/// capture that owned the directory fails or is cancelled; the next
+/// process's sweep covers a removal that never runs.
+fn release(dir: PathBuf) {
+    let remove = move || {
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    target: "plurxd::ffmpeg",
+                    path = %dir.display(),
+                    "could not remove a released font environment: {error}"
+                );
             }
-        };
-        // Released with the last recipe, which can be on a runtime worker;
-        // the next process's sweep covers a removal that never runs.
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => drop(handle.spawn_blocking(remove)),
-            Err(_) => remove(),
+        }
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => drop(handle.spawn_blocking(remove)),
+        Err(_) => remove(),
+    }
+}
+
+/// The directory of an environment still being built. It exists before the
+/// first write and is moved into every blocking task that writes there and
+/// back out, so whichever way the capture ends — refused, or cancelled by its
+/// caller's deadline while a task or an `fc-*` child is in flight — dropping
+/// it removes the directory; only [`Owned::hand_over`] to the finished
+/// [`FontEnvironment`] keeps it. §7.4: ownership, not age.
+struct Owned {
+    dir: PathBuf,
+    kept: bool,
+}
+
+impl Owned {
+    fn new(dir: PathBuf) -> Self {
+        Self { dir, kept: false }
+    }
+
+    fn path(&self) -> &Path {
+        &self.dir
+    }
+
+    fn hand_over(mut self) -> PathBuf {
+        self.kept = true;
+        std::mem::take(&mut self.dir)
+    }
+}
+
+impl Drop for Owned {
+    fn drop(&mut self) {
+        if !self.kept {
+            release(std::mem::take(&mut self.dir));
         }
     }
 }
@@ -258,36 +316,31 @@ async fn freeze_charged(
         }
     }
     registry.next += 1;
-    let dir = runtime_cache.join(FONT_ENVIRONMENT_DIR).join(format!(
+    // Owned before anything is written: a capture its caller abandons (a
+    // resurrection's `timeout_at`) removes what it built instead of leaving
+    // it for the next process.
+    let owned = Owned::new(runtime_cache.join(FONT_ENVIRONMENT_DIR).join(format!(
         "{}-{}",
         &digest[..16],
         registry.next
-    ));
-    let built = build(
-        &dir,
-        Frozen {
-            digest,
-            config,
-            rules,
-            fonts,
-        },
-        sources,
-        cost,
-    )
-    .await;
-    match built {
-        Ok(environment) => {
-            let environment = Arc::new(environment);
-            registry.live.insert(key, Arc::downgrade(&environment));
-            Ok(environment)
-        }
-        Err(error) => {
-            let _ =
-                blocking(move || std::fs::remove_dir_all(&dir).map_err(|error| error.to_string()))
-                    .await;
-            Err(error)
-        }
-    }
+    )));
+    let environment = Arc::new(
+        build(
+            &runtime_cache,
+            owned,
+            Frozen {
+                digest,
+                config,
+                rules,
+                fonts,
+            },
+            sources,
+            cost,
+        )
+        .await?,
+    );
+    registry.live.insert(key, Arc::downgrade(&environment));
+    Ok(environment)
 }
 
 struct Frozen {
@@ -315,22 +368,30 @@ fn outside<'a>(root: &Path, reported: &'a str) -> std::borrow::Cow<'a, str> {
 }
 
 async fn build(
-    dir: &Path,
+    runtime_cache: &Path,
+    owned: Owned,
     frozen: Frozen,
     sources: FontSources<'_>,
     cost: &mut FreezeCost,
 ) -> Result<FontEnvironment, String> {
     let started = Instant::now();
-    let layout = {
-        let dir = dir.to_path_buf();
+    let materialised = {
         let rules = frozen.rules.clone();
         let fonts = frozen.fonts.clone();
-        blocking(move || materialise(&dir, &rules, &fonts)).await
+        // The guard rides inside the task: a task that outlives its awaiting
+        // future hands its output, and so the guard, to the runtime to drop.
+        blocking(move || {
+            let layout = materialise(owned.path(), &rules, &fonts)?;
+            Ok((owned, layout))
+        })
+        .await
     };
     cost.stat += started.elapsed();
-    let layout = layout?;
+    let (owned, layout) = materialised?;
+    #[cfg(test)]
+    tests::hooks::paused(runtime_cache).await;
 
-    let command = |program: &str| {
+    let command = |program: &Path| {
         let mut command = tokio::process::Command::new(program);
         command
             .env("FONTCONFIG_SYSROOT", &layout.root)
@@ -348,18 +409,21 @@ async fn build(
         }
     };
 
-    // The cache exists before the first producer, so no launch pays a scan.
-    let (cached, elapsed) = probe(command("fc-cache"), "building the frozen cache").await;
-    cost.spawn += elapsed;
-    cached?;
-    let (loaded, elapsed) = probe(command("fc-conflist"), "listing the frozen rules").await;
+    // Parity under the system library. No `fc-cache` first: `fc-list` builds
+    // the system library's cache as it lists, and that cache is only the
+    // producer's if the two libraries share a cache version.
+    let (loaded, elapsed) = probe(
+        command(Path::new("fc-conflist")),
+        "listing the frozen rules",
+    )
+    .await;
     cost.spawn += elapsed;
     rules_match(
         &layout.root,
         sources.rules,
         &String::from_utf8_lossy(&loaded?),
     )?;
-    let mut list = command("fc-list");
+    let mut list = command(Path::new("fc-list"));
     list.arg(FONT_LISTING_FORMAT);
     let (listed, elapsed) = probe(list, "listing the frozen fonts").await;
     cost.spawn += elapsed;
@@ -369,24 +433,71 @@ async fn build(
         &String::from_utf8_lossy(&listed?),
     )?;
 
+    // Parity under the producer's library. libass links whatever
+    // libfontconfig the ffmpeg build bundles (Jellyfin FFmpeg ships its own
+    // beside an older system one), so one burn under the child's exact
+    // environment, with Fontconfig tracing what it loads, is the only proof
+    // that *this* library resolves inside the sysroot. Its first scan also
+    // writes the cache in that library's own format, so no producer launch
+    // pays one.
+    let program = producer_program(runtime_cache)?;
+    let mut render = command(&program);
+    crate::producer_spawn::configure_ffmpeg_runtime(&mut render, runtime_cache);
+    render
+        .current_dir(owned.path())
+        .env("FC_DEBUG", FC_DEBUG_CONFIG)
+        .args([
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=64x64:d=0.04",
+            "-vf",
+        ])
+        .arg(format!("subtitles={PROBE_SCRIPT_NAME}"))
+        .args(["-frames:v", "1", "-f", "null", "-"]);
+    let (traced, elapsed) = probe(render, "rendering under the frozen environment").await;
+    cost.spawn += elapsed;
+    library_loads_match(
+        &layout.root,
+        sources.rules,
+        &String::from_utf8_lossy(&traced?),
+    )?;
+
     let started = Instant::now();
-    let objects = {
-        let dir = dir.to_path_buf();
+    let attested = {
         let digest = frozen.digest.clone();
         let config = frozen.config.clone();
         let rules = frozen.rules;
         let fonts = frozen.fonts;
-        blocking(move || attest(&dir, &digest, &config, &rules, &fonts, layout)).await
+        blocking(move || {
+            let attested = attest(owned.path(), &digest, &config, &rules, &fonts, layout)?;
+            Ok((owned, attested))
+        })
+        .await
     };
     cost.stat += started.elapsed();
-    let (root, objects) = objects?;
+    let (owned, (root, objects)) = attested?;
     Ok(FontEnvironment {
-        dir: dir.to_path_buf(),
+        dir: owned.hand_over(),
         root,
         config: frozen.config,
         digest: frozen.digest,
         objects: objects.into(),
     })
+}
+
+/// The encoder a producer for this recipe runs.
+fn producer_program(_runtime_cache: &Path) -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Some(program) = tests::hooks::producer_program(_runtime_cache) {
+        return Ok(program);
+    }
+    crate::ffmpeg::encoder_executable_path()
+        .ok_or_else(|| "cannot resolve the encoder executable".to_owned())
 }
 
 struct Layout {
@@ -420,6 +531,8 @@ fn materialise(
     };
     let root = dir.join("root");
     std::fs::create_dir_all(&root).map_err(io("creating", &root))?;
+    let script = dir.join(PROBE_SCRIPT_NAME);
+    std::fs::write(&script, PROBE_SCRIPT).map_err(io("writing", &script))?;
     // Fontconfig realpaths the sysroot before comparing prefixes.
     let root = std::fs::canonicalize(&root).map_err(io("resolving", &root))?;
     let mut entries = Vec::with_capacity(rules.len() + fonts.len());
@@ -519,6 +632,65 @@ fn faces_match(root: &Path, live: &str, frozen: &str) -> Result<(), String> {
         live.len(),
         live_set.difference(&frozen_set).count(),
         frozen_set.difference(&live_set).count(),
+    ))
+}
+
+/// The producer's own Fontconfig, traced with `FC_DEBUG` while it burnt the
+/// probe, must have read configuration only inside the sysroot, and loaded
+/// the same set of files the live enumeration did. The trace is in start
+/// order, not `fc-conflist`'s finish order, and a library may load its
+/// configuration more than once, so this compares sets; the order was
+/// proved by [`rules_match`] and the tree is the same bytes at the same
+/// paths.
+fn library_loads_match(root: &Path, live: &[PathBuf], trace: &str) -> Result<(), String> {
+    let mut loaded = BTreeSet::new();
+    let mut escaped = BTreeSet::new();
+    for line in trace.lines() {
+        let line = line.trim_start();
+        let (loading, rest) = if let Some(rest) = line.strip_prefix("Loading config file ") {
+            (true, rest)
+        } else if let Some(rest) = line
+            .strip_prefix("Scanning config file ")
+            .or_else(|| line.strip_prefix("Scanning config dir "))
+        {
+            (false, rest)
+        } else {
+            continue;
+        };
+        let path = rest.strip_prefix("from ").unwrap_or(rest);
+        let path = path.strip_suffix(" done").unwrap_or(path);
+        if Path::new(path).strip_prefix(root).is_err() {
+            escaped.insert(path.to_owned());
+        } else if loading {
+            loaded.insert(outside(root, path).into_owned());
+        }
+    }
+    if let Some(first) = escaped.first() {
+        return Err(format!(
+            "the producer's Fontconfig read {} configuration paths outside the frozen \
+             environment (first: {first}); its library does not honour FONTCONFIG_SYSROOT, so \
+             the burn would render under the live configuration",
+            escaped.len()
+        ));
+    }
+    if loaded.is_empty() {
+        return Err(
+            "the producer's ffmpeg traced no Fontconfig configuration while burning text, so \
+             nothing proves which configuration its libass renders under"
+                .to_owned(),
+        );
+    }
+    let live: BTreeSet<String> = live.iter().map(|path| path.display().to_string()).collect();
+    if loaded == live {
+        return Ok(());
+    }
+    Err(format!(
+        "the producer's Fontconfig loads {} configuration files where the live one loads {} \
+         ({} missing, {} different); the burn would render under other rules",
+        loaded.len(),
+        live.len(),
+        live.difference(&loaded).count(),
+        loaded.difference(&live).count(),
     ))
 }
 

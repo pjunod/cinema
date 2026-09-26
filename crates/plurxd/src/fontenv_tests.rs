@@ -549,3 +549,269 @@ async fn a_frozen_host_environment_matches_and_renders_like_the_live_one() {
     assert_ne!(live, render(&host_fc(), false), "the burn drew glyphs");
     assert_eq!(render(&frozen, true), live);
 }
+
+/// Test-only seams in `build`, keyed by the runtime cache a capture freezes
+/// under so parallel tests never see each other's.
+pub(crate) mod hooks {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use tokio::sync::Notify;
+
+    #[derive(Clone, Default)]
+    pub(crate) struct Hooks {
+        /// `(reached, resume)`: a capture signals `reached` once its
+        /// environment is on disk, then waits for `resume`.
+        pub(crate) pause: Option<(Arc<Notify>, Arc<Notify>)>,
+        /// Run in place of the encoder for the producer-library proof.
+        pub(crate) producer_program: Option<PathBuf>,
+    }
+
+    fn table() -> &'static Mutex<HashMap<PathBuf, Hooks>> {
+        static TABLE: OnceLock<Mutex<HashMap<PathBuf, Hooks>>> = OnceLock::new();
+        TABLE.get_or_init(Default::default)
+    }
+
+    fn get(runtime_cache: &Path) -> Hooks {
+        table()
+            .lock()
+            .expect("hook table")
+            .get(runtime_cache)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn install(runtime_cache: &Path, hooks: Hooks) {
+        table()
+            .lock()
+            .expect("hook table")
+            .insert(runtime_cache.to_path_buf(), hooks);
+    }
+
+    pub(crate) async fn paused(runtime_cache: &Path) {
+        if let Some((reached, resume)) = get(runtime_cache).pause {
+            reached.notify_one();
+            resume.notified().await;
+        }
+    }
+
+    pub(crate) fn producer_program(runtime_cache: &Path) -> Option<PathBuf> {
+        get(runtime_cache).producer_program
+    }
+}
+
+/// Every environment directory a capture left under the fixture's runtime
+/// cache, waited for briefly because removal runs on the blocking pool.
+async fn environments_left(fixture: &Fixture) -> Vec<PathBuf> {
+    let root = fixture.runtime.join(FONT_ENVIRONMENT_DIR);
+    let list = || -> Vec<PathBuf> {
+        std::fs::read_dir(&root)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok().map(|e| e.path()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !list().is_empty() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    list()
+}
+
+async fn refused(fixture: &Fixture) -> String {
+    plurx_core::testfixtures::require_ffmpeg();
+    EncodedEngine::capture_from(Some(&fixture.runtime), Some(&fixture.config))
+        .await
+        .expect_err("the capture refuses the burn")
+}
+
+/// Finding 1 of PR #553's review: the rule parity must refuse through
+/// `build`, not only as a function. A required `<include>` of an empty
+/// directory loads live, but `materialise` copies only loaded *files*, so the
+/// directory does not exist under the sysroot and the frozen load falls back
+/// to Fontconfig's rule-less default (exit 0, `+ memory`).
+#[tokio::test]
+async fn a_capture_whose_frozen_rules_diverge_is_refused() {
+    let fixture = fixture();
+    let empty = fixture.base.path().join("empty-conf.d");
+    std::fs::create_dir_all(&empty).expect("empty include");
+    let config = std::fs::read_to_string(&fixture.config).expect("fixture config");
+    std::fs::write(
+        &fixture.config,
+        config.replace(
+            "</fontconfig>\n",
+            &format!("  <include>{}</include>\n</fontconfig>\n", empty.display()),
+        ),
+    )
+    .expect("required include");
+    let error = refused(&fixture).await;
+    assert!(
+        error.contains("the frozen Fontconfig environment loads"),
+        "refused by the rule parity: {error}"
+    );
+    assert_eq!(environments_left(&fixture).await, Vec::<PathBuf>::new());
+}
+
+/// Finding 1, the face half. Fontconfig caches a directory's scan keyed on
+/// the directory alone, so a live cache written under a scan-time rule that
+/// no longer exists still names the renamed family; the frozen environment
+/// has its own cache, rescans, and resolves the file's real family. The
+/// rules are the same files, so only the face parity can refuse it.
+#[tokio::test]
+async fn a_capture_whose_frozen_faces_diverge_is_refused() {
+    let fixture = fixture();
+    let config = std::fs::read_to_string(&fixture.config).expect("fixture config");
+    let renaming = fixture.base.path().join("renaming.conf");
+    std::fs::write(
+        &renaming,
+        config.replace(
+            "</fontconfig>\n",
+            "  <match target=\"scan\"><edit name=\"family\" mode=\"assign\" binding=\"strong\">\
+             <string>PlurxRenamed</string></edit></match>\n</fontconfig>\n",
+        ),
+    )
+    .expect("renaming config");
+    fc("fc-cache", &live_fc(&renaming), &[]);
+    assert!(
+        fc(
+            "fc-list",
+            &live_fc(&fixture.config),
+            &["--format=%{family}\n"]
+        )
+        .contains("PlurxRenamed"),
+        "the live listing is served from the stale cache"
+    );
+    let error = refused(&fixture).await;
+    assert!(
+        error.contains("the frozen Fontconfig environment resolves"),
+        "refused by the face parity: {error}"
+    );
+    assert_eq!(environments_left(&fixture).await, Vec::<PathBuf>::new());
+}
+
+/// Finding 3: the system `fc-*` tools prove nothing about the libfontconfig
+/// the producer's ffmpeg links. A producer whose library ignores
+/// `FONTCONFIG_SYSROOT` (older than 2.13.1) reads the live root
+/// configuration by its original path, and the capture must refuse it.
+#[tokio::test]
+async fn a_producer_library_that_ignores_the_sysroot_is_refused() {
+    let fixture = fixture();
+    let program = fixture.base.path().join("ffmpeg-without-sysroot");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\nunset FONTCONFIG_SYSROOT\nexec '{}' \"$@\"\n",
+            crate::ffmpeg::encoder_executable_path()
+                .expect("an encoder on this host")
+                .display()
+        ),
+    )
+    .expect("stand-in encoder");
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        &program,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .expect("executable stand-in");
+    hooks::install(
+        &fixture.runtime,
+        hooks::Hooks {
+            producer_program: Some(program),
+            ..Default::default()
+        },
+    );
+    let error = refused(&fixture).await;
+    assert!(
+        error.contains("does not honour FONTCONFIG_SYSROOT"),
+        "refused by the producer-library proof: {error}"
+    );
+    assert_eq!(environments_left(&fixture).await, Vec::<PathBuf>::new());
+}
+
+/// The trace as the production image's bundled Fontconfig prints it
+/// (the production `plurxd:latest` image, 2026-09-26): start order, a
+/// doubled slash after the sysroot for `conf.d` entries, a `done` line per
+/// file, and the whole configuration loaded more than once.
+#[test]
+fn the_producer_library_trace_is_read_as_the_image_prints_it() {
+    let root = Path::new("/cache/fontenv/abc-1/root");
+    let live = [
+        PathBuf::from("/etc/fonts/conf.d/10-a.conf"),
+        PathBuf::from("/etc/fonts/fonts.conf"),
+    ];
+    let once = "\tLoading config file from /cache/fontenv/abc-1/root/etc/fonts/fonts.conf\n\
+                \tScanning config dir /cache/fontenv/abc-1/root//etc/fonts/conf.d\n\
+                \tLoading config file from /cache/fontenv/abc-1/root//etc/fonts/conf.d/10-a.conf\n\
+                \tLoading config file from /cache/fontenv/abc-1/root//etc/fonts/conf.d/10-a.conf done\n\
+                \tLoading config file from /cache/fontenv/abc-1/root/etc/fonts/fonts.conf done\n";
+    let trace = format!("FC_DEBUG=1024\n{once}{once}");
+    library_loads_match(root, &live, &trace).expect("the frozen files, twice");
+
+    let escaped = trace.replace(
+        "/cache/fontenv/abc-1/root//etc/fonts/conf.d/10-a.conf",
+        "/etc/fonts/conf.d/10-a.conf",
+    );
+    let error = library_loads_match(root, &live, &escaped).expect_err("a live file was read");
+    assert!(
+        error.contains("1 configuration paths outside the frozen environment"),
+        "{error}"
+    );
+    let scanned = format!("{trace}\tScanning config dir /usr/share/fontconfig/conf.avail\n");
+    assert!(library_loads_match(root, &live, &scanned).is_err());
+
+    let error = library_loads_match(root, &live, "FC_DEBUG=1024\n").expect_err("no trace");
+    assert!(
+        error.contains("traced no Fontconfig configuration"),
+        "{error}"
+    );
+
+    let partial = "\tLoading config file from /cache/fontenv/abc-1/root/etc/fonts/fonts.conf\n";
+    let error = library_loads_match(root, &live, partial).expect_err("a file not loaded");
+    assert!(error.contains("(1 missing, 0 different)"), "{error}");
+}
+
+/// Finding 2: a capture its caller abandons — `vod_resurrect_before`'s
+/// `timeout_at` dropping `prepare_vod_encoding` after `materialise` — must
+/// not leave its directory for the next process. Paused with the
+/// environment on disk and before any `fc-*` child, then aborted.
+#[tokio::test]
+async fn a_cancelled_capture_leaves_no_environment_behind() {
+    let fixture = fixture();
+    let (reached, resume) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    hooks::install(
+        &fixture.runtime,
+        hooks::Hooks {
+            pause: Some((Arc::clone(&reached), Arc::clone(&resume))),
+            ..Default::default()
+        },
+    );
+    plurx_core::testfixtures::require_ffmpeg();
+    let (runtime, config) = (fixture.runtime.clone(), fixture.config.clone());
+    let capture =
+        tokio::spawn(
+            async move { EncodedEngine::capture_from(Some(&runtime), Some(&config)).await },
+        );
+    tokio::time::timeout(Duration::from_secs(60), reached.notified())
+        .await
+        .expect("the capture materialised its environment");
+    let built = std::fs::read_dir(fixture.runtime.join(FONT_ENVIRONMENT_DIR))
+        .expect("fontenv")
+        .count();
+    assert_eq!(
+        built, 1,
+        "the environment is on disk when the caller gives up"
+    );
+    capture.abort();
+    assert!(capture.await.expect_err("aborted").is_cancelled());
+    assert_eq!(
+        environments_left(&fixture).await,
+        Vec::<PathBuf>::new(),
+        "a cancelled capture removes what it built"
+    );
+    drop(resume);
+}
