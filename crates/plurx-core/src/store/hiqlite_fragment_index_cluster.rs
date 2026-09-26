@@ -3472,14 +3472,22 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 },
             )
             .await?;
-        Ok(matches!(
-            result,
-            EnqueueOutcome::Accepted { .. }
-                | EnqueueOutcome::Existing {
-                    cancelled: false,
-                    ..
-                }
-        ))
+        match result {
+            EnqueueOutcome::Accepted { .. } => Ok(true),
+            EnqueueOutcome::Existing {
+                job_id,
+                cancelled: false,
+                ..
+            } => Ok(self.background_job(&job_id).await?.is_some_and(|job| {
+                matches!(
+                    job.state,
+                    crate::store::background_jobs::JobState::Queued
+                        | crate::store::background_jobs::JobState::Running
+                        | crate::store::background_jobs::JobState::Succeeded
+                )
+            })),
+            _ => Ok(false),
+        }
     }
 
     async fn requeue_cluster_fragment_index(

@@ -634,7 +634,7 @@ BEGIN
         generation_id = excluded.generation_id, bytes = excluded.bytes, complete = 1,
         publication_generation = transcode_cache_locations.publication_generation + 1,
         manifest_digest = excluded.manifest_digest, scrub_object_index = 0,
-        last_seen_at = excluded.last_seen_at;
+        last_seen_at = MAX(transcode_cache_locations.last_seen_at, excluded.last_seen_at);
 
     UPDATE background_jobs SET state = 'succeeded',
         result_ref = json_extract(NEW.result_json, '$.result_ref'),
@@ -783,6 +783,11 @@ BEGIN
         AND EXISTS (SELECT 1 FROM cluster_fragment_index_heads
             WHERE generation_cache_key = json_extract(NEW.request_json, '$.artifact.cache_key'))
         AND json_extract(NEW.result_json, '$.outcome') = 'published';
+    -- Reproject after waiter settlement: the successful charged attempt remains
+    -- visible in history even though it no longer owns a running lease.
+    UPDATE background_jobs SET priority = priority
+    WHERE id = json_extract(NEW.result_json, '$.job_id')
+        AND json_extract(NEW.result_json, '$.outcome') = 'published';
     DELETE FROM background_job_commands WHERE id = NEW.id;
 END;
 
@@ -811,7 +816,8 @@ BEGIN
                 AND interest.state = 'pending' AND interest.participation_fence = NEW.fence)) THEN NEW.lease_expires_ms ELSE NULL END,
         fence = NEW.fence,
         attempts = CASE WHEN NEW.kind = 'fragment_index_build' THEN COALESCE((SELECT MAX(interest.failed_attempts
-            + CASE WHEN NEW.state = 'running' AND interest.state = 'pending'
+            + CASE WHEN ((NEW.state = 'running' AND interest.state = 'pending')
+                OR (NEW.state = 'succeeded' AND interest.state IN ('succeeded','awaiting_hydration')))
                 AND interest.participation_fence = NEW.fence THEN 1 ELSE 0 END)
             FROM background_job_waiters interest WHERE interest.job_id = NEW.id
                 AND COALESCE(interest.target_node_id, '') = cluster_fragment_index_jobs.target_node_id), attempts)

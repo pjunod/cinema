@@ -370,3 +370,25 @@ The failing replicated test is being rerun before the main fast lane starts.
   and projected readiness honors both job and interest delays. The abandoned
   owner fixture now crosses the real 30-second lease and invokes independent
   upkeep instead of assuming the retired claim-time sweep.
+
+- The expanded replaced-queue contract batch first passed 15/29, then 27/29
+  after repairs. Fixed terminal-failure reporting in the legacy admission API
+  and preserved charged successful attempts in the domain projection. Updated
+  fixtures for atomic request settlement, fixed 30-second leases, independent
+  upkeep and the shared two-reader budget. Demand expiry now retains its
+  seven-day receipt and failure history; it is not an implicit budget reset.
+  Artifact repair must retain immutable builder provenance. The final affected
+  SQLite/replicated batch is running; daemon lifecycle tests follow it.
+
+- The replicated cache-clock contract found that common transcode publication
+  could move `last_seen_at` backwards. The upsert now preserves the maximum
+  observed timestamp, matching the existing fenced-cache contract. Its focused
+  rerun follows the in-progress batch; no assertion was weakened.
+
+- Final replicated adapter batch: 32/34 passed. The two failures were the
+  cache timestamp regression and a fixture that seeded retired queue rows
+  without the v71 migration. The fixture now runs that real migration and
+  checks exact parity for common jobs, waiters and legacy mappings. Both
+  focused reruns passed (18 seconds execution). The batch included all 29
+  affected SQLite contracts and five replicated-only import/concurrency checks.
+  Daemon lifecycle validation and the remote fast lane remain pending.

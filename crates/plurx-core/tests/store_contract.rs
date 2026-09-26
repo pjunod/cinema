@@ -15872,6 +15872,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
+    use plurx_core::store::background_jobs::BackgroundJobStore;
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let store = open_contract_hiqlite_store(&cluster).await;
@@ -15881,7 +15882,36 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
         .expect("reset replicated current-schema import target");
 
     let source = tempfile::tempdir().expect("current SQLite import fixture directory");
-    populated_current_import_fixture(source.path());
+    let source_path = populated_current_import_fixture(source.path());
+    // This shared fixture seeds the old domain rows with SQL. Run the actual
+    // v71 upgrade before calling it a current backup, so live work has the
+    // same sealed mapping and common queue rows a real upgraded daemon has.
+    let connection = rusqlite::Connection::open(&source_path).expect("open upgrade fixture");
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row
+                .get::<_, i64>(0))
+            .expect("empty common queue fixture"),
+        0
+    );
+    connection
+        .execute_batch("DELETE FROM background_job_migration; PRAGMA user_version = 70;")
+        .expect("stage pre-queue fixture");
+    drop(connection);
+    let upgraded = SqliteStore::open(&source_path).expect("apply common queue migration");
+    assert!(upgraded
+        .import_legacy_jobs(1_000)
+        .await
+        .expect("materialize upgraded work"));
+    assert_eq!(
+        upgraded
+            .job_migration_status()
+            .await
+            .expect("source migration status")
+            .materialized,
+        2
+    );
+    drop(upgraded);
     let prepared = prepare_sqlite_import(source.path()).expect("prepare current import backup");
     assert_eq!(
         prepared.schema_version,
@@ -15907,6 +15937,23 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
         .await
         .expect("import populated current backup");
     assert_eq!(report.search_rows, 2);
+    for table in [
+        "background_jobs",
+        "background_job_waiters",
+        "background_job_legacy",
+    ] {
+        assert_eq!(
+            report
+                .tables
+                .iter()
+                .find(|digest| digest.table == table)
+                .expect("common queue import digest")
+                .row_count,
+            2,
+            "{table} must survive the current backup with exact parity"
+        );
+    }
+
     assert_eq!(
         report
             .tables
@@ -15990,7 +16037,13 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
         scratch_bytes: 2_048,
     };
     let imported_claim = store
-        .fixture_claim_pretranscode_job("import-worker", &imported_capabilities, &[], 1_000, 2_000)
+        .fixture_claim_pretranscode_job(
+            "import-worker",
+            &imported_capabilities,
+            &[],
+            32_000,
+            62_000,
+        )
         .await
         .expect("claim imported queue work")
         .expect("an imported due job must remain runnable");
@@ -18513,8 +18566,7 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
             "backend {backend}: an exhausted budget keeps its history"
         );
 
-        // A row the sweep expires *is* reopened, and a fresh budget starts a
-        // fresh history.
+        // Demand expiry releases work but preserves its receipt and charged history.
         let expiring_pipeline = "c".repeat(64);
         let expiring_key =
             cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &expiring_pipeline)
@@ -18540,26 +18592,17 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
             "source_unavailable",
         )
         .await;
-        // Seven hours on, the claim sweep expires a row that never got a slot.
-        let expired_at = now + 7 * 60 * 60 * 1_000;
-        let _ = store
-            .fixture_claim_cluster_fragment_index(
-                "sweeping-node",
-                &[],
-                expired_at,
-                expired_at + 1_000,
-            )
+        let expired_at = now + 24 * 60 * 60 * 1_000;
+        store
+            .maintain_jobs(expired_at)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: expiry sweep: {error}"));
+            .expect("expire inactive demand");
         let expired = store
             .cluster_fragment_index_job(&expiring_key, &job.target_node_id)
             .await
             .unwrap_or_else(|error| panic!("{backend}: read expired job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the expiring row exists"));
-        assert_eq!(
-            expired.last_error_code, "queue_expired",
-            "backend {backend}"
-        );
+        assert_eq!(expired.state, "cancelled", "backend {backend}");
         assert_eq!(
             expired.attempt_errors, "source_unavailable",
             "backend {backend}: expiry is not a charged attempt, so it appends nothing"
@@ -18569,7 +18612,7 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
         reopened.not_before_ms = expired_at;
         reopened.created_at_ms = expired_at;
         assert!(
-            store
+            !store
                 .enqueue_cluster_fragment_index(&reopened)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: reopen expired: {error}")),
@@ -18580,10 +18623,10 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: read reopened job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the reopened row exists"));
-        assert_eq!(fresh.attempts, 0, "backend {backend}");
+        assert_eq!(fresh.attempts, 1, "backend {backend}");
         assert_eq!(
-            fresh.attempt_errors, "",
-            "backend {backend}: a fresh budget starts a fresh history"
+            fresh.attempt_errors, "source_unavailable",
+            "backend {backend}: an expired demand cannot reset the retained retry budget"
         );
     })
     .await;
@@ -19028,7 +19071,7 @@ async fn analysis_history_contract_runs_through_dyn_store() {
                 .settle_analysis_requests(13)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: settle old generation: {error}")),
-            1,
+            0,
             "backend {backend}"
         );
 
@@ -19261,8 +19304,8 @@ async fn fragment_location_retention_is_bounded_through_dyn_store() {
                     cache_key: cache_key.clone(),
                     node_id: format!("node-{index}"),
                     bytes: 128,
-                    verified_at_ms: index + 1,
-                    last_seen_at_ms: index + 1,
+                    verified_at_ms: index + 11,
+                    last_seen_at_ms: index + 11,
                 })
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: seed stale location {index}: {error}"));
@@ -20265,6 +20308,17 @@ async fn analysis_priority_ages_fairly_and_survives_worker_handoff_through_dyn_s
                 &worker.cache_key, expected_cache_key,
                 "{backend}: request priority survives the structural worker handoff"
             );
+            assert!(store
+                .fixture_yield_cluster_fragment_index(
+                    &worker.cache_key,
+                    &worker.target_node_id,
+                    &worker.owner_node_id,
+                    worker.fence,
+                    600_011,
+                    700_000,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: release priority fixture: {error}")));
         }
     })
     .await;
@@ -20581,7 +20635,7 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
                 .settle_analysis_requests(18)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: settle metrics request: {error}")),
-            1,
+            0,
             "backend {backend}"
         );
         let published = store
@@ -21216,7 +21270,7 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
 }
 
 #[tokio::test]
-async fn expired_structural_analysis_lease_uses_stable_backoff_through_dyn_store() {
+async fn expired_structural_analysis_lease_allows_fenced_takeover_through_dyn_store() {
     for_each_backend(|store, backend| async move {
         let (_, file_id) = seed_file(&store, "analysis-structural-lease-backoff").await;
         let source_sha256 = "e".repeat(64);
@@ -21250,29 +21304,16 @@ async fn expired_structural_analysis_lease_uses_stable_backoff_through_dyn_store
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim structural lease job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: structural lease claim"));
-        assert!(store
-            .fixture_claim_cluster_fragment_index("analysis-node-b", &[], 20, 30)
-            .await
-            .unwrap_or_else(|error| panic!("{backend}: expire structural lease: {error}"))
-            .is_none());
-        let retry_seed = format!("{}:{}", job.cache_key, job.target_node_id);
-        let retry_at = 20 + analysis_backoff_ms(&retry_seed, 1, 5_000, 300_000);
-        let queued = store
-            .cluster_fragment_index_job(&job.cache_key, &job.target_node_id)
-            .await
-            .unwrap_or_else(|error| panic!("{backend}: read queued structural retry: {error}"))
-            .unwrap_or_else(|| panic!("{backend}: retained structural retry"));
-        assert_eq!(queued.state, "queued", "backend {backend}");
-        assert_eq!(queued.not_before_ms, retry_at, "backend {backend}");
+        let retry_at = expired.lease_expires_ms;
         assert!(store
             .fixture_claim_cluster_fragment_index(
                 "analysis-node-b",
                 &[],
                 retry_at - 1,
-                retry_at + 9,
+                retry_at + 1_000,
             )
             .await
-            .unwrap_or_else(|error| panic!("{backend}: early structural retry: {error}"))
+            .expect("early takeover query")
             .is_none());
         let successor = store
             .fixture_claim_cluster_fragment_index(
@@ -21329,11 +21370,10 @@ async fn exhausted_structural_lease_counts_loss_and_failure_through_dyn_store() 
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim exhausted lease job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: exhausted lease claim"));
-        assert!(store
-            .fixture_claim_cluster_fragment_index("analysis-node-b", &[], 20, 30)
+        store
+            .maintain_jobs(30_010)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: expire exhausted lease: {error}"))
-            .is_none());
+            .expect("expire exhausted lease");
 
         let failed = store
             .cluster_fragment_index_job(&job.cache_key, &job.target_node_id)
@@ -21343,7 +21383,7 @@ async fn exhausted_structural_lease_counts_loss_and_failure_through_dyn_store() 
         assert_eq!(failed.state, "failed", "backend {backend}");
         assert_eq!(failed.last_error_code, "attempt_limit", "backend {backend}");
         let metrics = store
-            .prometheus_store_snapshot("analysis-node-b", 20)
+            .prometheus_store_snapshot("analysis-node-b", 30_010)
             .await
             .unwrap_or_else(|error| panic!("{backend}: exhausted lease metrics: {error}"));
         assert_eq!(
@@ -21457,9 +21497,13 @@ async fn requeue_through_the_no_holder_arm_preserves_exhausted_lease_terminality
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim cleanup victim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: cleanup victim claim"));
+        store
+            .maintain_jobs(30_010)
+            .await
+            .expect("expire repair victim lease");
         let repair_requeue = NewClusterFragmentIndexJob {
-            not_before_ms: 20,
-            created_at_ms: 20,
+            not_before_ms: 30_010,
+            created_at_ms: 30_010,
             ..repair
         };
         assert!(
@@ -21483,7 +21527,7 @@ async fn requeue_through_the_no_holder_arm_preserves_exhausted_lease_terminality
             "{backend}: attempt-limit cleanup cannot be reopened as queue expiry"
         );
         let metrics = store
-            .prometheus_store_snapshot("analysis-node-b", 20)
+            .prometheus_store_snapshot("analysis-node-b", 30_010)
             .await
             .unwrap_or_else(|error| panic!("{backend}: repair cleanup metrics: {error}"));
         assert_eq!(
@@ -21652,7 +21696,7 @@ async fn analysis_admin_retry_queues_only_its_forced_generation_through_dyn_stor
                 .settle_analysis_requests(13)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: settle retry original: {error}")),
-            1,
+            0,
             "{backend}"
         );
 
@@ -21954,7 +21998,7 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
                 .settle_analysis_requests(13)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: settle normal generation: {error}")),
-            1,
+            0,
             "backend {backend}"
         );
 
@@ -22004,12 +22048,7 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim forced worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: forced worker"));
-        assert!(store
-            .fixture_claim_cluster_fragment_index("analysis-node-next", &[], 30, 1_030)
-            .await
-            .unwrap_or_else(|error| panic!("{backend}: expire forced worker: {error}"))
-            .is_none());
-        let retry_at = 30 + analysis_backoff_ms(&generation_key, 1, 5_000, 300_000);
+        let retry_at = forced_worker.lease_expires_ms;
         let current_forced_worker = store
             .fixture_claim_cluster_fragment_index("analysis-node", &[], retry_at, retry_at + 1_000)
             .await
@@ -22096,7 +22135,7 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
                 .settle_analysis_requests(retry_at + 2)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: settle forced generation: {error}")),
-            1,
+            0,
             "backend {backend}"
         );
         assert_eq!(
@@ -22146,6 +22185,23 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             last_seen_at_ms: retry_at + 11,
             ..forced_location
         };
+        assert!(
+            !store
+                .fixture_complete_cluster_fragment_index(
+                    &repair_claim,
+                    &rebuilt_artifact,
+                    &rebuilt_location,
+                    retry_at + 11,
+                )
+                .await
+                .expect("reject changed provenance"),
+            "{backend}: repair cannot replace immutable builder provenance"
+        );
+        let rebuilt_artifact = store
+            .cluster_fragment_index_artifact(&generation_key)
+            .await
+            .expect("read immutable repair provenance")
+            .expect("original immutable artifact");
         assert!(store
             .fixture_complete_cluster_fragment_index(
                 &repair_claim,
@@ -22246,8 +22302,9 @@ async fn content_analysis_retry_contract_runs_through_dyn_store() {
             "{backend}: rediscovery must retain the original retry deadline"
         );
         assert_eq!(
-            retried.lease_expires_ms, retry_deadline,
-            "{backend}: an initial claim cannot lease work past its retry deadline"
+            retried.lease_expires_ms,
+            six_hours + plurx_core::store::background_jobs::JOB_LEASE_MS,
+            "{backend}: a retry receives the common bounded lease"
         );
         let artifact = ClusterFragmentIndexArtifact {
             cache_key: retried.cache_key.clone(),
@@ -22418,7 +22475,7 @@ async fn content_analysis_repair_contract_runs_through_dyn_store() {
                 .settle_analysis_requests(13)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: settle predecessor: {error}")),
-            1,
+            0,
             "{backend}"
         );
 
