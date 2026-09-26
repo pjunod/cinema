@@ -343,6 +343,7 @@ async fn run_generation(
         // generation is matched against was built with — they share one
         // `CopyVideoOptions`, so they cannot disagree.
         convert_dolby_vision: rendition.recipe.video.converts_dolby_vision(),
+        retain_hevc_parameter_sets: rendition.recipe.video.retains_hevc_parameter_sets(),
     };
     let sink = RenditionSink {
         shared: Arc::clone(&shared),

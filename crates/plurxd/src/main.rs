@@ -16,6 +16,7 @@ mod dvpipe;
 mod ffmpeg;
 mod fragindex;
 mod fragment_index_cluster;
+mod hevc_census;
 mod http;
 mod job_lease;
 mod library_search;

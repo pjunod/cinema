@@ -183,10 +183,7 @@ impl VodServe {
             ));
         };
         let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
-        let probe_json = self
-            .shared
-            .store
-            .get_file_probe_json(file.id)
+        let probe_json = crate::hevc_census::probe_json_for_copy(self.shared.store.as_ref(), file)
             .await
             .map_err(|error| format!("reading the file probe: {error}"))?;
         let video = copy_video_pipeline(

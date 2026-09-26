@@ -1108,7 +1108,10 @@ impl TranscodeManager {
                 .await?;
         }
 
-        let probe_json = self.store.get_file_probe_json(file_id).await.ok().flatten();
+        let probe_json = crate::hevc_census::probe_json_for_copy(self.store.as_ref(), &file)
+            .await
+            .ok()
+            .flatten();
         file.audio_offset_ms = if file.audio_streams.is_empty() {
             0
         } else {
