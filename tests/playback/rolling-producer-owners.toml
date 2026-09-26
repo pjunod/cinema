@@ -2130,7 +2130,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # times above. The handle it returns is the test's only owner; the test drops
 # it on return, which closes the actor's sender and ends its run loop. It owns
 # no producer; the test reaps its own fixture child before returning.
-expected_occurrences = 640
+# 640 -> 641 with the review round of S-14 M8 (#556, finding 1), measured by
+# zeroing this row, test-only: the `std::thread::spawn` in
+# `supervisor_pause_releases_its_supervisor_when_the_test_unwinds`, a plain
+# thread standing in for a supervisor held at a `SupervisorPause`. The test
+# joins it before returning. It owns no producer, process, task or timer.
+expected_occurrences = 641
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -3858,7 +3863,16 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # 405 measured by zeroing this row after merging `origin/main` at
 # `4b112204b` into S-14 M8 (#543): main's 404, reviewed above, plus this
 # branch's one reviewed test-only call.
-expected_occurrences = 405
+# 405 -> 397 with the review round of S-14 M8 (#556, finding 1), measured by
+# zeroing this row. All eight removed calls were `std::sync::Barrier::wait`,
+# in-process test synchronization and never a child-process call: the two
+# per fence point in `AttemptChildPauses` (four) and the two per race test in
+# `producer_signal_and_retirement_share_one_authorization_linearization` and
+# `actor_task_exit_fences_a_reserved_signal_and_cleanup_still_progresses`
+# (four). Their bounded replacement (`SupervisorPause::hold` /
+# `wait_reached` and a release guard) waits through `Condvar::wait_timeout_while`,
+# which this pattern does not match. No production lifecycle call changed.
+expected_occurrences = 397
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
