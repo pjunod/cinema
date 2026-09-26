@@ -864,6 +864,19 @@ pub async fn client_log(
     }
 
     let event = client_playback_event(&ev, user.id);
+    // A first frame or a failure report settles the start attempt this
+    // node opened for the viewer and file (C-08 M5 row 4); any other beacon
+    // about a play in progress keeps that play alive. The beacon's own
+    // `file_id`: the session join below may replace it with the session's.
+    if let Some(file_id) = event.file_id {
+        state.start_attempts.client_event(
+            user.id,
+            file_id,
+            &event.event,
+            event.method.as_deref(),
+            std::time::Instant::now(),
+        );
+    }
     // Deliberately not `ev.ua`: the class must come from the same input the
     // read paths use, or the prior is written under a key nothing reads.
     // The same derivation labels `plurx_ttff_ms{client}`, and it is taken
@@ -4972,6 +4985,7 @@ pub(crate) struct MetricsState {
     live_tv_peers: Arc<crate::http::live_tv::LiveTvPeerMetrics>,
     backup: Arc<crate::backup::BackupMetrics>,
     plex_census: Arc<super::PlexCensus>,
+    start_attempts: Arc<crate::playstart::StartAttempts>,
 }
 
 impl FromRef<AppState> for MetricsState {
@@ -4993,6 +5007,7 @@ impl FromRef<AppState> for MetricsState {
             live_tv_peers: state.live_tv_peers.metrics_handle(),
             backup: state.backup.metrics(),
             plex_census: Arc::clone(&state.plex_census),
+            start_attempts: Arc::clone(&state.start_attempts),
         }
     }
 }
@@ -5388,6 +5403,10 @@ pub(crate) async fn metrics(
     State(state): State<MetricsState>,
 ) -> impl axum::response::IntoResponse {
     let uptime = state.started_at.elapsed().as_secs();
+    // Settle every start attempt past its deadline before the counters are
+    // read, so an idle node still reports the last one that was abandoned
+    // (C-08 M5 row 4). In memory only: no Store read on a scrape.
+    state.start_attempts.sweep(Instant::now());
     let (sessions, active_cache_entries) = state.transcode.snapshot();
     let decode_fact_metrics = state.transcode.decode_facts_prometheus();
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
