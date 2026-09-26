@@ -33216,6 +33216,8 @@ async fn sqlite_v70_migration_adds_the_read_indexes_and_keeps_the_catalogue() {
         3,
         "a fresh database is created with them"
     );
+    conn.execute_batch("DROP TRIGGER live_tv_capture_revision_update; DROP TRIGGER live_tv_capture_revision_delete; DROP TABLE live_tv_resource_records; DROP TABLE live_tv_resource_revision;")
+        .expect("remove later Live TV schema before rewinding to v69");
     for index in ITEM_READ_INDEXES {
         conn.execute_batch(&format!("DROP INDEX {index};"))
             .expect("remove v70-only shape");
@@ -33233,7 +33235,6 @@ async fn sqlite_v70_migration_adds_the_read_indexes_and_keeps_the_catalogue() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("user_version");
     assert_eq!(version, plurx_core::store::SQLITE_SCHEMA_VERSION);
-    assert_eq!(version, 70);
     drop(conn);
     SqliteStore::open(&path).expect("a current database reopens without replaying v70");
 }
@@ -33302,9 +33303,18 @@ async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
         .iter()
         .map(|index| (format!("DROP INDEX {index}"), hiqlite::params!()))
         .collect::<Vec<_>>();
+    for sql in [
+        "DROP TRIGGER live_tv_capture_revision_update",
+        "DROP TRIGGER live_tv_capture_revision_delete",
+        "DROP TABLE live_tv_resource_records",
+        "DROP TABLE live_tv_resource_revision",
+    ] {
+        rewind.push((sql.to_owned(), hiqlite::params!()));
+    }
+    // Pin this fixture's predecessor; later migrations must run after the indexes.
     rewind.push((
         "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1".to_owned(),
-        hiqlite::params!(AUTH_SCHEMA_VERSION - 1),
+        hiqlite::params!(47_i64),
     ));
     client
         .txn(rewind)
@@ -33319,7 +33329,6 @@ async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
         .await
         .expect("daemon v47 through v48 read-index migration");
     assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
-    assert_eq!(AUTH_SCHEMA_VERSION, 48);
     assert_eq!(
         replicated_read_index_count(&client).await,
         3,
@@ -33333,7 +33342,7 @@ async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
     client
         .txn([(
             "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
-            hiqlite::params!(AUTH_SCHEMA_VERSION - 1),
+            hiqlite::params!(47_i64),
         )])
         .await
         .expect("rewind the marker under the migrated shape");
