@@ -11114,6 +11114,454 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
     }
 }
 
+/// The replicated schema exactly as `HiqliteAuthStore::bootstrap` left it at
+/// schema 42 (commit `c448d2165`), captured once and never regenerated. It is
+/// the base the migration-chain comparison below starts from, so it must
+/// stay independent of today's bootstrap: rebuilding it from the current
+/// code would make that comparison compare bootstrap with itself.
+#[cfg(feature = "hiqlite-contract-tests")]
+const FROZEN_V42_SCHEMA: &str = include_str!("fixtures/hiqlite-schema-v42.sql");
+
+/// The version `FROZEN_V42_SCHEMA` is stamped at. Pinned separately so a
+/// fixture quietly re-captured at a newer version (which would leave the
+/// chain nothing to run) fails loudly instead of passing vacuously.
+#[cfg(feature = "hiqlite-contract-tests")]
+const FROZEN_V42_SCHEMA_VERSION: i64 = 42;
+
+/// Objects `cluster::membership` installs into the same replicated database
+/// through its own schema (`MEMBERSHIP_SCHEMA`), outside the Store's
+/// bootstrap and outside the Store's migration chain. The contract clusters
+/// run no membership layer, so neither side of the comparison holds them;
+/// they are excluded by name so the comparison stays about the Store's own
+/// schema if either side ever does.
+#[cfg(feature = "hiqlite-contract-tests")]
+const OUTSIDE_STORE_BOOTSTRAP: &[&str] = &[
+    "cluster_artwork_repairs",
+    "cluster_cache_admin_revocation_lease_intents",
+    "cluster_cache_admin_revocation_lease_releases",
+    "cluster_cache_admin_revocation_leases",
+    "cluster_cache_admin_revocation_release_watermark",
+    "cluster_join_tokens",
+    "cluster_learner_join_intents",
+    "cluster_live_tv_activation",
+    "cluster_live_tv_join_intents",
+    "cluster_membership_meta",
+    "cluster_node_activity_keys",
+    "cluster_node_capabilities",
+    "cluster_node_heartbeat_intents",
+    "cluster_node_hostnames",
+    "cluster_node_http",
+    "cluster_node_http_claims",
+    "cluster_node_join_staging",
+    "cluster_node_maintenance",
+    "cluster_node_maintenance_heartbeat_intents",
+    "cluster_node_progress",
+    "cluster_node_promotions",
+    "cluster_node_removal_attempts",
+    "cluster_node_removal_intents",
+    "cluster_node_removals",
+    "cluster_nodes",
+    "cluster_operation_lease_intents",
+    "cluster_operation_lease_releases",
+    "cluster_operation_leases",
+    "cluster_cache_admin_lease_delete_intent_guard",
+    "cluster_cache_admin_lease_heartbeat_expiry",
+    "cluster_cache_admin_lease_insert_intent_guard",
+    "cluster_cache_admin_lease_join_reservation_guard",
+    "cluster_cache_admin_lease_join_staging_guard",
+    "cluster_cache_admin_lease_operation_guard",
+    "cluster_cache_admin_lease_promotion_guard",
+    "cluster_cache_admin_lease_removal_guard",
+    "cluster_cache_admin_lease_update_intent_guard",
+    "cluster_cache_admin_v1_insert_retired",
+    "cluster_cache_admin_v1_update_retired",
+    "cluster_cache_admin_v2_insert_retired",
+    "cluster_cache_admin_v2_update_retired",
+    "cluster_credential_token_delete_guard",
+    "cluster_credential_token_insert_guard",
+    "cluster_credential_user_delete_guard",
+    "cluster_credential_user_update_guard",
+    "cluster_learner_join_v1_guard",
+    "cluster_live_tv_activation_delete_mirror",
+    "cluster_live_tv_activation_insert_mirror",
+    "cluster_live_tv_activation_update_mirror",
+    "cluster_live_tv_join_reservation_guard",
+    "cluster_live_tv_join_staging_guard",
+    "cluster_node_maintenance_heartbeat_guard",
+    "cluster_node_removal_attempt_delete_guard",
+    "cluster_node_removal_insert_guard",
+    "cluster_node_removal_legacy_finalize_guard",
+    "cluster_node_removal_legacy_heartbeat_guard",
+    "cluster_node_removal_legacy_insert_guard",
+    "cluster_node_removal_owner_delete_guard",
+    "cluster_operation_lease_delete_intent_guard",
+    "cluster_operation_lease_heartbeat_expiry",
+    "cluster_operation_lease_insert_intent_guard",
+    "cluster_operation_lease_join_reservation_guard",
+    "cluster_operation_lease_join_staging_guard",
+    "cluster_operation_lease_promotion_guard",
+    "cluster_operation_lease_removal_guard",
+    "cluster_operation_lease_update_intent_guard",
+    "job_leases_removed_owner_insert",
+    "job_leases_removed_owner_update",
+];
+
+#[cfg(feature = "hiqlite-contract-tests")]
+struct SchemaText {
+    value: String,
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+impl From<&mut Row<'_>> for SchemaText {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            value: row.get("value"),
+        }
+    }
+}
+
+/// Canonical text for one schema statement: comments dropped, identifier
+/// quotes dropped, keywords and names lowercased, whitespace collapsed and
+/// removed wherever it does not separate two words. String literals are kept
+/// byte for byte, because a CHECK's admitted values are exactly what a
+/// missing step changes.
+#[cfg(feature = "hiqlite-contract-tests")]
+fn canonical_schema_sql(sql: &str) -> String {
+    fn wordish(c: char) -> bool {
+        c.is_alphanumeric() || c == '_' || c == '\''
+    }
+    let mut out = String::new();
+    let mut space = false;
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '-' && chars.peek() == Some(&'-') {
+            for d in chars.by_ref() {
+                if d == '\n' {
+                    break;
+                }
+            }
+            space = true;
+            continue;
+        }
+        if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            let mut previous = ' ';
+            for d in chars.by_ref() {
+                if previous == '*' && d == '/' {
+                    break;
+                }
+                previous = d;
+            }
+            space = true;
+            continue;
+        }
+        if c.is_whitespace() {
+            space = true;
+            continue;
+        }
+        if c == '"' || c == '`' {
+            continue;
+        }
+        if space && out.chars().next_back().is_some_and(wordish) && wordish(c) {
+            out.push(' ');
+        }
+        space = false;
+        if c == '\'' {
+            out.push('\'');
+            while let Some(d) = chars.next() {
+                out.push(d);
+                if d == '\'' {
+                    if chars.peek() == Some(&'\'') {
+                        out.push('\'');
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.extend(c.to_lowercase());
+    }
+    out.trim_end_matches(';').to_owned()
+}
+
+/// A table's definition as the set of its top-level column and constraint
+/// definitions plus its trailing options (`strict`, `without rowid`).
+/// `ALTER TABLE ... ADD COLUMN` appends to the stored text and a fresh
+/// install declares the column inline, so order is not compared; every
+/// definition's full text, CHECK clauses included, is.
+#[cfg(feature = "hiqlite-contract-tests")]
+fn table_definition_items(canonical: &str) -> (BTreeSet<String>, String) {
+    let Some(open) = canonical.find('(') else {
+        return (BTreeSet::from([canonical.to_owned()]), String::new());
+    };
+    let mut items = BTreeSet::new();
+    let mut depth = 0usize;
+    let mut literal = false;
+    let mut start = open + 1;
+    let mut close = canonical.len();
+    for (index, c) in canonical.char_indices().skip_while(|(i, _)| *i <= open) {
+        if literal {
+            if c == '\'' {
+                literal = false;
+            }
+            continue;
+        }
+        match c {
+            '\'' => literal = true,
+            '(' => depth += 1,
+            ')' if depth == 0 => {
+                close = index;
+                break;
+            }
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                items.insert(canonical[start..index].to_owned());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    items.insert(canonical[start..close].to_owned());
+    let options = canonical.get(close + 1..).unwrap_or_default().to_owned();
+    (items, options)
+}
+
+/// Every Store-owned schema object in a replicated database, keyed by
+/// `(type, name)`, with a canonical description of its shape: for a table,
+/// its definitions, options, `pragma_table_xinfo` columns and foreign keys;
+/// for an index, trigger or view, its canonical SQL.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn store_schema_snapshot(
+    client: &Client,
+) -> std::collections::BTreeMap<(String, String), Vec<String>> {
+    const SEP: char = '\u{1f}';
+    let rows: Vec<SchemaText> = client
+        .query_consistent_map(
+            "SELECT type || char(31) || name || char(31) || tbl_name || char(31) || \
+                    COALESCE(sql, '') AS value \
+             FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read sqlite_master");
+    let columns: Vec<SchemaText> = client
+        .query_consistent_map(
+            "SELECT m.name || char(31) || 'column ' || p.name || ' type=' || p.type || \
+                    ' notnull=' || p.\"notnull\" || ' default=' || \
+                    COALESCE(p.dflt_value, '<none>') || ' pk=' || p.pk || \
+                    ' hidden=' || p.hidden AS value \
+             FROM sqlite_master m, pragma_table_xinfo(m.name) p \
+             WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read table columns");
+    let foreign_keys: Vec<SchemaText> = client
+        .query_consistent_map(
+            "SELECT m.name || char(31) || 'foreign key ' || f.seq || ' ' || f.\"from\" || \
+                    ' -> ' || f.\"table\" || '(' || COALESCE(f.\"to\", '<pk>') || ')' || \
+                    ' on update ' || f.on_update || ' on delete ' || f.on_delete || \
+                    ' match ' || f.\"match\" AS value \
+             FROM sqlite_master m, pragma_foreign_key_list(m.name) f \
+             WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read foreign keys");
+
+    let mut snapshot = std::collections::BTreeMap::new();
+    for row in rows {
+        let mut parts = row.value.splitn(4, SEP);
+        let (kind, name, table, sql) = (
+            parts.next().unwrap_or_default().to_owned(),
+            parts.next().unwrap_or_default().to_owned(),
+            parts.next().unwrap_or_default().to_owned(),
+            parts.next().unwrap_or_default(),
+        );
+        if OUTSIDE_STORE_BOOTSTRAP.contains(&name.as_str()) {
+            continue;
+        }
+        let canonical = canonical_schema_sql(sql);
+        let mut shape = vec![format!("on {table}")];
+        if kind == "table" {
+            let (items, options) = table_definition_items(&canonical);
+            shape.extend(items.into_iter().map(|item| format!("definition {item}")));
+            shape.push(format!("options {options}"));
+        } else {
+            shape.push(format!("sql {canonical}"));
+        }
+        snapshot.insert((kind, name), shape);
+    }
+    for row in columns.into_iter().chain(foreign_keys) {
+        let Some((table, fact)) = row.value.split_once(SEP) else {
+            continue;
+        };
+        if let Some(shape) = snapshot.get_mut(&("table".to_owned(), table.to_owned())) {
+            shape.push(fact.to_owned());
+        }
+    }
+    for shape in snapshot.values_mut() {
+        shape.sort();
+    }
+    snapshot
+}
+
+/// Every difference between two snapshots, one line each.
+#[cfg(feature = "hiqlite-contract-tests")]
+fn schema_differences(
+    bootstrapped: &std::collections::BTreeMap<(String, String), Vec<String>>,
+    migrated: &std::collections::BTreeMap<(String, String), Vec<String>>,
+) -> Vec<String> {
+    let mut differences = Vec::new();
+    for (key, migrated_shape) in migrated {
+        match bootstrapped.get(key) {
+            None => differences.push(format!(
+                "{} {} exists after the migration chain but not after a fresh bootstrap",
+                key.0, key.1
+            )),
+            Some(bootstrapped_shape) => {
+                for fact in migrated_shape {
+                    if !bootstrapped_shape.contains(fact) {
+                        differences.push(format!(
+                            "{} {}: migrated has, bootstrap lacks: {fact}",
+                            key.0, key.1
+                        ));
+                    }
+                }
+                for fact in bootstrapped_shape {
+                    if !migrated_shape.contains(fact) {
+                        differences.push(format!(
+                            "{} {}: bootstrap has, migrated lacks: {fact}",
+                            key.0, key.1
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    for key in bootstrapped.keys() {
+        if !migrated.contains_key(key) {
+            differences.push(format!(
+                "{} {} exists after a fresh bootstrap but not after the migration chain",
+                key.0, key.1
+            ));
+        }
+    }
+    differences
+}
+
+/// Bootstrap installs every schema object directly and stamps
+/// `AUTH_SCHEMA_VERSION`; the daemon's `open_or_migrate` never reruns a step
+/// the stamp says has happened. So bootstrap is a second copy of the
+/// migration chain, and a step added to the chain but not to bootstrap
+/// leaves every fresh cluster stamped past a schema it never got (v47's
+/// subtitle-source step once did exactly that).
+///
+/// This compares the two copies object for object. One cluster is
+/// bootstrapped fresh; the other is loaded from a frozen schema-42 tree and
+/// brought current by the real chain. Tables, columns (type, not-null,
+/// default, key, hidden), CHECK and other constraints, foreign keys,
+/// indexes, triggers and views must all agree. A new `MigrateFrom` arm
+/// without its bootstrap counterpart (or the reverse) fails here, in
+/// `make cluster-store-check`, whether or not any contract writes to it.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree() {
+    let _case = HIQLITE_CASE.lock().await;
+
+    let bootstrapped = {
+        let cluster = ContractCluster::start().await;
+        let client = Client::remote(
+            cluster.addresses.clone(),
+            true,
+            true,
+            CONTRACT_API_SECRET.to_owned(),
+            false,
+            None,
+        )
+        .await
+        .expect("connect fresh-bootstrap client");
+        let telemetry = cluster
+            ._root
+            .path()
+            .join("schema-parity-fresh-telemetry.db");
+        let store = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+            .await
+            .expect("bootstrap current schema");
+        drop(store);
+        store_schema_snapshot(&client).await
+    };
+
+    let migrated = {
+        let cluster = ContractCluster::start().await;
+        let client = Client::remote(
+            cluster.addresses.clone(),
+            true,
+            true,
+            CONTRACT_API_SECRET.to_owned(),
+            false,
+            None,
+        )
+        .await
+        .expect("connect frozen-base client");
+        for result in client
+            .batch(FROZEN_V42_SCHEMA)
+            .await
+            .expect("submit frozen schema-42 tree")
+        {
+            result.expect("load frozen schema-42 tree");
+        }
+        let stamped: Vec<I64Value> = client
+            .query_consistent_map(
+                "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("read frozen marker");
+        assert_eq!(
+            stamped.iter().map(|row| row.value).collect::<Vec<_>>(),
+            vec![FROZEN_V42_SCHEMA_VERSION],
+            "the frozen base must be the schema-42 tree it claims to be"
+        );
+        const { assert!(FROZEN_V42_SCHEMA_VERSION < AUTH_SCHEMA_VERSION) };
+        let telemetry = cluster
+            ._root
+            .path()
+            .join("schema-parity-chain-telemetry.db");
+        let store = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+            .await
+            .expect("migrate frozen schema-42 tree through the chain");
+        drop(store);
+        let reached: Vec<I64Value> = client
+            .query_consistent_map(
+                "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("read migrated marker");
+        assert_eq!(
+            reached.iter().map(|row| row.value).collect::<Vec<_>>(),
+            vec![AUTH_SCHEMA_VERSION]
+        );
+        store_schema_snapshot(&client).await
+    };
+
+    assert!(
+        bootstrapped.len() > 100,
+        "snapshot saw only {} objects; the comparison would be vacuous",
+        bootstrapped.len()
+    );
+    let differences = schema_differences(&bootstrapped, &migrated);
+    assert!(
+        differences.is_empty(),
+        "a fresh bootstrap and the migration chain disagree on {} schema facts:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+}
+
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v23_store_migrates_the_conversion_ledger_on_daemon_open() {

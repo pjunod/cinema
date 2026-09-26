@@ -1061,6 +1061,9 @@ async fn subtitle_source_schema_is_current(client: &hiqlite::Client) -> Result<b
 /// out is never run afterwards, because the stamped version says it already
 /// was. Each half has its own presence guard, so a bootstrap retried after a
 /// cancelled future resumes wherever the first attempt stopped.
+/// `fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree`
+/// holds this to the chain: it fails when a fresh bootstrap and a frozen
+/// schema-42 tree migrated through the real chain differ in any object.
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
     if !analysis_component_schema_is_current(client).await? {
         install_analysis_base_schema(client).await?;
