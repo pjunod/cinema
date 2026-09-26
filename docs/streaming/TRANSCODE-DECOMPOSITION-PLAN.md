@@ -474,7 +474,36 @@ smaller one.** (a) changes production read paths, which M7 excludes
   an inline literal into `NODE_TOMBSTONED_SQL` so the test can run the same
   text, and `local_node_is_committed_voter` calls
   `lifecycle::committed_voter`, which is its old
-  `voter_ids().any(|id| id == raft_id)` rule. No SQL text changed.
+  `voter_ids().any(|id| id == raft_id)` rule. After the review of #543 three
+  more literals moved verbatim the same way (`NODE_MAINTENANCE_COUNT_SQL`,
+  `NODE_PROMOTION_COUNT_SQL`, `EXISTING_REMOVAL_ATTEMPT_SQL`), and the
+  metrics read `local_node_is_committed_voter` passes to that rule is the
+  `committed_voter_ids!` macro (`membership_config.voter_ids()`, as before),
+  so the test applies the same read to the `StoredMembership` values it
+  builds. A macro, because `openraft` is a dev-dependency of `plurx-core`
+  and production code cannot name its type. No SQL text changed.
+- What the test agrees, dimension by dimension (after the review of #543;
+  the first version asserted neither `maintenance` nor the attempt set, and
+  compared the committed-voter verdict with the projection's own rule):
+  readiness and `join` against `capability_unready_node_predicate` and
+  `capability_ready_predicate`; the tombstone against `NODE_TOMBSTONED_SQL`;
+  the attempt set of a removal in progress against the three reads
+  production makes of it (`ROLLBACK_REMOVAL_FENCE_SQL` needs it empty,
+  `BEGIN_REMOVAL_INTENT_SQL` needs one attempt in it,
+  `EXISTING_REMOVAL_ATTEMPT_SQL` returns its least attempt);
+  `durable_role` against `admitted_learner_nodes_sql`; a maintenance request
+  against `NODE_MAINTENANCE_COUNT_SQL` and `Acknowledged` on an active node
+  against `EXIT_MAINTENANCE_SQL` itself, run in a rolled-back savepoint with
+  its other preconditions made true; `membership` against
+  `committed_voter_ids!`. **Not agreed, because production has no reader
+  for them:** `promotion`'s `Started` / `Barrier` / `Joint` split (only the
+  audit row's existence is read, and that is agreed against
+  `NODE_PROMOTION_COUNT_SQL`; nothing reads `barrier_index` back), the
+  attempt set of a tombstoned node (the references are left behind on
+  purpose and no removal read consults them again), and `Acknowledged` on a
+  tombstoned node. The test pins the promotion split to this section's
+  specification; that is not an agreement with production, and the
+  transition PR must not treat it as one.
 - Dimensions beyond the list above, because the predicates read them:
   `durable_role` (the `role` column; `admitted_learner_nodes_sql` reads it)
   and `join` (the staging row, which `capability_unready_node_predicate`
@@ -544,7 +573,14 @@ every method is an empty `async fn` or returns `Duration::ZERO`); tests
 install the pausing implementation that today's barriers become. The
 struct then has the same layout in both builds (one `Arc<dyn Hooks>`), and
 the `.await` on a hook is a cancellation point in both builds — the
-no-op future is `Ready` and costs one poll. Where a seam is not a pause
+no-op future is `Ready` and costs one poll. **As built (M8's first owner,
+#543):** each owner gets its own small trait named for its points, held as
+`Box<dyn …Hooks>` (`RollingRetirementSettlement` holds
+`Box<dyn RetirementSettlementHooks>`, production installs
+`NoopRetirementSettlementHooks`), not one shared `Hooks` behind an `Arc`.
+The owners' points do not overlap, and boxing the zero-sized no-op
+allocates nothing. Later owners follow the per-owner shape unless their PR
+records why not. Where a seam is not a pause
 but an *alternate implementation* (`#[cfg(not(test))]` twins), the
 production body becomes the only body and the test variant becomes a
 hook return value. The `fail` crate is the alternative for statements
@@ -704,7 +740,8 @@ Order: `RollingRetirementSettlement` (1 field, 1 statement pair) →
 `DecodeFactSource` delays → the `playback_control.rs` seams → the
 `hls.rs` fault helpers. One owner per PR; each PR migrates the seam,
 keeps the race test through the hook, and adds a release-profile
-integration test running the same scenario with `NoopHooks`.
+integration test running the same scenario with `NoopHooks`. The §7 Q3
+`syn` pass is owed by the `AttemptChild` PR, not the first one (see §7).
 
 Acceptance per PR: `python3 validation/cfg_test_census.py .` shows the
 owner's `field` and `statement` counts at zero; the race tests it names
@@ -737,8 +774,17 @@ still pass; `cargo test --release -p plurxd <owner>_shipped_shape` green;
    wrong owner; if not, T12 stops at `manager.rs` as one file and the
    further cut becomes its own PR.
 3. How many of the 153 `statement` seams are pauses (hook candidates)
-   versus one-shot faults (`fail` candidates); the `syn` pass in M8's
-   first PR answers it, and the split of the M8 PRs follows the answer.
+   versus one-shot faults (`fail` candidates). **Still open.** The plan
+   gave the answer to M8's first PR; that PR (#543,
+   `RollingRetirementSettlement`) did not run the `syn` pass. Its owner's
+   seams were one field and one statement pair, all an ordering pause
+   (a `Barrier` awaited before `settled.await`), classified by reading, so
+   it took the trait without needing the answer. The pass moves to the
+   `AttemptChild` PR, the first owner whose `statement` seams
+   (`producer/attempt_child.rs` carries 16 in the census) may be one-shot
+   faults rather than pauses; that PR runs it before migrating anything,
+   records the pause/fault split here, and the split of the remaining M8
+   PRs follows the answer.
 4. Whether Paul wants the §3.6 registry evaluation written at all this
    quarter, or the duplication documented as intentional now.
 
@@ -770,3 +816,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M7 | [#543](http://192.168.4.7:3000/noirr/plurx/pulls/543) | Built under **Decision D-M7** (§3.8; Paul can overturn it): row types used only by the projection, and an agreement test that runs the production SQL itself over fixtures. `crates/plurx-core/src/cluster/membership/lifecycle.rs`: `ClusterNodeRow`, `CapabilityRow`, `RemovalRow`, `PromotionRow`, `MaintenanceRow` in `NodeRows`, `RaftMembershipView`, and `observed_lifecycle(NodeRows, &RaftMembershipView) -> LifecycleView` with independent `membership`, `durable_role`, `join`, per-capability readiness, `maintenance`, `removal` (`InProgress{attempts}` / `Tombstoned`) and `promotion` (`Started` / `Barrier{index}` / `Joint`); nothing in the daemon calls it. `cargo test -p plurx-core --features hiqlite-store --lib cluster::membership::tests::lifecycle_projection_agrees` (the crate's cluster module needs the feature; `make unit` gets it by workspace unification) exit 0 in 4.4 s: 2,592 row shapes (role NULL/`learner`/`voter` × removed or not × staged or not × subject capability missing/current/stale × anchor current/stale × no fence or a fence with 0/1/2 attempt references × no/requested/acknowledged maintenance × no promotion / no barrier / barrier) written into `MEMBERSHIP_SCHEMA`'s tables plus the additive columns, read back, and checked against `capability_unready_node_predicate` (both nodes, two capabilities), `capability_ready_predicate`, `NODE_TOMBSTONED_SQL` and `admitted_learner_nodes_sql`, each under five real `openraft::Membership` values (absent, learner, voter, joint entering, joint leaving) checked against `committed_voter` and a hand-written membership table: 12,960 evaluations, every boolean verdict reached both ways. Production reads unchanged: the tombstone count moved verbatim into `NODE_TOMBSTONED_SQL` and `local_node_is_committed_voter` calls `lifecycle::committed_voter` (its old `voter_ids().any(== raft_id)` rule); no SQL text changed. Mutations, each run and each failing the test: a staged node counted as holding back readiness; a pending removal fence not counted as tombstoned; the joint interval collapsed into `Started`/`Barrier`; a Raft learner projected as absent. The transition function stays a later PR, after one release of agreement. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M8 / `RollingRetirementSettlement` | [#543](http://192.168.4.7:3000/noirr/plurx/pulls/543) | First owner migrated. Its `#[cfg(test)] wait_before_await_pause` field, the field's initialiser and the two `#[cfg(test)]` statements in `wait()` became one `hooks: Box<dyn RetirementSettlementHooks>` in every build, with `before_await_settled()` awaited where the pause was. Production installs `NoopRetirementSettlementHooks`, whose future is a zero-sized ready future (boxing it allocates nothing; awaiting it is one poll). **Deviation from §3.9's shape, recorded:** one small trait per owner, named for that owner's points, held as `Box<dyn>` rather than one shared `Hooks` trait behind an `Arc`: the owners' points do not overlap, and the box of the zero-sized no-op does not allocate. Census (`validation/cfg_test_census.py`): the owner's `field` 1 → 0 and `statement` 3 → 0 (whole tree `field` 186 → 185, `statement` 252 → 249); the rest of `rolling/retirement.rs`'s `#[cfg(test)]` lines belong to `spawn_rolling_scratch_cleanup_owner` and other owners. `retirement_settlement_registers_notify_before_the_wait_gap` keeps its barrier pause through a test hook; `rolling_retirement_settlement_shipped_shape` runs the same scenario with the production constructor, polling one waiter by hand (no task, no timer). Debug run of both: exit 0. Mutations, each run: taking the `Notify` interest after the wait gap fails the race test (exit 101); a production hook that never becomes ready fails the shipped-shape test (exit 101). Release profile: `cargo test --release --locked -p plurxd --bin plurxd rolling_retirement_settlement_shipped_shape` on nuc3 exit 0 (release build 7 m 58 s; 1 passed); the release artefacts were deleted afterwards (disk under 20 GB). `tests/playback/rolling-producer-owners.toml`, measured by zeroing each row: `m4-exact-rolling-retirement-settlement` 7 → 8 and `process-lifecycle-method` 399 → 400, both the shipped-shape test's one constructor call and one `wait()`, reviewed in the file. **Not done:** the remaining owners in §5.9's order (`AttemptChild` next, then `Encoding.admission_pause`, `DecodeFactSource`, the `playback_control.rs` seams, the `hls.rs` fault helpers), and §7 Q3 (the `syn` pass that splits the 153 `statement` seams into pauses and one-shot faults) is not answered here; this owner was a pause, so it took the trait. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 remainder | [#543](http://192.168.4.7:3000/noirr/plurx/pulls/543) | Not attempted. The declarations-only move of `StartInfo`, `probe_media_origin` and the ~30 shared helpers out of `transcode.rs` (M3 row above) is still a follow-up move PR with its own identity recipe. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Review of #543 | [#543](http://192.168.4.7:3000/noirr/plurx/pulls/543) | Answers the single adversarial review ([comment 5261](http://192.168.4.7:3000/noirr/plurx/pulls/543#issuecomment-5261)); disposition in the PR thread. **Main merge:** `acc6a6b1e` merges `main` @ `4b112204b`; the one conflict was `tests/playback/rolling-producer-owners.toml`'s `process-lifecycle-method` row, re-measured by zeroing it: 405 (main's 404 plus this branch's one). **Finding 1:** the M7 row above claimed each dimension was checked; `maintenance` and the removal attempt set were not asserted, and the committed-voter check compared the projection with its own rule. `lifecycle_projection_agrees` now agrees `maintenance` with `NODE_MAINTENANCE_COUNT_SQL` and `EXIT_MAINTENANCE_SQL`, the attempt set with `ROLLBACK_REMOVAL_FENCE_SQL`, `BEGIN_REMOVAL_INTENT_SQL` and `EXISTING_REMOVAL_ATTEMPT_SQL`, promotion existence with `NODE_PROMOTION_COUNT_SQL`, and `membership` with `committed_voter_ids!` (the read `local_node_is_committed_voter` makes); the `Started`/`Barrier`/`Joint` split is recorded as having no production reader (§3.8). Mutations, each run: acknowledged-for-unacknowledged maintenance, an emptied attempt set, both together (the reviewer's pair), and `committed_voter_ids!` reading only the last joint configuration each fail the test. **Finding 2:** §7 Q3 moved to the `AttemptChild` PR and §3.9 records the per-owner `Box<dyn …Hooks>` shape as built. |
