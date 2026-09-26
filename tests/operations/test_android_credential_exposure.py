@@ -54,6 +54,7 @@ SIGNING_VARIABLES = (
 )
 SETTINGS_STORE = ANDROID / "app/src/main/java/tv/plurx/app/data/SettingsStore.kt"
 ANDROID_DETAIL = ANDROID / "app/src/main/java/tv/plurx/app/ui/DetailScreen.kt"
+ANDROID_PDF_READER = ANDROID / "app/src/main/java/tv/plurx/app/ui/PdfReaderScreen.kt"
 APPLE_DETAIL = ROOT / "clients/apple/Sources/DetailView.swift"
 
 # The directory the Preferences DataStore writes under the app's `file`
@@ -74,10 +75,33 @@ class BookReaderCredentialBoundaryCase(unittest.TestCase):
     def test_mobile_book_actions_keep_account_urls_inside_plurx(self) -> None:
         android = ANDROID_DETAIL.read_text(encoding="utf-8")
         apple = APPLE_DETAIL.read_text(encoding="utf-8")
+        self.assertIn("onReadPdf(playable.id, playable.size)", android)
         self.assertNotIn("Session.mediaUrl(", android)
         self.assertNotIn("Intent.ACTION_VIEW", android)
         self.assertNotIn("Session.shared.mediaURL(", apple)
         self.assertNotIn("openBookExternally", apple)
+
+    def test_pdf_download_checks_selected_size_and_profile(self) -> None:
+        """The selected edition and signed-in profile survive the download."""
+        detail = ANDROID_DETAIL.read_text(encoding="utf-8")
+        reader = ANDROID_PDF_READER.read_text(encoding="utf-8")
+        self.assertIn("onReadPdf(playable.id, playable.size)", detail)
+        self.assertIn("require(expectedSize in 1L..MAX_PDF_READER_BYTES)", reader)
+        self.assertIn("if (temporary.length() != expectedSize)", reader)
+        self.assertIn("Session.canonicalPrimaryOrigin() != origin || Session.token != token", reader)
+
+    def test_pdf_page_error_is_local_and_scroll_resets_per_page(self) -> None:
+        """A bad page stays in the reader and navigation begins at its top."""
+        reader = ANDROID_PDF_READER.read_text(encoding="utf-8")
+        render = reader.split("val page by produceState", 1)[1].split("\n    Column(", 1)[0]
+        self.assertIn("document.renderer.openPage(pageIndex).use", render)
+        self.assertIn("source.render(rendered", render)
+        self.assertRegex(render, r"catch \(failure: Exception\) \{\s*bitmap\?\.recycle\(\)\s*throw failure")
+        self.assertIn("catch (cancelled: CancellationException)", render)
+        self.assertIn("Result.failure(failure)", render)
+        self.assertRegex(reader, r"key\(pageIndex\) \{\s*Box\(\s*Modifier\.fillMaxSize\(\)\.verticalScroll\(rememberScrollState\(\)\)")
+        self.assertIn("page?.isFailure == true", reader)
+        self.assertIn('Text("Previous page")', reader)
 
 
 def _excluded_file_paths(element: ET.Element) -> set[str]:
