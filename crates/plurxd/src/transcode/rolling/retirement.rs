@@ -244,22 +244,68 @@ pub(super) struct RollingRetirementOutcome {
     pub(super) cause: Arc<str>,
 }
 
+/// The future a lifecycle hook returns. Boxed so the hook set is one trait
+/// object in every build; see [`RetirementSettlementHooks`].
+pub(super) type HookFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+
+/// The points of the rolling retirement settlement below that a test can
+/// pause at (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
+///
+/// The settlement holds one of these in every build, so its layout and the
+/// `.await` points of its `wait` are the same in the test and release
+/// binaries. Production installs
+/// [`NoopRetirementSettlementHooks`]; the race tests install a pausing
+/// implementation. A paused hook's timing is still a test artefact: what this
+/// makes identical is the struct and the set of await points, not scheduling.
+pub(super) trait RetirementSettlementHooks: Send + Sync {
+    /// After the waiter has registered its `Notify` interest and re-checked
+    /// the result, before it awaits the notification.
+    fn before_await_settled(&self) -> HookFuture<'_>;
+}
+
+/// What production installs: every point is already ready.
+pub(super) struct NoopRetirementSettlementHooks;
+
+/// A zero-sized, already-ready future, so boxing it allocates nothing and
+/// awaiting it costs one poll.
+struct HookReady;
+
+impl std::future::Future for HookReady {
+    type Output = ();
+
+    fn poll(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        std::task::Poll::Ready(())
+    }
+}
+
+impl RetirementSettlementHooks for NoopRetirementSettlementHooks {
+    fn before_await_settled(&self) -> HookFuture<'_> {
+        Box::pin(HookReady)
+    }
+}
+
 pub(super) struct RollingRetirementSettlement {
     cause: std::sync::Mutex<Arc<str>>,
     result: std::sync::Mutex<Option<Result<bool, String>>>,
     settled: tokio::sync::Notify,
-    #[cfg(test)]
-    pub(super) wait_before_await_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    hooks: Box<dyn RetirementSettlementHooks>,
 }
 
 impl RollingRetirementSettlement {
     pub(super) fn new(cause: &'static str) -> Self {
+        Self::with_hooks(cause, Box::new(NoopRetirementSettlementHooks))
+    }
+
+    pub(super) fn with_hooks(
+        cause: &'static str,
+        hooks: Box<dyn RetirementSettlementHooks>,
+    ) -> Self {
         Self {
             cause: std::sync::Mutex::new(Arc::from(cause)),
             result: std::sync::Mutex::new(None),
             settled: tokio::sync::Notify::new(),
-            #[cfg(test)]
-            wait_before_await_pause: std::sync::Mutex::new(None),
+            hooks,
         }
     }
 
@@ -312,17 +358,7 @@ impl RollingRetirementSettlement {
             {
                 continue;
             }
-            #[cfg(test)]
-            let pause = self
-                .wait_before_await_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            #[cfg(test)]
-            if let Some(pause) = pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
+            self.hooks.before_await_settled().await;
             settled.await;
         }
     }
