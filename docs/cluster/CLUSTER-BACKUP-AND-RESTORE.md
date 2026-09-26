@@ -482,3 +482,109 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 | [PR #426](http://192.168.4.7:3000/noirr/plurx/pulls/426) | Pending: the container-smoke extension requires a qualified image and end-to-end daemon start; no container result is inferred from the source-level restore regression. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M5 | [PR #426](http://192.168.4.7:3000/noirr/plurx/pulls/426) | Pending fleet-only evidence: no lab1–lab4/NAS drill was run, so no RPO/RTO receipt exists. The exact isolated-first and production fencing procedure is now in `OPERATIONS.md`. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | Sole-review disposition | [PR #426](http://192.168.4.7:3000/noirr/plurx/pulls/426) | Addressed comment #3366 without a second review: preserved deployed wire ordinals; added DVR remap and all session-ledger cleanup; made key verification load-only and publication fail closed; fenced schedule days only after publication; and replaced the hand-shaped acceptance gap with focused real-store/real-snapshot tests. M4/M5 remain pending exactly as before. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 | [PR #542](http://192.168.4.7:3000/noirr/plurx/pulls/542) | Done locally, and in-lane on amd64 (2026-09-26 row below); the arm64 in-lane run is pending. `scripts/container-restore-smoke IMAGE` starts the packaged image on an empty loopback-published volume, runs first-run setup, creates an ordinary user and a movies library through the API, runs `plurxd cluster backup --token-file … --output /var/lib/plurx/backups` inside the container (as first written the token was on the `docker exec -e` argv and curl's, and the passwords on curl's; since the 2026-09-26 row no secret is on any command line), stops that source, runs `plurxd restore --verify` and then `plurxd restore --archive … --data-dir /var/lib/plurx` in one-off containers against a second empty volume, proves a second restore over the result is refused, starts the restored volume and asserts the same `instance_id`, that the pre-loss admin token still lists the library, and that both the ordinary user and the admin log in by password. **Decision:** a separate script rather than more lines in `scripts/container-smoke`, because `publish-release.yml` and `scripts/registry-push` also run `container-smoke` against already-qualified release images; the drill belongs to candidate qualification, not publication. `make container-smoke` now runs both scripts, and the `package_smoke` job (the `container`/`release_build` scope lane) runs it as its own step after the stop/start smoke on amd64 and arm64. **Evidence (nuc3, amd64, image built from `71d1c1ecd` as `plurx/plurxd:k01-2`):** `scripts/container-smoke` exit 0; `scripts/container-restore-smoke` exit 0 in 18 s wall (the lane's added runtime on this host). Negative control: the same drill against the pre-K-01 image `noirr/plurxd:latest` (built 2026-09-01) exits 1 at `plurxd cluster backup failed`. This row first said the CI `package_smoke` run on this PR would be the in-lane result. That cannot happen: `ci.yml` runs only on `v*` tags and `workflow_dispatch`, and pull requests run `main-fast-lane.yml`, which has no container job. The in-lane result comes from a dispatched `ci.yml` run: [run 3205](http://192.168.4.7:3000/noirr/plurx/actions/runs/3205); see the 2026-09-26 row. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 | [PR #542](http://192.168.4.7:3000/noirr/plurx/pulls/542) | **needs: fleet drills** (GPT, post-merge; exact steps in [§M5 fleet steps](#m5-fleet-steps-2026-09-25) below). Premise re-check: `lab1`-`lab4` and `nas` are not hosts in the current `noirr` inventory (`nynuc`, `m6`, `nuc4`, `nuc3`, per the [2026-09-24 fleet evidence](../reviews/ARCHITECTURE-REVIEW-FLEET-EVIDENCE-2026-09-24.md) §1), and that inventory is the production fleet. The steps therefore split §5.5 into a non-destructive part that GPT can run once this merges and deploys (steps 0-2 and 4: scheduled and on-demand artefacts, and the isolated-first restore on a network-internal throwaway container), step 3's one-voter loss, which stops a production voter, and the production majority-loss drill (part D), which retires a live voter's `hiqlite/`. **Step 3 and part D are not to be run without Paul's explicit go-ahead**; step 3 also needs a healthy, zero-lag quorum checked immediately before (amended 2026-09-26 after the review of #542; the first version called step 3 non-destructive and runnable now). No RPO/RTO receipt exists yet. OPERATIONS.md's runbook (the §5.5 docs half) already landed with M3. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4-M5 review disposition | [PR #542](http://192.168.4.7:3000/noirr/plurx/pulls/542) | Sole review [comment 5262](http://192.168.4.7:3000/noirr/plurx/pulls/542#issuecomment-5262) raised one P1 and two P2 findings. **P1, in-lane evidence:** `ci.yml` was dispatched (`workflow_dispatch`) on `plan/K-01-2` @ `4165b0939` as [run 3205](http://192.168.4.7:3000/noirr/plurx/actions/runs/3205) (API run id 3226). `package and smoke (amd64)` (job 35107, task 12426) **passed**: `container smoke passed`, then `container restore smoke passed in 21s` on the CI-built `plurx/plurxd:ci-amd64`. `package and smoke (arm64)` (job 35108) was **never scheduled**: the only runner carrying `ci-arm64`, `gha-mbp-linux-arm-01`, is offline, and the backup `maca` VM is not registered. The run was cancelled once the amd64 leg finished, so it would not hold the shared runners for lanes this branch does not touch. In that run, Apple iOS failed two source-scan tests (`testEveryOwnerStopSiteStopsThePlayerBeforeItRaises`, `testTheOwnerStopsThePlayerInExactlyOnePlace`) and Android instrumented failed at `adb` device setup; this branch changes no client file. **M4 is therefore done locally and in-lane on amd64; the arm64 in-lane run is pending.** GPT step (post-merge, once `gha-mbp-linux-arm-01` or the `maca` backup is online with `ci-arm64`): dispatch `ci.yml` on `main`, and record `package and smoke (arm64)`'s run id and the `Back up the running image and restore it into a fresh container` step result in a new row here. **P2, secrets on argv:** the drill now keeps both passwords and every bearer token in owner-only files under a private 0700 directory (`--data-binary @file`, `-H @file`, and the in-container token file written over `docker exec -i` stdin); no `docker exec -e`. `test_container_restore_smoke_keeps_secrets_off_every_command_line` runs the real script against recording `docker`/`curl` stand-ins and fails on any argv carrying a secret (proved: it fails on the previous script). An `strace -f -e trace=execve` audit of a real run on nuc3 found no password, token or `-e` in any of 105 execs; the only `Bearer` text is `sed`'s header prefix. **P2, M5 safety:** step 3 now needs Paul's explicit go-ahead and, immediately before the stop, `plurxd cluster status --json` exiting 0 with `safe_to_restart_one` plus capacity checks, and stops only the verdict's `candidate_node_id`; step 4 shreds and removes both the restored data dir and the copied artefact. `main` @ `93bfa1169` merged with no conflicts. |
+
+### M5 fleet steps (2026-09-25)
+
+For the GPT session with SSH to the `noirr` nodes, after this PR is merged and
+deployed to all four. Record everything in
+`benchmarks/evidence/backup-restore-<deployed-sha8>.json` (fields below) and
+append one row to the Execution log above through an evidence-only docs PR.
+`TOKEN_FILE` is an owner-only (0600) file holding an admin bearer token on the
+node where a command runs, and `HEADER_FILE` is an owner-only (0600) file beside
+it holding the one line `authorization: Bearer <that token>` for curl's
+`-H @HEADER_FILE`. Never pass the token on a command line (no `$(cat …)` in an
+argument, no `docker exec -e`): other users see argv in `ps`, and Docker records
+an exec's environment. Delete both files when the drill ends.
+
+```text
+GPT prompt (fleet; SSH to nynuc, m6, nuc4, nuc3; do NOT run step 3 or part D
+without Paul's explicit go-ahead in chat for that step):
+
+0. Preconditions. On every node: `docker exec plurxd plurxd --version` equals the
+   deployed main sha; `curl -fsS http://127.0.0.1:32400/readyz`. On one node,
+   `docker exec plurxd plurxd cluster status --token-file TOKEN_FILE` and record which
+   nodes are voters and which are learners (nuc3 was a learner on 2026-09-24).
+   Keep `plurxd cluster status --json` output (each node's observation,
+   `serving.ready`, `raft.sample_valid`/`watermark_valid`, `raft.apply_lag_entries`
+   and the `verdict`) and `curl -fsS -H @HEADER_FILE
+   http://127.0.0.1:32400/api/v1/cluster/nodes` (each node's `is_voter`,
+   `is_leader` and `reachable`, and `capacity`: `voting_nodes`, `voting_quorum`,
+   `voting_failure_tolerance`, `non_voting_replicas`).
+   Pick the backup destination: run `docker inspect plurxd --format '{{json .Mounts}}'`
+   on each voter and choose a container path on a writable mount that is NOT the
+   /var/lib/plurx volume and exists on every voter (a NAS mount if one exists). If no
+   such mount exists, stop and report it; do not add mounts. Call it DEST.
+1. Scheduled artefact. `curl -fsS -X PUT -H @HEADER_FILE
+   -H 'content-type: application/json' http://127.0.0.1:32400/api/v1/settings
+   --data '{"backup_destination":"DEST","backup_schedule_utc":"<UTC now+5 min, HH:MM>","backup_keep":14}'`.
+   After that minute, read `plurx_backup_last_success_seconds` and
+   `plurx_backup_runs_total` from /metrics on EVERY node: exactly one voter must show
+   ok=1 and a fresh timestamp; learners must show 0. Copy that artefact's manifest.json
+   and `ls -la` of the artefact directory (credentials.key must be 0600, dir 0700).
+   Run `docker exec plurxd plurxd restore --verify --archive DEST/<artefact>` and keep
+   the JSON.
+2. On-demand artefact. On a voter: `docker exec plurxd plurxd cluster backup
+   --token-file <in-container 0600 token path> --output DEST`; record wall time,
+   artefact bytes (`plurx_backup_artifact_bytes`) and manifest `image_bytes`.
+3. One-voter loss (PRODUCTION MUTATION: stops a live voter; only with Paul's
+   explicit go-ahead for this step, as part D and as K-02 treats a follower
+   restart). With three voters, the cluster tolerates no further failure while
+   one is down, so keep the window short.
+   Precondition, checked immediately before the stop (repeat step 0's two reads):
+   `docker exec plurxd plurxd cluster status --token-file TOKEN_FILE --json` exits 0
+   with `"safe_to_restart_one": true` and no blockers. That verdict already requires
+   every committed voter to be observed, live, serving-ready, with a fresh Raft
+   sample and watermark, `apply_lag_entries` 0 and a healthy WAL; one agreed term
+   and leader; one build; and a majority that survives one stop. In addition,
+   `/api/v1/cluster/nodes` must show `capacity.voting_nodes` of at least 3,
+   `voting_failure_tolerance` of at least 1, every `is_voter` node `reachable`, and
+   no learner among the voters. Stop only the verdict's `candidate_node_id`, which is
+   never the leader. If any check fails, stop nothing and report both outputs.
+   `docker stop plurxd` there. From a surviving voter repeat step 2 and confirm it
+   succeeds (quorum still holds). Set backup_schedule_utc to now+3 min and confirm the
+   scheduled run builds on a surviving voter. If any surviving voter turns unhealthy
+   or stale at any point, `docker start plurxd` on the stopped node at once and
+   report. `docker start plurxd` on the stopped node;
+   confirm it becomes a voter again via `plurxd cluster status` with no restore step,
+   and that every voter is back at `apply_lag_entries` 0.
+   Record minutes from start to voter.
+4. Isolated-first restore (non-destructive; §3.6). On nuc3, with a fresh empty host dir
+   R (e.g. /srv/plurx-restore-drill, owned by the container uid) and the latest
+   artefact A copied to /srv/plurx-restore-archive:
+     docker network create --internal plurx-restore-drill
+     T0=$(date +%s)
+     docker run --rm -v /srv/plurx-restore-archive:/a:ro -v R:/var/lib/plurx \
+       <deployed image> restore --archive /a/<A> --data-dir /var/lib/plurx
+     docker run -d --name plurx-restore-drill --network plurx-restore-drill \
+       -v R:/var/lib/plurx <deployed image>
+   The internal network keeps the restored copy off the tuner, Trakt and the live
+   cluster. Poll `http://<its container IP>:32400/readyz` from the host (or from a curl
+   container on that network) until 200; RTO_isolated = now - T0. Then with a token
+   that existed before the artefact was built: GET /api/v1/server (instance_id must
+   equal production's), GET /api/v1/hubs (Home), GET one title's /api/v1/items/<id>,
+   count DVR schedules, read Trakt link status in /api/v1/settings. Run
+   `restore --verify` on A again. Then `docker rm -f plurx-restore-drill`,
+   `docker network rm plurx-restore-drill`. Both R and the copied artefact hold the
+   production database (every bearer token) and `credentials.key`, so shred and
+   remove both (sudo if the container uid owns them):
+     find R /srv/plurx-restore-archive -type f -exec shred -u {} +
+     rm -rf R /srv/plurx-restore-archive
+   and confirm neither path exists.
+5. Report and write the evidence JSON: {sha, date, voters, learners, dest, db_image_bytes,
+   artefact_bytes, scheduled_run_node, on_demand_seconds, one_voter_loss:{node,
+   backup_ok, rejoin_minutes}, isolated_restore:{artefact, artefact_age_seconds,
+   rto_readyz_seconds, instance_id_match, token_ok, home_ok, title_ok, dvr_schedules,
+   trakt_linked}, anything the restore command printed that you did not expect}.
+   RPO for this non-destructive run = artefact age when step 4 began.
+
+D. Production majority loss (DESTRUCTIVE; only with Paul's explicit go-ahead). Stop two
+   voters, restore the latest artefact onto the designated first voter's EMPTY data dir
+   with its production --advertise-host, start it, `/readyz` 200, then on every other
+   node stop plurxd, rename hiqlite/ to hiqlite.retired-<UTC>, and rejoin with a fresh
+   join token (docs/OPERATIONS.md "Backing up and restoring an activated cluster").
+   RTO = restore start to /readyz 200 plus last rejoin as voter. Writes newer than the
+   artefact on the survivors are discarded by design (§7 Q4).
+```

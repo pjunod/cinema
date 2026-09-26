@@ -242,7 +242,7 @@ timeout_seconds = 3600
 
 [[checks]]
 id = "container-runtime"
-title = "Release container startup, health, and restart smoke"
+title = "Release container startup, health, restart, and backup/restore smoke"
 command = "mkdir -p target/validation/buildx && BUILDX_CONFIG=target/validation/buildx make container-smoke"
 profiles = ["full", "nightly"]
 platforms = ["darwin", "linux"]
@@ -1037,6 +1037,7 @@ paths = [
   "scripts/package-windows",
   "scripts/{bench,dv-evidence,gop-census,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-n2-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
   "scripts/container-smoke",
+  "scripts/container-restore-smoke",
   "scripts/windows-smoke.ps1",
   "scripts/decoder-diagnostic-qualification",
   "scripts/validate-docker-startup-budget",
