@@ -4180,8 +4180,10 @@ Watching, Next Up, and Recently Added candidates and enqueues immutable source
 generations. It does not encode them. The generation identity includes the
 requested encoder and rate-control policy plus normalized audio language,
 subtitle language, and subtitle mode. Every voter with a configured local
-cache then competes for a distinct compatible row, so three idle workers can
-prepare three titles at once without three schedulers selecting the same work.
+cache then competes for a compatible durable job. Whole-title preparation and
+fragment indexing share one ownership queue, one heavy worker per node and two
+cluster-wide source-I/O reservations. Spare nodes can prepare different titles
+without duplicating the same computation or multiplying NAS reads by node count.
 
 Workers advertise the capabilities the local daemon actually proved at boot.
 A row that needs an unsupported decoder, encoder family, HLS output contract,
@@ -4202,21 +4204,51 @@ yielded job reclaimed on the same node resumes its numbered parts. Foreground
 playback still has priority and receives the encoder lane inside the existing
 five-second admission window.
 
-The queue admits at most 4,096 active and 10,000 total rows. Each candidate
-pass removes up to 512 ready rows whose local location has been evicted and
-retains only the newest 4,096 failed/cancelled dedupe tombstones. This bounds
-Raft history while preserving recent terminal suppression; terminal rows
-discard their capability/policy and staging payloads. Capability scans
-page in groups of 128 until they find the highest compatible row; a large band
-of GPU-specific work cannot starve a software-capable title behind it.
-Worker polling measures current free space and makes one cheap claim; it does
-not run a cache walk on every empty-queue poll. Each producer-enabled node also
+The shared queue admits at most 4,096 active and 10,000 retained computations;
+automatic work stops at 3,840 active rows to reserve foreground headroom. At
+most 16,384 interests (128 per user) retain separate cancellation and request
+identities. Request receipts last seven days; bounded upkeep preserves the
+up to 16 resolved attempts per job. At global history pressure it compacts older resolved attempts beyond the two-minute reconciliation window, preserving each job's newest attempt and lifetime counters. Terminal payloads remain available for
+explicit audited retry. Ordinary scheduler ticks never reset a failed budget.
+A successfully completed transcode whose last cache location was evicted can
+receive one fresh repair interest.
+
+Workers scan candidates in pages of 128, skip incompatible work and poll with
+5–30 second jittered idle backoff. Empty candidate polling makes no claim or
+renewal write. Polling measures current free space without walking every cache.
+Each producer-enabled node also
 rate-limits one bounded local cache sweep to every 15 minutes, even while its
 queue is empty; the normal cleanup schedule remains an independent backstop.
 Both paths recognize queue staging and fenced final-directory syntax, so
 abandoned queue bytes remain reclaimable after restart even when there are no
 cache-location rows. Rename-to-publication holds both the recipe eviction
 guard and final-directory orphan guard until fenced completion.
+
+Settings → Activity lists durable work separately from live playback and offers
+admin cancellation and explicit retry. A cancelled interest does not cancel
+another viewer's demand. Running children keep their physical permits until
+they have exited. Offline packages retain their own quota and download
+permissions; an exact recipe already preparing on their delivery node can be
+joined at priority 2 without starting another encoder. Cross-node offline
+transcode delivery is not yet provided by this queue adapter.
+
+Settings → Developer contains enable controls and timestamped advisory
+requirements for the existing analysis and speculative-preparation preferences.
+Unknown or unmet observations do not prevent saving the choice. There is no
+queue certification or fleet receipt to obtain. The first schema conversion
+requires the stopped-writer maintenance procedure in the
+[queue migration contract](cluster/DURABLE-WORK-QUEUE-IMPLEMENTATION.md#7-migration-and-rollback--one-ownership-system-after-cutover);
+do not perform a mixed-version rolling cutover or a binary-only downgrade.
+
+Queue count, oldest age, source-I/O reservations and legacy backlog gauges
+come from the existing cached Store sampler. Worker-event counters and claim,
+queue-wait and execution histograms are process-local; every metrics scrape is
+Store-free. Counts of acknowledged transitions can undercount lost replies and
+reset on restart; durable attempts remain the audit record. Increasing
+`plurx_background_legacy_pending` needs migration attention. Queued work with
+idle compatible workers suggests source/admission trouble; rising age with all
+reservations held suggests capacity pressure. `claim_write` events without
+eligible work indicate an idle-poll regression.
 
 The cache bytes remain node-local. With P5 remote placement enabled, any
 ingress may select a voter that advertises the exact verified generation and

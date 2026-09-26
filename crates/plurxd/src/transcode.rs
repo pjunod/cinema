@@ -31,7 +31,7 @@ use plurx_core::transcode::{
 };
 use sha2::{Digest as _, Sha256};
 use tokio::process::Child;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use crate::admission::Admission;
 use crate::admission::TranscodeResourceEstimate;
@@ -1476,6 +1476,9 @@ pub struct TranscodeManager {
     /// offline request asks speculative work to stop at its next published
     /// segment boundary, then takes this gate before resuming its own claim.
     background_producer: Mutex<()>,
+    /// Shared by every heavy durable worker, independently of CPU/GPU cost.
+    /// The owned guard follows the physical child through cancellation/join.
+    background_heavy: Arc<tokio::sync::Semaphore>,
     offline_waiting: AtomicBool,
     /// Whether this daemon's ffmpeg can strip a Dolby Vision configuration —
     /// probed at boot ([`crate::ffmpeg::has_dovi_rpu`]).
