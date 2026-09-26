@@ -2462,6 +2462,30 @@ mod tests {
         }
     }
 
+    /// K-10 §3.1, #540 review finding 2: a package created on this node
+    /// wakes this node's offline worker, which then claims it whatever its
+    /// local replica shows (`offline::tests::claim_a_wake_claims_what_the_local_replica_does_not_show_yet`).
+    /// A retry that finds the existing package does not wake it again.
+    #[tokio::test]
+    async fn a_created_package_wakes_this_nodes_offline_worker() {
+        let fixture = fixture().await;
+        assert!(!fixture.state.offline.take_wake().await, "no wake yet");
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (code, created) =
+            create_response(&fixture, fixture.file.id, request(&request_id)).await;
+        assert_eq!(code, StatusCode::ACCEPTED, "{created}");
+        assert!(
+            fixture.state.offline.take_wake().await,
+            "a local creation wakes the worker"
+        );
+        let (code, retry) = create_response(&fixture, fixture.file.id, request(&request_id)).await;
+        assert_eq!(code, StatusCode::ACCEPTED, "{retry}");
+        assert!(
+            !fixture.state.offline.take_wake().await,
+            "a retry is not a new package"
+        );
+    }
+
     #[tokio::test]
     async fn an_idempotent_create_returns_the_original_ready_state() {
         let fixture = fixture().await;

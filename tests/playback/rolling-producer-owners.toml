@@ -2099,7 +2099,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # `library_search::tests::classification_a_change_after_idle_forced_passes_waits_only_the_idle_ceiling`,
 # stopped by its cancellation token and joined before the test returns. No
 # production spawn; it owns no producer, process or recipe decision.
-expected_occurrences = 638
+# 638 -> 639 with the same round (finding 2), measured by zeroing this row,
+# test-only: the offline worker loop under test in
+# `offline::tests::claim_a_wake_claims_what_the_local_replica_does_not_show_yet`,
+# aborted before the test returns. No production spawn.
+expected_occurrences = 639
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2977,7 +2981,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # this row, all test-only (virtual clock) in `library_search::tests`: the six
 # idle hours, the 60 s wait after the last forced pass and the 250 ms
 # classification poll. No production timer; none paces or bounds a producer.
-expected_occurrences = 1007
+# 1007 -> 1009 with the same round (finding 2), measured by zeroing this row,
+# both test-only: the 65 s idle wait (virtual clock) of
+# `offline::tests::claim_a_wake_claims_what_the_local_replica_does_not_show_yet`,
+# and the zero-length `tokio::time::timeout` in the `#[cfg(test)]`
+# `OfflineManager::take_wake` probe, which only asks whether a wake permit is
+# stored. No production timer.
+expected_occurrences = 1009
 
 [[module_structures]]
 id = "bare-time-constructor"

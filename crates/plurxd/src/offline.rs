@@ -11,7 +11,7 @@ use std::{collections::HashMap, time::SystemTime};
 
 use plurx_core::domain::OfflinePackage;
 use plurx_core::error::StoreError;
-use plurx_core::store::offline_claim::{ClaimOutcome, OfflineClaimPolicy};
+use plurx_core::store::offline_claim::{ClaimOutcome, OfflineClaimPolicy, OfflineClaimStore};
 use plurx_core::store::{keys, Store};
 
 use crate::transcode::{
@@ -420,6 +420,14 @@ impl OfflineManager {
         self.wake.notify_one();
     }
 
+    /// Whether a wake is waiting for the worker, consuming it.
+    #[cfg(test)]
+    pub(crate) async fn take_wake(&self) -> bool {
+        tokio::time::timeout(Duration::ZERO, self.wake.notified())
+            .await
+            .is_ok()
+    }
+
     pub(crate) fn record_request(&self, height: i64) {
         self.metrics.record_request(height);
     }
@@ -476,6 +484,21 @@ impl OfflineManager {
         self: Arc<Self>,
         authority: Arc<dyn plurx_core::cluster::coordination::ClusterJobAuthority>,
     ) {
+        let store = Arc::clone(&self.store);
+        self.run_with_claims(authority, store.as_ref()).await;
+    }
+
+    /// [`Self::run`] with the claim policy's two Store calls — the local
+    /// queue hint and the replicated claim — taken from `claims`. Production
+    /// passes this manager's own store; a test passes a replica that has not
+    /// applied a new row yet, which a SQLite store never is.
+    async fn run_with_claims<C>(
+        self: Arc<Self>,
+        authority: Arc<dyn plurx_core::cluster::coordination::ClusterJobAuthority>,
+        claims: &C,
+    ) where
+        C: OfflineClaimStore + ?Sized,
+    {
         match self
             .store
             .reset_interrupted_offline_packages(&self.node_id)
@@ -508,7 +531,9 @@ impl OfflineManager {
                 }
                 next_expiry_sweep = Instant::now() + Duration::from_secs(60);
             }
-            delay = self.claim_pass(&mut policy, authority.as_ref()).await;
+            delay = self
+                .claim_pass(&mut policy, authority.as_ref(), claims)
+                .await;
             // Never sleep past the next expiry sweep.
             delay = delay.min(next_expiry_sweep.saturating_duration_since(Instant::now()));
         }
@@ -521,16 +546,17 @@ impl OfflineManager {
     /// authority — not the switch, and not the queue. Only a hint that fires,
     /// a local wake or the forced claim reaches the gates below and the
     /// replicated claim, which stays the only thing that binds a package.
-    async fn claim_pass(
+    async fn claim_pass<C>(
         &self,
         policy: &mut OfflineClaimPolicy,
         authority: &dyn plurx_core::cluster::coordination::ClusterJobAuthority,
-    ) -> Duration {
+        claims: &C,
+    ) -> Duration
+    where
+        C: OfflineClaimStore + ?Sized,
+    {
         let now = tokio::time::Instant::now().into_std();
-        if !policy
-            .should_claim(self.store.as_ref(), &self.node_id, now)
-            .await
-        {
+        if !policy.should_claim(claims, &self.node_id, now).await {
             self.metrics.record_claim_tick(ClaimOutcome::SkippedHint);
             return policy.delay();
         }
@@ -553,7 +579,7 @@ impl OfflineManager {
             self.metrics.record_claim_tick(ClaimOutcome::Gated);
             return policy.delay();
         };
-        let package = match policy.claim(self.store.as_ref(), &self.node_id, now).await {
+        let package = match policy.claim(claims, &self.node_id, now).await {
             Ok((outcome, package)) => {
                 self.metrics.record_claim_tick(outcome);
                 package
@@ -1923,6 +1949,49 @@ mod tests {
         queue_stale_package(&fixture, "woken").await;
         fixture.manager.wake();
         let waited = time_to_claim(&fixture, "woken", Duration::from_millis(500)).await;
+        assert!(waited < plurx_core::store::offline_claim::BASE_TICK);
+        task.abort();
+    }
+
+    /// A replica that has not applied the newest offline rows: its local
+    /// queue hint stays silent, and the replicated claim still goes to the
+    /// authority. On SQLite the "local" hint is the authority, so without
+    /// this the woken pass would see the package anyway and claim it whether
+    /// or not the wake forced the claim.
+    struct LaggingReplica(Arc<dyn Store>);
+
+    #[plurx_core::cluster::coordination::cluster_job_async_trait]
+    impl OfflineClaimStore for LaggingReplica {
+        async fn queue_hint(&self, _node_id: &str) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
+        async fn claim(&self, node_id: &str) -> Result<Option<OfflinePackage>, StoreError> {
+            self.0.claim_next_offline_package(node_id).await
+        }
+    }
+
+    /// K-10 §3.1, #540 review finding 2: the wake forces the claim.
+    ///
+    /// A package this node created is on the authority when `create`
+    /// returns, but the local replica may not have applied it yet. The wake
+    /// must make the next pass claim whatever the hint says: on a replica
+    /// whose hint is still silent, the package is claimed within one base
+    /// tick, not when the forced claim next falls due (90 s here, 25 s
+    /// away).
+    #[tokio::test(start_paused = true)]
+    async fn claim_a_wake_claims_what_the_local_replica_does_not_show_yet() {
+        let fixture = seeded_fixture().await;
+        let manager = Arc::clone(&fixture.manager);
+        let replica = LaggingReplica(Arc::clone(&fixture.store));
+        let task = tokio::spawn(async move {
+            manager.run_with_claims(voter_authority(), &replica).await;
+        });
+        // Clear of the forced claims at 60 s and 90 s.
+        tokio::time::sleep(Duration::from_secs(65)).await;
+        queue_stale_package(&fixture, "woken-lagging").await;
+        fixture.manager.wake();
+        let waited = time_to_claim(&fixture, "woken-lagging", Duration::from_millis(500)).await;
         assert!(waited < plurx_core::store::offline_claim::BASE_TICK);
         task.abort();
     }
