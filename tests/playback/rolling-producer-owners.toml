@@ -181,7 +181,15 @@ also_in = ["crates/plurxd/src/transcode"]
 # `new_with_job` registrations, the production registration inside
 # `install_replacement_child`, and the `#[cfg(test)]`
 # `test_session_with_control` helper.
-expected_occurrences = 22
+# 22 -> 23 with S-14 M8 (seam migration, `AttemptChild`), measured by zeroing
+# this row: the one new occurrence is `AttemptChild::new_with_job(` in the
+# test-only `attempt_child_shipped_shape` (`transcode/tests/chunk_02.rs`), which
+# registers a supervisor over the `long_running_child()` fixture it spawned,
+# suspends and resumes it, requests termination and waits for the published
+# reap before returning. It registers no shipped producer. The migration's own
+# constructor split (`new` and `new_with_job` both delegating to the private
+# `new_with_hooks`) adds no `new(`/`new_with_job(` call.
+expected_occurrences = 23
 kind = "process_owner"
 replacement = "retained as the sole OS-child supervisor, registered before publication"
 
@@ -1217,7 +1225,13 @@ pattern = "RollingRetirementSettlement"
 # and completes the settlement. The race test's construction changed from
 # `::new` to `::with_hooks` (same count). The settlement is still created only
 # by the retirement path in `rolling/retirement.rs`; no new owner.
-expected_occurrences = 8
+# 8 -> 9 with S-14 M8's §7 Q3 census, measured by zeroing this row: the one
+# new occurrence is the owner name in `seam_census_of_the_workspace`
+# (`transcode/tests/seam_census.rs`), a string that test matches against the
+# census's owner column to assert a migrated owner keeps no test-only seams. It
+# constructs nothing; the settlement is still created only by the retirement
+# path in `rolling/retirement.rs`.
+expected_occurrences = 9
 
 [[module_symbols]]
 id = "m4-exact-rolling-scratch-owner-latch"
@@ -2110,6 +2124,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # test-only: the offline worker loop under test in
 # `offline::tests::claim_a_wake_claims_what_the_local_replica_does_not_show_yet`,
 # aborted before the test returns. No production spawn.
+# 639 -> 640 with S-14 M8 (`AttemptChild`), measured by zeroing this row:
+# `crate::playback_control::RollingControlHandle::spawn(` in the test-only
+# `attempt_child_shipped_shape`, the ordinary test-actor shape counted many
+# times above. The handle it returns is the test's only owner; the test drops
+# it on return, which closes the actor's sender and ends its run loop. It owns
+# no producer; the test reaps its own fixture child before returning.
+# 640 -> 641 with the review round of S-14 M8 (#556, finding 1), measured by
+# zeroing this row, test-only: the `std::thread::spawn` in
+# `supervisor_pause_releases_its_supervisor_when_the_test_unwinds`, a plain
+# thread standing in for a supervisor held at a `SupervisorPause`. The test
+# joins it before returning. It owns no producer, process, task or timer.
 # 639 -> 641 with K-10 M4 (offline expiry sweep), measured from the
 # validation unittests' actual count, both test-only: the offline worker loop
 # under test in `offline::tests::expiry_an_idle_worker_sweeps_only_on_the_forced_interval`
@@ -2117,7 +2142,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # each aborted before its test returns. No production spawn; the expiry pass
 # runs inside the existing offline worker loop. Neither owns a producer, a
 # process or a recipe decision.
-expected_occurrences = 641
+# 641 + K-10 M4 -> 643 (measured by zeroing this row) on the merge of main
+# into #556: S-14 M8's two test-only sites and K-10 M4's two test-only
+# offline worker spawns coexist unchanged; the merge adds no new site.
+expected_occurrences = 643
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -3001,6 +3029,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # and the zero-length `tokio::time::timeout` in the `#[cfg(test)]`
 # `OfflineManager::take_wake` probe, which only asks whether a wake permit is
 # stored. No production timer.
+# 1009 -> 1010 with S-14 M8 (`AttemptChild`), measured by zeroing this row:
+# one `tokio::time::timeout(` in the test-only `attempt_child_shipped_shape`,
+# bounding (5 s) the wait for the supervisor to publish the reap after the
+# termination request. It is awaited by the test, which fails on expiry.
 # 1009 -> 1012 with K-10 M4 (offline expiry sweep), measured from the
 # validation unittests' actual count, all test-only (virtual clock) in
 # `offline::tests`: the 30-minute idle wait, the 65 s idle wait and the
@@ -3008,7 +3040,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # worker's one `tokio::time::sleep(delay)`, now never sleeping past the next
 # 60 s expiry pass on Tokio's clock. No production timer; none paces or
 # bounds a producer.
-expected_occurrences = 1012
+# 1010 + K-10 M4 -> 1013 (measured by zeroing this row) on the merge of
+# main into #556: S-14 M8's one test-only timeout and K-10 M4's three
+# virtual-clock test waits coexist unchanged; the merge adds no new site.
+expected_occurrences = 1013
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3848,7 +3883,16 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # 405 measured by zeroing this row after merging `origin/main` at
 # `4b112204b` into S-14 M8 (#543): main's 404, reviewed above, plus this
 # branch's one reviewed test-only call.
-expected_occurrences = 405
+# 405 -> 397 with the review round of S-14 M8 (#556, finding 1), measured by
+# zeroing this row. All eight removed calls were `std::sync::Barrier::wait`,
+# in-process test synchronization and never a child-process call: the two
+# per fence point in `AttemptChildPauses` (four) and the two per race test in
+# `producer_signal_and_retirement_share_one_authorization_linearization` and
+# `actor_task_exit_fences_a_reserved_signal_and_cleanup_still_progresses`
+# (four). Their bounded replacement (`SupervisorPause::hold` /
+# `wait_reached` and a release guard) waits through `Condvar::wait_timeout_while`,
+# which this pattern does not match. No production lifecycle call changed.
+expected_occurrences = 397
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -3999,7 +4043,11 @@ pattern = "AttemptChild::new(?:_with_job)?\\s*\\("
 # the same two test-only predecessor children.
 # The Windows constructor variant is included because it is the same exact
 # attempt supervisor with an additional retained Job Object guard.
-expected_occurrences = 22
+# 22 -> 23 with S-14 M8 (`AttemptChild`), measured by zeroing this row: the
+# module-wide twin of `supervisor-registration`, and the same one test-only
+# `new_with_job(` in `attempt_child_shipped_shape`, which reaps its own fixture
+# child before returning.
+expected_occurrences = 23
 
 [[module_structures]]
 id = "forbidden-timer-or-task-alias"
