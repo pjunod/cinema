@@ -90,6 +90,13 @@
  * @property {any} [mediaAttachment]       the current media attachment token
  * @property {any} [terminalStop]          the stop that ended this player, once one did
  * @property {boolean} [samplingStopped]
+ * @property {number} [_mediaAttachmentOrdinal] the last attachment token's id (beginPlaybackMediaAttachment)
+ *
+ * Progress reporting (reportProgress)
+ * @property {any} [timelineAttachment]    the attachment that reached a timeline; a zero position posts only from it
+ * @property {number|null} [lastBeatMs]    position the last progress beat posted, ms; null after a failed post
+ * @property {number|null} [lastBeatAt]    performance.now() of that beat
+ * @property {any} [lastBeatAttachment]    the attachment that beat was posted from
  *
  * hls.js
  * @property {any} hls                     the Hls instance (typed `any` via types/globals.d.ts)
@@ -104,6 +111,10 @@
  * @property {any} [marks]                 per-kind performance.now() marks (frag, …) for the stats panel
  * @property {number} [_segFetch]          performance.now() of the last segment fetch
  * @property {number} [_chaseAt]           performance.now() of the last live-edge chase
+ *
+ * Stats panel
+ * @property {number|null} [_fpsVal]       smoothed measured frame rate
+ * @property {{total:number,at:number}} [_statsFrames] the frame count and time the rate was last measured from
  *
  * Quality ladder and adaptive bitrate
  * @property {any[]} [ladder]              the quality rungs on offer
@@ -143,6 +154,10 @@
  * @property {string|null} [waitReportedDetail]
  * @property {number|null} [waitNudgedAt]  the wait began-time a nudge was already spent on
  * @property {any} [surfaceState]          the presenter's shared state (PLAYBACK_SURFACE)
+ * @property {any} [progressWatch]         the presentation-progress watch ({key, clock, frames, at, startedAt, fired})
+ * @property {number|null} [presentationAdvancedAt] performance.now() the presented position last advanced
+ * @property {number} [stallDeferrals]     times the current wait deferred to the server's verdict
+ * @property {number|null} [stallDeferralsAt] the wait began-time those deferrals count against
  *
  * Playback control (the reporter and intent)
  * @property {boolean} [wantsPlayback]     the viewer's intent, not the element's `paused`
@@ -160,6 +175,24 @@
  * @property {any} [controlRenderOverride] a prepared switch's render override, until committed
  * @property {any} [controlObservationOverride] a prepared switch's observation override, until committed
  * @property {any} [directedChange]        the directed quality/track change in flight
+ * @property {any} [controlOwner]          the owner the reporter was started for (flushPreparedSettlement)
+ * @property {any} [controlLastRequest]    the reporter's last request, for the Developer card
+ * @property {any} [controlLastResponse]   the server's last answer
+ * @property {number|null} [controlLastExchangeAt] Date.now() of that answer
+ * @property {{at:number,message:string}|null} [controlLastError] the last refused exchange, until one succeeds
+ * @property {number|null} [controlLastFailureLogAt] Date.now() the last refusal was logged (one per minute)
+ * @property {any} [controlVerdict]        an armed terminal action from the server, until its lease lapses
+ * @property {number|null} [controlVerdictExpiresAt] performance.now() the armed verdict lapses
+ * @property {any[]} [controlAcknowledgements] prepared-action acknowledgements queued for the next exchange
+ * @property {number|null} [controlPositionHintSec] film position reports claim until frames flow
+ * @property {boolean} [subtitleReadinessReady] the last subtitle readiness seen (one retry per transition)
+ *
+ * Prepared replacement (a staged successor for a quality or track change)
+ * @property {any} [prepared]              the successor being prepared, until it settles
+ * @property {any} [preparedCommitting]    the prepared successor being committed
+ * @property {any[]} [preparedSettled]     action ids already settled, so a late commit is refused
+ * @property {any} [switchCommit]          the last prepared switch's commit timing
+ * @property {any[]} [switchFrames]        frame samples taken around a prepared switch
  *
  * Library channels
  * @property {any} [libraryChannel]        the channel this playback follows, if any

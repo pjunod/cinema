@@ -78,7 +78,7 @@ crates/plurxd/src/web/player/projection-chrome.js	TS2339	1
 crates/plurxd/src/web/player/projection-chrome.js	TS2551	1
 crates/plurxd/src/web/player/stall-diagnosis.js	TS2339	16
 crates/plurxd/src/web/player/stall-diagnosis.js	TS2551	2
-crates/plurxd/src/web/player/stats.js	TS2339	53
+crates/plurxd/src/web/player/stats.js	TS2339	43
 crates/plurxd/src/web/player/stats.js	TS2345	2
 crates/plurxd/src/web/player/stats.js	TS2551	2
 crates/plurxd/src/web/player/surface.js	TS2339	5

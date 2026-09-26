@@ -64,4 +64,63 @@ assert.deepEqual(probe("PLAYER.hlsRetryUsed=1; return PLAYER.sessionId;"), []);
 // A field typed as a number refuses a string.
 assert.equal(probe("PLAYER.offset='12';").length, 1);
 
-console.log(`PASS the Player typedef names ${properties} fields and the checker holds reads to them`);
+// Every field the rows write on the playback object is named.
+//
+// Most writers reach the player through a parameter (`p`, `player`,
+// `openedPlayer`, …) that carries no type, so tsc never compared those writes
+// with the typedef, and fields they add were missing from it while
+// `PLAYER||{}` casts reported them as false TS2339s (PR #554 review, finding
+// 1). Two checks, the second the stronger:
+//
+// 1. A write `p.x=` / `player.x=` / `PLAYER.x=` (and `+=`, `++`, `||=`, …)
+//    anywhere under player/ names a field the typedef lists.
+// 2. The whole shell compiled with every such parameter under player/ typed
+//    `Player` (a JSDoc tag prepended on the function's own line, so line
+//    numbers do not move) has no "does not exist on type 'Player'"
+//    diagnostic, reads included: a field nothing writes is a dead read.
+const named = new Set([...player.matchAll(/^ \* @property \{.*?\} \[?([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]));
+assert.equal(named.size, properties, "every @property line must parse to one field name");
+const PLAYER_DIR = path.join(WEB, "player");
+const WRITE = /\b(?:p|player|PLAYER|[a-z]+Player)\.([A-Za-z_$][\w$]*)\s*(?:=(?!=)|\+\+|--|(?:\+|-|\*|\/|\|\||&&|\?\?)=)/g;
+const unnamedWrites = [];
+for (const file of fs.readdirSync(PLAYER_DIR).filter((f) => f.endsWith(".js")).sort()) {
+  fs.readFileSync(path.join(PLAYER_DIR, file), "utf8").split("\n").forEach((line, i) => {
+    for (const m of line.matchAll(WRITE)) {
+      if (!named.has(m[1])) unnamedWrites.push(`player/${file}:${i + 1} writes .${m[1]}`);
+    }
+  });
+}
+assert.deepEqual(unnamedWrites, [], "fields written on the player that the Player typedef does not name");
+
+const PARAM = /^(?:p|player|[a-z]+Player)$/;
+function typePlayerParameters(text) {
+  return text.split("\n").map((line) => {
+    const m = line.match(/^(\s*)((?:async\s+)?function\s*\*?\s*[\w$]+\s*\(([^)]*)\))/);
+    if (!m) return line;
+    const name = m[3].split(",").map((a) => a.split("=")[0].trim()).find((a) => PARAM.test(a));
+    return name ? `${m[1]}/** @param {Player} ${name} */ ${line.slice(m[1].length)}` : line;
+  }).join("\n");
+}
+const parsed = ts.getParsedCommandLineOfConfigFile(path.join(WEB, "jsconfig.json"), {},
+  {...ts.sys, onUnRecoverableConfigFileDiagnostic: (d) => { throw new Error(ts.flattenDiagnosticMessageText(d.messageText, " ")); }});
+const host = ts.createCompilerHost(parsed.options);
+const readFile = host.readFile.bind(host);
+let typedParameters = 0;
+host.readFile = (fileName) => {
+  const text = readFile(fileName);
+  if (text == null || path.dirname(path.resolve(fileName)) !== PLAYER_DIR || !fileName.endsWith(".js")) return text;
+  const typed = typePlayerParameters(text);
+  typedParameters += (typed.match(/\/\*\* @param \{Player\} /g) || []).length - (text.match(/\/\*\* @param \{Player\} /g) || []).length;
+  return typed;
+};
+const program = ts.createProgram(parsed.fileNames, parsed.options, host);
+const missing = ts.getPreEmitDiagnostics(program)
+  .filter((d) => /on type 'Player'/.test(ts.flattenDiagnosticMessageText(d.messageText, " ")))
+  .map((d) => {
+    const {line} = d.file.getLineAndCharacterOfPosition(d.start);
+    return `${path.relative(WEB, d.file.fileName)}:${line + 1} ${ts.flattenDiagnosticMessageText(d.messageText, " ")}`;
+  });
+assert.ok(typedParameters >= 100, `only ${typedParameters} player parameters were typed; the rewrite stopped matching`);
+assert.deepEqual(missing, [], "with every player parameter typed Player, these fields are not in the typedef");
+
+console.log(`PASS the Player typedef names ${properties} fields, the checker holds reads to them, and ${typedParameters} typed player parameters find no field it misses`);

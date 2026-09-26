@@ -401,7 +401,7 @@ function playbackStatsTelemetry(){
     switched:p.rescuedNote||((p.abr&&p.abr.switches)||[]).map(item=>`${item.from} → ${item.to} · ${item.reason}`).join(" · ")||null,
     source_video:sourceVideo,source_resolution:s.width&&s.height?`${s.width}×${s.height}`:null,
     source_bitrate:s.bitrate?fmtMbps(s.bitrate):null,container:s.container?String(s.container).toUpperCase():null,
-    source_audio:sourceAudio,source_file:s.filename||p.filename||null,
+    source_audio:sourceAudio,source_file:s.filename||null,
     av_offset:`${p.aoffset||0} ms`,av_offset_note:p.declared&&p.declared!==(p.aoffset||0)?`container ${p.declared>0?"+":""}${p.declared} ms`:null,
     decode_resolution:v&&v.videoWidth>0&&v.videoHeight>0?`${v.videoWidth}×${v.videoHeight}`:"Unavailable",
     decode_resolution_note:v&&v.videoWidth>0&&v.videoHeight>0?"Browser intrinsic dimensions":"Unavailable",
