@@ -43,7 +43,7 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_durable.rs", 29),
     ("hiqlite_dv_conversion.rs", 13),
     ("hiqlite_dvr.rs", 19),
-    ("hiqlite_fragment_index_cluster.rs", 31),
+    ("hiqlite_fragment_index_cluster.rs", 32),
     ("hiqlite_import.rs", 3),
     ("hiqlite_library_channels.rs", 13),
     ("hiqlite_media.rs", 67),
