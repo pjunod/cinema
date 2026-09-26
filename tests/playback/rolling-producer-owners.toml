@@ -1225,7 +1225,13 @@ pattern = "RollingRetirementSettlement"
 # and completes the settlement. The race test's construction changed from
 # `::new` to `::with_hooks` (same count). The settlement is still created only
 # by the retirement path in `rolling/retirement.rs`; no new owner.
-expected_occurrences = 8
+# 8 -> 9 with S-14 M8's §7 Q3 census, measured by zeroing this row: the one
+# new occurrence is the owner name in `seam_census_of_the_workspace`
+# (`transcode/tests/seam_census.rs`), a string that test matches against the
+# census's owner column to assert a migrated owner keeps no test-only seams. It
+# constructs nothing; the settlement is still created only by the retirement
+# path in `rolling/retirement.rs`.
+expected_occurrences = 9
 
 [[module_symbols]]
 id = "m4-exact-rolling-scratch-owner-latch"
