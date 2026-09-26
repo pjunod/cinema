@@ -1675,12 +1675,7 @@ impl MediaStore for HiqliteAuthStore {
         if tmdb_id.is_none() && imdb_id.is_none() {
             return Ok(None);
         }
-        let sql = format!(
-            "SELECT {ITEM_COLS} FROM items WHERE kind = $1 \
-             AND (($2 IS NOT NULL AND tmdb_id = $2) \
-             OR ($3 IS NOT NULL AND imdb_id = $3 COLLATE NOCASE)) \
-             ORDER BY ($2 IS NOT NULL AND tmdb_id = $2) DESC, id LIMIT 1"
-        );
+        let sql = super::sql_source::item_by_external_id(ITEM_COLS).hiqlite();
         trace_statement("item_by_external_id", &sql);
         one_item(
             self.client()

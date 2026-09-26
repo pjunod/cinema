@@ -187,7 +187,10 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     for result in timeout_store(client.batch(CATALOG_SCHEMA)).await? {
         result.map_err(database_error)?;
     }
-    for sql in [READING_STATE_TABLE_SCHEMA, READING_STATE_INDEX_SCHEMA] {
+    for sql in [READING_STATE_TABLE_SCHEMA, READING_STATE_INDEX_SCHEMA]
+        .into_iter()
+        .chain(super::sql_source::item_read_index_statements())
+    {
         validate_sql(sql)?;
         timeout_store(client.execute(sql, params!())).await?;
     }
