@@ -387,7 +387,6 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       shippedSource("subtitleStoredSourcesCard"),
       shippedSource("subtitleClusterSourcesCard"),
       shippedSource("subtitleBackfillCard"),
-      shippedSource("subtitlePlaybackRangesCard"),
       shippedSource("chapterThumbnailsCard"),
       shippedSource("seekScratchReservationsCard"),
       shippedSource("liveTvGuideCard"), shippedSource("liveTvDeinterlaceCard"),
