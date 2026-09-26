@@ -2,7 +2,7 @@
 
 **Status:** first-hour readout, mixed builds · **Starting build:** `f600d28230222005441cfc62301c306785c852ce` · **Observed:** 2026-09-25 02:24–03:29 UTC
 
-**Main movement:** PR #533 merged as `0915b3ee9e62` at 21:52 UTC; PRs #528, #511, #530 and #405 advanced main to `ea215603f` by 2026-09-26 00:03 UTC; the S-14/K-03 ledger correction #538 reached `71d1c1ecd` at 00:20 UTC. All four nodes and physical installs remained on `8ae8cab1e136`. The closed 8ae8 hour is historical exact-build evidence; no 24-hour, seven-day or final-main acceptance carries over. Redeployment waits for final code/evidence merge.
+**Main movement:** PR #533 merged as `0915b3ee9e62` at 21:52 UTC; PRs #528, #511, #530 and #405 advanced main to `ea215603f` by 2026-09-26 00:03 UTC; the S-14/K-03 ledger correction #538 reached `71d1c1ecd` at 00:20 UTC. Independent merges including W-02 type checking #554 and the Live TV controls repair #560 reached `e680849fb` at 20:59 UTC. All four nodes and physical installs remained on `8ae8cab1e136`. The closed 8ae8 hour is historical exact-build evidence; no 24-hour, seven-day or final-main acceptance carries over. Redeployment waits for final code/evidence merge.
 
 This appendix records read-only evidence for [K-02](../cluster/RAFT-SNAPSHOT-CADENCE-AND-CONSISTENT-CUT.md), [C-05](../server/DETAIL-READS-AND-STORAGE-AVAILABILITY.md), [C-08](../server/OBSERVABILITY-BASELINE.md), [P-02](../ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md), and [S-11](../streaming/CODEC-AND-GPU-QUALIFICATION.md). It supplements the [deployment record](ARCHITECTURE-REVIEW-FLEET-EVIDENCE-2026-09-24.md) on the integration branch. The four current nodes are `nynuc` (192.168.5.236), `m6` (192.168.4.14), `nuc4` (192.168.4.8), and learner `nuc3` (192.168.4.7); older plan aliases are not additional machines.
 
@@ -814,3 +814,7 @@ and retained aggregate HTTP counts only, so it cannot supply per-route
 offset/page counts; a full 459-item order/duplicate scan was not performed.
 A-03 acceptance remains open. Sanitized receipt SHA-256
 `f33299ff467954e487863c12e4fe6201341488507fc774ccc06a079552f2f221`.
+
+## A-04 integrated Firefox repeat — 2026-09-26 00:58 UTC
+
+The unmerged A-04 integrated release candidate based on main `71d1c1ecd` plus the reviewed D-03 candidate produced a second Firefox two-cliff trace. Its earlier Firefox run reached playback but exceeded the first 100 ms video-gap limit at 134.26 ms while the second gap was 99.94 ms. The repeat failed more substantially: in the 1,100 kb/s stage, measured media delivery was 613.2 kb/s; Auto first moved 720→144p at 3.248 s and later upgraded 144→240p at 68.235 s. In the 350 kb/s stage it moved 240→144p at 10.874 s with one restart, a 1.733 s maximum video gap, one wait and two hitches. This is variable candidate behavior and does not qualify D3 or current main. Local raw report `/private/tmp/codex-a04-firefox-integrated-20260926.json` SHA-256 `82f79e6a333dc4503a8748c7d2f5608a7e8e8e0a1d5d31b542a8eb6c6e061a4f`.
