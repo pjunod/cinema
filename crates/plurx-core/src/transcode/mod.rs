@@ -17,6 +17,7 @@ pub mod decoder_inventory;
 pub mod dvconvert;
 mod encoder;
 pub mod health;
+pub mod hevc_census;
 pub mod manifest;
 mod pipeline;
 pub mod progress;
@@ -306,6 +307,23 @@ pub fn hevc_copy_bsf_for_client(
     hevc_copy_bsf_for_copy(hdr, have_dovi_bsf, preserve_dolby_vision, false)
 }
 
+/// [`hevc_copy_bsf_for_client`] for a source whose in-band parameter sets
+/// must reach the decoder (see [`hevc_copy_bsf_for_copy_retaining`]).
+pub fn hevc_copy_bsf_for_client_retaining(
+    hdr: Option<&str>,
+    have_dovi_bsf: bool,
+    preserve_dolby_vision: bool,
+    retain_parameter_sets: bool,
+) -> String {
+    hevc_copy_bsf_for_copy_retaining(
+        hdr,
+        have_dovi_bsf,
+        preserve_dolby_vision,
+        false,
+        retain_parameter_sets,
+    )
+}
+
 /// The same choice, told whether this copy also converts Profile 7 to 8.1.
 ///
 /// A converting copy drops NAL type 63 — the enhancement layer, which Profile
@@ -325,6 +343,49 @@ pub fn hevc_copy_bsf_for_copy(
     preserve_dolby_vision: bool,
     convert_dolby_vision: bool,
 ) -> String {
+    hevc_copy_bsf_for_copy_retaining(
+        hdr,
+        have_dovi_bsf,
+        preserve_dolby_vision,
+        convert_dolby_vision,
+        false,
+    )
+}
+
+/// The same choice, told whether the source's in-band parameter sets have to
+/// survive the copy.
+///
+/// Every branch of the historical filter deletes VPS/SPS/PPS (types 32-34),
+/// which is only lossless when the in-band sets repeat the sample entry's
+/// record. A chunk-encoded source that redefines them between shots decodes
+/// against the record's stale definitions once they are gone — pink and green
+/// blotches over a picture whose samples were copied unchanged. For such a
+/// source ([`hevc_census`]) this keeps types 32-34 and changes nothing else:
+/// the Dolby Vision layers are kept, dropped or partly dropped exactly as
+/// before. A filter that would otherwise have nothing left to do is `null`
+/// rather than absent, so the packets take the same bitstream-filter path
+/// they always have.
+pub fn hevc_copy_bsf_for_copy_retaining(
+    hdr: Option<&str>,
+    have_dovi_bsf: bool,
+    preserve_dolby_vision: bool,
+    convert_dolby_vision: bool,
+    retain_parameter_sets: bool,
+) -> String {
+    if retain_parameter_sets {
+        return if hdr == Some("dolby_vision") && convert_dolby_vision {
+            "filter_units=remove_types=63"
+        } else if hdr == Some("dolby_vision") && preserve_dolby_vision {
+            "null"
+        } else if hdr == Some("dolby_vision") && have_dovi_bsf {
+            "dovi_rpu=strip=1,filter_units=remove_types=62-63"
+        } else if hdr == Some("dolby_vision") {
+            "filter_units=remove_types=62-63"
+        } else {
+            "null"
+        }
+        .to_owned();
+    }
     if hdr == Some("dolby_vision") && convert_dolby_vision {
         "filter_units=remove_types=32-34|63".to_owned()
     } else if hdr == Some("dolby_vision") && preserve_dolby_vision {
@@ -430,6 +491,7 @@ pub struct CopyVideoOptions {
     preserve_dolby_vision: bool,
     promote_hevc_parameter_sets: bool,
     dv_convert: bool,
+    retain_hevc_parameter_sets: bool,
 }
 
 impl CopyVideoOptions {
@@ -439,7 +501,28 @@ impl CopyVideoOptions {
             preserve_dolby_vision,
             promote_hevc_parameter_sets: false,
             dv_convert: false,
+            retain_hevc_parameter_sets: false,
         }
+    }
+
+    /// Keep the source's in-band VPS/SPS/PPS in the copied stream.
+    ///
+    /// Set by [`CopyVideoOptions::from_probe`] from the source's stored
+    /// [`hevc_census`] when its in-band parameter sets redefine what the
+    /// sample entry says. It reaches the bitstream filter and therefore the
+    /// argv fingerprint, so a retaining copy has its own fragment-index
+    /// identity; a source whose in-band sets only repeat the record keeps the
+    /// historical argv, bytes and identity unchanged. The segmenter reads it
+    /// too ([`crate::fmp4::Segmenter::retaining_hevc_parameter_sets`]), or the
+    /// merge would delete the very units the filter kept.
+    pub const fn with_parameter_set_retention(mut self, retain: bool) -> Self {
+        self.retain_hevc_parameter_sets = retain;
+        self
+    }
+
+    /// Whether this copy keeps its in-band HEVC parameter sets.
+    pub const fn retains_hevc_parameter_sets(self) -> bool {
+        self.retain_hevc_parameter_sets
     }
 
     pub const fn with_parameter_set_promotion(mut self, required: bool) -> Self {
@@ -491,6 +574,9 @@ impl CopyVideoOptions {
     ) -> Self {
         Self::new(have_dovi_bsf, preserve_dolby_vision)
             .with_parameter_set_promotion(hevc_parameter_set_promotion_required(source, probe_json))
+            .with_parameter_set_retention(hevc_census::in_band_parameter_sets_vary(
+                source, probe_json,
+            ))
     }
 
     pub const fn promotes_parameter_sets(self) -> bool {
@@ -1941,11 +2027,12 @@ pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<Str
             args.push(filters.join(","));
         } else if !promote_profile5_parameter_sets {
             args.push("-bsf:v".into());
-            args.push(hevc_copy_bsf_for_copy(
+            args.push(hevc_copy_bsf_for_copy_retaining(
                 source.hdr.as_deref(),
                 options.have_dovi_bsf,
                 options.preserve_dolby_vision,
                 options.dv_convert,
+                options.retain_hevc_parameter_sets,
             ));
         }
     }
@@ -1971,8 +2058,23 @@ pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<Str
     if options.dv_convert && source.hdr.as_deref() == Some("dolby_vision") {
         args.push(DV_CONVERT_MARKER.into());
     }
+    // Retention changes the bytes on every branch, including the two that
+    // emit no 32-34 filter at all (Profile 5 preservation and empty-hvcC
+    // promotion): there it is the segmenter's merge that stops stripping.
+    // The filter string cannot carry that, so the recipe does.
+    if options.retain_hevc_parameter_sets
+        && matches!(source.video_codec.as_deref(), Some("hevc" | "h265"))
+    {
+        args.push(HEVC_RETAIN_PARAMETER_SETS_MARKER.into());
+    }
     args
 }
+
+/// The marker `copy_video_args` carries for a copy that keeps its in-band HEVC
+/// parameter sets ([`CopyVideoOptions::retains_hevc_parameter_sets`]).
+///
+/// Like [`DV_CONVERT_MARKER`], fingerprinted and then removed before exec.
+pub const HEVC_RETAIN_PARAMETER_SETS_MARKER: &str = "--plurx-hevc-parameter-sets=retain";
 
 /// The marker `copy_video_args` carries for a Profile 7 → 8.1 conversion.
 ///
@@ -2212,6 +2314,17 @@ pub fn copy_index_pipe_args_with_input(
         .iter()
         .map(|s| s.to_string()),
     );
+    if matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
+        args[2] = "info".to_owned();
+        args.insert(3, "-xerror".to_owned());
+        if let Some(index) = args.iter().position(|arg| arg == "-bsf:v") {
+            args[index + 1] = format!("trace_headers,{}", args[index + 1]);
+        } else {
+            // Insert before the output URL so this remains an output option.
+            let at = args.len() - 1;
+            args.splice(at..at, ["-bsf:v".to_owned(), "trace_headers".to_owned()]);
+        }
+    }
     args
 }
 
@@ -4490,9 +4603,27 @@ mod index_pipe_tests {
                     contains_run(&production, &video),
                     "production pipe lost the video arguments: {production:?}"
                 );
+                // Header tracing is observational and must precede the
+                // exact production filters. Compare after removing only
+                // that explicitly asserted prefix, not the filter itself.
+                let mut observed = index.clone();
+                let filter = observed
+                    .iter()
+                    .position(|arg| arg == "-bsf:v")
+                    .expect("HEVC analysis filter")
+                    + 1;
+                if observed[filter] == "trace_headers" {
+                    // Preserved DV may need no production bitstream filter.
+                    observed.drain(filter - 1..=filter);
+                } else {
+                    observed[filter] = observed[filter]
+                        .strip_prefix("trace_headers,")
+                        .expect("observe original headers before destructive filtering")
+                        .to_owned();
+                }
                 assert!(
-                    contains_run(&index, &video),
-                    "index pipe lost the video arguments: {index:?}"
+                    contains_run(&observed, &video),
+                    "index pipe changed production video arguments: {index:?}"
                 );
             }
         }

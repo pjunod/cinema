@@ -573,6 +573,7 @@ pub async fn run<R: AsyncRead + Unpin>(
     grants: Option<WriteGrants>,
 ) -> Outcome {
     let strip_dolby_vision_record = video.leaves_a_stale_dolby_vision_record(source);
+    let retain_hevc_parameter_sets = video.retains_hevc_parameter_sets();
     match tokio::fs::metadata(&dir).await {
         Ok(metadata) if metadata.is_dir() => {}
         Ok(_) => {
@@ -864,7 +865,10 @@ pub async fn run<R: AsyncRead + Unpin>(
                                 }
                             };
                         }
-                        segmenter = Some(Segmenter::new(init, policy));
+                        segmenter = Some(
+                            Segmenter::new(init, policy)
+                                .retaining_hevc_parameter_sets(retain_hevc_parameter_sets),
+                        );
                     }
                     let Some(seg) = segmenter.as_mut() else {
                         unreachable!("the first fragment constructs the segmenter");

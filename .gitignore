@@ -48,3 +48,6 @@ crates/*/pipe:1
 # Agent scratch: a `tomllib` shim for hosts on python 3.10. Committed by
 # accident in `378167bc` and removed since; ignored so it cannot happen again.
 .pyshim/
+# The pinned TypeScript that scripts/web-types installs with `npm ci`. Dev-only;
+# the lockfile beside it is what is committed (THIRD-PARTY-NOTICES §7).
+/tools/web-types/node_modules/

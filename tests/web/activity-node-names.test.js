@@ -84,6 +84,8 @@ const PRELUDE = `
   function dvrActivityRows(){ return ""; }
   function analysisSummaryCard(){ return "<div class=\\"analysis\\"></div>"; }
   function statusText(){ return "idle"; }
+  // The Processes table has its own suite (activity-processes.test.js).
+  function activityProcessesHtml(){ return ""; }
 `;
 
 const painter = new Function(

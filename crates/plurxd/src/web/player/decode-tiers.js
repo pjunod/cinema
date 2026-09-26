@@ -872,6 +872,7 @@ function preparePlayOutgoing(attempt,decision){
   return {startSec,ladder,priorKbps,autoStartHeight,retireOutgoing,src,book,
     applied,wantSub,preBurn,outgoing};
 }
+/** @returns {Player} every field named in the typedef (player/player.js) */
 function buildPlayer(attempt,decided,prepared){
   const {decision,retestDecodeLimit,learnedLimitView}=decided;
   const {fileId,title,knownDurMs,meta,playerLastFocused,playerOpener,playerOpenerClick,

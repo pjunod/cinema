@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — current main is `71d1c1ecd` after #538. Ready D-03 PR #534 targets Android 129 and Apple 186; its internal PDF/EPUB readers have compiled, while physical reader acceptance remains open. The separate external-reader exchange is refused pending authorization. A-04 traces and fleet duration evidence remain open. · **Updated:** 2026-09-26 00:38 UTC · **Main:** `71d1c1ecd`
+**Status:** open — current main is `e680849fb`. D-03 PR #534 passed fast lane #3183 on the prior main and is integrating this newer base; it now targets Android 130 and Apple 187. Physical reader acceptance remains open. The separate external-reader exchange is refused pending authorization. A-04 traces and fleet duration evidence remain open. · **Updated:** 2026-09-26 21:15 UTC · **Main:** `e680849fb`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating

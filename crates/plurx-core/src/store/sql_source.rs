@@ -10,6 +10,9 @@ pub(super) enum Param {
     Limit,
     LibraryId,
     WindowOffset,
+    Kind,
+    TmdbId,
+    ImdbId,
 }
 
 impl Param {
@@ -19,6 +22,9 @@ impl Param {
             Self::Limit => "@limit@",
             Self::LibraryId => "@library_id@",
             Self::WindowOffset => "@window_offset@",
+            Self::Kind => "@kind@",
+            Self::TmdbId => "@tmdb_id@",
+            Self::ImdbId => "@imdb_id@",
         }
     }
 }
@@ -65,6 +71,75 @@ impl Stmt {
     pub(super) fn hiqlite(&self) -> String {
         self.render('$')
     }
+}
+
+/// K-05 M5: the catalogue read indexes the M0 query plans justified, created
+/// by SQLite schema v70 and replicated schema v48 on an existing database and
+/// by the schema of a fresh one. The measured before/after plans and timings
+/// for both backends are in `benchmarks/evidence/query-plans-*.md`.
+///
+/// - `idx_items_tmdb` and `idx_items_imdb` are the two arms of
+///   [`item_by_external_id`], which otherwise scans every item once per
+///   lookup. They are partial because most rows (seasons, episodes, home
+///   videos) carry neither id. The IMDb index is `COLLATE NOCASE` because the
+///   lookup compares with that collation; a `BINARY` index cannot serve it.
+/// - `idx_items_top_level_title` is a library's top-level items in title
+///   order: the Title page reads it in order instead of sorting the whole
+///   library, and every sort's count reads only top-level entries instead of
+///   every season and episode. SQLite uses a partial index only for a query
+///   whose `WHERE` contains the index's `WHERE` term as written, so the
+///   predicate here is `TOP_LEVEL_ITEM_PREDICATE` character for character;
+///   `top_level_title_index_is_the_top_level_predicate` fails if the two
+///   drift, because a changed predicate needs a new index and a new
+///   migration, never an edit of this shipped one.
+///
+/// `IF NOT EXISTS` makes every statement idempotent, which the replicated
+/// step relies on when two voters race the same migration and when an older
+/// marker is replayed under a shape that already has them.
+pub(super) const ITEM_READ_INDEXES: &str = "\
+CREATE INDEX IF NOT EXISTS idx_items_tmdb ON items(tmdb_id) WHERE tmdb_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_items_imdb ON items(imdb_id COLLATE NOCASE) WHERE imdb_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_items_top_level_title ON items(library_id, sort_title) WHERE (kind IN ('movie','show','book','audiobook') OR (kind IN ('folder','video','photo') AND parent_id IS NULL));
+";
+
+/// [`ITEM_READ_INDEXES`] one statement at a time, for a replicated
+/// transaction.
+#[cfg(feature = "hiqlite-store")]
+pub(super) fn item_read_index_statements() -> impl Iterator<Item = &'static str> {
+    ITEM_READ_INDEXES
+        .split(';')
+        .map(str::trim)
+        .filter(|statement| !statement.is_empty())
+}
+
+/// The item of kind `@kind@` whose TMDB id is `@tmdb_id@`, else the one
+/// whose IMDb id is `@imdb_id@` (case-insensitively): TMDB matches first,
+/// then the lowest id. A null id matches nothing, so an id the caller does
+/// not have can never pair with a row whose id is also NULL.
+///
+/// The rows are exactly those of `kind = @kind@ AND ((tmdb arm) OR (imdb
+/// arm))`, the statement this replaced, and the `ORDER BY` is that
+/// statement's verbatim, so the one row returned is the same. It is spelled
+/// `id IN (tmdb arm UNION ALL imdb arm)` because the planner (bundled SQLite
+/// 3.53) did not drive the `OR` from the two indexes in
+/// `idx_items_tmdb` and `idx_items_imdb` ([`ITEM_READ_INDEXES`]): with them present it still scanned
+/// `idx_items_library_kind` across every item, once per lookup. Each arm is
+/// now one partial-index search and the outer query reads its rows by id.
+pub(super) fn item_by_external_id(item_columns: &str) -> Stmt {
+    Stmt::new(
+        format!(
+            "SELECT {item_columns} FROM items \
+             WHERE kind = @kind@ AND id IN ( \
+                 SELECT id FROM items \
+                  WHERE @tmdb_id@ IS NOT NULL AND tmdb_id = @tmdb_id@ \
+                 UNION ALL \
+                 SELECT id FROM items \
+                  WHERE @imdb_id@ IS NOT NULL AND imdb_id = @imdb_id@ COLLATE NOCASE) \
+             ORDER BY (@tmdb_id@ IS NOT NULL AND tmdb_id = @tmdb_id@) DESC, id \
+             LIMIT 1"
+        ),
+        &[Param::Kind, Param::TmdbId, Param::ImdbId],
+    )
 }
 
 /// The first window `recently_added` reads, in rows per requested card.
@@ -280,5 +355,38 @@ mod tests {
         assert_eq!(recently_added_first_window_offset(-1), i64::MAX);
         assert_eq!(recently_added_wider_window_offset(191), 383);
         assert_eq!(recently_added_wider_window_offset(i64::MAX), i64::MAX);
+    }
+
+    #[test]
+    fn item_by_external_id_renders_equivalent_valid_dialects_from_one_parameter_order() {
+        let statement = item_by_external_id("id, kind");
+        assert_eq!(
+            statement.params,
+            [Param::Kind, Param::TmdbId, Param::ImdbId]
+        );
+        let sqlite = statement.sqlite();
+        let hiqlite = statement.hiqlite();
+        assert_eq!(sqlite.replace('?', "$"), hiqlite);
+        super::super::placeholder_census::validate_sqlite_placeholders(&sqlite)
+            .expect("the SQLite dialect has contiguous numeric placeholders");
+        super::super::hiqlite::validate_sql(&hiqlite)
+            .expect("the replicated dialect introduces placeholders in binding order");
+    }
+
+    /// A partial index serves only a query whose `WHERE` contains the
+    /// index's own `WHERE` term, so `idx_items_top_level_title` is useful
+    /// exactly while its predicate is the one the library pages carry.
+    #[test]
+    fn top_level_title_index_is_the_top_level_predicate() {
+        let predicate = super::super::TOP_LEVEL_ITEM_PREDICATE;
+        assert!(
+            ITEM_READ_INDEXES.contains(&format!(
+                "idx_items_top_level_title ON items(library_id, sort_title) WHERE {predicate};"
+            )),
+            "TOP_LEVEL_ITEM_PREDICATE changed: the shipped v70/v48 index no longer \
+             serves the library pages. Add a new index with the new predicate in a new \
+             migration on both backends (and drop the old one there); never edit this one."
+        );
+        assert_eq!(item_read_index_statements().count(), 3);
     }
 }
