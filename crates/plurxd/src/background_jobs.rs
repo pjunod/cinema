@@ -22,10 +22,39 @@ use tokio_util::sync::CancellationToken;
 mod faults;
 #[path = "background_job_metrics.rs"]
 mod metrics;
-pub(crate) use metrics::prometheus;
 use metrics::Event;
+pub(crate) use metrics::{accepted_claims, prometheus};
 
 const PUBLICATION_MARGIN: Duration = Duration::from_secs(3);
+
+/// Disposable per-loop pacing. Empty polls never need a durable timestamp.
+pub(crate) struct IdlePoll {
+    idle_rounds: u32,
+    jitter: u64,
+}
+impl IdlePoll {
+    pub(crate) fn new() -> Self {
+        Self {
+            idle_rounds: 0,
+            jitter: uuid::Uuid::new_v4().as_u128() as u64,
+        }
+    }
+    pub(crate) fn delay(&mut self, progressed: bool) -> Duration {
+        if progressed {
+            self.idle_rounds = 0;
+        }
+        let base_ms = (5000_u64 << self.idle_rounds.min(3)).min(25_000);
+        self.jitter = self
+            .jitter
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1);
+        let delay = Duration::from_millis(base_ms + self.jitter % 5001);
+        if !progressed {
+            self.idle_rounds = self.idle_rounds.saturating_add(1);
+        }
+        delay
+    }
+}
 
 pub(crate) fn retry_delay_ms(id: &str, failed_attempts: i64) -> i64 {
     let base = match failed_attempts {
@@ -859,10 +888,27 @@ pub(crate) async fn claim_fragment(
             else {
                 continue;
             };
-            let projection = plurx_core::store::background_jobs_fragment_admission::projection(
+            let projection = match plurx_core::store::background_jobs_fragment_admission::projection(
                 &job,
                 artifact.as_ref(),
-            )?;
+            ) {
+                Ok(projection) => projection,
+                Err(error) => {
+                    if let Some(token) = job.token {
+                        store
+                            .settle_job(SettleJob {
+                                token,
+                                settlement: JobSettlement::Fail {
+                                    error_code: "artifact_metadata_missing".into(),
+                                },
+                                now_ms: unix_ms()?,
+                            })
+                            .await?;
+                    }
+                    tracing::warn!(%error, "durable delivery metadata disappeared before execution");
+                    continue;
+                }
+            };
             let active = ActiveBackgroundJob::start(
                 Arc::clone(&store),
                 Arc::clone(&authority),
@@ -984,6 +1030,24 @@ mod tests {
         )
         .expect("start");
         (store, id, active)
+    }
+
+    #[test]
+    fn idle_poll_is_bounded_and_progress_resets_backoff() {
+        let mut pacing = IdlePoll {
+            idle_rounds: 0,
+            jitter: 17,
+        };
+        for round in 0..16 {
+            let delay = pacing.delay(false);
+            assert!(delay >= Duration::from_secs(5));
+            assert!(delay <= Duration::from_secs(30));
+            if round >= 3 {
+                assert!(delay >= Duration::from_secs(25));
+            }
+        }
+        assert!(pacing.delay(true) <= Duration::from_secs(10));
+        assert!(pacing.delay(false) <= Duration::from_secs(10));
     }
 
     #[tokio::test]

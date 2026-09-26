@@ -296,3 +296,11 @@ implementation is claimed; “compiled” does not mean tests passed.
   token with the old candidate snapshot lost takeover failure accounting and
   could retain stale priority/checkpoint information. No product setting or
   runtime feature gate was introduced; fault hooks compile only in test builds.
+
+- 2026-09-26: added independent durable consumers with 5–30 second jittered
+  idle backoff; work no longer waits for the minute-long discovery tick.
+  Existing scheduler and request paths remain disposable wake hints and share
+  the same local execution guards. Fast fragment polling does not run the old
+  analysis-settlement/pruning writes; it reads candidates/delivery intents and
+  writes only when there is actual work. Missing delivery metadata now settles
+  the exact unused claim explicitly instead of spending a crash timeout.

@@ -112,6 +112,14 @@ pub(super) fn execution(kind: JobKind, elapsed: Duration) {
     EXECUTION[kind_slot(kind)].observe(elapsed);
 }
 
+pub(crate) fn accepted_claims(kinds: &[JobKind]) -> u64 {
+    kinds.iter().fold(0_u64, |total, kind| {
+        total.saturating_add(
+            COUNTERS[kind_slot(*kind)][Event::ClaimAccepted as usize].load(Ordering::Relaxed),
+        )
+    })
+}
+
 pub(crate) fn prometheus() -> String {
     let mut out = String::from("# HELP plurx_background_worker_events_total Process worker events; acknowledged transitions may undercount lost replies.\n# TYPE plurx_background_worker_events_total counter\n");
     for (kind, counters) in JOB_METRIC_KINDS.iter().zip(COUNTERS.iter()) {

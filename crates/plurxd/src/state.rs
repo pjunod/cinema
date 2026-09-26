@@ -6020,6 +6020,47 @@ impl JobManager {
         }
     }
 
+    /// Independent durable consumers: discovery keeps its existing cadence,
+    /// while admitted work is retried with bounded, jittered read-only polling.
+    pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
+        use plurx_core::store::background_jobs::JobKind;
+        let preparation = async {
+            let mut pacing = crate::background_jobs::IdlePoll::new();
+            loop {
+                let kinds = [JobKind::TranscodePrepare];
+                let before = crate::background_jobs::accepted_claims(&kinds);
+                if self.may_run_cluster_jobs().await
+                    && self.job_interval(keys::JOB_CACHE_PRODUCE_MINS).await > 0
+                {
+                    Arc::clone(&self)
+                        .work_pretranscode_queue(Arc::clone(&transcode))
+                        .await;
+                }
+                let progressed = crate::background_jobs::accepted_claims(&kinds) != before;
+                tokio::time::sleep(pacing.delay(progressed)).await;
+            }
+        };
+        let fragments = async {
+            let mut pacing = crate::background_jobs::IdlePoll::new();
+            loop {
+                let kinds = [JobKind::FragmentIndexBuild, JobKind::ArtifactHydrate];
+                let before = crate::background_jobs::accepted_claims(&kinds);
+                if self.may_run_cluster_jobs().await
+                    && self.cluster_fragment_index_enabled().await
+                    && !self.cluster_index_working.swap(true, Ordering::AcqRel)
+                {
+                    let _guard = ClusterIndexWorkingGuard(Arc::clone(&self));
+                    self.enqueue_fragment_deliveries().await;
+                    self.drain_cluster_fragment_index_slot(Arc::clone(&transcode))
+                        .await;
+                }
+                let progressed = crate::background_jobs::accepted_claims(&kinds) != before;
+                tokio::time::sleep(pacing.delay(progressed)).await;
+            }
+        };
+        tokio::join!(preparation, fragments);
+    }
+
     async fn maintain_background_queue(self: Arc<Self>) {
         if self.background_upkeep_running.swap(true, Ordering::AcqRel) {
             return;
@@ -6193,9 +6234,9 @@ impl JobManager {
             }
         }
 
-        // Execution has no interval of its own. Every node asks once per
-        // scheduler tick while speculative production is enabled, and the
-        // process-local guard keeps a long title from stacking worker loops.
+        // Discovery's tick also acts as a local wake hint. The independent
+        // durable consumer handles restart/retry latency between these ticks;
+        // both paths share the same physical worker guard.
         if global.cache_produce_mins > 0 {
             let state = Arc::clone(self);
             let transcode = Arc::clone(transcode);
@@ -8059,6 +8100,14 @@ impl JobManager {
             return;
         }
 
+        self.enqueue_fragment_deliveries().await;
+        let built = self.drain_cluster_fragment_index_slot(transcode).await;
+        if built > 0 {
+            tracing::info!(built, "cluster fragment-index queue pass finished");
+        }
+    }
+
+    async fn enqueue_fragment_deliveries(&self) {
         match self.store.delivery_intents(clock_ms()).await {
             Ok(intents) => {
                 for intent in intents {
@@ -8068,10 +8117,6 @@ impl JobManager {
                 }
             }
             Err(error) => tracing::warn!(%error, "reading fragment delivery obligations"),
-        }
-        let built = self.drain_cluster_fragment_index_slot(transcode).await;
-        if built > 0 {
-            tracing::info!(built, "cluster fragment-index queue pass finished");
         }
     }
 

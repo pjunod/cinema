@@ -2735,6 +2735,11 @@ fn spawn_background_loops(
         std::sync::Arc::clone(&state.jobs).schedule_loop(std::sync::Arc::clone(&state.transcode)),
     );
 
+    tokio::spawn(
+        std::sync::Arc::clone(&state.jobs)
+            .background_work_loop(std::sync::Arc::clone(&state.transcode)),
+    );
+
     // Trakt: hourly (and on-demand) two-way sync + the scrobble-pause sweep.
     tokio::spawn(
         std::sync::Arc::clone(&state.trakt)
