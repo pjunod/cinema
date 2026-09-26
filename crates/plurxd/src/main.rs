@@ -2743,9 +2743,23 @@ fn spawn_background_loops(
     // The watched outbox. Its own loop because a retry scheduled two minutes
     // out has no request to wake it, and a Curator that is down must not stall
     // anything a viewer is waiting on.
-    tokio::spawn(
-        std::sync::Arc::clone(&state.watched).run(std::sync::Arc::new(state.membership.clone())),
-    );
+    match plurx_core::cluster::coordination::StoreCoordinator::new(
+        std::sync::Arc::clone(&state.store),
+        state.node_id.clone(),
+    ) {
+        Ok(coordinator) => {
+            tokio::spawn(std::sync::Arc::clone(&state.watched).run(
+                crate::watched::DrainAuthority {
+                    coordinator,
+                    authority: std::sync::Arc::new(state.membership.clone()),
+                    policy: crate::watched::WatchedLeasePolicy::PRODUCTION,
+                },
+            ));
+        }
+        Err(error) => {
+            tracing::error!(%error, "the watched outbox drain cannot start without a lease owner id");
+        }
+    }
 }
 
 /// Which port the GDM responder should answer on, or `None` when it must not
