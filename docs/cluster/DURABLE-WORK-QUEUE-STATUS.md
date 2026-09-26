@@ -16,7 +16,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | Compiler | Ready | Rust 1.97.1; core + Hiqlite all-target compile and baseline daemon compile passed |
 | M1 durable queue and pre-transcode | In progress | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Legacy cutover and fault-injection coverage remain |
 | M2 fragment analysis and hydration | In progress | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Repair and legacy cutover remain |
-| M3 UI, recovery and migration | In progress | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; retry, metrics and bounded cutover remain |
+| M3 UI, recovery and migration | In progress | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; retry, metrics and legacy execution removal remain |
 | E0 subtitle and library workers | Planned | Reuse newly landed subtitle extraction implementation |
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
@@ -175,3 +175,23 @@ implementation is claimed; “compiled” does not mean tests passed.
   only participating requests; cancellation recomputes the remaining schedule.
   Added budget-joining, takeover and delayed-interest regression contracts;
   test execution remains deferred to the final review/fast-lane sequence.
+
+- 2026-09-25: retry-ledger batch committed and pushed as `bf83ee2e4`; the
+  normal pinned hook passed. The migration batch now captures a finite legacy
+  snapshot with the schema and imports pages atomically, bounded to 128 rows
+  and 512 KiB including SQL/parameter framing. Queue-full results remain in
+  `awaiting_import`; ordinary background producers yield admission to the
+  backlog while foreground headroom remains available.
+
+- 2026-09-25: migrated fragment targets converge onto one computation, with
+  independent retry budgets and target receipts. Submitted analysis identities
+  survive, including cancellation before import. Pre-transcode preserves the
+  existing unique job/staging identity and offers its staging node a 30-second
+  preference before another compatible worker may restart it. Existing part
+  validation remains authoritative. There is at most one active legacy
+  pre-transcode row per dedupe key, so no staging files are combined.
+
+- 2026-09-25: added backup/import/reset mappings and Activity migration counts.
+  Wrote duplicate-target/restart and 4,100-request overflow regression fixtures;
+  no tests executed. Removal of old ownership APIs and further migration fault
+  cases remain before this draft is ready for its final adversarial review.

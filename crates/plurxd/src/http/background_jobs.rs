@@ -55,7 +55,7 @@ pub async fn list(
         valid_id(cursor)?;
     }
     let now_ms = crate::state::clock_ms();
-    let (page, counts) = tokio::try_join!(
+    let (page, counts, migration) = tokio::try_join!(
         state.store.list_jobs(JobQuery {
             state: query.state,
             kind: query.kind,
@@ -63,6 +63,7 @@ pub async fn list(
             limit: 100
         }),
         state.store.job_counts(now_ms),
+        state.store.job_migration_status(),
     )?;
     let ids = page
         .jobs
@@ -83,7 +84,7 @@ pub async fn list(
         })
         .collect::<Vec<_>>();
     Ok(Json(json!({"jobs": jobs,
-        "counts": counts, "next_cursor": page.next_after_id, "observed_at_ms": now_ms})))
+        "counts": counts, "migration": migration, "next_cursor": page.next_after_id, "observed_at_ms": now_ms})))
 }
 
 pub async fn detail(

@@ -416,6 +416,32 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "background_job_migration",
+        columns: &["singleton", "format_version", "source_count"],
+        order_by: "singleton",
+        minimum_schema: 70,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_job_legacy",
+        columns: &[
+            "legacy_key",
+            "kind",
+            "snapshot_json",
+            "state",
+            "job_id",
+            "outcome",
+            "updated_at_ms",
+        ],
+        order_by: "legacy_key",
+        minimum_schema: 70,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "background_fragment_targets",
         columns: &["cache_key", "target_node_id", "job_id"],
         order_by: "cache_key, target_node_id",
@@ -1764,6 +1790,14 @@ impl HiqliteAuthStore {
         self.refuse_unsealed_source_credentials(&source, schema_version)
             .await?;
         self.verify_empty_import_target().await?;
+        // A fresh queue schema has an empty seal marker. The backup supplies
+        // its own marker; older backups are sealed only after parity is proved.
+        self.client()
+            .execute(
+                "DELETE FROM background_job_migration WHERE source_count = 0",
+                params!(),
+            )
+            .await?;
         self.import_instance_setting(&metadata).await?;
 
         for table in TABLES {
@@ -1817,6 +1851,12 @@ impl HiqliteAuthStore {
             });
         }
 
+        if schema_version < 70 {
+            // Triggers were installed at bootstrap; now capture the imported
+            // legacy rows in the same finite schema-defined snapshot.
+            super::hiqlite_background_jobs::seal_legacy(self.client()).await?;
+        }
+
         Ok(SqliteImportReport {
             source_schema_version: schema_version,
             backup_sha256: metadata.backup_sha256,
@@ -1867,7 +1907,16 @@ impl HiqliteAuthStore {
     async fn verify_empty_import_target(&self) -> Result<(), StoreError> {
         for table in TABLES {
             let filter = import_filter_sql(*table);
-            let rows = self.target_count(table.name, filter).await?;
+            let rows = self
+                .target_count(
+                    table.name,
+                    if table.name == "background_job_migration" {
+                        Some("source_count > 0".to_owned())
+                    } else {
+                        filter
+                    },
+                )
+                .await?;
             if rows != 0 {
                 return Err(import_error(format!(
                     "Hiqlite import target is not fresh: table {} already has {rows} application row(s)",
@@ -3193,7 +3242,7 @@ mod tests {
         assert!(names.contains(&"media_classifications"));
         assert!(names.contains(&"file_grants"));
         assert!(!names.contains(&"classification_fts"));
-        assert_eq!(names.len(), 58, "review every imported durable table");
+        assert_eq!(names.len(), 60, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its

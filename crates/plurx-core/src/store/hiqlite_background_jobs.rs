@@ -23,8 +23,40 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     Ok(())
 }
 
+pub(super) async fn seal_legacy(client: &super::hiqlite::TimedClient) -> Result<(), StoreError> {
+    let statements: Vec<(String, hiqlite::Params)> = SCHEMA
+        .split("-- next statement\n")
+        .filter(|sql| {
+            sql.trim_start()
+                .starts_with("INSERT INTO background_job_legacy")
+                || sql
+                    .trim_start()
+                    .starts_with("INSERT INTO background_job_migration")
+                || sql
+                    .trim_start()
+                    .starts_with("DELETE FROM background_job_legacy WHERE kind")
+        })
+        .map(|sql| (sql.to_owned(), params!()))
+        .collect();
+    for result in client.txn(statements).await? {
+        result.map_err(database_error)?;
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl QueueSql for HiqliteAuthStore {
+    async fn queue_transaction(&self, statements: Vec<(String, String)>) -> Result<(), StoreError> {
+        let statements: Vec<(String, hiqlite::Params)> = statements
+            .into_iter()
+            .map(|(sql, request)| (sql, params!(request)))
+            .collect();
+        for result in self.client().txn(statements).await? {
+            result.map_err(database_error)?;
+        }
+        Ok(())
+    }
+
     async fn queue_sql(
         &self,
         sql: String,

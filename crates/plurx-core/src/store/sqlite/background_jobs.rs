@@ -8,6 +8,19 @@ use crate::store::background_jobs::QueueSql;
 
 #[async_trait]
 impl QueueSql for SqliteStore {
+    async fn queue_transaction(&self, statements: Vec<(String, String)>) -> Result<(), StoreError> {
+        self.with_conn(move |connection| {
+            let transaction = connection.unchecked_transaction()?;
+            for (sql, request) in statements {
+                let mut statement = transaction.prepare(&sql)?;
+                let mut rows = statement.query([request])?;
+                while rows.next()?.is_some() {}
+            }
+            transaction.commit().map_err(StoreError::from)
+        })
+        .await
+    }
+
     async fn queue_sql(
         &self,
         sql: String,

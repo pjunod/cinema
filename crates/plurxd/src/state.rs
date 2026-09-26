@@ -5990,6 +5990,9 @@ impl JobManager {
         if let Err(error) = self.store.maintain_jobs(clock_ms()).await {
             tracing::warn!(%error, "durable queue upkeep unavailable");
         }
+        if let Err(error) = self.store.import_legacy_jobs(clock_ms()).await {
+            tracing::warn!(%error, "durable queue legacy import unavailable");
+        }
     }
 
     async fn run_due_jobs(

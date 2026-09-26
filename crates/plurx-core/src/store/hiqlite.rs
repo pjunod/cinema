@@ -1530,11 +1530,11 @@ impl HiqliteAuthStore {
         super::hiqlite_durable::install_schema(&client).await?;
         super::hiqlite_dv_conversion::install_schema(&client).await?;
         super::hiqlite_pretranscode::install_schema(&client).await?;
-        super::hiqlite_background_jobs::install_schema(&client).await?;
         super::hiqlite_sessions::install_schema(&client).await?;
         super::hiqlite_shared_cache::install_schema(&client).await?;
         super::hiqlite_timeline_annotations::install_schema(&client).await?;
         super::hiqlite_fragment_index_cluster::install_schema(&client).await?;
+        super::hiqlite_background_jobs::install_schema(&client).await?;
         super::hiqlite_library_channels::install_schema(&client).await?;
         super::hiqlite_dvr::install_schema(&client).await?;
         client
@@ -2919,6 +2919,8 @@ impl HiqliteAuthStore {
         self.telemetry.clear().await?;
         let statements = vec![
             ("DELETE FROM background_job_commands".to_owned(), params!()),
+            ("DELETE FROM background_job_legacy".to_owned(), params!()),
+            ("DELETE FROM background_job_migration".to_owned(), params!()),
             (
                 "DELETE FROM background_fragment_targets".to_owned(),
                 params!(),

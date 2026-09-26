@@ -15,6 +15,7 @@ use super::background_jobs_fragment::PUBLISH_FRAGMENT_SQL;
 pub use super::background_jobs_fragment::{FragmentJobFailure, PublishFragmentJob};
 pub use super::background_jobs_fragment_admission::EnqueueFragmentJob;
 use super::background_jobs_maintenance::{CANCEL_WAITER_SQL, MAINTENANCE_NEEDED, MAINTENANCE_SQL};
+pub use super::background_jobs_migration::JobMigrationStatus;
 pub use super::background_jobs_observation::{JobAttemptObservation, JobCount, JobLabel};
 use super::background_jobs_observation::{ATTEMPTS_SQL, COUNTS_SQL, LABELS_SQL};
 use super::background_jobs_publication::PUBLISH_TRANSCODE_SQL;
@@ -60,14 +61,34 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
       WHERE request_scope = json_extract(body, '$.request.scope')
         AND request_id = json_extract(body, '$.request.request_id')) AS prior_state,
     (SELECT id FROM background_jobs WHERE dedupe_key = json_extract(body, '$.dedupe_key')
-      AND state IN ('queued','running','cancelling')) AS active_job,
+      AND (state IN ('queued','running','cancelling') OR (json_type(body, '$.legacy_key') IS NOT NULL
+        AND (id = json_extract(body, '$.id') OR id IN (SELECT mapped.job_id FROM background_job_legacy mapped
+            WHERE mapped.state = 'materialized' AND mapped.kind = 'fragment_index_build'
+              AND json_extract(mapped.snapshot_json, '$.cache_key') = json_extract(body, '$.payload.cache_key')))))
+      ORDER BY CASE WHEN state IN ('queued','running','cancelling') THEN 0 ELSE 1 END, created_at_ms DESC, id LIMIT 1) AS active_job,
     (SELECT state FROM background_jobs WHERE dedupe_key = json_extract(body, '$.dedupe_key')
-      AND state IN ('queued','running','cancelling')) AS active_state,
+      AND (state IN ('queued','running','cancelling') OR (json_type(body, '$.legacy_key') IS NOT NULL
+        AND (id = json_extract(body, '$.id') OR id IN (SELECT mapped.job_id FROM background_job_legacy mapped
+            WHERE mapped.state = 'materialized' AND mapped.kind = 'fragment_index_build'
+              AND json_extract(mapped.snapshot_json, '$.cache_key') = json_extract(body, '$.payload.cache_key')))))
+      ORDER BY CASE WHEN state IN ('queued','running','cancelling') THEN 0 ELSE 1 END, created_at_ms DESC, id LIMIT 1) AS active_state,
     (SELECT payload_json FROM background_jobs WHERE dedupe_key = json_extract(body, '$.dedupe_key')
-      AND state IN ('queued','running','cancelling')) AS active_payload
+      AND (state IN ('queued','running','cancelling') OR (json_type(body, '$.legacy_key') IS NOT NULL
+        AND (id = json_extract(body, '$.id') OR id IN (SELECT mapped.job_id FROM background_job_legacy mapped
+            WHERE mapped.state = 'materialized' AND mapped.kind = 'fragment_index_build'
+              AND json_extract(mapped.snapshot_json, '$.cache_key') = json_extract(body, '$.payload.cache_key')))))
+      ORDER BY CASE WHEN state IN ('queued','running','cancelling') THEN 0 ELSE 1 END, created_at_ms DESC, id LIMIT 1) AS active_payload
   FROM request
 ), classified AS (
   SELECT *, CASE
+    WHEN json_type(body, '$.legacy_key') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM background_job_legacy WHERE legacy_key = json_extract(body, '$.legacy_key')
+        AND state = 'awaiting_import'
+    ) THEN 'legacy_settled'
+    WHEN json_type(body, '$.legacy_key') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM files WHERE id = json_extract(body, '$.payload.file_id')
+        AND size = json_extract(body, '$.payload.source_size') AND mtime = json_extract(body, '$.payload.source_mtime')
+    ) THEN 'source_changed'
     WHEN json_type(body, '$.producer_lease') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM job_leases WHERE resource = json_extract(body, '$.producer_lease.resource')
       AND owner_node_id = json_extract(body, '$.producer_lease.owner_node_id')
@@ -124,7 +145,9 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
           AND (COALESCE(last_error_code, '') != 'queue_expired' OR index_retry_deadline_ms != 0)) THEN 'domain_terminal'
     WHEN active_state = 'cancelling' THEN 'job_cancelling'
     WHEN active_job IS NOT NULL AND json_remove(active_payload, '$.reason') != json_remove(json_extract(body, '$.payload'), '$.reason') THEN 'conflict'
-    WHEN EXISTS (SELECT 1 FROM background_jobs WHERE id = json_extract(body, '$.id')) THEN 'conflict'
+    WHEN json_type(body, '$.legacy_key') IS NULL AND EXISTS (SELECT 1 FROM background_jobs WHERE id = json_extract(body, '$.id')) THEN 'conflict'
+    WHEN json_type(body, '$.legacy_key') IS NULL AND json_extract(body, '$.priority') < 2
+      AND EXISTS (SELECT 1 FROM background_job_legacy WHERE state = 'awaiting_import') THEN 'queue_full'
     WHEN (SELECT COUNT(*) FROM background_job_waiters) >= 16384 THEN 'queue_full'
     WHEN json_extract(body, '$.request.scope') LIKE 'user:%' AND (SELECT COUNT(*) FROM background_job_waiters
       WHERE request_scope = json_extract(body, '$.request.scope')
@@ -819,6 +842,8 @@ pub struct CancelWaiterOutcome {
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    async fn import_legacy_jobs(&self, now_ms: i64) -> Result<bool, StoreError>;
+    async fn job_migration_status(&self) -> Result<JobMigrationStatus, StoreError>;
     async fn enqueue_fragment_job(
         &self,
         request: EnqueueFragmentJob,
@@ -874,6 +899,7 @@ pub trait BackgroundJobStore: Send + Sync {
 /// Authority reads use the replicated leader barrier; listing is advisory.
 #[async_trait]
 pub(super) trait QueueSql: Send + Sync {
+    async fn queue_transaction(&self, statements: Vec<(String, String)>) -> Result<(), StoreError>;
     async fn queue_sql(
         &self,
         sql: String,
@@ -909,6 +935,24 @@ async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn import_legacy_jobs(&self, now_ms: i64) -> Result<bool, StoreError> {
+        super::background_jobs_migration::import_page(self, now_ms).await
+    }
+    async fn job_migration_status(&self) -> Result<JobMigrationStatus, StoreError> {
+        let rows = self
+            .queue_sql(
+                super::background_jobs_migration::STATUS_SQL.into(),
+                "{}".into(),
+                false,
+                true,
+            )
+            .await?;
+        decode(
+            rows.first()
+                .ok_or_else(|| invalid("missing queue migration status"))?,
+        )
+    }
+
     async fn enqueue_fragment_job(
         &self,
         input: EnqueueFragmentJob,
@@ -1044,8 +1088,9 @@ impl<T: QueueSql> BackgroundJobStore for T {
             .queue_sql(
                 "SELECT json_quote(id) AS result_json FROM background_jobs job
             WHERE kind = 'transcode_prepare' AND state IN ('queued','running','cancelling')
-            AND EXISTS (SELECT 1 FROM background_job_attempts attempt WHERE attempt.job_id = job.id
-                AND attempt.owner_node_id = json_extract($1, '$.node_id'))
+            AND (json_extract(job.checkpoint_json, '$.staging_node_id') = json_extract($1, '$.node_id')
+                OR EXISTS (SELECT 1 FROM background_job_attempts attempt WHERE attempt.job_id = job.id
+                AND attempt.owner_node_id = json_extract($1, '$.node_id')))
             ORDER BY id LIMIT 4097"
                     .into(),
                 encode(&serde_json::json!({"node_id": node_id}))?,

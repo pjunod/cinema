@@ -37,6 +37,7 @@ function durableQueueHtml(){
     <div class="row"><label>State <select aria-label="Durable job state" onchange="filterDurableJobs(this.value)">${states.map(state=>`<option value="${state}"${q.state===state?" selected":""}>${state} (${count(state)})</option>`).join("")}</select></label>
     <button class="ghost sm" onclick="refreshDurableActivity(true)">Refresh</button></div>
     <p class="hint">${q.observed?`Durable state observed ${esc(new Date(q.observed).toLocaleTimeString())}. Live worker progress is shown separately above.`:"Loading durable work…"}</p>
+    ${q.migration&&q.migration.accepted?`<p class="hint">Legacy cutover: ${esc(q.migration.awaiting_import)} awaiting import · ${esc(q.migration.materialized)} mapped · ${esc(q.migration.failed)} failed · ${esc(q.migration.cancelled)} cancelled. Accepted work remains in the sealed backlog while queue capacity is full.</p>`:""}
     ${q.error?`<p class="err" role="status">${esc(q.error)}${q.observed?" Showing the last observation.":""}</p>`:""}
     ${rows?`<div class="tbl"><table><thead><tr><th>Work</th><th>State</th><th>Owner</th><th>Priority</th><th>Age</th><th>Reason</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`:q.observed?'<p class="muted">No jobs on this page.</p>':""}
     <div class="row">${q.cursor?'<button class="ghost sm" onclick="pageDurableJobs(null)">First page</button>':""}${q.next?`<button class="ghost sm" onclick="pageDurableJobs(${esc(JSON.stringify(q.next))})">Next 100</button>`:""}</div>
@@ -59,7 +60,7 @@ async function refreshDurableActivity(force=false){
     const query=new URLSearchParams({state:q.state});if(q.cursor)query.set("cursor",q.cursor);
     const page=await api(`/cluster/jobs?${query}`);
     if(epoch!==q.epoch||generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity")return;
-    q.rows=page.jobs;q.counts=page.counts;q.next=page.next_cursor;q.observed=page.observed_at_ms;q.error=null;
+    q.rows=page.jobs;q.counts=page.counts;q.migration=page.migration;q.next=page.next_cursor;q.observed=page.observed_at_ms;q.error=null;
   }catch(error){if(epoch===q.epoch&&generation===PAGE_RENDER_GENERATION)q.error=error.message||String(error);}
   finally{q.busy=false;paintDurableActivity();if(epoch!==q.epoch)refreshDurableActivity(true);}
 }

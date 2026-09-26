@@ -267,6 +267,81 @@ BEGIN
         AND target_node_id = json_extract(NEW.request_json, '$.payload.target_node_id')
         AND json_extract(NEW.result_json, '$.outcome') = 'accepted';
 
+    -- Only the sealed snapshot importer can supply legacy_key. Admission,
+    -- preserved ledgers and mapping advance in this same transaction.
+    UPDATE background_job_waiters SET
+        failed_attempts = json_extract(NEW.request_json, '$.legacy_failures'),
+        retry_deadline_ms = COALESCE(json_extract(NEW.request_json, '$.legacy_snapshot.index_retry_deadline_ms'), 0),
+        attempt_errors = COALESCE(json_extract(NEW.request_json, '$.legacy_snapshot.attempt_errors'), '') ||
+            CASE WHEN json_extract(NEW.request_json, '$.legacy_snapshot.state') = 'running'
+                THEN CASE WHEN COALESCE(json_extract(NEW.request_json, '$.legacy_snapshot.attempt_errors'), '') = ''
+                    THEN 'legacy_abandoned' ELSE ',legacy_abandoned' END ELSE '' END,
+        last_error_code = CASE WHEN json_extract(NEW.request_json, '$.legacy_snapshot.state') = 'running'
+            THEN 'legacy_abandoned' ELSE json_extract(NEW.request_json, '$.legacy_snapshot.last_error_code') END,
+        index_diagnostic_json = COALESCE(json_extract(NEW.request_json, '$.legacy_snapshot.index_diagnostic_json'), '')
+    WHERE request_scope = json_extract(NEW.request_json, '$.request.scope')
+        AND request_id = json_extract(NEW.request_json, '$.request.request_id')
+        AND json_type(NEW.request_json, '$.legacy_key') IS NOT NULL
+        AND json_extract(NEW.result_json, '$.outcome') = 'accepted';
+
+    UPDATE background_job_waiters SET state = CASE
+        WHEN failed_attempts >= attempt_limit THEN 'failed'
+        WHEN retry_deadline_ms > 0 AND retry_deadline_ms <= json_extract(NEW.request_json, '$.now_ms') THEN 'failed'
+        WHEN (SELECT state FROM background_jobs WHERE id = job_id) IN ('failed','cancelled')
+            THEN (SELECT state FROM background_jobs WHERE id = job_id)
+        WHEN (SELECT state FROM background_jobs WHERE id = job_id) = 'succeeded'
+            THEN CASE WHEN target_node_id IS NULL OR EXISTS (SELECT 1 FROM cluster_fragment_index_locations location
+                WHERE location.cache_key = json_extract(NEW.request_json, '$.payload.cache_key')
+                    AND location.node_id = background_job_waiters.target_node_id) THEN 'succeeded' ELSE 'awaiting_hydration' END
+        ELSE state END,
+        last_error_code = CASE WHEN failed_attempts >= attempt_limit THEN 'attempt_limit'
+            WHEN retry_deadline_ms > 0 AND retry_deadline_ms <= json_extract(NEW.request_json, '$.now_ms') THEN 'index_retry_window_expired'
+            ELSE last_error_code END,
+        result_ref = (SELECT result_ref FROM background_jobs WHERE id = job_id)
+    WHERE request_scope = json_extract(NEW.request_json, '$.request.scope')
+        AND request_id = json_extract(NEW.request_json, '$.request.request_id')
+        AND json_type(NEW.request_json, '$.legacy_key') IS NOT NULL
+        AND json_extract(NEW.result_json, '$.outcome') = 'accepted';
+
+    INSERT INTO background_fragment_targets (cache_key, target_node_id, job_id)
+    SELECT json_extract(NEW.request_json, '$.payload.cache_key'),
+        COALESCE(json_extract(NEW.request_json, '$.request.target_node_id'), ''), json_extract(NEW.result_json, '$.job_id')
+    WHERE json_type(NEW.request_json, '$.legacy_key') IS NOT NULL
+        AND json_extract(NEW.request_json, '$.payload.kind') = 'fragment_index_build'
+        AND json_extract(NEW.result_json, '$.outcome') = 'accepted'
+    ON CONFLICT(cache_key, target_node_id) DO UPDATE SET job_id = excluded.job_id;
+
+    UPDATE background_jobs SET
+        failed_attempts = CASE WHEN kind = 'transcode_prepare' THEN json_extract(NEW.request_json, '$.legacy_failures') ELSE failed_attempts END,
+        checkpoint_json = CASE WHEN kind = 'transcode_prepare' THEN json_object(
+            'staging_node_id', json_extract(NEW.request_json, '$.legacy_snapshot.staging_node_id'),
+            'legacy_job_id', json_extract(NEW.request_json, '$.legacy_snapshot.id'),
+            'prefer_until_ms', json_extract(NEW.request_json, '$.now_ms') + 30000) ELSE checkpoint_json END,
+        not_before_ms = COALESCE((SELECT MIN(not_before_ms) FROM background_job_waiters
+            WHERE job_id = background_jobs.id AND state = 'pending'), not_before_ms),
+        retry_deadline_ms = CASE WHEN EXISTS (SELECT 1 FROM background_job_waiters
+            WHERE job_id = background_jobs.id AND state = 'pending' AND retry_deadline_ms = 0) THEN 0
+            ELSE COALESCE((SELECT MAX(retry_deadline_ms) FROM background_job_waiters
+                WHERE job_id = background_jobs.id AND state = 'pending'), retry_deadline_ms) END,
+        state = CASE WHEN state = 'queued' AND NOT EXISTS (SELECT 1 FROM background_job_waiters
+            WHERE job_id = background_jobs.id AND state = 'pending')
+            AND NOT EXISTS (SELECT 1 FROM background_job_legacy remaining WHERE remaining.state = 'awaiting_import'
+                AND remaining.legacy_key != json_extract(NEW.request_json, '$.legacy_key')
+                AND remaining.kind = 'fragment_index_build'
+                AND json_extract(remaining.snapshot_json, '$.cache_key') = json_extract(NEW.request_json, '$.payload.cache_key'))
+            THEN 'failed' ELSE state END,
+        created_at_ms = MIN(created_at_ms, json_extract(NEW.request_json, '$.legacy_snapshot.created_at_ms'))
+    WHERE id = json_extract(NEW.result_json, '$.job_id') AND state IN ('queued','running')
+        AND json_type(NEW.request_json, '$.legacy_key') IS NOT NULL
+        AND json_extract(NEW.result_json, '$.outcome') = 'accepted';
+
+    UPDATE background_job_legacy SET state = CASE WHEN json_extract(NEW.result_json, '$.outcome') IN ('accepted','existing')
+        THEN 'materialized' ELSE 'failed' END,
+        job_id = json_extract(NEW.result_json, '$.job_id'), outcome = json_extract(NEW.result_json, '$.outcome'),
+        updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE legacy_key = json_extract(NEW.request_json, '$.legacy_key') AND state = 'awaiting_import'
+        AND json_extract(NEW.result_json, '$.outcome') IN ('accepted','existing','source_changed','conflict');
+
     DELETE FROM background_job_commands WHERE id = NEW.id;
 END;
 
@@ -445,6 +520,9 @@ BEGIN
         WHERE job.state IN ('queued','running') AND job.revision < 9223372036854775807
           AND NOT EXISTS (SELECT 1 FROM background_job_waiters
             WHERE job_id = job.id AND state IN ('pending','awaiting_hydration'))
+          AND NOT EXISTS (SELECT 1 FROM background_job_legacy remaining WHERE remaining.state = 'awaiting_import'
+            AND remaining.kind = 'fragment_index_build'
+            AND json_extract(remaining.snapshot_json, '$.cache_key') = json_extract(job.payload_json, '$.cache_key'))
         ORDER BY job.id LIMIT 128);
     UPDATE background_jobs SET state = 'cancelled', owner_node_id = NULL,
         owner_boot_id = NULL, claim_id = NULL, lease_expires_ms = NULL,
@@ -481,6 +559,9 @@ BEGIN
         SELECT job.id FROM background_jobs job
         WHERE job.state IN ('succeeded','failed','cancelled')
           AND job.updated_at_ms <= json_extract(NEW.request_json, '$.now_ms') - 604800000
+          AND NOT EXISTS (SELECT 1 FROM background_job_legacy remaining WHERE remaining.state = 'awaiting_import'
+            AND remaining.kind = 'fragment_index_build'
+            AND json_extract(remaining.snapshot_json, '$.cache_key') = json_extract(job.payload_json, '$.cache_key'))
           AND NOT EXISTS (SELECT 1 FROM background_job_waiters
             WHERE job_id = job.id AND state IN ('pending','awaiting_hydration'))
         ORDER BY job.updated_at_ms, job.id LIMIT 128);
@@ -789,6 +870,8 @@ AFTER UPDATE ON analysis_requests
 WHEN NEW.component = 'fragment_index' AND (NEW.state = 'cancelled' OR NEW.cancel_requested = 1)
     AND (OLD.state != 'cancelled' AND OLD.cancel_requested = 0)
 BEGIN
+    UPDATE background_job_legacy SET state = 'cancelled', outcome = 'request_cancelled', updated_at_ms = NEW.updated_at_ms
+    WHERE legacy_key = 'analysis:' || NEW.request_id AND state = 'awaiting_import';
     INSERT INTO background_job_commands (id, operation, request_json, result_json)
     SELECT 'analysis-cancel:' || NEW.request_id, 'cancel_waiter',
         json_object('scope', 'analysis', 'request_id', NEW.request_id, 'now_ms', NEW.updated_at_ms),
@@ -895,4 +978,106 @@ BEGIN
             ELSE COALESCE((SELECT MAX(retry_deadline_ms) FROM background_job_waiters
                 WHERE job_id = NEW.job_id AND state = 'pending'), retry_deadline_ms) END
     WHERE id = NEW.job_id AND kind = 'fragment_index_build' AND state IN ('queued','running');
+END;
+
+-- A one-time sealed inbox preserves accepted legacy work beyond live queue
+-- capacity. The schema transaction captures source rows before workers start.
+-- next statement
+CREATE TABLE IF NOT EXISTS background_job_migration (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    format_version INTEGER NOT NULL CHECK (format_version = 1),
+    source_count INTEGER NOT NULL CHECK (source_count >= 0)
+) STRICT;
+-- next statement
+CREATE TABLE IF NOT EXISTS background_job_legacy (
+    legacy_key TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL CHECK (json_valid(snapshot_json)),
+    state TEXT NOT NULL CHECK (state IN ('awaiting_import','materialized','failed','cancelled')),
+    job_id TEXT,
+    outcome TEXT,
+    updated_at_ms INTEGER NOT NULL DEFAULT 0
+) STRICT;
+-- next statement
+CREATE INDEX IF NOT EXISTS background_job_legacy_pending ON background_job_legacy(state, legacy_key);
+-- next statement
+INSERT INTO background_job_legacy (legacy_key, kind, snapshot_json, state)
+SELECT 'transcode:' || id, 'transcode_prepare', json_object(
+    'id', id, 'dedupe_key', dedupe_key, 'file_id', file_id, 'source_size', source_size,
+    'source_mtime', source_mtime, 'target_height', target_height, 'policy_generation', policy_generation,
+    'requirements_json', requirements_json, 'reason', reason, 'priority', priority,
+    'state', state, 'attempts', attempts, 'not_before_ms', not_before_ms,
+    'last_error_code', last_error_code, 'created_at_ms', created_at_ms, 'staging_node_id', staging_node_id),
+    'awaiting_import'
+FROM pretranscode_jobs WHERE state IN ('queued','running')
+    AND NOT EXISTS (SELECT 1 FROM background_job_migration) ON CONFLICT DO NOTHING;
+-- next statement
+INSERT INTO background_job_legacy (legacy_key, kind, snapshot_json, state)
+SELECT 'fragment:' || json_array(cache_key, target_node_id), 'fragment_index_build', json_object(
+    'cache_key', cache_key, 'file_id', file_id, 'source_size', source_size, 'source_mtime', source_mtime,
+    'source_sha256', source_sha256, 'pipeline_sha256', pipeline_sha256, 'priority', priority,
+    'trigger', trigger, 'target_node_id', target_node_id, 'state', state, 'attempts', attempts,
+    'not_before_ms', not_before_ms, 'created_at_ms', created_at_ms, 'last_error_code', last_error_code,
+    'attempt_errors', attempt_errors, 'index_retry_deadline_ms', index_retry_deadline_ms,
+    'index_diagnostic_json', index_diagnostic_json,
+    'attempt_limit', MAX(1, MIN(20, COALESCE((SELECT CASE WHEN trim(value) GLOB '[0-9]*' THEN CAST(value AS INTEGER) ELSE 5 END
+        FROM settings WHERE key = 'analysis.max_attempts'), 5)))), 'awaiting_import'
+FROM cluster_fragment_index_jobs WHERE state IN ('queued','running')
+    AND NOT EXISTS (SELECT 1 FROM background_job_migration) ON CONFLICT DO NOTHING;
+-- next statement
+INSERT INTO background_job_legacy (legacy_key, kind, snapshot_json, state)
+SELECT 'analysis:' || request.request_id, 'fragment_index_build',
+    json_set(legacy.snapshot_json, '$.analysis_request_id', request.request_id), 'awaiting_import'
+FROM analysis_requests request JOIN background_job_legacy legacy
+    ON legacy.legacy_key = 'fragment:' || json_array(request.result_cache_key, request.target_node_id)
+WHERE request.state = 'submitted' AND request.component = 'fragment_index'
+    AND NOT EXISTS (SELECT 1 FROM background_job_migration) ON CONFLICT DO NOTHING;
+-- next statement
+DELETE FROM background_job_legacy WHERE kind = 'fragment_index_build'
+    AND legacy_key LIKE 'fragment:%' AND NOT EXISTS (SELECT 1 FROM background_job_migration)
+    AND EXISTS (SELECT 1 FROM analysis_requests request WHERE request.state = 'submitted'
+        AND request.component = 'fragment_index' AND request.result_cache_key = json_extract(background_job_legacy.snapshot_json, '$.cache_key')
+        AND request.target_node_id = json_extract(background_job_legacy.snapshot_json, '$.target_node_id'));
+-- next statement
+INSERT INTO background_job_migration (singleton, format_version, source_count)
+SELECT 1, 1, COUNT(*) FROM background_job_legacy WHERE true ON CONFLICT DO NOTHING;
+
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_legacy_reject_command
+AFTER INSERT ON background_job_commands WHEN NEW.operation = 'legacy_reject'
+BEGIN
+    UPDATE background_job_legacy SET state = 'failed', outcome = json_extract(NEW.request_json, '$.code'),
+        updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE legacy_key = json_extract(NEW.request_json, '$.legacy_key') AND state = 'awaiting_import';
+    DELETE FROM background_job_commands WHERE id = NEW.id;
+END;
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_legacy_terminal
+AFTER UPDATE OF state ON background_job_legacy WHEN NEW.state IN ('failed','cancelled') AND OLD.state = 'awaiting_import'
+BEGIN
+    UPDATE analysis_requests SET state = NEW.state, last_error_code = NEW.outcome, updated_at_ms = NEW.updated_at_ms
+    WHERE request_id = json_extract(NEW.snapshot_json, '$.analysis_request_id') AND state = 'submitted';
+    UPDATE cluster_fragment_index_jobs SET state = NEW.state, owner_node_id = NULL, lease_expires_ms = NULL,
+        last_error_code = NEW.outcome, updated_at_ms = NEW.updated_at_ms
+    WHERE NEW.kind = 'fragment_index_build' AND cache_key = json_extract(NEW.snapshot_json, '$.cache_key')
+        AND target_node_id = json_extract(NEW.snapshot_json, '$.target_node_id') AND state IN ('queued','running')
+        AND NOT EXISTS (SELECT 1 FROM background_fragment_targets shared
+            WHERE shared.cache_key = cluster_fragment_index_jobs.cache_key AND shared.target_node_id = cluster_fragment_index_jobs.target_node_id);
+    UPDATE pretranscode_jobs SET state = NEW.state, owner_node_id = NULL, lease_expires_ms = NULL,
+        last_error_code = NEW.outcome, updated_at_ms = NEW.updated_at_ms
+    WHERE NEW.kind = 'transcode_prepare' AND id = json_extract(NEW.snapshot_json, '$.id') AND state IN ('queued','running');
+END;
+
+-- The old transcode row is retained only as history and a staging reference.
+-- Common ownership is the sole execution authority after import.
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_legacy_transcode_projection
+AFTER UPDATE ON background_jobs WHEN NEW.kind = 'transcode_prepare'
+BEGIN
+    UPDATE pretranscode_jobs SET state = CASE NEW.state WHEN 'succeeded' THEN 'ready'
+        WHEN 'cancelling' THEN 'running' ELSE NEW.state END,
+        owner_node_id = NEW.owner_node_id, lease_expires_ms = NEW.lease_expires_ms,
+        fence = NEW.fence, attempts = NEW.failed_attempts, not_before_ms = NEW.not_before_ms,
+        last_error_code = NEW.last_error_code, updated_at_ms = NEW.updated_at_ms
+    WHERE id = NEW.id;
 END;

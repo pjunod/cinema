@@ -570,6 +570,17 @@ pub(crate) async fn claim_pretranscode(
             if candidate.payload_version != 1 || excluded.contains(&candidate.id) {
                 continue;
             }
+            if let Some(checkpoint) = &candidate.checkpoint {
+                if checkpoint["staging_node_id"]
+                    .as_str()
+                    .is_some_and(|preferred| preferred != node)
+                    && checkpoint["prefer_until_ms"]
+                        .as_i64()
+                        .is_some_and(|until| until > unix_ms().unwrap_or(i64::MAX))
+                {
+                    continue;
+                }
+            }
             let Ok(payload) = candidate.supported_payload() else {
                 continue;
             };
