@@ -241,3 +241,11 @@ implementation is claimed; “compiled” does not mean tests passed.
   always below priority 3. User/library scopes rotate within the selected class;
   keyset cursors retain the fairness window across pages. Added backend
   ordering/pagination and physical admission guard contracts (not yet run).
+
+- 2026-09-25: Developer now exposes the existing analysis switch and
+  speculative worker schedule as enable controls. Advisory observations cover
+  durable storage, tool inventory, instantaneous capacity, fresh scratch
+  headroom, unknown per-source access and peer compatibility. Observation
+  timestamps stay visible; delayed results patch evidence rows only. The save
+  path reads no readiness value. Also corrected Retry's request-body encoding
+  and added transport-replay and unavailable-readiness browser regressions.

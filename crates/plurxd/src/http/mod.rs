@@ -9253,6 +9253,7 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "durable_cluster_work",
                 "cluster_backup",
                 "windows_server",
                 // D-01 adds the Android TV display-mode card. Its one row is
@@ -9286,7 +9287,10 @@ mod tests {
                 let id = requirement["id"].as_str().expect("requirement id");
                 let status = requirement["status"].as_str().expect("requirement status");
                 assert!(
-                    matches!(status, "met" | "unmet" | "unobservable"),
+                    matches!(
+                        status,
+                        "met" | "unmet" | "unobservable" | "unknown" | "unavailable"
+                    ),
                     "{id} reported an unbounded status {status}"
                 );
                 let evidence = requirement["evidence"].as_str().expect("evidence");
@@ -9321,7 +9325,11 @@ mod tests {
             .filter(|id| {
                 !matches!(
                     *id,
-                    "probe_reporter_named"
+                    "durable_store"
+                        | "durable_tools"
+                        | "durable_capacity"
+                        | "durable_scratch"
+                        | "probe_reporter_named"
                         | "stored_source_self_test"
                         | "stored_source_local_cache"
                         | "stored_source_free_space"

@@ -81,9 +81,12 @@ async function cancelDurableJob(id,button){
 async function retryDurableJob(id,button){
   button.disabled=true;
   const q=DURABLE_ACTIVITY;
-  if(!q.retries.has(id))q.retries.set(id,crypto.randomUUID());
+  if(!q.retries.has(id)){
+    if(q.retries.size>=128)q.retries.delete(q.retries.keys().next().value);
+    q.retries.set(id,crypto.randomUUID());
+  }
   try{
-    const result=await api(`/cluster/jobs/${encodeURIComponent(id)}/retry`,{method:"POST",body:JSON.stringify({request_id:q.retries.get(id)})});
+    const result=await api(`/cluster/jobs/${encodeURIComponent(id)}/retry`,{method:"POST",body:{request_id:q.retries.get(id)}});
     q.retries.delete(id);
     toast(result.analysis_request_id?"New analysis generation requested":"New durable retry requested");
     q.epoch++;q.observed=0;q.detail=null;
