@@ -197,6 +197,7 @@ CONTAINER_PATHS = (
     "plurx.example.toml",
     "rust-toolchain.toml",
     "scripts/container-smoke",
+    "scripts/container-restore-smoke",
 )
 
 
