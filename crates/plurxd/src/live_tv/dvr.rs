@@ -1783,8 +1783,12 @@ impl LiveTvManager {
             } else {
                 "worker lost"
             };
-            self.finish_row(&row, events, now, gap, None, reason, generation)
-                .await?;
+            if let Err(error) = self
+                .finish_row(&row, events, now, gap, None, reason, generation)
+                .await
+            {
+                tracing::debug!(recording = %row.id, %error, "finalization deferred to an eligible storage worker");
+            }
         }
         Ok(())
     }
@@ -2061,17 +2065,21 @@ impl LiveTvManager {
                 );
                 continue;
             }
-            self.finish_row_with_facts(
-                &row,
-                facts,
-                events,
-                now,
-                0,
-                row.stop_requested_by_user_id,
-                "stopped by a viewer",
-                generation,
-            )
-            .await?;
+            if let Err(error) = self
+                .finish_row_with_facts(
+                    &row,
+                    facts,
+                    events,
+                    now,
+                    0,
+                    row.stop_requested_by_user_id,
+                    "stopped by a viewer",
+                    generation,
+                )
+                .await
+            {
+                tracing::debug!(recording = %row.id, %error, "stopped recording finalization deferred");
+            }
             self.close_finished_transports().await;
         }
         Ok(())
@@ -2269,8 +2277,12 @@ impl LiveTvManager {
                 );
                 continue;
             }
-            self.finish_row(&row, events, now, 0, None, "capture complete", generation)
-                .await?;
+            if let Err(error) = self
+                .finish_row(&row, events, now, 0, None, "capture complete", generation)
+                .await
+            {
+                tracing::debug!(recording = %row.id, %error, "completed recording finalization deferred");
+            }
         }
         self.close_finished_transports().await;
         Ok(())
@@ -3085,11 +3097,33 @@ impl LiveTvManager {
         .map_err(|_| {
             LiveTvError::OwnerUnavailable("recording finalization authority timed out".into())
         })??;
+        let current = self
+            .store
+            .get_dvr_recording(&row.id)
+            .await
+            .map_err(store_error)?
+            .ok_or_else(|| LiveTvError::Conflict("recording was removed".into()))?;
+        if current.attempt != claim.epoch || current.state != DvrState::Recording {
+            return Err(LiveTvError::Conflict(
+                "recording changed during finalizer admission".into(),
+            ));
+        }
+        let extra_gap = if row.attempt == claim.epoch {
+            extra_gap
+        } else {
+            (now - current
+                .last_progress_ms
+                .or(current.started_at_ms)
+                .unwrap_or(current.created_at_ms)
+                / 1000)
+                .max(0)
+        };
+        let row = &current;
         let input_base = PathBuf::from(&claim.base_path);
         let base = sibling(&input_base, &format!(".f{}", claim.finalizer_epoch));
         let gap = row.gap_s + extra_gap;
         let assembled = tokio::select! {
-            result = concatenate_sealed_attempts(&input_base, &base, row.attempt) => result,
+            result = concatenate_sealed_attempts(&input_base, &base, claim.epoch) => result,
             result = self.resource_finalize_lease(&claim, finalizer_deadline) => {
                 let _ = tokio::fs::remove_file(final_path(&base)).await;
                 return result;
@@ -3122,7 +3156,13 @@ impl LiveTvManager {
             reason.to_owned()
         };
         if bytes > 0 {
-            write_sidecar(&base, row, &facts, state, bytes, gap, now).await;
+            if let Err(error) = write_sidecar(&base, row, &facts, state, bytes, gap, now).await {
+                let _ = tokio::fs::remove_file(final_path(&base)).await;
+                let _ = tokio::fs::remove_file(sidecar_path(&base)).await;
+                return Err(LiveTvError::DeviceUnavailable(format!(
+                    "recording sidecar: {error}"
+                )));
+            }
         }
         self.resource_publish(
             &claim,
@@ -3132,7 +3172,7 @@ impl LiveTvManager {
             stopped_by,
         )
         .await?;
-        for attempt in 1..=row.attempt {
+        for attempt in 1..=claim.epoch {
             let _ = tokio::fs::remove_file(attempt_path(&input_base, attempt)).await;
         }
         tracing::info!(
@@ -3697,7 +3737,8 @@ async fn write_sidecar(
     bytes: u64,
     gap_s: i64,
     now: i64,
-) {
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
     let document = serde_json::json!({
         "plurx_dvr": 1,
         "recording_id": row.id,
@@ -3731,16 +3772,15 @@ async fn write_sidecar(
         "bytes": bytes,
     });
     let path = sidecar_path(base);
-    let body = match serde_json::to_vec_pretty(&document) {
-        Ok(body) => body,
-        Err(error) => {
-            tracing::warn!(%error, "could not serialise a recording sidecar");
-            return;
-        }
-    };
-    if let Err(error) = tokio::fs::write(&path, body).await {
-        tracing::warn!(%error, path = %path.display(), "could not write a recording sidecar");
-    }
+    let body = serde_json::to_vec_pretty(&document)?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .await?;
+    file.write_all(&body).await?;
+    file.sync_all().await?;
+    Ok(())
 }
 
 /// Byte counts reaching the Store, so the Activity row's number rises without
@@ -6132,7 +6172,8 @@ mod tests {
             41,
             1_789_002_700,
         )
-        .await;
+        .await
+        .expect("sidecar");
         let parsed = plurx_core::scan::recordings::read_sidecar(&final_path(&base))
             .expect("the scan must be able to read what the engine wrote");
         let programme = parsed.programme.expect("programme");

@@ -1,7 +1,7 @@
 # Live TV cluster resource — implementation status
 
-**Status:** building · **Updated:** 2026-09-25 · **Branch:**
-`codex/live-tv-cluster-resource` · **Base:** `0915b3ee9`
+**Status:** review addressed; final fast lane pending · **Updated:** 2026-09-25 · **Branch:**
+`codex/live-tv-cluster-resource` · **Base:** `2b6cb21e6`
 
 The [implementation contract](LIVE-TV-CLUSTER-RESOURCE-IMPLEMENTATION.md)
 and [accepted design review](LIVE-TV-CLUSTER-RESOURCE-REVIEW.md) define the
@@ -19,8 +19,8 @@ The user's existing checkouts are not build or edit workspaces for this work.
 | DVR claims, storage and finalization | Implemented | Pre-I/O claims, storage identities, independent finalization, immutable publication and storage-local deletion. |
 | Guide, Activity and reminders | Building | Source-refresh lease, persistent guide copies and local worker Activity are integrated; validation pending. |
 | Developer enablement and clients | Building | Advisory Developer control and protocol 4 intents wired on web, Apple and Android. iOS/tvOS and Android compilation passed. |
-| One adversarial code review | Deferred | Only when the complete main-bound PR is ready. |
-| Fast lane and merge | Deferred | After review fixes; no repeated unit-suite runs during implementation. |
+| One adversarial code review | Complete | Five findings corrected and verified in the same independent review pass; approved for final lane. |
+| Fast lane and merge | Starting | PR #537 will be marked ready after the review-fix commit; one unit/fast-lane set, then failures only. |
 
 ## Delivery decisions
 
@@ -55,7 +55,11 @@ claims and worker integration). `8fa3dad27` contains lifecycle, client and guide
 catalog lint, formatting, workspace Clippy and served JavaScript syntax.
 Apple iOS/tvOS builds and Android application/test-source compilation pass.
 No test methods were executed by these compiler checks.
-No PR yet. No runtime tests, hardware acceptance,
+Draft [PR #537](http://192.168.4.7:3000/noirr/plurx/pulls/537) is open; all fast-lane jobs are skipped while draft. No runtime tests, hardware acceptance,
 code review, fast-lane result, merge or deployment is claimed.
 
 Latest integration: current main merged; cleanup retains deletion until file removal succeeds, capture recovery preserves base paths and finalizer epochs, lifecycle events commit with claim/publication, and Developer readiness reports each worker. Unit execution remains deferred until the final review is addressed.
+
+2026-09-25: Candidate `3486578c7` includes current main `2b6cb21e6`. The normal hook passed pinned Rust workspace Clippy/all-target compilation, formatting, catalog and JS syntax on this exact tree. One independent adversarial code review is running. No unit tests have run.
+
+Final review: four P1 findings and one P2 finding corrected and verified. The review document records each disposition. No unit execution preceded review. Physical tuner and actual predecessor-binary qualification remain unverified and are not represented as merge evidence.

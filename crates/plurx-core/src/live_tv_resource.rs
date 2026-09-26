@@ -1140,7 +1140,10 @@ fn expire(snapshot: &mut Snapshot, user_id: i64, now: i64) -> Changes {
     for record in &mut snapshot.records {
         if let Record::Start(s) = record {
             if !s.phase.terminal()
-                && ((s.phase == StartPhase::Issued && s.admission_until_ms <= now)
+                && ((matches!(
+                    s.phase,
+                    StartPhase::Issued | StartPhase::Reserved | StartPhase::Opening
+                ) && s.admission_until_ms <= now)
                     || s.ingest_id
                         .as_ref()
                         .is_some_and(|id| expired_ingests.contains(id)))
@@ -1150,6 +1153,24 @@ fn expire(snapshot: &mut Snapshot, user_id: i64, now: i64) -> Changes {
                 if s.user_id == user_id {
                     snapshot.user_history_count += 1;
                 }
+                changes.upsert.push(record.clone());
+            }
+        }
+    }
+    let terminal_starts = snapshot
+        .records
+        .iter()
+        .filter_map(|r| match r {
+            Record::Start(s) if s.phase.terminal() => Some(r.id()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for record in &mut snapshot.records {
+        if let Record::Ingest(i) = record {
+            let before = i.consumers.len();
+            i.consumers.retain(|key, _| !terminal_starts.contains(key));
+            if i.consumers.len() != before {
+                i.draining = i.consumers.is_empty();
                 changes.upsert.push(record.clone());
             }
         }

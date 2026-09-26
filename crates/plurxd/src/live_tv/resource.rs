@@ -155,6 +155,11 @@ impl LiveTvManager {
                 _ => None,
             })
             .ok_or_else(fenced)?;
+        if start.digest != start_record(request, &start.device_id, now_ms())?.digest {
+            return Err(LiveTvError::Conflict(
+                "this request ID names different playback".into(),
+            ));
+        }
         if start.phase == phase && start.worker.as_ref() == Some(&self.resource_worker()) {
             return Ok(());
         }

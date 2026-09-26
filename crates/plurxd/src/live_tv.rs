@@ -4004,15 +4004,10 @@ impl LiveTvManager {
                 serde_json::to_string(response).ok(),
             )
             .await?;
-        } else {
-            let _ = self
-                .resource_advance(
-                    &request,
-                    plurx_core::live_tv_resource::StartPhase::Failed,
-                    None,
-                )
-                .await;
         }
+        // A refused replay is not authority to fail the original operation.
+        // Spawned workers close their own claim; reservations that never
+        // spawned expire through the ledger's bounded pending-start window.
         if result.is_err() {
             self.metrics.starts_failed.fetch_add(1, Ordering::Relaxed);
         }
@@ -5415,7 +5410,7 @@ impl LiveTvManager {
             ));
         }
         let clock = resource::now_ms();
-        let guide_lease = match self
+        let mut guide_lease = match self
             .store
             .acquire_lease(
                 &format!("live-tv-guide:{}", config.generation),
@@ -5431,92 +5426,104 @@ impl LiveTvManager {
                 return Err(LiveTvError::DeviceUnavailable(format!("guide source refresh is assigned to {owner_node_id}; cached guides remain available")));
             }
         };
-        let deadline = tokio::time::Instant::now() + guide::GUIDE_REFRESH_TIMEOUT;
-        let fetch = self.fetch_guide(
-            config,
-            &channels,
-            deadline,
-            &refresh_cancel,
-            &refresh_permit,
-        );
-        tokio::pin!(fetch);
-        let watch_config = async {
-            loop {
+        let result = async {
+            let deadline = tokio::time::Instant::now() + guide::GUIDE_REFRESH_TIMEOUT;
+            let fetch = self.fetch_guide(
+                config,
+                &channels,
+                deadline,
+                &refresh_cancel,
+                &refresh_permit,
+            );
+            tokio::pin!(fetch);
+            let watch_config = async {
+                loop {
+                    tokio::select! {
+                        _ = external_cancel.cancelled() => {
+                            refresh_cancel.cancel();
+                            return;
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                    }
+                    match self.config().await {
+                        Ok(current) if current == *config => {}
+                        _ => {
+                            refresh_cancel.cancel();
+                            return;
+                        }
+                    }
+                }
+            };
+            tokio::pin!(watch_config);
+            let coordinated = async {
                 tokio::select! {
-                    _ = external_cancel.cancelled() => {
-                        refresh_cancel.cancel();
-                        return;
-                    }
-                    _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                    result = &mut fetch => result,
+                    _ = &mut watch_config => fetch.await,
                 }
-                match self.config().await {
-                    Ok(current) if current == *config => {}
-                    _ => {
-                        refresh_cancel.cancel();
-                        return;
-                    }
+            };
+            let (result, timed_out) = match tokio::time::timeout_at(deadline, coordinated).await {
+                Ok(result) => (result, false),
+                Err(_) => {
+                    refresh_cancel.cancel();
+                    (
+                        Err(LiveTvError::DeviceUnavailable(
+                            "programme guide refresh exceeded its total deadline".to_owned(),
+                        )),
+                        true,
+                    )
                 }
+            };
+            if external_cancel.is_cancelled() {
+                return Err(LiveTvError::DeviceUnavailable(
+                    "programme guide refresh stopped during shutdown".to_owned(),
+                ));
             }
-        };
-        tokio::pin!(watch_config);
-        let coordinated = async {
-            tokio::select! {
-                result = &mut fetch => result,
-                _ = &mut watch_config => fetch.await,
+            let current = self.config().await?;
+            if current != *config || (refresh_cancel.is_cancelled() && !timed_out) {
+                return Err(LiveTvError::DeviceUnavailable(
+                    "programme guide settings changed while the refresh was running".to_owned(),
+                ));
             }
-        };
-        let (result, timed_out) = match tokio::time::timeout_at(deadline, coordinated).await {
-            Ok(result) => (result, false),
-            Err(_) => {
-                refresh_cancel.cancel();
-                (
-                    Err(LiveTvError::DeviceUnavailable(
-                        "programme guide refresh exceeded its total deadline".to_owned(),
-                    )),
-                    true,
-                )
-            }
-        };
-        if external_cancel.is_cancelled() {
-            return Err(LiveTvError::DeviceUnavailable(
-                "programme guide refresh stopped during shutdown".to_owned(),
-            ));
-        }
-        let current = self.config().await?;
-        if current != *config || (refresh_cancel.is_cancelled() && !timed_out) {
-            return Err(LiveTvError::DeviceUnavailable(
-                "programme guide settings changed while the refresh was running".to_owned(),
-            ));
-        }
-        let clock = resource::now_ms();
-        if !matches!(
-            tokio::time::timeout(
+            let clock = resource::now_ms();
+            guide_lease = match tokio::time::timeout(
                 Duration::from_secs(2),
                 self.store
-                    .renew_lease(&guide_lease, clock, clock.saturating_add(300_000))
+                    .renew_lease(&guide_lease, clock, clock.saturating_add(300_000)),
             )
-            .await,
-            Ok(Ok(Some(_)))
-        ) {
-            return Err(LiveTvError::DeviceUnavailable(
-                "guide refresh authority expired before publication".into(),
-            ));
-        }
-        let outcome = if result.is_ok() { "ok" } else { "error" };
-        self.metrics
-            .observe_guide_refresh(config.guide_source, outcome);
-        let published = self
-            .guide_cache
-            .store(config.generation, sequence, &result)
-            .await;
-        // A failed refresh keeps the previous titles for as long as the cache
-        // behind them is still served.
-        if published {
-            if let Ok(guide) = &result {
-                self.metrics.observe_guide(guide.total_programmes());
-                self.publish_guide_titles(guide);
+            .await
+            {
+                Ok(Ok(Some(lease))) => lease,
+                _ => {
+                    return Err(LiveTvError::DeviceUnavailable(
+                        "guide refresh authority expired before publication".into(),
+                    ))
+                }
+            };
+            let outcome = if result.is_ok() { "ok" } else { "error" };
+            self.metrics
+                .observe_guide_refresh(config.guide_source, outcome);
+            let published = self
+                .guide_cache
+                .store(config.generation, sequence, &result)
+                .await;
+            // A failed refresh keeps the previous titles for as long as the cache
+            // behind them is still served.
+            if published {
+                if let Ok(guide) = &result {
+                    self.metrics.observe_guide(guide.total_programmes());
+                    self.publish_guide_titles(guide);
+                }
             }
+            result
         }
+        .await;
+        // Release success and ordinary failure alike. Cancellation of this
+        // future still falls back to the bounded lease expiry.
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            self.store.release_lease(&guide_lease, resource::now_ms()),
+        )
+        .await;
         result
     }
 
@@ -9834,6 +9841,28 @@ mod tests {
             worker_session.changed.notify_waiters();
         });
         session
+    }
+
+    #[tokio::test]
+    async fn refused_replay_does_not_terminalize_the_original_claim() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        let session = register_test_session(
+            &manager,
+            7,
+            &hex_request_id(40),
+            LiveTvSessionPhase::Active,
+            tokio::time::Instant::now(),
+        )
+        .await;
+        let mut changed = session.request.clone();
+        changed.channel_id = "different-channel".into();
+        assert!(manager.start_local(changed).await.is_err());
+        manager
+            .resource_session_fence(&session)
+            .await
+            .expect("original remains authorized");
+        assert!(!session.cancel.is_cancelled());
     }
 
     fn hex_request_id(seed: u8) -> String {

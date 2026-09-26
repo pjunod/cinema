@@ -261,3 +261,23 @@ hardware evidence was produced by this documentation review.
 only the plan status header and §12 verdict text to reflect that acceptance.
 The implementation contracts are unchanged. Final delivered plan SHA-256:
 `cd6cb0867c9d5e52cce8beb9b8ed72daf77aa4a0153704cafb92e20ab6dd06e3`.
+
+
+## 4. Final implementation review — PR #537
+
+One independent adversarial code review examined candidate `3486578c7`
+against main `2b6cb21e6`, followed by verification of the corrections in the
+same review pass. The reviewer executed no tests.
+
+| Finding | Correction | Disposition |
+|---|---|---|
+| P1: refused replay could fail an existing valid start | Remove unconditional caller cleanup; workers close their own claims. Check immutable payload digest on advancement. Unspawned pending starts expire and detach their consumers. | Verified by reviewer; regression added. |
+| P1: unavailable recording storage aborted unrelated scheduling | Recovery, Stop and end-of-window finalization defer individual rows when storage/claim is unavailable, allowing the remaining DVR tick to proceed. | Verified by reviewer. |
+| P1: sidecar failure could publish an unindexable recording | Require exclusive sidecar creation, complete write and fsync before manifest publication; failure retains capture inputs for retry. | Verified by reviewer. |
+| P1: stale row snapshot could omit a newer capture attempt | Re-read the recording after finalizer admission, compare its attempt with the claim, and assemble/delete through the claimed epoch. | Verified by reviewer. |
+| P2: guide refresh retained its lease after completion | Release the exact latest token after success or ordinary failure. Cancellation retains bounded expiry as fallback. | Verified by reviewer. |
+
+Final verdict: **approve the corrections for the final unit/fast-lane run**.
+No remaining blocker was identified in the corrections. This is code-review
+evidence; it does not claim runtime, physical tuner, or predecessor-binary
+qualification. The PR status page records the final test and merge result.
