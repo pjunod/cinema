@@ -335,7 +335,7 @@ async function saveLiveTvEnable(button){
   if(button)button.disabled=true;
   try{
     const saved=await api("/settings",{method:"PUT",body:{live_tv_config_generation:SETTINGS.live_tv_config_generation,
-      live_tv_enabled:document.getElementById("dev-live-tv-enable").checked},signal:AbortSignal.timeout(45000)});
+      live_tv_enabled:/** @type {HTMLInputElement} */ (document.getElementById("dev-live-tv-enable")).checked},signal:AbortSignal.timeout(45000)});
     cacheSettings(saved);toast("Live TV enablement saved");if(button)setCardSaved(button);
   }catch(e){if(err&&err.isConnected)err.textContent=e.message;if(button&&button.isConnected)button.disabled=false;}
 }
