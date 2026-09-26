@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — main reached `ea215603f` on 2026-09-26 00:03 UTC after PRs #528, #511, #530 and #405. All four nodes and installed Apple/Android Release builds still reflect prior main `8ae8cab1e136`; their exact-build receipts and closed 21:25–22:26 UTC observation hour are historical, not current-main acceptance. Bounded Chrome and Google TV interaction evidence is partial. Redeployment waits for the final code/evidence merge. · **Updated:** 2026-09-26 00:04 UTC · **Main:** `ea215603f`
+**Status:** open — main reached `71d1c1ecd` on 2026-09-26 00:20 UTC after PRs #528, #511, #530, #405 and #538. All four nodes and installed Apple/Android Release builds still reflect prior main `8ae8cab1e136`; their exact-build receipts and closed 21:25–22:26 UTC observation hour are historical, not current-main acceptance. Bounded Chrome and Google TV interaction evidence is partial. Redeployment waits for the final code/evidence merge. · **Updated:** 2026-09-26 00:24 UTC · **Main:** `71d1c1ecd`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
