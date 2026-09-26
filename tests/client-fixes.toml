@@ -1,6 +1,33 @@
 version = 1
 enforce_after = "e8a910f"
 
+# D-03's internal reader corrections need a durable source-to-test bridge.
+# The Android PDF checks below are source contracts; simulator/device behavior
+# remains separate acceptance evidence on the D-03 workboard.
+[[fixes]]
+id = "clients.book-actions-stay-inside-plurx"
+commits = ["c5396c1c7"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/DetailScreen.kt"
+source_anchor = "onReadPdf(playable.id, playable.size)"
+test = "tests/operations/test_android_credential_exposure.py"
+test_anchor = "test_mobile_book_actions_keep_account_urls_inside_plurx"
+
+[[fixes]]
+id = "android.pdf-selected-size-and-profile"
+commits = ["269f7c39b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/PdfReaderScreen.kt"
+source_anchor = "if (temporary.length() != expectedSize)"
+test = "tests/operations/test_android_credential_exposure.py"
+test_anchor = "test_pdf_download_checks_selected_size_and_profile"
+
+[[fixes]]
+id = "android.pdf-page-failure-and-scroll-reset"
+commits = ["53c450b81"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/PdfReaderScreen.kt"
+source_anchor = "bitmap?.recycle()"
+test = "tests/operations/test_android_credential_exposure.py"
+test_anchor = "test_pdf_page_error_is_local_and_scroll_resets_per_page"
+
 [[fixes]]
 id = "web.live-tv-picture-evidence"
 commits = ["148829768"]
