@@ -362,3 +362,11 @@ The failing replicated test is being rerun before the main fast lane starts.
 - Integrated main `cb67fe938` before final lane: Apple menus/runner updates
   and the equivalent upstream macOS process-priority compile fix. Queue code
   is unchanged by this merge; normal pinned compiler checks are rerun.
+
+- The offline-sharing contract now passes on both backends. Existing adapter
+  contracts passed 7/10, exposing two projection defects: staging cleanup
+  retained every past owner and fragment status ignored the queue yield delay.
+  Staging now follows only the current fence (or pre-claim migration staging),
+  and projected readiness honors both job and interest delays. The abandoned
+  owner fixture now crosses the real 30-second lease and invokes independent
+  upkeep instead of assuming the retired claim-time sweep.

@@ -66,6 +66,7 @@ impl PretranscodeJobStore for SqliteStore {
                 let mut statement = conn.prepare(
                     "SELECT id FROM pretranscode_jobs
                   WHERE staging_node_id = ?1 AND state IN ('queued', 'running')
+                    AND NOT EXISTS (SELECT 1 FROM background_jobs WHERE id = pretranscode_jobs.id)
                   ORDER BY id",
                 )?;
                 let rows = statement.query_map(params![node_id], |row| row.get(0))?;

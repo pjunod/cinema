@@ -1193,9 +1193,9 @@ impl<T: QueueSql> BackgroundJobStore for T {
             .queue_sql(
                 "SELECT json_quote(id) AS result_json FROM background_jobs job
             WHERE kind = 'transcode_prepare' AND state IN ('queued','running','cancelling')
-            AND (json_extract(job.checkpoint_json, '$.staging_node_id') = json_extract($1, '$.node_id')
+            AND ((job.fence = 0 AND json_extract(job.checkpoint_json, '$.staging_node_id') = json_extract($1, '$.node_id'))
                 OR EXISTS (SELECT 1 FROM background_job_attempts attempt WHERE attempt.job_id = job.id
-                AND attempt.owner_node_id = json_extract($1, '$.node_id')))
+                AND attempt.fence = job.fence AND attempt.owner_node_id = json_extract($1, '$.node_id')))
             ORDER BY id LIMIT 4097"
                     .into(),
                 encode(&serde_json::json!({"node_id": node_id}))?,

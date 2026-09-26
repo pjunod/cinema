@@ -834,9 +834,9 @@ BEGIN
                 AND COALESCE(interest.target_node_id, '') = cluster_fragment_index_jobs.target_node_id
                 ORDER BY interest.failed_attempts DESC, interest.updated_at_ms DESC, interest.request_scope, interest.request_id LIMIT 1), index_diagnostic_json)
             WHEN NEW.index_diagnostic_json != '' THEN NEW.index_diagnostic_json ELSE index_diagnostic_json END,
-        not_before_ms = COALESCE((SELECT MIN(interest.not_before_ms) FROM background_job_waiters interest
+        not_before_ms = MAX(NEW.not_before_ms, COALESCE((SELECT MIN(interest.not_before_ms) FROM background_job_waiters interest
             WHERE interest.job_id = NEW.id AND interest.state = 'pending'
-                AND COALESCE(interest.target_node_id, '') = cluster_fragment_index_jobs.target_node_id), NEW.not_before_ms),
+                AND COALESCE(interest.target_node_id, '') = cluster_fragment_index_jobs.target_node_id), NEW.not_before_ms)),
         last_error_code = CASE WHEN NEW.state = 'succeeded'
             AND target_node_id != json_extract(NEW.result_ref, '$.node_id') AND target_node_id != '' THEN 'awaiting_hydration'
             WHEN NEW.kind = 'fragment_index_build' THEN (SELECT interest.last_error_code FROM background_job_waiters interest WHERE interest.job_id = NEW.id

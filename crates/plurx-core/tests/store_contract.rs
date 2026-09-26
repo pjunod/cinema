@@ -18383,8 +18383,9 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
         now += 10_000;
 
         // The third charged attempt is a lease that lapses while the budget
-        // still has room: the claim sweep reclaims it back to `queued` and
-        // appends `lease_expired`. That is the branch the outage produced
+        // still has room: takeover charges the abandoned attempt, and an
+        // uncharged yield returns it to `queued` with `lease_expired` retained.
+        // That is the abandoned-owner branch the outage produced
         // 9,915 times, so it is the one most worth pinning.
         let lapsing = store
             .fixture_claim_cluster_fragment_index("history-node", &[], now, now + 1)
@@ -18392,11 +18393,27 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
             .unwrap_or_else(|error| panic!("{backend}: claim for reclaim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the job is claimable for reclaim"));
         assert_eq!(lapsing.attempts, 3, "backend {backend}");
-        now += 10_000;
-        let _ = store
+        now += plurx_core::store::background_jobs::JOB_LEASE_MS + 1;
+        let takeover = store
             .fixture_claim_cluster_fragment_index("sweeping-node", &[], now, now + 1_000)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: reclaim sweep: {error}"));
+            .unwrap_or_else(|error| panic!("{backend}: reclaim sweep: {error}"))
+            .expect("successor claims the expired owner");
+        assert_eq!(
+            takeover.attempts, 4,
+            "three charged attempts plus the live successor"
+        );
+        assert!(store
+            .fixture_yield_cluster_fragment_index(
+                &cache_key,
+                &target,
+                &takeover.owner_node_id,
+                takeover.fence,
+                now + 1,
+                now + 2
+            )
+            .await
+            .expect("yield successor"));
         let reclaimed = store
             .cluster_fragment_index_job(&cache_key, &target)
             .await
@@ -18429,12 +18446,13 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
             .unwrap_or_else(|error| panic!("{backend}: claim for lapse: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the job is claimable for lapse"));
         assert_eq!(lapsed.attempts, 5, "backend {backend}");
-        now += 10_000;
-        // Sweeping is a side effect of the next claim on any node.
-        let _ = store
-            .fixture_claim_cluster_fragment_index("sweeping-node", &[], now, now + 1_000)
+        now += plurx_core::store::background_jobs::JOB_LEASE_MS + 1;
+        // Upkeep is independent of claims, so exhaustion settles even when
+        // execution is disabled or no worker has compatible capabilities.
+        assert!(store
+            .maintain_jobs(now)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: sweep claim: {error}"));
+            .expect("reap exhausted owner"));
 
         let dead = store
             .cluster_fragment_index_job(&cache_key, &job.target_node_id)
