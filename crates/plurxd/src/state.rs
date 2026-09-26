@@ -12622,6 +12622,7 @@ mod tests {
         "scan:library:1",
         "repair:probe",
         "candidate:pretranscode",
+        "watched:outbox",
     ];
 
     /// Leases that are singletons but not *cluster* singletons, named so this
