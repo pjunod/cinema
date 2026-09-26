@@ -7530,10 +7530,13 @@ async fn probe_live_source(
     if let Some(path) = std::env::var_os("PATH") {
         command.env("PATH", path);
     }
-    let (mut child, _child_job) =
-        crate::process_control::spawn_job_owned(&mut command).map_err(|error| {
-            LiveTvError::CodecUnsupported(format!("starting bounded source probe: {error}"))
-        })?;
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::realtime("Live TV source probe"),
+    )
+    .map_err(|error| {
+        LiveTvError::CodecUnsupported(format!("starting bounded source probe: {error}"))
+    })?;
     let stdout = child.stdout.take().ok_or_else(|| {
         LiveTvError::StreamFailed("bounded source probe did not expose stdout".into())
     })?;
@@ -7632,8 +7635,11 @@ fn spawn_live_ffmpeg(
     directory: &Path,
 ) -> Result<(tokio::process::Child, crate::process_control::ChildJob), LiveTvError> {
     let mut command = live_ffmpeg_command(system, plan, directory)?;
-    crate::process_control::spawn_job_owned(&mut command)
-        .map_err(|error| LiveTvError::CodecUnsupported(format!("starting live-TV FFmpeg: {error}")))
+    crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::realtime("Live TV stream"),
+    )
+    .map_err(|error| LiveTvError::CodecUnsupported(format!("starting live-TV FFmpeg: {error}")))
 }
 
 fn live_ffmpeg_command(
@@ -8189,9 +8195,10 @@ fn session_source_format(
 
 /// The delivery to publish for `delivery`: with a `captions_advertised`
 /// reason when this node's caption probe proved the exact graph it runs.
-/// The fixture is 1080i MPEG-2 with AC-3. Only a matching source graph can use
-/// its proof; H.264 copy and other source families stay unadvertised until
-/// their own production graph has been proven on this FFmpeg build.
+/// The fixtures cover 1080i and 720p MPEG-2 with AC-3. Only a matching source
+/// graph can use its proof; H.264 copy and other source families stay
+/// unadvertised until their own production graph has been proven on this
+/// FFmpeg build.
 fn advertise_proven_captions(
     proofs: &[caption_probe::CaptionProof],
     source: &LiveSourceFacts,
@@ -8200,12 +8207,12 @@ fn advertise_proven_captions(
 ) -> LiveDeliveryPlan {
     if source.video_codec.as_deref() == Some("mpeg2video")
         && delivery.video_action == LiveTrackAction::Encode
-        && delivery.deinterlace
     {
         if let Some(proof) = proofs.iter().find(|proof| {
             Some(proof.encoder.as_str()) == encoder
                 && proof.packaging == delivery.packaging
-                && Some(proof.deinterlace) == delivery.deinterlace_output
+                && proof.deinterlace == delivery.deinterlace_output
+                && source.height == Some(proof.source_height)
                 && proof.output_height == delivery.output.height
         }) {
             delivery
@@ -9386,7 +9393,10 @@ async fn run_graph_probe(
             .map_err(|error| format!("could not build live-TV graph probe: {error}"))?;
     let output = tokio::time::timeout(
         Duration::from_secs(20),
-        crate::process_control::output_job_owned(&mut command),
+        crate::process_control::output_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::background("Live TV readiness probe"),
+        ),
     )
     .await
     .map_err(|_| "live-TV FFmpeg graph probe timed out".to_owned())?
@@ -12711,7 +12721,11 @@ Output #0, hls, to 'index.m3u8':
         );
         let mut command = tokio::process::Command::new("sleep");
         command.arg("30");
-        let (child, job) = crate::process_control::spawn_job_owned(&mut command).expect("child");
+        let (child, job) = crate::process_control::spawn_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::realtime("Live TV test child"),
+        )
+        .expect("child");
         let pid = child.id().expect("child pid");
         *session.process.lock().await = Some(LiveTvProcess {
             child,

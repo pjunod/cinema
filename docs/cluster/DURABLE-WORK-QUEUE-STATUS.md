@@ -2,7 +2,7 @@
 
 **Status:** M1/M2 worker integration in progress · **Updated:** 2026-09-26 ·
 **Branch:** `codex/durable-cluster-work` ·
-**Base:** `9f9786b2e` · **PR:** [#532 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/532)
+**Base:** `2ab0cd497` · **PR:** [#532 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/532)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -317,3 +317,13 @@ implementation is claimed; “compiled” does not mean tests passed.
   copy-video variant instead of passing an empty “whichever identity is next”
   selector. A changed source/pipeline requires a new media-analysis request,
   preventing a retry click from silently rebuilding another Dolby Vision variant.
+
+- 2026-09-26: integrated current main's transcode module split, process-priority
+  accounting and web type checker. Queue admission and publication now live in
+  the corresponding extracted modules. Appended queue migrations after main's
+  read indexes (SQLite v71, replicated v49); retained literal v47 fixtures for
+  the earlier index migration. Web types match the unchanged baseline. The
+  merged workspace all-target compile passed; final Clippy is pending.
+  Kept the queue's 30-second local refusal: its bounded candidate scan can
+  advance past busy candidates, so the old 24-hour suppression is unnecessary.
+  No tests or production deployments have run.

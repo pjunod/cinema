@@ -1485,6 +1485,8 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/page-read-budget.test.js
 	@node tests/web/theme-family.test.js
 	@node tests/web/activity-node-names.test.js
+	# Every child process is listed with its priority class and a stop (P-02 §3.2).
+	@node tests/web/activity-processes.test.js
 	@node tests/web/analysis-node-names.test.js
 	@node tests/web/settings-sections.test.js
 	@node --test tests/web/subtitle-downloads.test.js
@@ -1503,6 +1505,13 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/asset-load.test.js
 	@node tests/web/asset-layout.test.js
 	@scripts/js-check
+	# Shape, not order: TypeScript's checker (tsc, checkJs) over the same rows,
+	# against a per-file baseline that only shrinks. The file list is generated
+	# from the shell, so a new row is read the day it is served.
+	# docs/clients/WEB-TYPE-CHECKING-AND-PLAYER-DECOMPOSITION.md §3.
+	@node tests/web/jsconfig-generated.test.js
+	@scripts/web-types
+	@node tests/web/player-typedef.test.js
 	@scripts/contrast-check --from-index crates/plurxd/src/web/core/theme.js \
 		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
 		--allow scripts/contrast-allow.txt
@@ -1525,8 +1534,9 @@ docker: ## Build the container image
 	docker build --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" -t plurx/plurxd:latest .
 
 .PHONY: container-smoke
-container-smoke: docker ## Build, start, probe, restart, and re-probe the container
+container-smoke: docker ## Build, start, probe, restart, re-probe, then back up and restore the container
 	@scripts/container-smoke plurx/plurxd:latest
+	@scripts/container-restore-smoke plurx/plurxd:latest
 
 # The Compose deploy, as one command that cannot forget the stamp.
 #
@@ -1804,14 +1814,12 @@ apk: android ## Build the Android debug APK (alias for android)
 # the device trusted could read the account bearer straight out of
 # `files/datastore/plurx.preferences_pb`.
 #
-# The keystore stays wherever the vault put it on the host — never in the
-# repository, never in the image — and is bind-mounted read-only for the one
-# build. `PLURX_ANDROID_KEYSTORE` names the host path here and the mount point
-# inside the container; the three secrets ride `-e NAME`, which forwards the
-# caller's value and passes nothing when the caller has none. Gradle then
-# fails naming whichever is missing (`requiredSigningValue` in
-# clients/android/app/build.gradle.kts), so an unsigned or debug-signed
-# "release" is not a reachable outcome.
+# Both keystores and the signing lineage stay on the host, outside the repo
+# and image, and are bind-mounted read-only for the one build. Passwords and
+# aliases pass by environment variable name rather than appearing in command
+# arguments. Gradle first signs with the durable release key; the helper then
+# applies the audited lineage and verifies the effective signer at API 28 and
+# 36. Any missing input or mismatch fails before publishing an APK.
 #
 # The keystore path is resolved to an absolute one before `docker run -v`
 # sees it. Docker reads a source that is not absolute as a *volume name*: the
@@ -1819,20 +1827,30 @@ apk: android ## Build the Android debug APK (alias for android)
 # would become an empty named volume, mounted as a directory at
 # /signing/upload.jks, and the build would fail on a keystore that exists.
 .PHONY: android-release
-android-release: android-image ## Build the SIGNED Android release APK (needs PLURX_ANDROID_KEYSTORE etc.)
+android-release: android-image ## Build the lineage-signed Android release APK (needs the release and migration signers)
 	@test -n "$${PLURX_ANDROID_KEYSTORE:-}" || { echo "set PLURX_ANDROID_KEYSTORE to the upload keystore's path on this host (streamed from the vault, not stored in the repo)"; exit 1; }
 	@test -f "$${PLURX_ANDROID_KEYSTORE}" || { echo "PLURX_ANDROID_KEYSTORE=$${PLURX_ANDROID_KEYSTORE} is not a file"; exit 1; }
+	@test -f "$${PLURX_ANDROID_OLD_KEYSTORE:-}" || { echo "set PLURX_ANDROID_OLD_KEYSTORE to the audited original signer"; exit 1; }
+	@test -f "$${PLURX_ANDROID_LINEAGE:-}" || { echo "set PLURX_ANDROID_LINEAGE to the signed debug-to-release lineage"; exit 1; }
 	keystore="$$(cd "$$(dirname "$${PLURX_ANDROID_KEYSTORE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_KEYSTORE}")" && \
+	oldkeystore="$$(cd "$$(dirname "$${PLURX_ANDROID_OLD_KEYSTORE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_OLD_KEYSTORE}")" && \
+	lineage="$$(cd "$$(dirname "$${PLURX_ANDROID_LINEAGE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_LINEAGE}")" && \
 	docker run --rm \
 	  --platform $(ANDROID_PLATFORM) \
 	  -u $$(id -u):$$(id -g) -e HOME=/tmp \
 	  -e GRADLE_USER_HOME=/workspace/clients/android/.gradle-docker \
 	  -e PLURX_ANDROID_KEYSTORE_PASSWORD -e PLURX_ANDROID_KEY_ALIAS \
 	  -e PLURX_ANDROID_KEY_PASSWORD \
+	  -e PLURX_ANDROID_OLD_KEYSTORE_PASSWORD -e PLURX_ANDROID_OLD_KEY_ALIAS \
+	  -e PLURX_ANDROID_OLD_KEY_PASSWORD -e PLURX_ANDROID_RELEASE_CERT_SHA256 \
 	  -e PLURX_ANDROID_KEYSTORE=/signing/upload.jks \
+	  -e PLURX_ANDROID_OLD_KEYSTORE=/signing/old.jks \
+	  -e PLURX_ANDROID_LINEAGE=/signing/lineage.bin \
 	  -v "$$keystore":/signing/upload.jks:ro \
+	  -v "$$oldkeystore":/signing/old.jks:ro \
+	  -v "$$lineage":/signing/lineage.bin:ro \
 	  -v "$(CURDIR)":/workspace -w /workspace/clients/android \
-	  $(ANDROID_IMAGE) ./gradlew --no-daemon :app:assembleRelease
+	  $(ANDROID_IMAGE) sh -ec './gradlew --no-daemon :app:assembleRelease && python3 /workspace/scripts/sign-android-release'
 	@echo "→ clients/android/app/build/outputs/apk/release/app-release.apk"
 
 # Publishing keeps the R8 mapping of every build it serves (plan
@@ -1865,8 +1883,7 @@ android-publish: android-release ## Build the signed APK + serve it from the web
 	  cp "$(ANDROID_OUTPUTS)/apk/release/app-release.apk" "$(ANDROID_DATA_DIR)/plurx-android.apk" && \
 	  echo "R8 mapping for versionCode $$code -> $$kept"
 	@echo "Published -> $(ANDROID_DATA_DIR)/plurx-android.apk (served at /download/plurx-android.apk, no restart needed)"
-	@echo "NOTE: the signing key changed with the debug->release switch; the first"
-	@echo "      install on each device needs an 'adb uninstall tv.plurx.app' first."
+	@echo "NOTE: retain the verified release key and lineage for every future update."
 
 .PHONY: clean
 clean: ## Remove build artifacts and coverage output

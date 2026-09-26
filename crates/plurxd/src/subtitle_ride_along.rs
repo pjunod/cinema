@@ -1693,7 +1693,8 @@ fn judge_text_mks(
             bytes.len()
         ));
     }
-    let probe = std::process::Command::new(crate::ffmpeg::ffprobe_bin())
+    let mut probe = std::process::Command::new(crate::ffmpeg::ffprobe_bin());
+    probe
         .args([
             "-v",
             "error",
@@ -1705,8 +1706,12 @@ fn judge_text_mks(
             "-of",
             "default=nokey=1:noprint_wrappers=1",
         ])
-        .arg(mks)
-        .output();
+        .arg(mks);
+    // `verdicts` runs inside `spawn_blocking`, so the blocking launcher.
+    let probe = crate::process_control::output_job_owned_blocking(
+        &mut probe,
+        crate::process_control::ChildWork::background("PGS ride-along verdict probe"),
+    );
     let probe = match probe {
         Ok(output) if output.status.success() => output,
         Ok(output) => {
@@ -2828,15 +2833,21 @@ async fn run_ffmpeg(bin: &str, args: &[String], runtime_cache: &Path) -> Result<
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let output = tokio::time::timeout(SELF_TEST_STEP_BUDGET, command.output())
-        .await
-        .map_err(|_| {
-            format!(
-                "{bin} did not finish within {}s",
-                SELF_TEST_STEP_BUDGET.as_secs()
-            )
-        })?
-        .map_err(|error| format!("running {bin}: {error}"))?;
+    let output = tokio::time::timeout(
+        SELF_TEST_STEP_BUDGET,
+        crate::process_control::output_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::background("PGS ride-along self-test"),
+        ),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "{bin} did not finish within {}s",
+            SELF_TEST_STEP_BUDGET.as_secs()
+        )
+    })?
+    .map_err(|error| format!("running {bin}: {error}"))?;
     if output.stdout.len() > SELF_TEST_MAX_STDOUT_BYTES {
         return Err(format!(
             "{bin} wrote {} bytes to stdout",

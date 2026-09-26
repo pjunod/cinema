@@ -1394,6 +1394,10 @@ jobs:
             --entrypoint /usr/local/bin/plurx-cluster-check \
             "$IMAGE" build-identity)" = "$GITHUB_SHA"
           scripts/container-smoke "$IMAGE"
+      - name: Back up the running image and restore it into a fresh container
+        env:
+          IMAGE: plurx/plurxd:ci-${{ matrix.arch }}
+        run: scripts/container-restore-smoke "$IMAGE"
       - name: Retain the exact package receipt
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:

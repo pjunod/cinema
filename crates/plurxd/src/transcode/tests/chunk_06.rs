@@ -553,15 +553,13 @@
         session.first_media_handoff_applied.store(true, Release);
         reserve_test_admissions(&session, &admissions);
         let reap_pause = Arc::new(LifecycleTestPause::new());
-        *session
+        session
             .child
             .lock()
             .await
             .as_ref()
             .expect("attempt child")
-            .terminate_before_reap_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&reap_pause));
+            .pause_terminate_before_reap(Arc::clone(&reap_pause));
 
         let settlement = spawn_published_failure_cleanup_owner(
             &session,
@@ -881,14 +879,36 @@
         }
     }
 
+    /// The pause `retirement_settlement_registers_notify_before_the_wait_gap`
+    /// has always used, as a hook: the first wait to reach the point takes it
+    /// and meets the test at the barrier twice.
+    struct PausingRetirementSettlementHooks(std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>);
+
+    impl RetirementSettlementHooks for PausingRetirementSettlementHooks {
+        fn before_await_settled(&self) -> HookFuture<'_> {
+            let pause = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            Box::pin(async move {
+                if let Some(pause) = pause {
+                    pause.wait().await;
+                    pause.wait().await;
+                }
+            })
+        }
+    }
+
     #[tokio::test]
     async fn retirement_settlement_registers_notify_before_the_wait_gap() {
-        let settlement = Arc::new(RollingRetirementSettlement::new("ended"));
         let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *settlement
-            .wait_before_await_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let settlement = Arc::new(RollingRetirementSettlement::with_hooks(
+            "ended",
+            Box::new(PausingRetirementSettlementHooks(std::sync::Mutex::new(
+                Some(Arc::clone(&pause)),
+            ))),
+        ));
         let waiter = tokio::spawn({
             let settlement = Arc::clone(&settlement);
             async move { settlement.wait().await }
@@ -902,6 +922,30 @@
             .expect("registered Notify waiter must not lose completion")
             .expect("settlement waiter task")
             .expect("settlement result"));
+    }
+
+    /// M8's shipped-shape test for the retirement settlement: the production
+    /// constructor (no-op hooks) runs the race test's scenario to completion.
+    /// Acceptance runs it in the release profile
+    /// (`cargo test --release -p plurxd rolling_retirement_settlement_shipped_shape`),
+    /// where the settlement has the layout and await points the daemon ships.
+    /// The waiter is polled by hand, so the test needs no task and no timer.
+    #[tokio::test]
+    async fn rolling_retirement_settlement_shipped_shape() {
+        use futures_util::FutureExt;
+
+        let settlement = RollingRetirementSettlement::new("ended");
+        let mut waiter = Box::pin(settlement.wait());
+        assert!(
+            waiter.as_mut().now_or_never().is_none(),
+            "nothing has settled, so the waiter parks on its registered Notify"
+        );
+        settlement.complete(Ok(true));
+        assert_eq!(
+            waiter.as_mut().now_or_never(),
+            Some(Ok(true)),
+            "the parked waiter observes completion on its next poll"
+        );
     }
 
     #[tokio::test]
@@ -1327,15 +1371,13 @@
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&owner_pause));
         let reap_pause = Arc::new(LifecycleTestPause::new());
-        *session
+        session
             .child
             .lock()
             .await
             .as_ref()
             .expect("attempt child")
-            .terminate_before_reap_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&reap_pause));
+            .pause_terminate_before_reap(Arc::clone(&reap_pause));
         manager
             .sessions
             .lock()
@@ -1400,15 +1442,13 @@
             watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
         reserve_test_admissions(&session, &admissions);
         let reap_pause = Arc::new(LifecycleTestPause::new());
-        *session
+        session
             .child
             .lock()
             .await
             .as_ref()
             .expect("attempt child")
-            .terminate_before_reap_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&reap_pause));
+            .pause_terminate_before_reap(Arc::clone(&reap_pause));
         manager
             .sessions
             .lock()

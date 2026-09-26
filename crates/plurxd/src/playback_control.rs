@@ -3141,7 +3141,7 @@ pub(crate) struct PersistDesired {
     pub canonical_form: String,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ControlState {
     generation: Option<String>,
     owner_epoch: u64,
@@ -3375,6 +3375,107 @@ pub(crate) enum PreparationDirective {
     },
 }
 
+/// One control exchange as [`accept_step`] reads it: the owner tuple and
+/// sequence the request carries, and what acceptance must see of its body.
+pub(crate) struct ControlRequestView<'a> {
+    pub(crate) generation: &'a str,
+    pub(crate) owner_epoch: u64,
+    pub(crate) client_instance_id: &'a str,
+    pub(crate) sequence: u64,
+    pub(crate) acceptance: ControlAcceptance,
+}
+
+/// What an accepted or replayed exchange answers: the tuple `accept` has
+/// always returned, with its fields named.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Disposition {
+    pub(crate) disposition: ControlDisposition,
+    pub(crate) sequence: u64,
+    pub(crate) action: ControlAction,
+    pub(crate) platform: ClientPlatform,
+    pub(crate) action_suppressed: bool,
+}
+
+type DispositionTuple = (ControlDisposition, u64, ControlAction, ClientPlatform, bool);
+
+impl Disposition {
+    fn from_tuple(
+        (disposition, sequence, action, platform, action_suppressed): DispositionTuple,
+    ) -> Self {
+        Self {
+            disposition,
+            sequence,
+            action,
+            platform,
+            action_suppressed,
+        }
+    }
+
+    pub(crate) fn into_tuple(self) -> DispositionTuple {
+        (
+            self.disposition,
+            self.sequence,
+            self.action,
+            self.platform,
+            self.action_suppressed,
+        )
+    }
+}
+
+/// The owner-local control fence as a step from one state to the next.
+///
+/// It reads `state` and never writes it, and it returns the state the
+/// exchange leaves behind on **both** arms. The second half is the contract
+/// rather than a convenience: rejection has never been atomic. A first packet
+/// adopts the session's generation before its sequence or platform is
+/// judged; an owner-epoch advance resets the client sequence space before the
+/// preparation checks that can still refuse the packet; and a request's ask
+/// (`desired_digest`) is recorded before the prepared-successor observation
+/// can answer `Unavailable`. (A bound terminal acknowledgement is recorded
+/// before that observation too, but a recorded one skips the observation, so
+/// it never precedes a refusal.) `accept_step_rejection_order` pins each of
+/// the three as a row, and pins the order of the sites below pairwise. Making the
+/// fence atomic would change what a refused packet leaves behind, which is an
+/// API decision (plan §3.7), so this step preserves it.
+///
+/// The rejection sites run in this order: client-instance parse (`?`),
+/// generation, older owner epoch, an epoch advance that is not sequence 1 or
+/// carries no platform, a first packet that is not sequence 1 or carries no
+/// platform (the second a `?`), another client instance, another platform, a
+/// sequence below the last, the same sequence with another request
+/// fingerprint, a replay that drops the vocabulary its `Prepare` was issued
+/// under, the rate floor, and the prepared-successor binding (a changed
+/// payload under the bound staged identity, a binding for another staged
+/// identity, an unavailable observation). That is the fourteen `return Err`
+/// sites and two of the three `?` sites; the third, a missing client platform
+/// after the client is registered, cannot be reached because registration
+/// sets both together.
+pub(crate) fn accept_step(
+    state: &ControlState,
+    now: Instant,
+    request: ControlRequestView<'_>,
+) -> (ControlState, Result<Disposition, ControlStateError>) {
+    let ControlRequestView {
+        generation,
+        owner_epoch,
+        client_instance_id,
+        sequence,
+        acceptance,
+    } = request;
+    let mut next = state.clone();
+    let result = next
+        .accept_in_place(
+            now,
+            generation,
+            owner_epoch,
+            client_instance_id,
+            sequence,
+            acceptance,
+        )
+        .map(Disposition::from_tuple);
+    (next, result)
+}
+
 impl ControlState {
     /// Apply the second, owner-local fence after ingress or relay has proved
     /// the same tuple against the durable route. Advancing an epoch resets the
@@ -3399,6 +3500,34 @@ impl ControlState {
     }
 
     fn accept_at(
+        &mut self,
+        now: Instant,
+        generation: &str,
+        owner_epoch: u64,
+        client_instance_id: &str,
+        sequence: u64,
+        acceptance: ControlAcceptance,
+    ) -> Result<(ControlDisposition, u64, ControlAction, ClientPlatform, bool), ControlStateError>
+    {
+        let (next, result) = accept_step(
+            self,
+            now,
+            ControlRequestView {
+                generation,
+                owner_epoch,
+                client_instance_id,
+                sequence,
+                acceptance,
+            },
+        );
+        *self = next;
+        result.map(Disposition::into_tuple)
+    }
+
+    /// The fence's body, applied to the copy [`accept_step`] owns. Kept
+    /// byte-for-byte as the mutable `accept_at` was, so the step changes the
+    /// shape of the call and nothing it decides.
+    fn accept_in_place(
         &mut self,
         now: Instant,
         generation: &str,
@@ -30522,5 +30651,650 @@ mod tests {
             })
         );
         assert!(actor.latched_decode_fault().is_none());
+    }
+
+    /// The owner-local fence's rejection sites, one row each, in the order
+    /// `accept_step` reaches them (S-14 M6, plan §3.7). Each row builds the
+    /// cheapest state that passes every earlier fence, asserts the variant,
+    /// asserts that the mutable `accept_at` leaves exactly the state the pure
+    /// step returns, and asserts what the refused packet left behind: nothing,
+    /// except in the rows marked as preserved findings.
+    ///
+    /// A row that breaks one fence shows the site is reachable, not that it
+    /// runs before its neighbour, so the order itself is pinned by a second
+    /// table: for each pair of adjacent sites, a packet that breaks **both**
+    /// and must be answered (variant and residue) by the earlier one. Swapping
+    /// any two adjacent checks fails a pair row, except where the swap cannot
+    /// be observed:
+    /// - an older owner epoch / an epoch advance, a first packet / another
+    ///   client instance, a sequence below the last / the same sequence, and
+    ///   the three prepared-successor arms are exclusive branches of one
+    ///   comparison or one `match`, so no packet breaks both;
+    /// - an epoch advance without a platform / a first packet that is not
+    ///   sequence 1: an advance that is not sequence 1 is answered by the
+    ///   advance's own sequence check first, so no packet reaches both;
+    /// - another client instance / another platform: both answer
+    ///   `StaleClient` and leave nothing behind, so their order has no
+    ///   observable consequence.
+    ///
+    /// The last pair row is not adjacent: it pins that the ask lands after the
+    /// rate floor, so a rate-limited packet cannot move what the viewer is
+    /// understood to want.
+    #[test]
+    fn accept_step_rejection_order() {
+        #[derive(Clone, Copy, Debug)]
+        enum LeftBehind {
+            Nothing,
+            /// Finding, preserved: a first packet adopts the generation before
+            /// its sequence or platform is judged.
+            GenerationAdopted,
+            /// Finding, preserved: the ask lands before the prepared-successor
+            /// observation can refuse the packet.
+            AskAdvanced,
+            /// Finding, preserved: an owner-epoch advance resets the sequence
+            /// space and registers the client before the observation refuses.
+            EpochRolledOver,
+        }
+        struct Row {
+            site: &'static str,
+            state: ControlState,
+            now: Instant,
+            generation: String,
+            owner_epoch: u64,
+            client_instance_id: String,
+            sequence: u64,
+            acceptance: ControlAcceptance,
+            expected: ControlStateError,
+            left_behind: LeftBehind,
+        }
+
+        let started = Instant::now();
+        let later = started + MIN_CONTROL_INTERVAL;
+        let generation = uuid::Uuid::new_v4().to_string();
+        let client = uuid::Uuid::new_v4().to_string();
+        let web = || ControlAcceptance::new(Some(ClientPlatform::Web), None);
+        let accepted = |owner_epoch: u64| {
+            let mut state = ControlState::default();
+            state
+                .accept_at(started, &generation, owner_epoch, &client, 1, web())
+                .expect("sequence 1 accepted");
+            state
+        };
+        let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+        let successor = |media_origin_ms: i64| PreparedSuccessorAction {
+            staged_incarnation_id: staged_incarnation_id.clone(),
+            deadline_ms: i64::MAX,
+            session_id: "prepared".to_owned(),
+            playlist_url: "/api/v1/hls/prepared/index.m3u8".to_owned(),
+            media_origin_ms,
+            effective_selection: prepared_selection(),
+        };
+        let prepared = |fingerprint: Option<&str>| {
+            let mut state = ControlState::default();
+            assert!(state.stage_preparation(
+                staged_incarnation_id.clone(),
+                generation.clone(),
+                i64::MAX,
+                None,
+            ));
+            let acceptance =
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor(42_000)));
+            let acceptance = match fingerprint {
+                Some(fingerprint) => acceptance.fingerprinted(fingerprint),
+                None => acceptance,
+            };
+            let accepted = state
+                .accept_at(started, &generation, 1, &client, 1, acceptance)
+                .expect("the staged successor is announced");
+            assert!(matches!(accepted.2, ControlAction::Prepare { .. }));
+            state
+        };
+        let asked_for = selection_at(QualitySelection::Manual { height: 480 });
+        let row = |site,
+                   state,
+                   now,
+                   owner_epoch,
+                   client_instance_id: &str,
+                   sequence,
+                   acceptance,
+                   expected,
+                   left_behind| Row {
+            site,
+            state,
+            now,
+            generation: generation.clone(),
+            owner_epoch,
+            client_instance_id: client_instance_id.to_owned(),
+            sequence,
+            acceptance,
+            expected,
+            left_behind,
+        };
+
+        let rows = vec![
+            row(
+                "client instance id is not a UUID",
+                accepted(1),
+                later,
+                1,
+                "not-a-uuid",
+                2,
+                web(),
+                ControlStateError::StaleClient,
+                LeftBehind::Nothing,
+            ),
+            Row {
+                generation: uuid::Uuid::new_v4().to_string(),
+                ..row(
+                    "another generation",
+                    accepted(1),
+                    later,
+                    1,
+                    &client,
+                    2,
+                    web(),
+                    ControlStateError::StaleGeneration,
+                    LeftBehind::Nothing,
+                )
+            },
+            row(
+                "an older owner epoch",
+                accepted(2),
+                later,
+                1,
+                &client,
+                2,
+                web(),
+                ControlStateError::OwnerChanged,
+                LeftBehind::Nothing,
+            ),
+            row(
+                "an owner-epoch advance that is not sequence 1",
+                accepted(1),
+                later,
+                2,
+                &client,
+                2,
+                web(),
+                ControlStateError::StaleSequence,
+                LeftBehind::Nothing,
+            ),
+            row(
+                "an owner-epoch advance without a platform",
+                accepted(1),
+                later,
+                2,
+                &client,
+                1,
+                ControlAcceptance::new(None, None),
+                ControlStateError::StaleClient,
+                LeftBehind::Nothing,
+            ),
+            row(
+                "a first packet that is not sequence 1",
+                ControlState::default(),
+                started,
+                0,
+                &client,
+                2,
+                web(),
+                ControlStateError::StaleSequence,
+                LeftBehind::GenerationAdopted,
+            ),
+            row(
+                "a first packet without a platform",
+                ControlState::default(),
+                started,
+                0,
+                &client,
+                1,
+                ControlAcceptance::new(None, None),
+                ControlStateError::StaleClient,
+                LeftBehind::GenerationAdopted,
+            ),
+            row(
+                "another client instance",
+                accepted(1),
+                later,
+                1,
+                &uuid::Uuid::new_v4().to_string(),
+                2,
+                web(),
+                ControlStateError::StaleClient,
+                LeftBehind::Nothing,
+            ),
+            row(
+                "another platform",
+                accepted(1),
+                later,
+                1,
+                &client,
+                2,
+                ControlAcceptance::new(Some(ClientPlatform::Apple), None),
+                ControlStateError::StaleClient,
+                LeftBehind::Nothing,
+            ),
+            // Duplicate-sequence semantics, first half: N-1 after N.
+            row(
+                "a sequence below the last accepted one",
+                {
+                    let mut state = accepted(1);
+                    state
+                        .accept_at(later, &generation, 1, &client, 2, web())
+                        .expect("sequence 2 accepted");
+                    state
+                },
+                later + MIN_CONTROL_INTERVAL,
+                1,
+                &client,
+                1,
+                web(),
+                ControlStateError::StaleSequence,
+                LeftBehind::Nothing,
+            ),
+            // Duplicate-sequence semantics, second half: N with another body.
+            row(
+                "the last sequence with another request fingerprint",
+                {
+                    let mut state = ControlState::default();
+                    state
+                        .accept_at(
+                            started,
+                            &generation,
+                            1,
+                            &client,
+                            1,
+                            web().fingerprinted(&"a".repeat(64)),
+                        )
+                        .expect("sequence 1 accepted");
+                    state
+                },
+                later,
+                1,
+                &client,
+                1,
+                ControlAcceptance::new(None, None).fingerprinted(&"b".repeat(64)),
+                ControlStateError::StaleSequence,
+                LeftBehind::Nothing,
+            ),
+            row(
+                "a replay that drops the vocabulary its Prepare was issued under",
+                prepared(None),
+                later,
+                1,
+                &client,
+                1,
+                ControlAcceptance::new(None, None),
+                ControlStateError::Unavailable,
+                LeftBehind::Nothing,
+            ),
+            row(
+                "the rate floor",
+                accepted(1),
+                started + Duration::from_millis(100),
+                1,
+                &client,
+                2,
+                web(),
+                ControlStateError::RateLimited(150),
+                LeftBehind::Nothing,
+            ),
+            row(
+                "a changed payload under the bound staged identity",
+                prepared(None),
+                later,
+                1,
+                &client,
+                2,
+                ControlAcceptance::new(None, Some(&successor(43_000))),
+                ControlStateError::Unavailable,
+                LeftBehind::Nothing,
+            ),
+            // Production never builds this state: staging clears the binding.
+            // The branch is defensive, and pinned by building it directly.
+            row(
+                "a binding for another staged identity",
+                {
+                    let mut state = prepared(None);
+                    state
+                        .prepared_action
+                        .as_mut()
+                        .expect("a bound Prepare")
+                        .successor
+                        .staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+                    state
+                },
+                later,
+                1,
+                &client,
+                2,
+                ControlAcceptance::new(None, Some(&successor(42_000))),
+                ControlStateError::Unavailable,
+                LeftBehind::Nothing,
+            ),
+            row(
+                "an unavailable prepared-successor observation",
+                accepted(1),
+                later,
+                1,
+                &client,
+                2,
+                ControlAcceptance::unavailable(None).asking(&asked_for),
+                ControlStateError::Unavailable,
+                LeftBehind::AskAdvanced,
+            ),
+            row(
+                "an unavailable observation after an owner-epoch advance",
+                accepted(1),
+                later,
+                2,
+                &client,
+                1,
+                ControlAcceptance::unavailable(Some(ClientPlatform::Web)),
+                ControlStateError::Unavailable,
+                LeftBehind::EpochRolledOver,
+            ),
+        ];
+
+        let sites: Vec<&str> = rows.iter().map(|row| row.site).collect();
+        assert_eq!(sites.len(), 17, "fourteen `return Err` sites, two reachable `?` sites and one preserved rollover finding");
+
+        // Each pair row breaks two fences; the earlier one must answer.
+        let pairs = vec![
+            Row {
+                generation: uuid::Uuid::new_v4().to_string(),
+                ..row(
+                    "order: the client-instance parse before the generation",
+                    accepted(1),
+                    later,
+                    1,
+                    "not-a-uuid",
+                    2,
+                    web(),
+                    ControlStateError::StaleClient,
+                    LeftBehind::Nothing,
+                )
+            },
+            Row {
+                generation: uuid::Uuid::new_v4().to_string(),
+                ..row(
+                    "order: the generation before an older owner epoch",
+                    accepted(2),
+                    later,
+                    1,
+                    &client,
+                    2,
+                    web(),
+                    ControlStateError::StaleGeneration,
+                    LeftBehind::Nothing,
+                )
+            },
+            row(
+                "order: an epoch advance's sequence before its platform",
+                accepted(1),
+                later,
+                2,
+                &client,
+                2,
+                ControlAcceptance::new(None, None),
+                ControlStateError::StaleSequence,
+                LeftBehind::Nothing,
+            ),
+            row(
+                "order: a first packet's sequence before its platform",
+                ControlState::default(),
+                started,
+                0,
+                &client,
+                2,
+                ControlAcceptance::new(None, None),
+                ControlStateError::StaleSequence,
+                LeftBehind::GenerationAdopted,
+            ),
+            row(
+                "order: another platform before a sequence below the last",
+                {
+                    let mut state = accepted(1);
+                    state
+                        .accept_at(later, &generation, 1, &client, 2, web())
+                        .expect("sequence 2 accepted");
+                    state
+                },
+                later + MIN_CONTROL_INTERVAL,
+                1,
+                &client,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Apple), None),
+                ControlStateError::StaleClient,
+                LeftBehind::Nothing,
+            ),
+            row(
+                "order: another request fingerprint before the dropped Prepare vocabulary",
+                prepared(Some(&"a".repeat(64))),
+                later,
+                1,
+                &client,
+                1,
+                ControlAcceptance::new(None, None).fingerprinted(&"b".repeat(64)),
+                ControlStateError::StaleSequence,
+                LeftBehind::Nothing,
+            ),
+            row(
+                "order: the dropped Prepare vocabulary before the rate floor",
+                prepared(None),
+                started + Duration::from_millis(100),
+                1,
+                &client,
+                1,
+                ControlAcceptance::new(None, None),
+                ControlStateError::Unavailable,
+                LeftBehind::Nothing,
+            ),
+            row(
+                "order: the rate floor before a changed payload under the bound staged identity",
+                prepared(None),
+                started + Duration::from_millis(100),
+                1,
+                &client,
+                2,
+                ControlAcceptance::new(None, Some(&successor(43_000))),
+                ControlStateError::RateLimited(150),
+                LeftBehind::Nothing,
+            ),
+            row(
+                "order: the rate floor before the ask lands",
+                accepted(1),
+                started + Duration::from_millis(100),
+                1,
+                &client,
+                2,
+                ControlAcceptance::unavailable(None).asking(&asked_for),
+                ControlStateError::RateLimited(150),
+                LeftBehind::Nothing,
+            ),
+        ];
+        assert_eq!(
+            pairs.len(),
+            9,
+            "eight observable adjacent pairs and the ask placement"
+        );
+        for row in rows.into_iter().chain(pairs) {
+            let before = row.state.clone();
+            let request = || ControlRequestView {
+                generation: &row.generation,
+                owner_epoch: row.owner_epoch,
+                client_instance_id: &row.client_instance_id,
+                sequence: row.sequence,
+                acceptance: row.acceptance.clone(),
+            };
+            let (next, result) = accept_step(&before, row.now, request());
+            assert_eq!(result, Err(row.expected), "{}", row.site);
+
+            let mut mutable = before.clone();
+            assert_eq!(
+                mutable.accept_at(
+                    row.now,
+                    &row.generation,
+                    row.owner_epoch,
+                    &row.client_instance_id,
+                    row.sequence,
+                    row.acceptance.clone(),
+                ),
+                Err(row.expected),
+                "{}",
+                row.site
+            );
+            assert_eq!(
+                format!("{mutable:?}"),
+                format!("{next:?}"),
+                "{}: accept_at must leave exactly the state accept_step returns",
+                row.site
+            );
+            // The pre-step body itself, run in place on the caller's state as
+            // `accept_at` did before the step existed.
+            let mut in_place = before.clone();
+            assert_eq!(
+                in_place.accept_in_place(
+                    row.now,
+                    &row.generation,
+                    row.owner_epoch,
+                    &row.client_instance_id,
+                    row.sequence,
+                    row.acceptance.clone(),
+                ),
+                Err(row.expected),
+                "{}",
+                row.site
+            );
+            assert_eq!(
+                format!("{in_place:?}"),
+                format!("{next:?}"),
+                "{}: the step must leave what the in-place body left",
+                row.site
+            );
+
+            let mut residue = next.clone();
+            match row.left_behind {
+                LeftBehind::Nothing => {}
+                LeftBehind::GenerationAdopted => {
+                    assert_eq!(before.generation, None, "{}", row.site);
+                    assert_eq!(residue.generation.as_deref(), Some(generation.as_str()));
+                    residue.generation = None;
+                }
+                LeftBehind::AskAdvanced => {
+                    assert_eq!(before.desired_digest, None, "{}", row.site);
+                    assert_eq!(
+                        residue.desired_digest.as_deref(),
+                        Some(asked_for.desired().digest().as_str()),
+                        "{}",
+                        row.site
+                    );
+                    residue.desired_digest = None;
+                }
+                LeftBehind::EpochRolledOver => {
+                    assert_eq!(
+                        (before.owner_epoch, next.owner_epoch),
+                        (1, 2),
+                        "{}",
+                        row.site
+                    );
+                    assert_eq!(next.last_sequence, 0, "{}", row.site);
+                    assert_eq!(next.last_accepted_at, None, "{}", row.site);
+                    assert_eq!(
+                        next.client_instance_id,
+                        Some(uuid::Uuid::parse_str(&client).expect("uuid")),
+                        "{}",
+                        row.site
+                    );
+                    continue;
+                }
+            }
+            assert_eq!(
+                format!("{residue:?}"),
+                format!("{before:?}"),
+                "{}: the refused packet left state behind",
+                row.site
+            );
+        }
+    }
+
+    /// The accepting half of S-14 M6: a run of exchanges that are accepted,
+    /// replayed, rate-free and epoch-advancing answers the same tuples and
+    /// leaves the same state through `accept_step` as through the in-place
+    /// body `accept_at` ran before the step, and the step never writes the
+    /// state it was handed.
+    #[test]
+    fn accept_step_matches_the_in_place_fence_on_accepted_exchanges() {
+        let started = Instant::now();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let client = uuid::Uuid::new_v4().to_string();
+        let web = || ControlAcceptance::new(Some(ClientPlatform::Web), None);
+        let asked_for = selection_at(QualitySelection::Manual { height: 480 });
+        let exchanges: Vec<(Instant, u64, u64, ControlAcceptance)> = vec![
+            (started, 1, 1, web()),
+            (
+                started + MIN_CONTROL_INTERVAL,
+                1,
+                2,
+                web().asking(&asked_for),
+            ),
+            // The same sequence and body again: a replay, not a rejection.
+            (
+                started + MIN_CONTROL_INTERVAL * 2,
+                1,
+                2,
+                web().asking(&asked_for),
+            ),
+            (started + MIN_CONTROL_INTERVAL * 3, 1, 3, web()),
+            // An owner-epoch advance restarts the sequence space.
+            (started + MIN_CONTROL_INTERVAL * 4, 2, 1, web()),
+            (started + MIN_CONTROL_INTERVAL * 5, 2, 2, web()),
+        ];
+        let mut stepped = ControlState::default();
+        let mut in_place = ControlState::default();
+        let mut replays = 0;
+        for (index, (now, owner_epoch, sequence, acceptance)) in exchanges.into_iter().enumerate() {
+            let handed = format!("{stepped:?}");
+            let (next, result) = accept_step(
+                &stepped,
+                now,
+                ControlRequestView {
+                    generation: &generation,
+                    owner_epoch,
+                    client_instance_id: &client,
+                    sequence,
+                    acceptance: acceptance.clone(),
+                },
+            );
+            assert_eq!(
+                format!("{stepped:?}"),
+                handed,
+                "exchange {index}: the step wrote its input"
+            );
+            let expected = in_place.accept_in_place(
+                now,
+                &generation,
+                owner_epoch,
+                &client,
+                sequence,
+                acceptance,
+            );
+            let answered = result.map(Disposition::into_tuple);
+            assert!(
+                answered.is_ok(),
+                "exchange {index} was refused: {answered:?}"
+            );
+            assert_eq!(answered, expected, "exchange {index}");
+            assert_eq!(
+                format!("{next:?}"),
+                format!("{in_place:?}"),
+                "exchange {index}"
+            );
+            if matches!(answered, Ok((ControlDisposition::Replay, ..))) {
+                replays += 1;
+            }
+            stepped = next;
+        }
+        assert_eq!(replays, 1, "the run exercises exactly one replay");
     }
 }

@@ -2292,6 +2292,7 @@ struct PlayerView: View {
                 .frame(minWidth: 20)
         }
         .accessibilityLabel(controller.isPlaying ? "Pause" : "Play")
+        .accessibilityIdentifier("player-play-pause")
         #if os(tvOS)
         .buttonStyle(TVPlayerControlButtonStyle())
         .focusEffectDisabled()
@@ -2307,6 +2308,7 @@ struct PlayerView: View {
             Image(systemName: "goforward.10")
         }
         .accessibilityLabel("Forward 10 seconds")
+        .accessibilityIdentifier("player-skip-forward")
         #if os(tvOS)
         .buttonStyle(TVPlayerControlButtonStyle())
         .focusEffectDisabled()
@@ -2490,6 +2492,12 @@ struct PlayerView: View {
         .buttonStyle(TVPlayerControlButtonStyle())
         .focusEffectDisabled()
         .focused($focusedControl, equals: .subtitles)
+        .accessibilityIdentifier("player-subtitles")
+        .accessibilityValue(
+            controller.selectedSubtitle.flatMap { selected in
+                controller.subtitles.first(where: { $0.index == selected }).map(Self.subtitleLabel)
+            } ?? "Off"
+        )
         #endif
         }
 

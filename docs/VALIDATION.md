@@ -957,6 +957,18 @@ invalidate it. The line has two carriers and one resolver
   changes under it. The landing commit may be a Forgejo merge
   (`Merge pull request '<title>' (#N) …`), a squash (`<title> (#N)`), or an
   integration branch's `Merge plan/X (#N) at <sha>`.
+- **The default merge message.** `.forgejo/default_merge_message/MERGE_TEMPLATE.md`
+  keeps Forgejo's own subject line and adds `${PullRequestDescription}` and
+  the `Reviewed-on:`/`Reviewed-by:` lines as the body. Forgejo 16 reads it
+  from `main`'s tip. The **web** merge form is prefilled with both halves
+  and posts both, so a web merge carries every `Regression-Test:` line of
+  the description. The **API** merge (`POST …/pulls/<N>/merge`) takes only
+  the template's first line when no `MergeTitleField` is given and discards
+  its body (`routers/api/v1/repo/pull.go`); only `MergeMessageField` adds a
+  body there. An API merge of a corrective pull request must therefore
+  still pass the `--landing-lines` output as `MergeMessageField`.
+  `tests/validation/test_merge_template.py` renders the template the way
+  Forgejo does and runs both landings through the audit.
 
 The pre-merge check is what makes a typo fixable: once a landing commit
 exists it cannot be amended, and the only remaining remedy is a permanent row

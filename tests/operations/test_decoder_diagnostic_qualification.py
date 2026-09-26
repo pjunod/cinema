@@ -8,6 +8,7 @@ import runpy
 import tempfile
 import tomllib
 import unittest
+from validation.rust_modules import module_source
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -454,16 +455,14 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
                 source = ROOT / surface["source"]
                 self.assertTrue(source.is_file())
                 self.assertEqual(
-                    source.read_text(encoding="utf-8").count(surface["anchor"]),
+                    module_source(source).count(surface["anchor"]),
                     1,
                     f'{surface["id"]} must name one exact source anchor',
                 )
                 self.assertTrue(surface["obligation"])
 
     def test_every_shipping_hls_builder_is_in_the_m0_inventory(self) -> None:
-        transcode = (ROOT / "crates/plurxd/src/transcode.rs").read_text(
-            encoding="utf-8"
-        )
+        transcode = module_source("crates/plurxd/src/transcode.rs")
         self.assertEqual(
             transcode.count("transcode::hls_args("),
             3,

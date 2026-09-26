@@ -109,7 +109,11 @@ pub mod background_jobs_pretranscode;
 mod background_jobs_publication;
 #[cfg(test)]
 mod background_jobs_tests;
+pub mod classification_schedule;
+pub mod offline_claim;
+pub mod offline_expiry;
 pub mod replicated;
+pub mod watched_drain;
 
 pub use dv_conversion::{
     DvConversion, DvConversionCandidate, DvConversionMode, DvConversionProgress,
@@ -1910,6 +1914,9 @@ pub mod keys {
     /// request: missing diagnostic contracts are reported as advisory facts
     /// and never override an explicit enable.
     pub const AUTOMATIC_DECODER_RECOVERY: &str = "playback.automatic_decoder_recovery";
+    /// Operator override for HEVC copy without configuration/source proof.
+    /// Off by default. Readiness is advisory and never prevents saving it.
+    pub const HEVC_UNVERIFIED_COPY: &str = "playback.hevc_unverified_copy";
     /// Ask this node to plan into the health-qualified artifact identity, so a
     /// transcode may only be reused when its producer's own receipt says the
     /// decode was clean.
@@ -3116,6 +3123,20 @@ pub trait MediaStore: Send + Sync + 'static {
         file_id: i64,
         chapters_json: &str,
     ) -> Result<(), StoreError>;
+    /// Graft the HEVC parameter-set census (`transcode::hevc_census`) onto a
+    /// file's stored probe JSON, under its `PROBE_KEY`.
+    ///
+    /// Fenced to the source revision measured: the row must still have that
+    /// size and mtime, and a probe to graft onto, or nothing is written and
+    /// the answer is `false`. A rescan that replaced the file replaces the
+    /// probe too, so a census can never outlive the bytes it described.
+    async fn merge_file_probe_hevc_parameter_sets(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        census_json: &str,
+    ) -> Result<bool, StoreError>;
     /// Files whose probe never succeeded (`probe_json IS NULL`), oldest scan
     /// first. `library_id` narrows to one library; `None` is server-wide. These
     /// are the records the retry job and the scan's repair pass exist for —
@@ -3513,6 +3534,16 @@ pub trait WatchedOutboxStore: Send + Sync + 'static {
     async fn settle_watched(&self, entry: &OutboxEntry) -> Result<(), StoreError>;
     /// `(pending, ok, failed)` — for the settings page and `/metrics`.
     async fn watched_outbox_counts(&self) -> Result<(i64, i64, i64), StoreError>;
+    /// Whether any row *may* be due now, read from this node's local replica
+    /// without consensus and without a Raft proposal.
+    ///
+    /// A hint in both directions and never an authorization: `false` can be
+    /// a follower that has not applied a recent enqueue yet, `true` can be a
+    /// row a peer has since settled. The drain uses it only to decide whether
+    /// to ask the authority at all; [`due_watched`](Self::due_watched)'s
+    /// replicated claim stays the only thing that selects a row
+    /// (docs/cluster/REPLICATED-WRITE-RATE-HYGIENE.md §3.1).
+    async fn watched_outbox_hint(&self) -> Result<bool, StoreError>;
 }
 
 /// The pre-transcode cache: what has been produced, and where a copy is.
@@ -3902,6 +3933,18 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
         node_id: &str,
     ) -> Result<Option<OfflinePackage>, StoreError>;
 
+    /// Whether any package *may* be queued for `node_id`, read from this
+    /// node's local replica without consensus and without a Raft proposal.
+    ///
+    /// A hint in both directions and never an authorization: `false` can be
+    /// a replica that has not applied a re-home or a re-enable yet, `true`
+    /// can be a package this node has since claimed. The offline worker uses
+    /// it only to decide whether to ask the authority at all;
+    /// [`claim_next_offline_package`](Self::claim_next_offline_package)'s
+    /// replicated claim stays the only thing that binds a package to a
+    /// producer (docs/cluster/REPLICATED-WRITE-RATE-HYGIENE-II.md §3.1).
+    async fn offline_queue_hint(&self, node_id: &str) -> Result<bool, StoreError>;
+
     /// Node and claim generation fence the yield to the exact current worker.
     /// A re-homed package, or one reclaimed by the same node, must not be
     /// knocked back to `queued` by an earlier producer finishing its last part.
@@ -4039,6 +4082,19 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
     ) -> Result<bool, StoreError>;
 
     async fn expire_offline_packages(&self, now: i64) -> Result<u64, StoreError>;
+
+    /// Whether any package *may* have lapsed by `now` (`expires_at <= now`,
+    /// the predicate of [`expire_offline_packages`](Self::expire_offline_packages)),
+    /// read from this node's local replica without consensus and without a
+    /// Raft proposal.
+    ///
+    /// A hint in both directions and never an authorization: `true` can be a
+    /// replica that has not applied a renewal yet, `false` a replica that has
+    /// not applied a package at all. The expiry sweep uses it only to decide
+    /// whether to ask the authority, and the replicated sweep's own predicate
+    /// stays the only thing that deletes a package
+    /// (docs/cluster/REPLICATED-WRITE-RATE-HYGIENE-II.md §3.4).
+    async fn offline_expiry_hint(&self, now: i64) -> Result<bool, StoreError>;
 
     // --- Node removal (`CLUSTERING-PLAN.md` §6.7) -------------------------
     //
@@ -4214,6 +4270,15 @@ pub trait CoordinationStore: Send + Sync + 'static {
     ) -> Result<Option<Lease>, StoreError>;
 
     async fn release_lease(&self, lease: &Lease, now_unix_ms: i64) -> Result<bool, StoreError>;
+
+    /// This node's local, possibly stale view of `resource`'s lease expiry,
+    /// or `None` when no row is visible. No consensus and no proposal.
+    ///
+    /// A hint only: a caller may use it to *skip* an acquire while a lease is
+    /// visibly live, never to believe it holds one. A stale replica delays a
+    /// successor by its lag; it cannot grant anything, because
+    /// [`acquire_lease`](Self::acquire_lease) still decides on the authority.
+    async fn lease_expiry_hint(&self, resource: &str) -> Result<Option<i64>, StoreError>;
 }
 
 /// Durable mutations performed by singleton cluster jobs. Implementations

@@ -134,10 +134,16 @@ WEB_LAYOUT_PATHS = (
     "scripts/control-reporter-browser-check",
     "scripts/js-check",
     "scripts/themes-proposed.json",
+    "scripts/web-jsconfig",
+    "scripts/web-types",
     "scripts/ui-baseline",
     "tests/playback/player-input-contract.json",
     "tests/playback/playback-info-fields.json",
     "tests/ui-structure.golden",
+    "tests/web/jsconfig-generated.test.js",
+    "tests/web/player-typedef.test.js",
+    "tests/web/tsc-baseline.tsv",
+    "tools/web-types/**",
 )
 
 # The cargo gate cannot be affected by native-client sources: a Kotlin or
@@ -197,6 +203,7 @@ CONTAINER_PATHS = (
     "plurx.example.toml",
     "rust-toolchain.toml",
     "scripts/container-smoke",
+    "scripts/container-restore-smoke",
 )
 
 

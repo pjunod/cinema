@@ -1482,7 +1482,7 @@
         // Split rather than written out, so this test's own source does not
         // match the scan it performs.
         let marker = concat!("_cancelled", "_preparation(");
-        let source = include_str!("../../hls.rs");
+        let source = hls_product_source();
 
         /// The argument list of a call whose opening parenthesis has just been
         /// consumed: balanced, and blind to parentheses inside string literals,
@@ -1554,9 +1554,12 @@
                     reasons.insert(reason.to_owned());
                 }
                 None => {
+                    // rustfmt gives a wrapped signature a trailing comma; the
+                    // shape is the same one either way.
                     let normalized = arguments.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let normalized = normalized.trim_end_matches(',');
                     assert!(
-                        FORWARDING.contains(&normalized.as_str()),
+                        FORWARDING.contains(&normalized),
                         "a settlement is passed a reason this scan cannot read: {normalized:?}. \
                          Pass the reason as a literal at the call site, or add the new \
                          forwarding shape here deliberately.",
@@ -2379,4 +2382,26 @@
                 "test cleanup",
             )
             .await;
+    }
+
+    /// A split child logs under its parent's target. `playlist_error` moved to
+    /// `http/hls/playlist.rs`, a `#[path]` child whose default target is
+    /// `plurxd::http::hls::playlist`; the console, journald and the log view
+    /// label the line with the target, and a move does not change a log line.
+    #[test]
+    fn a_line_logged_by_an_hls_child_keeps_the_hls_target() {
+        use tracing_subscriber::prelude::*;
+        let logs = std::sync::Arc::new(crate::logbuf::LogBuffer::new(8));
+        let guard = crate::test_tracing_default(
+            tracing_subscriber::registry()
+                .with(crate::logbuf::BufferLayer(std::sync::Arc::clone(&logs))),
+        );
+        let _ = playlist_error("sess-target", PlaylistError::SessionGone);
+        drop(guard);
+        let refused = logs
+            .tail("trace", 8)
+            .into_iter()
+            .find(|entry| entry.message.contains("HLS playlist request refused"))
+            .expect("the refusal is logged");
+        assert_eq!(refused.target, "plurxd::http::hls");
     }

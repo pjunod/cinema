@@ -366,19 +366,21 @@ async fn measure_selected_decoders_inner(
     measured
 }
 
+/// Every decoder-inventory child: a capability probe nobody is waiting on.
+const INVENTORY: crate::process::ChildWork =
+    crate::process::ChildWork::background("decoder inventory probe");
+
 /// The backends this build advertises, with software always first.
 ///
 /// Advertising is an invitation to probe, not a measurement. A compiled
 /// method with no usable device is harmless here because the per-pair probe
 /// records nothing unless FFmpeg positively states that it selected it.
 async fn advertised_backends(ffmpeg_bin: &str) -> Vec<DecodeBackend> {
-    let output = bounded(
-        tokio::process::Command::new(ffmpeg_bin)
-            .kill_on_drop(true)
-            .args(["-hide_banner", "-hwaccels"])
-            .output(),
-    )
-    .await;
+    let mut command = tokio::process::Command::new(ffmpeg_bin);
+    command
+        .kill_on_drop(true)
+        .args(["-hide_banner", "-hwaccels"]);
+    let output = bounded(crate::process::output_job_owned(&mut command, INVENTORY)).await;
     match output {
         Some(Ok(output)) if output.status.success() => {
             parse_hwaccel_list(&String::from_utf8_lossy(&output.stdout))
@@ -446,30 +448,28 @@ impl Drop for ProbeClip {
 
 async fn probe_clip(ffmpeg_bin: &str, encoder: &str, clip: &std::path::Path) -> bool {
     let source = format!("testsrc=size={PROBE_SIZE}:rate={PROBE_FPS}:duration={PROBE_SECONDS}");
+    let mut command = tokio::process::Command::new(ffmpeg_bin);
+    command
+        .kill_on_drop(true)
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &source,
+            "-c:v",
+            encoder,
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            PROBE_CONTAINER,
+        ])
+        .arg(clip);
     matches!(
-        bounded(
-            tokio::process::Command::new(ffmpeg_bin)
-            .kill_on_drop(true)
-            .args([
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                &source,
-                "-c:v",
-                encoder,
-                "-pix_fmt",
-                "yuv420p",
-                "-f",
-                PROBE_CONTAINER,
-            ])
-            .arg(clip)
-            .output()
-        )
-        .await,
+        bounded(crate::process::output_job_owned(&mut command, INVENTORY)).await,
         Some(Ok(output)) if output.status.success()
     )
 }
@@ -518,15 +518,13 @@ async fn probe_decode(
             hardware_output_format(backend).expect("hardware backend has an output format"),
         ]);
     }
-    let output = bounded(
-        command
-            .arg("-i")
-            .arg(clip)
-            .args(["-frames:v", "1", "-f", "null", "-"])
-            .output(),
-    )
-    .await?
-    .ok()?;
+    command
+        .arg("-i")
+        .arg(clip)
+        .args(["-frames:v", "1", "-f", "null", "-"]);
+    let output = bounded(crate::process::output_job_owned(&mut command, INVENTORY))
+        .await?
+        .ok()?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     if backend == DecodeBackend::Software {
         output

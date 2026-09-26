@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""Evaluate K-03's replicated-write capture and attribute replicated writes.
+
+Read-only tooling for docs/cluster/REPLICATED-WRITE-RATE-HYGIENE.md §5.1.
+
+  replicated-write-capture evaluate SAMPLES.tsv [--gate-hours 12] [--json]
+      Replay the sampler's window rules over its samples.tsv and report every
+      continuous idle window, which ones meet the gate, and the M0 readout
+      (per-voter deltas and per-day rates) for each qualifying window.
+
+  replicated-write-capture attribute WAL [WAL ...] [--json]
+      Classify every entry of a copied hiqlite-wal log file by the table its
+      first SQL statement writes (and, for job_leases, by lease resource).
+      Point it at a *copy* of a node's `hiqlite/logs/*.wal`; it never opens
+      the live file for writing and it never talks to a node.
+
+The window rules are the sampler's (scripts/replicated-write-capture-sampler):
+a sample counts only when all three voters answered, every field is numeric,
+each reports itself a voter with zero pending outbox rows and no transcode,
+Live TV or protected-playback activity; an open window resets on any failing
+sample, on any build change, and on any counter going backwards. Paul set the
+gate to 12 hours on 2026-09-25 (it was 24).
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import datetime as dt
+import json
+import re
+import struct
+import sys
+from collections import Counter, OrderedDict
+
+GATE_HOURS = 12
+NODES = ("nuc4", "m6", "nynuc")
+NUMERIC = (
+    "local_is_voter",
+    "commit_index",
+    "authority_reads",
+    "writes",
+    "snapshot_builds",
+    "pending_outbox",
+    "transcode_active",
+    "live_tv_starting",
+    "live_tv_active",
+    "active_playback_entries",
+)
+IDLE_ZERO = (
+    "pending_outbox",
+    "transcode_active",
+    "live_tv_starting",
+    "live_tv_active",
+    "active_playback_entries",
+)
+MONOTONIC = ("commit_index", "authority_reads", "writes", "snapshot_builds")
+
+
+def iso(epoch: int) -> str:
+    return dt.datetime.fromtimestamp(epoch, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_ticks(lines) -> "OrderedDict[int, dict[str, dict[str, str]]]":
+    ticks: "OrderedDict[int, dict[str, dict[str, str]]]" = OrderedDict()
+    for row in csv.DictReader(lines, delimiter="\t"):
+        ticks.setdefault(int(row["epoch"]), {})[row["node"]] = row
+    return ticks
+
+
+def sample_valid(rows: dict[str, dict[str, str]], nodes=NODES) -> tuple[bool, str]:
+    if set(rows) != set(nodes):
+        return False, "missing node"
+    for node in nodes:
+        row = rows[node]
+        if row["reachable"] != "1":
+            return False, f"{node} unreachable"
+        for field in NUMERIC:
+            if not row[field].isdigit():
+                return False, f"{node} {field} not numeric"
+        if row["local_is_voter"] != "1":
+            return False, f"{node} not a voter"
+        for field in IDLE_ZERO:
+            if row[field] != "0":
+                return False, f"{node} {field}={row[field]}"
+    return True, ""
+
+
+def builds(rows, nodes=NODES) -> str:
+    return ";".join(f"{node}={rows[node]['build']}" for node in nodes)
+
+
+def windows(ticks, nodes=NODES) -> list[dict]:
+    """Every continuous idle window, exactly as the sampler would see it."""
+    found: list[dict] = []
+    current = None
+    previous = None
+    for epoch, rows in ticks.items():
+        ok, why = sample_valid(rows, nodes)
+        if ok and current is not None:
+            if builds(rows, nodes) != current["builds"]:
+                ok, why = False, "build changed"
+            else:
+                for node in nodes:
+                    for field in MONOTONIC:
+                        if int(rows[node][field]) < int(previous[node][field]):
+                            ok, why = False, f"{node} {field} went backwards"
+        if not ok:
+            if current is not None:
+                current["ended_by"] = why
+                found.append(current)
+            current = None
+            previous = None
+            continue
+        if current is None:
+            current = {
+                "start": epoch,
+                "first": rows,
+                "builds": builds(rows, nodes),
+                "samples": 0,
+                "max_gap_seconds": 0,
+            }
+        else:
+            current["max_gap_seconds"] = max(current["max_gap_seconds"], epoch - current["end"])
+        current["end"] = epoch
+        current["last"] = rows
+        current["samples"] += 1
+        previous = rows
+    if current is not None:
+        current["ended_by"] = "still open"
+        found.append(current)
+    return found
+
+
+def readout(window: dict, nodes=NODES) -> dict:
+    seconds = window["end"] - window["start"]
+    per_node = {}
+    for node in nodes:
+        first, last = window["first"][node], window["last"][node]
+        per_node[node] = {}
+        for field in MONOTONIC:
+            delta = int(last[field]) - int(first[field])
+            per_node[node][field] = {
+                "delta": delta,
+                "per_second": round(delta / seconds, 3) if seconds else None,
+                "per_day": round(delta * 86400 / seconds) if seconds else None,
+            }
+    return {"seconds": seconds, "hours": round(seconds / 3600, 2), "per_node": per_node}
+
+
+def summarize(window: dict) -> dict:
+    return {
+        "start": iso(window["start"]),
+        "end": iso(window["end"]),
+        "hours": round((window["end"] - window["start"]) / 3600, 2),
+        "samples": window["samples"],
+        "max_gap_seconds": window["max_gap_seconds"],
+        "ended_by": window["ended_by"],
+        "builds": window["builds"],
+    }
+
+
+def evaluate(lines, gate_hours: float = GATE_HOURS) -> dict:
+    ticks = load_ticks(lines)
+    found = windows(ticks)
+    gate = gate_hours * 3600
+    qualifying = [w for w in found if w["end"] - w["start"] >= gate]
+    epochs = list(ticks)
+    return {
+        "gate_hours": gate_hours,
+        "ticks": len(ticks),
+        "first_sample": iso(epochs[0]) if epochs else None,
+        "last_sample": iso(epochs[-1]) if epochs else None,
+        "windows": len(found),
+        "longest": [summarize(w) for w in sorted(found, key=lambda w: w["start"] - w["end"])[:5]],
+        "qualifying": [dict(summarize(w), readout=readout(w)) for w in qualifying],
+    }
+
+
+# --- hiqlite-wal attribution ------------------------------------------------
+
+WAL_HEADER = 7 + 1 + 8 + 8 + 4 + 4
+WRITE = re.compile(
+    rb"(INSERT OR [A-Z]+ INTO|INSERT INTO|UPDATE|DELETE FROM|REPLACE INTO)\s+([a-z_][a-z0-9_]*)",
+    re.I,
+)
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def wal_records(data: bytes):
+    """(log_id, payload) for every record, per hiqlite-wal's WalFile layout."""
+    if data[:7] != b"HQL_WAL":
+        raise ValueError("not a hiqlite-wal file")
+    # Start at the first record slot, not the header's `data_start`: a front
+    # purge only advances `data_start`, and the committed entries before it
+    # are still intact on disk. `attribute` checks the ids are contiguous.
+    offset = WAL_HEADER
+    while offset + 16 <= len(data):
+        (log_id,) = struct.unpack(">Q", data[offset : offset + 8])
+        (length,) = struct.unpack(">I", data[offset + 12 : offset + 16])
+        if log_id == 0 or length == 0 or offset + 16 + length > len(data):
+            return
+        yield log_id, data[offset + 16 : offset + 16 + length]
+        offset += 16 + length + 1
+
+
+def writer_of(payload: bytes) -> str:
+    writes = WRITE.findall(payload)
+    if not writes:
+        return "(no SQL: blank, membership or other)"
+    verb, table = writes[0][0].decode().split()[0].upper(), writes[0][1].decode()
+    if table == "job_leases":
+        text = [s.decode("latin1") for s in re.findall(rb"[\x20-\x7e]{4,}", payload)]
+        values = [
+            UUID.sub("<node>", s)
+            for s in text
+            if not s.startswith(" ") and not re.match(r"(INSERT|UPDATE|DELETE|SELECT|WITH)\b", s)
+        ]
+        resource = re.sub(r":\d+$", ":N", values[0]) if values else "?"
+        kind = "acquire" if verb == "INSERT" else "renew/release"
+        return f"job_leases {kind} {resource}"
+    suffix = f" (txn of {len(writes)})" if len(writes) > 1 else ""
+    return f"{verb} {table}{suffix}"
+
+
+def attribute(paths) -> dict:
+    seen: dict[int, str] = {}
+    for path in paths:
+        with open(path, "rb") as handle:
+            for log_id, payload in wal_records(handle.read()):
+                seen.setdefault(log_id, writer_of(payload))
+    counts = Counter(seen.values())
+    total = len(seen)
+    return {
+        "entries": total,
+        "first_log_id": min(seen) if seen else None,
+        "last_log_id": max(seen) if seen else None,
+        "contiguous": bool(seen) and max(seen) - min(seen) + 1 == total,
+        "by_writer": [
+            {"writer": writer, "entries": n, "share": round(n / total, 4)}
+            for writer, n in counts.most_common()
+        ],
+    }
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    ev = sub.add_parser("evaluate")
+    ev.add_argument("samples")
+    ev.add_argument("--gate-hours", type=float, default=GATE_HOURS)
+    ev.add_argument("--json", action="store_true")
+    at = sub.add_parser("attribute")
+    at.add_argument("wal", nargs="+")
+    at.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    if args.command == "evaluate":
+        with open(args.samples, newline="") as handle:
+            result = evaluate(handle, args.gate_hours)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(
+                f"{result['ticks']} samples {result['first_sample']} .. {result['last_sample']}; "
+                f"{result['windows']} idle windows; gate {result['gate_hours']} h"
+            )
+            for w in result["longest"]:
+                print(f"  {w['start']} .. {w['end']}  {w['hours']:6.2f} h  ended by: {w['ended_by']}")
+            print(f"{len(result['qualifying'])} window(s) meet the gate")
+        return 0 if result["qualifying"] else 1
+
+    result = attribute(args.wal)
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"{result['entries']} entries, log ids {result['first_log_id']}..{result['last_log_id']}")
+        for row in result["by_writer"][:30]:
+            print(f"  {row['entries']:7d} {100 * row['share']:5.1f}%  {row['writer']}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

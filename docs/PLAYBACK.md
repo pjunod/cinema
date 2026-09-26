@@ -12,6 +12,22 @@ repeating because every fork below inherits it: **the server's best move is to
 send the file untouched.** Transcoding is the last resort, not the default —
 and the player says so out loud in `/decision`.
 
+## HEVC header correctness
+
+Copied HEVC normally requires a complete original-header proof showing one
+unchanged VPS/SPS/PPS configuration, bound to the source held by VOD. Removing
+changed headers can alter decoded colors even though the video is copied.
+Unverified or changing configurations return typed errors instead of falling
+back to rolling copy. Progressive and rolling HEVC copy are unverified routes.
+
+Settings → Developer → **Enable HEVC copy** provides an unrestricted
+**Enable unverified HEVC copy** override. Readiness is advisory and never
+prevents saving it. Enabling can restore these routes, including files whose
+scan found changes, but can restore pink/green corruption too. It applies to
+new starts without restart. Default: off. See the
+[root cause and implementation](streaming/HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md)
+for source attestation, rollout and remaining browser qualification.
+
 ## The end-to-end path
 
 ```

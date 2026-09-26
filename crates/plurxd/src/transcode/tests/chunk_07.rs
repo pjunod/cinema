@@ -2353,6 +2353,12 @@ use crate::queue_fixture::QueueFixture;
         assert_eq!(mgr.active_sessions().await, 0);
 
         // The copy-video path likewise creates and tears down a session.
+        // This fixture tests lifecycle after admission; unverified HEVC copy
+        // requires the explicit Developer override.
+        store
+            .put_setting(keys::HEVC_UNVERIFIED_COPY, "1")
+            .await
+            .expect("allow unverified copy for lifecycle coverage");
         let info = mgr
             .start_copy(
                 file_id,
@@ -2447,6 +2453,10 @@ use crate::queue_fixture::QueueFixture;
 
         // The copy path supersedes too, and across paths: a transcode fallback
         // after a copy attempt must not leave the copy remux reading the disk.
+        store
+            .put_setting(keys::HEVC_UNVERIFIED_COPY, "1")
+            .await
+            .expect("allow unverified copy for supersession coverage");
         let copy = mgr
             .start_copy(
                 file_id,

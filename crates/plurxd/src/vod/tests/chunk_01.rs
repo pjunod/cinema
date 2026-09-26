@@ -110,7 +110,7 @@ use crate::queue_fixture::QueueFixture;
                 .expect("store rendition plan");
         }
         let store: Arc<dyn Store> = sqlite.clone();
-        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let serve = local_serve(base.path().to_path_buf(), store);
 
         serve.maintain().await;
         assert_eq!(
@@ -261,7 +261,7 @@ use crate::queue_fixture::QueueFixture;
         let video = copy_video_pipeline(&file, None, true, true, true);
         assert!(video.converts_dolby_vision());
 
-        let object_version = crate::fragment_index_cluster::inspect_source(&file)
+        let object_version = crate::fragment_index_cluster::inspect_copy_source(&file)
             .await
             .expect("source identity");
         let source_sha256 = "a".repeat(64);
@@ -370,7 +370,11 @@ use crate::queue_fixture::QueueFixture;
             .expect("selected converting artifact hydrates")
             .expect("source is already attested");
         assert_eq!(hydrated_key, cache_key);
-        assert_eq!(hydrated_version, object_version);
+        assert_eq!(
+            hydrated_version,
+            crate::fragment_index_cluster::local_object_version(&object_version),
+            "hydration returns the local fence identity, not the full-attestation memo key"
+        );
         assert_eq!(hydrated.promotion.dolby_vision, Some(record));
         assert_eq!(hydrated.rows, index.rows);
 
@@ -400,13 +404,16 @@ use crate::queue_fixture::QueueFixture;
     include!("../../vodencode_tests.rs");
 
     fn media_file_at(path: PathBuf, duration_ms: i64) -> MediaFile {
+        let metadata = std::fs::metadata(&path).ok();
+        let size = metadata.as_ref().map(|m| m.len() as i64).unwrap_or(1);
+        let mtime = metadata.and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|t| t.as_secs() as i64).unwrap_or(1);
         MediaFile {
             downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path,
-            size: 1,
-            mtime: 1,
+            size,
+            mtime,
             duration_ms: Some(duration_ms),
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
@@ -518,9 +525,10 @@ use crate::queue_fixture::QueueFixture;
             Duration::from_secs(120),
         )
         .await;
-        let IndexOutcome::Built(index) = outcome else {
+        let IndexOutcome::Built(mut index) = outcome else {
             panic!("the fixture must index: {outcome:?}");
         };
+        if let Some(proof) = index.promotion.hevc_configuration.as_mut() { proof.source_node_id = "test-local".into(); }
         let store = SqliteStore::open_in_memory().expect("store");
         store
             .put_fragment_index(file.id, &index)
@@ -529,20 +537,49 @@ use crate::queue_fixture::QueueFixture;
         (Arc::new(store) as Arc<dyn Store>, *index)
     }
 
+    fn local_serve(base: PathBuf, store: Arc<dyn Store>) -> Arc<VodServe> {
+        let cache = base.join("cluster-index");
+        VodServe::new_cluster(base, store, "test-local".into(), cache, None)
+    }
+
+    #[tokio::test]
+    async fn hevc_vod_checks_proof_before_reusing_a_cached_rendition() {
+        let file = fixture_file();
+        let (store, mut index) = store_with_index(&file).await;
+        let base = crate::test_tempdir().expect("HEVC regression fixture");
+        let serve = local_serve(base.path().to_path_buf(), Arc::clone(&store));
+        create(&serve, &file, "verified", "verified-play", &settings()).await;
+        let good = index.promotion.hevc_configuration.clone().expect("real trace proof");
+        for (name, proof, expected) in [
+            ("missing", None, "hevc_configuration_unverified"),
+            ("peer", Some(plurx_core::hevc_configuration::Proof { source_node_id: "another-node".into(), ..good.clone() }), "hevc_configuration_unverified"),
+            ("varying", Some(plurx_core::hevc_configuration::Proof { refusal: Some("changed PPS".into()), ..good }), "hevc_configuration_unsupported"),
+        ] {
+            index.promotion.hevc_configuration = proof;
+            store.put_fragment_index(file.id, &index).await.expect("HEVC regression fixture");
+            let error = serve.try_create(&request(name, 0.0), &file, &settings(),
+                VodAttribution { user_name: "user", item_title: "fixture", supersession_user: "user" }, name.into())
+                .await.expect_err("bad proof must refuse even with an existing rendition");
+            assert_eq!(crate::transcode::vod_refusal(&error).expect("HEVC regression fixture").0, expected);
+            assert!(!serve.owns(name).await);
+        }
+        serve.end("verified", Terminal::Deleted).await;
+    }
+
     async fn serve_on(base: &Path) -> (Arc<VodServe>, MediaFile) {
         serve_on_file(base, fixture_file()).await
     }
 
     async fn serve_on_file(base: &Path, file: MediaFile) -> (Arc<VodServe>, MediaFile) {
         let (store, _) = store_with_index(&file).await;
-        (VodServe::new(base.to_path_buf(), store), file)
+        (local_serve(base.to_path_buf(), store), file)
     }
 
     /// A `VodServe` with an empty store, for tests that drive internals
     /// directly against a hand-built rendition.
     fn bare_serve(base: &Path) -> Arc<VodServe> {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        VodServe::new(base.to_path_buf(), store)
+        local_serve(base.to_path_buf(), store)
     }
 
     async fn activate_control_route(store: &SqliteStore, session_id: &str, generation: &str) {
@@ -1093,7 +1130,7 @@ use crate::queue_fixture::QueueFixture;
         assert!(hit
             .produced_range
             .is_some_and(|range| (range.first..=range.last).contains(&destination.target_entry)));
-        let serve = VodServe::new(
+        let serve = local_serve(
             base.path().join("marker-telemetry"),
             Arc::clone(&store) as Arc<dyn Store>,
         );
@@ -1940,7 +1977,7 @@ use crate::queue_fixture::QueueFixture;
         let base = crate::test_tempdir().expect("base");
         let store: Arc<dyn Store> =
             Arc::new(SqliteStore::open_in_memory().expect("in-memory store"));
-        let serve = VodServe::new(base.path().join("serve"), store);
+        let serve = local_serve(base.path().join("serve"), store);
         let rendition = synthetic_rendition(base.path()).await;
         insert_control_session(
             &serve,
@@ -2370,4 +2407,32 @@ use crate::queue_fixture::QueueFixture;
                 .may_commit_preparation(&staged),
             "and the state agrees with the gate rather than contradicting it",
         );
+    }
+
+    /// A split child logs under its parent's target. The scanner moved to
+    /// `vod/discovery.rs`, a `#[path]` child whose default target is
+    /// `plurxd::vodserve::discovery`; the console, journald and the log view
+    /// label the line with the target, and a move does not change a log line.
+    #[test]
+    fn a_line_logged_by_a_vod_child_keeps_the_vodserve_target() {
+        use tracing_subscriber::prelude::*;
+        let base = crate::test_tempdir().expect("base");
+        // A plain file where the directory should be: `read_dir` fails with
+        // something other than `NotFound`, which is the logged branch.
+        let not_a_directory = base.path().join("not-a-directory");
+        std::fs::write(&not_a_directory, b"").expect("a plain file");
+        let logs = Arc::new(crate::logbuf::LogBuffer::new(8));
+        let guard = crate::test_tracing_default(
+            tracing_subscriber::registry().with(crate::logbuf::BufferLayer(Arc::clone(&logs))),
+        );
+        let found =
+            EncodedGenerationScanner::new(not_a_directory).discover("process", 1, 1, &HashSet::new());
+        drop(guard);
+        assert!(found.is_empty());
+        let refused = logs
+            .tail("trace", 8)
+            .into_iter()
+            .find(|entry| entry.message.contains("cannot discover obsolete encoded VOD generations"))
+            .expect("the failed discovery is logged");
+        assert_eq!(refused.target, "plurxd::vodserve");
     }

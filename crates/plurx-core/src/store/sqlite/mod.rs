@@ -1148,7 +1148,11 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::FILE_GRANTS_SCHEMA,
     // v69: cluster subtitle-source queue constraints and publication metadata.
     crate::store::fragment_index_cluster::SUBTITLE_SOURCE_SCHEMA,
-    // v70: common durable background work identities and ownership.
+    // v70: K-05 M5 catalogue read indexes (external-id lookup, top-level
+    // items in title order). Indexes only: no row changes, and every
+    // statement is `IF NOT EXISTS`.
+    super::sql_source::ITEM_READ_INDEXES,
+    // v71: common durable background work identities and ownership.
     super::background_jobs::SCHEMA,
 ];
 
@@ -2839,9 +2843,10 @@ mod tests {
         // both of those for the same reason they reached main first. No
         // earlier entry moved; the list stays append-only. v67 adds durable
         // downloaded captions to files. v68 adds external-reader file grants;
-        // v69 adds the cluster subtitle-source queue and publication metadata.
+        // v69 adds the cluster subtitle-source queue and publication metadata;
+        // v70 adds K-05 M5's catalogue read indexes; v71 adds the common queue.
         assert_eq!(
-            version, 69,
+            version, 71,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

@@ -1,6 +1,6 @@
 # Transcode decomposition — behaviour-preserving moves first, redesign later
 
-**Status:** executing in [PR #425](http://192.168.4.7:3000/noirr/plurx/pulls/425) · **Executes:** §4.1, §4.2, §4.9, F-stream-15,
+**Status:** executing in draft [PR #543](http://192.168.4.7:3000/noirr/plurx/pulls/543) from M7 onward (M0 to M6 came in through [PR #425](http://192.168.4.7:3000/noirr/plurx/pulls/425) and [PR #511](http://192.168.4.7:3000/noirr/plurx/pulls/511); M4 through S-05) · **Executes:** §4.1, §4.2, §4.9, F-stream-15,
 F-core-10, F-sc-12, F-hist-13, F-build-ops-codehealth-3 and -14 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 (§5.3 "this quarter", size L) · **Written:** 2026-09-20 against `main` @
@@ -445,6 +445,80 @@ expressed as effects that the manager still executes in the same order.
 The etcd shape is the reference; the joint-consensus interval (`:769-770`)
 is an explicit `promotion: Joint` state, never collapsed.
 
+**Decision D-M7 (2026-09-25, taken by the executing session under Paul's
+delegation of reasonable design decisions; Paul can overturn it).** The
+row types above did not exist when M7 opened, and the three agreement
+points are not Rust predicates over rows: `capability_ready_predicate` is
+SQL evaluated inside Raft transactions, `node_is_tombstoned` a consistent
+SQL count, and `local_node_is_committed_voter` a Raft metrics read. Two
+designs were open: (a) a row-typed read model that production reads
+through, or (b) row types used only by the projection, with a test that
+evaluates the production SQL itself over fixtures. **Chosen: (b), the
+smaller one.** (a) changes production read paths, which M7 excludes
+("projection and agreement test only"). What (b) is, concretely:
+
+- `crates/plurx-core/src/cluster/membership/lifecycle.rs` holds the row
+  types (`ClusterNodeRow`, `CapabilityRow`, `RemovalRow` with its attempt
+  ids, `PromotionRow`, `MaintenanceRow`, gathered in `NodeRows`), a
+  `RaftMembershipView` built from the accessors production calls
+  (`voter_ids()`, `nodes()`, `get_joint_config().len() > 1`), and
+  `observed_lifecycle(NodeRows, &RaftMembershipView) -> LifecycleView`.
+  Nothing in the daemon calls it.
+- The test writes fixtures into the production table definitions (the
+  `CREATE TABLE` statements of `MEMBERSHIP_SCHEMA` plus the additive
+  columns; the triggers are left out because they need the coordinator's
+  intent rows), reads the rows back into those types, and compares the
+  projection with the production predicate functions and constants
+  themselves, never copies.
+- Production reads are unchanged. The tombstone count moved verbatim from
+  an inline literal into `NODE_TOMBSTONED_SQL` so the test can run the same
+  text, and `local_node_is_committed_voter` calls
+  `lifecycle::committed_voter`, which is its old
+  `voter_ids().any(|id| id == raft_id)` rule. After the review of #543 three
+  more literals moved verbatim the same way (`NODE_MAINTENANCE_COUNT_SQL`,
+  `NODE_PROMOTION_COUNT_SQL`, `EXISTING_REMOVAL_ATTEMPT_SQL`), and the
+  metrics read `local_node_is_committed_voter` passes to that rule is the
+  `committed_voter_ids!` macro (`membership_config.voter_ids()`, as before),
+  so the test applies the same read to the `StoredMembership` values it
+  builds. A macro, because `openraft` is a dev-dependency of `plurx-core`
+  and production code cannot name its type. No SQL text changed.
+- What the test agrees, dimension by dimension (after the review of #543;
+  the first version asserted neither `maintenance` nor the attempt set, and
+  compared the committed-voter verdict with the projection's own rule):
+  readiness and `join` against `capability_unready_node_predicate` and
+  `capability_ready_predicate`; the tombstone against `NODE_TOMBSTONED_SQL`;
+  the attempt set of a removal in progress against the three reads
+  production makes of it (`ROLLBACK_REMOVAL_FENCE_SQL` needs it empty,
+  `BEGIN_REMOVAL_INTENT_SQL` needs one attempt in it,
+  `EXISTING_REMOVAL_ATTEMPT_SQL` returns its least attempt);
+  `durable_role` against `admitted_learner_nodes_sql`; a maintenance request
+  against `NODE_MAINTENANCE_COUNT_SQL` and `Acknowledged` on an active node
+  against `EXIT_MAINTENANCE_SQL` itself, run in a rolled-back savepoint with
+  its other preconditions made true; `membership` against
+  `committed_voter_ids!`. **Not agreed, because production has no reader
+  for them:** `promotion`'s `Started` / `Barrier` / `Joint` split (only the
+  audit row's existence is read, and that is agreed against
+  `NODE_PROMOTION_COUNT_SQL`; nothing reads `barrier_index` back), the
+  attempt set of a tombstoned node (the references are left behind on
+  purpose and no removal read consults them again), and `Acknowledged` on a
+  tombstoned node. The test pins the promotion split to this section's
+  specification; that is not an agreement with production, and the
+  transition PR must not treat it as one.
+- Dimensions beyond the list above, because the predicates read them:
+  `durable_role` (the `role` column; `admitted_learner_nodes_sql` reads it)
+  and `join` (the staging row, which `capability_unready_node_predicate`
+  exempts). `promotion` gains `Started` (an audit row whose `barrier_index`
+  is still NULL). `Joint` is taken from the committed Raft configuration
+  while the audit row exists, so the joint interval stays its own state.
+- "Agreed with production for a release" is read as: the agreement test is
+  in the tree and green for one release before the transition PR. No
+  production shadow comparison is added, because that needs the production
+  reads (a) would add.
+
+To overturn it: choose (a), or add a shadow comparison, before the
+transition PR is opened. The projection and its test stay useful either
+way.
+
 ### 3.9 Test-seam migration
 
 **Census script** (checked into `validation/cfg_test_census.py` by §5.1;
@@ -456,12 +530,12 @@ reproduced here so the numbers in §2.6 can be re-run):
 import collections, pathlib, re, sys
 ROOT = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".")
 CLASSES = [
-    ("module", re.compile(r"^\s*(pub(\(crate\))?\s+)?mod\s+\w+\s*[;{]")),
-    ("use", re.compile(r"^\s*(pub(\(crate\))?\s+)?use\s")),
-    ("type", re.compile(r"^\s*(pub(\(crate\))?\s+)?(struct|enum|type|trait|const|static)\s")),
+    ("module", re.compile(r"^\s*(pub(\([^)]*\))?\s+)?mod\s+\w+\s*[;{]")),
+    ("use", re.compile(r"^\s*(pub(\([^)]*\))?\s+)?use\s")),
+    ("type", re.compile(r"^\s*(pub(\([^)]*\))?\s+)?(struct|enum|type|trait|const|static)\s")),
     ("impl", re.compile(r"^\s*impl\b")),
-    ("fn", re.compile(r"^\s*(pub(\(crate\))?\s+)?(async\s+)?fn\s")),
-    ("field", re.compile(r"^\s*(pub(\(crate\))?\s+)?\w+\s*:\s*[^=]")),
+    ("fn", re.compile(r"^\s*(pub(\([^)]*\))?\s+)?(async\s+)?fn\s")),
+    ("field", re.compile(r"^\s*(pub(\([^)]*\))?\s+)?\w+\s*:\s*[^=]")),
     ("statement", re.compile(r"^\s*(let|if|match|for|while|loop|return|\w+[\.\(]|\{|\*)")),
 ]
 def classify(line):
@@ -499,7 +573,33 @@ every method is an empty `async fn` or returns `Duration::ZERO`); tests
 install the pausing implementation that today's barriers become. The
 struct then has the same layout in both builds (one `Arc<dyn Hooks>`), and
 the `.await` on a hook is a cancellation point in both builds — the
-no-op future is `Ready` and costs one poll. Where a seam is not a pause
+no-op future is `Ready` and costs one poll. **As built (M8's first owner,
+#543):** each owner gets its own small trait named for its points, held as
+`Box<dyn …Hooks>` (`RollingRetirementSettlement` holds
+`Box<dyn RetirementSettlementHooks>`, production installs
+`NoopRetirementSettlementHooks`), not one shared `Hooks` behind an `Arc`.
+The owners' points do not overlap, and boxing the zero-sized no-op
+allocates nothing. Later owners follow the per-owner shape unless their PR
+records why not. **As built ([#556](http://192.168.4.7:3000/noirr/plurx/pulls/556)):** `AttemptChild` holds
+`Arc<dyn AttemptChildHooks>` and `DecodeFactSource` holds
+`Arc<dyn DecodeFactSourceHooks>` — `Arc`, not `Box`, because the child and
+its supervisor task both hold the hooks and the source is `Clone`. Two of
+`AttemptChild`'s three points (`after_signal_authorization`,
+`after_flow_reservation`) are synchronous methods: they sit inside the
+producer transition fence, where the old seams blocked on a
+`std::sync::Barrier` and neither build has an await point. The test pauses
+at those two points are a bounded `SupervisorPause`, not a barrier: the
+held supervisor blocks a runtime worker thread, which a runtime drop cannot
+cancel, so a race test that fails while it is held must release it (a
+guard that releases on drop, including while unwinding) and a supervisor
+whose test never arrives lets itself go after 10 s. The hook trait
+has `Any` as a supertrait so a test can reach the pauses installed on a
+child it did not construct (the test-only `AttemptChild::new` installs
+them; production `new_with_job` installs the no-op). `DecodeFactSource`'s
+`#[cfg(not(test))]` getter twins are gone: both builds read the delay from
+the hook. The census script above now accepts any `pub(...)` restriction;
+it matched only `pub(crate)`, so `pub(super) fn` lines were counted as
+statements. Where a seam is not a pause
 but an *alternate implementation* (`#[cfg(not(test))]` twins), the
 production body becomes the only body and the test variant becomes a
 hook return value. The `fail` crate is the alternative for statements
@@ -527,7 +627,15 @@ shape runs the same test scenario to completion).
 
 1. **A move PR changes no behaviour.** No lock order, `.await`, error
    string, log line, metric or constant changes. The identity script is
-   the proof; a PR whose script prints a hunk is not a move PR.
+   the proof; a PR whose script prints a hunk is not a move PR. A log
+   line's *target* is part of the line and is outside what reassembly can
+   see: a `#[path]` child's default tracing target is its own
+   `module_path!()`, so every event a move puts in a child names its
+   parent's target explicitly (`target: "plurxd::transcode"`,
+   `"plurxd::http::hls"`, `"plurxd::vodserve"`), the identity script
+   removes exactly those pins before comparing, and
+   `split_children_log_under_their_parent_target` walks the child
+   directories to keep it so (review of #511, finding 4).
 2. **No `pub(crate)` widening to make a move compile** (rule 2). Child
    modules and `pub(super)` only; the PR body lists the `pub(super)`s.
 3. **Spawn unification, `accept_step`, `NodeLifecycle` and seam migration
@@ -649,9 +757,13 @@ changed.
 Order: `RollingRetirementSettlement` (1 field, 1 statement pair) →
 `AttemptChild` (3 fields) → `Encoding.admission_pause` →
 `DecodeFactSource` delays → the `playback_control.rs` seams → the
-`hls.rs` fault helpers. One owner per PR; each PR migrates the seam,
+`hls.rs` fault helpers. **Done:** `RollingRetirementSettlement` (#543),
+`AttemptChild` and `DecodeFactSource` (#556; `DecodeFactSource` taken ahead
+of `Encoding`, whose design question is in the execution log). One owner
+per PR; each PR migrates the seam,
 keeps the race test through the hook, and adds a release-profile
-integration test running the same scenario with `NoopHooks`.
+integration test running the same scenario with `NoopHooks`. The §7 Q3
+`syn` pass is owed by the `AttemptChild` PR, not the first one (see §7).
 
 Acceptance per PR: `python3 validation/cfg_test_census.py .` shows the
 owner's `field` and `statement` counts at zero; the race tests it names
@@ -684,8 +796,48 @@ still pass; `cargo test --release -p plurxd <owner>_shipped_shape` green;
    wrong owner; if not, T12 stops at `manager.rs` as one file and the
    further cut becomes its own PR.
 3. How many of the 153 `statement` seams are pauses (hook candidates)
-   versus one-shot faults (`fail` candidates); the `syn` pass in M8's
-   first PR answers it, and the split of the M8 PRs follows the answer.
+   versus one-shot faults (`fail` candidates). **Answered 2026-09-26
+   ([#556](http://192.168.4.7:3000/noirr/plurx/pulls/556)).** The `syn` pass is
+   `crates/plurxd/src/transcode/tests/seam_census.rs`;
+   `cargo test -p plurxd --bin plurxd seam_census -- --nocapture` prints
+   the table. (#543's one owner, a single `Barrier` pause, was classified
+   by reading.) It parses every production file under `crates/*/src`, skips
+   files reached only through a `#[cfg(test)]` module or `include!`, and
+   `#[cfg(test)]`/`#[test]` items, and classifies each gated statement in a
+   shipping function by what it does (`#[cfg(all(test, ..))]` counts as
+   gated). After this PR's two migrations, of the
+   158 gated statements: **48 pause** (a wait on a rendezvous or a
+   delay: `wait`, `notified`, `recv`, `acquire`, `sleep`, or awaiting a
+   held receiver), **17 fault** (an injected `Err`, `?` on a
+   test-only call, `panic!` or a `pending()` hang), 15 override (a
+   substituted value or an early `return` of a test-supplied result, an
+   alternate implementation rather than a fault), 34 record (counters,
+   pushes, notifications with no wait) and 44 plumbing (a `let` that
+   carries a slot to one of the others). Beside them: 97 gated struct fields
+   and enum variants, 104 struct-literal initialisers and 19 `match`
+   arms, each counted against its owner. (The line census's 153 was never
+   this population: it counts every literal `#[cfg(test)]` line, including
+   test-only files, initialisers and arms.)
+
+   **What follows for the remaining M8 PRs.** Pauses dominate, so the
+   per-owner hook trait stays the default shape. The one-shot faults are
+   concentrated: 7 of the 17 are `dv_disk.rs`'s injected filesystem
+   failures, one in each filesystem step of the Dolby Vision disk
+   replacement (link, rename, unlink, restore, scratch removal) — one
+   module, and the natural candidate for the `fail`-style cargo feature on
+   the `scratch-fault-injection` precedent rather than a trait; the rest are single sites spread over `live_tv.rs`,
+   `decode_facts.rs`, `http/hls/{control,release}.rs`, `offline.rs`,
+   `transcode/manager/produce.rs` and `cluster/migration.rs` (beside its
+   existing `PLURX_CLUSTER_ACTIVATION_FAILPOINT` env failpoint), each
+   migrated with its owner. The
+   `playback_control.rs` owners are mostly plumbing and arms around a few
+   pauses, so they are trait migrations; the `hls.rs` "fault helpers"
+   named in §5.9 are `fn`-class helpers whose consuming statements are
+   mostly pauses (`release_session`, `settle_preparation_control`) with one
+   fault each in `control_local_with_settlement_capacity` and
+   `end_media_session_for_release`. The override and record classes are
+   not lifecycle seams by §3.9's rule unless their owner's layout matters;
+   they are left to their owners' PRs.
 4. Whether Paul wants the §3.6 registry evaluation written at all this
    quarter, or the duplication documented as intentional now.
 
@@ -704,3 +856,22 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [#425](http://192.168.4.7:3000/noirr/plurx/pulls/425) | Pinned Rust 1.97.1 established. Census: module 183, fn 255, field 173, statement 156, type 31, impl 13, use 8, other 35 (all within the plan's ±5 bound). The parameterized identity template reports `OK` against the exact branch base/current parent source. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | [#425](http://192.168.4.7:3000/noirr/plurx/pulls/425) | Moved the `transcode`, `http::hls`, and `vodserve` inline test modules into same-path include chunks below 3,000 lines; moved `pretranscode_renewal_tests` alongside them. The exact base/head test-name lists are byte-identical at 2,454 tests. `scripts/split-identity 9deb58a2 --plan` expands each child manifest at an explicit parent marker, reverses only the five checked relative-path relocations, and reconstructs all three parents byte-for-byte; affected all-target check and one focused test from each moved region pass. The current one-plan/one-PR protocol chooses the plan's allowed combined-review form rather than three milestone PRs. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 / T2 | [#425](http://192.168.4.7:3000/noirr/plurx/pulls/425) | Moved the complete segment-index leaf region to `transcode/rolling/segment_index.rs`. Parent access is restored only with 40 checked `pub(super)` additions; no crate visibility widened. The same marker-expanded identity command strips exactly the structural child header and those 40 additions, then reconstructs the complete base parent byte-for-byte. Pinned all-target check and the shrink, concurrent-observation, and prune/append regressions pass. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 / T3-T7 | [#511](http://192.168.4.7:3000/noirr/plurx/pulls/511) | `c9dcbef4f`: five contiguous leaf regions moved verbatim into `transcode/rolling/flow.rs`, `producer/spawn.rs`, `rolling/prepublication.rs`, `rolling/retirement.rs` and `producer/attempt_child.rs`, plus `producer/prepublication_executor.rs` for the base region no §3.2 row mapped (named T6b). Parent reach restored with `pub(super)` only (196 additions, counted per child) and two re-exports at their existing `pub` visibility. `scripts/split-identity 0e2c3fd47 --moves` reports `OK` for `transcode.rs`. Test-name list byte-identical to the base (2,780 names). |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 / T8-T12 | [#511](http://192.168.4.7:3000/noirr/plurx/pulls/511) | `09850da65`: session, response, request and manager regions moved into `rolling/publication.rs`, `rolling/session.rs`, `response.rs`, `hls_codecs.rs`, `cluster_adoption.rs`, `session_request.rs`, `requests.rs`, `pretranscode/{source,parts}.rs`, `rate_control.rs`, `rolling/retention.rs`, `ladder.rs`, `test_support.rs` and `manager/*.rs`. `transcode.rs` was 1,802 lines at this commit (1,810 after the main merges; acceptance: under 2,000). §7 Q2 answered: the `impl TranscodeManager` block had one section comment, so it is cut at method-group boundaries into ten contiguous impl blocks, order preserved, no method changed. Items reached as `crate::transcode::X` keep that path through glob re-exports, which clamp each item to its own visibility, so none widens. Identity `OK` against `0e2c3fd47`. **Deviation, recorded after the review of #511 (finding 5):** two items §3.2 assigns to M3 stayed in `transcode.rs`. `StartInfo` (T11, target `session_request.rs`) sits between the `hls-codecs` and `cluster-adoption` markers, and `probe_media_origin` (§3.2: moves with T12's `plan` block) sits with its inline test between the `response` and `hls-codecs` markers, far from the `impl TranscodeManager` region. A child here is one contiguous region reassembled at one marker, so moving either into its destination would reorder the parent and needs its own identity recipe; neither was moved. The parent also still holds about 30 free functions (error-string constructors, `session_log_id` and the ffmpeg log helpers, the live-recovery counters, `probe_media_origin`) and several structs (`Progress`, `BoundPlanCaller`, `RecentMarkerAmbiguityLedger`, `HttpWaitLedger`, `TranscodeMetrics`, `CodecQualificationMetrics`, `MediaNodeRuntime`, `MediaOfferProbe`, `RollingTerminalAdmission`), so M3's qualitative acceptance ("declarations, re-exports, constants and the manager struct only") is **not met**; the line criterion is. Moving them is a follow-up move PR, not done here. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 | [#511](http://192.168.4.7:3000/noirr/plurx/pulls/511) | Not executed in this plan. S-05 [FFMPEG-SPAWN-UNIFICATION](FFMPEG-SPAWN-UNIFICATION.md) delivered §3.5 first ([#415](http://192.168.4.7:3000/noirr/plurx/pulls/415), `e12f0c023`, `fe6067748`): VOD generation, head regeneration and progressive remux spawn through `producer_spawn::spawn`, which applies `configure_ffmpeg_runtime`, and one progress-key classifier lives in `plurx_core::transcode::progress`. This plan's `transcode/producer/spawn.rs` is the rolling path's move and changes none of that. **needs:** the §5.5 fleet observation, which is S-05's M3 fleet check and is recorded once, there. GPT prompt: *On media1 (Docker) after deploying a build that contains #415: start Harbor Lights as an encoded VOD session with the text subtitle track burned in; paste `cat /proc/$(pgrep -n -f 'ffmpeg.*dev/fd/3')/environ \| tr '\0' '\n' \| grep -E 'XDG_CACHE_HOME\|AV_LOG_FORCE_NOCOLOR'` (both must be present), and the time to first segment for this start and a second start of the same title; then start a progressive remux from the web client and paste the same grep for its ffmpeg. Record the result in S-05's and this plan's execution logs through one evidence-only docs PR.* |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 / H2-H8, V2-V9 | [#511](http://192.168.4.7:3000/noirr/plurx/pulls/511) | `0dfe5b1c8`: every product region of `http/hls.rs` (now 191 lines) and `vodserve.rs` (728 lines at this commit, 751 after the main merges) moved verbatim into `http/hls/*.rs` and `vod/*.rs`; `impl VodServe` is cut at method boundaries into six contiguous impl blocks under `vod/serve/`. Three relocations, each reversed exactly by `scripts/split-identity 0e2c3fd47 --moves`, which reports `OK` for both parents: hls.rs's `pub(super)` written `pub(in crate::http)` (or `pub(in crate::http::hls)` inside `plan_derivation`) in a child (the same 21 sites), one extra `super::` on 13 sibling paths, and the parent-reach `pub(super)`s counted per child. `http/hls/subtitles.rs` did not move (guardrail 9). |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Source scans | [#511](http://192.168.4.7:3000/noirr/plurx/pulls/511) | `37375df70`: `validation/rust_modules.py` `module_source(path)` reassembles a split parent (children at their `// split:` markers, split plumbing removed) so the Python inventories that pin anchors or counts in the three parents read the same text as before; no pinned count or anchor changed. `9bb321474`: two Rust scans updated - `the_roster_reader_has_exactly_these_callers` walks every non-test child under `http/` (proved by planting a roster read in `http/hls/status.rs`: the test fails naming it), and the hls cancellation-reason scan accepts the rustfmt-wrapped forwarding signature's trailing comma. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 | [#511](http://192.168.4.7:3000/noirr/plurx/pulls/511) | `043f8751a`: `accept_step(&ControlState, Instant, ControlRequestView) -> (ControlState, Result<Disposition, ControlStateError>)`; `accept_at` is the step plus `*self = next`, and the fence body moved unedited into `accept_in_place`. **Deviation from §3.7's signature, recorded as the finding §3.7 asks for:** rejection is not atomic, so the step returns the next state on both arms. Three sites change state before refusing and are preserved, not fixed: a first packet adopts the generation before its sequence or platform is judged; an owner-epoch advance resets the sequence space and registers the client before the prepared-successor observation refuses; a request's ask (`desired_digest`) is recorded before an `Unavailable` observation refuses. `accept_step_rejection_order` has 17 rows in `return Err` order: the 14 `return Err` sites, the two reachable `?` sites (the third, a missing platform after registration, is unreachable) and the rollover finding; duplicate sequences are two rows and the 250 ms floor is one. The floor orders one client's packets; it does not prove concurrent requests cannot reorder. `accept_step_matches_the_in_place_fence_on_accepted_exchanges` pins equivalence on accepted, replayed and epoch-advancing exchanges and that the step never writes its input. No `ControlStateError` variant or text changed. Proof: making `accept_at` drop the stepped state fails the table test. **Review of #511 (finding 1):** a row that breaks one fence shows the site is reachable, not that it runs before its neighbour, and swapping the platform check with the sequence floor, or lifting the rate floor above the replay block, left both M6 tests green. The table test now also sends, for each of the eight adjacent pairs one packet can break together, a packet that breaks both and asserts that the earlier site answers (variant and residue), plus one row pinning that the ask lands after the rate floor; both review mutations fail it (run). The adjacent pairs whose order cannot be observed (exclusive branches, or `StaleClient` from both with nothing left behind) are listed in the test's doc comment. The `accept_step` doc comment no longer names a fourth non-atomic site (finding 2): a recorded terminal acknowledgement skips the observation, so it never precedes an `Unavailable`. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M7 | [#511](http://192.168.4.7:3000/noirr/plurx/pulls/511) | Not opened. §3.8 names `ClusterNodeRow`, `PromotionRow` and `MaintenanceRow` inputs that do not exist in `plurx-core/src/cluster/membership.rs`: `capability_ready_predicate` is a SQL fragment evaluated inside Raft transactions, `node_is_tombstoned` a consistent SQL count, and `local_node_is_committed_voter` a Raft metrics read. An agreement test therefore needs either a row-typed read model or a harness that evaluates those SQL predicates over fixtures - a design choice for the session that opens M7, not a move. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M8 | [#511](http://192.168.4.7:3000/noirr/plurx/pulls/511) | Not opened. Each owner migration needs its release-profile shipped-shape test (`cargo test --release -p plurxd <owner>_shipped_shape`), a release build of the plurxd test target this session did not attempt on the shared build host (about 15 GB free, shared with other agents); the first owner (`RollingRetirementSettlement`) is next. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Main merge | [#511](http://192.168.4.7:3000/noirr/plurx/pulls/511) | `e0cb9a2f5` merges `main` @ `8251d14f7` (142 commits past `0e2c3fd47`, among them #505, #513, K-09 and the scratch-grant writes). Main's 80 hunks in the three split parents (`transcode.rs` 52, `http/hls.rs` 7, `vodserve.rs` 21) were re-applied where their code now lives: 76 inside child modules, 4 in the parents (`session_log_text`, the `TranscodeManager` struct, the `vodserve` constants block); 77 matched their base context uniquely in one file, 3 were placed by hand (a context spanning an impl-chunk boundary, a new first `impl VodServe` method, a signature rustfmt had wrapped). Main items that a sibling child now reaches gained `pub(super)` only: 1 in `producer/prepublication_executor.rs`, 1 in `rolling/session.rs`, 8 in `vod/session.rs`, 2 in the `TranscodeManager` impl chunks; the `MOVES` counts carry them. `scripts/split-identity origin/main --moves` (BASE is the new merge base; the script already took BASE as an argument, only its docstring and usage changed) reports `OK` for all three parents, which shows no main change was dropped or duplicated. `plurxd` test list: 2,866 names (2,853 passed, 13 ignored) = main's plus the two M6 `accept_step` tests (source scan of both trees differs by exactly those two). |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Review of #511 | [#511](http://192.168.4.7:3000/noirr/plurx/pulls/511) | Answers the single adversarial review ([comment 4695](http://192.168.4.7:3000/noirr/plurx/pulls/511#issuecomment-4695)); disposition in the PR thread. **Main merges:** `9c3ff5332` merges `main` @ `b47c5ff88`: #500's per-method delivery meters conflicted in `transcode.rs` (4 hunks) and `vodserve.rs` (1) and were re-applied in `manager/cache.rs`, `manager/start.rs` (two constructors), `manager/describe.rs` (`test_software_threads_in_use`) and `vod/serve/create.rs`; `63414cfb6` merges `main` @ `38f61dfe6`: #517's store argument to `warm_vtt_window` re-applied in `http/hls/subtitle_playlist.rs`. `scripts/split-identity origin/main --moves` reports `OK` for all three parents against each new merge base. **Findings:** (1) `accept_step_rejection_order` now pins the order with nine pair rows (M6 row); (2) the `accept_step` doc comment names three non-atomic sites, not four; (3) the three hls source scans read `hls_product_source()`, checked against a walk of `http/hls/` on every call, so an unlisted product child fails them (checked with a planted `unlisted_child.rs`); (4) **behaviour restored**: the 299 tracing events the moves put in child modules had been relabelled with the child's module path (`plurxd::transcode::manager_start` and so on); each now names its parent's target, `scripts/split-identity` removes exactly those pins before comparing, and `split_children_log_under_their_parent_target` plus three captured-event tests pin it (all four fail with the pins reverted); guardrail 1 now names the target; (5) the M3 deviation and the post-merge line counts (1,810 / 191 / 751) are recorded in the M3 and M5 rows. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M7 | [#543](http://192.168.4.7:3000/noirr/plurx/pulls/543) | Built under **Decision D-M7** (§3.8; Paul can overturn it): row types used only by the projection, and an agreement test that runs the production SQL itself over fixtures. `crates/plurx-core/src/cluster/membership/lifecycle.rs`: `ClusterNodeRow`, `CapabilityRow`, `RemovalRow`, `PromotionRow`, `MaintenanceRow` in `NodeRows`, `RaftMembershipView`, and `observed_lifecycle(NodeRows, &RaftMembershipView) -> LifecycleView` with independent `membership`, `durable_role`, `join`, per-capability readiness, `maintenance`, `removal` (`InProgress{attempts}` / `Tombstoned`) and `promotion` (`Started` / `Barrier{index}` / `Joint`); nothing in the daemon calls it. `cargo test -p plurx-core --features hiqlite-store --lib cluster::membership::tests::lifecycle_projection_agrees` (the crate's cluster module needs the feature; `make unit` gets it by workspace unification) exit 0 in 4.4 s: 2,592 row shapes (role NULL/`learner`/`voter` × removed or not × staged or not × subject capability missing/current/stale × anchor current/stale × no fence or a fence with 0/1/2 attempt references × no/requested/acknowledged maintenance × no promotion / no barrier / barrier) written into `MEMBERSHIP_SCHEMA`'s tables plus the additive columns, read back, and checked against `capability_unready_node_predicate` (both nodes, two capabilities), `capability_ready_predicate`, `NODE_TOMBSTONED_SQL` and `admitted_learner_nodes_sql`, each under five real `openraft::Membership` values (absent, learner, voter, joint entering, joint leaving) checked against `committed_voter` and a hand-written membership table: 12,960 evaluations, every boolean verdict reached both ways. Production reads unchanged: the tombstone count moved verbatim into `NODE_TOMBSTONED_SQL` and `local_node_is_committed_voter` calls `lifecycle::committed_voter` (its old `voter_ids().any(== raft_id)` rule); no SQL text changed. Mutations, each run and each failing the test: a staged node counted as holding back readiness; a pending removal fence not counted as tombstoned; the joint interval collapsed into `Started`/`Barrier`; a Raft learner projected as absent. The transition function stays a later PR, after one release of agreement. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M8 / `RollingRetirementSettlement` | [#543](http://192.168.4.7:3000/noirr/plurx/pulls/543) | First owner migrated. Its `#[cfg(test)] wait_before_await_pause` field, the field's initialiser and the two `#[cfg(test)]` statements in `wait()` became one `hooks: Box<dyn RetirementSettlementHooks>` in every build, with `before_await_settled()` awaited where the pause was. Production installs `NoopRetirementSettlementHooks`, whose future is a zero-sized ready future (boxing it allocates nothing; awaiting it is one poll). **Deviation from §3.9's shape, recorded:** one small trait per owner, named for that owner's points, held as `Box<dyn>` rather than one shared `Hooks` trait behind an `Arc`: the owners' points do not overlap, and the box of the zero-sized no-op does not allocate. Census (`validation/cfg_test_census.py`): the owner's `field` 1 → 0 and `statement` 3 → 0 (whole tree `field` 186 → 185, `statement` 252 → 249); the rest of `rolling/retirement.rs`'s `#[cfg(test)]` lines belong to `spawn_rolling_scratch_cleanup_owner` and other owners. `retirement_settlement_registers_notify_before_the_wait_gap` keeps its barrier pause through a test hook; `rolling_retirement_settlement_shipped_shape` runs the same scenario with the production constructor, polling one waiter by hand (no task, no timer). Debug run of both: exit 0. Mutations, each run: taking the `Notify` interest after the wait gap fails the race test (exit 101); a production hook that never becomes ready fails the shipped-shape test (exit 101). Release profile: `cargo test --release --locked -p plurxd --bin plurxd rolling_retirement_settlement_shipped_shape` on nuc3 exit 0 (release build 7 m 58 s; 1 passed); the release artefacts were deleted afterwards (disk under 20 GB). `tests/playback/rolling-producer-owners.toml`, measured by zeroing each row: `m4-exact-rolling-retirement-settlement` 7 → 8 and `process-lifecycle-method` 399 → 400, both the shipped-shape test's one constructor call and one `wait()`, reviewed in the file. **Not done:** the remaining owners in §5.9's order (`AttemptChild` next, then `Encoding.admission_pause`, `DecodeFactSource`, the `playback_control.rs` seams, the `hls.rs` fault helpers), and §7 Q3 (the `syn` pass that splits the 153 `statement` seams into pauses and one-shot faults) is not answered here; this owner was a pause, so it took the trait. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 remainder | [#543](http://192.168.4.7:3000/noirr/plurx/pulls/543) | Not attempted. The declarations-only move of `StartInfo`, `probe_media_origin` and the ~30 shared helpers out of `transcode.rs` (M3 row above) is still a follow-up move PR with its own identity recipe. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Review of #543 | [#543](http://192.168.4.7:3000/noirr/plurx/pulls/543) | Answers the single adversarial review ([comment 5261](http://192.168.4.7:3000/noirr/plurx/pulls/543#issuecomment-5261)); disposition in the PR thread. **Main merge:** `acc6a6b1e` merges `main` @ `4b112204b`; the one conflict was `tests/playback/rolling-producer-owners.toml`'s `process-lifecycle-method` row, re-measured by zeroing it: 405 (main's 404 plus this branch's one). **Finding 1:** the M7 row above claimed each dimension was checked; `maintenance` and the removal attempt set were not asserted, and the committed-voter check compared the projection with its own rule. `lifecycle_projection_agrees` now agrees `maintenance` with `NODE_MAINTENANCE_COUNT_SQL` and `EXIT_MAINTENANCE_SQL`, the attempt set with `ROLLBACK_REMOVAL_FENCE_SQL`, `BEGIN_REMOVAL_INTENT_SQL` and `EXISTING_REMOVAL_ATTEMPT_SQL`, promotion existence with `NODE_PROMOTION_COUNT_SQL`, and `membership` with `committed_voter_ids!` (the read `local_node_is_committed_voter` makes); the `Started`/`Barrier`/`Joint` split is recorded as having no production reader (§3.8). Mutations, each run: acknowledged-for-unacknowledged maintenance, an emptied attempt set, both together (the reviewer's pair), and `committed_voter_ids!` reading only the last joint configuration each fail the test. **Finding 2:** §7 Q3 moved to the `AttemptChild` PR and §3.9 records the per-owner `Box<dyn …Hooks>` shape as built. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M8 / `AttemptChild` | [#556](http://192.168.4.7:3000/noirr/plurx/pulls/556) | `f83df478d`. **Premise re-verified:** `transcode/producer/attempt_child.rs` held the three `#[cfg(test)]` pause fields (`:178-185` at base `91f363154`), six `#[cfg(test)]` clones of them (`:261-275`), three gated pause blocks in the supervisor (authorization `:314-322` and flow reservation `:335-345`, both inside the producer transition fence and blocking on a `std::sync::Barrier`; before-reap `:387-395`, an awaited `Notify` pair) and the gated initialisers (`:451-456`); every test construction went through the test-only `AttemptChild::new`, and the pauses were installed after construction (`pause_signal_after_*`, and the `terminate_before_reap_pause` field in three `chunk_06.rs` tests). All three seams are ordering pauses. **Built:** one `Arc<dyn AttemptChildHooks>` held by the child in every build, the supervisor running through a clone taken from it; production `new_with_job` installs `NoopAttemptChildHooks`, the test-only `new` installs `AttemptChildPauses` (reached by `Any` upcasting). The two fence points are synchronous hook methods (no await point there in either build, as before); the before-reap point is an awaited `HookFuture` whose no-op is the zero-sized `HookReady` #543 introduced, now shared. **Deviations, recorded:** `Arc` instead of #543's `Box` (two holders), and two owners in one PR (§5.9 says one per PR; each owner is its own commit). Census (`validation/cfg_test_census.py`, pattern corrected in `f8337377b` to accept `pub(super)`; base re-measured with the corrected script): `attempt_child.rs` `field` 3 → 0, `statement` 10 → 0 (under the old pattern: 2 → 0 and 16 → 7, the 7 being `pub(super) fn`/`struct` lines it mis-filed). Race tests kept through the hooks and green: `producer_signal_and_retirement_share_one_authorization_linearization`, `actor_task_exit_fences_a_reserved_signal_and_cleanup_still_progresses`, `published_failure_cleanup_survives_waiter_cancellation_and_retains_media`, `prepublication_retirement_holds_admissions_until_confirmed_reap`, `first_media_settlement_gap_keeps_confirmed_reap_ownership`. Shipped shape: `attempt_child_shipped_shape` runs `new_with_job` through all three points (suspend and resume publish the held and running flow for the attempt; a termination request reaches the published reap within 5 s). Mutations, each run: the production before-reap hook never ready fails the shipped-shape test (exit 101); the authorization hook moved outside the transition fence made the linearization race test hang instead of fail: its assertion fired, but the supervisor stayed parked on its second unbounded `std::sync::Barrier` wait, so the runtime never dropped (the review measured `timeout 60` exit 124; this row first said exit 101, which was wrong). The review row below bounds the pause, and the same mutation now fails by name. `tests/playback/rolling-producer-owners.toml`, measured by zeroing each row: `supervisor-registration` and `rolling-supervisor-construction` 22 → 23, `namespaced-task-spawn` 639 → 640, `namespaced-time-constructor` 1009 → 1010, all the shipped-shape test's, reviewed in the file. No fleet or device step (§6). |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | §7 Q3 (`syn` pass) | [#556](http://192.168.4.7:3000/noirr/plurx/pulls/556) | `f8337377b`: `crates/plurxd/src/transcode/tests/seam_census.rs`, run with `cargo test -p plurxd --bin plurxd seam_census -- --nocapture`. Answer recorded in §7 Q3: after this PR, 158 gated statements in shipping functions — 48 pause, 17 fault (7 of them `dv_disk.rs`), 15 override, 34 record, 44 plumbing — plus 97 gated fields and variants, 104 initialisers and 19 arms, over 310 production files (33 test-only files skipped). Two fixture tests pin the classifier (every class, `#[cfg(all(test, ..))]`, and test items ignored) and the test-file resolution (`#[cfg(test)] mod`, `#[path]`, `include!` from a test file); `seam_census_of_the_workspace` asserts the migrated owners (`AttemptChild`, `RollingRetirementSettlement`, `DecodeFactSource`) keep no gated sites. The fixture spells `cfg(TEST)` and swaps it before parsing so the line census does not count fixture text. `m4-exact-rolling-retirement-settlement` 8 → 9 (the owner name as a string in that assertion), measured and reviewed. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M8 / `DecodeFactSource` | [#556](http://192.168.4.7:3000/noirr/plurx/pulls/556) | `bc1c632ee`. **Premise re-verified:** `decode_facts.rs` held `#[cfg(test)] initial_identity_delay` / `final_identity_delay` fields (`:640-643` at base), their gated initialisers (`:656-659`) and `#[cfg(test)]`/`#[cfg(not(test))]` getter twins (`:684-702`) read at the two identity observations (`:3400`, `:3496`), which hand the delay to the blocking syscall owner that sleeps only when it is non-zero. Delays installed by consuming test builders on a source the test holds, so the hook is chosen before use. **Built:** `Arc<dyn DecodeFactSourceHooks>` (the source is `Clone`), production `NoopDecodeFactSourceHooks` (both zero), test `IdentityDelays` installed by `with_identity_delay` / `with_final_identity_delay`, each keeping the delay it does not set; the twins are gone. Census: `decode_facts.rs` `field` 8 → 4 (the owner's two fields and two initialisers; the four left belong to other owners in the file), `statement` 13 unchanged (other owners). Race test `blocked_source_identity_returns_deadline_without_releasing_probe_ownership` kept, and the manager tests that use `with_final_identity_delay` (`source_change_refuses_bound_plan`, `prepared_plan_keeps_producer_execution_out_of_the_probe_lane`) pass in the full suite. Shipped shape: `decode_fact_source_shipped_shape`, the race test's scenario with `DecodeFactSource::new`, returns the fixture probe's `InvalidJson` inside the 100 ms budget with the probe lane free. Mutations, each run (exit 101): a production initial delay of 1 s fails the shipped-shape test; a getter ignoring the hook fails the race test. **Taken ahead of `Encoding.admission_pause`:** that owner's race tests (`vod/tests/chunk_03.rs` ×3, `vodencode_tests.rs`) install the pause after construction on `Encoding`s production code builds (`transcode/manager/create.rs:966`, reached through the VOD recipe fixtures), and on one specific `Encoding` of a predecessor/successor pair. A hook held by an `Encoding` cannot be replaced once it is inside its `Arc`, so the options are a test-build constructor twin (what M8 removes) or a hook factory held by `TranscodeManager` (itself an owner with eight test-only fields) that can target one rendition — a design choice for the `Encoding` PR, not guessed here. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Gates for #556 | [#556](http://192.168.4.7:3000/noirr/plurx/pulls/556) | On nuc3 in `~/work/hc4` at `bc1c632ee` (base `91f363154`; `main` has since gained only #552's one-line K-09 board edit): `cargo fmt --all -- --check` exit 0; `cargo clippy --workspace --all-targets --locked -- -D warnings` exit 0; `cargo test --locked --no-fail-fast -p plurxd` exit 0 (2,957 passed, 14 ignored, compiled from this worktree); `cargo test --release --locked -p plurxd --bin plurxd -- attempt_child_shipped_shape decode_fact_source_shipped_shape rolling_retirement_settlement_shipped_shape` exit 0 (release build 10 m 10 s, 3 passed), release artefacts deleted afterwards (disk under 20 GB); `make history-check` 0, `make validation-lint` 0, validation unittests 0 (246 tests), `make operations-check` 0, `make spike-lock-check` 0. **Remaining M8 owners:** `Encoding.admission_pause` (design question above), the `playback_control.rs` owners, the `http/hls/` sites, the `dv_disk.rs` faults (a `fail`-feature candidate, §7 Q3), and the owners the census lists that §5.9 does not name (`TranscodeManager`, `Session`, `LiveTvManager`, `JobManager`, VOD `Shared`/`Rendition`). |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Review of #556 | [#556](http://192.168.4.7:3000/noirr/plurx/pulls/556) | Answers the single adversarial review ([comment 5375](http://192.168.4.7:3000/noirr/plurx/pulls/556#issuecomment-5375)); disposition in the PR thread. **Main merge:** `94e9af103` merges `main` @ `7d545ffce` (#550's Apple test and #552's board line), no conflicts; `cargo test --locked --no-fail-fast -p plurxd` after the merge, before any change: exit 0 (2,957 passed, 14 ignored). **Finding 1 (P2):** `801035dff`. `AttemptChildPauses`' two fence points took a `std::sync::Barrier` and waited on it twice, unbounded; they now take a test-only `SupervisorPause` (a `Mutex`/`Condvar` rendezvous in `producer/attempt_child.rs`). The supervisor side announces the point and waits for release for at most 10 s; the test side (`wait_reached`) panics naming the point if the supervisor does not arrive within 10 s, and returns a `SupervisorPauseHeld` guard whose `release` or drop lets the supervisor go, so a failed assertion releases it while the test unwinds. Both race tests use the guard. Pinned by `supervisor_pause_releases_its_supervisor_when_the_test_unwinds` (a panic inside the hold releases a supervisor thread promptly, not at its 30 s bound), `supervisor_pause_names_a_point_the_supervisor_never_reaches` and `supervisor_pause_lets_the_supervisor_go_when_the_test_never_arrives`. Mutations, each run on a binary copied out of the shared target (`timeout 60`): the reviewer's (authorization hook above `lock_producer_transition()`) — before this change exit 124 after 60 s, after it exit 101 in 0 s at `the paused supervisor must own the transition guard`; the flow-reservation hook above the fence — exit 101 in 0 s at `the reserved signal owns the transition fence before its syscall`; the guard's `Drop` removed — the unwind test fails (exit 101, 30 s). `DecodeFactSource`'s hooks are `Duration`s the identity owner sleeps for, never a rendezvous, so they cannot hang this way; the before-reap point is an awaited `Notify` pair the runtime drop cancels. `tests/playback/rolling-producer-owners.toml`, measured by zeroing each row: `namespaced-task-spawn` 640 → 641 (the unwind test's supervisor thread) and `process-lifecycle-method` 405 → 397 (the eight `Barrier::wait` calls removed), reviewed in the file. Gates at `801035dff` plus this row: `cargo fmt --check` 0, `cargo clippy --workspace --all-targets --locked -D warnings` 0, `cargo test --locked --no-fail-fast -p plurxd` 0 (2,960 passed, 14 ignored; compiled from this worktree), `make history-check` 0, `make validation-lint` 0, validation unittests 0 (246), `make operations-check` 0, `make spike-lock-check` 0. The release-profile shipped-shape run was not repeated: the change is test-only and the production `NoopAttemptChildHooks` it exercises is unchanged. |

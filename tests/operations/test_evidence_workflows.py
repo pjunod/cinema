@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import unittest
+from validation.rust_modules import module_source
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -299,7 +300,7 @@ class EvidenceWorkflowCase(unittest.TestCase):
         apple_view = self.read("clients/apple/Sources/PlayerView.swift")
         apple_adapter = self.read("clients/apple/Sources/PlayerRemoteAdapter.swift")
         apple_policy = self.read("clients/apple/Sources/PlayerInputRouting.swift")
-        hls = self.read("crates/plurxd/src/http/hls.rs")
+        hls = module_source("crates/plurxd/src/http/hls.rs")
 
         self.assertIn("return realMediaPositionMs(", android)
         self.assertIn("val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)", android)

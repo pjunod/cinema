@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Re-sign a Gradle release APK with the audited debug-to-release lineage.
+
+The Gradle output is signed with the durable release key first. This helper
+replaces that signature with the lineage-bearing signature needed to upgrade
+the existing debug-signed physical fleet without deleting app data. Shipping
+entry points must call it before reading app-release.apk.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+
+
+OLD_CERT_SHA256 = "5cefd0c7db3f0a8d6fd818937425b7647b3222f9ed1419d79883a12c3e168bce"
+APK = Path(__file__).resolve().parents[1] / "clients/android/app/build/outputs/apk/release/app-release.apk"
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"Android release signing: {message}")
+
+
+def required(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        fail(f"{name} is required")
+    return value
+
+
+def build_tool(name: str) -> str:
+    override = os.environ.get(f"PLURX_{name.upper()}")
+    if override:
+        path = Path(override)
+        if not path.is_file() or not os.access(path, os.X_OK):
+            fail(f"{path} is not an executable {name}")
+        return str(path)
+    sdk = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+    if sdk:
+        candidates = sorted((Path(sdk) / "build-tools").glob(f"*/{name}"))
+        candidates = [candidate for candidate in candidates if os.access(candidate, os.X_OK)]
+        if candidates:
+            return str(candidates[-1])
+    found = shutil.which(name)
+    if found:
+        return found
+    fail(f"{name} not found in Android SDK build-tools or PATH")
+
+
+def run(*args: str, output: bool = False) -> bytes:
+    result = subprocess.run(args, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode:
+        detail = result.stderr.decode("utf-8", "replace").strip().splitlines()
+        fail(f"{Path(args[0]).name} failed: {detail[-1] if detail else result.returncode}")
+    return result.stdout if output else b""
+
+
+def cert_digest(apksigner: str, apk: Path, api: int) -> str:
+    report = run(
+        apksigner, "verify", "--verbose", "--print-certs",
+        "--min-sdk-version", str(api), "--max-sdk-version", str(api),
+        str(apk), output=True,
+    ).decode("utf-8", "replace")
+    digests = re.findall(r"Signer #\d+ certificate SHA-256 digest:\s*([0-9a-fA-F]+)", report)
+    if len(digests) != 1:
+        fail(f"expected one effective signer at API {api}; got {len(digests)}")
+    return digests[0].lower()
+
+
+def validate_lineage(apksigner: str, lineage: Path, expected_new: str) -> None:
+    report = run(
+        apksigner, "lineage", "--in", str(lineage), "--print-certs", output=True,
+    ).decode("utf-8", "replace")
+    sections = [
+        section for section in re.split(
+            r"(?=^Signer #\d+ in lineage certificate DN:)", report, flags=re.MULTILINE,
+        ) if section.startswith("Signer #")
+    ]
+    if len(sections) != 2:
+        fail(f"signing lineage must contain exactly two certificates; got {len(sections)}")
+    for number, (section, digest) in enumerate(
+        zip(sections, (OLD_CERT_SHA256, expected_new), strict=True), start=1,
+    ):
+        match = re.search(
+            rf"^Signer #{number} in lineage certificate SHA-256 digest:\s*([0-9a-fA-F]{{64}})$",
+            section, flags=re.MULTILINE,
+        )
+        if not match or match.group(1).lower() != digest:
+            fail(f"signing lineage certificate {number} does not match the audited key")
+        if not re.search(
+            r"^Has installed data capability\s*:\s*true$", section,
+            flags=re.MULTILINE,
+        ):
+            fail(f"signing lineage certificate {number} cannot preserve installed data")
+    if not re.search(
+        r"^Has rollback capability\s*:\s*false$", sections[0],
+        flags=re.MULTILINE,
+    ):
+        fail("signing lineage unexpectedly grants rollback to the old certificate")
+
+
+def main() -> None:
+    os.umask(0o077)
+    new_store = Path(required("PLURX_ANDROID_KEYSTORE")).resolve()
+    new_alias = required("PLURX_ANDROID_KEY_ALIAS")
+    required("PLURX_ANDROID_KEYSTORE_PASSWORD")
+    required("PLURX_ANDROID_KEY_PASSWORD")
+    old_store = Path(required("PLURX_ANDROID_OLD_KEYSTORE")).resolve()
+    old_alias = required("PLURX_ANDROID_OLD_KEY_ALIAS")
+    required("PLURX_ANDROID_OLD_KEYSTORE_PASSWORD")
+    required("PLURX_ANDROID_OLD_KEY_PASSWORD")
+    lineage = Path(required("PLURX_ANDROID_LINEAGE")).resolve()
+    expected_new = required("PLURX_ANDROID_RELEASE_CERT_SHA256").lower().replace(":", "")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_new) or expected_new == OLD_CERT_SHA256:
+        fail("PLURX_ANDROID_RELEASE_CERT_SHA256 must name a distinct SHA-256 signer")
+    for path in (new_store, old_store, lineage, APK):
+        if not path.is_file() or not path.stat().st_size:
+            fail(f"required file is absent or empty: {path}")
+
+    apksigner = build_tool("apksigner")
+    zipalign = build_tool("zipalign")
+    aapt = build_tool("aapt")
+    keytool = shutil.which("keytool")
+    if not keytool:
+        fail("keytool is required to pin the old signing certificate")
+    old_der = run(
+        keytool, "-exportcert", "-alias", old_alias, "-keystore", str(old_store),
+        "-storepass:env", "PLURX_ANDROID_OLD_KEYSTORE_PASSWORD", output=True,
+    )
+    if hashlib.sha256(old_der).hexdigest() != OLD_CERT_SHA256:
+        fail("old keystore does not match the signer installed on the audited fleet")
+    validate_lineage(apksigner, lineage, expected_new)
+    if cert_digest(apksigner, APK, 28) != expected_new:
+        fail("Gradle output does not carry the expected durable release signer")
+
+    badging = run(aapt, "dump", "badging", str(APK), output=True).decode("utf-8", "replace")
+    if "name='tv.plurx.app'" not in badging:
+        fail("APK package is not tv.plurx.app")
+    min_sdk = re.search(r"sdkVersion:'(\d+)'", badging)
+    if not min_sdk or int(min_sdk.group(1)) < 28:
+        fail("release APK must exclude API 23-27, which cannot rotate the old signer")
+
+    # AGP already aligns and signs the release output with the new key. Check
+    # its alignment without touching it; changing a signed APK after this
+    # point would invalidate the Gradle signature before apksigner replaces it.
+    run(zipalign, "-c", "-P", "16", "4", str(APK))
+    with tempfile.TemporaryDirectory(prefix="plurx-sign-", dir=APK.parent) as temporary:
+        signed = Path(temporary) / "signed.apk"
+        run(
+            apksigner, "sign", "--out", str(signed),
+            "--ks", str(old_store), "--ks-key-alias", old_alias,
+            "--ks-pass", "env:PLURX_ANDROID_OLD_KEYSTORE_PASSWORD",
+            "--key-pass", "env:PLURX_ANDROID_OLD_KEY_PASSWORD",
+            "--next-signer", "--ks", str(new_store), "--ks-key-alias", new_alias,
+            "--ks-pass", "env:PLURX_ANDROID_KEYSTORE_PASSWORD",
+            "--key-pass", "env:PLURX_ANDROID_KEY_PASSWORD",
+            "--lineage", str(lineage), "--rotation-min-sdk-version", "28",
+            str(APK),
+        )
+        for api in (28, 36):
+            if cert_digest(apksigner, signed, api) != expected_new:
+                fail(f"rotated APK signer at API {api} is not the durable release key")
+        os.replace(signed, APK)
+    print(f"Verified lineage release APK: {APK} sha256={hashlib.sha256(APK.read_bytes()).hexdigest()}")
+
+
+if __name__ == "__main__":
+    main()

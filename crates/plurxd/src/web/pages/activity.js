@@ -48,9 +48,10 @@ function durableQueueHtml(){
 function paintDurableActivity(){
   if(location.hash!=="#/activity")return;
   const host=document.getElementById("durable-activity");if(!host)return;
-  const focus=document.activeElement?.dataset?.durableFocus;
+  const focus=(/** @type {HTMLElement} */ (document.activeElement))?.dataset?.durableFocus;
   host.innerHTML=durableQueueHtml();
-  if(focus)[...host.querySelectorAll("[data-durable-focus]")].find(el=>el.dataset.durableFocus===focus)?.focus({preventScroll:true});
+  const buttons=/** @type {NodeListOf<HTMLButtonElement>} */ (host.querySelectorAll("[data-durable-focus]"));
+  if(focus)[...buttons].find(el=>el.dataset.durableFocus===focus)?.focus({preventScroll:true});
 }
 async function refreshDurableActivity(force=false){
   const q=DURABLE_ACTIVITY,generation=PAGE_RENDER_GENERATION,epoch=q.epoch;

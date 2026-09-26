@@ -15,12 +15,23 @@
 //! nothing is enqueued unless an admin turned `monarr.watched_sync` on, and
 //! the settings page says in as many words what it sends.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use plurx_core::cluster::coordination::{ClusterJobAuthority, StoreCoordinator};
 use plurx_core::domain::ItemKind;
+use plurx_core::store::watched_drain::{TickOutcome, WatchedDrain, BASE_TICK};
 use plurx_core::store::{keys, OutboxEntry, Store};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
+
+use crate::job_lease::{acquire_cluster_job_with_policy, ActiveJobLease};
+
+/// The drain's cluster-wide singleton lease (K-03 M2). One node drains a
+/// cluster-wide outbox; the replicated claim still admits one claimant per
+/// row if two ever briefly both believe they own it.
+pub(crate) const OUTBOX_LEASE: &str = "watched:outbox";
 
 /// Attempt schedule. Long enough to ride out a Curator restart, short enough
 /// that a genuinely dead one is marked failed while somebody could still act
@@ -63,14 +74,94 @@ pub struct WatchedEvent {
     pub user: String,
 }
 
+/// How the drain holds its singleton lease. Production uses the ordinary
+/// cluster-job TTL and heartbeat; tests shorten them to exercise failover.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WatchedLeasePolicy {
+    pub(crate) ttl: Duration,
+    pub(crate) heartbeat: Duration,
+    /// How often a node that does not own the drain looks again. Its look is
+    /// a local read of the lease row; only an absent or visibly expired
+    /// lease is worth an `acquire_lease` proposal. Worst-case failover after
+    /// an owner dies is TTL + retry + apply lag, about 105 s, against a
+    /// 5/30/120 s delivery retry ladder.
+    pub(crate) retry: Duration,
+}
+
+impl WatchedLeasePolicy {
+    pub(crate) const PRODUCTION: Self = Self {
+        ttl: crate::job_lease::JOB_LEASE_TTL,
+        heartbeat: crate::job_lease::JOB_LEASE_HEARTBEAT,
+        retry: Duration::from_secs(15),
+    };
+}
+
+/// Who may drain: the committed-voter gate, the lease coordinator for this
+/// node, and the lease timing.
+pub(crate) struct DrainAuthority {
+    pub(crate) coordinator: StoreCoordinator,
+    pub(crate) authority: Arc<dyn ClusterJobAuthority>,
+    pub(crate) policy: WatchedLeasePolicy,
+}
+
+/// `plurx_watched_outbox_ticks_total{outcome}`: why each drain pass did or
+/// did not ask the authority. Five fixed values.
+static TICKS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+
+pub(crate) fn prometheus() -> String {
+    let mut out = String::from(
+        "# HELP plurx_watched_outbox_ticks_total Watched-outbox drain passes by outcome.\n\
+         # TYPE plurx_watched_outbox_ticks_total counter\n",
+    );
+    for outcome in TickOutcome::ALL {
+        out.push_str(&format!(
+            "plurx_watched_outbox_ticks_total{{outcome=\"{}\"}} {}\n",
+            outcome.as_str(),
+            TICKS[outcome.index()].load(Ordering::Relaxed)
+        ));
+    }
+    out
+}
+
 /// Builds and delivers watched notifications.
 pub struct WatchedNotifier {
     store: Arc<dyn Store>,
+    /// A row was enqueued on this node: claim on the next pass.
+    wake: Notify,
+    /// The Curator URL or key was written on this node: re-read them now.
+    settings: Notify,
+    /// This notifier's own share of [`TICKS`], so a test can tell two
+    /// drains over one store apart.
+    outcomes: [AtomicU64; 5],
+    /// `acquire_lease` proposals this notifier has made for the drain lease.
+    lease_acquires: AtomicU64,
 }
 
 impl WatchedNotifier {
     pub fn new(store: Arc<dyn Store>) -> Arc<Self> {
-        Arc::new(Self { store })
+        Arc::new(Self {
+            store,
+            wake: Notify::new(),
+            settings: Notify::new(),
+            outcomes: [const { AtomicU64::new(0) }; 5],
+            lease_acquires: AtomicU64::new(0),
+        })
+    }
+
+    fn record_tick(&self, outcome: TickOutcome) {
+        TICKS[outcome.index()].fetch_add(1, Ordering::Relaxed);
+        self.outcomes[outcome.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn outcome_count(&self, outcome: TickOutcome) -> u64 {
+        self.outcomes[outcome.index()].load(Ordering::Relaxed)
+    }
+
+    /// The settings route wrote the Curator URL or key on this node. A write
+    /// on another node is seen within the drain's 60 s settings refresh.
+    pub(crate) fn settings_changed(&self) {
+        self.settings.notify_one();
     }
 
     /// Queue a watched notification for one item, if the feature is on.
@@ -104,6 +195,7 @@ impl WatchedNotifier {
             .enqueue_watched(&payload)
             .await
             .map_err(|e| e.to_string())?;
+        self.wake.notify_one();
         tracing::info!(
             target: "plurxd::integrate",
             item = item_id, kind = %event.kind, user = %event.user,
@@ -179,51 +271,128 @@ impl WatchedNotifier {
         }))
     }
 
-    /// Drain the outbox until `ctx` ends. Run in a task beside the others.
-    /// Drain the replicated watched outbox.
+    /// Drain the replicated watched outbox (K-03 M1–M2).
     ///
-    /// Gated per tick for the same reason as the Trakt sync: the outbox is
+    /// Gated per pass for the same reason as the Trakt sync: the outbox is
     /// cluster-wide state, and a node with no vote must not deliver from it.
-    /// The check is live so a promotion needs no restart.
-    pub async fn run(
-        self: Arc<Self>,
-        authority: Arc<dyn plurx_core::cluster::coordination::ClusterJobAuthority>,
-    ) {
-        let mut tick = tokio::time::interval(Duration::from_secs(1));
+    /// The check is live so a promotion needs no restart. Among the voters,
+    /// only the holder of [`OUTBOX_LEASE`] drains, and it asks the authority
+    /// only when [`WatchedDrain`] says a claim can find something — see that
+    /// module for why the local hint it uses can never authorize a delivery.
+    pub(crate) async fn run(self: Arc<Self>, drain_authority: DrainAuthority) {
+        let mut drain = WatchedDrain::new();
+        let mut owner: Option<ActiveJobLease> = None;
+        let mut next_acquire = tokio::time::Instant::now();
+        let mut delay = Duration::ZERO;
         loop {
-            tick.tick().await;
-            if !authority.may_run_cluster_jobs().await {
-                continue;
+            tokio::select! {
+                () = tokio::time::sleep(delay) => {}
+                () = self.wake.notified() => drain.wake(),
+                () = self.settings.notified() => drain.settings_changed(),
             }
-            self.deliver_due().await;
+            delay = self
+                .tick(&mut drain, &mut owner, &mut next_acquire, &drain_authority)
+                .await;
         }
     }
 
-    async fn deliver_due(&self) {
-        let due = match self.store.due_watched(BATCH).await {
-            Ok(rows) => rows,
+    /// One pass of the loop above; returns how long to wait before the next.
+    async fn tick(
+        &self,
+        drain: &mut WatchedDrain,
+        owner: &mut Option<ActiveJobLease>,
+        next_acquire: &mut tokio::time::Instant,
+        drain_authority: &DrainAuthority,
+    ) -> Duration {
+        if !drain_authority.authority.may_run_cluster_jobs().await {
+            if let Some(held) = owner.take() {
+                if let Err(error) = held.release().await {
+                    tracing::debug!(target: "plurxd::integrate", %error, "releasing the watched-outbox lease");
+                }
+            }
+            return BASE_TICK;
+        }
+        if owner
+            .as_ref()
+            .is_some_and(|held| held.loss_token().is_cancelled())
+        {
+            *owner = None;
+        }
+        let now = tokio::time::Instant::now();
+        if owner.is_none() {
+            if now < *next_acquire {
+                self.record_tick(TickOutcome::NotOwner);
+                return *next_acquire - now;
+            }
+            *next_acquire = now + drain_authority.policy.retry;
+            match self.try_own(drain_authority).await {
+                Some(held) => {
+                    *owner = Some(held);
+                    // A new owner trusts no hint until it has asked once.
+                    *drain = WatchedDrain::new();
+                }
+                None => {
+                    self.record_tick(TickOutcome::NotOwner);
+                    tracing::debug!(target: "plurxd::integrate", "watched outbox: not_owner");
+                    return drain_authority.policy.retry;
+                }
+            }
+        }
+        match drain.pass(self.store.as_ref(), now.into_std(), BATCH).await {
+            Ok(pass) => {
+                self.record_tick(pass.outcome);
+                for entry in pass.rows {
+                    self.attempt(entry, &pass.target.url, &pass.target.key)
+                        .await;
+                }
+            }
             Err(e) => {
                 tracing::warn!(target: "plurxd::integrate", error = %e, "reading the watched outbox");
-                return;
             }
-        };
-        if due.is_empty() {
-            return;
         }
-        let url = self
+        drain.delay()
+    }
+
+    /// Take the drain's lease if it is free. A lease row this node can see
+    /// is live is not worth an `acquire_lease`, which is a Raft proposal even
+    /// when it answers `Held`; the local read is a hint by the same rule as
+    /// the outbox hint — a stale replica delays a successor, never grants.
+    async fn try_own(&self, drain_authority: &DrainAuthority) -> Option<ActiveJobLease> {
+        if let Ok(Some(expires_at_ms)) = self.store.lease_expiry_hint(OUTBOX_LEASE).await {
+            if expires_at_ms > crate::media_sessions::unix_ms() {
+                return None;
+            }
+        }
+        self.lease_acquires.fetch_add(1, Ordering::Relaxed);
+        match acquire_cluster_job_with_policy(
+            &drain_authority.coordinator,
+            drain_authority.authority.as_ref(),
+            OUTBOX_LEASE.to_owned(),
+            drain_authority.policy.ttl,
+            drain_authority.policy.heartbeat,
+        )
+        .await
+        {
+            Ok(held) => held,
+            Err(error) => {
+                tracing::debug!(target: "plurxd::integrate", %error, "acquiring the watched-outbox lease");
+                None
+            }
+        }
+    }
+
+    /// Claim and attempt every due row once, bypassing the tick policy. The
+    /// delivery tests use it to exercise [`Self::attempt`] through the real
+    /// claim.
+    #[cfg(test)]
+    async fn deliver_due(&self) {
+        let due = self.store.due_watched(BATCH).await.expect("claim due rows");
+        let (url, key) = self
             .store
-            .get_setting(keys::MONARR_URL)
+            .get_setting_pair(keys::MONARR_URL, keys::MONARR_API_KEY)
             .await
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        let key = self
-            .store
-            .get_setting(keys::MONARR_API_KEY)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+            .expect("curator settings");
+        let (url, key) = (url.unwrap_or_default(), key.unwrap_or_default());
         for entry in due {
             self.attempt(entry, &url, &key).await;
         }
@@ -373,6 +542,19 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         format!("http://{addr}")
+    }
+
+    fn drain_authority(
+        store: &Arc<dyn Store>,
+        node: &str,
+        authority: Arc<dyn ClusterJobAuthority>,
+        policy: WatchedLeasePolicy,
+    ) -> DrainAuthority {
+        DrainAuthority {
+            coordinator: StoreCoordinator::new(Arc::clone(store), node).expect("coordinator"),
+            authority,
+            policy,
+        }
     }
 
     async fn seeded_notifier() -> (Arc<dyn Store>, Arc<WatchedNotifier>, i64, i64) {
@@ -674,8 +856,11 @@ mod tests {
         assert!(!permanent);
         assert!(message.contains("cannot reach Curator"));
 
-        let runner = tokio::spawn(Arc::clone(&retry_notifier).run(Arc::new(
-            plurx_core::cluster::coordination::UnclusteredJobAuthority,
+        let runner = tokio::spawn(Arc::clone(&retry_notifier).run(drain_authority(
+            &retry_store,
+            "node-a",
+            Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
+            WatchedLeasePolicy::PRODUCTION,
         )));
         tokio::task::yield_now().await;
         runner.abort();
@@ -714,8 +899,12 @@ mod tests {
         );
 
         let authority = Arc::new(MovableAuthority(AtomicBool::new(false)));
-        let runner = tokio::spawn(Arc::clone(&notifier).run(Arc::clone(&authority)
-            as Arc<dyn plurx_core::cluster::coordination::ClusterJobAuthority>));
+        let runner = tokio::spawn(Arc::clone(&notifier).run(drain_authority(
+            &store,
+            "node-a",
+            Arc::clone(&authority) as Arc<dyn ClusterJobAuthority>,
+            WatchedLeasePolicy::PRODUCTION,
+        )));
 
         // The interval's first tick fires immediately, so this covers two.
         tokio::time::sleep(Duration::from_millis(1_500)).await;
@@ -743,5 +932,433 @@ mod tests {
         );
 
         runner.abort();
+    }
+
+    // ---- K-03 M1: the drain's tick policy -------------------------------
+    //
+    // A scripted store stands in for the authority so each test controls
+    // exactly what the local hint sees and counts every call by cost:
+    // `claims` are Raft proposals, `settings_reads` are authority reads.
+
+    use plurx_core::store::watched_drain::{
+        CuratorTarget, WatchedDrainStore, HINT_FORCE_INTERVAL, IDLE_TICK_MAX, SETTINGS_REFRESH,
+    };
+    use std::sync::atomic::AtomicBool;
+
+    #[derive(Default)]
+    struct ScriptedOutbox {
+        configured: AtomicBool,
+        /// What the local replica shows.
+        hint: AtomicBool,
+        /// Rows only the authority holds.
+        authority_rows: AtomicU64,
+        claims: AtomicU64,
+        settings_reads: AtomicU64,
+    }
+
+    #[plurx_core::cluster::coordination::cluster_job_async_trait]
+    impl WatchedDrainStore for ScriptedOutbox {
+        async fn curator_target(&self) -> Result<CuratorTarget, plurx_core::error::StoreError> {
+            self.settings_reads.fetch_add(1, Ordering::SeqCst);
+            Ok(if self.configured.load(Ordering::SeqCst) {
+                CuratorTarget {
+                    url: "http://curator".to_owned(),
+                    key: "key".to_owned(),
+                }
+            } else {
+                CuratorTarget::default()
+            })
+        }
+
+        async fn outbox_hint(&self) -> Result<bool, plurx_core::error::StoreError> {
+            Ok(self.hint.load(Ordering::SeqCst))
+        }
+
+        async fn claim_due(
+            &self,
+            _limit: i64,
+        ) -> Result<Vec<OutboxEntry>, plurx_core::error::StoreError> {
+            self.claims.fetch_add(1, Ordering::SeqCst);
+            let rows = self.authority_rows.swap(0, Ordering::SeqCst);
+            Ok((0..rows)
+                .map(|id| OutboxEntry {
+                    id: id as i64,
+                    payload: "{}".to_owned(),
+                    attempts: 0,
+                    last_error: String::new(),
+                    status: "pending".to_owned(),
+                    next_at: 0,
+                    claim_until: 60,
+                })
+                .collect())
+        }
+    }
+
+    /// Drive passes on a virtual clock, sleeping exactly what the drain asks
+    /// for, until `until` returns true or `limit` elapses. Returns when.
+    async fn drive(
+        drain: &mut WatchedDrain,
+        store: &ScriptedOutbox,
+        start: std::time::Instant,
+        limit: Duration,
+        mut until: impl FnMut(&plurx_core::store::watched_drain::DrainPass, Duration) -> bool,
+    ) -> Option<Duration> {
+        let mut at = Duration::ZERO;
+        while at <= limit {
+            let pass = drain.pass(store, start + at, BATCH).await.expect("pass");
+            if until(&pass, at) {
+                return Some(at);
+            }
+            at += drain.delay();
+        }
+        None
+    }
+
+    /// A row enqueued on this node is claimed on the next pass even though
+    /// the local replica does not show it yet, at the base cadence.
+    #[tokio::test]
+    async fn watched_drain_claims_a_locally_enqueued_row_on_the_next_pass() {
+        let store = ScriptedOutbox::default();
+        store.configured.store(true, Ordering::SeqCst);
+        let start = std::time::Instant::now();
+        let mut drain = WatchedDrain::new();
+        // Settle into the idle ceiling first.
+        for second in 0..40 {
+            let _ = drain
+                .pass(&store, start + Duration::from_secs(second), BATCH)
+                .await
+                .expect("idle pass");
+        }
+        let claims_before = store.claims.load(Ordering::SeqCst);
+        store.authority_rows.store(1, Ordering::SeqCst);
+        drain.wake();
+        assert_eq!(drain.delay(), BASE_TICK, "a local enqueue is served at 1 s");
+        let pass = drain
+            .pass(&store, start + Duration::from_secs(41), BATCH)
+            .await
+            .expect("woken pass");
+        assert_eq!(pass.outcome, TickOutcome::Claimed);
+        assert_eq!(pass.rows.len(), 1);
+        assert_eq!(store.claims.load(Ordering::SeqCst), claims_before + 1);
+    }
+
+    /// A row visible only on the authority — the hint stuck at "nothing" —
+    /// is still claimed within the 30 s forced-claim bound.
+    #[tokio::test]
+    async fn watched_drain_claims_a_row_the_hint_cannot_see_within_thirty_seconds() {
+        let store = ScriptedOutbox::default();
+        store.configured.store(true, Ordering::SeqCst);
+        let start = std::time::Instant::now();
+        let mut drain = WatchedDrain::new();
+        let first = drain.pass(&store, start, BATCH).await.expect("first pass");
+        assert_eq!(
+            first.outcome,
+            TickOutcome::EmptyClaim,
+            "a fresh drain asks once"
+        );
+        store.authority_rows.store(1, Ordering::SeqCst);
+        let claimed_at = drive(
+            &mut drain,
+            &store,
+            start,
+            Duration::from_secs(120),
+            |pass, _| pass.outcome == TickOutcome::Claimed,
+        )
+        .await
+        .expect("the forced claim must find the row");
+        assert!(
+            claimed_at <= HINT_FORCE_INTERVAL,
+            "claimed at {claimed_at:?}, later than the forced-claim bound"
+        );
+        assert_eq!(
+            store.claims.load(Ordering::SeqCst),
+            2,
+            "one fresh claim, one forced"
+        );
+    }
+
+    /// An unconfigured Curator costs no claim at all over an idle outbox,
+    /// and its settings are re-read every 60 s so a pairing on another node
+    /// is noticed.
+    #[tokio::test]
+    async fn watched_drain_unconfigured_makes_no_claims_and_rereads_settings_each_minute() {
+        let store = ScriptedOutbox::default();
+        let start = std::time::Instant::now();
+        let mut drain = WatchedDrain::new();
+        let _ = drive(
+            &mut drain,
+            &store,
+            start,
+            Duration::from_secs(130),
+            |pass, _| {
+                assert_eq!(pass.outcome, TickOutcome::SkippedUnconfigured);
+                false
+            },
+        )
+        .await;
+        assert_eq!(store.claims.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store.settings_reads.load(Ordering::SeqCst),
+            3,
+            "read at 0 s, and again once each {SETTINGS_REFRESH:?}"
+        );
+
+        // Paired elsewhere: the next refresh sees it and the drain claims.
+        store.configured.store(true, Ordering::SeqCst);
+        store.authority_rows.store(1, Ordering::SeqCst);
+        store.hint.store(true, Ordering::SeqCst);
+        let claimed = drive(
+            &mut drain,
+            &store,
+            start + Duration::from_secs(131),
+            SETTINGS_REFRESH + IDLE_TICK_MAX,
+            |pass, _| pass.outcome == TickOutcome::Claimed,
+        )
+        .await;
+        assert!(
+            claimed.is_some(),
+            "a Curator paired on another node is seen within a refresh"
+        );
+    }
+
+    /// Rows waiting on an unconfigured Curator are still failed permanently,
+    /// as before — but only once the authority confirms it is unconfigured.
+    #[tokio::test]
+    async fn watched_drain_rechecks_settings_before_claiming_for_an_unconfigured_curator() {
+        let store = ScriptedOutbox::default();
+        let start = std::time::Instant::now();
+        let mut drain = WatchedDrain::new();
+        let _ = drain.pass(&store, start, BATCH).await.expect("idle pass");
+        assert_eq!(store.settings_reads.load(Ordering::SeqCst), 1);
+        store.hint.store(true, Ordering::SeqCst);
+        store.authority_rows.store(1, Ordering::SeqCst);
+        let pass = drain
+            .pass(&store, start + Duration::from_secs(2), BATCH)
+            .await
+            .expect("pending pass");
+        assert_eq!(pass.outcome, TickOutcome::Claimed);
+        assert!(!pass.target.configured());
+        assert_eq!(
+            store.settings_reads.load(Ordering::SeqCst),
+            2,
+            "the cached 'unconfigured' is confirmed on the authority first"
+        );
+    }
+
+    /// Twenty empty passes back off to the 10 s ceiling; a wake returns the
+    /// cadence to 1 s at once, and so does a local settings write.
+    #[tokio::test]
+    async fn watched_drain_backs_off_to_ten_seconds_and_a_wake_returns_it_to_one() {
+        let store = ScriptedOutbox::default();
+        store.configured.store(true, Ordering::SeqCst);
+        let start = std::time::Instant::now();
+        let mut drain = WatchedDrain::new();
+        let mut at = Duration::ZERO;
+        let mut delays = Vec::new();
+        for _ in 0..20 {
+            let _ = drain.pass(&store, start + at, BATCH).await.expect("pass");
+            delays.push(drain.delay());
+            at += drain.delay();
+        }
+        assert!(
+            delays.iter().all(|delay| *delay <= IDLE_TICK_MAX),
+            "{delays:?}"
+        );
+        assert!(
+            delays
+                .iter()
+                .filter(|delay| **delay == IDLE_TICK_MAX)
+                .count()
+                >= 10,
+            "an idle drain spends its time at the ceiling: {delays:?}"
+        );
+        assert!(
+            store.claims.load(Ordering::SeqCst) <= 1 + at.as_secs() / HINT_FORCE_INTERVAL.as_secs(),
+            "only forced claims while idle"
+        );
+        drain.wake();
+        assert_eq!(drain.delay(), BASE_TICK);
+        let _ = drain.pass(&store, start + at, BATCH).await.expect("pass");
+        at += drain.delay();
+        let _ = drain.pass(&store, start + at, BATCH).await.expect("pass");
+        assert!(drain.delay() > BASE_TICK, "and backs off again once idle");
+        drain.settings_changed();
+        assert_eq!(drain.delay(), BASE_TICK);
+    }
+
+    /// The loop itself: a row enqueued through `on_watched` on this node is
+    /// delivered within about a second even from the idle ceiling, because
+    /// the enqueue wakes the drain.
+    #[tokio::test]
+    async fn watched_drain_delivers_a_local_enqueue_within_a_second_from_idle() {
+        let (store, notifier, user, movie) = seeded_notifier().await;
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let base = serve_webhook(StatusCode::NO_CONTENT, Arc::clone(&received)).await;
+        store
+            .put_setting(keys::MONARR_URL, &base)
+            .await
+            .expect("url");
+        store
+            .put_setting(keys::MONARR_API_KEY, "secret")
+            .await
+            .expect("key");
+        store
+            .put_setting(keys::MONARR_WATCHED_SYNC, "1")
+            .await
+            .expect("sync on");
+        let runner = tokio::spawn(Arc::clone(&notifier).run(drain_authority(
+            &store,
+            "node-a",
+            Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
+            WatchedLeasePolicy::PRODUCTION,
+        )));
+        // Let the drain take its lease, make its fresh claim and back off.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(notifier.outcome_count(TickOutcome::SkippedHint) > 0);
+
+        let queued_at = std::time::Instant::now();
+        notifier.on_watched(user, movie).await;
+        let delivered = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if !received.lock().await.is_empty() {
+                    return queued_at.elapsed();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a local enqueue must be delivered promptly");
+        assert!(
+            delivered < Duration::from_millis(1_500),
+            "delivered after {delivered:?}"
+        );
+        runner.abort();
+    }
+
+    // ---- K-03 M2: one drainer per cluster --------------------------------
+
+    /// Two drains over one store: one owns `watched:outbox` and drains, the
+    /// other only ever records `not_owner`. Killing the owner (its heartbeat
+    /// dies with it) hands the drain to the other within TTL + retry.
+    #[tokio::test]
+    async fn watched_singleton_one_node_drains_and_the_other_takes_over_after_the_owner_dies() {
+        let (store, notifier_a, _, _) = seeded_notifier().await;
+        let notifier_b = WatchedNotifier::new(Arc::clone(&store));
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let base = serve_webhook(StatusCode::NO_CONTENT, Arc::clone(&received)).await;
+        store
+            .put_setting(keys::MONARR_URL, &base)
+            .await
+            .expect("url");
+        store
+            .put_setting(keys::MONARR_API_KEY, "secret")
+            .await
+            .expect("key");
+        let policy = WatchedLeasePolicy {
+            ttl: Duration::from_millis(900),
+            heartbeat: Duration::from_millis(300),
+            retry: Duration::from_millis(100),
+        };
+        let unclustered = || -> Arc<dyn ClusterJobAuthority> {
+            Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority)
+        };
+        let owner_of = |store: Arc<dyn Store>| async move {
+            let now = crate::media_sessions::unix_ms();
+            match store
+                .acquire_lease(OUTBOX_LEASE, "probe", now, now + 1)
+                .await
+                .expect("probe")
+            {
+                plurx_core::cluster::coordination::LeaseClaim::Held { owner_node_id, .. } => {
+                    Some(owner_node_id)
+                }
+                plurx_core::cluster::coordination::LeaseClaim::Acquired(lease) => {
+                    let _ = store.release_lease(&lease, now).await;
+                    None
+                }
+            }
+        };
+
+        let runner_a = tokio::spawn(Arc::clone(&notifier_a).run(drain_authority(
+            &store,
+            "node-a",
+            unclustered(),
+            policy,
+        )));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while owner_of(Arc::clone(&store)).await.as_deref() != Some("node-a") {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("node-a takes the drain");
+        let runner_b = tokio::spawn(Arc::clone(&notifier_b).run(drain_authority(
+            &store,
+            "node-b",
+            unclustered(),
+            policy,
+        )));
+
+        store.enqueue_watched("{}").await.expect("enqueue");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while received.lock().await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the owner drains");
+        let acquires_before = notifier_b.lease_acquires.load(Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(notifier_b.outcome_count(TickOutcome::NotOwner) > 0);
+        assert_eq!(
+            notifier_b.lease_acquires.load(Ordering::Relaxed),
+            acquires_before,
+            "while the lease is visibly live, a non-owner's retry is a local read, not an acquire proposal"
+        );
+        for outcome in [
+            TickOutcome::Claimed,
+            TickOutcome::EmptyClaim,
+            TickOutcome::SkippedHint,
+        ] {
+            assert_eq!(
+                notifier_b.outcome_count(outcome),
+                0,
+                "a non-owner must not touch the outbox ({})",
+                outcome.as_str()
+            );
+        }
+        assert_eq!(
+            owner_of(Arc::clone(&store)).await.as_deref(),
+            Some("node-a")
+        );
+
+        // Kill the owner: its heartbeat dies with the task, the lease runs out.
+        runner_a.abort();
+        let _ = runner_a.await;
+        let died = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while owner_of(Arc::clone(&store)).await.as_deref() != Some("node-b") {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("node-b takes over");
+        assert!(
+            died.elapsed() <= policy.ttl + policy.retry + Duration::from_millis(500),
+            "failover took {:?}",
+            died.elapsed()
+        );
+        store
+            .enqueue_watched("{}")
+            .await
+            .expect("enqueue after failover");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while received.lock().await.len() < 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the successor drains");
+        runner_b.abort();
     }
 }

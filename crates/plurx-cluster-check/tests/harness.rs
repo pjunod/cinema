@@ -14,6 +14,10 @@
 //! of each. The multi-voter loss contracts stay where they belong, in
 //! `make cluster-check`.
 
+// A test, never a daemon child: the launcher rule in clippy.toml is for
+// production code.
+#![allow(clippy::disallowed_methods)]
+
 use std::path::PathBuf;
 use std::process::Command;
 

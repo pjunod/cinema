@@ -573,6 +573,7 @@ struct MediaRow: View {
                             .font(.system(.caption, design: .rounded).weight(.bold))
                         }
                         .shelfActionButtonStyle()
+                        .accessibilityIdentifier("library-open-\(destination.id)")
                     }
                 }
                 .padding(.horizontal, screenHPad)
