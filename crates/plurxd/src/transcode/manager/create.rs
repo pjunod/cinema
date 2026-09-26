@@ -931,7 +931,8 @@ impl TranscodeManager {
             options
                 .subtitle_burn
                 .as_ref()
-                .is_some_and(|burn| !burn.bitmap),
+                .is_some_and(|burn| !burn.bitmap)
+                .then_some(self.runtime_cache.as_path()),
         )
         .await
         .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?;

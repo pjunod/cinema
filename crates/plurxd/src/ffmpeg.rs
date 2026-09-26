@@ -1820,7 +1820,7 @@ struct FragmentIndexEngine {
 /// reuse across nodes or daemon restarts: hardware/driver behavior cannot be
 /// proven byte-identical merely because the selected encoder has the same
 /// name. Within one daemon, every loaded dependency and (for text burn) every
-/// active Fontconfig rule and discoverable font file is still rechecked
+/// object of the recipe's frozen Fontconfig environment is still rechecked
 /// before spawning and publication.
 #[derive(Debug, Clone)]
 pub(crate) struct EncodedEngine {
@@ -1828,15 +1828,28 @@ pub(crate) struct EncodedEngine {
     process_identity: String,
     /// The encoder dependency closure. Statted under `kind="media"`.
     objects: Arc<[(std::path::PathBuf, String)]>,
-    /// The Fontconfig rules and font files a text burn captured, kept apart
-    /// from `objects` so their cost is charged under `kind="font"`. Empty
-    /// for every recipe that does not burn text.
+    /// The frozen Fontconfig environment a text burn renders under, kept
+    /// apart from `objects` so its cost is charged under `kind="font"`.
+    /// Empty for every recipe that does not burn text.
     font_objects: Arc<[(std::path::PathBuf, String)]>,
-    font_digest: Option<String>,
+    /// The environment itself: the producer reads only its copies and links,
+    /// and the last recipe holding it removes it.
+    font_env: Option<Arc<crate::fontenv::FontEnvironment>>,
 }
 
 impl EncodedEngine {
-    pub async fn capture(text_burn: bool) -> Result<Self, String> {
+    /// `text_burn` is the runtime cache a text burn's frozen Fontconfig
+    /// environment is built under, or `None` for a recipe that burns no text.
+    pub async fn capture(text_burn: Option<&std::path::Path>) -> Result<Self, String> {
+        Self::capture_from(text_burn, None).await
+    }
+
+    /// `source_config` replaces the daemon's Fontconfig configuration for the
+    /// live enumeration only; tests use it to stand up a known closure.
+    pub(crate) async fn capture_from(
+        text_burn: Option<&std::path::Path>,
+        source_config: Option<&std::path::Path>,
+    ) -> Result<Self, String> {
         let media = FRAGMENT_INDEX_ENGINE
             .get_or_init(fragment_index_engine_inner)
             .await;
@@ -1862,12 +1875,13 @@ impl EncodedEngine {
         digest.update(process.as_bytes());
         let mut objects = media.objects.to_vec();
         let mut font_objects: Vec<(std::path::PathBuf, String)> = Vec::new();
-        let mut font_digest = None;
-        if text_burn {
+        let mut font_env = None;
+        if let Some(root) = text_burn {
             // Fontconfig's closure is live configuration, unlike the process's
             // loaded media libraries. Probe it for every recipe capture so a
-            // newly installed font or rule cannot reuse the old URI identity.
-            let enumeration = font_render_engine_inner().await;
+            // newly installed font or rule cannot reuse the old URI identity,
+            // then freeze what it found so the producer can see nothing else.
+            let enumeration = font_render_engine_inner(source_config).await;
             charges.add(
                 EngineAttestationKind::Font,
                 EngineAttestationPhase::Spawn,
@@ -1878,7 +1892,7 @@ impl EncodedEngine {
                 EngineAttestationPhase::Stat,
                 enumeration.stat_elapsed,
             );
-            let fonts = enumeration.engine;
+            let fonts = &enumeration.engine;
             let attested = if fonts.usable {
                 let (current, elapsed) =
                     engine_objects_are_current_batch(None, Arc::clone(&fonts.objects)).await;
@@ -1897,9 +1911,40 @@ impl EncodedEngine {
                     "Fontconfig rules and resolved font files could not be attested".to_owned(),
                 );
             }
-            digest.update(fonts.digest.as_bytes());
-            font_digest = Some(fonts.digest.clone());
-            font_objects = fonts.objects.to_vec();
+            let versions: std::collections::HashMap<_, _> = fonts.objects.iter().cloned().collect();
+            let (frozen, cost) = crate::fontenv::freeze(
+                root,
+                crate::fontenv::FontSources {
+                    digest: &fonts.digest,
+                    rules: &enumeration.rules,
+                    fonts: &enumeration.fonts,
+                    versions: &versions,
+                    listing: &enumeration.listing,
+                },
+            )
+            .await;
+            charges.add(
+                EngineAttestationKind::Font,
+                EngineAttestationPhase::Spawn,
+                cost.spawn,
+            );
+            charges.add(
+                EngineAttestationKind::Font,
+                EngineAttestationPhase::Stat,
+                cost.stat,
+            );
+            let frozen = match frozen {
+                Ok(frozen) => frozen,
+                Err(error) => {
+                    charges.flush();
+                    return Err(format!(
+                        "the text burn's Fontconfig environment could not be frozen: {error}"
+                    ));
+                }
+            };
+            digest.update(frozen.digest().as_bytes());
+            font_objects = frozen.objects().to_vec();
+            font_env = Some(frozen);
         }
         charges.flush();
         objects.sort_by(|left, right| left.0.cmp(&right.0));
@@ -1911,14 +1956,15 @@ impl EncodedEngine {
             process_identity: process.to_owned(),
             objects: objects.into(),
             font_objects: font_objects.into(),
-            font_digest,
+            font_env,
         })
     }
 
     /// Re-attest every input which can change the bytes emitted under this
-    /// recipe. Fontconfig must be enumerated again: checking only the files
-    /// captured earlier detects replacements and removals, but not additions
-    /// which change font resolution.
+    /// recipe. A text burn is not re-enumerated: its producer reads only the
+    /// frozen environment, so a font or rule installed since capture cannot
+    /// reach it, and a replaced, removed or edited object of the environment
+    /// changes a captured version.
     #[cfg(test)]
     pub async fn is_current(&self) -> bool {
         self.is_current_charged(None).await.0
@@ -1960,41 +2006,47 @@ impl EncodedEngine {
             charges.flush();
             return (false, charges);
         }
-        let Some(expected_font_digest) = self.font_digest.as_deref() else {
+        if self.font_env.is_none() {
             charges.flush();
             return (true, charges);
-        };
+        }
 
-        // Three font stat batches, one observation: the captured font
-        // objects, the re-enumeration's own stat loop, and the freshly
-        // enumerated closure.
-        let (captured_current, captured_elapsed) =
+        // One stat batch and no child: the frozen environment cannot gain
+        // inputs, so there is nothing for `fc-list` to find.
+        let (fonts_current, fonts_elapsed) =
             engine_objects_are_current_batch(None, Arc::clone(&self.font_objects)).await;
         charges.add(
             EngineAttestationKind::Font,
             EngineAttestationPhase::Stat,
-            captured_elapsed,
-        );
-        let enumeration = font_render_engine_inner().await;
-        charges.add(
-            EngineAttestationKind::Font,
-            EngineAttestationPhase::Spawn,
-            enumeration.spawn_elapsed,
-        );
-        charges.add(
-            EngineAttestationKind::Font,
-            EngineAttestationPhase::Stat,
-            enumeration.stat_elapsed,
-        );
-        let (closure_current, closure_elapsed) =
-            font_closure_is_current(expected_font_digest, &enumeration.engine).await;
-        charges.add(
-            EngineAttestationKind::Font,
-            EngineAttestationPhase::Stat,
-            closure_elapsed,
+            fonts_elapsed,
         );
         charges.flush();
-        (captured_current && closure_current, charges)
+        (fonts_current, charges)
+    }
+
+    /// What a producer running this recipe adds to its environment: a text
+    /// burn names its frozen Fontconfig sysroot and root configuration, so
+    /// libass resolves fonts from the captured environment and nothing
+    /// else. Child-local, like `configure_ffmpeg_runtime`'s cache; the
+    /// daemon's own environment and every other child are untouched.
+    pub(crate) fn child_env(&self) -> Vec<(&'static str, &std::ffi::OsStr)> {
+        self.font_env
+            .iter()
+            .flat_map(|environment| environment.child_env())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn font_environment(&self) -> Option<&Arc<crate::fontenv::FontEnvironment>> {
+        self.font_env.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn is_current_charged_for_test(
+        &self,
+    ) -> (bool, Vec<(&'static str, &'static str, usize)>) {
+        let (current, charges) = self.is_current_charged(None).await;
+        (current, charges.charged())
     }
 
     pub fn process_identity(&self) -> &str {
@@ -2020,7 +2072,7 @@ impl EncodedEngine {
             process_identity: process.to_owned(),
             objects: objects.into(),
             font_objects: Vec::new().into(),
-            font_digest: None,
+            font_env: None,
         })
     }
 }
@@ -2033,24 +2085,6 @@ pub(crate) fn encoded_process_identity() -> &'static str {
     ENCODED_PROCESS_IDENTITY
         .get_or_init(|| uuid::Uuid::new_v4().to_string())
         .as_str()
-}
-
-/// Compare a freshly enumerated Fontconfig closure with the captured digest,
-/// returning what the stat batch cost so the caller can charge it once for
-/// the whole attestation.
-async fn font_closure_is_current(
-    expected_digest: &str,
-    current: &FragmentIndexEngine,
-) -> (bool, Duration) {
-    if !current.usable {
-        return (false, Duration::ZERO);
-    }
-    let (objects_current, elapsed) =
-        engine_objects_are_current_batch(None, Arc::clone(&current.objects)).await;
-    (
-        objects_current && current.digest == expected_digest,
-        elapsed,
-    )
 }
 
 /// Digest the executable bytes and its complete self/dependency reports once
@@ -2107,7 +2141,7 @@ fn engine_objects_are_current(objects: &[(std::path::PathBuf, String)]) -> bool 
 /// task, so no caller has to stat it on a runtime worker. It reports its
 /// elapsed time rather than observing, because one attestation is several of
 /// these batches and the histogram is charged once for the whole check.
-async fn engine_objects_are_current_batch(
+pub(crate) async fn engine_objects_are_current_batch(
     extra: Option<(std::path::PathBuf, String)>,
     objects: Arc<[(std::path::PathBuf, String)]>,
 ) -> (bool, Duration) {
@@ -2246,28 +2280,55 @@ struct FontEnumeration {
     engine: FragmentIndexEngine,
     spawn_elapsed: Duration,
     stat_elapsed: Duration,
+    /// Every loaded configuration file, in the order `fc-conflist` reports
+    /// it: the order each *finished* loading, root last. That is not the
+    /// order its rules apply (see `fontenv`), so the freeze only compares it.
+    rules: Vec<std::path::PathBuf>,
+    /// Every font file `fc-list` named, sorted and unique.
+    fonts: Vec<std::path::PathBuf>,
+    /// The raw `fc-list` answer, one line per face.
+    listing: String,
 }
 
-async fn font_render_engine_inner() -> FontEnumeration {
+/// A Fontconfig tool run under the font probe budget, answering its stdout.
+pub(crate) async fn font_probe_output(command: tokio::process::Command) -> Result<Vec<u8>, String> {
+    bounded_command_output_with_timeout(command, FONT_ENGINE_PROBE_TIMEOUT)
+        .await
+        .map(|output| output.stdout)
+}
+
+async fn font_render_engine_inner(source_config: Option<&std::path::Path>) -> FontEnumeration {
     let probe_started = Instant::now();
     let mut digest = Sha256::new();
     digest.update(b"plurx/font-render/engine-v1\0");
     let mut usable = true;
     let mut paths = Vec::new();
+    let mut fonts = Vec::new();
+    let mut rules: Vec<std::path::PathBuf> = Vec::new();
+    let mut listing = String::new();
 
     let mut font_list = tokio::process::Command::new("fc-list");
-    font_list.arg("--format=%{file}\n");
+    font_list.arg(crate::fontenv::FONT_LISTING_FORMAT);
+    let mut configuration = tokio::process::Command::new("fc-conflist");
+    if let Some(config) = source_config {
+        font_list.env("FONTCONFIG_FILE", config);
+        configuration.env("FONTCONFIG_FILE", config);
+    }
     match bounded_command_output_with_timeout(font_list, FONT_ENGINE_PROBE_TIMEOUT).await {
         Ok(output) => {
             digest.update((output.stdout.len() as u64).to_be_bytes());
             digest.update(&output.stdout);
-            paths.extend(
-                String::from_utf8_lossy(&output.stdout)
+            listing = String::from_utf8_lossy(&output.stdout).into_owned();
+            fonts.extend(
+                listing
                     .lines()
-                    .map(str::trim)
+                    .filter_map(|line| line.split('\t').next())
                     .filter(|path| path.starts_with('/'))
                     .map(std::path::PathBuf::from),
             );
+            fonts.sort();
+            fonts.dedup();
+            paths.extend(fonts.iter().cloned());
         }
         Err(error) => {
             usable = false;
@@ -2275,19 +2336,22 @@ async fn font_render_engine_inner() -> FontEnumeration {
         }
     }
 
-    let configuration = tokio::process::Command::new("fc-conflist");
     match bounded_command_output_with_timeout(configuration, FONT_ENGINE_PROBE_TIMEOUT).await {
         Ok(output) => {
             digest.update((output.stdout.len() as u64).to_be_bytes());
             digest.update(&output.stdout);
-            paths.extend(
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .filter_map(|line| line.strip_prefix("+ "))
-                    .filter_map(|line| line.split_once(": ").map(|(path, _)| path))
-                    .filter(|path| path.starts_with('/'))
-                    .map(std::path::PathBuf::from),
-            );
+            for rule in String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.strip_prefix("+ "))
+                .filter_map(|line| line.split_once(": ").map(|(path, _)| path))
+                .filter(|path| path.starts_with('/'))
+                .map(std::path::PathBuf::from)
+            {
+                if !rules.contains(&rule) {
+                    rules.push(rule);
+                }
+            }
+            paths.extend(rules.iter().cloned());
         }
         Err(error) => {
             usable = false;
@@ -2322,6 +2386,9 @@ async fn font_render_engine_inner() -> FontEnumeration {
         },
         spawn_elapsed,
         stat_elapsed,
+        rules,
+        fonts,
+        listing,
     }
 }
 
@@ -2542,7 +2609,7 @@ async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String),
     Ok((object.finalize().to_vec(), version))
 }
 
-fn engine_path_version(path: &std::path::Path) -> Result<String, String> {
+pub(crate) fn engine_path_version(path: &std::path::Path) -> Result<String, String> {
     #[cfg(unix)]
     {
         let metadata =
@@ -4559,26 +4626,10 @@ mod tests {
             "a non-burn check stats the dependency closure and nothing else"
         );
 
-        let fonts = EncodedEngine::capture_test_objects(std::slice::from_ref(&font), "p")
-            .await
-            .expect("font objects");
-        let burn = EncodedEngine {
-            digest: media.digest.clone(),
-            process_identity: media.process_identity.clone(),
-            objects: Arc::clone(&media.objects),
-            font_objects: Arc::clone(&fonts.objects),
-            font_digest: Some("captured-font-closure".to_owned()),
-        };
-        assert_eq!(
-            burn.is_current_charged(None).await.1.charged(),
-            vec![
-                ("font", "spawn", 1),
-                ("font", "stat", 3),
-                ("media", "stat", 1)
-            ],
-            "a burn check charges its dependency closure to media, and folds its three \
-             font stat batches into one observation"
-        );
+        // The burn half — one `font,stat` observation and no `font,spawn`
+        // per check — needs a real frozen environment and is pinned by
+        // `fontenv::tests::a_new_system_font_does_not_withdraw_a_frozen_recipe`.
+        let _ = font;
     }
 
     #[tokio::test]
@@ -4615,27 +4666,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_changed_fontconfig_closure_invalidates_the_retained_recipe() {
-        let captured = FragmentIndexEngine {
-            digest: "font-closure-a".to_owned(),
-            objects: Vec::new().into(),
-            usable: true,
-        };
-        let added_font = FragmentIndexEngine {
-            digest: "font-closure-b".to_owned(),
-            objects: Vec::new().into(),
-            usable: true,
-        };
-
-        assert!(font_closure_is_current("font-closure-a", &captured).await.0);
-        assert!(
-            !font_closure_is_current("font-closure-a", &added_font)
-                .await
-                .0
-        );
-    }
-
     #[test]
     fn font_inventory_keeps_a_load_tolerant_probe_budget() {
         assert!(FONT_ENGINE_PROBE_TIMEOUT >= Duration::from_secs(30));
@@ -4645,7 +4675,8 @@ mod tests {
     #[tokio::test]
     async fn text_renderer_attests_active_font_rules_and_files() {
         plurx_core::testfixtures::require_ffmpeg();
-        let engine = EncodedEngine::capture(true)
+        let runtime_cache = crate::test_tempdir().expect("runtime cache");
+        let engine = EncodedEngine::capture(Some(runtime_cache.path()))
             .await
             .expect("text renderer attestation");
         assert!(engine.is_current().await);

@@ -63,6 +63,7 @@ pub(super) async fn spawn_generation(
         #[cfg(windows)]
         let descriptors = crate::producer_spawn::Descriptors::default();
         let program = recipe_program(recipe);
+        let env = recipe_child_env(recipe);
         let spawned = match crate::producer_spawn::spawn(
             &program,
             &args,
@@ -70,7 +71,7 @@ pub(super) async fn spawn_generation(
                 runtime_cache: &shared.runtime_cache,
                 progress: crate::producer_spawn::Progress::None,
                 descriptors,
-                env: &[],
+                env: &env,
                 work: crate::process_control::ChildWork::realtime("VOD transcode"),
             },
         ) {
@@ -162,6 +163,17 @@ pub(super) async fn recipe_engine_is_current(recipe: &Recipe) -> bool {
         }
     }
     recipe.cluster_cache_key.is_none() || crate::ffmpeg::fragment_index_engine_is_current().await
+}
+
+/// What a producer for `recipe` adds to its environment: a text burn's frozen
+/// Fontconfig configuration, so the child sees the fonts the recipe captured
+/// and nothing installed since.
+pub(super) fn recipe_child_env(recipe: &Recipe) -> Vec<(&'static str, &std::ffi::OsStr)> {
+    recipe
+        .encoding
+        .as_ref()
+        .map(|encoding| encoding.engine.child_env())
+        .unwrap_or_default()
 }
 
 pub(super) fn recipe_program(recipe: &Recipe) -> std::path::PathBuf {

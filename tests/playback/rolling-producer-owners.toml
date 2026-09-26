@@ -2110,7 +2110,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # test-only: the offline worker loop under test in
 # `offline::tests::claim_a_wake_claims_what_the_local_replica_does_not_show_yet`,
 # aborted before the test returns. No production spawn.
-expected_occurrences = 639
+# 639 -> 641 (measured) with S-04 M2, the frozen Fontconfig environment:
+# `fontenv::blocking`'s `tokio::task::spawn_blocking`, the one bounded
+# filesystem owner that reads and copies the rule files, links the fonts,
+# stats the environment and sweeps a predecessor's directories; every
+# JoinHandle is awaited by its caller and a panicked task is a failure. And
+# the test-only `crate::producer_spawn::spawn(` in
+# `fontenv::tests::a_frozen_environment_names_only_the_captured_fonts`, which
+# runs `fc-list` through the production builder and reaps it before the test
+# returns. Neither owns a producer or a recipe decision.
+expected_occurrences = 641
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2218,7 +2227,12 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # aborted at the census budget and dropped (aborting any stragglers) when it
 # returns. Each task awaits one bounded, ChildWork-launched ffmpeg that is
 # killed on drop. No rolling-producer owner.
-expected_occurrences = 47
+# 47 -> 48 (measured) with S-04 M2: `handle.spawn_blocking(remove)` in
+# `FontEnvironment::drop`, which removes a released environment's directory
+# off the runtime worker. Fire-and-forget by design (a drop cannot await);
+# the removal is idempotent, holds no permit, and a removal that never runs
+# is covered by the next process's sweep. It owns no producer or process.
+expected_occurrences = 48
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2994,7 +3008,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # and the zero-length `tokio::time::timeout` in the `#[cfg(test)]`
 # `OfflineManager::take_wake` probe, which only asks whether a wake permit is
 # stored. No production timer.
-expected_occurrences = 1009
+# 1009 -> 1011 (measured) with S-04 M2, both test-only: the two
+# `tokio::time::sleep` waits in
+# `fontenv::tests::recipes_frozen_from_one_closure_share_it_until_the_last_is_released`
+# (one fixed 100 ms settle, one 20 ms poll bounded by a 10 s deadline) while
+# the environment's directory removal runs on the blocking pool. No
+# production timer.
+expected_occurrences = 1011
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3270,7 +3290,18 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # x265 fixture encode, its concat mux, the framemd5 decode and the production
 # copy pipe. Each is collected by testfixtures::run or Command::output before
 # its temporary directory drops. No detached owner.
-expected_occurrences = 188
+# 188 -> 191 (measured) with S-04 M2. One production: `fontenv::build`'s
+# `tokio::process::Command::new(program)`, which constructs the capture-time
+# `fc-cache`, `fc-conflist` and `fc-list` under the frozen environment's
+# variables; each goes through `ffmpeg::font_probe_output` (the bounded,
+# job-owned engine probe with its 30 s budget), is reaped there, and runs once
+# per recipe capture, never per segment. Two test-only: `fontenv::tests::fc`'s
+# `std::process::Command::new(tool)` for the Fontconfig tools, and the ffmpeg
+# glyph render in
+# `a_frozen_host_environment_matches_and_renders_like_the_live_one`; both
+# `.output()`, waited to completion. The live enumeration's `fc-conflist`
+# construction moved within `font_render_engine_inner`; it is not new.
+expected_occurrences = 191
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3665,7 +3696,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Command::output calls (framemd5 decode, production copy pipe) that collect
 # finite fixture children. The census's own ffmpeg starts through
 # process::bounded::output with ChildWork::realtime.
-expected_occurrences = 389
+# 389 -> 391 (measured) with S-04 M2, both test-only: the `.output()` of
+# the two commands described under `process-command-construction` above
+# (`fontenv::tests::fc` and the glyph render). Same children, counted once in
+# each sentinel; each is spawned, drained and reaped in one call.
+expected_occurrences = 391
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3834,7 +3869,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # 405 measured by zeroing this row after merging `origin/main` at
 # `4b112204b` into S-14 M8 (#543): main's 404, reviewed above, plus this
 # branch's one reviewed test-only call.
-expected_occurrences = 405
+# 405 -> 406 (measured) with S-04 M2, test-only: the `.wait()` that reaps
+# the `fc-list` child `a_frozen_environment_names_only_the_captured_fonts`
+# launches through `producer_spawn::spawn`, after its stdout is read.
+expected_occurrences = 406
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"

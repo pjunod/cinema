@@ -151,7 +151,7 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
         executable: crate::ffmpeg::EncodedExecutable::capture()
             .await
             .expect("frozen encoder"),
-        engine: crate::ffmpeg::EncodedEngine::capture(false)
+        engine: crate::ffmpeg::EncodedEngine::capture(None)
             .await
             .expect("frozen engine"),
         admissions: crate::admission::Admissions::new(),
@@ -364,7 +364,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
         executable: crate::ffmpeg::EncodedExecutable::capture()
             .await
             .expect("encoder"),
-        engine: crate::ffmpeg::EncodedEngine::capture(false)
+        engine: crate::ffmpeg::EncodedEngine::capture(None)
             .await
             .expect("engine"),
         admissions: encoding.admissions.clone(),
