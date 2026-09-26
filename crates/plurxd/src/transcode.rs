@@ -341,7 +341,7 @@ const AUTO_SOFTWARE_HEIGHT: i64 = 720;
 /// sources may follow validated hardware encoders to [`MAX_HEIGHT`].
 const AUTO_HARDWARE_PROBED_HEIGHT: i64 = 1080;
 /// Floor for any requested rung. Below this there is no picture worth the
-/// session; the adaptive ladder itself bottoms out at 360p.
+/// session; the adaptive ladder itself bottoms out here.
 pub const MIN_HEIGHT: i64 = 144;
 /// Ceiling for any requested or resolved rung. Hardware-backed SDR Auto and
 /// explicit quality/source promises may reach it.

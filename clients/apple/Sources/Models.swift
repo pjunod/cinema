@@ -281,6 +281,8 @@ enum PlaybackQuality: String, CaseIterable, Identifiable {
     case p720 = "720"
     case p480 = "480"
     case p360 = "360"
+    case p240 = "240"
+    case p144 = "144"
 
     var id: String { rawValue }
     var label: String {
@@ -293,6 +295,8 @@ enum PlaybackQuality: String, CaseIterable, Identifiable {
         case .p720: return "720p"
         case .p480: return "480p"
         case .p360: return "360p"
+        case .p240: return "240p"
+        case .p144: return "144p"
         }
     }
 

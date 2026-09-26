@@ -365,6 +365,96 @@ A dedicated signed-in Chrome tab on `m6` played channel 8.1 past 106 seconds at 
 
 This is a caption-positive source with an **open M4 web visual acceptance**, unlike the earlier source-empty #520 revisit. The concurrent source stream and web HLS session were different tuner streams, and this run did not decode the HLS output; it cannot assign the missing track to the graph probe, playlist advertisement, or browser. A bounded source-to-HLS-to-selector comparison is next. Sanitized local receipt: `/Users/pjunod/code/plurx-agent/codex-l03-caption-evidence-20260925/l03-channel-8-1-caption-positive-web-off-20260925.json` (SHA-256 `e3f93552a5bed5cd9668dc92c972a5706a16c5c176dcd5d80bbbe63bad21abe2`).
 
+## Draft PR #527 source-exact Chrome two-cliff trace — 2026-09-25
+
+Draft PR #527 source `dee7c87efd060ce6756f295470d042ccbe3454fe`, after merging then-current main `196d2a43e`, built under pinned Rust 1.97.1 as `v0.3.0-4184-gdee7c87ef` (binary SHA-256 `5ef5902c992b1ca5ecbd8f030e2ab506f719cb46f2bb7a9cde56bcff123e3005`). The isolated Chrome SDR run applied both 75-second windows of the 8→1.1→0.35 Mb/s profile with no shaper transport errors. Media actually delivered at 861.9 and 71.5 kb/s in those windows because playback stopped requesting or receiving a full link's worth; those byte rates do not establish that the configured link was saturated. The fixed harness followed the authoritative `<video>` across both prepared swaps and recorded each target's first presented frame.
+
+The first cliff began from a 0.991× clock baseline. Auto prepared and committed 720p→240p with 6.8 seconds of runway, but its first downshift took 13.302 seconds against the 10-second limit. The prepared 240p stream later ran out, causing one persistent-stall restart, 30.813 seconds to sustained recovery and an 11.433-second transition video gap. The second cliff began from a valid 1.000× baseline. Auto prepared and committed 240p→144p with 6.8 seconds of runway; the first downshift took 13.677 seconds. The 144p stream stopped advancing and never sustained 10 seconds at 0.9×; the scored video gap was 52.583 seconds, with zero restarts in that window. These are failed A-04 D3 results, not continuity acceptance. The remaining cause is a server/media supply shortfall after prepared commitment plus decision latency beyond 10 seconds; the trace does not prove whether encoding, session lifecycle or HLS delivery caused the shortfall. Safari, Firefox, native device, HDR and the rest of the §5.3 matrix remain owed.
+
+The raw report SHA-256 is `cafa68dbc291db45813ef377a856b86522097c74bceda0c0656ae7101b587a57`; normalized report SHA-256 is `db98967e3b307b4c5dc2aa1da4e80cd669653955191f5e95b96f7dba6182d272`. Durable receipt: `/Users/pjunod/code/plurx-agent/codex-a04-evidence-20260925/pr527-dee7c87ef/receipt.json`, SHA-256 `52dfb360d20c87647a5a3bead8d8eb443b6674a56aebed15a1378c167663b950`. The browser, isolated server and loopback shaper were cleaned up after the run. PR #527 remains draft pending a stable main base and its one post-review fast lane; no second adversarial review is planned.
+
+## Draft PR #527 post-review Chrome two-cliff iterations — 2026-09-25
+
+The pinned Rust 1.97.1 isolated-server traces on draft PR #527 remained failed through eight source-exact revisions. The low rungs and session handoff did improve the behavior measured on `dee7c87ef`: `655423a0f` applied 8→1.1→0.35 Mb/s for separate 74.939 and 74.899 second windows, with 1,082.6 and 349.2 kb/s of measured media delivery. Cliff 1 passed every scored check: 720p→240p in 9.410 seconds, 66.7 ms maximum transition video gap, and zero restarts, waits, stalls or hitches. Cliff 2 reached 144p with zero restarts, waits, stalls or hitches and a 100 ms video gap, but its first downshift took 10.767 seconds against the 10-second limit. This is a near-pass candidate trace, **not** D3 acceptance. Its source stamp was `v0.3.0-4195-g655423a0f`; the exact binary SHA-256 was `5e97c06ee798947bed100e1f881ac123c53f6f1a74534480975de685aa91108f`.
+
+A shorter successor start lead on source `26b0e0c6b` did not repeat that result: cliff 1 had a 100.1 ms video gap and cliff 2 took 10.957 seconds to downshift. The change was reverted. The earlier `b9b1c3ca3`, `8ec815136`, `f801f0ca4`, `1c1d002f5` and `de7fdadcd` runs showed why nominal bitrate selection, preparation timing and first-frame exposure mattered, but none passed both scored cliffs. Their exact build stamps, cliff metrics, raw and normalized SHA-256 hashes and JUnit reports are retained in `/Users/pjunod/code/plurx-agent/codex-a04-evidence-20260925/pr527-iterations-20260925/`; manifest SHA-256 `45c1719667fb545eef254335b572f061c78b8c483fc4eefd71815fe8ee18a575`. All client/server/shaper sessions were cleaned after each complete run.
+
+The A-04 row stays **blocked: incomplete D3 matrix**. Safari, Firefox, Apple TV, iPhone, four Android devices, HDR and the remaining six-metric acceptance matrix are still owed. Draft PR #527 received one adversarial review; no second review is planned. Its branch merged then-current main `1781e8e2d` at `1051831b3`, but the source-exact trace above predates that merge. Final integration and qualification wait for PR #524 to reach main.
+
+## Draft PR #527 Chrome D3 pass on source-exact `ca7ec94db` — 2026-09-25
+
+The prior 240p successor did not install the attached player's fragment
+observers. A diagnostic trace showed its last 1,097 kb/s transfer sample
+aging beyond 70 seconds through the second cliff; hls.js EWMA fell, but the
+emergency policy correctly required a fresh media transfer. The controller
+therefore waited for two mild-pressure samples. Commit `ca7ec94db` records
+progress and completed-fragment throughput on an attached prepared successor
+only. Staging, non-2xx and retired-successor traffic cannot change the
+incumbent's estimate. The focused web-control regression passed.
+
+An isolated Chrome SDR run on pinned Rust 1.97.1 binary
+`v0.3.0-4266-gca7ec94db` (SHA-256
+`32e54a21c485c9e06b4dca9ed78a3f9e5181dc9fd91ec9992fa4878915e7e08b`)
+passed the unmodified 8→1.1→0.35 Mb/s two-cliff scorer. The first shaped
+stage held 11.989 s at 7,999.9 kb/s measured media delivery; the next two
+held 74.895 s at 1,099.2 kb/s and 74.659 s at 349.2 kb/s. The shaper
+reported zero transport errors.
+
+| Scored cliff | Baseline clock | First downshift | Maximum video gap | Restarts · waits · stalls · hitches | First target frame |
+|---|---:|---:|---:|---:|---:|
+| 8→1.1 Mb/s | 0.995× | 720p→240p in 6.950 s | 100 ms | 0 · 0 · 0 · 0 | 0.048 s from boundary |
+| 1.1→0.35 Mb/s | 1.000× | 240p→144p in 7.773 s | 100 ms | 0 · 0 · 0 · 0 | 0.063 s from boundary |
+
+The raw report SHA-256 is
+`44d57cd3ec225c757f47a9c3aa6bb99dec305c82e4dbc80484ebb91b419413ec`;
+normalized SHA-256 is
+`78ef88f3e4ca2629936e6fc967b0eb01342e650eac5202580903e6362ba6746a`;
+JUnit SHA-256 is
+`e7b126137c4e9284eb3575fad3a9ccbbae7f5f32f9dfaba92e3f39f94b1a3258`.
+The private evidence directory is
+`/Users/pjunod/code/plurx-agent/codex-a04-evidence-20260925/pr527-source-exact-ca7ec94db/`;
+its manifest SHA-256 is
+`5de44b0b0778ccee07698d944f17cca37d7daa3657c5521bb9ec59c4d94e597a`.
+The isolated browser, server and shaper exited after the run.
+
+This is one passing Chrome SDR candidate trace on draft PR #527. PR #524
+has not yet merged into its base, so it is not a current-main or final
+qualification claim. Safari, Firefox, Apple TV, iPhone, Android devices, HDR
+and the remaining §5.3 platform matrix remain owed. PR #527 received its
+sole adversarial review already; no second review is planned.
+
+## Draft PR #527 remaining browser and native availability — 2026-09-25
+
+The source-exact `ca7ec94db` isolated server attempted the same A-04
+two-cliff fixture in Safari. `/usr/bin/safaridriver` was present, but
+WebDriver `POST /session` timed out while connecting to a Safari automation
+instance. The run ended before browser playback, so it measured no cliff,
+frame, or recovery outcome. Raw Safari harness report SHA-256:
+`38f62ee501b13058e3f0f70bbd8b7422787f9026deab493bd7b765cda106ed8f`;
+normalized SHA-256:
+`5c235c59023396788bce31f7b5b3364c9af3e32b98da0599ec7826cf31f0aeb2`;
+JUnit SHA-256:
+`9cc19c76a3a07615bdfb305bb0c3fb6e21f035db4250fb20d7f86b5c89802eba`.
+Firefox and geckodriver were absent on this host, so no Firefox trace was
+started. The host ffmpeg lacks `zscale`, which prevents the HDR corpus case.
+
+Read-only native inventory found Plurx bundle version 183 on the connected
+iPhone Air, iPhone 17 Pro Max, iPad mini, iPad Pro and iPhone 18 Pro, and
+version 184 on the Bedroom Apple TV. Android package inventory found
+versionCode 126 on the 9445X and 125 on the Google TV Streamer, Pixel 10 Pro
+Fold and Pixel 11 Pro XL. These installed builds do not identify the draft
+PR's exact client source. No app was launched, installed, or controlled; the
+inventory establishes availability only and is not native D3 playback
+evidence.
+
+The private sanitized receipt and Safari reports are in
+`/Users/pjunod/code/plurx-agent/codex-a04-evidence-20260925/pr527-platform-attempts/`;
+receipt SHA-256
+`07b200bdef6e8d9777ceccb93cd0aed64804d0b0a40c0b793219632396388217`.
+The Chrome SDR result above remains the only D3 candidate pass. Safari,
+Firefox, native devices, HDR and the rest of the §5.3 platform matrix
+remain open.
+
 ## L-03 caption-positive HLS comparison — 17:50–17:59 UTC
 
 A 12-second direct HDHomeRun capture of 8.1 WRIC-TV during signed-in Chrome

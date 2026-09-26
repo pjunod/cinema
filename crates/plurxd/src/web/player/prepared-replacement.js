@@ -22,7 +22,7 @@ const PREPARED_HANDOFF_KEY="plurx.prepared_handoff";
 // How far past the incumbent's current film position the successor must be
 // buffered before this client will switch. A handoff that commits at the
 // playhead hands the viewer a decoder with nothing in front of it.
-const PREPARED_BUFFER_LEAD_MS=4000;
+const PREPARED_BUFFER_LEAD_MS=2000;
 // Drift the successor may carry into the switch before it is seeked onto the
 // incumbent's second. Below this a corrective seek costs more than it fixes:
 // it flushes the buffer that was the whole point of preparing.
@@ -151,11 +151,34 @@ function settlePlaybackControlAcknowledgement(p,request){
   // Matched on both fields rather than on identity: the reporter replays a
   // retried request, and the object it replays is the one that was queued.
   const at=queue.findIndex(entry=>entry.action_id===sent.action_id&&entry.state===sent.state);
-  if(at!==-1) queue.splice(at,1);
+  if(at!==-1){
+    queue.splice(at,1);
+    const change=p.directedChange;
+    if(sent.state==="committed"&&change&&change.committedActionId===sent.action_id
+       &&change.outcome==="committed"&&change.autoMove){
+      // The successor's first control exchange must keep the rung it was
+      // built for. Plain Auto is a *new* ask to the server and would stage an
+      // immediate, unwanted replacement back toward the opening rung.
+      change.committedActionId=null;
+    }
+    const pending=p.preparedControlPending;
+    if(sent.state==="committed"&&pending&&pending.actionId===sent.action_id){
+      p.preparedControlPending=null;
+      if(pending.bootstrap&&p.sessionId===pending.sessionId){
+        // The predecessor reporter owns the commit response; start the
+        // successor reporter only after that callback has finished.
+        setTimeout(()=>{
+          if(PLAYER===p&&p.sessionId===pending.sessionId&&playbackOwnsAttachedMedia(p))
+            startPlaybackControl(document.getElementById("video"),p,pending.bootstrap);
+        },0);
+      }
+    }
+  }
 }
 
+/** @returns {HTMLVideoElement|null} */
 function preparedVideoElement(){
-  return document.getElementById("video-prepared");
+  return /** @type {HTMLVideoElement|null} */ (document.getElementById("video-prepared"));
 }
 // Created on the first preparation rather than shipped in the modal. The
 // structural golden pins what `#player` contains, and a second `<video>` that
@@ -240,11 +263,22 @@ function beginPreparedReplacement(p,action){
   const offeredOriginMs=Math.max(0,Math.round(Number(action.media_origin_ms)||0));
   const originMs=sessionMediaOriginMs({vod:!!p.vod,media_origin_ms:offeredOriginMs});
   const filmMs=playbackFilmPositionMs(v,p);
+  // A replacement that begins encoding at the incumbent's current second
+  // spends its entire preparation chasing a moving playhead. Begin up to three
+  // seconds ahead when the incumbent already has enough runway to play
+  // until that second. The buffer gate below still requires overlap with the
+  // actual incumbent position before exposure, so this cannot skip content.
+  const startLeadMs=Math.min(PREPARED_BUFFER_LEAD_MS+1000,
+    Math.max(0,Math.round((bufferRunway(v)-3)*1000)));
   const state={actionId:action.action_id,sessionId:action.session_id,
-    playlistUrl:action.playlist_url,mediaOriginMs:originMs,offeredOriginMs,
+    playlistUrl:action.playlist_url,controlBootstrap:action.control||null,
+    mediaOriginMs:originMs,offeredOriginMs,
     selection:action.effective_selection,
-    startAtSec:preparedLocalPositionMs(filmMs,originMs)/1000,
+    startAtSec:preparedLocalPositionMs(filmMs+startLeadMs,originMs)/1000,
     state:"building",hls:null,metadata:false,buffered:false,
+    warmFrameReady:false,warmFrameCallbackId:null,
+    exposeFrameTimer:null,exposeFrameCallbackId:null,
+    incumbentHls:null,incumbentLoadPaused:false,incumbentResumeTimer:null,
     frameTimer:null,framePollTimer:null,frameListener:null,startedAt:Date.now()};
   p.prepared=state;
   clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"staged",
@@ -253,7 +287,21 @@ function beginPreparedReplacement(p,action){
     playbackContext()));
   try{
     spare.muted=true;
-    spare.style.display="none";
+    // Keep the prepared decoder in the compositor under a nearly transparent
+    // overlay. display:none can suspend its video frames in Chrome, so the
+    // first visible frame may cost several more frame intervals.
+    spare.style.position="absolute";
+    spare.style.inset="0";
+    spare.style.opacity="0.001";
+    spare.style.pointerEvents="none";
+    spare.style.zIndex="1";
+    spare.style.display="";
+    if(typeof spare.requestVideoFrameCallback==="function"){
+      try{ state.warmFrameCallbackId=spare.requestVideoFrameCallback(()=>{
+        state.warmFrameCallbackId=null;
+        if(preparedState(p)===state) state.warmFrameReady=true;
+      }); }catch(e){}
+    }
     if(preferNativeHls(spare)||!window.Hls||!Hls.isSupported()) preparedNativeAttach(p,state,spare);
     else preparedHlsAttach(p,state,spare);
   }catch(error){
@@ -271,10 +319,12 @@ function preparedSelectionText(selection){
 }
 function preparedHlsAttach(p,state,spare){
   const tgt=bufferTargets(p&&p.bufSegSecs);
+  const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
   const hls=new Hls({
     maxBufferLength:tgt.fwd,
     backBufferLength:tgt.back,
     ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
+    ...(StockLoader?{loader:createPreparedHlsLoader(StockLoader,p,state)}:{}),
     fragLoadPolicy:vodClientContract().fragLoadPolicy,
     // Told before the first fragment, exactly as the incumbent was: seeking
     // after attach downloads the opening of the successor and throws it away,
@@ -291,6 +341,21 @@ function preparedHlsAttach(p,state,spare){
     outgoingEstimateBps:p&&p.bandwidthSeedBps, priorKbps:p&&p.priorKbps});
   if(seed) try{ hls.bandwidthEstimate=seed; }catch(e){}
   state.hls=hls;
+  // The successor and incumbent share the viewer's link. Give the lower
+  // bitrate successor a bounded first-fragment window while the incumbent
+  // continues playing its buffered media. Restore incumbent loading on every
+  // failed/aborted preparation and after at most six seconds if no handoff occurred.
+  const incumbent=p&&p.hls;
+  const pauseMs=Math.min(6000,Math.max(0,(bufferRunway(document.getElementById("video"))-3)*1000));
+  if(pauseMs>0&&incumbent&&typeof incumbent.stopLoad==="function"
+     &&typeof incumbent.startLoad==="function"){
+    try{
+      incumbent.stopLoad();
+      state.incumbentHls=incumbent;
+      state.incumbentLoadPaused=true;
+      state.incumbentResumeTimer=setTimeout(()=>resumePreparedIncumbentLoad(p,state),pauseMs);
+    }catch(e){}
+  }
   hls.loadSource(state.playlistUrl);
   hls.attachMedia(spare);
   const current=()=>preparedState(p)===state&&PLAYER===p;
@@ -305,10 +370,86 @@ function preparedHlsAttach(p,state,spare){
   if(Hls.Events.BUFFER_APPENDED) hls.on(Hls.Events.BUFFER_APPENDED,()=>{
     if(current()) notePreparedBuffer(p,state);
   });
+  if(Hls.Events.FRAG_LOADED) hls.on(Hls.Events.FRAG_LOADED,(_,d)=>{
+    notePreparedHlsFragmentLoaded(p,state,d);
+  });
   hls.on(Hls.Events.ERROR,(_,d)=>{
     if(!current()||!d||!d.fatal) return;
     failPreparedReplacement(p,state,String(d.details||d.type||"hls.js fatal error"));
   });
+}
+// The staged pipeline does not own the viewer's bandwidth history until it is
+// exposed. Once attached it must measure its own fragments: otherwise the
+// predecessor's last sample ages out, and a later cliff can only take the slow
+// two-sample voluntary path even while the successor's hls.js EWMA falls.
+function attachedPreparedHls(p,state){
+  return PLAYER===p&&p.hls===state.hls&&p.sessionId===state.sessionId;
+}
+function createPreparedHlsLoader(StockLoader,p,state){
+  return class PlurxPreparedLoader extends StockLoader{
+    load(context,config,callbacks){
+      this.plurxMediaProgress=null;
+      return super.load(context,config,callbacks);
+    }
+    openAndSendXhr(xhr,context,config){
+      if(context&&context.frag&&context.frag.type==='main'
+        &&context.frag.duration>0&&typeof xhr.addEventListener==='function'){
+        xhr.addEventListener('progress',event=>{
+          if(!attachedPreparedHls(p,state)||!(xhr.status>=200&&xhr.status<300)) return;
+          const loaded=Number(event&&event.loaded),now=performance.now();
+          if(!(loaded>0)) return;
+          const previous=this.plurxMediaProgress;
+          if(!previous||previous.xhr!==xhr||loaded<previous.bytes){
+            this.plurxMediaProgress={xhr,bytes:loaded,at:now};
+            return;
+          }
+          const bytes=loaded-previous.bytes;
+          if(now-previous.at<1500||bytes<16*1024) return;
+          this.plurxMediaProgress={xhr,bytes:loaded,at:now};
+          const kbps=PlaybackPolicy.transferSampleKbps({loadedBytes:bytes,
+            loadingStartMs:previous.at,loadingEndMs:now});
+          if(kbps&&p.abr){
+            p.abr.recentEstimateKbps=kbps;
+            p.abr.recentEstimateAtMs=now;
+            p.abr.recentEstimateSource='progress';
+            p.abr.recentEstimateUrl=String(context.url||'');
+          }
+        });
+      }
+      return super.openAndSendXhr(xhr,context,config);
+    }
+  };
+}
+function notePreparedHlsFragmentLoaded(p,state,d){
+  if(!attachedPreparedHls(p,state)||!p.abr) return;
+  const stats=d&&((d.frag&&d.frag.stats)||d.stats);
+  const loaded=stats&&(stats.loaded||stats.total);
+  const loading=stats&&stats.loading||{};
+  const kbps=loaded>0&&d.frag&&d.frag.duration>0
+    ?PlaybackPolicy.transferSampleKbps({loadedBytes:loaded,
+      loadingStartMs:loading.start,loadingEndMs:loading.end}):null;
+  if(!kbps) return;
+  const now=performance.now(),url=String(d.frag.url||'');
+  // A completed request can average bytes from both sides of a cliff. Keep
+  // the fresher within-request progress delta until a new request measures it.
+  if(p.abr.recentEstimateSource==='progress'&&p.abr.recentEstimateUrl===url
+    &&now-p.abr.recentEstimateAtMs<=3000) return;
+  p.abr.recentEstimateKbps=kbps;
+  p.abr.recentEstimateAtMs=now;
+  p.abr.recentEstimateSource='complete';
+  p.abr.recentEstimateUrl=url;
+}
+function resumePreparedIncumbentLoad(p,state){
+  if(!state) return;
+  if(state.incumbentResumeTimer!=null){
+    clearTimeout(state.incumbentResumeTimer);
+    state.incumbentResumeTimer=null;
+  }
+  if(!state.incumbentLoadPaused) return;
+  state.incumbentLoadPaused=false;
+  if(p&&p.hls===state.incumbentHls){
+    try{ state.incumbentHls.startLoad(-1); }catch(e){}
+  }
 }
 // Native HLS: the session id in the URL is the credential, same as the
 // incumbent's path.
@@ -358,7 +499,17 @@ function notePreparedBuffer(p,state){
   if(!v||!spare) return;
   const through=preparedBufferedThroughMs(state,spare);
   if(through==null) return;
-  const target=playbackFilmPositionMs(v,p)+PREPARED_BUFFER_LEAD_MS;
+  const filmMs=playbackFilmPositionMs(v,p);
+  // The successor may start ahead to catch up quickly. Wait until its first
+  // buffered range also covers the exact incumbent second to avoid a skip.
+  let coversIncumbent=false;
+  for(let i=0;i<spare.buffered.length;i++){
+    const start=state.mediaOriginMs+spare.buffered.start(i)*1000;
+    const end=state.mediaOriginMs+spare.buffered.end(i)*1000;
+    if(start<=filmMs+250&&end>=filmMs){ coversIncumbent=true; break; }
+  }
+  if(!coversIncumbent) return;
+  const target=filmMs+PREPARED_BUFFER_LEAD_MS;
   if(through<target) return;
   if(!state.buffered){
     state.buffered=true;
@@ -387,7 +538,7 @@ function commitPreparedReplacement(p,state){
   const drift=Math.abs((spare.currentTime||0)-wanted)*1000;
   // Already on the incumbent's second: nothing to wait for, and the exposure
   // is the same synchronous block it has always been.
-  if(drift<=PREPARED_ALIGN_SLACK_MS) return exposePreparedReplacement(p,state,v,spare,filmMs);
+  if(drift<=PREPARED_ALIGN_SLACK_MS) return exposePreparedReplacementAtFrame(p,state,v,spare,filmMs);
   // Otherwise finish aligning BEFORE the successor is seen or heard. The
   // corrective seek used to be the line above, with nothing between it and the
   // element swap; a seek is asynchronous, so the successor had nothing decoded
@@ -422,7 +573,7 @@ async function alignPreparedReplacement(p,state,v,spare){
       const filmMs=playbackFilmPositionMs(v,p);
       const target=preparedLocalPositionMs(filmMs,state.mediaOriginMs)/1000;
       if(Math.abs((spare.currentTime||0)-target)*1000<=PREPARED_ALIGN_SLACK_MS)
-        return exposePreparedReplacement(p,state,v,spare,filmMs);
+        return exposePreparedReplacementAtFrame(p,state,v,spare,filmMs);
     }
   }
   if(!live()) return false;
@@ -463,12 +614,43 @@ function preparedAlignedBuffered(spare){
   }catch(e){}
   return false;
 }
+// A decoded successor frame while it is nearly transparent proves that Chrome
+// is presenting the prepared layer. Expose on its next frame instead of at an
+// arbitrary point between two 30-fps pictures. A browser that does not render
+// the warm layer keeps the immediate path; a missed next frame is bounded.
+function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
+  if(!state.warmFrameReady||typeof spare.requestVideoFrameCallback!=="function")
+    return exposePreparedReplacement(p,state,v,spare,filmMs);
+  let settled=false;
+  const finish=()=>{
+    if(settled) return;
+    settled=true;
+    if(state.exposeFrameTimer!=null){ clearTimeout(state.exposeFrameTimer); state.exposeFrameTimer=null; }
+    if(state.exposeFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
+      try{ spare.cancelVideoFrameCallback(state.exposeFrameCallbackId); }catch(e){}
+    state.exposeFrameCallbackId=null;
+    if(PLAYER!==p||preparedState(p)!==state||document.getElementById("video")!==v
+      ||preparedVideoElement()!==spare||!playbackOwnsAttachedMedia(p)) return;
+    exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
+  };
+  state.exposeFrameTimer=setTimeout(finish,100);
+  try{ state.exposeFrameCallbackId=spare.requestVideoFrameCallback(finish); }
+  catch(e){ finish(); }
+  return true;
+}
 // Phase two: the exposure, unchanged. Intent is sampled at the last reversible
 // boundary, mute and rate are applied before display, the elements swap, and
 // the predecessor stays alive and hidden until a real successor frame proves
 // rollback is no longer needed.
 function exposePreparedReplacement(p,state,v,spare,filmMs){
   const predecessor=p.hls, retired=v;
+  // The timer is only for a still-authoritative incumbent. Keep the paused
+  // state for rollback, which explicitly restarts this pipeline if exposure
+  // fails its first-frame proof.
+  if(state.incumbentResumeTimer!=null){
+    clearTimeout(state.incumbentResumeTimer);
+    state.incumbentResumeTimer=null;
+  }
   // Intent is sampled at the last reversible boundary. Preparation can take
   // seconds, during which the viewer may pause, mute, or change rate; copying
   // the earlier snapshot would overwrite that newer choice.
@@ -510,6 +692,11 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     spare.playbackRate=intent.playbackRate;
   }catch(e){}
   spare.style.display="";
+  spare.style.position="";
+  spare.style.inset="";
+  spare.style.opacity="";
+  spare.style.pointerEvents="";
+  spare.style.zIndex="";
   spare.removeAttribute("aria-hidden");
   retired.style.display="none";
   retired.muted=true;
@@ -552,6 +739,10 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     if(p.preparedCommitting===state) p.preparedCommitting=null;
     // The switch the viewer asked for happened. Nothing owes them a reopen,
     // and the rung they asked for is the one being delivered.
+    if(p.directedChange&&p.directedChange.autoMove)
+      p.directedChange.committedActionId=state.actionId;
+    p.preparedControlPending={actionId:state.actionId,sessionId:state.sessionId,
+      bootstrap:state.controlBootstrap};
     settleDirectedChange(p,p.directedChange,"committed",
       Math.round(performance.now()-((p.directedChange&&p.directedChange.tappedAt)||performance.now())));
     retirePreparedPredecessor(p,state);

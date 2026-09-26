@@ -1267,6 +1267,7 @@ async function main() {
       shippedSource("preparedVideoElement"), shippedSource("preparedState"),
       shippedSource("queuePlaybackControlAcknowledgement"),
       shippedSource("destroyHlsInstance"),
+      shippedSource("resumePreparedIncumbentLoad"),
       shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
       "function cancelPreparedFirstFrame(){} function cancelHlsStartup(){}",
       shippedSource("rememberPlaybackTransportIntent"),shippedSource("pausePlaybackInternally"),
@@ -2133,6 +2134,32 @@ async function main() {
   assert.equal(PREPARE_FIXTURE.media_origin_ms, 0);
   assert.equal(PREPARE_FIXTURE.playlist_url,
     `/api/v1/hls/${PREPARE_SESSION}/index.m3u8`);
+  const successorBootstrap={...bootstrap(),
+    url:`/api/v1/hls/${PREPARE_SESSION}/control`,
+    generation:"55555555-5555-4555-8555-555555555555"};
+  assert.equal(control.validPreparation({...PREPARE_FIXTURE,control:successorBootstrap}),true);
+  assert.equal(control.validPreparation({...PREPARE_FIXTURE,
+    control:{...successorBootstrap,url:"/api/v1/hls/other/control"}}),false,
+  "a preparation cannot hand the reporter to another session");
+  {
+    const live={id:"video"}, started=[];
+    let scheduled=null;
+    const player={sessionId:PREPARE_SESSION,
+      preparedControlPending:{actionId:PREPARE_ACTION_ID,sessionId:PREPARE_SESSION,
+        bootstrap:successorBootstrap},
+      controlAcknowledgements:[{action_id:PREPARE_ACTION_ID,state:"committed"}]};
+    const settle=new Function("PLAYER","document","setTimeout","playbackOwnsAttachedMedia",
+      "startPlaybackControl",`${shippedSource("settlePlaybackControlAcknowledgement")};
+        return settlePlaybackControlAcknowledgement;`)(player,{getElementById:()=>live},
+      fn=>{scheduled=fn;},()=>true,(video,p,controlBootstrap)=>
+        started.push({video,p,controlBootstrap}));
+    settle(player,{acknowledgement:{action_id:PREPARE_ACTION_ID,state:"committed"}});
+    assert.equal(player.controlAcknowledgements.length,0);
+    assert.equal(started.length,0,"the old reporter finishes its accepted exchange first");
+    scheduled();
+    assert.deepEqual(started,[{video:live,p:player,controlBootstrap:successorBootstrap}],
+      "the successor reporter is bound to the visible element and its own session");
+  }
   {
     // A whole exchange, so the fixture is proven through `validResponse` and
     // not only through the validator it happens to call.
@@ -2539,6 +2566,7 @@ async function main() {
         shippedSource("finishStoppingPlaybackControl"),
         shippedSource("continueStoppingPlaybackControl"),
         shippedSource("destroyHlsInstance"),
+        shippedSource("resumePreparedIncumbentLoad"),
         shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
         // The dispatch under test: a `prepare` answer must reach the player's
         // state machine. Recorded rather than run — the pipeline itself has its
@@ -3518,6 +3546,7 @@ async function main() {
         shippedSource("finishStoppingPlaybackControl"),
         shippedSource("continueStoppingPlaybackControl"),
         shippedSource("destroyHlsInstance"),
+        shippedSource("resumePreparedIncumbentLoad"),
         shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
         shippedSource("askPlaybackControl"),
         shippedSource("settlePlaybackControlWaiters"),
@@ -3912,6 +3941,8 @@ async function main() {
       on(event, fn) { this.events[event] = fn; }
       loadSource(url) { this.source = url; }
       attachMedia(media) { this.media = media; }
+      stopLoad() { this.loadsStopped = (this.loadsStopped || 0) + 1; }
+      startLoad() { this.loadsResumed = (this.loadsResumed || 0) + 1; }
       destroy() { this.destroyed = true; }
     }
     const scope = new Function(
@@ -3935,6 +3966,7 @@ async function main() {
         "function tok(url){return url;}",
         "function preferNativeHls(){return nativeHls;}",
         "function bufferTargets(){return {fwd:20,back:10,budgeted:false};}",
+        shippedSource("bufferRunway"),
         "function vodClientContract(){return {fragLoadPolicy:{}};}",
         shippedConst("PREPARED_HANDOFF_KEY"),
         shippedConst("PREPARED_BUFFER_LEAD_MS"),
@@ -3957,6 +3989,7 @@ async function main() {
         shippedSource("handlePreparedReplacementAction"),
         shippedSource("beginPreparedReplacement"), shippedSource("preparedSelectionText"),
         shippedSource("preparedHlsAttach"), shippedSource("preparedNativeAttach"),
+        shippedSource("resumePreparedIncumbentLoad"),
         shippedSource("notePreparedMetadata"), shippedSource("preparedBufferedThroughMs"),
         shippedConst("PREPARED_ALIGN_SEEK_MS"), shippedConst("PREPARED_ALIGN_ATTEMPTS"),
         shippedSource("notePreparedBuffer"), shippedSource("commitPreparedReplacement"),
@@ -3964,7 +3997,8 @@ async function main() {
         // successor is exposed, so a corrective seek can no longer put a
         // blank element in front of the viewer.
         shippedSource("alignPreparedReplacement"), shippedSource("preparedAlignSeek"),
-        shippedSource("preparedAlignedBuffered"), shippedSource("exposePreparedReplacement"),
+        shippedSource("preparedAlignedBuffered"), shippedSource("exposePreparedReplacementAtFrame"),
+        shippedSource("exposePreparedReplacement"),
         // M3's instruments. Sliced rather than stubbed, so a commit in this
         // harness exercises the real recording and the assertions below can
         // read what it recorded.
@@ -3997,6 +4031,7 @@ async function main() {
         "async function requestPlaybackMediaChange(p,change){mediaChanges.push(change);return true;}",
         "function selectedAudioIndex(){return 0;} function playQuality(){return quality;}",
         "function hlsStartupCurrent(){return false;}",
+        "function recordAutoSwitch(p,from,to,reason,pos,id){(p.abr.switches||(p.abr.switches=[])).push({from,to,reason,pos,id});}",
         shippedConst("PREPARED_OFFER_BOUND_MS"),
         shippedConst("PREPARED_OFFER_CADENCE_MS"),
         shippedSource("playbackControlSelection"),
@@ -4113,6 +4148,53 @@ async function main() {
     controlAcknowledgement: null, pendingMediaChange: null, wantsPlayback: true,
   }, overrides);
 
+  // A warmed successor remains transparent until its next decoded frame;
+  // the current video stays authoritative during that one-frame rendezvous.
+  {
+    const h = preparedHarness();
+    h.live.currentTime = 20;
+    h.live.ranges = [[18, 29]];
+    const incumbent = { destroy() {} };
+    const p = h.set(preparedPlayer({ hls: incumbent }));
+    h.handle(prepareAction());
+    h.spare.frameCallback();
+    h.instances[0].events.manifest();
+    h.spare.currentTime = 20;
+    h.spare.ranges = [[20, 30]];
+    h.instances[0].events.append();
+    assert.equal(p.hls, incumbent, "the predecessor stays visible until the warm frame callback");
+    assert.equal(h.spare.id, "video-prepared");
+    h.spare.frameCallback();
+    assert.equal(p.hls, h.instances[0], "the successor becomes authoritative on its next frame");
+  }
+
+  // Preparing a second HLS pipeline temporarily gives it the shaped link.
+  // Every abort and the bounded pause must restore incumbent loading.
+  {
+    const h = preparedHarness();
+    h.live.currentTime = 20;
+    h.live.ranges = [[18, 29]];
+    const incumbent = { stopped: 0, resumed: 0, destroyed: false,
+      stopLoad() { this.stopped++; }, startLoad() { this.resumed++; },
+      destroy() { this.destroyed = true; } };
+    const p = h.set(preparedPlayer({ hls: incumbent }));
+    h.handle(prepareAction());
+    assert.equal(incumbent.stopped, 1);
+    assert.equal(incumbent.resumed, 0);
+    h.abandon("aborted", "fixture abort");
+    assert.equal(incumbent.resumed, 1, "abort resumes the still-authoritative pipeline");
+    assert.equal(incumbent.destroyed, false);
+    h.fireAll();
+    assert.equal(incumbent.resumed, 1, "a canceled timer cannot resume twice");
+    h.handle(prepareAction({ action_id: "817334fb-1472-4be4-9240-fc890a346cf8" }));
+    assert.equal(incumbent.stopped, 2);
+    h.fireAll();
+    assert.equal(incumbent.resumed, 2, "the bounded pause expires even before settlement");
+    h.abandon("aborted", "fixture abort after bound");
+    assert.equal(incumbent.resumed, 2);
+    assert.equal(p.hls, incumbent);
+  }
+
   // §4 — the alignment functions, as pure functions, with no player at all.
   {
     const h = preparedHarness();
@@ -4129,6 +4211,25 @@ async function main() {
     assert.equal(h.film(Number.NaN, 900_000, false), 0);
     assert.equal(h.local(910_000, 900_000), 10_000, "and the inverse puts the successor there");
     assert.equal(h.local(10_000, 900_000), 0, "a successor never starts before its own zero");
+  }
+
+  // With safe incumbent runway, the successor begins one lead ahead and
+  // cannot commit until its buffered range covers the incumbent's real second.
+  {
+    const h = preparedHarness();
+    h.live.currentTime = 20;
+    h.live.ranges = [[18, 29]];
+    const p = h.set(preparedPlayer({ hls: { destroy() {} } }));
+    h.handle(prepareAction());
+    assert.equal(h.instances[0].config.startPosition, 23);
+    h.instances[0].events.manifest();
+    h.spare.currentTime = 24;
+    h.spare.ranges = [[24, 30]];
+    h.instances[0].events.append();
+    assert.ok(p.prepared, "a range beginning ahead cannot skip the incumbent's 20th second");
+    h.live.currentTime = 24;
+    h.instances[0].events.append();
+    assert.equal(p.hls, h.instances[0], "overlap and two seconds of lead permit the handoff");
   }
 
   // Building the second pipeline: one instance, on the hidden element, and the
@@ -4154,7 +4255,8 @@ async function main() {
     assert.equal(p.hls, incumbent, "the incumbent instance is untouched");
     assert.equal(incumbent.destroyed, false, "…and specifically not destroyed");
     assert.equal(h.spare.muted, true, "the successor is muted until the switch");
-    assert.equal(h.spare.style.display, "none", "…and invisible until the switch");
+    assert.equal(h.spare.style.opacity, "0.001", "…and nearly transparent while its decoder warms");
+    assert.equal(h.spare.style.position, "absolute", "…without shrinking the incumbent's picture");
     // §C6 — the successor's local zero is `media_origin_ms` in film time, so a
     // successor primed for film 900 s whose zero is 600 s starts at 300 s.
     assert.equal(h.instances[0].config.startPosition, 300,
@@ -4174,7 +4276,7 @@ async function main() {
 
     // Buffered short of the lead is not ready…
     h.spare.currentTime = 300;
-    h.spare.ranges = [[300, 302]];
+    h.spare.ranges = [[300, 301.5]];
     h.instances[0].events.append();
     assert.equal(latest(h).state, "metadata_ready",
       "buffered to the playhead is not buffered past the switch point");
@@ -4211,6 +4313,7 @@ async function main() {
     assert.equal(h.spare.playbackRate, 1.5);
     assert.equal(h.spare.paused, true, "a pause during preparation survives the switch");
     assert.equal(h.spare.style.display, "", "…and visible only after the switch");
+    assert.equal(h.spare.style.opacity, "", "…without the warm overlay's opacity");
     assert.equal(h.live.style.display, "none");
     assert.equal(h.live.muted, true);
     assert.equal(p.prepared, null, "the slot is free once the switch is made");
@@ -4811,6 +4914,10 @@ async function main() {
     h.spare.ranges = [[306, 330]];
     h.live.currentTime = 301;                 // film 901 s
     h.instances[0].events.append();
+    assert.equal(h.spare.currentTime, 306,
+      "a disjoint range is not a safe place to align the successor");
+    h.spare.ranges = [[300, 330]];
+    h.instances[0].events.append();
     assert.equal(h.spare.currentTime, 301,
       "the successor is put on the incumbent's second before the picture changes");
   }
@@ -5339,7 +5446,7 @@ async function main() {
     // cancels a preparation on `waiting`/`stalled` anyway, so asking would
     // spend twelve seconds to be told no — with the viewer already stalled.
     const h = preparedHarness();
-    const p = directedPlayer(h, { abr: { switching: false } });
+    const p = directedPlayer(h, { abr: { switching: false, switches: [] } });
     offerReporter(h);
     p.waitAt = 1;                      // the incumbent is not decoding
     await h.autoRung(720, { height: 1080, reason: "runway" });
@@ -5369,7 +5476,7 @@ async function main() {
   // ---- §7.4 D3-a, the web half: Auto carries the rung it wants -------------
   {
     const h = preparedHarness();
-    const p = directedPlayer(h, { abr: { switching: false } });
+    const p = directedPlayer(h, { abr: { switching: false, switches: [] } });
     offerReporter(h);
     p.autoHeight = 720;
     assert.deepEqual(h.selection().quality, { mode: "auto" },
@@ -5389,14 +5496,30 @@ async function main() {
     h.exchange(offerRequest(6), offerResponse({ action: prepareAction() }));
     fireOfferConfirm(h);
     await outcomeOf(moving);
+    assert.equal(p.abr.switching, true,
+      "the first prepared Auto ask keeps later controller ticks from opening another owner");
+    assert.equal(p.autoFallbackInFlight, true);
+    await h.autoRung(720, { height: 1080, reason: "runway" });
+    assert.equal(h.instances.length, 1, "a second tick cannot open another preparation");
     h.instances[0].events.manifest();
     h.spare.ranges = [[0, 30]];
     h.instances[0].events.append();
     h.spare.frameCallback(0, { presentationTime: 1, presentedFrames: 1 });
-    assert.equal(p.autoRequestedHeight, null,
-      "a committed rung is the delivered one now; the selection returns to plain Auto");
-    assert.deepEqual(h.selection().quality, { mode: "auto" },
-      "…which is a stable digest rather than a standing ask");
+    assert.equal(p.abr.switching, false);
+    assert.equal(p.autoFallbackInFlight, false);
+    assert.equal(p.autoHeight, 1080, "the committed rung is the next tick's delivered height");
+    assert.equal(p.abr.switches.length, 1, "prepared Auto success is recorded as a switch");
+    assert.equal(p.autoRequestedHeight, 1080,
+      "the committed acknowledgement must retain the selection that staged the successor");
+    assert.deepEqual(h.selection().quality, { mode: "auto", height: 1080 },
+      "clearing the ask before acknowledgement makes the server retire the successor");
+    const committed=h.pending("active");
+    assert.equal(committed.state,"committed");
+    h.settle({acknowledgement:committed});
+    assert.equal(p.autoRequestedHeight, 1080,
+      "the successor reporter continues to ask for the delivered rung");
+    assert.deepEqual(h.selection().quality, { mode: "auto", height: 1080 },
+      "plain Auto would stage an unwanted replacement on the successor");
   }
   {
     // A viewer who picks by hand overrides whatever the controller wanted.
@@ -5486,7 +5609,7 @@ async function main() {
     assert.equal(h.live.id, "video", "…and the incumbent still owns the picture");
     assert.equal(h.live.style.display, "", "…is still displayed");
     assert.equal(h.live.muted, false, "…and is still audible while the seek runs");
-    assert.equal(h.spare.style.display, "none", "the successor is not exposed yet");
+    assert.equal(h.spare.style.opacity, "0.001", "the successor is not exposed yet");
     assert.equal(p.prepared.state, "committing", "the staging is mid-commit, not exposed");
     // Now it lands, on a range that covers where it landed.
     h.spare.ranges = [[300, 330]];
@@ -6398,6 +6521,93 @@ async function vendoredHlsStartupTests(){
   const VendoredHls=require("../../crates/plurxd/src/web/hls.min.js");
   assert.equal(typeof VendoredHls.DefaultConfig.loader.prototype.openAndSendXhr,"function",
     "the vendored stock loader exposes the final-send seam the adapter wraps");
+
+  {
+    // The same adapter must see media bytes before FRAG_LOADED, without
+    // replacing hls.js's progress handler or accepting stale attachment data.
+    const sample=new Function("PlaybackPolicy",[
+      "let now=0;const performance={now:()=>now};",
+      "const attachment={current:()=>true};const hls={};",
+      "let PLAYER={hls,mediaAttachment:attachment,controlIntentGeneration:1,abr:{recentEstimateKbps:null,recentEstimateAtMs:null}};",
+      "const episode={player:PLAYER,attachment,mediaAttachment:attachment,hls,state:'presenting',loaders:new Set()};PLAYER.hlsStartup=episode;",
+      "class StockLoader{constructor(){}load(context,config,callbacks){this.context=context;this.callbacks=callbacks;return this.openAndSendXhr(context.xhr,context,config);}openAndSendXhr(xhr){xhr.onprogress=()=>{xhr.stockProgress=(xhr.stockProgress||0)+1;};}abort(){}destroy(){}}",
+      "class FakeXHR{constructor(status=200){this.status=status;this.listeners={};}addEventListener(name,fn){this.listeners[name]=fn;}progress(loaded){this.onprogress({loaded});if(this.listeners.progress)this.listeners.progress({loaded});}}",
+      shippedSource("playbackAttemptTerminallyStopped"),
+      shippedSource("hlsStartupCurrent"),
+      shippedSource("hlsStartupManifestRequest"),
+      shippedSource("createHlsStartupLoader"),
+      "const Loader=createHlsStartupLoader(StockLoader,episode);const loader=new Loader({});",
+      "const xhr=new FakeXHR();loader.load({xhr,frag:{type:'main',duration:2}}, {}, {});",
+      "return {xhr,player:PLAYER,setNow:value=>{now=value;},rejected(status){const x=new FakeXHR(status);loader.load({xhr:x,frag:{type:'main',duration:2}}, {}, {});return x;},manifest(){const x=new FakeXHR();loader.load({xhr:x,type:'manifest',url:'/index.m3u8'}, {}, {});return x;}};",
+    ].join("\n"))(require("../../crates/plurxd/src/web/playback-policy.js"));
+    sample.xhr.progress(20_000);
+    sample.setNow(1_000);
+    sample.xhr.progress(60_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,null,"a short delta cannot classify a cliff");
+    sample.setNow(1_600);
+    sample.xhr.progress(80_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,300,"60 kB over 1.6 s is measured, not inferred from runway");
+    assert.equal(sample.player.abr.recentEstimateAtMs,1_600);
+    assert.equal(sample.player.abr.recentEstimateSource,'progress');
+    assert.equal(sample.xhr.stockProgress,3,"hls.js keeps its own progress accounting");
+    for(const status of [0,503]){
+      const rejected=sample.rejected(status);
+      rejected.progress(20_000);
+      sample.setNow(status===0?3_200:4_800);
+      rejected.progress(140_000);
+      assert.equal(sample.player.abr.recentEstimateAtMs,1_600,
+        `HTTP ${status} progress must not become bandwidth evidence`);
+    }
+    sample.player.controlIntentGeneration=2;
+    sample.setNow(5_000);
+    sample.xhr.progress(200_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,300,"a superseded intent cannot overwrite throughput");
+    assert.equal(sample.manifest().listeners.progress,undefined,"manifest bytes are not media throughput");
+  }
+
+  {
+    // A staged HLS instance becomes the attached player without a new open.
+    // Its own loader must start sampling only then, and a later cliff must
+    // not be decided from the predecessor's expired bandwidth sample.
+    const sample=new Function("PlaybackPolicy",[
+      "let now=0;const performance={now:()=>now};",
+      "const predecessor={};const successor={};let PLAYER={hls:predecessor,sessionId:'old',abr:{recentEstimateKbps:1097,recentEstimateAtMs:-70000}};",
+      "const state={hls:successor,sessionId:'new'};",
+      "class StockLoader{load(context,config,callbacks){return this.openAndSendXhr(context.xhr,context,config);}openAndSendXhr(xhr){xhr.onprogress=()=>{};}}",
+      "class FakeXHR{constructor(status=200){this.status=status;this.listeners={};}addEventListener(name,fn){this.listeners[name]=fn;}progress(loaded){this.onprogress({loaded});this.listeners.progress?.({loaded});}}",
+      shippedSource("attachedPreparedHls"),
+      shippedSource("createPreparedHlsLoader"),
+      shippedSource("notePreparedHlsFragmentLoaded"),
+      "const Loader=createPreparedHlsLoader(StockLoader,PLAYER,state);const loader=new Loader({});",
+      "const xhr=new FakeXHR();loader.load({xhr,url:'/new/frag1',frag:{type:'main',duration:2}}, {}, {});",
+      "return {player:PLAYER,state,xhr,setNow:value=>{now=value;},attach(){PLAYER.hls=successor;PLAYER.sessionId='new';},reject(){const bad=new FakeXHR(503);loader.load({xhr:bad,url:'/new/frag2',frag:{type:'main',duration:2}}, {}, {});return bad;},complete(data){notePreparedHlsFragmentLoaded(PLAYER,state,data);}};",
+    ].join("\n"))(require("../../crates/plurxd/src/web/playback-policy.js"));
+    sample.xhr.progress(20_000);
+    sample.setNow(1_600);sample.xhr.progress(80_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,1097,
+      "staging traffic cannot replace the attached predecessor's estimate");
+    sample.attach();
+    sample.xhr.progress(100_000);
+    sample.setNow(3_200);sample.xhr.progress(160_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,300);
+    assert.equal(sample.player.abr.recentEstimateAtMs,3_200);
+    sample.complete({frag:{url:'/new/frag1',duration:2,
+      stats:{loaded:100_000,loading:{start:1_600,end:3_200}}}});
+    assert.equal(sample.player.abr.recentEstimateKbps,300,
+      "a complete average cannot overwrite fresh progress from the same fragment");
+    const rejected=sample.reject();rejected.progress(20_000);
+    sample.setNow(4_800);rejected.progress(160_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,300,
+      "non-2xx successor bytes cannot become bandwidth evidence");
+    sample.complete({frag:{url:'/new/frag3',duration:2,
+      stats:{loaded:100_000,loading:{start:3_200,end:4_800}}}});
+    assert.equal(sample.player.abr.recentEstimateKbps,500,
+      "the attached successor publishes a fresh complete-fragment estimate");
+    sample.player.hls={};
+    sample.setNow(6_400);sample.xhr.progress(240_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,500,
+      "a retired successor cannot overwrite its replacement's estimate");
+  }
 
   async function actualVendoredLoaderCase({xhrSetup=null}={}){
     const policy=require("../../crates/plurxd/src/web/playback-policy.js");
