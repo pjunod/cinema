@@ -11,17 +11,26 @@ the JSDoc types written into it, and reports those
 
 The shell did not start clean, so the gate is a ratchet: every diagnostic is
 counted under the key `path<TAB>TScode` (line and column dropped — they move
-on every edit) and compared with `tests/web/tsc-baseline.tsv`. A key whose
-count rose, or a key the baseline does not have, fails. A count that fell
-passes and says the baseline can shrink.
+on every edit) and compared with `tests/web/tsc-baseline.tsv`. The counts
+must match exactly. A key whose count rose, or a key the baseline does not
+have, fails with every diagnostic of it. A count that fell fails too, as a
+stale baseline, until `--update` lowers it: headroom left in the file would
+let a later, unrelated error under the same key pass as "unchanged" (PR #554
+review, finding 2), so the change that removes a diagnostic commits the
+lower count.
 
     scripts/web-types                                # the gate (make web-check)
     scripts/web-types --update                       # lower the baseline to what is left
     scripts/web-types --accept-increase "<reason>"   # raise it, with the reason on record
+    scripts/web-types --base <rev>                   # the gate, plus: every raise since
+                                                     # merge-base(<rev>, HEAD) is on record
 
 `--update` only ever lowers counts. Raising one takes `--accept-increase`,
-which writes `# accepted <date>: <reason>` into the baseline so the diff that
-raises it says why.
+which writes one `# accepted <date> <path> <code> <count>: <reason>` line per
+raised key. `--base` (the fast lane passes the pull request's base) compares
+the baseline file with its copy at the merge-base and fails on any count that
+rose, or key that appeared, without a new `# accepted` line naming that key
+and that count — so a hand edit of the TSV cannot raise the ceiling quietly.
 
 `tsc` is a dev-only tool pinned in `tools/web-types/package-lock.json`; this
 script runs `npm ci` there when the installed copy is missing or is not the
@@ -52,10 +61,16 @@ DIAGNOSTIC = re.compile(
 )
 
 HEADER = [
-    "# tsc diagnostics the web shell carried when this gate began, per file and",
-    "# code. scripts/web-types fails if a count rises or a key appears; lower it",
-    "# with `scripts/web-types --update`. Columns: path, code, count.",
+    "# tsc diagnostics the web shell carries, per file and code. scripts/web-types",
+    "# fails unless the counts match exactly: lower a count with",
+    "# `scripts/web-types --update`; raise one only with `--accept-increase`, whose",
+    "# `# accepted` line per key the fast lane requires. Columns: path, code, count.",
 ]
+
+# One raised key, as `--accept-increase` records it.
+ACCEPTED = re.compile(
+    r"^# accepted (?P<date>\d{4}-\d{2}-\d{2}) (?P<path>\S+) (?P<code>TS\d+) (?P<count>\d+): (?P<reason>\S.*)$"
+)
 
 Key = tuple  # (path, code)
 
@@ -124,11 +139,15 @@ def count(diagnostics: list[dict]) -> collections.Counter:
 
 
 def read_baseline(path: Path) -> tuple[collections.Counter, list[str]]:
+    if not path.is_file():
+        return collections.Counter(), []
+    return parse_baseline(path.read_text(encoding="utf-8"))
+
+
+def parse_baseline(text: str) -> tuple[collections.Counter, list[str]]:
     counts: collections.Counter = collections.Counter()
     accepted: list[str] = []
-    if not path.is_file():
-        return counts, accepted
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         if not line.strip():
             continue
         if line.startswith("#"):
@@ -158,6 +177,47 @@ def lowered(baseline: collections.Counter, current: collections.Counter) -> coll
     return collections.Counter({k: min(n, current[k]) for k, n in baseline.items() if current[k] > 0})
 
 
+def unrecorded_raises(base_text: str | None, head_text: str) -> list[str]:
+    """Keys `head_text` raised over `base_text` with no new `# accepted` line.
+
+    A raise is on record when the head adds an `# accepted` line (one not
+    already in the base) naming that path, code and the head's count. With no
+    baseline at the base, the change is the one introducing the file.
+    """
+    if base_text is None:
+        return []
+    base_counts, base_accepted = parse_baseline(base_text)
+    head_counts, head_accepted = parse_baseline(head_text)
+    recorded = set()
+    for line in set(head_accepted) - set(base_accepted):
+        match = ACCEPTED.match(line)
+        if match:
+            recorded.add((match["path"], match["code"], int(match["count"])))
+    return [
+        f"{file} {code}: {base_counts[(file, code)]} -> {n} with no new "
+        f"'# accepted <date> {file} {code} {n}: <reason>' line"
+        for (file, code), n in sorted(head_counts.items())
+        if n > base_counts[(file, code)] and (file, code, n) not in recorded
+    ]
+
+
+def baseline_at(rev: str) -> tuple[str | None, str]:
+    """The committed baseline at merge-base(rev, HEAD), or None if it had none."""
+    merge_base = subprocess.run(["git", "merge-base", rev, "HEAD"], cwd=ROOT,
+                                capture_output=True, text=True, check=False)
+    if merge_base.returncode != 0:
+        raise LookupError(f"git merge-base {rev} HEAD failed: {merge_base.stderr.strip()}")
+    sha = merge_base.stdout.strip()
+    rel = BASELINE.relative_to(ROOT).as_posix()
+    listed = subprocess.run(["git", "ls-tree", "--name-only", sha, "--", rel], cwd=ROOT,
+                            capture_output=True, text=True, check=True)
+    if not listed.stdout.strip():
+        return None, sha
+    shown = subprocess.run(["git", "show", f"{sha}:{rel}"], cwd=ROOT,
+                           capture_output=True, text=True, check=True)
+    return shown.stdout, sha
+
+
 def report_rose(rose: dict, diagnostics: list[dict]) -> None:
     for key in sorted(rose):
         was, now = rose[key]
@@ -174,11 +234,35 @@ def main(argv: list[str]) -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--update", action="store_true", help="lower the baseline to what is left")
     mode.add_argument("--accept-increase", metavar="REASON", help="raise the baseline, recording why")
+    parser.add_argument("--base", metavar="REV",
+                        help="also require every raise since merge-base(REV, HEAD) to be on record")
     parser.add_argument("--baseline", type=Path, default=BASELINE, help=argparse.SUPPRESS)
+    parser.add_argument("--base-file", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--tsc-output", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     started = time.monotonic()
+    unrecorded: list[str] = []
+    if args.base is not None or args.base_file is not None:
+        if args.base_file is not None:
+            # Tests feed the base's copy directly; "-" stands for none at the base.
+            base_text = None if str(args.base_file) == "-" else args.base_file.read_text(encoding="utf-8")
+            where = str(args.base_file)
+        else:
+            try:
+                base_text, sha = baseline_at(args.base)
+            except (LookupError, subprocess.CalledProcessError) as error:
+                print(f"web-types: FAIL — cannot read the baseline at the base: {error}", file=sys.stderr)
+                return 2
+            where = f"merge-base {sha[:12]}"
+        head_text = args.baseline.read_text(encoding="utf-8") if args.baseline.is_file() else ""
+        unrecorded = unrecorded_raises(base_text, head_text)
+        for line in unrecorded:
+            print(f"web-types: FAIL — baseline raised over {where}: {line}", file=sys.stderr)
+        if unrecorded:
+            print("web-types: raise a count only with scripts/web-types --accept-increase \"<why>\", "
+                  "which records the line.", file=sys.stderr)
+
     if args.tsc_output is not None:
         # Tests feed a recorded tsc run to exercise the ratchet on its own.
         output = args.tsc_output.read_text(encoding="utf-8")
@@ -222,15 +306,17 @@ def main(argv: list[str]) -> int:
             print("web-types: nothing rose; use --update to lower the baseline", file=sys.stderr)
             return 1
         stamp = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
-        write_baseline(args.baseline, current,
-                       accepted + [f"# accepted {stamp}: {' '.join(reason.split())}"])
+        why = " ".join(reason.split())
+        write_baseline(args.baseline, current, accepted + [
+            f"# accepted {stamp} {file} {code} {now}: {why}" for (file, code), (_, now) in sorted(rose.items())
+        ])
         print(f"web-types: wrote {rel} — {total} diagnostics in {len(current)} keys "
               f"(was {allowed}); accepted: {reason}")
         return 0
 
     if rose:
         report_rose(rose, diagnostics)
-        print(f"web-types: {len(rose)} key(s) rose above {rel}. Fix the new diagnostics; "
+        print(f"web-types: {len(rose)} key(s) rose above {rel}. Remove the new diagnostics; "
               "if one is truly intended, run scripts/web-types --accept-increase \"<why>\".",
               file=sys.stderr)
         return 1
@@ -239,19 +325,24 @@ def main(argv: list[str]) -> int:
         lower = lowered(baseline, current)
         if lower == baseline:
             print(f"web-types: nothing shrank — {rel} not written ({total} diagnostics)")
-            return 0
+            return 1 if unrecorded else 0
         write_baseline(args.baseline, lower, accepted)
         print(f"web-types: lowered {rel} from {allowed} to {sum(lower.values())} diagnostics")
-        return 0
+        return 1 if unrecorded else 0
 
     if fell:
         shrink = sum(was - now for was, now in fell.values())
-        print(f"web-types: OK, shrank — {total} diagnostics, baseline allows {allowed}; "
-              f"the baseline can shrink by {shrink} — run scripts/web-types --update "
-              f"({elapsed:.1f}s)")
-    else:
-        print(f"web-types: OK, unchanged — {total} diagnostics in {len(current)} keys "
-              f"match {rel} ({elapsed:.1f}s)")
+        for (file, code), (was, now) in sorted(fell.items()):
+            print(f"web-types: FAIL — {file} {code}: {now} now, baseline says {was}", file=sys.stderr)
+        print(f"web-types: baseline stale — {total} diagnostics, {rel} allows {allowed}. "
+              f"Run scripts/web-types --update and commit it: {shrink} diagnostic(s) of "
+              "headroom would let a new error under the same key pass as unchanged.",
+              file=sys.stderr)
+        return 1
+    if unrecorded:
+        return 1
+    print(f"web-types: OK, unchanged — {total} diagnostics in {len(current)} keys "
+          f"match {rel} ({elapsed:.1f}s)")
     return 0
 
 

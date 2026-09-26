@@ -239,6 +239,8 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          # --base reads the baseline at the merge-base with the target.
+          fetch-depth: 0
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
@@ -247,13 +249,18 @@ jobs:
           scripts/js-check
           git ls-files -z 'crates/plurxd/src/web/*.js' | xargs -0 -n1 node --check
       # TypeScript's checker over the same rows, against tests/web/
-      # tsc-baseline.tsv: a new or raised diagnostic fails. The script runs
+      # tsc-baseline.tsv: the counts must match exactly, so a new or raised
+      # diagnostic fails and so does one that fell without the baseline being
+      # lowered. --base also refuses a count the pull request raised in the
+      # TSV without a new `# accepted` line for that key. The script runs
       # `npm ci` into tools/web-types from its lockfile (one package, no
       # dependencies) when the pinned tsc is not already there.
       - name: Type-check the web shell against its baseline
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           node tests/web/jsconfig-generated.test.js
-          scripts/web-types
+          scripts/web-types --base "$PR_BASE_SHA"
           node tests/web/player-typedef.test.js
 
   apple_compile:

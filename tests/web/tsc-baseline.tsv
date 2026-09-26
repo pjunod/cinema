@@ -1,6 +1,7 @@
-# tsc diagnostics the web shell carried when this gate began, per file and
-# code. scripts/web-types fails if a count rises or a key appears; lower it
-# with `scripts/web-types --update`. Columns: path, code, count.
+# tsc diagnostics the web shell carries, per file and code. scripts/web-types
+# fails unless the counts match exactly: lower a count with
+# `scripts/web-types --update`; raise one only with `--accept-increase`, whose
+# `# accepted` line per key the fast lane requires. Columns: path, code, count.
 # accepted 2026-09-26: initial baseline: the web shell as it stood when this gate began
 crates/plurxd/src/web/core/api.js	TS2322	1
 crates/plurxd/src/web/core/api.js	TS2339	9
