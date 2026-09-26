@@ -94,6 +94,8 @@ mod placeholder_census;
 #[cfg(all(test, feature = "hiqlite-store"))]
 mod consistent_read_census;
 
+pub mod classification_schedule;
+pub mod offline_claim;
 pub mod replicated;
 pub mod watched_drain;
 
@@ -3998,6 +4000,18 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
         &self,
         node_id: &str,
     ) -> Result<Option<OfflinePackage>, StoreError>;
+
+    /// Whether any package *may* be queued for `node_id`, read from this
+    /// node's local replica without consensus and without a Raft proposal.
+    ///
+    /// A hint in both directions and never an authorization: `false` can be
+    /// a replica that has not applied a re-home or a re-enable yet, `true`
+    /// can be a package this node has since claimed. The offline worker uses
+    /// it only to decide whether to ask the authority at all;
+    /// [`claim_next_offline_package`](Self::claim_next_offline_package)'s
+    /// replicated claim stays the only thing that binds a package to a
+    /// producer (docs/cluster/REPLICATED-WRITE-RATE-HYGIENE-II.md §3.1).
+    async fn offline_queue_hint(&self, node_id: &str) -> Result<bool, StoreError>;
 
     /// Node and claim generation fence the yield to the exact current worker.
     /// A re-homed package, or one reclaimed by the same node, must not be

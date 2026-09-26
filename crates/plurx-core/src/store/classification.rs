@@ -90,11 +90,36 @@ pub fn inventory_sql() -> String {
 pub fn write_sql() -> String {
     format!("INSERT INTO media_classifications(item_id,source_json,payload,overrides,terms,revision) SELECT $1,$2,$3,$4,$5,$6+1 WHERE EXISTS(SELECT 1 FROM items i WHERE i.id=$1 AND {SOURCE}=$2) AND COALESCE((SELECT revision FROM media_classifications WHERE item_id=$1),0)=$6 ON CONFLICT(item_id) DO UPDATE SET source_json=excluded.source_json,payload=excluded.payload,overrides=excluded.overrides,terms=excluded.terms,revision=excluded.revision")
 }
+/// Seconds after a successful provider check before an entry is due another.
+pub const PROVIDER_REFRESH_SECS: i64 = 30 * 86_400;
+/// Seconds after a failed provider check before an entry is due another.
+pub const PROVIDER_RETRY_SECS: i64 = 3_600;
+
+/// Whether any entry the classification pass would act on exists: `$1` is
+/// the current `classification::VERSION`, `$2` now in Unix seconds. (SQLite
+/// numbers parameters by first appearance, so `$1` must come first.)
+///
+/// It mirrors the worker's `unchanged` test one condition at a time — no
+/// record, not indexed, a different source, a different rules version, or a
+/// provider check due under the worker's own rule (a configured TMDB key, a
+/// `movie` or `show`, a TMDB id, and the refresh or retry age). The
+/// store contract pins each condition on both backends, so a new condition
+/// in the worker without one here fails there rather than silently waiting
+/// for the forced pass.
+pub fn hint_sql() -> String {
+    format!("SELECT EXISTS(SELECT 1 FROM items i LEFT JOIN media_classifications c ON c.item_id=i.id WHERE i.kind IN ('movie','show','episode','video','book','audiobook') AND (c.item_id IS NULL OR NOT EXISTS(SELECT 1 FROM classification_fts WHERE rowid=i.id) OR c.source_json IS NOT ({SOURCE} || '') OR json_extract(c.payload,'$.version') IS NOT $1 OR (i.kind IN ('movie','show') AND i.tmdb_id IS NOT NULL AND EXISTS(SELECT 1 FROM settings WHERE key='{tmdb}' AND value<>'') AND $2-COALESCE(json_extract(c.payload,'$.provider_checked_at'),0) > CASE WHEN json_extract(c.payload,'$.provider_error') IS NULL THEN {PROVIDER_REFRESH_SECS} ELSE {PROVIDER_RETRY_SECS} END))) AS due", tmdb = super::keys::TMDB_API_KEY)
+}
+
 #[async_trait]
 pub trait ClassificationStore: Send + Sync {
     async fn classification_page(&self, after: i64, limit: i64) -> Result<Vec<Entry>, StoreError>;
     async fn write_classification(&self, item_id: i64, record: &Record)
         -> Result<bool, StoreError>;
+    /// Whether a classification pass could find anything to do, read from
+    /// this node's local replica ([`hint_sql`]) without consensus and
+    /// without a Raft proposal. A hint, never an authorization: a pass that
+    /// runs still reads its pages on the authority and fences every write.
+    async fn classification_hint(&self, now_unix: i64) -> Result<bool, StoreError>;
 }
 pub fn decode(payload: &str) -> Result<Entry, StoreError> {
     serde_json::from_str(payload).map_err(|e| StoreError::Database(e.to_string()))
