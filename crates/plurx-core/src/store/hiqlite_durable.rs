@@ -2791,6 +2791,20 @@ impl OfflinePackageStore for HiqliteAuthStore {
         Ok(results.get(1).copied().unwrap_or_default() == 1)
     }
 
+    async fn offline_expiry_hint(&self, now: i64) -> Result<bool, StoreError> {
+        // `query_map` reads this node's replica: no leader round trip and no
+        // proposal. See the trait method for why a stale answer is safe.
+        let rows = self
+            .client()
+            .query_map::<ScalarRow, _>(
+                "SELECT 1 AS value FROM offline_packages WHERE expires_at <= $1 LIMIT 1",
+                params!(now),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(!rows.is_empty())
+    }
+
     async fn expire_offline_packages(&self, now: i64) -> Result<u64, StoreError> {
         let statements = vec![
             (

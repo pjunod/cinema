@@ -96,6 +96,7 @@ mod consistent_read_census;
 
 pub mod classification_schedule;
 pub mod offline_claim;
+pub mod offline_expiry;
 pub mod replicated;
 pub mod watched_drain;
 
@@ -4150,6 +4151,19 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
     ) -> Result<bool, StoreError>;
 
     async fn expire_offline_packages(&self, now: i64) -> Result<u64, StoreError>;
+
+    /// Whether any package *may* have lapsed by `now` (`expires_at <= now`,
+    /// the predicate of [`expire_offline_packages`](Self::expire_offline_packages)),
+    /// read from this node's local replica without consensus and without a
+    /// Raft proposal.
+    ///
+    /// A hint in both directions and never an authorization: `true` can be a
+    /// replica that has not applied a renewal yet, `false` a replica that has
+    /// not applied a package at all. The expiry sweep uses it only to decide
+    /// whether to ask the authority, and the replicated sweep's own predicate
+    /// stays the only thing that deletes a package
+    /// (docs/cluster/REPLICATED-WRITE-RATE-HYGIENE-II.md §3.4).
+    async fn offline_expiry_hint(&self, now: i64) -> Result<bool, StoreError>;
 
     // --- Node removal (`CLUSTERING-PLAN.md` §6.7) -------------------------
     //
