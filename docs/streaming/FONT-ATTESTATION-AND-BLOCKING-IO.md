@@ -295,7 +295,9 @@ enumeration is unchanged in purpose (it is still how the environment is
 pool, every loaded configuration file is read and required to still be the
 version the enumeration attested, and every font link is statted through and
 required to match. Three parity proofs then run before the recipe exists,
-each under exactly the child's variables:
+each under exactly the child's variables. Proof 3's burn is *spawned* first,
+on the brand-new root, and its trace is *judged* last, after proofs 1 and 2
+(see proof 3 for why):
 
 1. `fc-conflist` must load the same configuration files **in the same
    order** as the live one. Same bytes at the same paths under the same
@@ -315,11 +317,23 @@ each under exactly the child's variables:
    start order and repeats whole loads, so this is a set; proof 1 settled the
    order). A library that ignored `FONTCONFIG_SYSROOT` would read the live
    root configuration by its original path and is refused here instead of
-   silently seeing newly installed fonts. That one spawn per environment also
-   leaves the producer library's own cache warm: the production image's
-   bundled library ignores the system's `cache-8` files and writes `cache-9`,
-   so the `fc-cache` run this design first had warmed a cache the producer
-   never read, and it is gone.
+   silently seeing newly installed fonts. A producer that traces nothing is
+   refused too; the proof is never skipped.
+
+   **The probe is always a cold load** (decided 2026-09-26, §7.6). Fontconfig
+   before 2.17 does not read `FC_DEBUG` for the parse libass starts itself;
+   it prints the trace only when it has no valid cache and a scan loads the
+   default configuration. Under a sysroot Fontconfig resolves *every*
+   `<cachedir>` (absolute, `~` and `prefix="xdg"`) inside the sysroot, so a
+   brand-new root is itself an empty cache: the burn runs before
+   `fc-conflist` and `fc-list` have read or written anything there, and
+   every capture's probe is cold on 2.15 and on 2.17+ alike. Its scan then
+   leaves the cache, in the producer library's own format, that every later
+   launch reads (`configure_ffmpeg_runtime` gives the probe the producer's
+   own `XDG_CACHE_HOME`). This also keeps the production image's case: its
+   bundled library ignores the system's `cache-8` files and writes
+   `cache-9`, so the `fc-cache` run this design first had warmed a cache the
+   producer never read, and it is gone.
 
 Any failing refuses the burn with `vod_engine_unattested`, rather than
 rendering with other fonts or rules. The engine digest folds the frozen
@@ -480,7 +494,9 @@ runners have). As built, against the table this section first proposed:
 | `a_process_clears_environments_its_predecessor_left` | a stale `fontenv/<id>` is removed by the first capture of a process |
 | `a_capture_whose_frozen_rules_diverge_is_refused` | added for #553's review: through `capture_from`, a live config with a required `<include>` of an empty directory (loads live; the directory is not copied, so the frozen load falls back) is refused **by the rule parity**, and leaves no environment behind |
 | `a_capture_whose_frozen_faces_diverge_is_refused` | added for #553's review: a live cache written under a since-removed scan rule still names a renamed family; the frozen environment rescans, so the same rule files resolve other faces and the capture is refused **by the face parity** |
-| `a_producer_library_that_ignores_the_sysroot_is_refused` | added for #553's review: the producer-library proof, through `capture_from`, with an encoder stand-in that unsets `FONTCONFIG_SYSROOT` before running the real ffmpeg; the trace names the live root config and the capture is refused |
+| `a_producer_library_that_ignores_the_sysroot_is_refused` | added for #553's review: the producer-library proof, through `capture_from`, with an encoder stand-in that unsets `FONTCONFIG_SYSROOT` and drops the live cache (a pre-2.13.1 library cannot read a 2.13+ cache, so it scans cold) before running the real ffmpeg; the trace names the live root config and the capture is refused |
+| `the_producer_probe_is_a_cold_load` | added for #553's fast lane (§7.6): a stand-in that exits unless no `*.cache-*` file exists anywhere under `FONTCONFIG_SYSROOT` when it runs; the capture succeeds only if the probe went before `fc-conflist`/`fc-list`, and the probe's scan leaves a cache in the environment for later launches |
+| `a_producer_that_traces_nothing_is_refused` | added for #553's fast lane: a stand-in that drops `FC_DEBUG`; the cold probe prints nothing and the capture is refused ("traced no Fontconfig configuration"), never skipped |
 | `the_producer_library_trace_is_read_as_the_image_prints_it` | the trace parser on the production image's format (doubled slash, `done` lines, repeated loads) accepts the frozen set and refuses an escaped path, an unsysrooted scan, an empty trace and a missing file |
 | `a_cancelled_capture_leaves_no_environment_behind` | added for #553's review: a capture paused with its environment on disk (before any `fc-*` child) and aborted, as `timeout_at` would, removes its directory |
 
@@ -588,6 +604,32 @@ on the host, `docker` and `curl`; the image has no `pgrep`, `curl` or
    saw Jellyfin FFmpeg's bundled library honour the sysroot; capture now
    checks that on every host, and what remains is fleet evidence (§5.2's GPT
    prompt) that the deployed session behaves as the tests say.
+6. **The producer-library proof is independent of cache warmth, not of the
+   host's Fontconfig version.** *Decided 2026-09-26 by the orchestrating
+   session on Paul's behalf; Paul can overturn it.* #553's fast lane runs
+   `ubuntu:24.04`, whose ffmpeg 6.1.1 links Fontconfig 2.15.0: it traces its
+   configuration only on a cold load, and proof 2's `fc-list` had warmed the
+   sysroot's cache in the same format first, so all 11 capture tests were
+   refused (comment 5433 listed three options). Chosen: every probe is a cold
+   load, on every host (§3.2, proof 3), with no version-dependent skip (a
+   skip is a failure); a producer that still prints nothing is refused. The
+   mechanism differs from the one first sketched (a probe-only
+   `XDG_CACHE_HOME` or an injected `<cachedir>`): an environment variable
+   cannot redirect an absolute `<cachedir>` such as Ubuntu's
+   `/var/cache/fontconfig`, and editing a copy would break the byte-for-byte
+   freeze proof 1 rests on. Under a sysroot all cache directories resolve
+   inside the new root, so running the probe before anything else touches
+   that root gives it its own empty cache; the cache it writes is kept,
+   because it is the producer library's warm cache. Measured with the
+   capture sequence run by hand on 2026-09-26: the cold probe loaded exactly
+   the live set of files, with none outside the root, in `ubuntu:24.04`
+   (Fontconfig 2.15.0: 70 trace lines, 51 ms; a warm traced run printed 0),
+   on nuc3 (2.17.1: 210 lines, 62 ms) and in the production image (Jellyfin
+   FFmpeg's bundled library: 136 lines, 64 ms); three later producer
+   launches under the frozen environment wrote no cache in each (35-63 ms),
+   so no segment pays a scan. Rejected: requiring Fontconfig 2.17 or the
+   Jellyfin build in the lane (keeps a warm-cache dependency that any
+   2.15 host would hit as a refusal), and version-conditional assertions.
 
 ---
 
@@ -607,3 +649,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 | [#553](http://192.168.4.7:3000/noirr/plurx/pulls/553) | Built at `b89c3a0d` from `main` @ `91f36315`: a text-burn recipe freezes a Fontconfig sysroot (byte copies of every loaded config, links to every listed font) and its producer runs under `FONTCONFIG_SYSROOT`/`FONTCONFIG_FILE`; `is_current` is one stat batch with no `fc-*` child. Design decision recorded in §3.2/§7.3: the XML-snapshot alternative was built first and failed `fc-match mono` on the host because Fontconfig applies rules at `<include>` positions. 11 `fontenv::` tests plus the updated `ffmpeg::tests` pass; each production hunk was reverted and its test failed (see PR body). **needs:** fleet evidence per §5.2's GPT prompt, including that media1's bundled libfontconfig honours the sysroot. |
 | 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 review round | [#553](http://192.168.4.7:3000/noirr/plurx/pulls/553) | All four findings of the adversarial review (comment 5377) addressed, after merging `main` @ `7d545ffc`. (1) The rule and face parity refusals are now pinned through `capture_from` (`a_capture_whose_frozen_rules_diverge_is_refused`, `a_capture_whose_frozen_faces_diverge_is_refused`); each fails when its call in `build` is deleted. (2) A capture's directory is owned by a guard from before the first write and removed if the capture is refused or abandoned (`a_cancelled_capture_leaves_no_environment_behind` fails without it). (3) Capture burns a probe once with the producer's own ffmpeg under the child's environment and `FC_DEBUG=1024` and refuses unless that library loaded only the frozen configuration (`a_producer_library_that_ignores_the_sysroot_is_refused`); the `fc-cache` run and its false "no launch pays a scan" comment are gone. The trace format was taken from the production image, where the bundled library honoured the sysroot. (4) §6's rollback line now says truthfully that nothing removes `fontenv/` after a revert, and §5.2's fleet prompt uses host-side `docker`/`curl` and in-image `sh`/`find`/`sed`/`grep`. **needs:** the same fleet evidence as above. |
 | 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 promotion | [#553](http://192.168.4.7:3000/noirr/plurx/pulls/553) | **Stopped and flagged.** The fast Rust gate at `56f684030` (the merge of `main` @ `abb6fe647`) failed 11 tests in `ubuntu:24.04`, each with "traced no Fontconfig configuration". Proof 3 (§5.2, point 3) reads `FC_DEBUG` output from the producer's library. Fontconfig before 2.17 does not read `FC_DEBUG` for a parse that libass starts itself, which 2.17 changed ("Make sure that the debugging facilities are initialized at loading config phase"). On a warm cache such a library is therefore silent. The lane's Ubuntu ffmpeg 6.1.1 links Fontconfig 2.15.0, and proof 2's `fc-list` warms the sysroot cache in the same format first. Reproduced in a clean `ubuntu:24.04` container: warm burn 0 trace lines, cold 70, after `fc-list` 0. The production `plurxd` image's bundled library printed 136 lines on each of three warm runs. Options are in [comment 5433](http://192.168.4.7:3000/noirr/plurx/pulls/553#issuecomment-5433); M2 stays unmerged until one is chosen. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 fast-lane fix | [#553](http://192.168.4.7:3000/noirr/plurx/pulls/553) | Decision §7.6 (taken on Paul's behalf, overturnable): the producer-library proof no longer depends on cache warmth. `build` spawns the probe burn first, on the brand-new root, whose every `<cachedir>` resolves inside the sysroot and is therefore empty, and judges its trace after proofs 1 and 2; a probe that still traces nothing is refused. `the_producer_probe_is_a_cold_load` (a stand-in that exits if any `*.cache-*` exists under the sysroot) and `a_producer_that_traces_nothing_is_refused` are new; the ignore-sysroot stand-in drops the live cache, as a pre-2.13.1 library would not read it. Evidence: `cargo test -p plurxd --bin plurxd -- fontenv:: ffmpeg::tests::` 73 passed, 0 failed in a clean `ubuntu:24.04` container (ffmpeg 6.1.1, Fontconfig 2.15.0) and on nuc3 (2.17.1); 19 passed with `PLURX_FFMPEG` set to the production image's Jellyfin FFmpeg 8.1.2 and its bundled libraries. With the production hunk reverted the container fails 11 (the CI failure) and nuc3 fails `the_producer_probe_is_a_cold_load`; with the `library_loads_match` call deleted both refusal tests fail. The capture sequence was run by hand in each environment: the cold probe loaded exactly the live files, none outside the root, and three later producer launches wrote no cache. **needs:** the same fleet evidence as above. |
