@@ -3740,8 +3740,24 @@ final class AppleClientTests: XCTestCase {
             String(source[setter.upperBound..<setterEnd.lowerBound]).contains(viewerStop),
             "the one explicit viewer stop belongs to the centralized intent setter"
         )
-        XCTAssertTrue(source.contains("self?.setPlaybackRequested(true)"))
-        XCTAssertTrue(source.contains("self?.setPlaybackRequested(false)"))
+        // The lock screen and remote controls reach the setter from inside
+        // their own command targets — past `RemoteCommandOwner`'s current-owner
+        // guard — rather than by a literal that could sit anywhere in the file.
+        for (command, requested) in [
+            ("commands.playCommand.addTarget", "true"),
+            ("commands.pauseCommand.addTarget", "false"),
+        ] {
+            let target = try XCTUnwrap(source.range(of: command), "remote command vanished: \(command)")
+            let targetEnd = try XCTUnwrap(
+                source.range(of: "remoteTargets.append", range: target.upperBound..<source.endIndex),
+                "\(command) is no longer followed by another registered target"
+            )
+            XCTAssertTrue(
+                String(source[target.upperBound..<targetEnd.lowerBound])
+                    .contains("self.setPlaybackRequested(\(requested))"),
+                "\(command) no longer routes through the centralized intent setter"
+            )
+        }
         // Every remaining writer, named. One is the viewer, one is the end of
         // the film, one is teardown, one is the owner's single helper, and one
         // makes the visible intent agree after iOS ends an interruption without
@@ -4216,7 +4232,10 @@ final class AppleClientTests: XCTestCase {
         // usefully bound, so it is pinned on its own: the pause is the line the
         // ladder's last rung falls through to.
         let failureStart = try XCTUnwrap(
-            source.range(of: "private func handleItemFailure(_ item: AVPlayerItem) async {")
+            // Anchored on the name and first parameter only: the signature has
+            // grown a parameter before (the finite item stream's `fatalError`)
+            // and the pin is about the body, not the parameter list.
+            source.range(of: "private func handleItemFailure(_ item: AVPlayerItem")
         )
         let failureRaise = try XCTUnwrap(
             source.range(of: "Self.mediaFailureSurfaceSource(", range: failureStart.upperBound..<source.endIndex)
