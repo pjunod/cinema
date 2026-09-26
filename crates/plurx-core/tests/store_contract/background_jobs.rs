@@ -1165,7 +1165,7 @@ async fn background_jobs_v70_backup_import_seals_legacy_work() {
 async fn background_library_publication_requires_both_live_owners() {
     use super::{acquired, publication_successor};
     for_each_backend(|store, backend| async move {
-        for scenario in ["live", "cancelled", "expired", "taken_over"] {
+        for scenario in ["live", "cancelled", "expired", "taken_over", "roots_changed"] {
             let (_, file_id) = seed_file(&store, &format!("dual-owner-{scenario}")).await;
             let file = store
                 .get_file(file_id)
@@ -1187,6 +1187,12 @@ async fn background_library_publication_requires_both_live_owners() {
             } else {
                 now
             };
+            if scenario == "roots_changed" {
+                let library = store.get_library(library_id).await.expect("library").expect("library");
+                assert!(store.replace_storage_domains(vec![plurx_core::store::background_jobs_resources::StorageDomainMapping {
+                    library_id, root_path: library.paths[0].to_string_lossy().into_owned(), domain_id: "old-nas".into(),
+                }], now).await.expect("map original storage"));
+            }
             let id = uuid::Uuid::new_v4().to_string();
             let admitted = store
                 .enqueue_job(EnqueueJob {
@@ -1289,6 +1295,19 @@ async fn background_library_publication_requires_both_live_owners() {
                     matches!(takeover, ClaimOutcome::Claimed { .. }),
                     "{backend}"
                 );
+            }
+            if scenario == "roots_changed" {
+                let library = store.get_library(library_id).await.expect("library").expect("library");
+                store.update_library(library_id, &plurx_core::domain::NewLibrary {
+                    name: library.name, kind: library.kind, paths: vec![std::path::PathBuf::from("/new-unmapped-storage")], anime: library.anime,
+                }).await.expect("change library root");
+                let renewed = store.renew_jobs(RenewJobs { tokens: vec![token.clone()], now_ms: now }).await.expect("renewal verdict");
+                assert!(matches!(renewed.as_slice(), [RenewOutcome::LostOwnership { .. }]), "{backend}: old slots cannot renew new storage work");
+                assert!(matches!(store.resolve_claim(ResolveClaim { job_id: id.clone(), node_id: token.node_id.clone(),
+                    boot_id: token.boot_id.clone(), claim_id: token.claim_id.clone(), fence: Some(token.fence),
+                    dispatched_at_ms: now, now_ms: now }).await.expect("reconcile refusal"), ClaimResolution::LostOwnership),
+                    "{backend}: acknowledgement recovery cannot restore invalid resource ownership");
+
             }
             let allowance = store.update_provider_budget(plurx_core::store::background_jobs_provider::ProviderBudgetRequest {
                 provider: plurx_core::metadata::Provider::Tmdb,

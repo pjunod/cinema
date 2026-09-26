@@ -310,6 +310,12 @@ WITH inputs AS (
     AND job.revision = json_extract(token, '$.revision')
     AND job.lease_expires_ms = json_extract(token, '$.lease_expires_ms')
     AND job.lease_expires_ms > now_ms AND job.state = 'running'
+            AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
+                WHERE required.job_id = job.id AND NOT EXISTS (
+                    SELECT 1 FROM background_job_reservations held
+                    WHERE held.job_id = job.id AND held.fence = job.fence
+                        AND held.resource_key = required.resource_key
+                        AND held.expires_at_ms >= job.lease_expires_ms))
     AND (job.retry_deadline_ms = 0 OR job.retry_deadline_ms > now_ms)
     AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || job.owner_node_id)
     AND job.revision < 9223372036854775807
@@ -1027,6 +1033,23 @@ pub(super) trait QueueSql: Send + Sync {
         mutation: bool,
         authoritative: bool,
     ) -> Result<Vec<String>, StoreError>;
+}
+
+// Claim acknowledgement and renewal reconciliation must not revive a token
+// whose library now requires different storage. Return the row and resource
+// verdict from one authoritative snapshot, not two independently timed reads.
+const CLAIM_RESOURCE_SNAPSHOT: &str = r#"NOT EXISTS (
+    SELECT 1 FROM background_job_required_resources required
+    WHERE required.job_id = background_jobs.id AND NOT EXISTS (
+        SELECT 1 FROM background_job_reservations held
+        WHERE held.job_id = background_jobs.id AND held.fence = background_jobs.fence
+            AND held.resource_key = required.resource_key
+            AND held.expires_at_ms >= background_jobs.lease_expires_ms))"#;
+
+#[derive(Deserialize)]
+struct ClaimSnapshot {
+    job: BackgroundJob,
+    resources_current: i64,
 }
 
 pub(super) fn decode<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, StoreError> {
@@ -1862,16 +1885,27 @@ impl<T: QueueSql> BackgroundJobStore for T {
         // Replaying an acknowledged or ambiguous claim must return its current
         // identity, not compete for a fresh fence. Never adopt another boot.
         let previous = self.queue_sql(
-            format!("SELECT {JOB_JSON} AS result_json FROM background_jobs WHERE id = json_extract($1, '$.job_id') AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))"),
+            format!("SELECT json_object('job', json({JOB_JSON}), 'resources_current', {CLAIM_RESOURCE_SNAPSHOT}) AS result_json FROM background_jobs WHERE id = json_extract($1, '$.job_id') AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))"),
             encode(&request)?, false, true,
         ).await?;
         let Some(previous) = previous.first() else {
             return Ok(ClaimOutcome::ExpiredOrPruned);
         };
-        let previous: BackgroundJob = decode(previous)?;
+        let snapshot: ClaimSnapshot = decode(previous)?;
+        let previous = snapshot.job;
+        if previous.payload_version != request.payload_version
+            || previous
+                .supported_payload()
+                .map(|payload| payload.kind())
+                .ok()
+                != Some(request.kind)
+        {
+            return Ok(ClaimOutcome::Unsupported);
+        }
         if let Some(token) = &previous.token {
             if token.claim_id == request.claim_id {
-                return if previous.state == JobState::Running
+                return if snapshot.resources_current == 1
+                    && previous.state == JobState::Running
                     && token.node_id == request.node_id
                     && token.boot_id == request.boot_id
                     && token.lease_expires_ms > request.now_ms
@@ -1888,15 +1922,6 @@ impl<T: QueueSql> BackgroundJobStore for T {
         }
         if matches!(previous.state, JobState::Cancelling | JobState::Cancelled) {
             return Ok(ClaimOutcome::Cancelled);
-        }
-        if previous.payload_version != request.payload_version
-            || previous
-                .supported_payload()
-                .map(|payload| payload.kind())
-                .ok()
-                != Some(request.kind)
-        {
-            return Ok(ClaimOutcome::Unsupported);
         }
         let rows = self
             .queue_sql(
@@ -1931,7 +1956,7 @@ impl<T: QueueSql> BackgroundJobStore for T {
             return Ok(ClaimResolution::ExpiredOrPruned);
         }
         let rows = self.queue_sql(format!(
-            "SELECT {JOB_JSON} AS result_json FROM background_jobs WHERE id = json_extract($1, '$.job_id') AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))
+            "SELECT json_object('job', json({JOB_JSON}), 'resources_current', {CLAIM_RESOURCE_SNAPSHOT}) AS result_json FROM background_jobs WHERE id = json_extract($1, '$.job_id') AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))
              AND EXISTS (SELECT 1 FROM background_job_attempts a WHERE a.job_id = background_jobs.id
                AND a.claim_id = json_extract($1, '$.claim_id')
                AND a.owner_node_id = json_extract($1, '$.node_id')
@@ -1941,7 +1966,11 @@ impl<T: QueueSql> BackgroundJobStore for T {
         let Some(row) = rows.first() else {
             return Ok(ClaimResolution::ExpiredOrPruned);
         };
-        let job: BackgroundJob = decode(row)?;
+        let snapshot: ClaimSnapshot = decode(row)?;
+        let job = snapshot.job;
+        if job.state == JobState::Running && snapshot.resources_current != 1 {
+            return Ok(ClaimResolution::LostOwnership);
+        }
         if let Some(token) = job.token {
             if token.claim_id != request.claim_id
                 || token.node_id != request.node_id

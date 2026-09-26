@@ -1066,10 +1066,7 @@ pub(crate) async fn claim_library(
                 .as_ref()
                 .is_none_or(|library| !library.paths.is_empty());
             for path in library.iter().flat_map(|library| &library.paths) {
-                if !tokio::fs::metadata(path)
-                    .await
-                    .is_ok_and(|metadata| metadata.is_dir())
-                {
+                if tokio::fs::read_dir(path).await.is_err() {
                     readable = false;
                     break;
                 }

@@ -253,6 +253,12 @@ WHERE request_id = json_extract($1, '$.request_id') AND job_id = json_extract($1
             AND job.fence = json_extract($1, '$.token.fence') AND job.revision = json_extract($1, '$.token.revision')
             AND job.lease_expires_ms = json_extract($1, '$.token.lease_expires_ms')
             AND job.lease_expires_ms > json_extract($1, '$.now_ms')
+            AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
+                WHERE required.job_id = job.id AND NOT EXISTS (
+                    SELECT 1 FROM background_job_reservations held
+                    WHERE held.job_id = job.id AND held.fence = job.fence
+                        AND held.resource_key = required.resource_key
+                        AND held.expires_at_ms >= job.lease_expires_ms))
             AND lease.resource = json_extract($1, '$.lease.resource')
             AND lease.owner_node_id = job.owner_node_id
             AND lease.owner_node_id = json_extract($1, '$.lease.owner_node_id')

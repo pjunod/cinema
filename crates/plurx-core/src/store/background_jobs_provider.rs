@@ -49,7 +49,13 @@ SELECT json_extract($1, '$.id'), 'provider_budget', $1,
                 AND binding.domain_fence = lease.fence AND job.fence = binding.job_fence
                 AND job.owner_node_id = binding.node_id AND job.owner_node_id = lease.owner_node_id
                 AND job.owner_boot_id = binding.boot_id AND job.claim_id = binding.claim_id
-                AND job.state = 'running' AND job.lease_expires_ms > json_extract($1, '$.now_ms')))
+                AND job.state = 'running' AND job.lease_expires_ms > json_extract($1, '$.now_ms')
+            AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
+                WHERE required.job_id = job.id AND NOT EXISTS (
+                    SELECT 1 FROM background_job_reservations held
+                    WHERE held.job_id = job.id AND held.fence = job.fence
+                        AND held.resource_key = required.resource_key
+                        AND held.expires_at_ms >= job.lease_expires_ms))))
     ) THEN json_object('outcome', 'lost_authority')
     WHEN json_extract($1, '$.action.kind') = 'observe' THEN json_object('outcome', 'observed')
     WHEN budget.next_dispatch_ms > json_extract($1, '$.now_ms') THEN json_object('outcome', 'wait', 'until_ms', budget.next_dispatch_ms)

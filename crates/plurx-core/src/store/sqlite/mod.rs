@@ -1712,6 +1712,12 @@ impl SqliteStore {
                             AND job.fence = binding.job_fence AND job.owner_node_id = binding.node_id
                             AND job.owner_boot_id = binding.boot_id AND job.claim_id = binding.claim_id
                             AND job.state = 'running' AND job.lease_expires_ms > ?8
+            AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
+                WHERE required.job_id = job.id AND NOT EXISTS (
+                    SELECT 1 FROM background_job_reservations held
+                    WHERE held.job_id = job.id AND held.fence = job.fence
+                        AND held.resource_key = required.resource_key
+                        AND held.expires_at_ms >= job.lease_expires_ms))
                             AND NOT EXISTS (SELECT 1 FROM settings WHERE key =
                                 'internal.cluster_job_owner_removed.' || job.owner_node_id)))",
                 params![

@@ -504,3 +504,13 @@ The failing replicated test is being rerun before the main fast lane starts.
   with queue cancellation. Wrote cross-owner pacing, cooldown, stale-owner
   transport and populated-backup parity regressions; none executed yet.
   The replicated state digest now includes all four E0 domain tables.
+
+- Construction follow-up: library path edits can change the required storage
+  domain without using the mapping editor. Renewal, library binding, catalogue
+  publication, per-request completion and provider charging now require the
+  claim to hold every current resource. A changed root invalidates those
+  operations; the worker stops and a later attempt reacquires current slots.
+  Lost-acknowledgement reconciliation checks the same resource snapshot, so
+  recovery cannot accidentally restore the invalid claim.
+  The ownership contract includes this race. Source eligibility now opens the
+  directory rather than treating a directory metadata record as readability.

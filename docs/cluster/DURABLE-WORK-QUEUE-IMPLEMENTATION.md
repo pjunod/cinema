@@ -596,7 +596,10 @@ settings accepts up to 256 named root mappings (64 KiB total). A job reserves
 all domains of its library conservatively, including file-specific jobs: this
 avoids interpreting platform-specific path prefixes inside the replicated SQL.
 Changing mappings requires an interval without live queue reservations so an
-active lease never changes resource identity underneath its worker. This
+active lease never changes resource identity underneath its worker. A library
+path edit that changes its required domains invalidates renewal and joint
+publication until a fresh claim acquires the current slots. Already-running
+I/O has the same bounded cancellation overlap as lease loss. This
 configuration constraint does not gate any feature enable setting. Library
 jobs also reserve two shared slots per metadata provider; unused provider
 slots may therefore reduce concurrency for local-only libraries initially. It also adapts
