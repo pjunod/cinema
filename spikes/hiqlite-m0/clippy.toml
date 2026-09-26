@@ -1,0 +1,6 @@
+# `spikes/hiqlite-m0` is a separate Cargo workspace: the M0 raft/SQLite
+# semantic proof, not daemon code. Clippy reads the nearest clippy.toml, so
+# without this file it would take the root one, whose `disallowed-methods`
+# (plan P-02 §3.2) hold every daemon child to
+# `plurx_core::process::spawn_job_owned`. The spike starts no daemon child;
+# its test reads its own RSS with `ps`. Nothing else is configured here.

@@ -287,7 +287,40 @@ enum BoundPlanCaller {
     Vod,
 }
 
+/// The class of what `encoder_and_grade_for` starts: every caller of it is a
+/// session start (VOD or streamed) or a peer's media offer for one.
+const SESSION_START_CLASS: crate::process_control::ChildClass =
+    crate::process_control::ChildClass::Realtime;
+
+/// The held source probe a VOD start runs under `ENGINE_PROBE_TIMEOUT`. A
+/// viewer waits on it and a miss answers `vod_source_rescan_required`, so it
+/// is realtime (plan P-02 §3.2.2).
+const VOD_START_HELD_PROBE: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::realtime("held source probe for a session start");
+
 impl BoundPlanCaller {
+    /// The class and purpose of the decode-fact probes this caller waits on.
+    /// A VOD start waits up to `DECODE_PLAN_PROBE_BUDGET` with a viewer in
+    /// front of it; the pre-transcode pass has nobody waiting.
+    const fn decode_fact_work(self) -> crate::process_control::ChildWork {
+        match self {
+            Self::Pretranscode => crate::process_control::ChildWork::background(
+                "decode-fact probe for the pre-transcode pass",
+            ),
+            Self::Vod => {
+                crate::process_control::ChildWork::realtime("decode-fact probe for a session start")
+            }
+        }
+    }
+
+    fn decode_fact_source(
+        self,
+        handle: Arc<std::fs::File>,
+        offset_gate: Arc<tokio::sync::Semaphore>,
+    ) -> crate::decode_facts::DecodeFactSource {
+        crate::decode_facts::DecodeFactSource::new(handle, offset_gate, self.decode_fact_work())
+    }
+
     fn finish(
         self,
         result: Result<ResolvedTranscode, String>,
@@ -1071,7 +1104,10 @@ pub(crate) async fn probe_media_origin(source_path: &std::path::Path, start_seco
         tracing::warn!(start_seconds, %error, "media-origin source changed before probe");
         return start_seconds;
     }
-    let probe = crate::process_control::output_job_owned(&mut command);
+    let probe = crate::process_control::output_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::realtime("playback start media probe"),
+    );
     let Ok(Ok(out)) = tokio::time::timeout(MEDIA_ORIGIN_PROBE_TIMEOUT, probe).await else {
         tracing::warn!(
             start_seconds,

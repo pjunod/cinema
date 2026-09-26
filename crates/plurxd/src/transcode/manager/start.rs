@@ -370,7 +370,11 @@ impl TranscodeManager {
             }
         }
         let subtitle_handle = self
-            .ensure_text_subtitle(&file, subtitle_burn.as_ref())
+            .ensure_text_subtitle(
+                &file,
+                subtitle_burn.as_ref(),
+                crate::process_control::ChildWork::realtime("text subtitle for a session start"),
+            )
             .await?;
 
         // Claim a hardware slot before spawning anything. An iGPU has one
@@ -937,6 +941,7 @@ impl TranscodeManager {
             .spawn_and_install_prepublication_child(generation, || {
                 spawn_ffmpeg(
                     &args,
+                    crate::process_control::ChildWork::realtime("playback transcode"),
                     encoder.label(),
                     &session_id,
                     FfmpegProgressObserver::rolling(
@@ -1527,6 +1532,7 @@ impl TranscodeManager {
                 .spawn_and_install_prepublication_pipe_child(generation, || {
                     spawn_ffmpeg_pipe(
                         &initial_args,
+                        crate::process_control::ChildWork::realtime("playback transcode"),
                         &session_id,
                         FfmpegProgressObserver::rolling(
                             Arc::clone(&progress),
@@ -1562,6 +1568,7 @@ impl TranscodeManager {
                 .spawn_and_install_prepublication_child(generation, || {
                     spawn_ffmpeg(
                         &initial_args,
+                        crate::process_control::ChildWork::realtime("playback copy HLS"),
                         "copy",
                         &session_id,
                         FfmpegProgressObserver::rolling(

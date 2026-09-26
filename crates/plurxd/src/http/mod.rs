@@ -395,6 +395,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/activity/sessions/{id}"
         | "/api/v1/activity/offline/{id}"
         | "/api/v1/activity/producer"
+        | "/api/v1/activity/processes/{pid}"
         | "/api/v1/trakt/status"
         | "/api/v1/trakt/link"
         | "/api/v1/trakt/sync"
@@ -1331,6 +1332,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/activity/producer",
             axum::routing::delete(system::stop_producer),
+        )
+        .route(
+            "/activity/processes/{pid}",
+            axum::routing::delete(system::stop_process),
         )
         .route("/trakt/status", get(trakt::status))
         .route("/system", get(system::system_info))
@@ -10205,6 +10210,9 @@ mod tests {
                 "dvr",
                 "live_tv",
                 "offline",
+                // This node's own child processes, for an admin only (plan
+                // P-02 §3.2); node-local, so not a clustered-only field.
+                "processes",
                 "producing",
                 "scans",
                 "sessions",
@@ -10292,6 +10300,106 @@ mod tests {
         // And on the page that has a stop button next to it.
         let (_, page) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
         assert_eq!(page["producing"]["title"], "Willow");
+    }
+
+    /// Plan P-02 §3.2: every child is attributable from inside the product.
+    /// The Activity page lists it with its priority class, purpose and the
+    /// nice/I/O/OOM values the kernel reports; only an admin sees the list
+    /// and only an admin can stop a child from it; `/metrics` counts it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_activity_page_lists_each_child_with_its_class_and_an_admin_can_stop_it() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let (app, _state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("token").to_owned();
+
+        let mut command = tokio::process::Command::new("sleep");
+        command.arg("300").kill_on_drop(true);
+        let (mut child, _job) = crate::process_control::spawn_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::background("activity page test"),
+        )
+        .expect("spawn");
+        let pid = child.id().expect("running child");
+
+        let (status, page) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        let row = page["processes"]
+            .as_array()
+            .expect("admins get the process list")
+            .iter()
+            .find(|row| row["pid"] == pid)
+            .unwrap_or_else(|| panic!("child {pid} is listed: {page}"))
+            .clone();
+        assert_eq!(row["class"], "background");
+        assert_eq!(row["purpose"], "activity page test");
+        assert_eq!(row["program"], "sleep");
+        assert_eq!(
+            row["reason"],
+            "nobody is waiting on it, so it yields to playback"
+        );
+        assert_eq!(row["requested"]["nice"], 15);
+        assert_eq!(row["requested"]["io_level"], 7);
+        assert_eq!(row["requested"]["oom_score_adj"], 800);
+        assert!(row["observed"]["nice"].as_i64().expect("nice read back") >= 15);
+        assert_eq!(row["observed"]["io_class"], "best_effort");
+        assert_eq!(row["applied"], true);
+        assert_eq!(row["stoppable"], true);
+
+        let (_, metrics) = call_text(&app, get("/metrics", None)).await;
+        assert!(
+            metrics.contains("plurx_child_processes{class=\"background\"} ")
+                && metrics.contains("plurx_child_spawns_total{class=\"realtime\"} ")
+                && metrics.contains("plurx_child_priority_unapplied_total{class=\"background\"} "),
+            "{metrics}"
+        );
+
+        let (_, viewer_page) = call(&app, get("/api/v1/activity/detail", Some(&viewer))).await;
+        assert!(
+            viewer_page.get("processes").is_none(),
+            "machine processes are an operator view"
+        );
+        let stop = format!("/api/v1/activity/processes/{pid}");
+        let (status, _) = call(&app, delete(&stop, Some(&viewer))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = call(&app, delete(&stop, None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, body) = call(&app, delete(&stop, Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let exited = tokio::time::timeout(std::time::Duration::from_secs(10), child.wait())
+            .await
+            .expect("the stopped child exits")
+            .expect("wait");
+        assert_eq!(exited.signal(), Some(libc::SIGKILL));
+
+        drop(_job);
+        let (status, _) = call(&app, delete(&stop, Some(&admin))).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a pid the launcher no longer lists cannot be signalled"
+        );
     }
 
     #[tokio::test]
@@ -14165,9 +14273,12 @@ mod tests {
             .expect("fixture after Unix epoch")
             .as_secs() as i64;
         let held = std::fs::File::open(&path).expect("held fixture source");
-        let raw_json = crate::ffmpeg::held_source_probe_json(&held)
-            .await
-            .expect("exact fixture probe");
+        let raw_json = crate::ffmpeg::held_source_probe_json(
+            &held,
+            crate::process_control::ChildWork::background("test fixture probe"),
+        )
+        .await
+        .expect("exact fixture probe");
         let probe = plurx_core::domain::ProbeResult {
             duration_ms: Some(8_000),
             container: Some("mkv".into()),
@@ -17214,9 +17325,12 @@ mod tests {
             .expect("file");
         write_real_av_fixture(&file.path, seconds);
         let held = std::fs::File::open(&file.path).expect("held fixture source");
-        let raw_json = crate::ffmpeg::held_source_probe_json(&held)
-            .await
-            .expect("exact fixture probe");
+        let raw_json = crate::ffmpeg::held_source_probe_json(
+            &held,
+            crate::process_control::ChildWork::background("test fixture probe"),
+        )
+        .await
+        .expect("exact fixture probe");
         let metadata = std::fs::metadata(&file.path).expect("fixture metadata");
         let size = i64::try_from(metadata.len()).expect("fixture size");
         let mtime = metadata
@@ -17369,6 +17483,11 @@ mod tests {
             .await
             .expect("file");
 
+        // The player is waiting on this extraction, so it starts at the
+        // realtime class (plan P-02 §3.2.2, review of #518 finding 1).
+        let viewer = super::stream::SUBTITLE_TRACK_FOR_A_VIEWER;
+        assert_eq!(viewer.class, crate::process_control::ChildClass::Realtime);
+        let realtime_before = crate::process_control::priority::spawns_of(viewer);
         let (status, body) = body_of(
             &app,
             get_q(&format!("/api/v1/files/{file}/subs/0.vtt?token={admin}")),
@@ -17378,6 +17497,10 @@ mod tests {
         let text = String::from_utf8_lossy(&body);
         assert!(text.contains("WEBVTT"), "{text}");
         assert!(text.contains("hello plurx"), "{text}");
+        assert!(
+            crate::process_control::priority::spawns_of(viewer) > realtime_before,
+            "the /subs extraction a viewer waits on must start at the realtime class"
+        );
 
         // Exactly one entry, keyed by (file, stream, size, mtime).
         let cached = state.subs_dir.join(format!("f{file}-s0-4242-7.vtt"));

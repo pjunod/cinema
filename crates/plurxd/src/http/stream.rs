@@ -2028,8 +2028,11 @@ async fn run_chapter_probe(path: &Path) -> Result<Vec<serde_json::Value>, Chapte
     #[cfg(windows)]
     crate::ffmpeg::verify_windows_source_path(&source, &input)
         .map_err(|_| ChapterProbeFailure::Failed)?;
-    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command)
-        .map_err(|_| ChapterProbeFailure::Failed)?;
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::realtime("chapter list probe"),
+    )
+    .map_err(|_| ChapterProbeFailure::Failed)?;
     let stdout = child.stdout.take().ok_or(ChapterProbeFailure::Failed)?;
     let mut bytes = Vec::new();
     stdout
@@ -2470,6 +2473,11 @@ pub async fn set_audio_offset(
 /// the file itself, to a temp name renamed into place once whole — two
 /// racing misses write identical bytes, and the loser's rename is a no-op
 /// worth nothing to fight over.
+/// A viewer turned this text track on and the player is waiting for it
+/// (plan P-02 §3.2.2).
+pub(crate) const SUBTITLE_TRACK_FOR_A_VIEWER: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::realtime("subtitle track a viewer turned on");
+
 pub async fn subtitles_vtt(
     _user: AuthUser,
     State(state): State<AppState>,
@@ -2498,6 +2506,7 @@ pub async fn subtitles_vtt(
         &file,
         index,
         &state.subtitle_source_access(),
+        SUBTITLE_TRACK_FOR_A_VIEWER,
     )
     .await
     .map_err(|why| {
@@ -3457,6 +3466,7 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
             },
             descriptors,
             env: &[],
+            work: crate::process_control::ChildWork::realtime("playback remux"),
         },
     )
     .map_err(ApiError::Internal)?;

@@ -2749,13 +2749,14 @@ async fn run_subtitle_source_pass(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let (mut child, _child_job) =
-        crate::process_control::spawn_job_owned(&mut command).map_err(|_| {
-            AnalysisResolutionError::Retry {
-                code: "source_process_failed",
-                charge_attempt: true,
-            }
-        })?;
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::background("subtitle source extraction"),
+    )
+    .map_err(|_| AnalysisResolutionError::Retry {
+        code: "source_process_failed",
+        charge_attempt: true,
+    })?;
     let mut stderr = child.stderr.take().ok_or(AnalysisResolutionError::Retry {
         code: "source_process_failed",
         charge_attempt: true,

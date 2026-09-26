@@ -4940,6 +4940,28 @@ they never label a session, file, user, network, or path.
 | `plurx_telemetry_batch_size`, `plurx_telemetry_batch_seconds` | Fixed-bucket histograms for batch occupancy and processing time. Use them to decide whether a second sidecar connection or different batch constants are warranted; do not infer that from queue depth alone. |
 | `plurx_telemetry_setting_refresh_failures_total` | Paired effective-setting refreshes that failed while the last good values remained active. |
 
+Every child process the daemon starts (ffmpeg, ffprobe, the Dolby Vision
+tools, `find`) goes through one launcher that gives it a priority class. A
+**realtime** child is one a viewer or a recording waits on (playback
+transcode, copy HLS, remux, VOD, Live TV, the playhead subtitle window) and
+runs at `nice` 5, best-effort I/O level 4 and `oom_score_adj` 500. A
+**background** child is one nobody waits on (scan thumbnails and covers,
+capability and decode-fact probes, whole-track subtitle and PGS extraction,
+the pre-transcode producer, fragment indexing, Dolby Vision conversion) and
+runs at `nice` 15, I/O level 7 and `oom_score_adj` 800. The daemon keeps its
+own values, so the scheduler serves it first and the OOM killer takes a
+background child, then a playback child, before it. **Activity → Processes**
+(admins only) lists each running child with those values as the kernel
+reports them and a **Stop**; the same list is `processes` in
+`/api/v1/activity/detail`.
+
+| Metric | How to read it |
+|---|---|
+| `plurx_child_processes{class="realtime|background"}` | Children this node is running now. A background count that never falls back to zero is a probe or extraction that is not finishing. |
+| `plurx_child_spawns_total{class="realtime|background"}` | Children started since the process started. |
+| `plurx_child_spawns_by_purpose_total{class, purpose}` | The same, by class and purpose (`purpose` is the fixed text the Activity page shows, such as `held source probe for a session start`). The class is the caller's: a probe or extraction a session start or a viewer's request waits on is `realtime`, the same work started by a warm-up, a backfill or the pre-transcode pass is `background`. A start-path purpose counting under `background` is a caller that picked the wrong class. |
+| `plurx_child_priority_unapplied_total{class="realtime|background"}` | Children whose kernel-reported `nice`, I/O class and level or `oom_score_adj` read back above their class's policy right after the start. Expected to stay `0` on Linux; a rising value means something between the daemon and the kernel (a container runtime, a seccomp profile) refuses the adjustment, and the child ran at the daemon's priority instead. A refused adjustment never stops the child from starting. |
+
 The compact Prometheus alert shape is: membership sample valid · leader known ·
 heartbeat quorum available · apply lag zero. `/readyz` remains the final active
 serving check because the metrics are deliberately passive and cached.

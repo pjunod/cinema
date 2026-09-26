@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 231
+One binary serves everything on one port (`:32400` by default). plurx has 232
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -431,6 +431,7 @@ of never storing it.
 | DELETE | `/api/v1/activity/sessions/{id}` | admin | Stops one transcode or VOD session |
 | DELETE | `/api/v1/activity/offline/{id}` | admin | Cancels and deletes one visible offline package |
 | DELETE | `/api/v1/activity/producer` | admin | Stops the pre-transcode producer after the current title |
+| DELETE | `/api/v1/activity/processes/{pid}` | admin | Kills one child process the Activity page lists |
 
 ### 5.1 Settings
 
@@ -559,13 +560,25 @@ do not answer, a `cluster_degraded` entry is inserted first, naming up to
 three missing nodes and counting the rest.
 
 `GET /api/v1/activity/detail` is readable by any user — it is their household
-server — but two parts of the payload are admin-gated and the three stop
+server — but three parts of the payload are admin-gated and the four stop
 actions are admin-only. `node_hostnames` is present for a clustered admin
 **even when empty**, deliberately: the field's presence answers "may this
 reader see machine names", and making an empty roster look identical to a
 refused one would leave the gate untestable from the wire. `analysis` is
 likewise admin-only, and degrades to `{"available": false, "enabled": <bool>}`
-rather than failing the request.
+rather than failing the request. `processes` is admin-only too: every child
+process this node is running, each with its priority class (`realtime` when a
+viewer or a recording waits on it, `background` otherwise), its purpose, the
+program, the requested and kernel-reported `nice` / I/O / `oom_score_adj`,
+whether the class was applied, and whether it can be stopped. It lists this
+node's children only, not its peers'.
+
+`DELETE /api/v1/activity/processes/{pid}` kills one listed child through the
+pidfd taken when it was started, so a pid the kernel has since reused for an
+unrelated process cannot be signalled: `404` for a pid the list does not
+hold, `409` where no pidfd exists (non-Linux, or a kernel without
+`pidfd_open`). The child's owner sees an ordinary exit and handles it as it
+handles a crashed encoder or a failed probe.
 
 `DELETE /api/v1/activity/producer` stops the producer **after the current
 title**, not mid-encode, because the producer resumes from published segment

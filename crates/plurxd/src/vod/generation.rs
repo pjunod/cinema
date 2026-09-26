@@ -71,6 +71,7 @@ pub(super) async fn spawn_generation(
                 progress: crate::producer_spawn::Progress::None,
                 descriptors,
                 env: &[],
+                work: crate::process_control::ChildWork::realtime("VOD transcode"),
             },
         ) {
             Ok(spawned) => spawned,
