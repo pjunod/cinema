@@ -937,6 +937,12 @@ mod tests {
     use plurx_core::store::SqliteStore;
 
     async fn active() -> (Arc<dyn Store>, String, ActiveBackgroundJob) {
+        active_with_deadline(None).await
+    }
+
+    async fn active_with_deadline(
+        local_deadline: Option<Duration>,
+    ) -> (Arc<dyn Store>, String, ActiveBackgroundJob) {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let library = store
             .create_library(&plurx_core::domain::NewLibrary {
@@ -1025,7 +1031,7 @@ mod tests {
             Arc::clone(&store),
             Arc::new(UnclusteredJobAuthority),
             job.token.expect("token"),
-            deadline,
+            local_deadline.map_or(deadline, |duration| Instant::now() + duration),
             JobKind::FragmentIndexBuild,
         )
         .expect("start");
@@ -1048,6 +1054,78 @@ mod tests {
         }
         assert!(pacing.delay(true) <= Duration::from_secs(10));
         assert!(pacing.delay(false) <= Duration::from_secs(10));
+    }
+
+    /// A conservative confirmed deadline is valid even while the durable row
+    /// remains live. Exercise the production heartbeat and child collection,
+    /// with no manual cancellation and no test-only heartbeat implementation.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_jobs_lease_expiry_reaps_child_before_releasing_capacity() {
+        let (store, id, active) = active_with_deadline(Some(Duration::from_secs(2))).await;
+        let fence = active.fence();
+        let directory = tempfile::tempdir().expect("directory");
+        let marker = directory.path().join("child.pid");
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = Arc::clone(&capacity).acquire_owned().await.expect("permit");
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .args(["-c", "echo $$ > \"$1\"; exec sleep 60", "lease-expiry-test"])
+            .arg(&marker);
+        let cancellation = fence.loss_token();
+        let child = tokio::spawn(async move {
+            let result = crate::ffmpeg::bounded_command_output_cancellable(
+                command,
+                Duration::from_secs(60),
+                1024,
+                "lease expiry regression",
+                Some(&cancellation),
+                crate::process_control::ChildWork::background("lease expiry regression"),
+            )
+            .await;
+            // The child collector above has killed and awaited the process.
+            active.finish().await;
+            drop(permit);
+            result
+        });
+        let pid = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(&marker).await {
+                    if let Ok(pid) = text.trim().parse::<i32>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("child starts before the confirmed lease expires");
+        assert_eq!(capacity.available_permits(), 0);
+        assert!(!fence.loss_token().is_cancelled());
+        let result = tokio::time::timeout(Duration::from_secs(5), child)
+            .await
+            .expect("lease loss returns capacity within playback budget")
+            .expect("worker");
+        assert!(result.is_err());
+        assert!(fence.loss_token().is_cancelled());
+        assert!(fence.snapshot().await.is_none());
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "child must be reaped before capacity is released"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert_eq!(capacity.available_permits(), 1);
+        let job = store.background_job(&id).await.expect("read").expect("job");
+        assert_eq!(job.state, JobState::Queued);
+        assert_eq!(
+            job.failed_attempts, 0,
+            "confirmed local expiry is an uncharged yield after join"
+        );
+        assert!(job.token.is_none());
     }
 
     #[tokio::test]

@@ -2386,7 +2386,7 @@ where
     (result, started.elapsed())
 }
 
-struct BoundedOutput {
+pub(crate) struct BoundedOutput {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
 }
@@ -2423,7 +2423,7 @@ async fn bounded_command_output_with_limits(
     bounded_command_output_cancellable(command, timeout, max_bytes, label, None, work).await
 }
 
-async fn bounded_command_output_cancellable(
+pub(crate) async fn bounded_command_output_cancellable(
     mut command: tokio::process::Command,
     timeout: Duration,
     max_bytes: u64,

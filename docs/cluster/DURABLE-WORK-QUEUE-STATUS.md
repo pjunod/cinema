@@ -323,7 +323,13 @@ implementation is claimed; “compiled” does not mean tests passed.
   the corresponding extracted modules. Appended queue migrations after main's
   read indexes (SQLite v71, replicated v49); retained literal v47 fixtures for
   the earlier index migration. Web types match the unchanged baseline. The
-  merged workspace all-target compile passed; final Clippy is pending.
+  merged workspace all-target compile and pinned Clippy passed (`b199a0b1b`).
   Kept the queue's 30-second local refusal: its bounded candidate scan can
   advance past busy candidates, so the old 24-hour suppression is unnecessary.
   No tests or production deployments have run.
+
+- 2026-09-26: added a real-child lease-expiry regression using the production
+  queue heartbeat and cancellable process collector. It checks child reaping,
+  stale-token refusal, uncharged retirement and capacity release within the
+  five-second playback budget. Written and compiled evidence remains separate
+  from test execution, which is still deferred.

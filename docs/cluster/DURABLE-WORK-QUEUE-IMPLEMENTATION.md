@@ -26,7 +26,7 @@ current. M1–M3 form the first batched PR. Once a PR is complete, obtain one
 adversarial agent review, address its findings, run the fast lane, fix its
 failures and merge when green. Do not run construction-time unit suites or
 add a separate full-qualification wrapper. This explicit direction supersedes
-the older task-PR and pre-push test cadence described below. Existing compiler,
+the older task-PR and pre-push test cadence. Existing compiler,
 lint and regression-declaration requirements still apply. E0–E3 remain in scope
 after the durable core; production deployment is separate from merging code.
 
@@ -1073,134 +1073,53 @@ Benchmarks inform engineering; no result becomes a runtime unlock bit.
 
 ## 11. Delivery pipeline — preserve velocity and the quality bar
 
-### 11.1 Follow the amendments, not superseded prose
+### 11.1 Current lane and construction checks
 
-The September 10/13 correction and September 20 test amendment at the top of
-[DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) match the workflow files:
+The build directive above governs this effort. Work in an independent clone,
+keep normal hooks enabled, and batch related commits into substantial draft
+PRs. M1–M3 share PR #532. Compile changed Rust with 1.97.1 and run formatting,
+Clippy and JavaScript/TypeScript checks before pushing. These checks do not
+execute the deferred tests. Maintain the build status with actual evidence.
 
-| Current behavior | Source and consequence |
-|---|---|
-| Ready main-bound PRs run the fast lane | [main-fast-lane.yml](../../.github/workflows/main-fast-lane.yml); drafts allocate no jobs; ready-for-review starts it |
-| Rust compilation, Clippy and unit tests block main merge | Fast Rust job runs `make effort-rust-check`, vendor Clippy, `make lint`, and `make unit` |
-| Effort compiler workflow is manual | [effort-ci.yml](../../.github/workflows/effort-ci.yml); no automatic task-PR compile fan-out |
-| Full sweep is manual or explicit release tag | [ci.yml](../../.github/workflows/ci.yml); no automatic full run on every task push or main merge |
-| Publication/deployment is separate | A merged queue change is not authorization to restart the fleet |
+The dated amendments in [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md)
+make [main-fast-lane.yml](../../.github/workflows/main-fast-lane.yml) the
+main-bound workflow. Drafts allocate no lane jobs. The current Rust job includes
+`make unit`; it is part of the required fast lane, not an additional manual
+full-suite sweep. Do not add qualification wrappers, recurring test schedules
+or release matrices to this effort. Full qualification and deployment remain
+separate operations.
 
-Do not revive the removed `fast-lane` label, periodic runtime-test schedules,
-full browser/device matrices on every patch, or “use CI as the compiler”.
-The development gates in [AGENTS.md](../../AGENTS.md) remain required; where
-the current workflow makes them manual, dispatch deliberately rather than
-rewiring triggers. Retain the required exact-tree qualification receipt for
-effort promotion. Never claim that the main fast lane alone produced a full
-effort receipt.
+### 11.2 Review, validate and merge each completed batch
 
-**Known documentation/workflow mismatch:** at the inspected SHA, the receipt
-steps in `ci.yml` run only when `qualification=true`, but its scope sets that
-value only for a pull-request event and the workflow accepts only dispatches
-and tags. A plain manual sweep therefore does **not** emit the old effort
-receipt. Do not leave the builder to discover this at final promotion.
-
-M3 owns one bounded evidence-collection wrapper if the mismatch remains. It
-uses a versioned mapping from **workflow job IDs**, not display names or a dump
-of every run job. For the inspected workflow, the mapping is:
-
-| Receipt key | Required workflow result |
-|---|---|
-| `scope`, `mobile_version`, `preflight` | Same-named job succeeds; scope selects every required evidence surface |
-| `rust` | `check` succeeds (the receipt's historical key differs from the workflow ID) |
-| `cluster_store` | Same-named aggregate succeeds and the implementation selected by captured execution mode succeeds |
-| `cluster_topology`, `cluster_wal`, `cluster_daemon` | Same-named jobs succeed |
-| `cluster_transport_recovery` | Aggregate plus contracts, voter and learner evidence all succeed on the same first run attempt |
-| `web_layout`, `vod_web`, `android_jvm`, `apple`, `android_device` | Same-named jobs succeed |
-| `package_smoke` | Both expected matrix children, `amd64` and `arm64`, succeed; missing or extra/unrecognized matrix shape is an error |
-
-Additionally require `rust_compile` and `windows_compile` success; retain those
-results in the receipt under their real IDs. Resolve reusable-workflow children
-through run provenance, not by accepting an aggregate whose required children
-are missing. The versioned mapping captures the resolved execution mode.
-`legacy` and
-`shadow` require `cluster_store_legacy`; `accelerated` requires all expected
-`cluster_store_shards` children. `cluster_store_shadow` is explicitly
-observational: do not wait for it, require its success, or promote it to the
-required path. Record its state separately. Only inactive required alternatives
-may use the workflow's documented neutral skipped/success result. A changed
-mode/matrix/workflow without an updated mapping
-fails evidence collection explicitly instead of silently losing coverage.
-
-Skipped `pr_gate`, `publish`, `publish_main`, `coverage` and `badge` are allowed
-when their documented event conditions exclude a manual dispatch; they are
-not receipt evidence. Record those exclusions separately. Do not include them
-as fabricated successes, and do not treat a skipped required evidence job as
-an allowed incidental skip. An unexplained failure still requires investigation;
-failure to publish a required evidence artifact prevents a receipt. A queued/failed observational shadow or
-non-evidence badge does not delay qualification when the existing required
-surface graph has succeeded. Preserve that distinction rather than requiring
-the overall run to finish its deliberately nonblocking work.
-
-Before dispatch, record PR number, head SHA, base SHA and expected candidate
-commit/tree. Use a dedicated non-release evidence ref, pinned to that candidate
-and never moved/reused. Dispatch the existing full sweep against that ref.
-Check that the actual run SHA, checkout commit/tree and workflow revision match
-that candidate; bind the captured execution mode and matrix to the same run.
-Before writing the receipt, resolve current PR head/base again. A moved ref,
-wrong run/workflow, missing child, changed tree or second run attempt is rejected.
-A protected/fixed evidence ref is not a `v*` tag and must not trigger release.
-
-Invoke [validation.qualification](../../validation/qualification.py) with real
-run metadata and normalized evidence results; retain the raw job-ID/matrix
-results, exclusions and captured PR bindings beside its output. PR identity
-is an external promotion binding; do not claim the dispatch was PR-triggered.
-Do not manufacture success values or loosen `REQUIRED_JOBS`. Test `check`→`rust`,
-failed/missing matrix members, permitted incidental skips, inactive-mode skips,
-missing selected children, stale PR refs and wrong checkout/workflow provenance.
-
-This closes the existing evidence wiring gap without changing workflow triggers
-or adding full-suite runs to ordinary pushes. If main repairs that mechanism
-first, use the repaired mechanism and omit the wrapper.
-
-### 11.2 Three planned task PRs and one promotion
-
-1. Create `effort/cluster-work` from current main. Each `codex/cluster-work-mN`
-   branch starts from the latest effort. Run pinned local compile/lint and the
-   smallest meaningful regression before pushing. Commit normally with the
-   tracked hook policy; do not disable hooks or rewrite CI to save time.
-2. Open each milestone PR into the effort, record focused commands and their
-   actual results, and obtain the required manual `Effort development gate`.
-   Integrate once that current candidate is green. Do not attach full release
-   testing to every milestone.
-3. After M3, freeze task merges and merge current main into the effort. Open
-   the main-bound promotion as draft. Obtain exactly one adversarial review
-   and address its findings before spending the full qualification run.
-4. Rerun focused queue/migration evidence on the settled exact tree. Obtain
-   the repository's required manual effort qualification and receipt for this
-   candidate, then mark ready. That starts the current fast lane, including
-   blocking Rust unit tests and Clippy. No repeated review loop and no automatic
-   whole-fleet testing per correction.
-5. Merge only with a green current-head **Main promotion gate** and the required
-   current-tree receipt. Changed head/base invalidates affected evidence; rerun
-   what the repository contract requires. Release/build/deploy explicitly after
-   merge, using §7 for the queue conversion.
-
-For E0–E3, if building the extensions together, use one subsequent
-`effort/cluster-capacity` with the same convention. A single independently
-commissioned extension can use an ordinary main-bound draft PR and its affected
-checks. Shared-file changes do not qualify for the disjoint-ownership exception.
+1. Finish the implementation and documentation in the draft. Merge current
+   main into the branch and compile the combined tree before claiming readiness.
+2. Obtain one adversarial agent review only when the main-bound PR is complete.
+   Address its findings before test execution.
+3. Run the affected fast lane, including the queue/legacy-domain regressions
+   and real-process teardown evidence. Fix failures and require the current
+   candidate to be green before merging. Do not repeat unrelated suites during
+   construction or run a separate full qualification campaign.
+4. Put concrete `Regression-Test: <path>::<test>` lines in the PR description
+   and landing commit. A Forgejo API merge must supply `MergeMessageField`,
+   since its default message omits the body. Preserve existing history checks.
+5. Update status with the merge and evidence. Continue E0–E3 in subsequent
+   substantial batches under the same convention. Remove temporary scratch
+   files and retired implementations as their replacements land.
 
 Update [ARCHITECTURE.md](../ARCHITECTURE.md), [OPERATIONS.md](../OPERATIONS.md),
 [API.md](../API.md), [FEATURES.md](../FEATURES.md) and validation ownership with
-the behavior they describe, in the same changes. Preserve regression-history
-requirements as implemented on the current base; the separate ledger cleanup
-proposal is not authorization to omit receipts. Web asset additions follow
-the shell/asset/index contract. Native-client changes are unnecessary for M1–M3.
+the behavior they describe. New web assets follow the shell/asset/index
+contract; native-client changes are unnecessary for M1–M3. A code merge does
+not authorize a production restart or rolling mixed-queue cutover.
 
 ## 12. Execution ledger and stop points
 
 | Unit | Status | Branch/PR | Evidence |
 |---|---|---|---|
 | Implementation plan | review findings addressed 2026-09-25; external review pending | Working-tree documentation only | One independent adversarial review; dispositions in §13; four docs-index tests and explicit new-file link/whitespace checks |
-| M1 queue + pre-transcode | foundation in progress | `codex/durable-cluster-work` | Core + Hiqlite compile; no implementation tests executed yet |
-| M2 fragment build + hydration | not started | — | — |
-| M3 operations + qualification | not started | — | — |
+| M1 queue + pre-transcode | implemented; final evidence pending | PR #532 | Pinned compiler and Clippy; tests deferred |
+| M2 fragment build + hydration | implemented; final evidence pending | PR #532 | Shared build, target hydration, retry ledgers and cutover compiled |
+| M3 operations + recovery | implemented; final evidence pending | PR #532 | Activity, advisory Developer controls, recovery and migration compiled |
 | Core promotion/deployment | not started | — | — |
 | E0 preparation + maintenance adapters | not started | — | — |
 | E1 reads + cache preparation | not started | — | — |
