@@ -5519,11 +5519,15 @@ impl LiveTvManager {
         .await;
         // Release success and ordinary failure alike. Cancellation of this
         // future still falls back to the bounded lease expiry.
-        let _ = tokio::time::timeout(
-            Duration::from_secs(2),
-            self.store.release_lease(&guide_lease, resource::now_ms()),
-        )
-        .await;
+        crate::store_result::observe_timeout(
+            crate::store_result::Operation::ReleaseLiveTvGuideLease,
+            crate::store_result::Discard::BestEffort,
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                self.store.release_lease(&guide_lease, resource::now_ms()),
+            )
+            .await,
+        );
         result
     }
 
@@ -7295,9 +7299,9 @@ async fn ensure_session_fence_from_observation(
             crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
         ));
     }
-    manager.resource_session_fence(session).await?;
     let observation = manager.fence.validated()?;
-    validate_start_config(&observation.config, &session.request, &manager.node_id)
+    validate_start_config(&observation.config, &session.request, &manager.node_id)?;
+    manager.resource_session_fence(session).await
 }
 
 async fn open_tuner_stream(
@@ -9741,9 +9745,8 @@ mod tests {
         register_test_session_at(manager, user_id, request_id, phase, last_touch, 0).await
     }
 
-    /// `serving_generation` distinguishes two sessions under one public
-    /// identity: `LiveTvRequestKey` includes it, so a fence blip between a POST
-    /// and its replay is exactly how a viewer ends up with two.
+    /// Inject legacy duplicates explicitly: current request keys stay stable
+    /// across ingress generations, while recovery must still close old duplicates.
     async fn register_test_session_at(
         manager: &Arc<LiveTvManager>,
         user_id: i64,
@@ -9811,10 +9814,18 @@ mod tests {
                 .registry
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            registry.requests.insert(
-                LiveTvRequestKey::from(&session.request),
-                session.capability.clone(),
-            );
+            let key = LiveTvRequestKey::from(&session.request);
+            if let Some(previous) = registry.requests.remove(&key) {
+                registry.requests.insert(
+                    LiveTvRequestKey {
+                        source_node_id: "legacy-ingress".into(),
+                        source_serving_generation: serving_generation,
+                        ..key.clone()
+                    },
+                    previous,
+                );
+            }
+            registry.requests.insert(key, session.capability.clone());
             registry
                 .sessions
                 .insert(session.capability.clone(), Arc::clone(&session));
@@ -9957,9 +9968,8 @@ mod tests {
             .expect("root");
         let id = hex_request_id(2);
         let now = tokio::time::Instant::now();
-        // Two sessions for one identity: legitimate, because the registry key
-        // includes the ingress's serving generation and a fence blip between a
-        // POST and its replay makes a second one.
+        // Two legacy sessions for one identity must still be retired together,
+        // although current admission no longer duplicates on ingress change.
         let first =
             register_test_session_at(&manager, 7, &id, LiveTvSessionPhase::Active, now, 0).await;
         let second =
@@ -10519,6 +10529,14 @@ mod tests {
         seed_test_config(&manager).await;
         let first = test_session(root.path().join("live-tv-a"), 1);
         let second = test_session(root.path().join("live-tv-b"), 1);
+        manager
+            .resource_start(&first.request, &first.device_id, 4)
+            .await
+            .expect("fixture admission");
+        manager
+            .resource_start(&second.request, &second.device_id, 4)
+            .await
+            .expect("fixture admission");
 
         manager.observe_fence().await;
         let (ok_before, failed_before) = all_settings_reads(&manager);
@@ -10563,6 +10581,11 @@ mod tests {
         let manager = test_manager(root.path());
         seed_test_config(&manager).await;
         let session = test_session(root.path().join("live-tv-graced"), 1);
+        manager
+            .resource_start(&session.request, &session.device_id, 4)
+            .await
+            .expect("fixture admission");
+
         manager.observe_fence().await;
         let proved = manager
             .fence
@@ -10701,6 +10724,11 @@ mod tests {
         let manager = test_manager(root.path());
         seed_test_config(&manager).await;
         let session = test_session(root.path().join("live-tv-conflict"), 1);
+        manager
+            .resource_start(&session.request, &session.device_id, 4)
+            .await
+            .expect("fixture admission");
+
         manager.observe_fence().await;
         ensure_session_fence_from_observation(&manager, &session)
             .await
@@ -10859,11 +10887,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn activation_is_bound_to_the_starting_voter_and_serving_generation() {
+    async fn activation_keeps_its_token_and_generation_fences_across_ingress_changes() {
         let root = crate::test_tempdir().expect("activation root");
         let manager = test_manager(root.path());
         seed_test_config(&manager).await;
         let session = test_session(manager.scratch_root.join("live-tv-activation"), 1);
+        manager
+            .resource_start(&session.request, &session.device_id, 4)
+            .await
+            .expect("fixture admission");
+
         {
             let mut state = session.state.lock().expect("session state");
             state.phase = LiveTvSessionPhase::Provisional;
@@ -10883,30 +10916,34 @@ mod tests {
             source_serving_generation: 0,
         };
 
+        let original_token = request.activation_token.clone();
+        request.activation_token = "wrong-token".into();
         assert!(matches!(
             manager.activate_local(&request, "node-b").await,
             Err(LiveTvError::Conflict(_))
         ));
-        request.source_serving_generation = 1;
+        request.activation_token = original_token;
+        request.config_generation = 2;
         assert!(matches!(
-            manager.activate_local(&request, "node-a").await,
+            manager.activate_local(&request, "node-b").await,
             Err(LiveTvError::Conflict(_))
         ));
-        request.source_serving_generation = 0;
+        request.config_generation = 1;
+        request.source_serving_generation = 1;
         assert!(
             manager
-                .activate_local(&request, "node-a")
+                .activate_local(&request, "node-b")
                 .await
-                .expect("matching activation")
+                .expect("valid activation through another ingress")
                 .live
         );
 
         let mut other_generation = session.request.clone();
         other_generation.source_serving_generation = 1;
-        assert_ne!(
+        assert_eq!(
             LiveTvRequestKey::from(&session.request),
             LiveTvRequestKey::from(&other_generation),
-            "a request replay cannot cross a source serving generation"
+            "a replay keeps its identity across ingress serving generations"
         );
     }
 

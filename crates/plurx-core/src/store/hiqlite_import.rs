@@ -3104,7 +3104,10 @@ mod tests {
         assert!(names.contains(&"media_classifications"));
         assert!(names.contains(&"file_grants"));
         assert!(!names.contains(&"classification_fts"));
-        assert_eq!(names.len(), 53, "review every imported durable table");
+        assert!(names.contains(&"live_tv_resource_records"));
+        // The revision/nonce is reconstructed above the greatest restored epoch.
+        assert!(!names.contains(&"live_tv_resource_revision"));
+        assert_eq!(names.len(), 54, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its

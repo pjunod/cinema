@@ -14871,6 +14871,10 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              -- v48's desired-selection row, then v45's negative fragment
              -- index, then v44's permanent recovery-guard ledger, then v43's
              -- conversion ledger.
+             DROP TRIGGER IF EXISTS live_tv_capture_revision_update;
+             DROP TRIGGER IF EXISTS live_tv_capture_revision_delete;
+             DROP TABLE IF EXISTS live_tv_resource_records;
+             DROP TABLE IF EXISTS live_tv_resource_revision;
              DROP TRIGGER IF EXISTS cache_publication_generation_guard;
              DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard;
              DROP INDEX IF EXISTS analysis_requests_one_active_forced_fragment_successor;
@@ -32564,7 +32568,7 @@ async fn sqlite_v69_migration_from_v68_preserves_file_grants_and_live_analysis_r
         v68_table, current_table,
         "fixture must restore v68 CHECK constraints"
     );
-    conn.execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_advance; DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_delete_source; DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_supersede_source; DROP TABLE subtitle_source_repair_epochs; DROP TRIGGER IF EXISTS subtitle_source_publications_delete_source; DROP TRIGGER IF EXISTS subtitle_source_publications_supersede_source; DROP TABLE subtitle_source_publications; DROP TRIGGER IF EXISTS analysis_requests_cancel_source; DROP TRIGGER IF EXISTS analysis_requests_supersede_source; DROP TRIGGER IF EXISTS analysis_requests_bound_terminal_history; DROP TRIGGER IF EXISTS analysis_requests_lifecycle_counters; DROP TABLE analysis_attempts; ALTER TABLE analysis_requests RENAME TO analysis_requests_v69_fixture;")
+    conn.execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER IF EXISTS live_tv_capture_revision_update; DROP TRIGGER IF EXISTS live_tv_capture_revision_delete; DROP TABLE live_tv_resource_records; DROP TABLE live_tv_resource_revision; DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_advance; DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_delete_source; DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_supersede_source; DROP TABLE subtitle_source_repair_epochs; DROP TRIGGER IF EXISTS subtitle_source_publications_delete_source; DROP TRIGGER IF EXISTS subtitle_source_publications_supersede_source; DROP TABLE subtitle_source_publications; DROP TRIGGER IF EXISTS analysis_requests_cancel_source; DROP TRIGGER IF EXISTS analysis_requests_supersede_source; DROP TRIGGER IF EXISTS analysis_requests_bound_terminal_history; DROP TRIGGER IF EXISTS analysis_requests_lifecycle_counters; DROP TABLE analysis_attempts; ALTER TABLE analysis_requests RENAME TO analysis_requests_v69_fixture;")
         .expect("remove v69-only shape");
     conn.execute_batch(&v68_table)
         .expect("restore v68 request table");
@@ -32572,12 +32576,8 @@ async fn sqlite_v69_migration_from_v68_preserves_file_grants_and_live_analysis_r
         .expect("preserve v68 live row");
     conn.execute_batch(&attempts_table)
         .expect("restore v68 attempt table");
-    conn.pragma_update(
-        None,
-        "user_version",
-        plurx_core::store::SQLITE_SCHEMA_VERSION - 1,
-    )
-    .expect("mark true v68 predecessor");
+    conn.pragma_update(None, "user_version", 68)
+        .expect("mark true v68 predecessor");
     drop(conn);
 
     let migrated = SqliteStore::open(&path).expect("migrate v68 to v69");

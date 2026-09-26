@@ -2726,7 +2726,7 @@ impl HiqliteAuthStore {
                     let now = self.now()?;
                     let mut statements = super::hiqlite_live_tv_resource::schema_statements();
                     statements.push((
-                        "UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".to_owned(),
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
                         params!(LIVE_TV_RESOURCE_SCHEMA_VERSION,now,SUBTITLE_SOURCE_SCHEMA_VERSION),
                     ));
                     let attempt = self.client().txn(statements).await;
@@ -6706,9 +6706,14 @@ mod tests {
             "v46 must advance exactly one step to the subtitle-source schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 42,
+            SUBTITLE_SOURCE_SCHEMA_VERSION + 1,
+            LIVE_TV_RESOURCE_SCHEMA_VERSION,
+            "v47 must advance exactly one step to the Live TV resource schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 43,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v47 step"
+            "this implementation contains every additive v5→v48 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

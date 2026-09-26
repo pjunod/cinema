@@ -159,6 +159,13 @@ pub struct SqliteTransactionSite {
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     SqliteTransactionSite {
+        module: "live_tv_resource.rs",
+        method: "commit_ledger",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
         module: "dvr.rs",
         method: "put_dvr_rule",
         is_async: true,
@@ -1042,6 +1049,10 @@ mod tests {
             "library_channels.rs",
             include_str!("sqlite/library_channels.rs"),
         ),
+        (
+            "live_tv_resource.rs",
+            include_str!("sqlite/live_tv_resource.rs"),
+        ),
         ("media.rs", include_str!("sqlite/media.rs")),
         ("mod.rs", include_str!("sqlite/mod.rs")),
         ("offline.rs", include_str!("sqlite/offline.rs")),
@@ -1218,7 +1229,8 @@ mod tests {
         // transaction boundary has to be a deliberate edit here. That is the
         // point of the assertion: two of the sites above reached main without
         // one, and ten more did before this correction.
-        assert_eq!(methods.len(), 101);
+        // 102 includes Live TV ledger commit: the revision CAS must win before any record write.
+        assert_eq!(methods.len(), 102);
     }
 
     #[test]

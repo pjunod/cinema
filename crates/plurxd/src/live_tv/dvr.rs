@@ -4550,7 +4550,7 @@ mod tests {
 
     fn tuner_input(
         chunks: Vec<bytes::Bytes>,
-        pulled_at: Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+        pulled_at: Arc<std::sync::Mutex<Vec<tokio::time::Instant>>>,
     ) -> LiveTunerInput {
         use futures_util::StreamExt as _;
 
@@ -4567,7 +4567,7 @@ mod tests {
                 pulled_at
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(std::time::Instant::now());
+                    .push(tokio::time::Instant::now());
                 Some((
                     Ok::<_, reqwest::Error>(chunks[index].clone()),
                     (chunks, index + 1, pulled_at),
@@ -4582,7 +4582,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_slow_sink_never_delays_the_tuner_reader_or_its_sibling() {
         let metrics = Arc::new(LiveTvMetrics::default());
         let delivered = Arc::new(AtomicU64::new(0));
@@ -4622,7 +4622,10 @@ mod tests {
             .collect::<Vec<_>>();
         let pulled_at = Arc::new(std::sync::Mutex::new(Vec::new()));
 
-        let started = std::time::Instant::now();
+        // Virtual time measures waiting on the blocked sink without charging
+        // unrelated runner CPU scheduling to the fanout. A blocking sink still
+        // advances the timer and violates the latency bound.
+        let started = tokio::time::Instant::now();
         let result = pump_tuner_fanout(
             tuner_input(chunks, Arc::clone(&pulled_at)),
             serving,

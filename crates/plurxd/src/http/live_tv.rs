@@ -2254,8 +2254,8 @@ mod tests {
         assert_eq!(negotiated_protocols(&[1, 2]), vec![1, 2]);
         assert_eq!(negotiated_protocols(&[1, 2, 3]), vec![1, 2, 3]);
         assert_eq!(
-            negotiated_protocols(&[1, 2, 3, 4]),
-            vec![1, 2, 3],
+            negotiated_protocols(&[1, 2, 3, 4, 5]),
+            vec![1, 2, 3, 4],
             "an owner newer than this ingress does not make this ingress newer"
         );
     }
