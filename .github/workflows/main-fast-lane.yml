@@ -246,6 +246,14 @@ jobs:
         run: |
           scripts/js-check
           git ls-files -z 'crates/plurxd/src/web/*.js' | xargs -0 -n1 node --check
+      # TypeScript's checker over the same rows, against tests/web/
+      # tsc-baseline.tsv: a new or raised diagnostic fails. The script runs
+      # `npm ci` into tools/web-types from its lockfile (one package, no
+      # dependencies) when the pinned tsc is not already there.
+      - name: Type-check the web shell against its baseline
+        run: |
+          node tests/web/jsconfig-generated.test.js
+          scripts/web-types
 
   apple_compile:
     name: fast Apple compile

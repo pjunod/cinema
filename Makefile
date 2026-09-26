@@ -1505,6 +1505,12 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/asset-load.test.js
 	@node tests/web/asset-layout.test.js
 	@scripts/js-check
+	# Shape, not order: TypeScript's checker (tsc, checkJs) over the same rows,
+	# against a per-file baseline that only shrinks. The file list is generated
+	# from the shell, so a new row is read the day it is served.
+	# docs/clients/WEB-TYPE-CHECKING-AND-PLAYER-DECOMPOSITION.md §3.
+	@node tests/web/jsconfig-generated.test.js
+	@scripts/web-types
 	@scripts/contrast-check --from-index crates/plurxd/src/web/core/theme.js \
 		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
 		--allow scripts/contrast-allow.txt

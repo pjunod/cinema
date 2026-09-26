@@ -140,7 +140,7 @@ id = "web-static"
 title = "Embedded JavaScript and theme contrast"
 command = "make web-check"
 profiles = ["commit", "ci", "full", "nightly"]
-requires = ["node", "python3"]
+requires = ["node", "npm", "python3"]
 missing = "fail"
 timeout_seconds = 120
 
@@ -958,6 +958,8 @@ paths = [
   "scripts/web-hls-startup-browser-check",
   "scripts/subtitle-readiness-browser-check",
   "scripts/js-check",
+  "scripts/web-jsconfig",
+  "scripts/web-types",
   "scripts/reader-browser",
   "scripts/themes-proposed.json",
   "scripts/ui-baseline",
@@ -967,6 +969,9 @@ paths = [
   # (THIRD-PARTY-NOTICES §7).
   "tests/vendor/**",
   "tests/web/**",
+  # TypeScript, pinned by lockfile for scripts/web-types and installed by it;
+  # dev-only, never served or shipped (THIRD-PARTY-NOTICES §7).
+  "tools/web-types/**",
 ]
 checks = ["rust-gate", "rust-gate-ci", "web-static", "player-input-fence", "playback-surface-fence", "web-membership", "reader-browser", "web-layout", "playback-smoke", "playback-exhaustive"]
 depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichment", "playback.pipeline"]

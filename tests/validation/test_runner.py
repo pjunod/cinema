@@ -180,6 +180,25 @@ class CatalogCase(unittest.TestCase):
         )
         self.assertTrue(reporter["web_layout"])
 
+    def test_the_type_gate_selects_the_web_job_it_runs_in(self):
+        """`scripts/web-types` runs in the fast lane's web job.
+
+        A change to the gate, its pinned TypeScript, its generator or its
+        baseline has to select that job, or the pull request that edits the
+        gate is the one pull request the gate never runs on — the failure the
+        browser gate above shipped with.
+        """
+        catalog = load_catalog(ROOT / "validation/points.toml")
+        for path in (
+            "scripts/web-types",
+            "scripts/web-jsconfig",
+            "tools/web-types/package-lock.json",
+            "tests/web/tsc-baseline.tsv",
+            "tests/web/jsconfig-generated.test.js",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(scope_for_paths(catalog, (path,))["web_layout"])
+
     def test_ci_scope_keeps_expensive_jobs_on_their_affected_surfaces(self):
         catalog = load_catalog(ROOT / "validation/points.toml")
 
