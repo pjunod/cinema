@@ -453,6 +453,12 @@ write, because settings are persisted one at a time and a later bad field must
 not leave an earlier policy change in force —
 `dv_disk_keep_original = false` is the destructive case that forced the rule.
 
+`hevc_unverified_copy` is an admin-writable boolean (default `false`). It
+allows new HEVC copy starts without configuration proof, including rolling and
+progressive playback. It can restore known color corruption. Saving it never
+depends on readiness; `hevc_header_trace_available` is a read-only nullable
+boolean reporting this node’s FFmpeg capability for the Developer advice.
+
 Live-TV settings are a separate transaction with their own generation
 compare-and-swap, and mixing them into a request with any non-Live-TV field is
 refused up front: a losing CAS must report 409 without an unrelated setting

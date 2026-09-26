@@ -1087,6 +1087,20 @@ impl TranscodeManager {
         playback_id: &str,
         automatic: bool,
     ) -> Result<StartInfo, String> {
+        let mut file = self
+            .store
+            .get_file(file_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "file not found".to_owned())?;
+        if matches!(file.video_codec.as_deref(), Some("hevc" | "h265"))
+            && !unverified_hevc_copy_enabled(self.store.as_ref()).await?
+        {
+            return Err(vod_refusal_error(
+                "hevc_configuration_unverified",
+                "HEVC rolling copy is unverified; enable unverified HEVC copy in Settings → Developer to allow it",
+            ));
+        }
         // Same make-before-break rule as the transcode path. A takeover
         // continues an existing incarnation and supersedes nothing.
         if replacement_deadline.is_none() && takeover.is_none() {
@@ -1094,12 +1108,6 @@ impl TranscodeManager {
                 .await?;
         }
 
-        let mut file = self
-            .store
-            .get_file(file_id)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "file not found".to_owned())?;
         let probe_json = self.store.get_file_probe_json(file_id).await.ok().flatten();
         file.audio_offset_ms = if file.audio_streams.is_empty() {
             0

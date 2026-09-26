@@ -431,7 +431,10 @@ also_in = ["crates/plurxd/src/transcode"]
 # adds the 300 ms spacing past the control rate limit and a 10 ms poll, inside
 # a two-second timeout, for the already-enqueued `resume` Store event. Both
 # are test-only and own no producer, process or recovery decision.
-expected_occurrences = 48
+# HEVC color repair: -1 test-only log-polling sleep. The old rolling-copy
+# argv fixture is replaced by direct refusal/override admission assertions;
+# no production timer or recovery owner changed.
+expected_occurrences = 47
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -2924,7 +2927,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # merged tree, measured by zeroing this row after the merge: 997, which is
 # main's 992 plus exactly this branch's five test-only timers reviewed above
 # (three M3, two from its review round). No production timer is added.
-expected_occurrences = 997
+# HEVC color repair: -1, the same removed test-only log-polling sleep.
+# Original-header analysis uses existing bounded index-process deadlines.
+# Re-landed with main at `3dadc61cd` after the push-mirror rewind erased
+# #535's merge: the value is main's 997 -1 for the HEVC
+# repair's shapes reviewed above, measured by zeroing this row after the merge.
+expected_occurrences = 996
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3188,7 +3196,15 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # +1 with the review round of P-02 M3 (#518, finding 1), test-only: the
 # `true` child in process::priority::tests::every_spawn_is_counted_by_its_class_and_purpose,
 # started through `spawn_job_owned` and reaped by the test before its job drops.
-expected_occurrences = 179
+# HEVC color repair: +5 synchronous, test-only finite FFmpeg commands in
+# fragindex::tests::hevc_original_header_scan_rejects_changed_pps_before_stripping:
+# encode the short fixture, concatenate, decode frame hashes, run production
+# fMP4 copy, and remux the A/B. testfixtures::run or Command::output collects
+# each child before its temporary directory is dropped. No detached owner.
+# Re-landed with main at `3dadc61cd` after the push-mirror rewind erased
+# #535's merge: the value is main's 179 +5 for the HEVC
+# repair's shapes reviewed above, measured by zeroing this row after the merge.
+expected_occurrences = 184
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3572,7 +3588,13 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # rolling publication-trap change): the value is the whole merged tree,
 # measured by zeroing this row after the merge: main's 390 less this branch's net six launcher
 # migrations reviewed above.
-expected_occurrences = 384
+# HEVC color repair: +2 test-only Command::output calls, for decoded frame
+# hashes and the production fMP4 copy in the changed-PPS regression. Each
+# synchronously collects a finite fixture child; no rolling lifecycle change.
+# Re-landed with main at `3dadc61cd` after the push-mirror rewind erased
+# #535's merge: the value is main's 384 +2 for the HEVC
+# repair's shapes reviewed above, measured by zeroing this row after the merge.
+expected_occurrences = 386
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

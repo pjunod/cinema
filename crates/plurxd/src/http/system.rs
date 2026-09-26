@@ -1696,6 +1696,10 @@ pub struct SettingsDto {
     /// request would tell an operator their node is enforcing something it is
     /// not.
     pub decoder_health_qualified_artifacts: bool,
+    /// Explicit operator override, applied to new copy starts.
+    pub hevc_unverified_copy: bool,
+    /// Advisory engine observation, never used to authorize a settings save.
+    pub hevc_header_trace_available: Option<bool>,
     /// What this node measured about itself, and the identity it therefore
     /// plans into. Read-only.
     pub decoder_health_qualification: DecoderHealthQualification,
@@ -2123,6 +2127,11 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             false,
         ),
         decoder_health_qualified_artifacts: decoder_health_requested,
+        hevc_unverified_copy: plurx_core::store::stored_switch(
+            setting(keys::HEVC_UNVERIFIED_COPY).as_deref(),
+            false,
+        ),
+        hevc_header_trace_available: crate::ffmpeg::hevc_header_trace_available().await,
         decoder_health_qualification: DecoderHealthQualification::of(
             &state.transcode.published_artifact_qualification(),
             decoder_health_requested,
@@ -2400,6 +2409,7 @@ pub struct UpdateSettings {
     pub prepared_quality_handoff: Option<bool>,
     pub automatic_decoder_recovery: Option<bool>,
     pub decoder_health_qualified_artifacts: Option<bool>,
+    pub hevc_unverified_copy: Option<bool>,
     pub pgs_overlay: Option<bool>,
     pub dolby_vision_convert: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
@@ -2564,6 +2574,7 @@ impl UpdateSettings {
             || self.prepared_quality_handoff.is_some()
             || self.automatic_decoder_recovery.is_some()
             || self.decoder_health_qualified_artifacts.is_some()
+            || self.hevc_unverified_copy.is_some()
             || self.pgs_overlay.is_some()
             || self.dolby_vision_convert.is_some()
             || self.vod_working_set_bytes.is_some()
@@ -3621,6 +3632,14 @@ pub async fn update_settings(
             .put_setting(keys::AUTOMATIC_DECODER_RECOVERY, if on { "1" } else { "0" })
             .await?;
         state.transcode.set_automatic_decoder_recovery(on);
+    }
+    if let Some(on) = req.hevc_unverified_copy {
+        // The saved preference is authoritative. No readiness condition is
+        // consulted here, including on a node without trace_headers.
+        state
+            .store
+            .put_setting(keys::HEVC_UNVERIFIED_COPY, if on { "1" } else { "0" })
+            .await?;
     }
     if let Some(on) = req.decoder_health_qualified_artifacts {
         state
