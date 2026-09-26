@@ -2,7 +2,7 @@
 
 **Status:** M1–M3 fast lane: preflight repairs complete · **Updated:** 2026-09-26 ·
 **Branch:** `codex/durable-cluster-work` ·
-**Base:** `e680849fb` · **PR:** [#532 — ready](http://192.168.4.7:3000/noirr/plurx/pulls/532)
+**Base:** `116559cb8` · **PR:** [#532 — ready](http://192.168.4.7:3000/noirr/plurx/pulls/532)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -422,3 +422,8 @@ The failing replicated test is being rerun before the main fast lane starts.
   (3), docs (4), and eight loopback cases passed focused reruns. Three unrelated
   Linux-fixture failures remain local-only: this Mac has no `/bin/true` or GNU
   `timeout`. The Linux fast lane is authoritative for those unchanged fixtures.
+
+- Integrated main `116559cb8` before restarting the lane. Its changes are
+  mobile PDF reading, client regression declarations and their documentation;
+  no Rust or queue ownership source changed. The final normal hook rechecks
+  the integrated tree before push.
