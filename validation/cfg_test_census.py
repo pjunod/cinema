@@ -9,17 +9,17 @@ import sys
 
 ROOT = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".")
 CLASSES = [
-    ("module", re.compile(r"^\s*(pub(\(crate\))?\s+)?mod\s+\w+\s*[;{]")),
-    ("use", re.compile(r"^\s*(pub(\(crate\))?\s+)?use\s")),
+    ("module", re.compile(r"^\s*(pub(\([^)]*\))?\s+)?mod\s+\w+\s*[;{]")),
+    ("use", re.compile(r"^\s*(pub(\([^)]*\))?\s+)?use\s")),
     (
         "type",
         re.compile(
-            r"^\s*(pub(\(crate\))?\s+)?(struct|enum|type|trait|const|static)\s"
+            r"^\s*(pub(\([^)]*\))?\s+)?(struct|enum|type|trait|const|static)\s"
         ),
     ),
     ("impl", re.compile(r"^\s*impl\b")),
-    ("fn", re.compile(r"^\s*(pub(\(crate\))?\s+)?(async\s+)?fn\s")),
-    ("field", re.compile(r"^\s*(pub(\(crate\))?\s+)?\w+\s*:\s*[^=]")),
+    ("fn", re.compile(r"^\s*(pub(\([^)]*\))?\s+)?(async\s+)?fn\s")),
+    ("field", re.compile(r"^\s*(pub(\([^)]*\))?\s+)?\w+\s*:\s*[^=]")),
     (
         "statement",
         re.compile(r"^\s*(let|if|match|for|while|loop|return|\w+[\.\(]|\{|\*)"),
