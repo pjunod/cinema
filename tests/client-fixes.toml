@@ -2,6 +2,14 @@ version = 1
 enforce_after = "e8a910f"
 
 [[fixes]]
+id = "apple.tvos-settings-picker-menu"
+commits = ["26f8749f7"]
+source = "clients/apple/Sources/SettingsView.swift"
+source_anchor = ".pickerStyle(.menu)"
+test = "clients/apple/UITests/TVPhysicalInputTests.swift"
+test_anchor = "func testSettingsChoicesOpenAsMenusOnAppleTV() throws"
+
+[[fixes]]
 id = "web.live-tv-picture-evidence"
 commits = ["148829768"]
 source = "crates/plurxd/src/web/live-tv.js"
