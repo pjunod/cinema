@@ -11,6 +11,10 @@
 //! protocol, request handlers, and validators against a one-voter cluster,
 //! which needs no quorum and therefore no contended host.
 
+// A harness that starts plurxd processes on purpose; it is never a
+// daemon child, so the launcher rule in clippy.toml does not apply.
+#![allow(clippy::disallowed_methods)]
+
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::future::Future;

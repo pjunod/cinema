@@ -2028,8 +2028,11 @@ async fn run_chapter_probe(path: &Path) -> Result<Vec<serde_json::Value>, Chapte
     #[cfg(windows)]
     crate::ffmpeg::verify_windows_source_path(&source, &input)
         .map_err(|_| ChapterProbeFailure::Failed)?;
-    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command)
-        .map_err(|_| ChapterProbeFailure::Failed)?;
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::realtime("chapter list probe"),
+    )
+    .map_err(|_| ChapterProbeFailure::Failed)?;
     let stdout = child.stdout.take().ok_or(ChapterProbeFailure::Failed)?;
     let mut bytes = Vec::new();
     stdout
@@ -2273,7 +2276,13 @@ pub async fn decision(
     // meaning until M2 moves every create path to the richer contract.
     decision.delivered_audio =
         playback::resolve_audio_for_method(&file, &q.profile(decision_now_ms), decision.method);
-    let probe_json = state.store.get_file_probe_json(id).await?;
+    // Only a copy needs the census; an encode never carries the source's
+    // parameter sets, and a direct play serves them untouched.
+    let probe_json = if decision.method == playback::PlaybackMethod::Remux {
+        crate::hevc_census::probe_json_for_copy(state.store.as_ref(), &file).await?
+    } else {
+        state.store.get_file_probe_json(id).await?
+    };
     let vod_video = plurx_core::transcode::CopyVideoOptions::from_probe(
         &file,
         probe_json.as_deref(),
@@ -2470,6 +2479,11 @@ pub async fn set_audio_offset(
 /// the file itself, to a temp name renamed into place once whole — two
 /// racing misses write identical bytes, and the loser's rename is a no-op
 /// worth nothing to fight over.
+/// A viewer turned this text track on and the player is waiting for it
+/// (plan P-02 §3.2.2).
+pub(crate) const SUBTITLE_TRACK_FOR_A_VIEWER: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::realtime("subtitle track a viewer turned on");
+
 pub async fn subtitles_vtt(
     _user: AuthUser,
     State(state): State<AppState>,
@@ -2498,6 +2512,7 @@ pub async fn subtitles_vtt(
         &file,
         index,
         &state.subtitle_source_access(),
+        SUBTITLE_TRACK_FOR_A_VIEWER,
     )
     .await
     .map_err(|why| {
@@ -2800,9 +2815,12 @@ pub async fn stream_mp4(
             "this source cannot be made compatible by the progressive copy endpoint; use the planned HLS session",
         ));
     }
-    let probe_json = state.store.get_file_probe_json(id).await?;
+    let probe_json = crate::hevc_census::probe_json_for_copy(state.store.as_ref(), &file).await?;
     let promote_hevc_parameter_sets =
         plurx_core::transcode::hevc_parameter_set_promotion_required(&file, probe_json.as_deref());
+    // A progressive copy has no header proof either, so it keeps every HEVC
+    // source's in-band parameter sets, like the rolling copy.
+    let retain_hevc_parameter_sets = matches!(file.video_codec.as_deref(), Some("hevc" | "h265"));
     // Copy HEVC gets an `hvc1` tag so Safari's <video> accepts the fMP4 (an
     // `hev1`-tagged MKV copy otherwise plays audio-only / black in Safari).
     let hevc = matches!(file.video_codec.as_deref(), Some("hevc" | "h265"));
@@ -2827,6 +2845,7 @@ pub async fn stream_mp4(
         selected_transport = "progressive",
         output_sample_entry = output_sample_entry.unwrap_or("not_hevc"),
         promote_hevc_parameter_sets,
+        retain_hevc_parameter_sets,
         preserved_dv_muxer_strict,
         strips_dolby_vision,
         dovi_rpu_filter_available = state.system.dovi_rpu,
@@ -2905,6 +2924,7 @@ pub async fn stream_mp4(
         have_dovi_bsf: state.system.dovi_rpu,
         preserve_dolby_vision: served.preserve_dolby_vision,
         promote_hevc_parameter_sets,
+        retain_hevc_parameter_sets,
         runtime_cache: &state.runtime_cache_dir,
         readrate,
         tracked,
@@ -3161,6 +3181,9 @@ struct RemuxSpec<'a> {
     /// rewrite the init after muxing, so retain the in-band sets and use the
     /// `hev1`/`dvhe` sample entry that permits them.
     promote_hevc_parameter_sets: bool,
+    /// The source redefines its parameter sets in band
+    /// (`transcode::hevc_census`); keep them rather than delete them.
+    retain_hevc_parameter_sets: bool,
     runtime_cache: &'a Path,
     readrate: f64,
     /// Telemetry handle and its registration, when the client asked to be able
@@ -3230,11 +3253,28 @@ fn spawn_remux_process_owner(
     (RemuxProcessGuard { cancel }, task)
 }
 
+#[cfg(test)]
 fn progressive_hevc_copy_args(
     source: &MediaFile,
     have_dovi_bsf: bool,
     preserve_dolby_vision: bool,
     promote_hevc_parameter_sets: bool,
+) -> Vec<String> {
+    progressive_hevc_copy_args_retaining(
+        source,
+        have_dovi_bsf,
+        preserve_dolby_vision,
+        promote_hevc_parameter_sets,
+        false,
+    )
+}
+
+fn progressive_hevc_copy_args_retaining(
+    source: &MediaFile,
+    have_dovi_bsf: bool,
+    preserve_dolby_vision: bool,
+    promote_hevc_parameter_sets: bool,
+    retain_hevc_parameter_sets: bool,
 ) -> Vec<String> {
     let mut args = vec![
         "-tag:v".to_owned(),
@@ -3259,10 +3299,11 @@ fn progressive_hevc_copy_args(
     if !promote_hevc_parameter_sets {
         args.extend([
             "-bsf:v".to_owned(),
-            plurx_core::transcode::hevc_copy_bsf_for_client(
+            plurx_core::transcode::hevc_copy_bsf_for_client_retaining(
                 source.hdr.as_deref(),
                 have_dovi_bsf,
                 preserve_dolby_vision,
+                retain_hevc_parameter_sets,
             ),
         ]);
     } else if source.hdr.as_deref() == Some("dolby_vision") && !preserve_dolby_vision {
@@ -3317,6 +3358,7 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         have_dovi_bsf,
         preserve_dolby_vision,
         promote_hevc_parameter_sets,
+        retain_hevc_parameter_sets,
         runtime_cache,
         readrate,
         tracked,
@@ -3387,11 +3429,12 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     // parameter sets (and no dead DV metadata) — same hygiene, same reasons,
     // as the segmented copy path (`hevc_copy_bsf`).
     if hevc {
-        args.extend(progressive_hevc_copy_args(
+        args.extend(progressive_hevc_copy_args_retaining(
             media,
             have_dovi_bsf,
             preserve_dolby_vision,
             promote_hevc_parameter_sets,
+            retain_hevc_parameter_sets,
         ));
     }
     if transcode_audio {
@@ -3457,6 +3500,7 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
             },
             descriptors,
             env: &[],
+            work: crate::process_control::ChildWork::realtime("playback remux"),
         },
     )
     .map_err(ApiError::Internal)?;

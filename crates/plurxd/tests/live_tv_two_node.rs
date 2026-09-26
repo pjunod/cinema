@@ -15,6 +15,9 @@
 //! anyone who asks for it gets a verdict, and an environment that cannot host
 //! the fixture device says so instead of quietly passing.
 
+// A test, never a daemon child: the launcher rule in clippy.toml is for
+// production code.
+#![allow(clippy::disallowed_methods)]
 #![cfg(unix)]
 
 use std::fs::{File, Permissions};

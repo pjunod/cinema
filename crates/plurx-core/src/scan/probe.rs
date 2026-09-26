@@ -174,14 +174,18 @@ fn executable_version(bin: &str) -> String {
 /// spawns: a deadline, a read bound, and a child that dies with its future.
 async fn probe_reporter_identity(bin: &str) -> Option<String> {
     use tokio::io::AsyncReadExt;
-    let mut child = tokio::process::Command::new(bin)
+    let mut command = tokio::process::Command::new(bin);
+    command
         .arg("-version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .ok()?;
+        .kill_on_drop(true);
+    let (mut child, _job) = crate::process::spawn_job_owned(
+        &mut command,
+        crate::process::ChildWork::realtime("ffprobe version check"),
+    )
+    .ok()?;
     let mut stdout = child.stdout.take()?;
     let mut text = String::new();
     let read = tokio::time::timeout(
@@ -259,6 +263,7 @@ pub async fn probe(path: &Path) -> Result<ProbeResult, ProbeError> {
             &invocation.args,
             invocation.wall_time,
             SCAN_PROBE_MAX_BYTES,
+            crate::process::ChildWork::background("library scan media probe"),
         )
         .await
         .map_err(|error| match error.kind() {
@@ -332,6 +337,7 @@ async fn probe_first_frame_luminance(path: &Path) -> Option<Value> {
         ],
         FRAME_LUMINANCE_PROBE_TIMEOUT,
         FRAME_LUMINANCE_PROBE_MAX_BYTES,
+        crate::process::ChildWork::background("library scan luminance probe"),
     )
     .await
     .ok()?;

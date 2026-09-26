@@ -1886,6 +1886,27 @@ impl MediaStore for SqliteStore {
         .await
     }
 
+    async fn merge_file_probe_hevc_parameter_sets(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        census_json: &str,
+    ) -> Result<bool, StoreError> {
+        let census = census_json.to_owned();
+        self.with_conn(move |conn| {
+            // The same in-SQL graft as the chapters above, fenced to the
+            // measured revision.
+            Ok(conn.execute(
+                "UPDATE files
+                    SET probe_json = json_set(probe_json, '$.plurx_hevc_parameter_sets', json(?1))
+                  WHERE id = ?2 AND size = ?3 AND mtime = ?4 AND probe_json IS NOT NULL",
+                params![census, file_id, size, mtime],
+            )? == 1)
+        })
+        .await
+    }
+
     async fn files_missing_dolby_vision(
         &self,
         after_id: i64,
