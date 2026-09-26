@@ -1,6 +1,6 @@
 # Live TV cluster resource — implementation status
 
-**Status:** review addressed; final fast lane pending · **Updated:** 2026-09-25 · **Branch:**
+**Status:** review addressed; final result tracked on PR #537 · **Updated:** 2026-09-25 · **Branch:**
 `codex/live-tv-cluster-resource` · **Base:** `2b6cb21e6`
 
 The [implementation contract](LIVE-TV-CLUSTER-RESOURCE-IMPLEMENTATION.md)
@@ -20,7 +20,7 @@ The user's existing checkouts are not build or edit workspaces for this work.
 | Guide, Activity and reminders | Building | Source-refresh lease, persistent guide copies and local worker Activity are integrated; validation pending. |
 | Developer enablement and clients | Building | Advisory Developer control and protocol 4 intents wired on web, Apple and Android. iOS/tvOS and Android compilation passed. |
 | One adversarial code review | Complete | Five findings corrected and verified in the same independent review pass; approved for final lane. |
-| Fast lane and merge | Starting | PR #537 will be marked ready after the review-fix commit; one unit/fast-lane set, then failures only. |
+| Fast lane and merge | Live result | [PR #537 checks and merge state](http://192.168.4.7:3000/noirr/plurx/pulls/537) are the authoritative result; one unit/fast-lane set, then failures only. |
 
 ## Delivery decisions
 
@@ -63,3 +63,5 @@ Latest integration: current main merged; cleanup retains deletion until file rem
 2026-09-25: Candidate `3486578c7` includes current main `2b6cb21e6`. The normal hook passed pinned Rust workspace Clippy/all-target compilation, formatting, catalog and JS syntax on this exact tree. One independent adversarial code review is running. No unit tests have run.
 
 Final review: four P1 findings and one P2 finding corrected and verified. The review document records each disposition. No unit execution preceded review. Physical tuner and actual predecessor-binary qualification remain unverified and are not represented as merge evidence.
+
+The reviewed corrections are committed as `422368653`. Forgejo did not schedule the lane when the WIP title was removed; this status commit supplies the ready-PR synchronize event. No unit methods ran during that skipped transition. Subsequent check results and merge status are recorded directly on PR #537 to avoid rerunning unit tests for status-only commits.
