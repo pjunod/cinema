@@ -811,3 +811,89 @@ async fn fragment_cancelled_due_interest_does_not_schedule_future_interest_early
         .jobs
         .is_empty());
 }
+
+#[tokio::test]
+async fn background_jobs_global_history_pressure_preserves_resolution_and_restores_progress() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("pressure.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let request = enqueue(1_000);
+    store.enqueue_job(request.clone()).await.expect("enqueue");
+    let connection = rusqlite::Connection::open(&path).expect("fixture connection");
+    // Reproduce 2,500 accepted non-expiring interests with 16 prior yields
+    // each. Seed historical rows in one transaction rather than 40,000 RPCs.
+    let transaction = connection.unchecked_transaction().expect("transaction");
+    transaction
+        .execute(
+            "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<2499)
+        INSERT INTO background_jobs (id, kind, payload_version, payload_json, dedupe_key, priority,
+            state, fence, revision, not_before_ms, created_at_ms, updated_at_ms)
+        SELECT 'pressure-'||i, kind, payload_version, payload_json, 'pressure-'||i, priority,
+            'queued', 16, 32, 1000, 1000, 1000 FROM n, background_jobs WHERE id=?1",
+            [&request.id],
+        )
+        .expect("jobs");
+    transaction
+        .execute(
+            "INSERT INTO background_job_waiters
+        (request_scope, request_id, request_digest, job_id, consumer_kind, consumer_ref, priority,
+         state, receipt_expires_ms, created_at_ms, updated_at_ms)
+        SELECT 'internal:pressure', id, ?2, id, 'analysis', id, 1, 'pending', 604801000, 1000, 1000
+        FROM background_jobs WHERE id != ?1",
+            rusqlite::params![request.id, "b".repeat(64)],
+        )
+        .expect("interests");
+    transaction
+        .execute(
+            "UPDATE background_jobs SET fence=16, revision=32 WHERE id=?1",
+            [&request.id],
+        )
+        .expect("original history fence");
+    transaction.execute_batch("WITH RECURSIVE n(fence) AS (VALUES(1) UNION ALL SELECT fence+1 FROM n WHERE fence<16)
+        INSERT INTO background_job_attempts
+        (job_id, fence, claim_id, owner_node_id, owner_boot_id, started_at_ms, resolve_until_ms, finished_at_ms, outcome)
+        SELECT id, n.fence, id||':'||n.fence, 'node-a', 'old-boot', 1000, 121000, 1001, 'yielded'
+        FROM background_jobs CROSS JOIN n;").expect("40,000 attempts");
+    transaction.commit().expect("commit fixture");
+    assert!(matches!(
+        store
+            .claim_job(claim(&request.id, 32, 2000))
+            .await
+            .expect("full history"),
+        ClaimOutcome::Contended
+    ));
+    assert!(!store
+        .maintain_jobs(120_999)
+        .await
+        .expect("protect reconciliation window"));
+    let count = || {
+        connection
+            .query_row("SELECT COUNT(*) FROM background_job_attempts", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count")
+    };
+    assert_eq!(count(), MAX_ATTEMPTS as i64);
+    assert!(store
+        .maintain_jobs(121_001)
+        .await
+        .expect("pressure cleanup"));
+    assert_eq!(count(), MAX_ATTEMPTS as i64 - 128, "one bounded page");
+    let newest: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM background_job_attempts WHERE fence=16",
+            [],
+            |row| row.get(0),
+        )
+        .expect("newest attempts");
+    assert_eq!(newest, 2500, "each job retains its newest attempt");
+    let compacted: i64 = connection
+        .query_row("SELECT SUM(yield_count) FROM background_jobs", [], |row| {
+            row.get(0)
+        })
+        .expect("compacted totals");
+    assert_eq!(compacted, 128, "compaction preserves lifetime counters");
+    let job = claimed(&store, claim(&request.id, 32, 121_002)).await;
+    assert_eq!(job.fence, 17);
+    assert_eq!(job.failed_attempts, 0);
+}

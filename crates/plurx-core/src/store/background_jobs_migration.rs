@@ -155,7 +155,10 @@ fn prepare(entry: &LegacyEntry, now_ms: i64) -> Result<Value, StoreError> {
     };
     request.now_ms = now_ms;
     request.request.deadline_ms = None;
-    request.request.retain_identity = true;
+    // Only analysis history owns an indefinitely retained request identity.
+    // The sealed migration mapping already prevents re-import after ordinary
+    // legacy receipts age out, without consuming waiter capacity forever.
+    request.request.retain_identity = request.request.scope == "analysis";
     request.validate()?;
     let mut body = serde_json::to_value(request).map_err(|_| invalid())?;
     body["legacy_key"] = entry.legacy_key.clone().into();
@@ -405,6 +408,76 @@ mod tests {
             (4_100, 4_100, 0, 0)
         );
     }
+    #[tokio::test]
+    async fn migration_terminal_legacy_receipts_expire_without_reimporting_work() {
+        let (_directory, path, connection) = legacy_database();
+        fragment(&connection, 1, "node-a", 0, 0);
+        let id = uuid::Uuid::new_v4().to_string();
+        connection.execute("INSERT INTO pretranscode_jobs
+            (id, dedupe_key, file_id, source_size, source_mtime, target_height, policy_generation,
+             requirements_json, reason, priority, state, not_before_ms, created_at_ms, updated_at_ms)
+            VALUES (?1, 'legacy-retention', 1, 100, 1, 720, 'policy:1', ?2, 'recent', 0, 'queued', 0, 100, 100)",
+            rusqlite::params![id, json!({"version":1,"decoder":"h264","acceptable_encoder_families":["software"],
+                "output_contract":"hls-v1","tone_map":false,"output_grade":"sdr","scratch_bytes":1024}).to_string()]).expect("transcode");
+        seal(&connection);
+        let store = SqliteStore::open(&path).expect("new binary");
+        while store.import_legacy_jobs(1000).await.expect("import") {}
+        let jobs = store
+            .list_jobs(JobQuery {
+                state: None,
+                kind: None,
+                after_id: None,
+                limit: 128,
+            })
+            .await
+            .expect("jobs");
+        assert_eq!(jobs.jobs.len(), 2);
+        for job in jobs.jobs {
+            store
+                .cancel_job(CancelJob {
+                    job_id: job.id,
+                    now_ms: 2000,
+                })
+                .await
+                .expect("finish interest");
+        }
+        let count = || {
+            connection
+                .query_row("SELECT COUNT(*) FROM background_job_waiters", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("waiters")
+        };
+        store
+            .maintain_jobs(604_800_999)
+            .await
+            .expect("before receipt expiry");
+        assert_eq!(count(), 2, "seven-day replay receipts are retained");
+        while store
+            .maintain_jobs(604_803_000)
+            .await
+            .expect("retire details")
+        {}
+        assert_eq!(count(), 0, "ordinary legacy receipts return their capacity");
+        assert!(!store
+            .import_legacy_jobs(604_803_001)
+            .await
+            .expect("sealed replay"));
+        assert_eq!(
+            store
+                .job_migration_status()
+                .await
+                .expect("sealed mapping")
+                .materialized,
+            2
+        );
+        assert_eq!(
+            count(),
+            0,
+            "sealed mapping, not an immortal waiter, prevents replay"
+        );
+    }
+
     #[tokio::test]
     async fn migration_page_failure_rolls_back_jobs_receipts_and_cursor_together() {
         let (_directory, path, connection) = legacy_database();

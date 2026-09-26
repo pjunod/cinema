@@ -28,6 +28,9 @@ pub use super::background_jobs_publication::{
 };
 use crate::error::StoreError;
 
+/// First SQLite schema containing this queue; stable across later migrations.
+pub const SQLITE_INTRODUCED_SCHEMA: i64 = 71;
+
 pub const JOB_LEASE_MS: i64 = 30_000;
 pub const JOB_RENEW_INTERVAL_MS: i64 = 10_000;
 pub const CLAIM_RESOLUTION_WINDOW_MS: i64 = 120_000;

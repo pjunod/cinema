@@ -1,4 +1,8 @@
 use super::{for_each_backend, seed_file};
+#[cfg(feature = "hiqlite-contract-tests")]
+use super::{
+    open_contract_hiqlite_store, populated_current_import_fixture, ContractCluster, HIQLITE_CASE,
+};
 use plurx_core::domain::PretranscodeRequirements;
 use plurx_core::store::background_jobs::*;
 
@@ -1085,4 +1089,74 @@ async fn background_offline_join_preserves_recipe_authority_and_independent_inte
         );
     })
     .await;
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_jobs_v70_backup_import_seals_legacy_work() {
+    use sha2::{Digest, Sha256};
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("fresh target");
+    let source = tempfile::tempdir().expect("source");
+    let path = populated_current_import_fixture(source.path());
+    {
+        let connection = rusqlite::Connection::open(&path).expect("fixture");
+        let objects = connection.prepare("SELECT type, name FROM sqlite_master WHERE name LIKE 'background_%' AND type IN ('trigger','table') ORDER BY CASE type WHEN 'trigger' THEN 0 ELSE 1 END")
+            .expect("queue objects").query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .expect("objects").collect::<Result<Vec<_>, _>>().expect("names");
+        for (kind, name) in objects {
+            connection
+                .execute_batch(&format!("DROP {} \"{}\"", kind, name.replace('"', "\"\"")))
+                .expect("remove v71 shape");
+        }
+        connection.execute("INSERT INTO pretranscode_jobs
+            (id, dedupe_key, file_id, source_size, source_mtime, target_height, policy_generation,
+             requirements_json, reason, priority, state, not_before_ms, created_at_ms, updated_at_ms)
+            SELECT ?1, 'v70-backup', id, size, mtime, 720, 'policy:1', ?2, 'recent', 0, 'queued', 0, 1, 1
+            FROM files ORDER BY id LIMIT 1",
+            rusqlite::params![uuid::Uuid::new_v4().to_string(), serde_json::json!({"version":1,"decoder":"h264",
+                "acceptable_encoder_families":["software"],"output_contract":"hls-v1","tone_map":false,
+                "output_grade":"sdr","scratch_bytes":1024}).to_string()]).expect("accepted legacy work");
+        connection
+            .pragma_update(None, "user_version", 70)
+            .expect("v70 marker");
+    }
+    // Read the old binary's prepared snapshot directly: opening through the
+    // current SQLite store would migrate it and conceal the import boundary.
+    let digest = hex::encode(Sha256::digest(
+        std::fs::read(&path).expect("snapshot bytes"),
+    ));
+    let report = store
+        .import_sqlite_backup(&path, &digest, 70)
+        .await
+        .expect("v70 import");
+    assert_eq!(report.source_schema_version, 70);
+    assert!(report
+        .tables
+        .iter()
+        .filter(|table| table.table.starts_with("background_"))
+        .all(|table| table.row_count == 0));
+    let migration = store
+        .job_migration_status()
+        .await
+        .expect("finite legacy seal");
+    assert!(migration.accepted > 0);
+    assert_eq!(migration.accepted, migration.awaiting_import);
+    assert!(store
+        .import_legacy_jobs(1000)
+        .await
+        .expect("materialize imported work"));
+    assert!(
+        store
+            .job_migration_status()
+            .await
+            .expect("progress")
+            .materialized
+            > 0
+    );
 }

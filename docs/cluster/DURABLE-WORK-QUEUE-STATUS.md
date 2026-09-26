@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 implemented; adversarial review in progress · **Updated:** 2026-09-26 ·
+**Status:** M1–M3 implemented; addressing adversarial findings · **Updated:** 2026-09-26 ·
 **Branch:** `codex/durable-cluster-work` ·
 **Base:** `2ab0cd497` · **PR:** [#532 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/532)
 
@@ -21,7 +21,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
-| Final adversarial review | In progress | Independent agent reviewing completed M1–M3 against main `2ab0cd497`; tests remain deferred until findings are addressed |
+| Final adversarial review | Complete; fixes in progress | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
 | Fast lane | Not run | After review findings are addressed |
 | Merge / cleanup | Not started | Green required lane before merge |
 
@@ -338,3 +338,16 @@ implementation is claimed; “compiled” does not mean tests passed.
   review. Review started against the integrated main base after pinned Clippy
   passed. PR #532 remains a draft. Tests have not started and no merge or
   production change is claimed.
+
+## Final core review — 2026-09-26
+
+Independent review of `f05f664b8` requested four corrections before testing:
+
+| Finding | Correction | Regression / evidence |
+|---|---|---|
+| P1: v70 backup reads nonexistent queue tables | One v71 introduction constant governs table imports and legacy sealing | Literal v70/v71 reader and replicated v70-import contracts written |
+| P1: incompatible fragment worker terminally fails shared work | Check local pipeline before claim; defensive mismatch yields without charging failure | Two worker identities leave original work available to the compatible worker |
+| P1: 40,000 retained attempts deadlock pending work | Bounded pressure compaction preserves newest attempt, reconciliation window and counters | 2,500 queued jobs × 16 yields; next claim progresses after upkeep |
+| P2: ordinary legacy receipts never release capacity | Only analysis-history interests retain identity indefinitely; sealed mapping prevents reimport | Terminal legacy receipts expire after seven days without replay |
+
+Fixes are being compiled. These regressions have not yet run.

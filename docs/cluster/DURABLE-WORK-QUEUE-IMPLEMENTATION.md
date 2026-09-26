@@ -289,7 +289,11 @@ that is a history window, not a lifetime claim/yield limit. Never reset the
 monotone fence or charged-failure count when compacting history. Fold older
 resolved yields into bounded totals (yield count, abandoned count, last outcome)
 once their claim-resolution retry window has expired. Current and unresolved
-claims are protected separately from that 16-row window.
+claims are protected separately from that 16-row window. At 39,872 global
+attempt rows, upkeep may compact older resolved attempts below 16 per job,
+while retaining each job's newest attempt. Pages still remove at most 128 rows;
+the two-minute reconciliation window and lifetime counters remain protected.
+This pressure policy prevents retained yields from deadlocking accepted work.
 
 An unacknowledged initial claim RPC has a two-minute retry/resolution window
 from dispatch. After that window, its caller may inspect the job but may not

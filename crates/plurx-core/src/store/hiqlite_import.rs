@@ -410,7 +410,7 @@ const TABLES: &[TablePlan] = &[
             "updated_at_ms",
         ],
         order_by: "id",
-        minimum_schema: 70,
+        minimum_schema: super::background_jobs::SQLITE_INTRODUCED_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -419,7 +419,7 @@ const TABLES: &[TablePlan] = &[
         name: "background_job_migration",
         columns: &["singleton", "format_version", "source_count"],
         order_by: "singleton",
-        minimum_schema: 70,
+        minimum_schema: super::background_jobs::SQLITE_INTRODUCED_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -436,7 +436,7 @@ const TABLES: &[TablePlan] = &[
             "updated_at_ms",
         ],
         order_by: "legacy_key",
-        minimum_schema: 70,
+        minimum_schema: super::background_jobs::SQLITE_INTRODUCED_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -445,7 +445,7 @@ const TABLES: &[TablePlan] = &[
         name: "background_fragment_targets",
         columns: &["cache_key", "target_node_id", "job_id"],
         order_by: "cache_key, target_node_id",
-        minimum_schema: 70,
+        minimum_schema: super::background_jobs::SQLITE_INTRODUCED_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -478,7 +478,7 @@ const TABLES: &[TablePlan] = &[
             "updated_at_ms",
         ],
         order_by: "request_scope, request_id",
-        minimum_schema: 70,
+        minimum_schema: super::background_jobs::SQLITE_INTRODUCED_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -498,7 +498,7 @@ const TABLES: &[TablePlan] = &[
             "error_code",
         ],
         order_by: "job_id, fence",
-        minimum_schema: 70,
+        minimum_schema: super::background_jobs::SQLITE_INTRODUCED_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -507,7 +507,7 @@ const TABLES: &[TablePlan] = &[
         name: "background_job_reservations",
         columns: &["resource_key", "slot", "job_id", "fence", "expires_at_ms"],
         order_by: "resource_key, slot",
-        minimum_schema: 70,
+        minimum_schema: super::background_jobs::SQLITE_INTRODUCED_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -1851,7 +1851,7 @@ impl HiqliteAuthStore {
             });
         }
 
-        if schema_version < 70 {
+        if schema_version < super::background_jobs::SQLITE_INTRODUCED_SCHEMA {
             // Triggers were installed at bootstrap; now capture the imported
             // legacy rows in the same finite schema-defined snapshot.
             super::hiqlite_background_jobs::seal_legacy(self.client()).await?;
@@ -3662,6 +3662,57 @@ mod tests {
                     .row_count,
                 1
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn background_jobs_import_distinguishes_v70_legacy_from_v71_queue() {
+        for version in [70, 71] {
+            let directory = tempfile::tempdir().expect("source directory");
+            let path = directory.path().join("source.db");
+            {
+                let connection = Connection::open(&path).expect("source");
+                crate::store::sqlite::SqliteStore::apply_migrations_for_test(&connection, version)
+                    .expect("literal schema");
+                connection.execute("INSERT INTO settings (key, value, updated_at) VALUES (?1, 'queue-import-fixture', 1)", [keys::INSTANCE_ID]).expect("instance");
+                if version == 71 {
+                    connection.execute_batch("INSERT INTO background_jobs
+                        (id, kind, payload_version, payload_json, dedupe_key, priority, state, not_before_ms, created_at_ms, updated_at_ms)
+                        VALUES ('fixture', 'artifact_hydrate', 1, '{}', 'fixture', 1, 'queued', 0, 0, 0);").expect("queued state");
+                }
+            }
+            let digest = sha256_file(&path).expect("source hash");
+            let (reader, _) = SourceReader::open(&path, &digest, version)
+                .await
+                .expect("reader");
+            for table in TABLES
+                .iter()
+                .copied()
+                .filter(|table| table.name.starts_with("background_"))
+            {
+                assert_eq!(table.minimum_schema, 71);
+                let rows = if version >= table.minimum_schema {
+                    reader
+                        .import_chunk(table, version, SourceChunk::Offset(0))
+                        .await
+                        .expect("queue table projection at source boundary")
+                } else {
+                    Vec::new()
+                };
+                let expected = i64::from(
+                    version == 71
+                        && matches!(table.name, "background_jobs" | "background_job_migration"),
+                );
+                assert_eq!(rows.len() as i64, expected, "v{version} {}", table.name);
+                assert_eq!(
+                    reader
+                        .digest(table, version)
+                        .await
+                        .expect("queue digest")
+                        .row_count as i64,
+                    expected
+                );
+            }
         }
     }
 

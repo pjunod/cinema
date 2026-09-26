@@ -805,6 +805,48 @@ pub(crate) async fn claim_pretranscode(
     Ok(None)
 }
 
+/// A pipeline is a worker capability, not an authority-wide version verdict.
+pub(crate) struct FragmentPipeline<'a> {
+    pub(crate) engine_sha256: &'a str,
+    pub(crate) have_dovi: bool,
+    pub(crate) convert_dolby_vision: bool,
+}
+
+async fn fragment_candidate_compatible(
+    store: &dyn Store,
+    payload: &plurx_core::store::background_jobs::JobPayload,
+    worker: &FragmentPipeline<'_>,
+) -> Result<bool, StoreError> {
+    use plurx_core::store::background_jobs::JobPayload;
+    let JobPayload::FragmentIndexBuild {
+        file_id,
+        source_size,
+        source_mtime,
+        pipeline_digest,
+        ..
+    } = payload
+    else {
+        return Ok(true); // Hydration consumes verified bytes, not this encoder.
+    };
+    let Some(file) = store.get_file(*file_id).await? else {
+        return Ok(true);
+    };
+    if file.size != *source_size || file.mtime != *source_mtime {
+        return Ok(true); // Let the claimed handler settle globally stale input.
+    }
+    let identities = crate::state::fragment_index_video_identity_options(
+        store,
+        &file,
+        worker.have_dovi,
+        worker.convert_dolby_vision,
+    )
+    .await?;
+    Ok(identities.into_iter().any(|(video, _)| {
+        crate::fragment_index_cluster::pipeline_digest(&file, worker.engine_sha256, video)
+            == *pipeline_digest
+    }))
+}
+
 /// Reserve this node's actual indexing capacity before acquiring a durable lease.
 pub(crate) async fn claim_fragment(
     store: Arc<dyn Store>,
@@ -812,6 +854,7 @@ pub(crate) async fn claim_fragment(
     transcode: &crate::transcode::TranscodeManager,
     node: &str,
     excluded: &[String],
+    worker: &FragmentPipeline<'_>,
 ) -> Result<
     Option<(
         plurx_core::store::ClusterFragmentIndexJob,
@@ -843,6 +886,9 @@ pub(crate) async fn claim_fragment(
             let Ok(payload) = candidate.supported_payload() else {
                 continue;
             };
+            if !fragment_candidate_compatible(store.as_ref(), &payload, worker).await? {
+                continue;
+            }
             let (key, kind, artifact) = match &payload {
                 JobPayload::FragmentIndexBuild { cache_key, .. } => {
                     (cache_key.clone(), JobKind::FragmentIndexBuild, None)
@@ -1126,6 +1172,117 @@ mod tests {
             "confirmed local expiry is an uncharged yield after join"
         );
         assert!(job.token.is_none());
+    }
+
+    #[tokio::test]
+    async fn background_jobs_incompatible_pipeline_leaves_work_for_compatible_worker() {
+        let (store, _, active) = active().await;
+        let token = active.fence().snapshot().await.expect("current token");
+        active.finish().await;
+        let original = store
+            .background_job(&token.job_id)
+            .await
+            .expect("read")
+            .expect("original");
+        let mut request = original.supported_payload().expect("payload");
+        let JobPayload::FragmentIndexBuild {
+            file_id,
+            ref mut pipeline_digest,
+            ref mut cache_key,
+            ..
+        } = request
+        else {
+            panic!("fragment");
+        };
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("file read")
+            .expect("file");
+        let video = crate::fragindex::video_identities(&file, None, false, false)[0];
+        *pipeline_digest =
+            crate::fragment_index_cluster::pipeline_digest(&file, &"a".repeat(64), video);
+        *cache_key = plurx_core::store::cluster_fragment_index_key(
+            file_id,
+            file.size,
+            file.mtime,
+            &"d".repeat(64),
+            pipeline_digest,
+        )
+        .expect("key");
+        let id = uuid::Uuid::new_v4().to_string();
+        let now_ms = unix_ms().expect("clock");
+        store
+            .enqueue_job(EnqueueJob {
+                id: id.clone(),
+                payload: request.clone(),
+                dedupe_key: format!("fragment:{id}"),
+                priority: 1,
+                not_before_ms: now_ms,
+                now_ms,
+                request: JobRequest {
+                    scope: "test:heterogeneous".into(),
+                    request_id: id.clone(),
+                    request_digest: "b".repeat(64),
+                    consumer_kind: "analysis".into(),
+                    consumer_ref: id.clone(),
+                    target_node_id: None,
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .expect("enqueue shared work");
+        let incompatible = FragmentPipeline {
+            engine_sha256: &"b".repeat(64),
+            have_dovi: false,
+            convert_dolby_vision: false,
+        };
+        assert!(
+            !fragment_candidate_compatible(store.as_ref(), &request, &incompatible)
+                .await
+                .expect("preflight")
+        );
+        let unclaimed = store
+            .background_job(&id)
+            .await
+            .expect("read")
+            .expect("shared job");
+        assert_eq!(unclaimed.state, JobState::Queued);
+        assert_eq!(unclaimed.fence, 0);
+        assert_eq!(unclaimed.failed_attempts, 0);
+        let compatible = FragmentPipeline {
+            engine_sha256: &"a".repeat(64),
+            have_dovi: false,
+            convert_dolby_vision: false,
+        };
+        assert!(
+            fragment_candidate_compatible(store.as_ref(), &request, &compatible)
+                .await
+                .expect("compatible peer")
+        );
+        let now_ms = unix_ms().expect("clock");
+        let result = claim_with_resolution(
+            store.as_ref(),
+            &unclaimed,
+            ClaimJob {
+                job_id: id,
+                expected_revision: 0,
+                node_id: "compatible-peer".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::FragmentIndexBuild,
+                payload_version: 1,
+                now_ms,
+                dispatched_at_ms: now_ms,
+            },
+        )
+        .await
+        .expect("claim");
+        assert!(
+            result.is_some(),
+            "the compatible peer can still execute the original request"
+        );
     }
 
     #[tokio::test]

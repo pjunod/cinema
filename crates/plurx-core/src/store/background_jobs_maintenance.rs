@@ -37,9 +37,12 @@ WHERE EXISTS (SELECT 1 FROM background_job_waiters
     AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms'))))
   OR EXISTS (SELECT 1 FROM background_job_attempts old
     WHERE old.finished_at_ms IS NOT NULL AND old.resolve_until_ms <= json_extract($1, '$.now_ms')
-      AND (SELECT COUNT(*) FROM background_job_attempts newer
+      AND ((SELECT COUNT(*) FROM background_job_attempts newer
         WHERE newer.job_id = old.job_id AND newer.finished_at_ms IS NOT NULL
-          AND newer.fence > old.fence) >= 16)
+          AND newer.fence > old.fence) >= 16
+        OR ((SELECT COUNT(*) FROM background_job_attempts) >= 39872
+          AND EXISTS (SELECT 1 FROM background_job_attempts newer
+            WHERE newer.job_id = old.job_id AND newer.fence > old.fence))))
   OR EXISTS (SELECT 1 FROM background_job_waiters
     WHERE state IN ('succeeded','failed','cancelled') AND retain_identity = 0
       AND receipt_expires_ms <= json_extract($1, '$.now_ms'))

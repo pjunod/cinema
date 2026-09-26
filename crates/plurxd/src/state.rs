@@ -9236,6 +9236,11 @@ impl JobManager {
                 &transcode,
                 &node_id,
                 &excluded,
+                &crate::background_jobs::FragmentPipeline {
+                    engine_sha256: &worker.engine_sha256,
+                    have_dovi: worker.have_dovi,
+                    convert_dolby_vision: worker.convert_dolby_vision,
+                },
             )
             .await
             {
@@ -9772,24 +9777,20 @@ impl JobManager {
                 .record_fragment_index_source(&attested.observation)
                 .await,
         );
-        // The job names one pipeline by digest; this node offers one identity
-        // per copy pipeline the file can be asked for. Claim the job only if
-        // one of them still produces the bytes the job was queued for — a job
-        // whose pipeline this build no longer emits is superseded exactly as
-        // it was when there was only ever one identity to compare.
+        // Recheck after source attestation: local capabilities may change
+        // after preflight. Another worker may still implement this identity.
         let Some(video) = videos.into_iter().find(|video| {
             crate::fragment_index_cluster::pipeline_digest(&file, &worker.engine_sha256, *video)
                 == job.pipeline_sha256
         }) else {
             let now = clock_ms();
-            self.fail_fragment_index_job(
-                &fence,
-                &job,
-                "pipeline_superseded",
-                false,
-                now.saturating_add(retry_ms),
+            self.remember_fragment_index_refusal(
+                &job.cache_key,
+                now.saturating_add(LOCAL_REFUSAL_MS),
             )
             .await;
+            self.yield_fragment_index_job(&fence, &job, "node_local_refusal", now)
+                .await;
             return false;
         };
 

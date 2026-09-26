@@ -4208,7 +4208,7 @@ The shared queue admits at most 4,096 active and 10,000 retained computations;
 automatic work stops at 3,840 active rows to reserve foreground headroom. At
 most 16,384 interests (128 per user) retain separate cancellation and request
 identities. Request receipts last seven days; bounded upkeep preserves the
-latest 16 resolved attempts per job. Terminal payloads remain available for
+up to 16 resolved attempts per job. At global history pressure it compacts older resolved attempts beyond the two-minute reconciliation window, preserving each job's newest attempt and lifetime counters. Terminal payloads remain available for
 explicit audited retry. Ordinary scheduler ticks never reset a failed budget.
 A successfully completed transcode whose last cache location was evicted can
 receive one fresh repair interest.

@@ -546,9 +546,12 @@ BEGIN
         SELECT old.job_id, old.fence FROM background_job_attempts old
         WHERE old.finished_at_ms IS NOT NULL
           AND old.resolve_until_ms <= json_extract(NEW.request_json, '$.now_ms')
-          AND (SELECT COUNT(*) FROM background_job_attempts newer
+          AND ((SELECT COUNT(*) FROM background_job_attempts newer
             WHERE newer.job_id = old.job_id AND newer.finished_at_ms IS NOT NULL
               AND newer.fence > old.fence) >= 16
+            OR ((SELECT COUNT(*) FROM background_job_attempts) >= 39872
+              AND EXISTS (SELECT 1 FROM background_job_attempts newer
+                WHERE newer.job_id = old.job_id AND newer.fence > old.fence)))
         ORDER BY old.finished_at_ms, old.job_id, old.fence LIMIT 128);
     DELETE FROM background_job_waiters WHERE (request_scope, request_id) IN (
         SELECT request_scope, request_id FROM background_job_waiters
