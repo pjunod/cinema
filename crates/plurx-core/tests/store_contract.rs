@@ -32573,6 +32573,238 @@ async fn subtitle_source_publication_crud_is_per_stamp_holder_and_representation
     .await;
 }
 
+/// The K-05 M5 read indexes, by name.
+const ITEM_READ_INDEXES: [&str; 3] = [
+    "idx_items_tmdb",
+    "idx_items_imdb",
+    "idx_items_top_level_title",
+];
+
+/// One enriched movie in a fresh Movies library, for the read-index
+/// migration tests on both backends: `(library_id, movie_id)`.
+async fn seed_read_index_movie<S>(store: &S) -> (i64, i64)
+where
+    S: LibraryStore + MediaStore + ?Sized,
+{
+    let library = store
+        .create_library(&NewLibrary {
+            name: "M5 Movies".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![],
+            anime: false,
+        })
+        .await
+        .expect("read-index library");
+    let movie = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "Dune".into(),
+            year: Some(2021),
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("read-index movie");
+    store
+        .apply_metadata(
+            movie,
+            &MetadataPatch {
+                tmdb_id: Some(438_631),
+                imdb_id: Some("tt1160419".into()),
+                enriched: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("read-index metadata");
+    (library.id, movie)
+}
+
+/// The migrated store answers from the indexes it just gained: both external
+/// id arms and the Title page.
+async fn assert_read_index_movie<S>(store: &S, backend: &str, library_id: i64, movie: i64)
+where
+    S: MediaStore + ?Sized,
+{
+    for (tmdb, imdb) in [(Some(438_631), None), (None, Some("TT1160419"))] {
+        assert_eq!(
+            store
+                .item_by_external_id(ItemKind::Movie, tmdb, imdb)
+                .await
+                .expect("external id lookup")
+                .map(|item| item.id),
+            Some(movie),
+            "{backend}: tmdb {tmdb:?}, imdb {imdb:?}"
+        );
+    }
+    let page = store
+        .list_top_items(library_id, ItemSort::Title, 0, 50)
+        .await
+        .expect("title page");
+    assert_eq!(page.total, 1, "{backend}");
+    assert_eq!(
+        page.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+        vec![movie],
+        "{backend}"
+    );
+}
+
+/// K-05 M5: an existing v69 SQLite database gains the three read indexes on
+/// open, keeps its rows, and a v70 database opens without replaying them.
+#[tokio::test]
+async fn sqlite_v70_migration_adds_the_read_indexes_and_keeps_the_catalogue() {
+    let directory = tempfile::tempdir().expect("v69 migration fixture");
+    let path = directory.path().join("v69.db");
+    let store = SqliteStore::open(&path).expect("open fixture");
+    let (library_id, movie) = seed_read_index_movie(&store).await;
+    drop(store);
+
+    let count_indexes = |conn: &rusqlite::Connection| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'items'
+               AND name IN ('idx_items_tmdb', 'idx_items_imdb', 'idx_items_top_level_title')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count read indexes")
+    };
+    let conn = rusqlite::Connection::open(&path).expect("open downgrade fixture");
+    assert_eq!(
+        count_indexes(&conn),
+        3,
+        "a fresh database is created with them"
+    );
+    for index in ITEM_READ_INDEXES {
+        conn.execute_batch(&format!("DROP INDEX {index};"))
+            .expect("remove v70-only shape");
+    }
+    conn.pragma_update(None, "user_version", 69)
+        .expect("mark the v69 predecessor");
+    drop(conn);
+
+    let migrated = SqliteStore::open(&path).expect("migrate v69 to v70");
+    assert_read_index_movie(&migrated, "sqlite v69 -> v70", library_id, movie).await;
+    drop(migrated);
+    let conn = rusqlite::Connection::open(&path).expect("inspect migrated fixture");
+    assert_eq!(count_indexes(&conn), 3, "v70 adds all three");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("user_version");
+    assert_eq!(version, plurx_core::store::SQLITE_SCHEMA_VERSION);
+    assert_eq!(version, 70);
+    drop(conn);
+    SqliteStore::open(&path).expect("a current database reopens without replaying v70");
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_read_index_count(client: &Client) -> i64 {
+    let rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT COUNT(*) AS value FROM sqlite_master
+              WHERE type = 'index' AND tbl_name = 'items'
+                AND name IN ('idx_items_tmdb', 'idx_items_imdb', 'idx_items_top_level_title')",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("count read indexes");
+    rows[0].value
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_schema_marker(client: &Client) -> i64 {
+    let rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read the marker");
+    rows[0].value
+}
+
+/// K-05 M5: a replicated v47 cluster gains the three read indexes through the
+/// daemon's migration step, keeps its rows, and forgives a replayed step
+/// (the loser of a two-voter race finds the indexes already there).
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect v47 read-index migration client");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("schema-v47-read-index-migration-telemetry.db");
+    let current = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current read-index schema");
+    let (library_id, movie) = seed_read_index_movie(&current).await;
+    drop(current);
+
+    assert_eq!(
+        replicated_read_index_count(&client).await,
+        3,
+        "a fresh cluster is created with them"
+    );
+
+    let mut rewind = ITEM_READ_INDEXES
+        .iter()
+        .map(|index| (format!("DROP INDEX {index}"), hiqlite::params!()))
+        .collect::<Vec<_>>();
+    rewind.push((
+        "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1".to_owned(),
+        hiqlite::params!(AUTH_SCHEMA_VERSION - 1),
+    ));
+    client
+        .txn(rewind)
+        .await
+        .expect("construct v47 fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit v47 fixture");
+    assert_eq!(replicated_read_index_count(&client).await, 0);
+
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("daemon v47 through v48 read-index migration");
+    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
+    assert_eq!(AUTH_SCHEMA_VERSION, 48);
+    assert_eq!(
+        replicated_read_index_count(&client).await,
+        3,
+        "v48 adds all three"
+    );
+    assert_read_index_movie(&migrated, "hiqlite v47 -> v48", library_id, movie).await;
+
+    // The indexes present with the marker behind: the step is `IF NOT
+    // EXISTS` throughout, so a repeated attempt moves the marker instead of
+    // refusing.
+    client
+        .txn([(
+            "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+            hiqlite::params!(AUTH_SCHEMA_VERSION - 1),
+        )])
+        .await
+        .expect("rewind the marker under the migrated shape");
+    let reopened = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("an idempotent step forgives a repeated attempt");
+    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
+    assert_eq!(replicated_read_index_count(&client).await, 3);
+    assert_read_index_movie(&reopened, "hiqlite replayed v48", library_id, movie).await;
+}
+
 #[tokio::test]
 async fn sqlite_v69_migration_from_v68_preserves_file_grants_and_live_analysis_requests() {
     let directory = tempfile::tempdir().expect("v68 migration fixture");
@@ -32647,12 +32879,10 @@ async fn sqlite_v69_migration_from_v68_preserves_file_grants_and_live_analysis_r
         .expect("preserve v68 live row");
     conn.execute_batch(&attempts_table)
         .expect("restore v68 attempt table");
-    conn.pragma_update(
-        None,
-        "user_version",
-        plurx_core::store::SQLITE_SCHEMA_VERSION - 1,
-    )
-    .expect("mark true v68 predecessor");
+    // A literal, not `SQLITE_SCHEMA_VERSION - 1`: the fixture is the v68
+    // shape, and later migrations (v70's indexes) must replay after v69.
+    conn.pragma_update(None, "user_version", 68)
+        .expect("mark true v68 predecessor");
     drop(conn);
 
     let migrated = SqliteStore::open(&path).expect("migrate v68 to v69");
