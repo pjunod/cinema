@@ -537,6 +537,7 @@ const OFFLINE_METHODS: &[&str] = &[
     "disable_offline_packages",
     "delete_offline_package",
     "expire_offline_packages",
+    "offline_expiry_hint",
     // Node removal (`CLUSTERING-PLAN.md` §6.7). Cluster-only behavior: the
     // SQLite backend implements these inertly because a single-node install
     // has no node to remove, so the real contract lives in the replicated
@@ -17310,7 +17311,12 @@ fn contract_inventory_matches_every_store_method() {
     // whether to ask the authority; `offline_queue_hint_follows_the_authority_locally`
     // and `classification_hint_fires_for_exactly_what_a_pass_acts_on` cover
     // them on both backends. No new trait or supertrait of `Store`.
-    assert_eq!(declared.len(), 395, "review the Store method count");
+    // 395 -> 396 for K-10 M4's local hint, `offline_expiry_hint` on
+    // `OfflinePackageStore`: a non-consensus read of the expiry sweep's own
+    // predicate that decides only whether to run the replicated sweep;
+    // `offline_expiry_hint_matches_the_sweep_and_nothing_expires_early_or_late`
+    // covers it on both backends. No new trait or supertrait of `Store`.
+    assert_eq!(declared.len(), 396, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -33888,6 +33894,115 @@ async fn offline_queue_hint_follows_the_authority_locally() {
     .await;
 }
 
+/// K-10 §3.4 (M4): the offline expiry hint is a local read of the sweep's own
+/// predicate, and the policy that trusts it keeps every package until its
+/// expiry and no longer than one sweep tick past it, on both backends.
+///
+/// The passes run on a virtual clock at the daemon's cadence. A package is
+/// asserted present at every pass before its `expires_at` and absent at every
+/// pass from it on, so a hint that is ignored (the forced sweep alone would
+/// keep the first package ten minutes), a hint that never fires, or a sweep
+/// that runs early each fail it.
+#[tokio::test]
+async fn offline_expiry_hint_matches_the_sweep_and_nothing_expires_early_or_late() {
+    use plurx_core::store::offline_expiry::{OfflineExpiryPolicy, SweepOutcome, SWEEP_TICK};
+
+    for_each_backend(|store, backend| async move {
+        let base: i64 = 1_000_000;
+        let packages = [
+            ("k10-expiry-late", base + 1_000),
+            ("k10-expiry-early", base + 90),
+        ];
+        assert!(
+            !store
+                .offline_expiry_hint(base + 10_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: empty hint: {error}")),
+            "{backend}: no package, no lapse"
+        );
+        let (user_id, file_id) = seed_file(&store, "k10-expiry").await;
+        for (id, expires_at) in packages {
+            let mut request = offline_request(id, &format!("{id}-request"), user_id, file_id);
+            request.expires_at = expires_at;
+            let OfflineCreateOutcome::Created(_) = store
+                .create_offline_package(&request, 10, 100_000, 100_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: create {id}: {error}"))
+            else {
+                panic!("{backend}: {id} must be created");
+            };
+            // Created later-expiring first, so each wait sees its own row.
+            let hinted = Arc::clone(&store);
+            k10_eventually(backend, "a package's expiry", move || {
+                let store = Arc::clone(&hinted);
+                Box::pin(
+                    async move { store.offline_expiry_hint(expires_at).await.unwrap_or(false) },
+                )
+            })
+            .await;
+        }
+        // The hint's boundary is the sweep's: `expires_at <= now`.
+        let (_, early_at) = packages[1];
+        assert!(
+            !store
+                .offline_expiry_hint(early_at - 1)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: hint: {error}")),
+            "{backend}: nothing has lapsed a second before the first expiry"
+        );
+        assert_eq!(
+            store
+                .expire_offline_packages(early_at - 1)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: sweep: {error}")),
+            0,
+            "{backend}: and the sweep agrees"
+        );
+
+        let mut policy = OfflineExpiryPolicy::new();
+        let start = std::time::Instant::now();
+        let mut expired_total = 0;
+        let mut outcomes = Vec::new();
+        for tick in 0..=20u32 {
+            let now_unix = base + i64::from(tick) * SWEEP_TICK.as_secs() as i64;
+            let (outcome, expired) = policy
+                .pass(store.as_ref(), now_unix, start + SWEEP_TICK * tick)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: pass {tick}: {error}"));
+            outcomes.push(outcome);
+            expired_total += expired;
+            for (id, expires_at) in packages {
+                let exists = store
+                    .offline_package_for_user(id, user_id)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: lookup {id}: {error}"))
+                    .is_some();
+                if now_unix < expires_at {
+                    assert!(
+                        exists,
+                        "{backend}: {id} expired early, at {now_unix} < {expires_at}"
+                    );
+                } else {
+                    assert!(
+                        !exists,
+                        "{backend}: {id} (expires {expires_at}) outlived its expiry at {now_unix}"
+                    );
+                }
+            }
+        }
+        assert_eq!(expired_total, 2, "{backend}: {outcomes:?}");
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == SweepOutcome::Swept)
+                .count(),
+            2,
+            "{backend}: one sweep per lapse: {outcomes:?}"
+        );
+    })
+    .await;
+}
+
 /// K-10 §3.2: the classification hint fires for exactly the entries the
 /// worker's pass would write or re-check, on both backends.
 ///
@@ -34087,6 +34202,129 @@ async fn an_idle_offline_worker_proposes_only_its_forced_claims_on_three_voters(
         .expect("woken pass");
     assert_eq!(outcome, ClaimOutcome::Claimed);
     assert_eq!(package.expect("claimed").id, "k10-woken");
+}
+
+/// K-10 M4 on three real voters: an idle offline expiry sweep proposes only
+/// its forced sweeps.
+///
+/// The half hour before is measured, not recalled: the old loop ran the
+/// replicated sweep `txn` once a minute whatever had lapsed, and thirty of
+/// them are thirty proposals. The policy's half hour over the same empty
+/// table sweeps at 0, 10 and 20 minutes and nothing else, reads nothing on
+/// the authority, and pays one local read per other pass. A sweep that
+/// ignores its hint fails the write count; then a lapse is swept on the very
+/// next pass.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn an_idle_offline_expiry_sweep_proposes_only_its_forced_sweeps_on_three_voters() {
+    use plurx_core::store::offline_expiry::{
+        OfflineExpiryPolicy, SweepOutcome, FORCED_SWEEP_INTERVAL, SWEEP_TICK,
+    };
+
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated contract state");
+    let base: i64 = 1_000_000;
+    let minutes: u32 = 30;
+    let unix_at = |tick: u32| base + i64::from(tick) * SWEEP_TICK.as_secs() as i64;
+
+    // Before: the old loop's half hour, one blind sweep a minute.
+    store.validation_reset_operation_counts();
+    for tick in 0..minutes {
+        assert_eq!(
+            store
+                .expire_offline_packages(unix_at(tick))
+                .await
+                .expect("blind sweep"),
+            0
+        );
+    }
+    let before = store.validation_operation_counts();
+    assert_eq!(
+        before.write_calls,
+        u64::from(minutes),
+        "the old idle half hour"
+    );
+
+    // After: the policy's half hour, at the same cadence.
+    let mut policy = OfflineExpiryPolicy::new();
+    let start = std::time::Instant::now();
+    let mut outcomes = Vec::new();
+    store.validation_reset_operation_counts();
+    for tick in 0..minutes {
+        let (outcome, expired) = policy
+            .pass(&store, unix_at(tick), start + SWEEP_TICK * tick)
+            .await
+            .expect("idle pass");
+        assert_eq!(expired, 0);
+        outcomes.push(outcome);
+    }
+    let after = store.validation_operation_counts();
+    let forced = u64::from(minutes) * SWEEP_TICK.as_secs() / FORCED_SWEEP_INTERVAL.as_secs();
+    assert_eq!(
+        after.write_calls, forced,
+        "an idle half hour may propose only the forced sweeps at 0, 10 and 20 minutes: {outcomes:?}"
+    );
+    assert_eq!(
+        after.consistent_query_calls, 0,
+        "nothing read on the authority"
+    );
+    assert_eq!(
+        after.non_consistent_query_calls,
+        u64::from(minutes) - forced,
+        "one local hint per unforced pass"
+    );
+    eprintln!(
+        "K-10 M4 offline expiry idle half hour on three voters: before {} proposals, after {} ({} passes)",
+        before.write_calls,
+        after.write_calls,
+        outcomes.len()
+    );
+
+    // A lapse is still swept on the next pass, well before the next forced
+    // sweep: the pass at 30 minutes is forced; the package lapses 50 s later
+    // and the unforced pass at 31 minutes expires it.
+    let (forced_outcome, _) = policy
+        .pass(&store, unix_at(minutes), start + SWEEP_TICK * minutes)
+        .await
+        .expect("forced pass");
+    assert_eq!(forced_outcome, SweepOutcome::EmptySweep);
+    let store: Arc<dyn Store> = Arc::new(store);
+    let (user_id, file_id) = seed_file(&store, "k10-expiry-voters").await;
+    let expires_at = unix_at(minutes) + 50;
+    let mut request = offline_request("k10-lapsing", "k10-lapsing-request", user_id, file_id);
+    request.expires_at = expires_at;
+    let OfflineCreateOutcome::Created(_) = store
+        .create_offline_package(&request, 10, 100_000, 100_000)
+        .await
+        .expect("create")
+    else {
+        panic!("the package must be created");
+    };
+    let hinted = Arc::clone(&store);
+    k10_eventually("hiqlite-3-voter", "the lapsing package", move || {
+        let store = Arc::clone(&hinted);
+        Box::pin(async move { store.offline_expiry_hint(expires_at).await.unwrap_or(false) })
+    })
+    .await;
+    let (outcome, expired) = policy
+        .pass(
+            store.as_ref(),
+            unix_at(minutes + 1),
+            start + SWEEP_TICK * (minutes + 1),
+        )
+        .await
+        .expect("hinted pass");
+    assert_eq!((outcome, expired), (SweepOutcome::Swept, 1));
+    assert!(store
+        .offline_package_for_user("k10-lapsing", user_id)
+        .await
+        .expect("lookup")
+        .is_none());
 }
 
 /// K-10 M2 on three real voters: the classification lease is no longer a
