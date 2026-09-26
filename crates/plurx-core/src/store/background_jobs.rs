@@ -21,6 +21,7 @@ pub use super::background_jobs_observation::{
     JOB_METRIC_SLOTS, JOB_METRIC_STATES,
 };
 use super::background_jobs_observation::{ATTEMPTS_SQL, COUNTS_SQL, LABELS_SQL};
+pub use super::background_jobs_offline::JoinOfflineJob;
 use super::background_jobs_publication::PUBLISH_TRANSCODE_SQL;
 pub use super::background_jobs_publication::{
     JobPublishOutcome, PublishTranscodeJob, TranscodeJobOutput,
@@ -103,6 +104,24 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
     ) THEN 'producer_fenced'
     WHEN prior_job IS NOT NULL AND prior_digest != json_extract(body, '$.request.request_digest') THEN 'conflict'
     WHEN prior_job IS NOT NULL THEN 'existing'
+    WHEN json_type(body, '$.offline_join') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM offline_packages package JOIN background_jobs original
+        ON original.id = json_extract(body, '$.offline_join.job_id')
+      JOIN files file ON file.id = package.file_id AND file.size = package.source_size AND file.mtime = package.source_mtime
+      WHERE package.id = json_extract(body, '$.offline_join.package_id') AND package.state = 'preparing'
+        AND package.node_id = json_extract(body, '$.offline_join.node_id')
+        AND package.claim_generation = json_extract(body, '$.offline_join.claim_generation')
+        AND package.recipe_hash = json_extract(body, '$.offline_join.recipe_hash')
+        AND package.decoder_recovery_state = 'primary' AND package.expires_at > json_extract(body, '$.now_ms') / 1000
+        AND original.state = 'running' AND original.owner_node_id = package.node_id
+        AND original.id = active_job AND original.lease_expires_ms > json_extract(body, '$.now_ms')
+        AND json_extract(original.checkpoint_json, '$.recipe_node_id') = package.node_id
+        AND json_extract(original.checkpoint_json, '$.effective_recipe_hash') = package.recipe_hash
+        AND json_extract(original.payload_json, '$.file_id') = package.file_id
+        AND json_extract(original.payload_json, '$.source_size') = package.source_size
+        AND json_extract(original.payload_json, '$.source_mtime') = package.source_mtime
+        AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || original.owner_node_id)
+    ) THEN 'no_demand'
     WHEN json_type(body, '$.cache_repair_of') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM background_jobs original WHERE original.id = json_extract(body, '$.cache_repair_of')
         AND original.kind = 'transcode_prepare' AND original.state = 'succeeded' AND original.payload_version = 1
@@ -299,8 +318,13 @@ UPDATE background_jobs SET
   failure_policy = COALESCE(json_extract($1, '$.failure_policy'), CASE json_extract($1, '$.settlement.disposition')
     WHEN 'retry' THEN 'retry' WHEN 'fail' THEN 'terminal' END),
   not_before_ms = COALESCE(json_extract($1, '$.settlement.not_before_ms'), not_before_ms),
-  checkpoint_json = CASE WHEN json_extract($1, '$.settlement.disposition') = 'yield'
-    THEN json_extract($1, '$.settlement.checkpoint') ELSE checkpoint_json END,
+  checkpoint_json = CASE WHEN json_extract($1, '$.settlement.disposition') != 'yield' THEN checkpoint_json
+    WHEN json_extract(checkpoint_json, '$.effective_recipe_hash') IS NOT NULL THEN json_set(
+      CASE WHEN json_type($1, '$.settlement.checkpoint') = 'object' THEN json_extract($1, '$.settlement.checkpoint')
+        ELSE checkpoint_json END,
+      '$.effective_recipe_hash', json_extract(checkpoint_json, '$.effective_recipe_hash'),
+      '$.recipe_node_id', json_extract(checkpoint_json, '$.recipe_node_id'))
+    ELSE COALESCE(json_extract($1, '$.settlement.checkpoint'), checkpoint_json) END,
   retry_deadline_ms = COALESCE(json_extract($1, '$.retry_deadline_ms'), retry_deadline_ms),
   index_diagnostic_json = COALESCE(json_extract($1, '$.index_diagnostic_json'), index_diagnostic_json),
   attempt_errors = CASE WHEN json_extract($1, '$.settlement.disposition') IN ('retry','fail') THEN
@@ -521,7 +545,7 @@ impl JobPayload {
     }
 }
 
-fn identifier(value: &str) -> bool {
+pub(super) fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
         && value
@@ -529,7 +553,7 @@ fn identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
 }
 
-fn digest(value: &str) -> bool {
+pub(super) fn digest(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
@@ -882,6 +906,16 @@ pub struct CancelWaiterOutcome {
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    async fn bind_transcode_job_recipe(
+        &self,
+        token: JobToken,
+        recipe_hash: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    async fn join_offline_job(
+        &self,
+        request: JoinOfflineJob,
+    ) -> Result<Option<EnqueueOutcome>, StoreError>;
     async fn import_legacy_jobs(&self, now_ms: i64) -> Result<bool, StoreError>;
     async fn job_migration_status(&self) -> Result<JobMigrationStatus, StoreError>;
     async fn enqueue_fragment_job(
@@ -958,12 +992,12 @@ pub(super) trait QueueSql: Send + Sync {
     ) -> Result<Vec<String>, StoreError>;
 }
 
-fn decode<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, StoreError> {
+pub(super) fn decode<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, StoreError> {
     serde_json::from_str(value)
         .map_err(|error| StoreError::Database(format!("invalid background job row: {error}")))
 }
 
-async fn enqueue_body<T: QueueSql>(
+pub(super) async fn enqueue_body<T: QueueSql>(
     store: &T,
     request: &EnqueueJob,
 ) -> Result<serde_json::Value, StoreError> {
@@ -984,6 +1018,20 @@ async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn bind_transcode_job_recipe(
+        &self,
+        token: JobToken,
+        recipe_hash: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_offline::bind_recipe(self, token, recipe_hash, now_ms).await
+    }
+    async fn join_offline_job(
+        &self,
+        request: JoinOfflineJob,
+    ) -> Result<Option<EnqueueOutcome>, StoreError> {
+        super::background_jobs_offline::join(self, request).await
+    }
     async fn import_legacy_jobs(&self, now_ms: i64) -> Result<bool, StoreError> {
         super::background_jobs_migration::import_page(self, now_ms).await
     }

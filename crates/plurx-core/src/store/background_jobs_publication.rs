@@ -48,6 +48,8 @@ WITH request AS (
       AND job.lease_expires_ms = json_extract(body, '$.token.lease_expires_ms')
       AND job.lease_expires_ms > json_extract(body, '$.now_ms')
       AND job.revision < 9223372036854775807
+      AND (json_extract(job.checkpoint_json, '$.effective_recipe_hash') IS NULL
+        OR json_extract(job.checkpoint_json, '$.effective_recipe_hash') = json_extract(body, '$.output.recipe_hash'))
       AND NOT EXISTS (SELECT 1 FROM settings WHERE key =
         'internal.cluster_job_owner_removed.' || job.owner_node_id)
       THEN 1 ELSE 0 END AS owns,

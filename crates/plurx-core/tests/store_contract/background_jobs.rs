@@ -859,3 +859,230 @@ async fn background_evicted_transcode_gets_one_new_interest_without_resetting_fa
     })
     .await;
 }
+
+#[tokio::test]
+async fn background_offline_join_preserves_recipe_authority_and_independent_interests() {
+    for_each_backend(|store, backend| async move {
+        let (user_id, file_id) = seed_file(&store, "background-offline-join").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis() as i64;
+        let input = preparation_request(&file, &uuid::Uuid::new_v4().to_string(), now);
+        store.enqueue_job(input.clone()).await.expect("speculation");
+        let ClaimOutcome::Claimed { job } = store
+            .claim_job(ClaimJob {
+                job_id: input.id.clone(),
+                expected_revision: 0,
+                node_id: "offline-node".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::TranscodePrepare,
+                payload_version: 1,
+                now_ms: now,
+                dispatched_at_ms: now,
+            })
+            .await
+            .expect("claim")
+        else {
+            panic!("{backend}: claim");
+        };
+        let token = job.token.expect("token");
+        let recipe = "b".repeat(64);
+        assert!(store
+            .bind_transcode_job_recipe(token.clone(), &recipe, now + 1)
+            .await
+            .expect("bind"));
+        let mut stale = token.clone();
+        stale.revision += 1;
+        assert!(!store
+            .bind_transcode_job_recipe(stale, &recipe, now + 1)
+            .await
+            .expect("stale binding"));
+        let mut packages = Vec::new();
+        for ordinal in 0..2 {
+            let mut request = super::offline_request(
+                &format!("joined-{ordinal}"),
+                &format!("joined-request-{ordinal}"),
+                user_id,
+                file_id,
+            );
+            request.expires_at = now / 1000 + 3600;
+            store
+                .create_offline_package(&request, 10, 100_000, 100_000)
+                .await
+                .expect("quota admission");
+            let package = store
+                .claim_next_offline_package("offline-node")
+                .await
+                .expect("claim package")
+                .expect("package");
+            assert!(store
+                .set_offline_package_recipe(
+                    &package.id,
+                    &package.node_id,
+                    package.claim_generation,
+                    &recipe
+                )
+                .await
+                .expect("package recipe"));
+            let join = JoinOfflineJob {
+                package_id: package.id.clone(),
+                node_id: package.node_id.clone(),
+                claim_generation: package.claim_generation,
+                recipe_hash: recipe.clone(),
+                now_ms: now + 2,
+            };
+            for mismatch in 0..3 {
+                let mut changed = join.clone();
+                match mismatch {
+                    0 => changed.recipe_hash = "c".repeat(64),
+                    1 => changed.node_id = "other-node".into(),
+                    _ => changed.claim_generation += 1,
+                }
+                assert!(
+                    store
+                        .join_offline_job(changed)
+                        .await
+                        .expect("mismatch")
+                        .is_none(),
+                    "{backend}"
+                );
+            }
+            for _ in 0..2 {
+                let outcome = store
+                    .join_offline_job(join.clone())
+                    .await
+                    .expect("join")
+                    .expect("match");
+                match outcome {
+                    EnqueueOutcome::Accepted { job_id, .. }
+                    | EnqueueOutcome::Existing {
+                        job_id,
+                        cancelled: false,
+                        ..
+                    } => assert_eq!(job_id, input.id),
+                    other => panic!("{backend}: {other:?}"),
+                }
+            }
+            packages.push(package);
+        }
+        let promoted = store
+            .background_job(&input.id)
+            .await
+            .expect("job")
+            .expect("job");
+        assert_eq!(promoted.priority, 2);
+        assert_eq!(promoted.token.expect("unchanged authority"), token);
+        assert!(!store
+            .bind_transcode_job_recipe(token.clone(), &"c".repeat(64), now + 3)
+            .await
+            .expect("cannot replace joined recipe"));
+        assert!(matches!(
+            store
+                .publish_transcode_job(PublishTranscodeJob {
+                    token: token.clone(),
+                    output: TranscodeJobOutput {
+                        recipe_hash: "c".repeat(64),
+                        recipe_version: 1,
+                        relative_dir: "wrong-recipe".into(),
+                        bytes: 100,
+                        expected_previous_bytes: None,
+                        manifest_digest: "d".repeat(64)
+                    },
+                    now_ms: now + 3,
+                })
+                .await
+                .expect("wrong output"),
+            JobPublishOutcome::LostOwnership
+        ));
+        assert!(store
+            .settle_job(SettleJob {
+                token,
+                settlement: JobSettlement::Yield {
+                    checkpoint: Some(
+                        serde_json::json!({"effective_recipe_hash": "c".repeat(64), "part": 2})
+                    ),
+                    not_before_ms: now + 4
+                },
+                now_ms: now + 4
+            })
+            .await
+            .expect("yield"));
+        let yielded = store
+            .background_job(&input.id)
+            .await
+            .expect("job")
+            .expect("job");
+        assert_eq!(
+            yielded.checkpoint.as_ref().expect("binding")["effective_recipe_hash"],
+            recipe
+        );
+        let remote = || CandidateQuery {
+            node_id: "other-node".into(),
+            kinds: vec![JobKind::TranscodePrepare],
+            after: None,
+            now_ms: now + 5,
+            limit: 10,
+        };
+        assert!(store
+            .job_candidates(remote())
+            .await
+            .expect("affinity")
+            .jobs
+            .is_empty());
+        for (ordinal, package) in packages.iter().enumerate() {
+            assert!(store
+                .delete_offline_package(&package.id, user_id)
+                .await
+                .expect("delete own package"));
+            let job = store
+                .background_job(&input.id)
+                .await
+                .expect("job")
+                .expect("job");
+            assert_eq!(
+                job.state,
+                JobState::Queued,
+                "{backend}: automatic interest survives"
+            );
+            assert_eq!(job.priority, if ordinal == 0 { 2 } else { 0 });
+            assert_eq!(
+                store
+                    .job_candidates(remote())
+                    .await
+                    .expect("remaining affinity")
+                    .jobs
+                    .len(),
+                ordinal
+            );
+        }
+        let waiters = store
+            .job_waiters(WaiterQuery {
+                job_id: input.id,
+                after: None,
+                limit: 10,
+            })
+            .await
+            .expect("interests");
+        assert_eq!(
+            waiters
+                .waiters
+                .iter()
+                .filter(|waiter| waiter.state == "pending")
+                .count(),
+            1
+        );
+        assert_eq!(
+            waiters
+                .waiters
+                .iter()
+                .filter(|waiter| waiter.consumer_kind == "offline_preparation"
+                    && waiter.state == "cancelled")
+                .count(),
+            2
+        );
+    })
+    .await;
+}

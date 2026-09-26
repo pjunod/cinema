@@ -14,9 +14,9 @@ implementation is claimed; “compiled” does not mean tests passed.
 |---|---|---|
 | Isolated clone | Complete | Agent-owned `/private/tmp/plurx-durable-work-agent`; original checkout untouched |
 | Compiler | Ready | Rust 1.97.1; core + Hiqlite all-target compile and baseline daemon compile passed |
-| M1 durable queue and pre-transcode | In progress | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; offline joining, scheduling and fault-injection coverage remain |
+| M1 durable queue and pre-transcode | In progress | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; local exact-recipe offline joining and scheduling implemented; cross-node convergence and fault-injection coverage remain |
 | M2 fragment analysis and hydration | In progress | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
-| M3 UI, recovery and migration | In progress | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and Developer controls remain |
+| M3 UI, recovery and migration | In progress | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
 | E0 subtitle and library workers | Planned | Reuse newly landed subtitle extraction implementation |
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
@@ -260,3 +260,14 @@ implementation is claimed; “compiled” does not mean tests passed.
 - 2026-09-26: continuing core integration. The commit hook caught a private
   clock-helper import in the new integration contract; replaced it with the
   test clock. No test execution or CI run was needed to find the compile error.
+
+- 2026-09-26: offline packages can attach to an already running, resolved
+  transcode on their delivery node when the effective recipe and source match.
+  Admission rechecks the quota-admitted package claim and producer authority
+  atomically, promotes the existing job to priority 2, and pins delivery while
+  those interests remain. Package deletion/requeue and caller timeout retire
+  only their own interest. Recipe binding survives a yield and rejects changed
+  output while an offline consumer waits. Recovery validation precedes recipe
+  mutation. New backend contracts are written and awaiting final execution.
+  This is deliberately partial: matching work on another node still needs a
+  portable transcode delivery path; no cross-node offline convergence is claimed.

@@ -104,6 +104,7 @@ pub mod background_jobs_fragment_admission;
 mod background_jobs_maintenance;
 mod background_jobs_migration;
 mod background_jobs_observation;
+mod background_jobs_offline;
 pub mod background_jobs_pretranscode;
 mod background_jobs_publication;
 #[cfg(test)]

@@ -499,6 +499,8 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    "bind_transcode_job_recipe",
+    "join_offline_job",
     "import_legacy_jobs",
     "job_migration_status",
     "enqueue_fragment_job",
@@ -16831,7 +16833,7 @@ fn contract_inventory_matches_every_store_method() {
     // `watch_summary_and_progress_rails_match_the_separate_reads_on_every_backend`;
     // no new trait or supertrait.
     // Retire eight legacy execution methods and audit 25 shared queue methods.
-    assert_eq!(declared.len(), 408, "review the Store method count");
+    assert_eq!(declared.len(), 410, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

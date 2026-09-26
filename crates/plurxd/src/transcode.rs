@@ -17013,6 +17013,16 @@ impl TranscodeManager {
         if cancelled.is_cancelled() {
             return Ok(PretranscodeProduceOutcome::Yielded);
         }
+        if let Some(fence) = &pretranscode_fence {
+            if !fence
+                .durable
+                .bind_transcode_recipe(&hash)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(PretranscodeProduceOutcome::Yielded);
+            }
+        }
         let queue_owned = pretranscode_fence.is_some();
 
         Ok(
@@ -17067,6 +17077,95 @@ impl TranscodeManager {
             .map_or("", |cache| cache.node_id.as_str())
     }
 
+    /// Join only a currently resolved exact recipe with local delivery. This
+    /// waits without holding an encoder or asking the matching producer to yield.
+    async fn wait_for_shared_offline_preparation(
+        &self,
+        package: &OfflinePackage,
+        recipe_hash: &str,
+        deadline: Instant,
+        cancelled: &tokio_util::sync::CancellationToken,
+    ) -> Result<bool, String> {
+        use plurx_core::store::background_jobs::{EnqueueOutcome, JobState, JoinOfflineJob};
+        let joined = self
+            .store
+            .join_offline_job(JoinOfflineJob {
+                package_id: package.id.clone(),
+                node_id: package.node_id.clone(),
+                claim_generation: package.claim_generation,
+                recipe_hash: recipe_hash.into(),
+                now_ms: unix_ms(),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        let job_id = match joined {
+            Some(
+                EnqueueOutcome::Accepted { job_id, .. }
+                | EnqueueOutcome::Existing {
+                    job_id,
+                    cancelled: false,
+                    ..
+                },
+            ) => job_id,
+            _ => return Ok(true),
+        };
+        let result = async {
+        loop {
+            if cancelled.is_cancelled() || Instant::now() >= deadline {
+                return Ok(false);
+            }
+            if !self
+                .store
+                .offline_package_claim_is_current(
+                    &package.id,
+                    &package.node_id,
+                    package.claim_generation,
+                    recipe_hash,
+                )
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(false);
+            }
+            let Some(job) = self
+                .store
+                .background_job(&job_id)
+                .await
+                .map_err(|error| error.to_string())?
+            else {
+                return Ok(false);
+            };
+            match job.state {
+                JobState::Succeeded => return Ok(true), // The normal path validates the local manifest next.
+                JobState::Failed => {
+                    return Err(
+                        "shared preparation exhausted its retry budget or failed validation".into(),
+                    )
+                }
+                JobState::Cancelled | JobState::Cancelling => return Ok(false),
+                JobState::Queued | JobState::Running => {}
+            }
+            tokio::select! {
+                () = cancelled.cancelled() => return Ok(false),
+                () = tokio::time::sleep_until(deadline.min(Instant::now() + Duration::from_secs(3)).into()) => {},
+            }
+        }
+        }.await;
+        // A timed-out caller must not leave priority or local affinity behind.
+        // Package mutation also retires this receipt atomically if the caller dies.
+        if !matches!(result, Ok(true)) {
+            self.store
+                .cancel_waiter(plurx_core::store::background_jobs::CancelWaiter {
+                    scope: format!("user:{}", package.user_id),
+                    request_id: format!("{}:{}", package.id, package.claim_generation),
+                    now_ms: unix_ms(),
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        result
+    }
+
     async fn offline_decode_alternate(
         &self,
         package_id: &str,
@@ -17118,20 +17217,6 @@ impl TranscodeManager {
         if cancelled.is_cancelled() {
             return Ok(OfflineProduceOutcome::Yielded);
         }
-        struct Waiting<'a>(&'a AtomicBool);
-        impl Drop for Waiting<'_> {
-            fn drop(&mut self) {
-                self.0.store(false, std::sync::atomic::Ordering::Release);
-            }
-        }
-        self.offline_waiting
-            .store(true, std::sync::atomic::Ordering::Release);
-        let waiting = Waiting(&self.offline_waiting);
-        let _producer = self.background_producer.lock().await;
-        drop(waiting);
-        if cancelled.is_cancelled() {
-            return Ok(OfflineProduceOutcome::Yielded);
-        }
         let encoder = self.encoder_for_file(file).await?;
         let subtitle_burn = match spec.subtitle {
             OfflineSubtitle::Burn(index) => {
@@ -17152,8 +17237,6 @@ impl TranscodeManager {
         let digest = self.digest().ok_or("no cache digest")?;
         let primary_hash = self.effective_recipe(&digest, &plan, false).hash();
         let mut recovery_state = OfflineRecoveryState::parse(&package.decoder_recovery_state)?;
-        let mut recovery_began_now = false;
-        let mut outcome = OfflineProduceOutcome::HealthRefused;
         if recovery_state == OfflineRecoveryState::Primary {
             if package.alternate_recipe_hash.is_some()
                 || package
@@ -17163,6 +17246,7 @@ impl TranscodeManager {
             {
                 return Err("primary offline recovery state carries a mismatched recipe".to_owned());
             }
+
             if !self
                 .store
                 .set_offline_package_recipe(
@@ -17176,6 +17260,30 @@ impl TranscodeManager {
             {
                 return Ok(OfflineProduceOutcome::Yielded);
             }
+            if !self
+                .wait_for_shared_offline_preparation(package, &primary_hash, deadline, cancelled)
+                .await?
+            {
+                return Ok(OfflineProduceOutcome::Yielded);
+            }
+        }
+        struct Waiting<'a>(&'a AtomicBool);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
+        self.offline_waiting
+            .store(true, std::sync::atomic::Ordering::Release);
+        let waiting = Waiting(&self.offline_waiting);
+        let _producer = self.background_producer.lock().await;
+        drop(waiting);
+        if cancelled.is_cancelled() {
+            return Ok(OfflineProduceOutcome::Yielded);
+        }
+        let mut recovery_began_now = false;
+        let mut outcome = OfflineProduceOutcome::HealthRefused;
+        if recovery_state == OfflineRecoveryState::Primary {
             outcome = self
                 .produce_offline_candidate(
                     package,

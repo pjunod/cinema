@@ -1081,3 +1081,40 @@ BEGIN
         last_error_code = NEW.last_error_code, updated_at_ms = NEW.updated_at_ms
     WHERE id = NEW.id;
 END;
+
+-- Exact local delivery belongs to accepted offline interests, not to the
+-- original speculative request. It follows the physical producer's node and
+-- is released when the last offline interest retires.
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_offline_interest_admitted
+AFTER INSERT ON background_job_waiters
+WHEN NEW.consumer_kind = 'offline_preparation' AND NEW.state = 'pending'
+BEGIN
+    UPDATE background_jobs SET target_node_id = NEW.target_node_id WHERE id = NEW.job_id AND kind = 'transcode_prepare';
+END;
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_offline_interest_retired
+AFTER UPDATE OF state ON background_job_waiters
+WHEN NEW.consumer_kind = 'offline_preparation' AND OLD.state = 'pending' AND NEW.state != 'pending'
+BEGIN
+    UPDATE background_jobs SET target_node_id = NULL WHERE id = NEW.job_id AND kind = 'transcode_prepare'
+        AND NOT EXISTS (SELECT 1 FROM background_job_waiters WHERE job_id = NEW.job_id
+            AND consumer_kind = 'offline_preparation' AND state = 'pending');
+END;
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_offline_package_changed
+AFTER UPDATE ON offline_packages
+WHEN NEW.state != 'preparing' OR OLD.node_id != NEW.node_id OR OLD.claim_generation != NEW.claim_generation
+    OR OLD.source_size != NEW.source_size OR OLD.source_mtime != NEW.source_mtime
+    OR OLD.recipe_hash IS NOT NEW.recipe_hash
+BEGIN
+    UPDATE background_job_waiters SET state = 'cancelled', updated_at_ms = MAX(updated_at_ms, NEW.updated_at * 1000)
+    WHERE consumer_kind = 'offline_preparation' AND consumer_ref = NEW.id AND state = 'pending';
+END;
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_offline_package_deleted
+AFTER DELETE ON offline_packages
+BEGIN
+    UPDATE background_job_waiters SET state = 'cancelled'
+    WHERE consumer_kind = 'offline_preparation' AND consumer_ref = OLD.id AND state = 'pending';
+END;

@@ -349,6 +349,36 @@ impl JobFence {
         Ok(result)
     }
 
+    pub(crate) async fn bind_transcode_recipe(
+        &self,
+        recipe_hash: &str,
+    ) -> Result<bool, StoreError> {
+        let state = self.0.state.lock().await;
+        if !self.0.authority.may_run_cluster_jobs().await || !self.may_publish() {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        match self
+            .0
+            .store
+            .bind_transcode_job_recipe(token.clone(), recipe_hash, unix_ms()?)
+            .await
+        {
+            Ok(bound) => Ok(bound),
+            Err(error) => {
+                if !self.may_publish() {
+                    return Err(error);
+                }
+                self.0
+                    .store
+                    .bind_transcode_job_recipe(token, recipe_hash, unix_ms()?)
+                    .await
+            }
+        }
+    }
+
     pub(crate) async fn publish_transcode(
         &self,
         output: TranscodeJobOutput,
