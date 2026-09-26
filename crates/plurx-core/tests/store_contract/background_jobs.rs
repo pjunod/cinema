@@ -548,18 +548,7 @@ async fn background_retry_is_new_audited_interest_idempotent_and_source_fenced()
         let (user_id, file_id) = seed_file(&store, "background-retry").await;
         let file = store.get_file(file_id).await.expect("file").expect("file");
         let original_id = uuid::Uuid::new_v4().to_string();
-        let input = plurx_core::store::background_jobs_pretranscode::enqueue_request(
-            &plurx_core::domain::NewPretranscodeJob {
-                id: original_id.clone(), dedupe_key: "a".repeat(64), file_id,
-                source_size: file.size, source_mtime: file.mtime, target_height: 720,
-                policy_generation: "policy:1".into(),
-                requirements_json: serde_json::to_string(&PretranscodeRequirements {
-                    version: 1, decoder: "h264".into(), acceptable_encoder_families: vec!["software".into()],
-                    output_contract: "hls-v1".into(), tone_map: false, output_grade: "sdr".into(), scratch_bytes: 1024,
-                }).expect("requirements"),
-                reason: "recent".into(), priority: 0, not_before_ms: 1000, created_at_ms: 1000,
-            }
-        ).expect("request");
+        let input = preparation_request(&file, &original_id, 1000);
         store.enqueue_job(input.clone()).await.expect("enqueue");
         let request_id = uuid::Uuid::new_v4().to_string();
         assert!(matches!(store.retry_background_job(&original_id, &request_id, user_id, 1001).await.expect("active conflict"), Some(EnqueueOutcome::Conflict)), "{backend}");
@@ -691,6 +680,181 @@ async fn background_candidates_rotate_scopes_and_offer_lower_work_after_eight_co
             order,
             vec![viewer.id, low.id, high_new_scope.id, high_old_scope.id],
             "{backend}: priority 3 stays first; stable cursor preserves the lower-class turn"
+        );
+    })
+    .await;
+}
+
+fn preparation_request(file: &plurx_core::domain::MediaFile, id: &str, now_ms: i64) -> EnqueueJob {
+    plurx_core::store::background_jobs_pretranscode::enqueue_request(
+        &plurx_core::domain::NewPretranscodeJob {
+            id: id.into(),
+            dedupe_key: "a".repeat(64),
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            target_height: 720,
+            policy_generation: "policy:1".into(),
+            requirements_json: serde_json::to_string(&PretranscodeRequirements {
+                version: 1,
+                decoder: "h264".into(),
+                acceptable_encoder_families: vec!["software".into()],
+                output_contract: "hls-v1".into(),
+                tone_map: false,
+                output_grade: "sdr".into(),
+                scratch_bytes: 1024,
+            })
+            .expect("requirements"),
+            reason: "recent".into(),
+            priority: 0,
+            not_before_ms: now_ms,
+            created_at_ms: now_ms,
+        },
+    )
+    .expect("request")
+}
+
+#[tokio::test]
+async fn background_evicted_transcode_gets_one_new_interest_without_resetting_failures() {
+    for_each_backend(|store, backend| async move {
+        use plurx_core::cluster::coordination::LeaseClaim;
+        let unix_ms = || -> Result<i64, std::time::SystemTimeError> {
+            Ok(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis() as i64)
+        };
+        let (_, file_id) = seed_file(&store, "background-eviction").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let now = unix_ms().expect("clock");
+        let LeaseClaim::Acquired(mut lease) = store
+            .acquire_lease("candidate:eviction", "node-a", now, now + 90_000)
+            .await
+            .expect("producer lease")
+        else {
+            panic!("{backend}: lease");
+        };
+        let input = preparation_request(&file, &uuid::Uuid::new_v4().to_string(), now);
+        let successor = lease.publication_successor().expect("successor");
+        assert!(matches!(
+            store
+                .enqueue_job_fenced(input.clone(), lease, successor.clone())
+                .await
+                .expect("admission"),
+            EnqueueOutcome::Accepted { .. }
+        ));
+        lease = successor;
+        let ClaimOutcome::Claimed { job } = store
+            .claim_job(ClaimJob {
+                job_id: input.id.clone(),
+                expected_revision: 0,
+                node_id: "node-a".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::TranscodePrepare,
+                payload_version: 1,
+                now_ms: now,
+                dispatched_at_ms: now,
+            })
+            .await
+            .expect("claim")
+        else {
+            panic!("{backend}: claim");
+        };
+        let published = store
+            .publish_transcode_job(PublishTranscodeJob {
+                token: job.token.expect("token"),
+                output: TranscodeJobOutput {
+                    recipe_hash: "b".repeat(64),
+                    recipe_version: 1,
+                    relative_dir: "first".into(),
+                    bytes: 100,
+                    expected_previous_bytes: None,
+                    manifest_digest: "d".repeat(64),
+                },
+                now_ms: now + 1,
+            })
+            .await
+            .expect("publish");
+        assert!(matches!(published, JobPublishOutcome::Published { .. }));
+        let mut next = input.clone();
+        next.id = uuid::Uuid::new_v4().to_string();
+        let successor = lease.publication_successor().expect("successor");
+        assert!(matches!(
+            store
+                .enqueue_job_fenced(next.clone(), lease, successor.clone())
+                .await
+                .expect("cached"),
+            EnqueueOutcome::Existing { .. }
+        ));
+        lease = successor;
+        store
+            .forget_cache_entry(&"b".repeat(64), "node-a", "local")
+            .await
+            .expect("evict");
+        let successor = lease.publication_successor().expect("successor");
+        let outcome = store
+            .enqueue_job_fenced(next, lease, successor.clone())
+            .await
+            .expect("repair demand");
+        let EnqueueOutcome::Accepted { job_id, .. } = outcome else {
+            panic!("{backend}: expected repair {outcome:?}");
+        };
+        lease = successor;
+        assert_ne!(job_id, input.id);
+        let interests = store
+            .job_waiters(WaiterQuery {
+                job_id: job_id.clone(),
+                after: None,
+                limit: 100,
+            })
+            .await
+            .expect("repair interest");
+        assert_eq!(interests.waiters.len(), 1);
+        assert_eq!(interests.waiters[0].consumer_kind, "transcode_cache_repair");
+        assert_eq!(interests.waiters[0].consumer_ref, input.id);
+        // Failed or cancelled repair remains terminal across ordinary ticks.
+        store
+            .cancel_job(CancelJob {
+                job_id: job_id.clone(),
+                now_ms: unix_ms().expect("clock"),
+            })
+            .await
+            .expect("cancel repair");
+        for _ in 0..2 {
+            let mut repeated = input.clone();
+            repeated.id = uuid::Uuid::new_v4().to_string();
+            let successor = lease.publication_successor().expect("successor");
+            assert!(matches!(
+                store
+                    .enqueue_job_fenced(repeated, lease, successor.clone())
+                    .await
+                    .expect("repeat tick"),
+                EnqueueOutcome::Existing { .. }
+            ));
+            lease = successor;
+        }
+        assert_eq!(
+            store
+                .list_jobs(JobQuery {
+                    state: None,
+                    kind: Some(JobKind::TranscodePrepare),
+                    after_id: None,
+                    limit: 100
+                })
+                .await
+                .expect("jobs")
+                .jobs
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .background_job(&input.id)
+                .await
+                .expect("original")
+                .expect("original")
+                .state,
+            JobState::Succeeded
         );
     })
     .await;

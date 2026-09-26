@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** M1/M2 worker integration in progress · **Updated:** 2026-09-25 ·
+**Status:** M1/M2 worker integration in progress · **Updated:** 2026-09-26 ·
 **Branch:** `codex/durable-cluster-work` ·
 **Base:** `9f9786b2e` · **PR:** [#532 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/532)
 
@@ -249,3 +249,14 @@ implementation is claimed; “compiled” does not mean tests passed.
   timestamps stay visible; delayed results patch evidence rows only. The save
   path reads no readiness value. Also corrected Retry's request-body encoding
   and added transport-replay and unavailable-readiness browser regressions.
+
+- 2026-09-25: speculative discovery can replace a successfully completed
+  transcode after its last complete cache location is retired. It creates a new
+  repair interest tied to that successful computation and preserves the old
+  receipt. Admission atomically rechecks cache absence, source identity and the
+  latest computation; failed/cancelled repairs stay terminal across ordinary
+  scheduler ticks. Added a replicated backend eviction/replay contract.
+
+- 2026-09-26: continuing core integration. The commit hook caught a private
+  clock-helper import in the new integration contract; replaced it with the
+  test clock. No test execution or CI run was needed to find the compile error.

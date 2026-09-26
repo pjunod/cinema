@@ -103,6 +103,21 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
     ) THEN 'producer_fenced'
     WHEN prior_job IS NOT NULL AND prior_digest != json_extract(body, '$.request.request_digest') THEN 'conflict'
     WHEN prior_job IS NOT NULL THEN 'existing'
+    WHEN json_type(body, '$.cache_repair_of') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM background_jobs original WHERE original.id = json_extract(body, '$.cache_repair_of')
+        AND original.kind = 'transcode_prepare' AND original.state = 'succeeded' AND original.payload_version = 1
+        AND original.dedupe_key = json_extract(body, '$.dedupe_key')
+        AND original.id = (SELECT latest.id FROM background_jobs latest
+            WHERE latest.dedupe_key = original.dedupe_key ORDER BY latest.created_at_ms DESC, latest.id DESC LIMIT 1)
+        AND json_valid(original.result_ref) AND NOT EXISTS (
+            SELECT 1 FROM transcode_cache_locations location
+            WHERE location.recipe_hash = CASE WHEN json_valid(original.result_ref) THEN json_extract(original.result_ref, '$.recipe_hash') END
+                AND location.complete = 1)
+    ) THEN 'no_demand'
+    WHEN json_type(body, '$.cache_repair_of') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM files WHERE id = json_extract(body, '$.payload.file_id')
+        AND size = json_extract(body, '$.payload.source_size') AND mtime = json_extract(body, '$.payload.source_mtime')
+    ) THEN 'source_changed'
     WHEN json_type(body, '$.retry_of') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM background_jobs original WHERE original.id = json_extract(body, '$.retry_of')
         AND original.state IN ('failed','cancelled') AND original.payload_version = 1
@@ -1659,7 +1674,43 @@ impl<T: QueueSql> BackgroundJobStore for T {
         {
             return Err(invalid("invalid background producer lease replacement"));
         }
+        // A completed automatic receipt is immutable, but its bytes may later
+        // be evicted. Only the latest *successful* computation can authorize
+        // another automatic interest; failure/cancellation never resets a budget.
+        #[derive(Deserialize)]
+        struct RepairPredecessor {
+            id: String,
+            created_at_ms: i64,
+        }
+        let cache_repair_of = if request.request.scope == "automatic:transcode"
+            && matches!(request.payload, JobPayload::TranscodePrepare { .. })
+        {
+            self.queue_sql(
+                "SELECT json_object('id', original.id, 'created_at_ms', original.created_at_ms) AS result_json FROM background_jobs original
+                 WHERE original.id = (SELECT id FROM background_jobs WHERE dedupe_key = json_extract($1, '$.dedupe_key')
+                    ORDER BY created_at_ms DESC, id DESC LIMIT 1)
+                   AND original.kind = 'transcode_prepare' AND original.payload_version = 1 AND original.state = 'succeeded'
+                   AND json_valid(original.result_ref) AND NOT EXISTS (SELECT 1 FROM transcode_cache_locations location
+                     WHERE location.recipe_hash = CASE WHEN json_valid(original.result_ref) THEN json_extract(original.result_ref, '$.recipe_hash') END
+                       AND location.complete = 1)".into(), encode(&request)?, false, true,
+            ).await?.first().map(|row| decode::<RepairPredecessor>(row)).transpose()?
+        } else {
+            None
+        };
+        if let Some(parent) = &cache_repair_of {
+            request.request.scope = "automatic:transcode-repair".into();
+            request.request.request_id = parent.id.clone();
+            request.request.consumer_kind = "transcode_cache_repair".into();
+            request.request.consumer_ref = parent.id.clone();
+            // Make the successor order deterministic even within one clock tick.
+            request.now_ms = request.now_ms.max(parent.created_at_ms.saturating_add(1));
+            request.validate()?;
+            request.priority = 1;
+        }
         let mut body = enqueue_body(self, &request).await?;
+        if let Some(parent) = cache_repair_of {
+            body["cache_repair_of"] = parent.id.into();
+        }
         body["producer_lease"] =
             serde_json::to_value(&lease).map_err(|error| invalid(&error.to_string()))?;
         body["producer_replacement"] =
