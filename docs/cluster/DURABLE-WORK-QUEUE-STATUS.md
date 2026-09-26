@@ -2,7 +2,7 @@
 
 **Status:** M1–M3 final validation; fixing test failures · **Updated:** 2026-09-26 ·
 **Branch:** `codex/durable-cluster-work` ·
-**Base:** `cb67fe938` · **PR:** [#532 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/532)
+**Base:** `e680849fb` · **PR:** [#532 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/532)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -392,3 +392,8 @@ The failing replicated test is being rerun before the main fast lane starts.
   focused reruns passed (18 seconds execution). The batch included all 29
   affected SQLite contracts and five replicated-only import/concurrency checks.
   Daemon lifecycle validation and the remote fast lane remain pending.
+
+- Integrated main `e680849fb` before the daemon/fast-lane run. Its only new
+  surface is web Live TV session controls; the durable queue changes do not
+  overlap those files. The normal commit hook and corrective-history audit
+  passed for the repaired queue batch (`4df68184b`).
