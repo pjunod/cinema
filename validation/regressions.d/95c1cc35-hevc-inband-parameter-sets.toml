@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["95c1cc35"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "unit-core"]
+reason = "A real two-pass x265 encode that redefines PPS 0 is measured by the census, copied through the production argv and segmenter with its parameter sets kept, and decodes frame-for-frame to the source while the historical copy does not; the same film indexes as VOD-presentable, and the store contract fences the probe graft to the measured revision on every backend."
