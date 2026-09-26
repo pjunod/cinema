@@ -176,8 +176,9 @@ function settlePlaybackControlAcknowledgement(p,request){
   }
 }
 
+/** @returns {HTMLVideoElement|null} */
 function preparedVideoElement(){
-  return document.getElementById("video-prepared");
+  return /** @type {HTMLVideoElement|null} */ (document.getElementById("video-prepared"));
 }
 // Created on the first preparation rather than shipped in the modal. The
 // structural golden pins what `#player` contains, and a second `<video>` that

@@ -200,6 +200,7 @@
  *
  * Timers (DOM timer ids)
  * @property {number|null} timer           the 5 s sampling / progress tick
+ * @property {number|null} [autoTimer]     the 1 s Auto quality decision tick
  * @property {number|null} idleTimer       control auto-hide
  * @property {number|null} [stallTimer]
  * @property {number|null} waitTimer
