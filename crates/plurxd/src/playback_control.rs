@@ -30769,6 +30769,7 @@ mod tests {
             deadline_ms: i64::MAX,
             session_id: "prepared".to_owned(),
             playlist_url: "/api/v1/hls/prepared/index.m3u8".to_owned(),
+            control: None,
             media_origin_ms,
             effective_selection: prepared_selection(),
         };
