@@ -2119,7 +2119,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # `fontenv::tests::a_frozen_environment_names_only_the_captured_fonts`, which
 # runs `fc-list` through the production builder and reaps it before the test
 # returns. Neither owns a producer or a recipe decision.
-expected_occurrences = 641
+# 641 -> 642 (measured by zeroing this row) with #553's review round,
+# test-only: the `tokio::spawn` in
+# `fontenv::tests::a_cancelled_capture_leaves_no_environment_behind`, which
+# runs one capture paused on its test hook, is aborted and then awaited
+# (`is_cancelled`) before the test asserts. The production blocking owner is
+# unchanged: `fontenv::blocking` now also carries the environment's directory
+# guard in and out of each task, so a task that outlives its abandoned caller
+# drops the guard, and removes the directory, when the runtime drops its
+# output. No producer, process or recipe decision.
+expected_occurrences = 642
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2228,8 +2237,10 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # returns. Each task awaits one bounded, ChildWork-launched ffmpeg that is
 # killed on drop. No rolling-producer owner.
 # 47 -> 48 (measured) with S-04 M2: `handle.spawn_blocking(remove)` in
-# `FontEnvironment::drop`, which removes a released environment's directory
-# off the runtime worker. Fire-and-forget by design (a drop cannot await);
+# `fontenv::release` (moved there from `FontEnvironment::drop` by #553's review
+# round, count unchanged; it is now also reached from the capture guard
+# `Owned`'s drop), which removes a released or abandoned environment's
+# directory off the runtime worker. Fire-and-forget by design (a drop cannot await);
 # the removal is idempotent, holds no permit, and a removal that never runs
 # is covered by the next process's sweep. It owns no producer or process.
 expected_occurrences = 48
@@ -3014,7 +3025,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # (one fixed 100 ms settle, one 20 ms poll bounded by a 10 s deadline) while
 # the environment's directory removal runs on the blocking pool. No
 # production timer.
-expected_occurrences = 1011
+# 1011 -> 1013 (measured by zeroing this row) with #553's review round, both
+# test-only: the `tokio::time::sleep` poll in `fontenv::tests::environments_left`
+# (20 ms steps under a 10 s deadline, waiting for a refused or abandoned
+# capture's removal on the blocking pool), and the 60 s `tokio::time::timeout`
+# in `a_cancelled_capture_leaves_no_environment_behind` bounding the wait for
+# the paused capture to reach its hook. No production timer.
+expected_occurrences = 1013
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3292,8 +3309,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # its temporary directory drops. No detached owner.
 # 188 -> 191 (measured) with S-04 M2. One production: `fontenv::build`'s
 # `tokio::process::Command::new(program)`, which constructs the capture-time
-# `fc-cache`, `fc-conflist` and `fc-list` under the frozen environment's
-# variables; each goes through `ffmpeg::font_probe_output` (the bounded,
+# `fc-conflist` and `fc-list` under the frozen environment's variables and,
+# since #553's review round (count unchanged; its `fc-cache` construction was
+# removed), the one-frame probe burn with the recipe's own encoder; each goes
+# through `ffmpeg::font_probe_output` (the bounded,
 # job-owned engine probe with its 30 s budget), is reaped there, and runs once
 # per recipe capture, never per segment. Two test-only: `fontenv::tests::fc`'s
 # `std::process::Command::new(tool)` for the Fontconfig tools, and the ffmpeg
