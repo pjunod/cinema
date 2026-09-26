@@ -1,0 +1,15 @@
+# Plan P-02 §3.2: every production child process is started by
+# `plurx_core::process::spawn_job_owned` (or output_job_owned /
+# status_job_owned / bounded::output), which gives it a priority class, a
+# row on the Activity page and a stop. These are the methods that start a
+# process without it. Each daemon crate allows them under `cfg(test)` only
+# (`#![cfg_attr(test, allow(clippy::disallowed_methods))]` at its root), and
+# `process::census` pins this file and those attributes.
+disallowed-methods = [
+    { path = "tokio::process::Command::spawn", reason = "start children through plurx_core::process::spawn_job_owned so they get a priority class and an Activity row" },
+    { path = "tokio::process::Command::output", reason = "use plurx_core::process::output_job_owned" },
+    { path = "tokio::process::Command::status", reason = "use plurx_core::process::status_job_owned" },
+    { path = "std::process::Command::spawn", reason = "start children through plurx_core::process::spawn_job_owned so they get a priority class and an Activity row" },
+    { path = "std::process::Command::output", reason = "use plurx_core::process::output_job_owned" },
+    { path = "std::process::Command::status", reason = "use plurx_core::process::status_job_owned" },
+]

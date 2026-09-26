@@ -370,7 +370,11 @@ impl TranscodeManager {
             }
         }
         let subtitle_handle = self
-            .ensure_text_subtitle(&file, subtitle_burn.as_ref())
+            .ensure_text_subtitle(
+                &file,
+                subtitle_burn.as_ref(),
+                crate::process_control::ChildWork::realtime("text subtitle for a session start"),
+            )
             .await?;
 
         // Claim a hardware slot before spawning anything. An iGPU has one
@@ -937,6 +941,7 @@ impl TranscodeManager {
             .spawn_and_install_prepublication_child(generation, || {
                 spawn_ffmpeg(
                     &args,
+                    crate::process_control::ChildWork::realtime("playback transcode"),
                     encoder.label(),
                     &session_id,
                     FfmpegProgressObserver::rolling(
@@ -1082,6 +1087,12 @@ impl TranscodeManager {
         playback_id: &str,
         automatic: bool,
     ) -> Result<StartInfo, String> {
+        let mut file = self
+            .store
+            .get_file(file_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "file not found".to_owned())?;
         // Same make-before-break rule as the transcode path. A takeover
         // continues an existing incarnation and supersedes nothing.
         if replacement_deadline.is_none() && takeover.is_none() {
@@ -1089,13 +1100,10 @@ impl TranscodeManager {
                 .await?;
         }
 
-        let mut file = self
-            .store
-            .get_file(file_id)
+        let probe_json = crate::hevc_census::probe_json_for_copy(self.store.as_ref(), &file)
             .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "file not found".to_owned())?;
-        let probe_json = self.store.get_file_probe_json(file_id).await.ok().flatten();
+            .ok()
+            .flatten();
         file.audio_offset_ms = if file.audio_streams.is_empty() {
             0
         } else {
@@ -1227,13 +1235,13 @@ impl TranscodeManager {
                  layer rather than a stream that names a profile it did not produce"
             );
         }
-        let video_options = transcode::CopyVideoOptions::from_probe(
+        let video_options = rolling_copy_video_options(
             &file,
             probe_json.as_deref(),
             have_dovi,
             preserve,
-        )
-        .with_dolby_vision_conversion(options.convert_dolby_vision);
+            options.convert_dolby_vision,
+        );
         if video_options.promotes_parameter_sets() && takeover.is_some() {
             return Err(
                 "this HEVC source requires GOP-aware init promotion and cannot use the legacy takeover muxer"
@@ -1527,6 +1535,7 @@ impl TranscodeManager {
                 .spawn_and_install_prepublication_pipe_child(generation, || {
                     spawn_ffmpeg_pipe(
                         &initial_args,
+                        crate::process_control::ChildWork::realtime("playback transcode"),
                         &session_id,
                         FfmpegProgressObserver::rolling(
                             Arc::clone(&progress),
@@ -1562,6 +1571,7 @@ impl TranscodeManager {
                 .spawn_and_install_prepublication_child(generation, || {
                     spawn_ffmpeg(
                         &initial_args,
+                        crate::process_control::ChildWork::realtime("playback copy HLS"),
                         "copy",
                         &session_id,
                         FfmpegProgressObserver::rolling(
@@ -1678,5 +1688,32 @@ impl TranscodeManager {
             vod: false,
             control_lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
         })
+    }
+}
+
+/// The copy pipeline a rolling HEVC session runs: always keeping the source's
+/// in-band parameter sets.
+///
+/// A rolling copy has no whole-film proof that deleting them is lossless, and
+/// no index identity to keep stable, so it takes the one packaging that is
+/// correct for every source: the definitions travel with the pictures that
+/// use them (`docs/streaming/HEVC-IN-BAND-PARAMETER-SETS.md`). That is what
+/// lets a title with no header proof yet — or one whose headers change, like
+/// UNABOMBER — play correctly through the rolling fallback instead of being
+/// refused or painted pink and green. Non-HEVC sources are unaffected.
+pub(super) fn rolling_copy_video_options(
+    file: &plurx_core::domain::MediaFile,
+    probe_json: Option<&str>,
+    have_dovi: bool,
+    preserve_dolby_vision: bool,
+    convert_dolby_vision: bool,
+) -> transcode::CopyVideoOptions {
+    let options =
+        transcode::CopyVideoOptions::from_probe(file, probe_json, have_dovi, preserve_dolby_vision)
+            .with_dolby_vision_conversion(convert_dolby_vision);
+    if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
+        options.with_parameter_set_retention(true)
+    } else {
+        options
     }
 }

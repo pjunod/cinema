@@ -431,7 +431,10 @@ also_in = ["crates/plurxd/src/transcode"]
 # adds the 300 ms spacing past the control rate limit and a 10 ms poll, inside
 # a two-second timeout, for the already-enqueued `resume` Store event. Both
 # are test-only and own no producer, process or recovery decision.
-expected_occurrences = 48
+# HEVC color repair: -1 test-only log-polling sleep. The old rolling-copy
+# argv fixture is replaced by direct refusal/override admission assertions;
+# no production timer or recovery owner changed.
+expected_occurrences = 47
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -2081,7 +2084,26 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # is the whole merged tree, measured by zeroing this row after the merge:
 # 629, which is main's 625 plus exactly the four K-03 test-only spawns
 # reviewed above.
-expected_occurrences = 629
+# +8 with K-10 (replicated write-rate hygiene II), all test-only and
+# measured by zeroing this row after merging `plan/K-03` at `e3687722b`. In `library_search::tests`: the classification
+# worker under test in the one-pass, idle-library and dead-peer tests (one
+# each) and the two workers of the walk-once test; each is stopped by its
+# cancellation token and joined before its test returns. In
+# `offline::tests`: the offline worker loop under test in the three `claim_`
+# tests, each aborted before its test returns. The production spawns of both
+# workers in `main.rs` are unchanged. None owns a producer, a process or a
+# recipe decision.
+# The merged value is 637: K-03's 629 plus exactly these eight.
+# 637 -> 638 with the #540 review round (finding 1), measured by zeroing
+# this row, test-only: the classification worker under test in
+# `library_search::tests::classification_a_change_after_idle_forced_passes_waits_only_the_idle_ceiling`,
+# stopped by its cancellation token and joined before the test returns. No
+# production spawn; it owns no producer, process or recipe decision.
+# 638 -> 639 with the same round (finding 2), measured by zeroing this row,
+# test-only: the offline worker loop under test in
+# `offline::tests::claim_a_wake_claims_what_the_local_replica_does_not_show_yet`,
+# aborted before the test returns. No production spawn.
+expected_occurrences = 639
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2173,7 +2195,23 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # awaits `wait_with_output` under a 180 s timeout, so it cannot outlive the
 # test. No producer, no session, nothing registered.
 # +1 VOD successor handoff test fixture (a running predecessor child).
-expected_occurrences = 49
+# 49 -> 46 with P-02 M3, the one child launcher (measured). -4: the scan
+# `ffprobe -version` reporter probe (scan/probe.rs), the held decode-fact
+# probe (decode_facts.rs `spawn_configured_probe`), the Live TV caption audit
+# fixture and the library-root `find` (media_pool.rs) no longer call
+# `.spawn()` themselves; each starts through `process::spawn_job_owned`,
+# which is now their owner and gives them a priority class and an Activity
+# row. +1: `process::output_job_owned_blocking`, the launcher's synchronous
+# form for a caller already inside `spawn_blocking`; it attaches the job and
+# registers the child exactly as `spawn_job_owned` does and waits for it
+# before returning, so it creates no detached owner. The census test counts
+# exactly these two launcher spawns.
+# +1 with the HEVC parameter-set census (hevc_census::measure): one
+# JoinSet::spawn per sampled keyframe, owned by the JoinSet in that function,
+# aborted at the census budget and dropped (aborting any stragglers) when it
+# returns. Each task awaits one bounded, ChildWork-launched ffmpeg that is
+# killed on drop. No rolling-producer owner.
+expected_occurrences = 47
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2895,7 +2933,61 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # is the whole merged tree, measured by zeroing this row after the merge:
 # 992, which is main's 977 plus exactly the fifteen K-03 shapes reviewed
 # above.
-expected_occurrences = 992
+# 969 -> 972 with P-02 M3 (measured). All three are test-only: the priority
+# tests' re-exec child sleeps until it is killed (`std::thread::sleep`), the
+# stop test bounds its wait for the killed child with `tokio::time::timeout`,
+# and the Activity HTTP test bounds the same wait. No production timer.
+# Merged with main at `3c89ad2ee` (#517 parallel subtitle ranges and the
+# rolling publication-trap change): the value is the whole merged tree,
+# measured by zeroing this row after the merge: main's 977 plus this branch's three test-only
+# timers reviewed above.
+# +2 with the review round of P-02 M3 (#518, finding 1), both test-only in
+# subtitles::tests::a_whole_track_extraction_runs_at_the_class_its_caller_passes:
+# a 30 s `tokio::time::timeout` bounding the wait for the detached warm-up's
+# publication and the 20 ms `tokio::time::sleep` that polls it. The warm-up
+# is the production warmer, which owns its flight; the test only waits for
+# it. No production timer, no rolling-producer owner.
+# Merged with main at `71d1c1ecd` (P-02 M3 branch): the value is the whole
+# merged tree, measured by zeroing this row after the merge: 997, which is
+# main's 992 plus exactly this branch's five test-only timers reviewed above
+# (three M3, two from its review round). No production timer is added.
+# HEVC color repair: -1, the same removed test-only log-polling sleep.
+# Original-header analysis uses existing bounded index-process deadlines.
+# Re-landed with main at `3dadc61cd` after the push-mirror rewind erased
+# #535's merge: the value is main's 997 -1 for the HEVC
+# repair's shapes reviewed above, measured by zeroing this row after the merge.
+# +1 with the HEVC parameter-set census: the one tokio::time::Instant::now()
+# that fixes its budget deadline. Bounded, per census, no producer timer.
+# +7 with K-10, measured by zeroing this row after merging `plan/K-03` at
+# `e3687722b`. Shipped, net -3: the
+# offline worker's five fixed `tokio::time::sleep(IDLE_POLL)` exits became one
+# `tokio::time::sleep(delay)` whose length its claim policy chooses (2 s
+# working, backing off to 10 s idle, never past the 30 s forced claim or the
+# next expiry sweep, cut short by a local package creation); the
+# classification worker's one fixed between-page sleep became a
+# `tokio::time::sleep(delay)` chosen by its pass schedule plus the unchanged
+# 1 s `tokio::time::sleep(schedule::PAGE_TICK)` between pages inside a pass.
+# Neither decides anything about playback; both only pace a background poll.
+# Test-only, +10: in `offline::tests` the 600 s, 65 s and 61 s idle waits and
+# the 50 ms claim poll (virtual clock); in `library_search::tests` the 100 ms
+# pass poll, the 600 s idle and walk-once waits, the 250 ms classification
+# poll, and the dead-peer test's 1.2 s observation window and 50 ms poll.
+# The merged value is 999: K-03's 992 plus exactly these seven.
+# Merged with main at `42ea7a9af` (K-10 branch, review round of #540): the
+# value is the whole merged tree, measured by zeroing this row after the
+# merge: 1004, which is main's 997 plus exactly the seven K-10 shapes
+# reviewed above.
+# 1004 -> 1007 with the #540 review round (finding 1), measured by zeroing
+# this row, all test-only (virtual clock) in `library_search::tests`: the six
+# idle hours, the 60 s wait after the last forced pass and the 250 ms
+# classification poll. No production timer; none paces or bounds a producer.
+# 1007 -> 1009 with the same round (finding 2), measured by zeroing this row,
+# both test-only: the 65 s idle wait (virtual clock) of
+# `offline::tests::claim_a_wake_claims_what_the_local_replica_does_not_show_yet`,
+# and the zero-length `tokio::time::timeout` in the `#[cfg(test)]`
+# `OfflineManager::take_wake` probe, which only asks whether a wake permit is
+# stored. No production timer.
+expected_occurrences = 1009
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3147,7 +3239,31 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Neither creates a playback owner. Production window extraction retains
 # the existing command construction but now routes its pipe through
 # BoundedDiagnosticChild, which owns cancellation kill/reap and bounded I/O.
-expected_occurrences = 175
+# 173 -> 176 with P-02 M3 (measured). Test-only: the priority tests' re-exec
+# sleeper and the refused-priority `/bin/sh` child (process/priority.rs), and
+# the Activity HTTP test's `sleep 300` child (http/mod.rs). Each starts
+# through `spawn_job_owned` or `output_job_owned`, is `kill_on_drop` or
+# awaited, and its job is dropped by the test.
+# Merged with main at `3c89ad2ee` (#517 parallel subtitle ranges and the
+# rolling publication-trap change): the value is the whole merged tree,
+# measured by zeroing this row after the merge: main's 175 plus this branch's three test-only
+# children reviewed above.
+# +1 with the review round of P-02 M3 (#518, finding 1), test-only: the
+# `true` child in process::priority::tests::every_spawn_is_counted_by_its_class_and_purpose,
+# started through `spawn_job_owned` and reaped by the test before its job drops.
+# HEVC color repair: +5 synchronous, test-only finite FFmpeg commands in
+# fragindex::tests::hevc_original_header_scan_rejects_changed_pps_before_stripping:
+# encode the short fixture, concatenate, decode frame hashes, run production
+# fMP4 copy, and remux the A/B. testfixtures::run or Command::output collects
+# each child before its temporary directory is dropped. No detached owner.
+# Re-landed with main at `3dadc61cd` after the push-mirror rewind erased
+# #535's merge: the value is main's 179 +5 for the HEVC
+# repair's shapes reviewed above, measured by zeroing this row after the merge.
+# +4 test-only with the HEVC parameter-set census (hevc_census::tests): the
+# x265 fixture encode, its concat mux, the framemd5 decode and the production
+# copy pipe. Each is collected by testfixtures::run or Command::output before
+# its temporary directory drops. No detached owner.
+expected_occurrences = 188
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3520,7 +3636,29 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # FFmpeg .output() calls inventoried above, plus Response::builder().status()
 # in internal_media::subtitle_range. That third occurrence builds an HTTP
 # response status and starts no process. No new rolling-producer owner.
-expected_occurrences = 390
+# 387 -> 381 with P-02 M3, the one child launcher (measured). -7: the
+# `.spawn()` / `.output()` calls that started children outside the launcher
+# (scan/probe.rs 1, decode_facts.rs 1, live_tv/caption_audit_tests.rs 2,
+# media_pool.rs 1, subtitle_ride_along.rs 2) now go through
+# `spawn_job_owned` / `output_job_owned` / `output_job_owned_blocking`.
+# +1: the blocking launcher's own `.spawn()` in process/mod.rs (see
+# method-spawn above).
+# Merged with main at `3c89ad2ee` (#517 parallel subtitle ranges and the
+# rolling publication-trap change): the value is the whole merged tree,
+# measured by zeroing this row after the merge: main's 390 less this branch's net six launcher
+# migrations reviewed above.
+# HEVC color repair: +2 test-only Command::output calls, for decoded frame
+# hashes and the production fMP4 copy in the changed-PPS regression. Each
+# synchronously collects a finite fixture child; no rolling lifecycle change.
+# Re-landed with main at `3dadc61cd` after the push-mirror rewind erased
+# #535's merge: the value is main's 384 +2 for the HEVC
+# repair's shapes reviewed above, measured by zeroing this row after the merge.
+# +3 with the HEVC parameter-set census: the JoinSet::spawn of each sample
+# task (a task, not a process; see method-spawn), and two test-only
+# Command::output calls (framemd5 decode, production copy pipe) that collect
+# finite fixture children. The census's own ffmpeg starts through
+# process::bounded::output with ChildWork::realtime.
+expected_occurrences = 389
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3673,7 +3811,15 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Merged with main's C-08 M5 release-evidence metrics (#500) at
 # `259d087ed`: the value is the whole merged tree, measured by zeroing this
 # row after the merge.
-expected_occurrences = 399
+# 399 -> 403 with P-02 M3 (measured). +2 in process/mod.rs: the blocking
+# launcher kills and reaps its child (`kill`, `wait`) when the job cannot be
+# attached, so a failed attach never strands a running process. +2
+# test-only: the stop test's and the Activity HTTP test's `child.wait()` for
+# the child they killed, each under a timeout.
+# +1 with the review round of P-02 M3 (#518, finding 1), test-only: the
+# `child.wait()` that reaps that same `true` child. No production lifecycle
+# call is added.
+expected_occurrences = 404
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -3713,7 +3859,11 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # `live_tv::tests::process_exists`, a signal-0 probe that delivers nothing;
 # it asserts that an orphaned child is still alive before its retry and gone
 # after it.
-expected_occurrences = 49
+# 49 -> 50 with P-02 M3 (measured). Test-only: the exec-ordering test's
+# `libc::execv` from inside a `pre_exec`, which reproduces the decode-fact
+# probe's exec-from-`pre_exec` to show that a priority registered after it
+# never runs. The child is owned by `spawn_job_owned` and killed on drop.
+expected_occurrences = 50
 
 [[module_structures]]
 id = "kill-on-drop-construction"
@@ -3808,7 +3958,10 @@ pattern = "kill_on_drop\\s*\\("
 # the cancellation backstop; the worker explicitly awaits ordinary exit and
 # kills/reaps on loss, deadline, or foreground preemption.
 # +1 the same test child, so a failing assertion cannot leak it.
-expected_occurrences = 87
+# 87 -> 89 with P-02 M3 (measured). Test-only: the priority tests' re-exec
+# sleeper and the Activity HTTP test's `sleep 300` child are `kill_on_drop`,
+# so a failed assertion cannot strand either.
+expected_occurrences = 89
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

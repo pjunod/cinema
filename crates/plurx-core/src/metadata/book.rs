@@ -689,9 +689,11 @@ async fn extract_attached_picture(
         // while the byte-bound reader is waiting on the first one.
         .stderr(Stdio::null());
     let extract = async move {
-        let mut child = command
-            .spawn()
-            .map_err(|error| BookMetadataError::EmbeddedCover(error.to_string()))?;
+        let (mut child, _job) = crate::process::spawn_job_owned(
+            &mut command,
+            crate::process::ChildWork::background("book cover extraction"),
+        )
+        .map_err(|error| BookMetadataError::EmbeddedCover(error.to_string()))?;
         let stdout = child.stdout.take().ok_or_else(|| {
             BookMetadataError::EmbeddedCover("ffmpeg stdout was unavailable".to_owned())
         })?;

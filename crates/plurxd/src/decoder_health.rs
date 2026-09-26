@@ -1327,9 +1327,15 @@ impl MeasuredBuild {
     }
 
     async fn run(bin: &str, args: &[&str]) -> Option<Vec<u8>> {
-        let output = crate::bounded_process::output(bin, args, Duration::from_secs(5), 64 * 1024)
-            .await
-            .ok()?;
+        let output = crate::bounded_process::output(
+            bin,
+            args,
+            Duration::from_secs(5),
+            64 * 1024,
+            crate::process_control::ChildWork::background("ffmpeg build identity probe"),
+        )
+        .await
+        .ok()?;
         // A build that does not understand `-buildconf` exits non-zero and
         // prints an error. Hashing that error text would give
         // `buildconf_sha256` a value that is not a build configuration, and a

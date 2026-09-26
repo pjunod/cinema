@@ -171,7 +171,7 @@
         let session_id = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
         activate_control_route(store.as_ref(), &session_id, &generation).await;
-        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let serve = local_serve(base.path().to_path_buf(), store);
         let rendition = synthetic_rendition(base.path()).await;
         let before = Instant::now() - Duration::from_secs(10);
         insert_control_session(&serve, &session_id, Arc::clone(&rendition), before).await;
@@ -262,7 +262,7 @@
         let session_id = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
         activate_control_route(store.as_ref(), &session_id, &generation).await;
-        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let serve = local_serve(base.path().to_path_buf(), store);
         let rendition = synthetic_rendition(base.path()).await;
         let before = Instant::now() - Duration::from_secs(10);
         insert_control_session(&serve, &session_id, Arc::clone(&rendition), before).await;
@@ -484,7 +484,7 @@
         let session_id = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
         activate_control_route(store.as_ref(), &session_id, &generation).await;
-        let serve = VodServe::new(base.path().to_path_buf(), store.clone());
+        let serve = local_serve(base.path().to_path_buf(), store.clone());
         let rendition = synthetic_rendition(base.path()).await;
         insert_control_session(&serve, &session_id, rendition, Instant::now()).await;
 
@@ -598,7 +598,7 @@
         let session_id = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
         activate_control_route(store.as_ref(), &session_id, &generation).await;
-        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let serve = local_serve(base.path().to_path_buf(), store);
         let rendition = synthetic_rendition(base.path()).await;
         insert_control_session(&serve, &session_id, Arc::clone(&rendition), Instant::now()).await;
         let client = uuid::Uuid::new_v4().to_string();
@@ -751,7 +751,7 @@
         let base = crate::test_tempdir().expect("base");
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
         activate_control_route(store.as_ref(), VIEWER, GENERATION).await;
-        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let serve = local_serve(base.path().to_path_buf(), store);
         let rendition = synthetic_rendition(base.path()).await;
         insert_control_session(&serve, VIEWER, Arc::clone(&rendition), Instant::now()).await;
         let control = |sequence, snapshot| crate::playback_control::LocalControlRequest {
@@ -887,7 +887,7 @@
         let base = crate::test_tempdir().expect("base");
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
         activate_control_route(store.as_ref(), VIEWER, GENERATION).await;
-        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let serve = local_serve(base.path().to_path_buf(), store);
         let rendition = synthetic_rendition(base.path()).await;
         insert_control_session(&serve, VIEWER, Arc::clone(&rendition), Instant::now()).await;
         let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
@@ -2764,7 +2764,7 @@
         // audio tail is derived from.
         let (store, _) = store_with_index(&media_file_at(source.clone(), 9_000)).await;
         let file = media_file_at(source, 12_000);
-        let serve = VodServe::new(temp.path().join("renditions"), store);
+        let serve = local_serve(temp.path().join("renditions"), store);
 
         // Seek into the tail (video ends ~9 s).
         serve
@@ -2814,7 +2814,7 @@
         let base = crate::test_tempdir().expect("base");
         let file = fixture_file();
         let (store, _) = store_with_index(&file).await;
-        let first = VodServe::new(base.path().to_path_buf(), Arc::clone(&store));
+        let first = local_serve(base.path().to_path_buf(), Arc::clone(&store));
         create(&first, &file, "sess-a", "play-a", &settings()).await;
         let len = plan_len(&first, "sess-a").await;
         for segment in 0..len {
@@ -2832,7 +2832,7 @@
             .await
             .expect("take the init away");
 
-        let second = VodServe::new(base.path().to_path_buf(), store);
+        let second = local_serve(base.path().to_path_buf(), store);
         create(&second, &file, "sess-b", "play-b", &settings()).await;
         let adopted = rendition_of(&second, "sess-b").await;
         assert_eq!(
@@ -2868,7 +2868,7 @@
         let base = crate::test_tempdir().expect("base");
         let file = fixture_file();
         let (store, _) = store_with_index(&file).await;
-        let first = VodServe::new(base.path().to_path_buf(), Arc::clone(&store));
+        let first = local_serve(base.path().to_path_buf(), Arc::clone(&store));
         create(&first, &file, "sess-a", "play-a", &settings()).await;
         fetch(&first, "sess-a", "seg00000.m4s").await;
         let rendition = rendition_of(&first, "sess-a").await;
@@ -2893,7 +2893,7 @@
             .await
             .expect("take the init away");
 
-        let second = VodServe::new(base.path().to_path_buf(), store);
+        let second = local_serve(base.path().to_path_buf(), store);
         create(&second, &file, "sess-b", "play-b", &settings()).await;
         let adopted = rendition_of(&second, "sess-b").await;
         assert_eq!(

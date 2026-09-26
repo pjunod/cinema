@@ -183,12 +183,14 @@ impl VodServe {
             ));
         };
         let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
-        let probe_json = self
-            .shared
-            .store
-            .get_file_probe_json(file.id)
-            .await
-            .map_err(|error| format!("reading the file probe: {error}"))?;
+        // An encoded rendition never carries the source's parameter sets, so
+        // only a copy waits on the census.
+        let probe_json = if prepared.encoding.is_none() {
+            crate::hevc_census::probe_json_for_copy(self.shared.store.as_ref(), file).await
+        } else {
+            self.shared.store.get_file_probe_json(file.id).await
+        }
+        .map_err(|error| format!("reading the file probe: {error}"))?;
         let video = copy_video_pipeline(
             file,
             probe_json.as_deref(),
@@ -258,6 +260,80 @@ impl VodServe {
                     None,
                 )
             }
+        };
+        // HEVC safety is established on original headers, before filters can
+        // hide updates. Bind the proof to this node's current source object;
+        // a peer's filesystem identity is not a local attestation.
+        // A copy that keeps its in-band parameter sets cannot decode against
+        // stale definitions, so it needs no proof that deleting them is safe.
+        let source_object_version = if prepared.encoding.is_none()
+            && matches!(file.video_codec.as_deref(), Some("hevc" | "h265"))
+            && !video.retains_hevc_parameter_sets()
+            && !crate::transcode::unverified_hevc_copy_enabled(self.shared.store.as_ref()).await?
+        {
+            let current = crate::fragment_index_cluster::inspect_source(file)
+                .await
+                .map_err(|reason| {
+                    crate::transcode::vod_refusal_error("hevc_configuration_unverified", reason)
+                })?;
+            let proof = index
+                .as_ref()
+                .and_then(|index| index.promotion.hevc_configuration.as_ref());
+            if !proof.is_some_and(|proof| {
+                proof.permits_on_node(
+                    &current,
+                    self.shared.cluster_node_id.as_deref().unwrap_or_default(),
+                )
+            }) {
+                let reason = proof
+                    .filter(|proof| {
+                        proof.source_object_version == current
+                            && Some(proof.source_node_id.as_str())
+                                == self.shared.cluster_node_id.as_deref()
+                    })
+                    .and_then(|proof| proof.refusal.as_deref());
+                let mut preparation = if cluster_cache_enabled {
+                    "HEVC copy needs preparation".to_owned()
+                } else {
+                    "HEVC copy needs preparation; shared preparation is disabled".to_owned()
+                };
+                if reason.is_none() && cluster_cache_enabled {
+                    if let Some(node) = self.shared.cluster_node_id.as_deref() {
+                        preparation = match crate::state::enqueue_copy_preparation_for_object(
+                            self.shared.store.as_ref(),
+                            node,
+                            file,
+                            video,
+                            Some(&current),
+                        )
+                        .await
+                        {
+                            Ok(request) => {
+                                format!("HEVC exact copy preparation is {}", request.state)
+                            }
+                            Err(error) => {
+                                format!("HEVC copy preparation could not be queued: {error}")
+                            }
+                        };
+                    }
+                }
+                let detail = reason.map(str::to_owned).unwrap_or_else(|| {
+                    format!(
+                    "{preparation}; Settings → Developer can enable unverified copy without waiting"
+                )
+                });
+                return Err(crate::transcode::vod_refusal_error(
+                    if reason.is_some() {
+                        "hevc_configuration_unsupported"
+                    } else {
+                        "hevc_configuration_unverified"
+                    },
+                    detail,
+                ));
+            }
+            Some(current)
+        } else {
+            source_object_version
         };
         if index.is_none() && prepared.encoding.is_none() {
             let reason = if needs_attestation {

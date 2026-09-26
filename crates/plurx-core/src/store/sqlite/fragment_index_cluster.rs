@@ -2371,7 +2371,9 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     source_size = excluded.source_size,
                     source_mtime = excluded.source_mtime,
                     source_sha256 = excluded.source_sha256,
-                    observed_at_ms = excluded.observed_at_ms",
+                    observed_at_ms = excluded.observed_at_ms
+                 WHERE cluster_fragment_index_sources.object_version !=
+                       'hevc-full-v1:' || excluded.object_version",
                 params![
                     observation.node_id,
                     observation.file_id,

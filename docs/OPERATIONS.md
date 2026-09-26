@@ -582,6 +582,57 @@ those rows in place, then take the backup again and re-run the import. Nobody
 has to reconnect the Trakt account. The refusal happens before any row is
 submitted, so a refused import leaves no partial replicated state to clean up.
 
+### Catalogue read indexes: SQLite v70, replicated schema v48
+
+K-05 M5 adds three indexes on `items` and nothing else — no column, no row
+change: `idx_items_tmdb` and `idx_items_imdb` (the coming-soon rail's
+per-entry external-id lookup, which scanned every item once per entry) and
+`idx_items_top_level_title` (a library's movies, shows, books and top-level
+home items in title order: the default Title grid reads it in order, and every
+sort's item count reads only those entries instead of every season and
+episode). The measured before and after plans are in
+[query-plans-m5-f782fc24.md](../benchmarks/evidence/query-plans-m5-f782fc24.md).
+
+**Standalone SQLite** applies v70 at open, before the HTTP listener binds, in
+one transaction. Nothing to do beyond the ordinary redeploy.
+
+**An activated cluster** takes it as one more replicated schema step, so the
+procedure is the one above for every such step: stop application traffic and
+update every voter as one maintenance operation, voters before learners. The
+first v48 daemon that reaches quorum commits the step and the new marker in
+one Raft transaction before it starts producers or binds HTTP. What that step
+costs:
+
+- **The Raft entry is the DDL text** (a few hundred bytes), not index pages.
+  Each voter builds the indexes from its own `items` table when it applies the
+  entry, and a snapshot taken afterwards carries them, so a learner or a
+  restored voter receives them with the snapshot.
+- **The build holds that voter's state-machine writer** for its duration.
+  Measured on the 75,600-item K-05 fixture on nuc3: about 60 ms for all three
+  (median of five, 63 ms cold and 59 ms warm; the evidence file has the
+  per-statement numbers). It grows with the
+  item count (a sort of the indexed rows, n log n), so a library ten times
+  that size is still well under a second. While it runs, reads on that voter
+  keep their WAL snapshot; consistent reads and writes wait for the entry to
+  apply, which is why traffic is stopped for the window anyway.
+- **Every statement is `IF NOT EXISTS`.** A second voter racing the step, or
+  a marker rewound under a shape that already has the indexes, finds them
+  standing and only moves the marker.
+- **Disk:** the three indexes are 688 KiB on the fixture, about half of
+  `idx_items_library_kind`; nothing is rewritten.
+- **Statistics:** the Hiqlite state machine runs `PRAGMA optimize` when it
+  opens a connection and after each snapshot, so each voter collects the new
+  indexes' statistics locally at its next snapshot. The plans in the evidence
+  file were taken both without statistics and with the statistics that pragma
+  produces; they choose the new indexes either way.
+
+**Rolling back** is the existing newer-schema refusal: a v47 binary will not
+open a v48 cluster, and a v69 SQLite build will not open a v70 `plurx.db`.
+The indexes are harmless to an older reader, but the marker is not, so do not
+restart an older binary after v48 commits; roll a failed node forward instead,
+exactly as for any other step. On standalone SQLite, the pre-deploy snapshot
+under `<PLURX_DATA>/backups/` is a v69 file an older build can open.
+
 ### M2 activation and crash recovery
 
 The first `plurxd run` against a legacy data directory imports into
@@ -4939,6 +4990,28 @@ they never label a session, file, user, network, or path.
 | `plurx_telemetry_queue_depth` | Current queue occupancy, never above 1,024. Non-terminal work stops at 896 so 128 slots remain for terminal outcomes, and a terminal arriving at a full queue displaces the oldest non-terminal rather than being refused — so a rise in `queue_full` alongside a flat `enqueued_total{class="terminal"}` is samples losing to terminals, which is the intended trade. |
 | `plurx_telemetry_batch_size`, `plurx_telemetry_batch_seconds` | Fixed-bucket histograms for batch occupancy and processing time. Use them to decide whether a second sidecar connection or different batch constants are warranted; do not infer that from queue depth alone. |
 | `plurx_telemetry_setting_refresh_failures_total` | Paired effective-setting refreshes that failed while the last good values remained active. |
+
+Every child process the daemon starts (ffmpeg, ffprobe, the Dolby Vision
+tools, `find`) goes through one launcher that gives it a priority class. A
+**realtime** child is one a viewer or a recording waits on (playback
+transcode, copy HLS, remux, VOD, Live TV, the playhead subtitle window) and
+runs at `nice` 5, best-effort I/O level 4 and `oom_score_adj` 500. A
+**background** child is one nobody waits on (scan thumbnails and covers,
+capability and decode-fact probes, whole-track subtitle and PGS extraction,
+the pre-transcode producer, fragment indexing, Dolby Vision conversion) and
+runs at `nice` 15, I/O level 7 and `oom_score_adj` 800. The daemon keeps its
+own values, so the scheduler serves it first and the OOM killer takes a
+background child, then a playback child, before it. **Activity → Processes**
+(admins only) lists each running child with those values as the kernel
+reports them and a **Stop**; the same list is `processes` in
+`/api/v1/activity/detail`.
+
+| Metric | How to read it |
+|---|---|
+| `plurx_child_processes{class="realtime|background"}` | Children this node is running now. A background count that never falls back to zero is a probe or extraction that is not finishing. |
+| `plurx_child_spawns_total{class="realtime|background"}` | Children started since the process started. |
+| `plurx_child_spawns_by_purpose_total{class, purpose}` | The same, by class and purpose (`purpose` is the fixed text the Activity page shows, such as `held source probe for a session start`). The class is the caller's: a probe or extraction a session start or a viewer's request waits on is `realtime`, the same work started by a warm-up, a backfill or the pre-transcode pass is `background`. A start-path purpose counting under `background` is a caller that picked the wrong class. |
+| `plurx_child_priority_unapplied_total{class="realtime|background"}` | Children whose kernel-reported `nice`, I/O class and level or `oom_score_adj` read back above their class's policy right after the start. Expected to stay `0` on Linux; a rising value means something between the daemon and the kernel (a container runtime, a seccomp profile) refuses the adjustment, and the child ran at the daemon's priority instead. A refused adjustment never stops the child from starting. |
 
 The compact Prometheus alert shape is: membership sample valid · leader known ·
 heartbeat quorum available · apply lag zero. `/readyz` remains the final active
