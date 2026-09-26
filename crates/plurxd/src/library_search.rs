@@ -138,13 +138,14 @@ pub(crate) async fn worker_with_policy(
             TICKS[decision.outcome().index()].fetch_add(1, Ordering::Relaxed);
             match decision {
                 Decision::Wait(delay, _) => delay,
-                Decision::Pass(_) => {
+                Decision::Pass(started) => {
                     run_pass(
                         &state,
                         &shutdown,
                         &policy,
                         &stats,
                         &mut schedule,
+                        started,
                         &mut cursor,
                     )
                     .await
@@ -169,6 +170,7 @@ async fn run_pass(
     policy: &ClassificationPolicy,
     stats: &WorkerStats,
     schedule: &mut ClassificationSchedule,
+    started: ScheduleOutcome,
     cursor: &mut i64,
 ) -> Duration {
     stats.lease_attempts.fetch_add(1, Ordering::Relaxed);
@@ -218,7 +220,7 @@ async fn run_pass(
     }
     if finished {
         stats.passes_completed.fetch_add(1, Ordering::Relaxed);
-        schedule.pass_finished((policy.clock)(), did_work);
+        schedule.pass_finished((policy.clock)(), started, did_work);
         Duration::ZERO
     } else {
         // Lost, failed or no longer a voter: the cursor is kept, and the next
@@ -655,6 +657,60 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         assert_eq!(stats.lease_attempts.load(Ordering::SeqCst), 2);
+        shutdown.cancel();
+        let _ = task.await;
+    }
+
+    /// #540 review, finding 1: hours of idle forced passes do not hold the
+    /// next change for the forced interval.
+    ///
+    /// One node over a classified library for six idle hours runs only its
+    /// forced passes, none of which does any work. An item added 60 s after
+    /// the latest of them is classified within the idle ceiling plus its
+    /// pass (plan §4), not when the gap those passes used to double reaches
+    /// the next forced pass, up to 30 min later.
+    #[tokio::test(start_paused = true)]
+    async fn classification_a_change_after_idle_forced_passes_waits_only_the_idle_ceiling() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let library = seed(&store, 40).await;
+        let stats = Arc::new(WorkerStats::default());
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(worker_with_policy(
+            state_on(Arc::clone(&store), "node-a"),
+            shutdown.clone(),
+            paused_policy(),
+            Arc::clone(&stats),
+        ));
+        tokio::time::sleep(Duration::from_secs(6 * 3_600)).await;
+        let passes = stats.passes_completed.load(Ordering::SeqCst);
+        assert!(passes >= 12, "{passes} passes in six idle hours");
+        wait_for(
+            "the next forced pass",
+            schedule::FORCE_PASS_INTERVAL,
+            || stats.passes_completed.load(Ordering::SeqCst) > passes,
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        store
+            .insert_item(&NewItem {
+                library_id: library,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "After a quiet evening".into(),
+                year: Some(2003),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("new item");
+        let start = tokio::time::Instant::now();
+        while unclassified(&store).await > 0 {
+            assert!(
+                start.elapsed() <= schedule::IDLE_TICK_MAX + Duration::from_secs(5),
+                "a new item after idle forced passes waited longer than the idle ceiling and its pass"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
         shutdown.cancel();
         let _ = task.await;
     }

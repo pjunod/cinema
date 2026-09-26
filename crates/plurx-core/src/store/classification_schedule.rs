@@ -218,24 +218,35 @@ impl ClassificationSchedule {
             let wait = (ready_ms - now_ms).min(until_forced).max(1);
             return Decision::Wait(from_millis(wait), ScheduleOutcome::Gap);
         }
+        // A silent hint ends whatever false firing the gap was backing off
+        // from: the next time it fires, it fires for something new, and that
+        // is owed the idle ceiling, not the gap an earlier false firing grew.
+        self.gap = PASS_GAP;
         let wait = from_millis(millis(self.idle_tick).min(until_forced).max(1));
         self.idle_tick = self.idle_tick.saturating_mul(2).min(IDLE_TICK_MAX);
         Decision::Wait(wait, ScheduleOutcome::Idle)
     }
 
-    /// A pass ran to the end of the library. `did_work` is whether it wrote
-    /// an entry or made a provider request: a pass that did neither doubles
-    /// this node's gap (up to the forced interval), so a hint that keeps
-    /// firing for nothing costs one pass per gap, not one per 30 s.
-    pub fn pass_finished(&mut self, now_ms: i64, did_work: bool) {
+    /// A pass ran to the end of the library. `started` is the outcome of the
+    /// decision that started it; `did_work` is whether it wrote an entry or
+    /// made a provider request.
+    ///
+    /// Only a pass the hint started and that did neither doubles this node's
+    /// gap (up to the forced interval), so a hint that keeps firing for
+    /// nothing costs one pass per gap, not one per 30 s. A forced pass that
+    /// found nothing says nothing about the hint — on an idle library it is
+    /// the only pass there is — so it leaves the gap alone; otherwise hours of
+    /// idle forced passes would grow the gap to the forced interval and hold
+    /// the next real change for up to 30 min (#540 review, finding 1).
+    pub fn pass_finished(&mut self, now_ms: i64, started: ScheduleOutcome, did_work: bool) {
         self.own_end_ms = Some(now_ms);
         self.seen_end_ms = self.seen_end_ms.max(Some(now_ms));
         self.idle_tick = IDLE_TICK;
-        self.gap = if did_work {
-            PASS_GAP
-        } else {
-            self.gap.saturating_mul(2).min(FORCE_PASS_INTERVAL)
-        };
+        if did_work {
+            self.gap = PASS_GAP;
+        } else if started == ScheduleOutcome::HintedPass {
+            self.gap = self.gap.saturating_mul(2).min(FORCE_PASS_INTERVAL);
+        }
     }
 }
 
@@ -287,7 +298,7 @@ mod tests {
             schedule.decide(&store, T0).await,
             Decision::Pass(ScheduleOutcome::ForcedPass)
         );
-        schedule.pass_finished(T0 + 5_000, false);
+        schedule.pass_finished(T0 + 5_000, ScheduleOutcome::ForcedPass, false);
         let mut now = T0 + 5_000;
         let mut waits = Vec::new();
         while now < T0 + 5_000 + millis(FORCE_PASS_INTERVAL) {
@@ -351,19 +362,164 @@ mod tests {
         let mut passes = 0;
         while now < T0 + 4 * 3_600_000 {
             match schedule.decide(&store, now).await {
-                Decision::Pass(_) => {
+                Decision::Pass(outcome) => {
                     passes += 1;
                     now += 1_000;
-                    schedule.pass_finished(now, false);
+                    schedule.pass_finished(now, outcome, false);
                 }
                 Decision::Wait(wait, _) => now += millis(wait),
             }
         }
-        // Gaps of 1, 2, 4, 8 and 16 min, then one pass per 30 min: 12 passes
-        // in four hours, where a hint trusted blindly would run one every
-        // 30 s.
-        assert_eq!(passes, 12);
-        schedule.pass_finished(now, true);
+        // The fresh process's forced pass leaves the gap at 30 s; each
+        // hinted pass that finds nothing then doubles it: gaps of 30 s and 1,
+        // 2, 4, 8 and 16 min, then one pass per 30 min. 13 passes in four
+        // hours, where a hint trusted blindly would run one every 30 s.
+        assert_eq!(passes, 13);
+        schedule.pass_finished(now, ScheduleOutcome::HintedPass, true);
         assert_eq!(schedule.gap, PASS_GAP, "real work resets the gap");
+    }
+
+    /// Drive the schedule as the worker does: a pass takes a second, and a
+    /// wait is slept in full. Returns the time after the last step.
+    async fn drive_until(
+        schedule: &mut ClassificationSchedule,
+        store: &Scripted,
+        mut now: i64,
+        until: i64,
+        passes: &mut Vec<(i64, ScheduleOutcome)>,
+    ) -> i64 {
+        while now < until {
+            match schedule.decide(store, now).await {
+                Decision::Pass(outcome) => {
+                    passes.push((now, outcome));
+                    now += 1_000;
+                    schedule.pass_finished(now, outcome, false);
+                }
+                Decision::Wait(wait, _) => now += millis(wait),
+            }
+        }
+        now
+    }
+
+    /// #540 review, finding 1: hours of idle forced passes must not grow the
+    /// gap, or the next real change waits for the forced interval.
+    ///
+    /// The reviewer's reproduction: six idle hours on one node (twelve forced
+    /// passes, none doing any work, the hint silent throughout), then an item
+    /// lands 60 s after the latest forced pass. It must be passed within the
+    /// idle ceiling (plan §4: ≤ 2 min + apply lag + walk). Before the fix the
+    /// gap had doubled to 30 min and the decision was `Wait(1740 s, Gap)`.
+    #[tokio::test]
+    async fn a_change_after_idle_forced_passes_is_passed_within_the_idle_ceiling() {
+        let store = Scripted::new();
+        let mut schedule = ClassificationSchedule::new(T0);
+        let mut passes = Vec::new();
+        let mut now = drive_until(&mut schedule, &store, T0, T0 + 6 * 3_600_000, &mut passes).await;
+        // Run on to the end of the next forced pass.
+        let count = passes.len();
+        while passes.len() == count {
+            now = drive_until(&mut schedule, &store, now, now + 1, &mut passes).await;
+        }
+        assert!(passes.len() >= 12, "{} forced passes", passes.len());
+        assert!(passes
+            .iter()
+            .all(|(_, outcome)| *outcome == ScheduleOutcome::ForcedPass));
+        // The item lands 60 s after that pass ended; until then the worker
+        // keeps deciding on the silent hint.
+        let arrival = now + 60_000;
+        let mut now = drive_until(&mut schedule, &store, now, arrival, &mut passes).await;
+        assert_eq!(passes.len(), count + 1, "no pass while the library is idle");
+        store.hint.store(true, Ordering::SeqCst);
+        loop {
+            match schedule.decide(&store, now).await {
+                Decision::Pass(outcome) => {
+                    assert_eq!(outcome, ScheduleOutcome::HintedPass);
+                    break;
+                }
+                Decision::Wait(wait, outcome) => {
+                    assert!(
+                        now + millis(wait) - arrival <= millis(IDLE_TICK_MAX),
+                        "a change after {} idle forced passes waits {wait:?} ({outcome:?}); gap {:?}",
+                        passes.len(),
+                        schedule.gap
+                    );
+                    now += millis(wait);
+                }
+            }
+        }
+        assert!(now - arrival <= millis(IDLE_TICK_MAX));
+    }
+
+    /// #540 review, finding 1: a forced pass that found nothing leaves the gap
+    /// alone. An item that lands while a fresh process's forced pass walks
+    /// the library is passed after one `PASS_GAP`, not a doubled one.
+    #[tokio::test]
+    async fn a_forced_pass_that_found_nothing_does_not_grow_the_gap() {
+        let store = Scripted::new();
+        let mut schedule = ClassificationSchedule::new(T0);
+        assert_eq!(
+            schedule.decide(&store, T0).await,
+            Decision::Pass(ScheduleOutcome::ForcedPass)
+        );
+        schedule.pass_finished(T0 + 1_000, ScheduleOutcome::ForcedPass, false);
+        store.hint.store(true, Ordering::SeqCst);
+        assert_eq!(
+            schedule.decide(&store, T0 + 1_000).await,
+            Decision::Wait(PASS_GAP, ScheduleOutcome::Gap)
+        );
+        assert_eq!(
+            schedule.decide(&store, T0 + 1_000 + millis(PASS_GAP)).await,
+            Decision::Pass(ScheduleOutcome::HintedPass)
+        );
+    }
+
+    /// #540 review, finding 1: a hint that fired for nothing, went silent,
+    /// and fires again is firing for something new. The gap its false firing
+    /// grew is dropped the moment the hint reads silent, so the new firing
+    /// is passed within the idle ceiling.
+    #[tokio::test]
+    async fn a_silent_hint_ends_the_backoff_a_false_firing_grew() {
+        let store = Scripted::new();
+        let mut schedule = ClassificationSchedule::new(T0);
+        store.hint.store(true, Ordering::SeqCst);
+        let mut passes = Vec::new();
+        let now = drive_until(&mut schedule, &store, T0, T0 + 3_600_000, &mut passes).await;
+        assert!(
+            schedule.gap >= Duration::from_secs(16 * 60),
+            "the false firing backed off: {:?}",
+            schedule.gap
+        );
+        store.hint.store(false, Ordering::SeqCst);
+        // Decide on the silent hint until it idles (a forced pass may fall
+        // due first; it finds nothing).
+        let mut now = now;
+        loop {
+            match schedule.decide(&store, now).await {
+                Decision::Pass(outcome) => {
+                    now += 1_000;
+                    schedule.pass_finished(now, outcome, false);
+                }
+                Decision::Wait(wait, ScheduleOutcome::Idle) => {
+                    now += millis(wait);
+                    break;
+                }
+                Decision::Wait(wait, _) => now += millis(wait),
+            }
+        }
+        let arrival = now;
+        store.hint.store(true, Ordering::SeqCst);
+        loop {
+            match schedule.decide(&store, now).await {
+                Decision::Pass(_) => break,
+                Decision::Wait(wait, outcome) => {
+                    assert!(
+                        now + millis(wait) - arrival <= millis(IDLE_TICK_MAX),
+                        "a new firing waits {wait:?} ({outcome:?}); gap {:?}",
+                        schedule.gap
+                    );
+                    now += millis(wait);
+                }
+            }
+        }
     }
 }

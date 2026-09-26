@@ -2094,7 +2094,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # workers in `main.rs` are unchanged. None owns a producer, a process or a
 # recipe decision.
 # The merged value is 637: K-03's 629 plus exactly these eight.
-expected_occurrences = 637
+# 637 -> 638 with the #540 review round (finding 1), measured by zeroing
+# this row, test-only: the classification worker under test in
+# `library_search::tests::classification_a_change_after_idle_forced_passes_waits_only_the_idle_ceiling`,
+# stopped by its cancellation token and joined before the test returns. No
+# production spawn; it owns no producer, process or recipe decision.
+expected_occurrences = 638
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2968,7 +2973,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # value is the whole merged tree, measured by zeroing this row after the
 # merge: 1004, which is main's 997 plus exactly the seven K-10 shapes
 # reviewed above.
-expected_occurrences = 1004
+# 1004 -> 1007 with the #540 review round (finding 1), measured by zeroing
+# this row, all test-only (virtual clock) in `library_search::tests`: the six
+# idle hours, the 60 s wait after the last forced pass and the 250 ms
+# classification poll. No production timer; none paces or bounds a producer.
+expected_occurrences = 1007
 
 [[module_structures]]
 id = "bare-time-constructor"
