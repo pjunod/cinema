@@ -382,10 +382,27 @@ pub enum JobKind {
     MediaProbe,
 }
 
-/// Closed payload variants carry domain identifiers, never executable text,
-/// credentials, external URLs or caller-selected filesystem paths.
+impl JobKind {
+    /// Learners may compute immutable results, but never own catalogue scans
+    /// or provider passes. Every publication still uses its typed transaction.
+    pub const fn permits_artifact_execution(self) -> bool {
+        match self {
+            Self::TranscodePrepare
+            | Self::FragmentIndexBuild
+            | Self::ArtifactHydrate
+            | Self::SubtitleExtract
+            | Self::ArtifactVerify
+            | Self::ArtworkDerivative
+            | Self::SemanticEmbedding
+            | Self::MediaProbe => true,
+            Self::LibraryScan | Self::MetadataRefresh => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+/// Closed payloads contain identifiers, never executable text or caller-selected paths.
 pub enum JobPayload {
     TranscodePrepare {
         file_id: i64,
@@ -993,6 +1010,8 @@ pub trait BackgroundJobStore: Send + Sync {
         replacement: crate::cluster::coordination::Lease,
     ) -> Result<EnqueueOutcome, StoreError>;
     async fn claim_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError>;
+    /// Narrow entry point shared by voter and learner artifact workers.
+    async fn claim_artifact_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError>;
     async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError>;
     async fn job_labels(&self, ids: &[String]) -> Result<Vec<JobLabel>, StoreError>;
     async fn job_counts(&self, now_ms: i64) -> Result<Vec<JobCount>, StoreError>;
@@ -1878,6 +1897,15 @@ impl<T: QueueSql> BackgroundJobStore for T {
             });
         }
         Ok(outcome)
+    }
+
+    async fn claim_artifact_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError> {
+        if !request.kind.permits_artifact_execution() {
+            return Err(invalid(
+                "artifact workers cannot claim catalogue or provider work",
+            ));
+        }
+        self.claim_job(request).await
     }
 
     async fn claim_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError> {

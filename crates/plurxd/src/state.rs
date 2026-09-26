@@ -5724,7 +5724,10 @@ impl JobManager {
             loop {
                 let kinds = [JobKind::TranscodePrepare];
                 let before = crate::background_jobs::accepted_claims(&kinds);
-                if self.may_run_cluster_jobs().await
+                if self
+                    .job_authority
+                    .may_execute_job(JobKind::TranscodePrepare)
+                    .await
                     && self.job_interval(keys::JOB_CACHE_PRODUCE_MINS).await > 0
                 {
                     Arc::clone(&self)
@@ -5740,12 +5743,19 @@ impl JobManager {
             loop {
                 let kinds = [JobKind::FragmentIndexBuild, JobKind::ArtifactHydrate];
                 let before = crate::background_jobs::accepted_claims(&kinds);
-                if self.may_run_cluster_jobs().await
+                if self
+                    .job_authority
+                    .may_execute_job(JobKind::FragmentIndexBuild)
+                    .await
                     && self.cluster_fragment_index_enabled().await
                     && !self.cluster_index_working.swap(true, Ordering::AcqRel)
                 {
                     let _guard = ClusterIndexWorkingGuard(Arc::clone(&self));
-                    self.enqueue_fragment_deliveries().await;
+                    // Outbox admission is still voter-owned; learners only
+                    // consume already-authorized immutable work for a target.
+                    if self.may_run_cluster_jobs().await {
+                        self.enqueue_fragment_deliveries().await;
+                    }
                     self.drain_cluster_fragment_index_slot(Arc::clone(&transcode))
                         .await;
                 }

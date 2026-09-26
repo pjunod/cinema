@@ -223,6 +223,16 @@ Idle consumers poll with local jitter and make no empty-queue writes. Metrics
 read cached observations; Activity exposes paged work and attempt history.
 Developer prerequisites are advisory and never veto saving enable preferences.
 
+Library intent and results use the same queue, with the existing catalogue
+lease bound to the exact attempt. Ready learners may execute immutable
+preparation, indexing and hydration through the artifact-only claim interface;
+scans, provider coordination, discovery and outbox admission remain voter work.
+Renewal and publication recheck live execution authority. Named library-root
+storage domains share two reader slots across aliases; unmapped work shares
+the global fallback. Provider requests use a replicated pacing/cooldown ledger
+across library, artwork and genre maintenance. These records participate in
+backup import and the replicated-state digest.
+
 Cutover seals old accepted requests in a finite backlog, drains bounded pages
 without losing capacity-refused work, and removes the old execution APIs.
 Operators must quiesce old workers before conversion; mixed old/new execution

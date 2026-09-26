@@ -1948,3 +1948,135 @@ async fn background_provider_budget_is_shared_charged_once_and_keeps_cooldowns()
     })
     .await;
 }
+
+#[tokio::test]
+async fn background_artifact_claim_cannot_adopt_catalogue_or_provider_authority() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "artifact-only-claim").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let library_id = store
+            .get_item(file.item_id)
+            .await
+            .expect("item")
+            .expect("item")
+            .library_id;
+        for (index, payload) in [
+            JobPayload::LibraryScan {
+                library_id,
+                generation: "library-work-v1".into(),
+            },
+            JobPayload::MetadataRefresh {
+                library_id,
+                generation: "library-work-v1".into(),
+            },
+            JobPayload::MediaProbe {
+                file_id,
+                source_generation: "source:1".into(),
+                probe_digest: "c".repeat(64),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let kind = payload.kind();
+            let id = uuid::Uuid::new_v4().to_string();
+            store
+                .enqueue_job(EnqueueJob {
+                    id: id.clone(),
+                    payload,
+                    dedupe_key: format!("artifact-scope:{index}"),
+                    priority: 1,
+                    not_before_ms: 1_000,
+                    now_ms: 1_000,
+                    request: JobRequest {
+                        scope: "artifact-scope".into(),
+                        request_id: id.clone(),
+                        request_digest: "d".repeat(64),
+                        consumer_kind: "test".into(),
+                        consumer_ref: id.clone(),
+                        target_node_id: None,
+                        deadline_ms: None,
+                        retain_identity: false,
+                    },
+                })
+                .await
+                .expect("enqueue");
+            let request = ClaimJob {
+                job_id: id.clone(),
+                expected_revision: 0,
+                node_id: "artifact-worker".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind,
+                payload_version: 1,
+                now_ms: 1_000,
+                dispatched_at_ms: 1_000,
+            };
+            if kind.permits_artifact_execution() {
+                assert!(
+                    matches!(
+                        store
+                            .claim_artifact_job(request)
+                            .await
+                            .expect("artifact scope"),
+                        ClaimOutcome::Claimed { .. }
+                    ),
+                    "{backend}"
+                );
+            } else {
+                assert!(
+                    store.claim_artifact_job(request.clone()).await.is_err(),
+                    "{backend}: {kind:?}"
+                );
+                assert!(
+                    store
+                        .job_attempts(&id)
+                        .await
+                        .expect("no attempt")
+                        .is_empty(),
+                    "{backend}"
+                );
+                assert!(matches!(
+                    store
+                        .claim_job(request.clone())
+                        .await
+                        .expect("voter coordinator"),
+                    ClaimOutcome::Claimed { .. }
+                ));
+                // Even knowing a live coordinator's exact claim identity cannot
+                // smuggle it through artifact acknowledgement replay.
+                assert!(
+                    matches!(
+                        store
+                            .claim_artifact_job(ClaimJob {
+                                kind: JobKind::MediaProbe,
+                                ..request
+                            })
+                            .await
+                            .expect("wrong-kind replay"),
+                        ClaimOutcome::Unsupported
+                    ),
+                    "{backend}"
+                );
+                let token = store
+                    .background_job(&id)
+                    .await
+                    .expect("job")
+                    .expect("job")
+                    .token
+                    .expect("token");
+                store
+                    .settle_job(SettleJob {
+                        token,
+                        settlement: JobSettlement::Stop {
+                            error_code: "scope_fixture_complete".into(),
+                        },
+                        now_ms: 1_001,
+                    })
+                    .await
+                    .expect("cleanup");
+            }
+        }
+    })
+    .await;
+}

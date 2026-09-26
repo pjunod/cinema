@@ -529,6 +529,7 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "enqueue_job_fenced",
     "retry_background_job",
     "claim_job",
+    "claim_artifact_job",
     "resolve_claim",
     "job_labels",
     "job_counts",
@@ -17556,7 +17557,7 @@ fn contract_inventory_matches_every_store_method() {
     // E0 adds the catalogue/queue dual-owner binding.
     // Three library admission/query/completion operations preserve each caller.
     // +2: replicated root-domain observation and atomic replacement.
-    assert_eq!(declared.len(), 423, "review the Store method count");
+    assert_eq!(declared.len(), 424, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

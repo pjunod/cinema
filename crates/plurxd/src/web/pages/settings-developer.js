@@ -322,6 +322,7 @@ function durableQueueCard(settings,readiness){
     <input type="hidden" id="durable-cadence" value="${cadence>0?cadence:360}">
     <p class="hint">Pre-transcoding still uses the configured <a href="#/settings/maintenance">cache disk budget</a>. A zero budget leaves no room for production. Queue cleanup and cancellation remain active while workers are paused.</p>
     <details class="setdetails" open><summary>Requirements and current observations</summary><div class="setdetails-body">
+      ${devReq(readiness,"durable_cluster_work","durable_role","Worker authority","Ready learners can prepare immutable artifacts. Library scans and provider coordination remain voter work.")}
       ${devReq(readiness,"durable_cluster_work","durable_store","Durable storage responds","Accepted work needs the replicated Store, or the local Store on a standalone server.")}
       ${devReq(readiness,"durable_cluster_work","durable_tools","Compatible tools","A worker needs decoders and the exact output recipe required by its job.")}
       ${devReq(readiness,"durable_cluster_work","durable_capacity","Spare capacity","Live playback takes precedence. Heavy jobs share one local lane and bounded source I/O across the cluster.")}
