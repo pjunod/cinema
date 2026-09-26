@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — current main is `116559cb8761` after D-03 #534 merged green. A-04 PR #527 targets Android 131 and Apple 188. Internal PDF/EPUB physical acceptance, A-04 D3, current-main fleet rollout and duration evidence remain open. The separate external-reader exchange remains refused pending authorization. · **Updated:** 2026-09-26 22:27 UTC · **Main:** `116559cb8761`
+**Status:** open — current main is `116559cb8761` after D-03 #534 merged green. A-04 PR #527 targets Android 131 and Apple 188. Internal PDF/EPUB physical acceptance, A-04 D3, current-main fleet rollout and duration evidence remain open. The separate external-reader exchange remains refused pending authorization. · **Updated:** 2026-09-26 22:53 UTC · **Main:** `116559cb8761`
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
@@ -29,10 +29,15 @@ the former four-rung ladder. Commits `630c8ad9a` and `e5a225c02` type the
 Auto timer and prepared video element, lower the checked TypeScript baseline
 from 536 to 531 diagnostics, and align the floor/offline expectations with
 the shipped six rungs. `scripts/web-types --base forgejo/main` and the three
-focused pinned Rust tests passed locally. One corrected exact-head fast lane
-is pending. This does not change the failed Chrome D3 measurement or its
-unchanged 100 ms gap criterion; Firefox, Safari, HDR, and physical native
-traces remain owed.
+focused pinned Rust tests passed locally. Corrected fast lane
+[#3295](http://192.168.4.7:3000/noirr/plurx/actions/runs/3295) passed policy,
+mobile versions, Apple and Android, then found one omitted
+`preparedControlPending` Player typedef field in its web job. Commit
+`c87759123` declares it; the focused typedef contract and web TypeScript
+ratchet pass locally. Rust and Windows subsequently passed on that previous
+head; only the web typedef omission failed. Another exact-head gate is owed. This does not change the failed
+Chrome D3 measurement or its unchanged 100 ms gap criterion; Firefox, Safari,
+HDR, and physical native traces remain owed.
 
 ## Sole adversarial review and fast lane
 
