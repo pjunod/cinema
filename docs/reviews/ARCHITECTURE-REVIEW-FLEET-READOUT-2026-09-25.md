@@ -2,7 +2,7 @@
 
 **Status:** first-hour readout, mixed builds · **Starting build:** `f600d28230222005441cfc62301c306785c852ce` · **Observed:** 2026-09-25 02:24–03:29 UTC
 
-**Main movement at 21:52 UTC:** PR #533 merged as `0915b3ee9e62` while all four nodes and physical installs remained on `8ae8cab1e136`. The 8ae8 collector continues only as a historical exact-build interval; no 24-hour, seven-day, or final-main acceptance can be carried over. Redeployment is paused for coordination.
+**Main movement:** PR #533 merged as `0915b3ee9e62` at 21:52 UTC; PRs #528, #511, #530 and #405 advanced main to `ea215603f` by 2026-09-26 00:03 UTC. All four nodes and physical installs remained on `8ae8cab1e136`. The closed 8ae8 hour is historical exact-build evidence; no 24-hour, seven-day or final-main acceptance carries over. Redeployment waits for final code/evidence merge.
 
 This appendix records read-only evidence for [K-02](../cluster/RAFT-SNAPSHOT-CADENCE-AND-CONSISTENT-CUT.md), [C-05](../server/DETAIL-READS-AND-STORAGE-AVAILABILITY.md), [C-08](../server/OBSERVABILITY-BASELINE.md), [P-02](../ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md), and [S-11](../streaming/CODEC-AND-GPU-QUALIFICATION.md). It supplements the [deployment record](ARCHITECTURE-REVIEW-FLEET-EVIDENCE-2026-09-24.md) on the integration branch. The four current nodes are `nynuc` (192.168.5.236), `m6` (192.168.4.14), `nuc4` (192.168.4.8), and learner `nuc3` (192.168.4.7); older plan aliases are not additional machines.
 
@@ -725,3 +725,22 @@ negative `fragment_indexes` markers everywhere: positive/total counts were
 Zero pending markers do not prove active postdeploy backfill or M3 storage
 availability. Sanitized receipt SHA-256
 `cab73129961001ddc1c3a80650441c20143d4e05172f26888a9fd689e250d350`.
+
+## Historical Google TV library revisit — 22:33–22:40 UTC
+
+On the signed Release128 Google TV Streamer still running source
+`8ae8cab1e136`, the Movies grid already had all 459 items cached. Four
+Everything↔Unwatched cycles held 459/459 loaded with 459 versus 328 matching
+items, without a premature empty state. After 100 rapid vertical swipes,
+the end viewport contained three clickable cards, consistent with 459 items
+in four columns; ten further swipes left that viewport unchanged.
+
+`dumpsys gfxinfo` over the grid/filter window recorded 561 frames, 43 janky
+(7.66%), with p50/p90/p95/p99 frame times of 16/25/36/48 ms. This was on
+Google TV, not the named Lenovo 6,000-title category, and the p95/p99 values
+do not meet a 16 ms bar. The category cache prevented a fresh first-page
+request observation. The historical collector had stopped before this visit
+and retained aggregate HTTP counts only, so it cannot supply per-route
+offset/page counts; a full 459-item order/duplicate scan was not performed.
+A-03 acceptance remains open. Sanitized receipt SHA-256
+`f33299ff467954e487863c12e4fe6201341488507fc774ccc06a079552f2f221`.
