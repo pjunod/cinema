@@ -628,6 +628,56 @@ enum LinuxBootstrapPhase {
     FirstNotificationResponse,
 }
 
+/// The points of a decode-fact probe's source-identity observation that a
+/// test can delay (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
+///
+/// The source holds one of these in every build, so its layout and the
+/// observation's calls are the same in the test and release binaries: the
+/// delay is read from the hook and handed to the blocking identity syscall
+/// owner, which sleeps only when it is non-zero. Production installs
+/// [`NoopDecodeFactSourceHooks`]; tests install [`IdentityDelays`] through
+/// `with_identity_delay` and `with_final_identity_delay`. The delay's length
+/// is still a test artefact: what this makes identical is the struct and the
+/// path the observation takes, not its timing.
+pub(crate) trait DecodeFactSourceHooks: Send + Sync {
+    /// Held inside the first source-identity observation, before its read.
+    fn initial_identity_delay(&self) -> Duration;
+
+    /// Held inside the final source-identity observation, before its read.
+    fn final_identity_delay(&self) -> Duration;
+}
+
+/// What production installs: no observation is delayed.
+pub(crate) struct NoopDecodeFactSourceHooks;
+
+impl DecodeFactSourceHooks for NoopDecodeFactSourceHooks {
+    fn initial_identity_delay(&self) -> Duration {
+        Duration::ZERO
+    }
+
+    fn final_identity_delay(&self) -> Duration {
+        Duration::ZERO
+    }
+}
+
+/// The delays the source-identity race tests install.
+#[cfg(test)]
+struct IdentityDelays {
+    initial: Duration,
+    last: Duration,
+}
+
+#[cfg(test)]
+impl DecodeFactSourceHooks for IdentityDelays {
+    fn initial_identity_delay(&self) -> Duration {
+        self.initial
+    }
+
+    fn final_identity_delay(&self) -> Duration {
+        self.last
+    }
+}
+
 /// A held source descriptor and the exclusive ownership lane for every child
 /// that can seek its shared open-file description.
 #[derive(Clone)]
@@ -637,10 +687,9 @@ pub(crate) struct DecodeFactSource {
     /// The class and purpose of every probe run for this source: the
     /// caller's, since only it knows whether a viewer is waiting.
     work: crate::process_control::ChildWork,
-    #[cfg(test)]
-    initial_identity_delay: Duration,
-    #[cfg(test)]
-    final_identity_delay: Duration,
+    /// The observation delays; see [`DecodeFactSourceHooks`]. Shared by
+    /// clones, since a clone is the same source.
+    hooks: Arc<dyn DecodeFactSourceHooks>,
 }
 
 impl DecodeFactSource {
@@ -653,10 +702,7 @@ impl DecodeFactSource {
             handle,
             offset_gate,
             work,
-            #[cfg(test)]
-            initial_identity_delay: Duration::ZERO,
-            #[cfg(test)]
-            final_identity_delay: Duration::ZERO,
+            hooks: Arc::new(NoopDecodeFactSourceHooks),
         }
     }
 
@@ -671,34 +717,28 @@ impl DecodeFactSource {
 
     #[cfg(test)]
     fn with_identity_delay(mut self, delay: Duration) -> Self {
-        self.initial_identity_delay = delay;
+        self.hooks = Arc::new(IdentityDelays {
+            initial: delay,
+            last: self.hooks.final_identity_delay(),
+        });
         self
     }
 
     #[cfg(test)]
     pub(crate) fn with_final_identity_delay(mut self, delay: Duration) -> Self {
-        self.final_identity_delay = delay;
+        self.hooks = Arc::new(IdentityDelays {
+            initial: self.hooks.initial_identity_delay(),
+            last: delay,
+        });
         self
     }
 
-    #[cfg(test)]
     fn initial_identity_delay(&self) -> Duration {
-        self.initial_identity_delay
+        self.hooks.initial_identity_delay()
     }
 
-    #[cfg(not(test))]
-    fn initial_identity_delay(&self) -> Duration {
-        Duration::ZERO
-    }
-
-    #[cfg(test)]
     fn final_identity_delay(&self) -> Duration {
-        self.final_identity_delay
-    }
-
-    #[cfg(not(test))]
-    fn final_identity_delay(&self) -> Duration {
-        Duration::ZERO
+        self.hooks.final_identity_delay()
     }
 }
 
@@ -5612,6 +5652,56 @@ void probe_main(unsigned long *stack) {
             .await
             .expect("detached source observation finishes")
             .expect("probe ownership returns after the syscall owner exits");
+    }
+
+    /// M8's shipped-shape test for the decode-fact source: the production
+    /// constructor (no-op hooks) runs the blocked-identity test's scenario —
+    /// same fixture probe, same source, same 100 ms budget — and, with no
+    /// observation delayed, the source-identity observation finishes inside
+    /// the budget, the probe runs, and the single probe lane is free when the
+    /// call returns.
+    /// Acceptance runs it in the release profile
+    /// (`cargo test --release -p plurxd decode_fact_source_shipped_shape`).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn decode_fact_source_shipped_shape() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = root.path().join("ffprobe-test");
+        executable(
+            &probe,
+            "#!/bin/sh\nprintf '%s\\n' 'ffprobe version source-identity'\n",
+        );
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
+            .await
+            .expect("fixture identity");
+        let media = root.path().join("media.bin");
+        std::fs::write(&media, b"source").expect("media");
+        let source = DecodeFactSource::new(
+            Arc::new(std::fs::File::open(media).expect("open media")),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            TEST_FACT_WORK,
+        );
+        let cache = DecodeFactCache::new();
+        let ownership = Arc::clone(&cache.probe_gate);
+        let result = cache
+            .get_or_probe(
+                &identity,
+                source,
+                None,
+                ProbeStreamSelection::FirstPlayable,
+                Duration::from_millis(100),
+                None,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(DecodeFactError::InvalidJson(_))),
+            "the undelayed observation finishes inside the budget, so the fixture probe runs \
+             and its (non-JSON) output is what fails, not the deadline: {result:?}"
+        );
+        assert!(
+            Arc::clone(&ownership).try_acquire_owned().is_ok(),
+            "an undelayed observation has returned the single probe lane"
+        );
     }
 
     #[cfg(target_os = "linux")]
