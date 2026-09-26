@@ -182,7 +182,7 @@ async function saveLiveTvSettings(button){
     live_tv_max_sessions:Number(document.getElementById("ltlimit").value),
     live_tv_output_height:720,
     live_tv_max_output_height:Number(document.getElementById("ltheight").value)},button);
-  if(saved&&typeof saved==="object") replaceLiveTvCard("live-tv-settings",liveTvSettingsCard(saved),"ltenable");
+  if(saved&&typeof saved==="object") replaceLiveTvCard("live-tv-settings",liveTvSettingsCard(saved),"ltip");
   return !!saved;
 }
 async function checkLiveTvReadiness(button){

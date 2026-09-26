@@ -1597,29 +1597,38 @@ async function main() {
     assert.equal(items.some(item => item.tab === "settings"), false);
   });
 
-  await test("settings separate disabled configuration, enable, and exact physical-fence recovery", async () => {
-    const writes = [], settings = { live_tv_enabled: false, live_tv_config_generation: 8,
-      live_tv_transition_from_owner_node_id: "owner-a", live_tv_transition_drain_before: 6 };
-    const nodes = { ltip: { value: " 10.42.4.99 " }, ltowner: { value: "owner-b" },
-      ltlimit: { value: "2" }, ltheight: { value: "720" }, ltfenced: { checked: false },
-      "live-tv-settings": { classList: { contains: () => false } } };
-    const controls = new Function("SETTINGS", "document", "liveTvSettingsWrite", "toast",
-      `${shipped("saveLiveTvSettings")}${shipped("setLiveTvEnabled")}${shipped("recoverLiveTvOwner")}
-       return {saveLiveTvSettings,setLiveTvEnabled,recoverLiveTvOwner};`)(
-      settings, { getElementById: id => nodes[id] }, async body => writes.push(body), () => {});
-    await controls.saveLiveTvSettings();
-    assert.deepEqual(writes.pop(), { live_tv_config_generation: 8, live_tv_enabled: false,
-      live_tv_device_ipv4: "10.42.4.99", live_tv_owner_node_id: "owner-b", live_tv_max_sessions: 2,
-      live_tv_output_height: 720, live_tv_max_output_height: 720 });
-    await controls.setLiveTvEnabled(true);
-    assert.deepEqual(writes.pop(), { live_tv_config_generation: 8, live_tv_enabled: true });
-    await controls.recoverLiveTvOwner(); assert.equal(writes.length, 0);
-    nodes.ltfenced.checked = true; await controls.recoverLiveTvOwner();
-    assert.deepEqual(writes.pop(), { live_tv_config_generation: 8, live_tv_fenced_owner: {
-      owner_node_id: "owner-a", drain_before_generation: 6, stopped_and_restart_prevented: true } });
-    settings.live_tv_enabled = true;
-    await controls.saveLiveTvSettings(); await controls.recoverLiveTvOwner();
-    assert.equal(writes.length, 0);
+  await test("cluster tuner configuration stays editable while enabled", async () => {
+    const writes = [], settings = { live_tv_enabled: true, live_tv_config_generation: 8 };
+    const nodes = { ltip: { value: " 10.42.4.99 " },
+      ltlimit: { value: "2" }, ltheight: { value: "720" } };
+    const save = new Function("SETTINGS", "document", "liveTvSettingsWrite",
+      `${shipped("saveLiveTvSettings")} return saveLiveTvSettings;`)(
+      settings, { getElementById: id => nodes[id] }, async body => { writes.push(body); return true; });
+    assert.equal(await save(), true);
+    assert.deepEqual(writes, [{ live_tv_config_generation: 8,
+      live_tv_device_ipv4: "10.42.4.99", live_tv_max_sessions: 2,
+      live_tv_output_height: 720, live_tv_max_output_height: 720 }]);
+  });
+
+  await test("Developer enable saves even when readiness is unmet or unavailable", async () => {
+    for (const readiness of ["Not met", "Readiness unavailable"]) {
+      const writes = [], saved = { live_tv_enabled: true, live_tv_config_generation: 9 };
+      const nodes = { "dev-live-tv-enable": { checked: true },
+        "dev-live-tv-readiness": { textContent: readiness },
+        "dev-live-tv-error": { textContent: "", isConnected: true } };
+      let cached;
+      const save = new Function("SETTINGS", "document", "api", "cacheSettings", "toast", "setCardSaved", "AbortSignal",
+        `${shipped("saveLiveTvEnable")} return saveLiveTvEnable;`)(
+        { live_tv_config_generation: 8 }, { getElementById: id => nodes[id] },
+        async (route, request) => { writes.push([route, request.method, request.body]); return saved; },
+        value => { cached = value; }, () => {}, button => { button.disabled = false; }, AbortSignal);
+      const button = { disabled: false, isConnected: true };
+      await save(button);
+      assert.deepEqual(writes, [["/settings", "PUT", { live_tv_config_generation: 8, live_tv_enabled: true }]]);
+      assert.equal(cached, saved);
+      assert.equal(nodes["dev-live-tv-error"].textContent, "");
+      assert.equal(button.disabled, false);
+    }
   });
 
   // ---- the shared guide cases, reproduced by the web renderer -------------
