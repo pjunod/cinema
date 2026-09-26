@@ -63,6 +63,7 @@ struct SettingsView: View {
                         Text(quality.label).tag(quality)
                     }
                 }
+                .accessibilityIdentifier("settings-quality")
                 Picker("Audio language", selection: audioBinding) {
                     ForEach(languages) { Text($0.name).tag($0.id) }
                 }
