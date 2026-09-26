@@ -179,6 +179,18 @@ impl CoordinationStore for HiqliteAuthStore {
             .await?
             == 1)
     }
+
+    async fn lease_expiry_hint(&self, resource: &str) -> Result<Option<i64>, StoreError> {
+        // A local replica read (`query_map`), never an authorization.
+        let rows = self
+            .client()
+            .query_map::<ExpiryRow, _>(
+                "SELECT expires_at_ms FROM job_leases WHERE resource = $1",
+                params!(resource),
+            )
+            .await?;
+        Ok(rows.first().map(|row| row.expires_at_ms))
+    }
 }
 
 struct LeaseRow {
@@ -187,6 +199,18 @@ struct LeaseRow {
     fence: i64,
     revision: i64,
     expires_at_unix_ms: i64,
+}
+
+struct ExpiryRow {
+    expires_at_ms: i64,
+}
+
+impl From<&mut Row<'_>> for ExpiryRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            expires_at_ms: row.get("expires_at_ms"),
+        }
+    }
 }
 
 struct CountRow {

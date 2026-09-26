@@ -454,6 +454,7 @@ const OUTBOX_METHODS: &[&str] = &[
     "due_watched",
     "settle_watched",
     "watched_outbox_counts",
+    "watched_outbox_hint",
 ];
 const CACHE_METHODS: &[&str] = &[
     "cache_hit",
@@ -597,7 +598,12 @@ const NETWORK_PRIOR_METHODS: &[&str] = &[
     "network_prior",
     "prune_network_priors",
 ];
-const COORDINATION_METHODS: &[&str] = &["acquire_lease", "renew_lease", "release_lease"];
+const COORDINATION_METHODS: &[&str] = &[
+    "acquire_lease",
+    "renew_lease",
+    "release_lease",
+    "lease_expiry_hint",
+];
 const MEDIA_SESSION_METHODS: &[&str] = &[
     "record_desired_selection",
     "desired_selection",
@@ -16746,7 +16752,13 @@ fn contract_inventory_matches_every_store_method() {
     // separate reads on both backends by
     // `watch_summary_and_progress_rails_match_the_separate_reads_on_every_backend`;
     // no new trait or supertrait.
-    assert_eq!(declared.len(), 390, "review the Store method count");
+    //
+    // 390 -> 392 for K-03's two local hints, `watched_outbox_hint` on
+    // `WatchedOutboxStore` and `lease_expiry_hint` on `CoordinationStore`.
+    // Both are non-consensus reads that decide only whether to ask the
+    // authority; `watched_outbox_and_lease_hints_follow_the_authority_locally`
+    // covers them on both backends. No new trait or supertrait of `Store`.
+    assert_eq!(declared.len(), 392, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -32642,4 +32654,240 @@ async fn hevc_full_attestation_survives_sampled_memos_on_every_backend() {
             .is_some());
     })
     .await;
+}
+
+/// The outbox hint and the lease-expiry hint are local reads that agree with
+/// the authority once it has applied, on both backends.
+///
+/// The replicated backend's answer comes from whichever replica the client
+/// reads, so the positive cases wait (boundedly) for the write to apply
+/// rather than assuming read-your-writes; that lag is exactly why the drain
+/// treats both as hints and still claims on the authority.
+#[tokio::test]
+async fn watched_outbox_and_lease_hints_follow_the_authority_locally() {
+    async fn eventually(
+        backend: &str,
+        what: &str,
+        mut probe: impl FnMut() -> std::pin::Pin<Box<dyn Future<Output = bool> + Send>>,
+    ) {
+        for _ in 0..200 {
+            if probe().await {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("{backend}: {what} never became visible to the local hint");
+    }
+
+    for_each_backend(|store, backend| async move {
+        assert!(
+            !store
+                .watched_outbox_hint()
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: empty hint: {error}")),
+            "{backend}: an empty outbox must not hint"
+        );
+        store
+            .enqueue_watched("{}")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}"));
+        let hinted = Arc::clone(&store);
+        eventually(backend, "an enqueued row", move || {
+            let store = Arc::clone(&hinted);
+            Box::pin(async move { store.watched_outbox_hint().await.unwrap_or(false) })
+        })
+        .await;
+        let claimed = store
+            .due_watched(10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"));
+        assert_eq!(claimed.len(), 1, "{backend}");
+        let quiet = Arc::clone(&store);
+        eventually(backend, "a claimed row leaving the hint", move || {
+            let store = Arc::clone(&quiet);
+            Box::pin(async move { !store.watched_outbox_hint().await.unwrap_or(true) })
+        })
+        .await;
+
+        assert_eq!(
+            store
+                .lease_expiry_hint("watched:outbox")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: absent lease hint: {error}")),
+            None,
+            "{backend}"
+        );
+        let now = 1_000_000;
+        let LeaseClaim::Acquired(lease) = store
+            .acquire_lease("watched:outbox", "node-a", now, now + 90_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: acquire: {error}"))
+        else {
+            panic!("{backend}: an absent lease must be acquired");
+        };
+        let leased = Arc::clone(&store);
+        eventually(backend, "an acquired lease", move || {
+            let store = Arc::clone(&leased);
+            let expected = lease.expires_at_unix_ms;
+            Box::pin(async move {
+                store
+                    .lease_expiry_hint("watched:outbox")
+                    .await
+                    .ok()
+                    .flatten()
+                    == Some(expected)
+            })
+        })
+        .await;
+    })
+    .await;
+}
+
+/// K-03 M1 on three real voters: an idle drain proposes only its forced
+/// claims.
+///
+/// Sixty one-second passes over an empty outbox with a configured Curator.
+/// Before the hint, every pass was a replicated `UPDATE … RETURNING` — sixty
+/// proposals a minute per voter. Now the first pass claims (a fresh drain
+/// trusts no hint) and the next forced claim is owed at 30 s, so exactly two
+/// proposals reach Raft; the settings pair is read once, and every pass pays
+/// one local read. A drain that ignores its hint fails the write count.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn an_idle_watched_drain_proposes_only_its_forced_claims_on_three_voters() {
+    use plurx_core::store::watched_drain::{TickOutcome, WatchedDrain, HINT_FORCE_INTERVAL};
+    use plurx_core::store::WatchedOutboxStore;
+
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated contract state");
+    let mut drain = WatchedDrain::new();
+    let start = std::time::Instant::now();
+
+    // Unconfigured (the fleet default): an idle minute claims nothing at
+    // all, not even the forced claim, and reads the settings pair once.
+    store.validation_reset_operation_counts();
+    for second in 0..60 {
+        let pass = drain
+            .pass(&store, start + std::time::Duration::from_secs(second), 20)
+            .await
+            .expect("unconfigured pass");
+        assert_eq!(pass.outcome, TickOutcome::SkippedUnconfigured);
+    }
+    let counts = store.validation_operation_counts();
+    assert_eq!(
+        counts.write_calls, 0,
+        "an unconfigured Curator claims nothing"
+    );
+    assert_eq!(counts.consistent_query_calls, 1);
+
+    store
+        .put_setting(
+            plurx_core::store::keys::MONARR_URL,
+            "http://curator.invalid",
+        )
+        .await
+        .expect("curator url");
+    store
+        .put_setting(plurx_core::store::keys::MONARR_API_KEY, "key")
+        .await
+        .expect("curator key");
+    drain.settings_changed();
+
+    let start = start + std::time::Duration::from_secs(60);
+    let mut outcomes = Vec::new();
+    store.validation_reset_operation_counts();
+    for second in 0..60 {
+        let pass = drain
+            .pass(&store, start + std::time::Duration::from_secs(second), 20)
+            .await
+            .expect("idle pass");
+        assert!(pass.rows.is_empty());
+        outcomes.push(pass.outcome);
+    }
+    let counts = store.validation_operation_counts();
+    assert_eq!(
+        counts.write_calls,
+        60 / HINT_FORCE_INTERVAL.as_secs(),
+        "an idle minute may propose only the forced claims at 0 s and 30 s: {outcomes:?}"
+    );
+    assert_eq!(
+        counts.consistent_query_calls, 1,
+        "the Curator settings pair is read once per refresh interval"
+    );
+    assert_eq!(
+        counts.non_consistent_query_calls, 60,
+        "one local hint per pass"
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == TickOutcome::EmptyClaim)
+            .count(),
+        2
+    );
+
+    // Work still flows: a local enqueue wakes the drain, and the very next
+    // pass claims the row on the authority whatever the replica shows.
+    store.enqueue_watched("{}").await.expect("enqueue");
+    drain.wake();
+    store.validation_reset_operation_counts();
+    let pass = drain
+        .pass(&store, start + std::time::Duration::from_secs(61), 20)
+        .await
+        .expect("woken pass");
+    assert_eq!(pass.outcome, TickOutcome::Claimed);
+    assert_eq!(pass.rows.len(), 1);
+    assert_eq!(store.validation_operation_counts().write_calls, 1);
+}
+
+/// K-03 M2's non-owner check is a local read: asking whether the drain's
+/// singleton lease is visibly live proposes nothing on three voters, where a
+/// blind `acquire_lease` against a held lease is still one proposal.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn a_lease_expiry_hint_proposes_nothing_on_three_voters() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated contract state");
+    let now = 1_000_000;
+    let LeaseClaim::Acquired(_) = store
+        .acquire_lease("watched:outbox", "node-a", now, now + 90_000)
+        .await
+        .expect("acquire")
+    else {
+        panic!("an absent lease must be acquired");
+    };
+
+    store.validation_reset_operation_counts();
+    for _ in 0..15 {
+        let _ = store
+            .lease_expiry_hint("watched:outbox")
+            .await
+            .expect("hint");
+    }
+    let counts = store.validation_operation_counts();
+    assert_eq!(counts.write_calls, 0, "a local lease read must not propose");
+    assert_eq!(counts.consistent_query_calls, 0);
+    assert_eq!(counts.non_consistent_query_calls, 15);
+
+    store.validation_reset_operation_counts();
+    let held = store
+        .acquire_lease("watched:outbox", "node-b", now + 1, now + 90_001)
+        .await
+        .expect("contested acquire");
+    assert!(matches!(held, LeaseClaim::Held { .. }));
+    assert_eq!(
+        store.validation_operation_counts().write_calls,
+        1,
+        "the acquire it replaces is a proposal even when the lease is held"
+    );
 }
