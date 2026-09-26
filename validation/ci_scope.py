@@ -141,6 +141,7 @@ WEB_LAYOUT_PATHS = (
     "tests/playback/playback-info-fields.json",
     "tests/ui-structure.golden",
     "tests/web/jsconfig-generated.test.js",
+    "tests/web/player-typedef.test.js",
     "tests/web/tsc-baseline.tsv",
     "tools/web-types/**",
 )

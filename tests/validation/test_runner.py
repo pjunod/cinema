@@ -195,6 +195,7 @@ class CatalogCase(unittest.TestCase):
             "tools/web-types/package-lock.json",
             "tests/web/tsc-baseline.tsv",
             "tests/web/jsconfig-generated.test.js",
+            "tests/web/player-typedef.test.js",
         ):
             with self.subTest(path=path):
                 self.assertTrue(scope_for_paths(catalog, (path,))["web_layout"])

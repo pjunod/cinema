@@ -255,7 +255,7 @@ const MSE_BACK_BYTES=12e6;
 const MSE_MIN_RESIDENT_BYTES=48e6;
 // `segSecs` is the longest segment this session publishes, once known.
 function bufferTargets(segSecs){
-  const p=PLAYER||{};
+  const p=/** @type {Player} */(PLAYER||{});
   // Only a copied stream puts the source's own bitrate on the wire. A
   // transcode's output is bounded by the rung, and its SOURCE bitrate says
   // nothing about what it will send — using it here would shrink the buffer on

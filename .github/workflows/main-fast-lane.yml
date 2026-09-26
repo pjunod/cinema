@@ -254,6 +254,7 @@ jobs:
         run: |
           node tests/web/jsconfig-generated.test.js
           scripts/web-types
+          node tests/web/player-typedef.test.js
 
   apple_compile:
     name: fast Apple compile

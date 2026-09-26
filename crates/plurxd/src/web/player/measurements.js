@@ -146,7 +146,7 @@ function newAttempt(reason){
   PLAYER.attemptAt=performance.now();
 }
 function playbackContext(){
-  const v=document.getElementById("video"), p=PLAYER||{};
+  const v=document.getElementById("video"), p=/** @type {Player} */(PLAYER||{});
   return {
     // What is on screen, not what was asked for — under Auto the request
     // carries no height at all, and a beacon that reported null would lose the

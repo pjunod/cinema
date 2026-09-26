@@ -3,7 +3,7 @@
 # with `scripts/web-types --update`. Columns: path, code, count.
 # accepted 2026-09-26: initial baseline: the web shell as it stood when this gate began
 crates/plurxd/src/web/core/api.js	TS2322	1
-crates/plurxd/src/web/core/api.js	TS2339	15
+crates/plurxd/src/web/core/api.js	TS2339	9
 crates/plurxd/src/web/core/auth.js	TS2304	10
 crates/plurxd/src/web/core/auth.js	TS2339	2
 crates/plurxd/src/web/core/auth.js	TS2554	3
@@ -62,11 +62,11 @@ crates/plurxd/src/web/pages/users-admin.js	TS2363	1
 crates/plurxd/src/web/player/audio-sync.js	TS2339	7
 crates/plurxd/src/web/player/autoplay-next.js	TS2339	1
 crates/plurxd/src/web/player/autoplay-next.js	TS2551	1
-crates/plurxd/src/web/player/decode-margin.js	TS2339	11
+crates/plurxd/src/web/player/decode-margin.js	TS2339	6
 crates/plurxd/src/web/player/decode-tiers.js	TS2322	1
 crates/plurxd/src/web/player/decode-tiers.js	TS2339	12
 crates/plurxd/src/web/player/directed-change.js	TS2339	8
-crates/plurxd/src/web/player/measurements.js	TS2339	21
+crates/plurxd/src/web/player/measurements.js	TS2339	7
 crates/plurxd/src/web/player/measurements.js	TS2345	1
 crates/plurxd/src/web/player/menus.js	TS2339	3
 crates/plurxd/src/web/player/player.js	TS2339	1
@@ -78,7 +78,7 @@ crates/plurxd/src/web/player/projection-chrome.js	TS2339	1
 crates/plurxd/src/web/player/projection-chrome.js	TS2551	1
 crates/plurxd/src/web/player/stall-diagnosis.js	TS2339	16
 crates/plurxd/src/web/player/stall-diagnosis.js	TS2551	2
-crates/plurxd/src/web/player/stats.js	TS2339	114
+crates/plurxd/src/web/player/stats.js	TS2339	53
 crates/plurxd/src/web/player/stats.js	TS2345	2
 crates/plurxd/src/web/player/stats.js	TS2551	2
 crates/plurxd/src/web/player/surface.js	TS2339	5

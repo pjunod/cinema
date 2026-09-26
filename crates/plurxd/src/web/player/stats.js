@@ -323,7 +323,7 @@ function playbackSamplingTick(v,p){
   updatePlayerMediaSession(v,p);
 }
 function playbackStatsTelemetry(){
-  const p=PLAYER||{},v=playbackOwnsAttachedMedia(PLAYER)?document.getElementById("video"):null,s=p.source||{},h=p.health||null;
+  const p=/** @type {Player} */(PLAYER||{}),v=playbackOwnsAttachedMedia(PLAYER)?document.getElementById("video"):null,s=p.source||{},h=p.health||null;
   const audio=p.audio&&p.audio[p.curAudio];
   const encoder=(h&&h.encoder)||p.encoder||null;
   const rung=p.autoHeight?`${p.autoHeight}p`:null;

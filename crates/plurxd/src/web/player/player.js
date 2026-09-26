@@ -4,6 +4,187 @@
 //  direct_play → native <video>, client-side seek/resume
 //  remux       → progressive fMP4 from ffmpeg, server fast-seek for resume
 //  transcode   → HLS via hls.js (ffmpeg tone-maps/re-encodes), offset resume
+/**
+ * The one playback object. `buildPlayer()` (decode-tiers.js) mints a new one
+ * per title and every reopen mutates it in place; the idle literal below is
+ * what the page holds before the first play and after a close. Fields that
+ * literal does not carry are optional here, which with `strict` off only
+ * means "may be absent"; a property this list does not name is a diagnostic
+ * `scripts/web-types` reports (docs/clients/WEB-TYPE-CHECKING-AND-PLAYER-
+ * DECOMPOSITION.md §3.4). Server documents are `any` on purpose: typing
+ * them is a later ratchet, and a wrong type here is worse than none.
+ * Times are film seconds unless the name says `Ms` or `At`; `At` is a
+ * `performance.now()` or epoch millisecond reading as the comment says.
+ * @typedef {Object} Player
+ *
+ * Identity and the decision
+ * @property {number|null} fileId          the media file being played
+ * @property {string} [title]
+ * @property {any} [meta]                  the item card's metadata (book parts, poster, episode facts)
+ * @property {string} [method]             direct_play | remux | transcode — mutates as the session moves
+ * @property {string} [decidedMethod]      the DECISION's method; never mutated (sessionHeight)
+ * @property {any} [capsSnapshot]          the capability document the decision was asked with
+ * @property {boolean} [requiresHls]       the delivery can only be served as HLS
+ * @property {any} [decodeRetest]          a learned decode limit this open is re-testing
+ * @property {any} [learnedLimit]          the learned decode-limit view the decision was rerouted by
+ * @property {string[]} [reasons]          the decision's reasons, for the stats panel
+ * @property {number} [declared]           the container's declared audio offset, ms
+ * @property {boolean} [transcodeAudio]
+ * @property {boolean} [preserveDolbyVision]
+ * @property {boolean} [requestHdr10]      what `/decision` asked the session to preserve; survives reopens
+ * @property {string|null} deliveredRange  the grade on the wire (decision, then each session's report)
+ * @property {number|null} deliveredDvProfile
+ * @property {boolean} [copyHls]           the HLS session copies the video stream
+ * @property {boolean} [vod]               the session answered with a VOD (fixed) playlist
+ * @property {string|null} [encoder]       the session's encoder, once one reports
+ *
+ * Position and duration
+ * @property {number} offset               film position of media-time zero, seconds
+ * @property {number} knownDur             duration the item card knew, ms
+ * @property {number} durMs                best known duration, ms
+ * @property {number} bookOffset           audiobook: this part's offset in the book, ms
+ * @property {number} bookDuration         audiobook: whole-book duration, ms
+ * @property {any[]|null} bookParts        audiobook: the parts, in order
+ * @property {number|null} [endedAt]       position of the last `ended` event
+ * @property {number} [endedTries]         consecutive `ended` events at the same position
+ * @property {number|null} [stallFrom]     position the current stall started at
+ *
+ * Tracks and subtitles
+ * @property {any[]} [audio]               the decision's audio tracks; `default` marks the effective one
+ * @property {any[]} [subs]                the decision's subtitle tracks
+ * @property {number} [curAudio]           index into `audio`
+ * @property {number} [curSub]             index into `subs`, -1 for none
+ * @property {number|null} [burnedSub]     the subtitle burned into the picture, if any
+ * @property {any} [preplay]               this playback's pre-play track choice, carried across reopens
+ * @property {number} [aoffset]            the viewer's audio offset for this session, ms
+ * @property {any} [_subOff]               the subtitle-offset control's state
+ *
+ * Markers (intro / credits)
+ * @property {any[]} markers
+ * @property {boolean} autoskip
+ * @property {Set<any>} [_markerOffers]    markers already offered this playback
+ * @property {number} [_lastMarkerSkipEndMs]
+ *
+ * Source and URLs
+ * @property {any} source                  the decision's source facts (duration, container, streams)
+ * @property {string|null} [probeUrl]      the URL the current attach is reading
+ * @property {string|null} [directUrl]     the direct-play URL
+ * @property {string} [segSrc]             the HLS playlist the segment table was read from
+ * @property {number[]|null} [segTimes]    HLS segment start times, film seconds
+ * @property {number|null} [_segIdx]       segment the stats panel last located
+ * @property {any} [segBytes]              per-segment byte sizes, for the stats panel
+ *
+ * The session
+ * @property {string|null} [sessionId]
+ * @property {string|null} [streamId]
+ * @property {any} [health]                the session's last health report
+ * @property {number} [healthObservedAt]   performance.now() the health report arrived
+ * @property {string|null} [attemptId]     `a<n>`, one per open attempt (stats and telemetry)
+ * @property {string|null} [attemptReason] cold-start | resume | seek | quality | …
+ * @property {number} [attemptAt]          performance.now() at the attempt
+ * @property {any} [openToken]             the open attempt's token (PLAY_OPEN_GATE)
+ * @property {any} [pendingOpenAttempt]    the open attempt this player was minted for, until it settles
+ * @property {any} [retiringOpenAttempt]   an open attempt being retired by a reopen
+ * @property {Player|null} [mediaPredecessor] the outgoing player kept until preparation succeeds
+ * @property {boolean} [internalMediaReset] the next media reset is ours, not a fault
+ * @property {any} [mediaAttachment]       the current media attachment token
+ * @property {any} [terminalStop]          the stop that ended this player, once one did
+ * @property {boolean} [samplingStopped]
+ *
+ * hls.js
+ * @property {any} hls                     the Hls instance (typed `any` via types/globals.d.ts)
+ * @property {any} [hlsStartup]            the startup episode of the current attach (attachHls)
+ * @property {number} [hlsRetryUsed]       the one automatic hls.js retry, 0 or 1
+ * @property {boolean} [triedFallback]     the remux → transcode fallback was already taken
+ * @property {any} [bufTarget]             hls.js buffer targets (bufferTargets(): fwd, back, budget)
+ * @property {number} [bufSegSecs]         segment duration the buffer target was sized for
+ * @property {number} [_levelAt]           performance.now() of the last LEVEL_LOADED
+ * @property {boolean} [_levelLive]        the last loaded level was a live playlist
+ * @property {any} [_hlsEvt]               per-event-name hls.js counters for the stats panel
+ * @property {any} [marks]                 per-kind performance.now() marks (frag, …) for the stats panel
+ * @property {number} [_segFetch]          performance.now() of the last segment fetch
+ * @property {number} [_chaseAt]           performance.now() of the last live-edge chase
+ *
+ * Quality ladder and adaptive bitrate
+ * @property {any[]} [ladder]              the quality rungs on offer
+ * @property {number|null} [priorKbps]     the bandwidth estimate carried from the last playback
+ * @property {number|null} [autoHeight]    the rung Auto started or settled on
+ * @property {number|null} [autoRequestedHeight] the rung Auto last asked the server for
+ * @property {number|null} [bandwidthSeedBps] a replacement's inherited bandwidth estimate
+ * @property {any} [abr]                   the adaptive controller's per-playback state
+ * @property {any} [pendingMediaChange]    a quality or track change waiting for its session
+ * @property {string|null} [inFlightChangeKey] the change whose session is in flight
+ * @property {any} [bufferLimits]
+ *
+ * Start, stalls and recovery
+ * @property {boolean} started             the first frame has been presented
+ * @property {number} [playStartedAt]      performance.now() of the click
+ * @property {number|null} [ttffMs]        time to first frame
+ * @property {number} [stalls]
+ * @property {any} [stallsByKind]          {supply, decode, …} counts
+ * @property {number} [stallRecoveries]
+ * @property {any} [recoveringStall]       the stall-recovery snapshot in progress
+ * @property {any} [stallPrompt]
+ * @property {any} [hitches]               {back, …} small-stall counters
+ * @property {number} [hitchArmedAt]       performance.now() the hitch detector armed
+ * @property {number} [_hitchReported]     hitches already reported
+ * @property {any} [rescuedNote]           why a stall rescue changed the stream (stats panel)
+ * @property {string} [surfaceTranscodeReason] why the surface moved this playback to a transcode
+ * @property {any} [decodeInfo]            MediaCapabilities.decodingInfo() answer for this stream
+ * @property {number} [mediaRecoveries]    media-error recoveries this playback
+ * @property {number|null} [mediaRecoveredAtMs]
+ * @property {boolean} [refusedOriginal]   the browser refused the original stream
+ * @property {boolean} [decodeRescued]     a decode-limit rescue already fired
+ * @property {boolean} [autoFallbackInFlight] the one automatic session-open claim (claimAutoFallback)
+ * @property {number|null} [waitAt]       performance.now() the current wait began
+ * @property {number|null} [waitStartedRunway] buffer runway when that wait began, seconds
+ * @property {boolean} [waitReported]
+ * @property {number|null} [waitReportedMs]
+ * @property {string|null} [waitReportedDetail]
+ * @property {number|null} [waitNudgedAt]  the wait began-time a nudge was already spent on
+ * @property {any} [surfaceState]          the presenter's shared state (PLAYBACK_SURFACE)
+ *
+ * Playback control (the reporter and intent)
+ * @property {boolean} [wantsPlayback]     the viewer's intent, not the element's `paused`
+ * @property {any} [controlSeek]           the control-plane seek in flight
+ * @property {number} [controlSeekSequence]
+ * @property {number} [controlIntentGeneration]
+ * @property {number} [controlSequenceFloor]
+ * @property {number} [controlPresentedFrames]
+ * @property {boolean} [controlHasFrameCallbacks]
+ * @property {any} [controlFrameCancel]    cancels the frame-callback loop
+ * @property {any} [controlReporter]       the PlaybackControl reporter for this player
+ * @property {any[]} [controlWaiters]      callers waiting for the reporter's next exchange
+ * @property {number} [controlPresentationEpoch]
+ * @property {any} [controlLastPreparation] the last delivery.preparation the server reported
+ * @property {any} [controlRenderOverride] a prepared switch's render override, until committed
+ * @property {any} [controlObservationOverride] a prepared switch's observation override, until committed
+ * @property {any} [directedChange]        the directed quality/track change in flight
+ *
+ * Library channels
+ * @property {any} [libraryChannel]        the channel this playback follows, if any
+ * @property {boolean} [libraryChannelReplacing]
+ *
+ * Timers (DOM timer ids)
+ * @property {number|null} timer           the 5 s sampling / progress tick
+ * @property {number|null} idleTimer       control auto-hide
+ * @property {number|null} [stallTimer]
+ * @property {number|null} waitTimer
+ * @property {number|null} [progressTimer]
+ *
+ * Chrome, seek bar and menus
+ * @property {number|null} _seekPreview    seek-bar hover position, seconds
+ * @property {number|null} _seekPending    keyboard seek target, seconds
+ * @property {boolean} [_seekDragging]
+ * @property {number} [_seekToken]         generation of the latest seek
+ * @property {string} _lastFocusedControl  the control focus returns to
+ * @property {any} _opener                 the element that opened the player
+ * @property {any} _openerClick
+ * @property {any} [_menuOpener]
+ * @property {boolean} [_menuDismissedByPointer]
+ * @property {any} [_statsOpener]
+ */
+/** @type {Player} */
 let PLAYER={fileId:null,timer:null,offset:0,hls:null,knownDur:0,durMs:0,markers:[],source:null,started:false,idleTimer:null,autoskip:false,deliveredRange:null,deliveredDvProfile:null,waitTimer:null,bookOffset:0,bookDuration:0,bookParts:null,_seekPreview:null,_seekPending:null,_lastFocusedControl:"pbplay",_opener:null,_openerClick:null};
 let PENDING_LIBRARY_CHANNEL_PLAYBACK=null;
 let LIBRARY_CHANNEL_RETURN=null;

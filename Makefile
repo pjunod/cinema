@@ -1511,6 +1511,7 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	# docs/clients/WEB-TYPE-CHECKING-AND-PLAYER-DECOMPOSITION.md §3.
 	@node tests/web/jsconfig-generated.test.js
 	@scripts/web-types
+	@node tests/web/player-typedef.test.js
 	@scripts/contrast-check --from-index crates/plurxd/src/web/core/theme.js \
 		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
 		--allow scripts/contrast-allow.txt
