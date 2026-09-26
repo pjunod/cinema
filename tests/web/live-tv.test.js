@@ -16,7 +16,9 @@ function shipped(name) {
   assert.ok(match, `missing shipped function ${name}`);
   const start = match.index + 1, end = shell.indexOf("\n}", start);
   assert.ok(end > start, `missing closing brace for ${name}`);
-  return shell.slice(start, end + 2);
+  const feedback=["stopLiveTv","watchLiveTv","liveTvAttachSession","resumeLiveTv","pauseLiveTv"].includes(name)
+    ? shipped("liveTvPlaybackState")+"\n"+shipped("liveTvPlaybackFailure")+"\n" : "";
+  return feedback+shell.slice(start, end + 2);
 }
 
 function test(name, run) {
@@ -43,7 +45,233 @@ function memoryStorage() {
     removeItem: key => values.delete(key) };
 }
 
+// Exercise the shipped lifecycle against the real lease queue. Deferred starts,
+// play promises and fullscreen exits reproduce races without a tuner or clock waits.
+function startupHarness(options={}) {
+  const messages=[],starts=[],releases=[],polls=[];
+  let clock=1000,plays=0,loads=0;
+  const state={channels:["one","two"].map((id,i)=>({id,guide_number:`${i+1}.1`,guide_name:id,drm:false,support:"ready"})),serial:0};
+  const video={paused:true,currentTime:0,textTracks:[],canPlayType:()=>"maybe",
+    play(){plays++;return options.play?options.play(video):Promise.resolve();},
+    pause(){video.paused=true;video.onpause?.();},
+    removeAttribute(){video.src="";},load(){loads++;}};
+  const nodes={"live-tv-video":video,"live-tv-host":{hidden:true,dataset:{mode:"slot"}},
+    "live-tv-status":{hidden:true,dataset:{}},"live-tv-status-text":{},
+    "live-tv-status-play":{},"live-tv-status-retry":{},
+    "live-tv-status-offers":{children:[],replaceChildren(){this.children=[];},append(button){this.children.push(button);}}};
+  const lease=new liveTv.Lease({
+    start:async id=>{starts.push(id);return options.start?options.start(id):{session_id:`cap-${id}`};},
+    release:async id=>{releases.push(id);},
+    status:async()=>options.status?options.status():{state:"active"},keepalive:async()=>{},
+  });
+  const document={getElementById:id=>nodes[id]||null,visibilityState:"visible",querySelectorAll:()=>[],
+    createElement:()=>({addEventListener(name,fn){this[name]=fn;}})};
+  const functions=["liveTvPlaybackState","liveTvPlaybackFailure","detachLiveTvMedia","stopLiveTv",
+    "watchLiveTv","liveTvAttachSession","resumeLiveTv","pauseLiveTv","liveTvNow","liveTvWatchChannel"];
+  const controls=new Function("LIVE_TV","LIVE_TV_LEASE","document","PlurxLiveTv","performance","setInterval","clearInterval","options","messages",
+    `const location={hash:'#/live-tv'},PAGE_RENDER_GENERATION=1,PLAYER=null,API='/api',window={};
+     function liveTvMessage(message){messages.push(message);}
+     function liveTvSelect(id){return watchLiveTv(LIVE_TV.channels.findIndex(channel=>channel.id===id));}
+     function closeLiveTvStats(){} function liveTvCaptionTracks(){return [];}
+     function liveTvRefreshCaptionControls(){} function liveTvInPip(){return false;}
+     function liveTvTrackSlot(){}
+     function liveTvShowHost(){document.getElementById('live-tv-host').hidden=false;}
+     function liveTvSetMode(mode){document.getElementById('live-tv-host').dataset.mode=mode;}
+     function exitLiveTvPresentation(){return options.exit?.();}
+     ${functions.map(shipped).join('\n')}
+     return {watchLiveTv,stopLiveTv,resumeLiveTv,pauseLiveTv,liveTvPlaybackFailure};`)(state,lease,document,liveTv,
+    {now:()=>clock},fn=>{polls.push(fn);return polls.length;},()=>{},options,messages);
+  return {...controls,state,lease,video,nodes,starts,releases,messages,polls,
+    advance:ms=>{clock+=ms;},get plays(){return plays;},get loads(){return loads;}};
+}
+
 async function main() {
+  await test("picture facts keep broadcast, planned frame and browser display distinct", () => {
+    const delivery = {
+      source: {width: 704, height: 480, sample_aspect_ratio: "40:33", video_codec: "mpeg2video"},
+      output: {width: 704, height: 480, video_codec: "h264"},
+      video_action: "encode",
+      reasons: [{code: "new_code", explanation: "<img onerror=bad>"}],
+    };
+    const facts = liveTv.normalizeLiveTvPictureFacts({delivery,
+      presentation: {width: 853, height: 480}, attachmentCurrent: true, nowSeconds: 1000});
+    const formatted = liveTv.formatLiveTvPictureFacts(facts);
+    assert.equal(formatted.source_resolution, "704×480");
+    assert.equal(formatted.stream_frame, "704×480");
+    assert.equal(formatted.stream_frame_note, "Planned output");
+    assert.equal(formatted.decode_resolution, "853×480");
+    assert.equal(formatted.source_display_aspect, "16:9");
+    assert.equal(formatted.frame_comparison, "No resize planned");
+    assert.equal(formatted.aspect_comparison, "Not verified");
+    assert.equal(liveTv.liveTvReasonText(delivery.reasons), "<img onerror=bad>");
+    assert.equal(liveTv.parsePictureRatio("0:1"), null);
+    assert.equal(liveTv.parsePictureRatio("N/A"), null);
+    const reduced = liveTv.formatLiveTvPictureFacts(liveTv.normalizeLiveTvPictureFacts({
+      delivery: {...delivery, source: {...delivery.source, width: 1920, height: 1080, sample_aspect_ratio: "1:1"},
+        output: {...delivery.output, width: 1280, height: 720}},
+      presentation: {width: 1920, height: 1080}, attachmentCurrent: true, nowSeconds: 1000}));
+    assert.equal(reduced.frame_comparison, "Resolution reduction planned");
+    const old = liveTv.formatLiveTvPictureFacts(liveTv.normalizeLiveTvPictureFacts({
+      delivery: null, presentation: {width: 853, height: 480}, attachmentCurrent: false, nowSeconds: 1000}));
+    assert.equal(old.stream_frame, "Unavailable");
+    assert.equal(old.decode_resolution, "Unavailable");
+  });
+
+  await test("startup feedback is immediate and repeated channel presses share one tune", async () => {
+    const grant=deferred(),entered=deferred();
+    const h=startupHarness({start:()=>{entered.resolve();return grant.promise;}});
+    const opening=h.watchLiveTv(0);
+    assert.equal(h.nodes["live-tv-host"].hidden,false);
+    assert.equal(h.nodes["live-tv-status"].hidden,false);
+    assert.equal(h.state.playbackState,"starting");
+    assert.match(h.nodes["live-tv-status-text"].textContent,/Tuning 1.1/);
+    await entered.promise;
+    await h.watchLiveTv(0);
+    assert.deepEqual(h.starts,["one"]);
+    assert.equal(h.state.serial,1,"a second press does not abandon the first reply");
+    grant.resolve({session_id:"cap-one"});await opening;
+    assert.equal(h.state.playbackState,"buffering","a resolved play promise is not proof of playback");
+    h.video.paused=false;h.video.onplaying();
+    assert.equal(h.state.playbackState,"playing");
+    assert.equal(h.nodes["live-tv-status"].hidden,true);
+    h.resumeLiveTv();
+    assert.equal(h.state.playbackState,"playing","Play on an already playing channel does not leave a spinner");
+    h.video.onpause();
+    assert.equal(h.state.playbackState,"playing","a queued pause from the old attachment is ignored");
+    h.video.onwaiting();
+    assert.equal(h.state.playbackState,"buffering");
+    h.video.onplaying();
+    assert.equal(h.nodes["live-tv-status"].hidden,true);
+    await h.watchLiveTv(0);
+    assert.deepEqual(h.starts,["one"]);
+    assert.deepEqual(h.releases,[]);
+  });
+
+  await test("autoplay refusal offers Play on the picture without reacquiring the tuner", async () => {
+    let denied=true;
+    const h=startupHarness({play:()=>denied?Promise.reject({name:"NotAllowedError"}):Promise.resolve()});
+    await h.watchLiveTv(0);
+    assert.equal(h.state.playbackState,"blocked");
+    assert.equal(h.nodes["live-tv-status-play"].hidden,false);
+    assert.match(shellSource().html,/id="live-tv-status-play" onclick="resumeLiveTv\(\)"/);
+    denied=false;h.resumeLiveTv();
+    assert.equal(h.plays,2,"the click calls play synchronously to retain user activation");
+    assert.deepEqual(h.starts,["one"]);
+    h.video.paused=false;h.video.onplaying();
+    assert.equal(h.nodes["live-tv-status"].hidden,true);
+    h.pauseLiveTv();
+    assert.equal(h.state.playbackState,"paused");
+    assert.equal(h.nodes["live-tv-status-play"].hidden,false);
+  });
+
+  await test("a failed channel start remains visible and can be retried", async () => {
+    let failed=true;
+    const h=startupHarness({start:()=>{if(failed)throw {code:"stream_failed"};return {session_id:"retry"};}});
+    await h.watchLiveTv(0);
+    assert.equal(h.state.playbackState,"error");
+    assert.equal(h.nodes["live-tv-status-retry"].hidden,false);
+    assert.equal(h.nodes["live-tv-status"].hidden,false);
+    failed=false;await h.watchLiveTv(0);
+    assert.deepEqual(h.starts,["one","one"]);
+    assert.equal(h.lease.current.session_id,"retry");
+    assert.equal(h.state.playbackState,"buffering");
+  });
+
+  await test("in-picture failures preserve typed retry and alternate-channel actions", async () => {
+    const h=startupHarness();
+    h.state.channels.push({id:"protected",guide_number:"3",support:"drm",drm:true});
+    h.liveTvPlaybackFailure({code:"tuner_capacity",retry:"never",answer:{body:{watchable:[
+      {channel_id:"two",guide_number:"2.1"},{channel_id:"protected",guide_number:"3"},
+      {channel_id:"gone",guide_number:"4"}]}}});
+    assert.equal(h.nodes["live-tv-status-retry"].hidden,true);
+    const buttons=h.nodes["live-tv-status-offers"].children;
+    assert.deepEqual(buttons.map(button=>button.textContent),["Watch 2.1 instead"]);
+    buttons[0].click();
+    await settled(0);
+    assert.deepEqual(h.starts,["two"]);
+    assert.equal(h.nodes["live-tv-status-offers"].children.length,0,"starting clears old alternatives");
+    h.liveTvPlaybackFailure({code:"admin_required",status:403});
+    assert.equal(h.nodes["live-tv-status-retry"].hidden,true,"a permanent ingress refusal offers no retry");
+    h.liveTvPlaybackFailure({code:"stream_failed",retry:"safe"});
+    assert.equal(h.nodes["live-tv-status-retry"].hidden,false);
+  });
+
+  await test("fullscreen idle separates pointer focus from keyboard and open caption menus", () => {
+    let tick,menuOpen=false;
+    const classes=new Set(),button={},video={paused:false,ended:false};
+    const host={dataset:{mode:"full"},contains:node=>node===button,
+      querySelector:()=>menuOpen?{}:null,classList:{add:name=>classes.add(name),remove:name=>classes.delete(name)}};
+    const document={activeElement:button,getElementById:()=>video},state={controlsInput:"pointer"};
+    const reveal=new Function("LIVE_TV","document","PlaybackPolicy","liveTvHost","setTimeout","clearTimeout",
+      shipped("liveTvReveal")+shipped("liveTvIdle")+"return liveTvReveal;")(
+      state,document,policy,()=>host,fn=>{tick=fn;return 1;},()=>{});
+    reveal();tick();
+    assert.ok(classes.has("idle"),"clicking a button does not pin fullscreen controls");
+    state.controlsInput="keyboard";reveal();tick();
+    assert.ok(!classes.has("idle"),"keyboard focus remains visible");
+    document.activeElement=null;reveal();tick();
+    assert.ok(classes.has("idle"),"leaving a keyboard control rearms hiding");
+    state.controlsInput="pointer";document.activeElement=button;menuOpen=true;reveal();
+    const oldTick=tick;tick();
+    assert.ok(!classes.has("idle"));assert.notEqual(tick,oldTick,"an open native menu rearms the timer");
+    menuOpen=false;tick();assert.ok(classes.has("idle"));
+  });
+
+  await test("late Stop teardown cannot erase a newer channel start", async () => {
+    const exit=deferred();
+    const h=startupHarness({exit:()=>exit.promise});
+    await h.watchLiveTv(0);
+    const stopping=h.stopLiveTv();
+    const opening=h.watchLiveTv(1);
+    await opening;
+    const loads=h.loads;
+    assert.equal(h.video.src,"/api/live-tv/sessions/cap-two/master.m3u8");
+    exit.resolve();await stopping;
+    assert.equal(h.loads,loads,"the old exit does not detach the new media");
+    assert.equal(h.nodes["live-tv-host"].hidden,false);
+    assert.equal(h.lease.current.session_id,"cap-two");
+    assert.equal(h.state.playbackState,"buffering");
+  });
+
+  await test("late autoplay rejection cannot cover a newer channel", async () => {
+    let rejectOld;
+    const oldPlay=new Promise((_,reject)=>{rejectOld=reject;});
+    let attempts=0;
+    const h=startupHarness({play:()=>++attempts===1?oldPlay:Promise.resolve()});
+    await h.watchLiveTv(0);
+    const oldPlaying=h.video.onplaying;
+    await h.watchLiveTv(1);
+    h.video.paused=false;h.video.onplaying();
+    rejectOld({name:"NotAllowedError"});await Promise.resolve();oldPlaying();
+    assert.equal(h.state.playbackState,"playing");
+    assert.equal(h.nodes["live-tv-status"].hidden,true);
+    assert.equal(h.lease.current.session_id,"cap-two");
+  });
+
+  await test("duplicate media failures perform only one compatibility retry", async () => {
+    const status=deferred();
+    const h=startupHarness({status:()=>status.promise});
+    await h.watchLiveTv(0);
+    h.video.error={code:3};
+    const failing=h.video.onerror();const duplicate=h.video.onerror();
+    status.resolve({state:"active"});await Promise.all([failing,duplicate]);
+    assert.deepEqual(h.starts,["one","one"]);
+    assert.deepEqual(h.releases,["cap-one"]);
+    assert.equal(h.state.compatibilityRetried,true);
+    assert.equal(h.state.playbackState,"buffering");
+  });
+
+  await test("playback timeout releases the tuner and keeps an in-picture retry", async () => {
+    const h=startupHarness();await h.watchLiveTv(0);
+    h.advance(30000);await h.polls[0]();
+    assert.equal(h.lease.current,null);
+    assert.deepEqual(h.releases,["cap-one"]);
+    assert.equal(h.nodes["live-tv-host"].hidden,false);
+    assert.equal(h.nodes["live-tv-status-retry"].hidden,false);
+    assert.equal(h.state.playbackState,"error");
+    assert.match(h.nodes["live-tv-status-text"].textContent,/30 seconds/);
+  });
+
   await test("held channel keys are owned by keyup rather than repeat cadence", () => {
     assert.match(shipped("liveTvChangeChannel"), /LIVE_TV_CHANNEL_GESTURE\.press\(key,LIVE_TV\)/);
     assert.match(shipped("liveTvWireKeys"), /keyup[\s\S]*LIVE_TV_CHANNEL_GESTURE\.release\(event\.key,LIVE_TV\)/);
@@ -149,6 +377,48 @@ async function main() {
     assert.equal(video.muted, false);
     assert.deepEqual(buttons.map(button => [button.textContent, button.title, button["aria-label"]]),
       [["🔇", "Mute", "Mute"], ["🔇", "Mute", "Mute"]]);
+  });
+
+  await test("live captions select the media track in every player geometry", () => {
+    const tracks=[
+      {kind:"captions",label:"English 708",language:"en",mode:"hidden"},
+      {kind:"captions",label:"English CC1",language:"en",mode:"hidden"},
+      {kind:"metadata",label:"timing",language:"",mode:"hidden"},
+    ];
+    const select={dataset:{},innerHTML:"",value:"off",parentElement:{hidden:true}};
+    const transport={dataset:{},innerHTML:"",value:"off",parentElement:{hidden:true}};
+    const document={getElementById:id=>id==="live-tv-video"?{textTracks:tracks}
+      :id==="live-tv-captions"?select:null,querySelectorAll:()=>[select,transport]};
+    const controls=new Function("document","esc",[
+      shipped("liveTvCaptionTracks"),shipped("liveTvCaptionTrackLabel"),
+      shipped("liveTvRefreshCaptionControls"),shipped("liveTvSelectCaption"),
+      "return {refresh:liveTvRefreshCaptionControls,select:liveTvSelectCaption};",
+    ].join("\n"))(document,String);
+    controls.refresh();
+    assert.match(select.innerHTML,/English 708/);
+    assert.match(select.innerHTML,/English CC1/);
+    assert.doesNotMatch(select.innerHTML,/timing/);
+    assert.equal(select.value,"off");
+    controls.select("0");
+    assert.deepEqual(tracks.map(track=>track.mode),["showing","disabled","hidden"]);
+    assert.equal(select.value,"0");
+    controls.select("1");
+    assert.deepEqual(tracks.map(track=>track.mode),["disabled","showing","hidden"]);
+    assert.equal(select.value,"1");
+    assert.equal(transport.value,"1");
+    assert.equal(transport.parentElement.hidden,false);
+    controls.select("off");
+    assert.deepEqual(tracks.map(track=>track.mode),["disabled","disabled","hidden"]);
+    assert.equal(select.value,"off");
+    assert.match(shellSource().html,/id="live-tv-captions"[^>]*aria-label="Live TV captions"/);
+    assert.match(shipped("liveTvNowBar"),/data-live-tv-captions/);
+    assert.match(shell,/\.lth\[data-mode="slot"\] \.lth-captions\{display:none\}/);
+    assert.match(shell,/\.lth\.idle \.lth-captions\{opacity:0/);
+    tracks.splice(0);
+    controls.refresh();
+    assert.equal(select.parentElement.hidden,true);
+    assert.equal(transport.parentElement.hidden,true);
+    assert.match(shipped("liveTvStatsTelemetry"),/selectedCaption\?liveTvCaptionTrackLabel/);
   });
 
   await test("protected channels are visible but never watchable", () => {
@@ -365,7 +635,7 @@ async function main() {
     });
     const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv",
       `const location={hash:'#/live-tv'}, PAGE_RENDER_GENERATION=1, PLAYER=null, API='/api', window={};
-       function detachLiveTvMedia(){} function liveTvMessage(){} function liveTvFailure(){}
+       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){}
        function exitLiveTvPresentation(){}
        function liveTvShowHost(){} function liveTvInPip(){ return false; }
        ${shipped("liveTvNow")}${shipped("stopLiveTv")}${shipped("watchLiveTv")}${shipped("liveTvAttachSession")} return watchLiveTv;`)(
@@ -400,7 +670,7 @@ async function main() {
     const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv", "ROUTING",
       `const location=ROUTING, PLAYER=null, API='/api', window={};
        let PAGE_RENDER_GENERATION=ROUTING.generation;
-       function detachLiveTvMedia(){} function liveTvMessage(){} function liveTvFailure(){}
+       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){}
        function exitLiveTvPresentation(){} function liveTvSetMode(){}
        function liveTvShowHost(){} function liveTvInPip(){ return false; }
        ${shipped("liveTvNow")}${shipped("stopLiveTv")}${shipped("watchLiveTv")}${shipped("liveTvAttachSession")} return watchLiveTv;`)(
@@ -446,7 +716,7 @@ async function main() {
     const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv", "ROUTING", "MODES",
       `const location=ROUTING, PLAYER=null, API='/api', window={};
        let PAGE_RENDER_GENERATION=1;
-       function detachLiveTvMedia(){} function liveTvMessage(){} function liveTvFailure(){}
+       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){}
        function exitLiveTvPresentation(){}
        function liveTvSetMode(mode){ MODES.push(mode); }
        function liveTvHost(){ return document.getElementById("live-tv-host"); }
@@ -463,7 +733,7 @@ async function main() {
     // The viewer leaves while the POST is outstanding.
     routing.hash = "#/";
     run.liveTvLeaveRoute();
-    assert.deepEqual(modes, ["dock"], "a start in flight docks rather than hiding");
+    assert.deepEqual(modes, ["slot", "dock"], "startup is visible immediately and docks when leaving");
 
     grant.resolve({ session_id: "cap" });
     await watching;
@@ -500,7 +770,7 @@ async function main() {
     const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval",
       "PlurxLiveTv", "PLAYER", "closePlayer", "reportProgress",
       `const location={hash:'#/live-tv'}, PAGE_RENDER_GENERATION=1, API='/api', window={};
-       function detachLiveTvMedia(){} function liveTvMessage(){} function liveTvFailure(){}
+       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){}
        function exitLiveTvPresentation(){}
        function liveTvShowHost(){} function liveTvInPip(){ return false; }
        ${shipped("liveTvNow")}${shipped("stopLiveTv")}${shipped("watchLiveTv")}${shipped("liveTvAttachSession")} return watchLiveTv;`)(
@@ -526,7 +796,7 @@ async function main() {
     });
     const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv",
       `const location={hash:'#/live-tv'}, PAGE_RENDER_GENERATION=1, PLAYER=null, API='/api', window={};
-       function detachLiveTvMedia(){} function liveTvMessage(){} function liveTvFailure(){}
+       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){}
        function exitLiveTvPresentation(){}
        function liveTvShowHost(){} function liveTvInPip(){ return false; }
        ${shipped("liveTvNow")}${shipped("stopLiveTv")}${shipped("watchLiveTv")}${shipped("liveTvAttachSession")} return watchLiveTv;`)(
@@ -551,7 +821,7 @@ async function main() {
     });
     const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv",
       `const location={hash:'#/live-tv'}, PAGE_RENDER_GENERATION=1, PLAYER=null, API='/api', window={};
-       function detachLiveTvMedia(){} function liveTvMessage(){} function liveTvFailure(){}
+       function detachLiveTvMedia(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){}
        function exitLiveTvPresentation(){}
        function liveTvShowHost(){} function liveTvInPip(){ return false; }
        ${shipped("liveTvNow")}${shipped("stopLiveTv")}${shipped("watchLiveTv")}${shipped("liveTvAttachSession")} return watchLiveTv;`)(
@@ -904,7 +1174,7 @@ async function main() {
     const attach = new Function(
       "LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv", "API",
       `const location={hash:"#/live-tv"}, PAGE_RENDER_GENERATION=1, window={};
-       function liveTvMessage(){} function liveTvFailure(){} function liveTvShowHost(){}
+       function liveTvRefreshCaptionControls(){} function liveTvMessage(){} function liveTvFailure(){} function liveTvShowHost(){}
        function liveTvSetMode(){} function liveTvInPip(){ return false; }
        async function stopLiveTv(){} async function watchLiveTv(){}
        ${shipped("liveTvNow")}${shipped("liveTvAttachSession")} return liveTvAttachSession;`,
@@ -1239,7 +1509,7 @@ async function main() {
     const load = new Function(
       "PlurxLiveTv", "PlaybackPolicy", "LIVE_TV", "api", "AbortSignal", "Date", "setTimeout", "clearTimeout",
       `let PAGE_RENDER_GENERATION=1; const location={hash:"#/live-tv"};
-       function renderLiveTvChannels(){} function liveTvMessage(){}
+       function renderLiveTvChannels(){} function liveTvRefreshCaptionControls(){} function liveTvMessage(){}
        // The guide read also kicks the DVR wave off; that is its own test.
        async function loadLiveTvDvr(){}
        ${shipped("loadLiveTvGuide")}${shipped("scheduleLiveTvGuide")} return loadLiveTvGuide;`,
@@ -1269,7 +1539,7 @@ async function main() {
     const events = [], panel = { hidden: false, dataset: { mode: "full" }, contains: () => false };
     const video = { webkitEnterFullscreen: () => events.push("iphone-enter") };
     const exited = deferred(), neverSettles = deferred(), listeners = new Map();
-    const document = { getElementById: id => id === "live-tv-host" ? panel : video,
+    const document = { getElementById: id => id === "live-tv-host" ? panel : id === "live-tv-video" ? video : null,
       addEventListener: (name, listener) => listeners.set(name, listener),
       removeEventListener: (name, listener) => { if (listeners.get(name) === listener) listeners.delete(name); },
       fullscreenElement: panel, exitFullscreen: () => {
@@ -1298,7 +1568,7 @@ async function main() {
   await test("Live TV retains an early release failure until presentation teardown", async () => {
     const exited = deferred(), panel = { hidden: false, contains: () => false };
     const listeners = new Map(), document = {
-      getElementById: id => id === "live-tv-host" ? panel : {},
+      getElementById: id => id === "live-tv-host" ? panel : null,
       addEventListener: (name, listener) => listeners.set(name, listener),
       removeEventListener: (name, listener) => { if (listeners.get(name) === listener) listeners.delete(name); },
       fullscreenElement: panel,

@@ -12,7 +12,7 @@ anything it can't (MKV, DTS/TrueHD, …) is delivered as the server's on-the-fly
 HDR display at runtime and sends that to `/decision`, so the server transcodes
 only what this hardware genuinely can't play.
 
-> Status: **v0.3.0**, build `183` in [`project.yml`](project.yml) — working
+> Status: **v0.3.0**, build `185` in [`project.yml`](project.yml) — working
 > development client. Browse, resume, discover, and play on both iOS and tvOS.
 > Both targets compile against the iOS/tvOS 26.5 SDKs and share the same
 > regression suite.
@@ -267,6 +267,14 @@ xcodebuild -project plurx.xcodeproj -scheme plurx-iOS  -configuration Release \
 xcodebuild -project plurx.xcodeproj -scheme plurx-tvOS -configuration Release \
   -destination 'generic/platform=tvOS Simulator' build
 ```
+
+The `plurx-tvOS-physical` XCUIRemote scheme uses a signed **Debug** app because
+its file/item fixture launch arguments are compiled only under `DEBUG`. A
+physical pass proves the remote interaction path in that configuration. It
+does not prove the shipped Release archive behaved identically. Reinstall the
+exact-source signed Release archive after the physical test and verify its
+bundle/build and launch; keep Release interaction acceptance open until it has
+an observable input path.
 
 Four green runs mean the shared Swift source and both platforms' conditional
 branches compile in **both** configurations, the app launches in each simulator,

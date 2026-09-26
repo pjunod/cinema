@@ -815,12 +815,29 @@ impl SecureDirectory {
     }
 
     pub async fn atomic_write_child(&self, destination: &str, bytes: &[u8]) -> io::Result<()> {
+        self.atomic_write_child_with_commit(destination, bytes, |rename| rename())
+            .await
+    }
+
+    /// Stage and sync bytes before entering the caller's synchronous rename
+    /// boundary. The held directory remains authority on every path.
+    pub async fn atomic_write_child_with_commit<F>(
+        &self,
+        destination: &str,
+        bytes: &[u8],
+        commit: F,
+    ) -> io::Result<()>
+    where
+        F: FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send + 'static,
+    {
         let directory = Arc::clone(&self.file);
         let destination = child_name(destination)?;
         let bytes = bytes.to_vec();
-        tokio::task::spawn_blocking(move || atomic_write_blocking(&directory, &destination, &bytes))
-            .await
-            .map_err(io::Error::other)?
+        tokio::task::spawn_blocking(move || {
+            atomic_write_blocking_with_commit(&directory, &destination, &bytes, commit)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     pub async fn rename_child(&self, from: &str, to: &str) -> io::Result<()> {
@@ -1186,6 +1203,18 @@ fn rename_child_blocking(
 }
 
 fn atomic_write_blocking(directory: &File, destination: &OsStr, bytes: &[u8]) -> io::Result<()> {
+    atomic_write_blocking_with_commit(directory, destination, bytes, |rename| rename())
+}
+
+fn atomic_write_blocking_with_commit<F>(
+    directory: &File,
+    destination: &OsStr,
+    bytes: &[u8],
+    commit: F,
+) -> io::Result<()>
+where
+    F: FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()>,
+{
     let temporary = OsString::from(format!(
         ".{}.{}.part",
         destination.to_string_lossy(),
@@ -1195,7 +1224,9 @@ fn atomic_write_blocking(directory: &File, destination: &OsStr, bytes: &[u8]) ->
     let result = (|| {
         file.write_all(bytes)?;
         file.sync_all()?;
-        rename_child_blocking(directory, &temporary, directory, destination, true).map(|_| ())
+        commit(&mut || {
+            rename_child_blocking(directory, &temporary, directory, destination, true).map(|_| ())
+        })
     })();
     if result.is_err() {
         let _ = unlink_child_blocking(directory, &temporary);

@@ -339,6 +339,28 @@
   .lth[data-mode="dock"] video{height:216px}
   .lth[data-mode="full"]{inset:0;width:100vw;height:100dvh;border-radius:0}
   .lth[data-mode="full"] video{height:100dvh;max-height:100dvh}
+  /* Page captions belong to the transport. Fullscreen/dock keep a persistent
+     selector so repainting programme details cannot dismiss an open menu. */
+  .lth-captions,.lt-captions{display:flex;align-items:center;gap:6px;font-size:12px}
+  .lth-captions{position:absolute;top:76px;right:24px;z-index:4;padding:5px 7px;
+    border-radius:6px;background:rgba(0,0,0,.7);color:#fff}
+  .lth-captions[hidden],.lt-captions[hidden],.lth[data-mode="slot"] .lth-captions{display:none}
+  .lth-captions select,.lt-captions select{width:auto;min-width:92px;max-width:160px;padding:4px 6px}
+  .lth-captions select{border:1px solid rgba(255,255,255,.5);background:#191919;color:#fff;color-scheme:dark}
+  .lth-captions select:focus-visible{outline:2px solid #fff;outline-offset:2px}
+  .lth.idle .lth-captions{opacity:0;pointer-events:none}
+  .lth[data-mode="dock"] .lth-captions{top:12px;right:12px}
+  .lth[data-mode="dock"]:not(:hover):not(:focus-within) .lth-captions{opacity:0;pointer-events:none}
+  .lth-status{position:absolute;inset:0;z-index:3;display:grid;place-items:center;
+    padding:16px;background:rgba(0,0,0,.65);color:#fff;text-align:center;cursor:default}
+  .lth-status[hidden],.lth-status button[hidden]{display:none}
+  .lth-status-card{max-width:36em;padding:18px;border-radius:10px;background:rgba(15,15,18,.92)}
+  #live-tv-status-offers{display:flex;flex-wrap:wrap;justify-content:center;gap:8px}
+  .lth-status-card p{margin:12px 0;line-height:1.5}
+  .lth-status .pspin{display:none;margin:auto}
+  .lth-status[data-state="starting"] .pspin,.lth-status[data-state="buffering"] .pspin{display:block}
+  .lth[data-mode="dock"] .lth-status{bottom:48px;font-size:12px}
+  @media(prefers-reduced-motion:reduce){.lth .lth-status .pspin{animation:none}}
 
   .lth-overlay{position:absolute;inset:0;pointer-events:none;transition:opacity .2s ease-out}
   .lth-overlay > *{pointer-events:auto}
@@ -3198,7 +3220,7 @@
 .pi-group summary:focus-visible{outline:2px solid #8bb8ff;outline-offset:2px}
 .pi-row{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:16px;padding:12px 0;border-top:1px solid #343d4d;overflow-wrap:anywhere}
 .pi-row b{font-weight:500}.pi-row small{display:block;font-size:12px;color:#acb7c9;margin-top:4px}.pi-row>.v{text-align:right;font-variant-numeric:tabular-nums}
-.pi-compact{display:flex;flex-wrap:wrap;gap:12px 24px}.pi-compact strong{font-size:19px}
+.pi-compact{display:flex;flex-wrap:wrap;gap:12px 24px}.pi-compact .pi-fact{flex:1 1 140px;min-width:0;overflow-wrap:anywhere}.pi-compact strong{font-size:19px}
 @container(max-width:520px){.pi-hero,.pi-tracks,.pi-metrics,.pi-row{grid-template-columns:minmax(0,1fr);gap:14px}.pi-hero>.pi-fact+ .pi-fact{border-left:0;border-top:1px solid #343d4d;padding:14px 0 0}.pi-row>.v{text-align:left}.statsov .statsbody{padding:18px 16px}.statsov .statshd{padding:12px 16px}.statsov .statsmodes button{padding:8px;font-size:13px}}
 
 .live-stats{position:fixed!important;top:20px!important;right:20px!important;max-height:calc(100dvh - 40px)!important;z-index:9999!important}

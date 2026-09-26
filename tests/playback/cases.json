@@ -57,7 +57,7 @@
       "filename": "shaping-mpeg4-mp3-720.avi",
       "builder": "mpeg4_mp3_avi_long",
       "opt_in": true,
-      "description": "120s 720p MPEG-4 Part 2 + MP3 in AVI; forces the transcode ladder and runs long enough to hold a bandwidth cliff and watch the recovery",
+      "description": "210s 720p MPEG-4 Part 2 + MP3 in AVI; forces the transcode ladder and leaves two independent 75s recovery windows after the initial cliff",
       "tags": ["transcode", "mpeg4", "mp3", "avi", "720p", "sdr", "ladder", "shaping"]
     }
   ],

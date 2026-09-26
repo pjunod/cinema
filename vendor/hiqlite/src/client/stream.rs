@@ -1409,6 +1409,14 @@ fn api_response_is_forward_to_leader(payload: &ApiStreamResponsePayload) -> bool
         ApiStreamResponsePayload::Notify(result) => result
             .as_ref()
             .is_err_and(|err| err.is_forward_to_leader().is_some()),
+        #[cfg(feature = "sqlite")]
+        ApiStreamResponsePayload::ExecuteAcked(result) => result
+            .as_ref()
+            .is_err_and(|err| err.is_forward_to_leader().is_some()),
+        #[cfg(feature = "sqlite")]
+        ApiStreamResponsePayload::ExecuteReturningAcked(result) => result
+            .as_ref()
+            .is_err_and(|err| err.is_forward_to_leader().is_some()),
     }
 }
 

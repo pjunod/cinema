@@ -6,6 +6,7 @@ import re
 import tomllib
 import unittest
 from pathlib import Path
+from validation.rust_modules import module_source
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -143,7 +144,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         cls.core_decode = CORE_DECODE.read_text(encoding="utf-8")
         cls.core_transcode = CORE_TRANSCODE.read_text(encoding="utf-8")
         cls.core_recipe = CORE_RECIPE.read_text(encoding="utf-8")
-        cls.daemon_transcode = DAEMON_TRANSCODE.read_text(encoding="utf-8")
+        cls.daemon_transcode = module_source(DAEMON_TRANSCODE)
         cls.live_tv = LIVE_TV.read_text(encoding="utf-8")
 
     def test_frozen_inventory_and_argument_claims_match_retained_artifacts(self) -> None:
@@ -408,7 +409,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertEqual(len(builders), 4)
         for surface in builders:
             with self.subTest(surface=surface["id"]):
-                source = (ROOT / surface["source"]).read_text(encoding="utf-8")
+                source = module_source(ROOT / surface["source"])
                 self.assertEqual(surface.get("m2_state"), "migrated")
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
@@ -541,7 +542,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         """
         manifest = CORE_MANIFEST.read_text(encoding="utf-8")
         health = CORE_HEALTH.read_text(encoding="utf-8")
-        daemon = DAEMON_TRANSCODE.read_text(encoding="utf-8")
+        daemon = module_source(DAEMON_TRANSCODE)
 
         # The receipt is inside `ManifestBody`, which is what `body_digest`
         # hashes — not merely a field beside the digest.
@@ -597,7 +598,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         false certificate the effort exists to prevent, reached by a new route.
         """
         health = CORE_HEALTH.read_text(encoding="utf-8")
-        daemon = DAEMON_TRANSCODE.read_text(encoding="utf-8")
+        daemon = module_source(DAEMON_TRANSCODE)
 
         # The record binds a receipt to the bytes it was settled over.
         self.assertIn("pub struct RetainedPartReceipt {", health)
@@ -632,7 +633,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # there is no part for its receipt to be sealed beside.
         self.assertIn('GENERATION_HEALTH_FILE: &str = ".generation-health.json"', daemon)
         self.assertIn("pub struct RetainedGenerationHealth {", health)
-        record = daemon.split("fn record(&mut self,", 1)[1].split("\n    }", 1)[0]
+        # Whitespace-agnostic: S-14's split made this method `pub(super)`, and
+        # rustfmt wrapped the longer signature.
+        record = re.split(r"fn record\(\s*&mut self,", daemon, maxsplit=1)[1].split("\n    }", 1)[0]
         self.assertIn("if !produced {", record)
         self.assertIn("self.attempts.push(receipt);", record)
 
@@ -703,7 +706,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # The recorded constraints a later milestone will implement literally.
         # `verified_cache_hit` reads like a reuse decision and is not: its only
         # caller feeds cluster offer eligibility.
-        daemon = DAEMON_TRANSCODE.read_text(encoding="utf-8")
+        daemon = module_source(DAEMON_TRANSCODE)
         self.assertEqual(daemon.count("self.verified_cache_hit("), 1)
         self.assertIn(
             "and so\n  does `verified_cache_hit`, which reads like a reuse decision and is not",
@@ -718,7 +721,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         has; make it a yield and the same plan re-encodes the same title on
         every discovery pass forever.
         """
-        daemon = DAEMON_TRANSCODE.read_text(encoding="utf-8")
+        daemon = module_source(DAEMON_TRANSCODE)
         state = (ROOT / "crates/plurxd/src/state.rs").read_text(encoding="utf-8")
         offline = (ROOT / "crates/plurxd/src/offline.rs").read_text(encoding="utf-8")
 
@@ -786,7 +789,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         matches nothing reports every stream as clean.
         """
         inventory = CORE_INVENTORY.read_text(encoding="utf-8")
-        daemon = DAEMON_TRANSCODE.read_text(encoding="utf-8")
+        daemon = module_source(DAEMON_TRANSCODE)
 
         # Both halves of the context are required, so a context belonging to
         # another stream of another codec cannot answer for this one.
@@ -936,7 +939,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         rather than lenient offline segment serving. None of those may move for
         a row that exists on a deployed node today.
         """
-        daemon = DAEMON_TRANSCODE.read_text(encoding="utf-8")
+        daemon = module_source(DAEMON_TRANSCODE)
 
         # The publication decision, stated once and gated on the identity.
         self.assertIn(
@@ -1153,13 +1156,14 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             ),
         )
         self.assertEqual(replicated.count("TransactionShape::WriteReadBack"), 2)
-        # 100 includes seven recording-event boundaries, subject_write, two
+        # 101 includes seven recording-event boundaries, subject_write, two
         # content-analysis repair boundaries added to the previous 87, and
         # C-04's `delete_token_by_prefix_for_user`, plus subtitle-source
-        # enqueue and foreground claim. Each is explicitly
-        # classified in replicated.rs; its census assertion remains a
-        # deliberate count rather than a value derived from the same table.
-        self.assertIn("assert_eq!(methods.len(), 100);", replicated)
+        # enqueue and foreground claim; 101 adds K-05's read-only
+        # `with_read_txn` snapshot. Each is explicitly classified in
+        # replicated.rs; its census assertion remains a deliberate count
+        # rather than a value derived from the same table.
+        self.assertIn("assert_eq!(methods.len(), 101);", replicated)
 
         # The shape records a real difference between the backends rather than
         # a promise about future work: the replicated twin cannot hold it, and
@@ -1222,7 +1226,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         The surface therefore reports the enabled policy, the conservative
         legacy whole-node fact, and the path coverage separately.
         """
-        daemon = DAEMON_TRANSCODE.read_text(encoding="utf-8")
+        daemon = module_source(DAEMON_TRANSCODE)
         system = HTTP_SYSTEM.read_text(encoding="utf-8")
         store = CORE_STORE.read_text(encoding="utf-8")
         web = web_body_script()
@@ -1527,7 +1531,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         retry per attempt instead of per playback: an unbounded loop against a
         decoder that will never succeed.
         """
-        hls = HTTP_HLS.read_text(encoding="utf-8")
+        hls = module_source(HTTP_HLS)
         store = CORE_STORE.read_text(encoding="utf-8")
         sqlite_sessions = SESSIONS_SQLITE.read_text(encoding="utf-8")
         hiqlite_sessions = SESSIONS_HIQLITE.read_text(encoding="utf-8")

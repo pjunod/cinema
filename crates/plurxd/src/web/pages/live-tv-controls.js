@@ -1,18 +1,64 @@
 "use strict";
+// Playback feedback belongs to the persistent video host, including while a
+// start is pending or the viewer has navigated to another page.
+function liveTvPlaybackState(state,message,actions={}){
+  LIVE_TV.playbackState=state;
+  if(message) liveTvMessage(message);
+  const surface=document.getElementById("live-tv-status");
+  if(!surface) return;
+  surface.dataset.state=state;
+  surface.hidden=state==="idle"||state==="playing";
+  const text=document.getElementById("live-tv-status-text");
+  if(text) text.textContent=message||"";
+  const play=document.getElementById("live-tv-status-play");
+  if(play) play.hidden=state!=="blocked"&&state!=="paused";
+  const retry=document.getElementById("live-tv-status-retry");
+  if(retry) retry.hidden=state!=="error"||actions.retryable===false;
+  const offers=document.getElementById("live-tv-status-offers");
+  if(offers){
+    offers.replaceChildren();
+    for(const offer of actions.offers||[]){
+      // The lineup may have changed since the owner sent this capacity answer.
+      if(!LIVE_TV.channels.some(channel=>channel.id===offer.channelId&&!PlurxLiveTv.channelView(channel).disabled)) continue;
+      const button=document.createElement("button");
+      button.type="button"; button.textContent=offer.label;
+      button.addEventListener("click",()=>liveTvWatchChannel(offer.channelId));
+      offers.append(button);
+    }
+  }
+  const host=document.getElementById("live-tv-host");
+  if(host&&!surface.hidden){
+    host.hidden=false;
+    // A terminal failure exits fullscreen before showing its actions. Restore
+    // the inline slot geometry before revealing the persistent host again.
+    if(host.dataset.mode==="slot") liveTvTrackSlot();
+  }
+}
+function liveTvPlaybackFailure(error){
+  const view=PlurxLiveTv.errorView(error);
+  liveTvPlaybackState("error",`${view.title}. ${view.detail}`,view);
+}
 function detachLiveTvMedia(){
   closeLiveTvStats(false);
   clearInterval(LIVE_TV.timer); LIVE_TV.timer=null;
   LIVE_TV.status=null;
   if(LIVE_TV.hls){ LIVE_TV.hls.destroy(); LIVE_TV.hls=null; }
   const video=document.getElementById("live-tv-video");
-  if(video){ video.onerror=null; video.onended=null; video.pause(); video.removeAttribute("src"); video.load(); }
+  if(video){
+    video.onerror=null; video.onended=null; video.onplaying=null; video.onwaiting=null; video.onpause=null; video.pause();
+    for(const {track} of liveTvCaptionTracks()) track.mode="disabled";
+    video.removeAttribute("src"); video.load();
+  }
+  liveTvRefreshCaptionControls();
 }
 async function stopLiveTv(){
   // Stop owns the tuner immediately. A keyup delivered after this point must
   // not commit a preview that was accumulated before Stop and reacquire it.
   if(typeof cancelLiveTvChannelGesture==="function") cancelLiveTvChannelGesture();
   else { LIVE_TV.pendingChannel=null; LIVE_TV.preview=null; }
-  ++LIVE_TV.serial;
+  const serial=++LIVE_TV.serial;
+  LIVE_TV.starting=null; LIVE_TV.tuningChannel=null;
+  liveTvPlaybackState("idle","");
   const host=document.getElementById("live-tv-host");
   // `document.exitFullscreen()` resolves before Chromium dispatches its
   // fullscreenchange event. Move out of `full` first so that late event cannot
@@ -24,29 +70,37 @@ async function stopLiveTv(){
   // then dismantle the media tree only after presentation state settles.
   const exiting=exitLiveTvPresentation();
   const stopping=LIVE_TV_LEASE.stop().then(value=>({ok:true,value}),error=>({ok:false,error}));
-  await exiting; detachLiveTvMedia();
-  if(host) host.hidden=true;
+  await exiting;
+  // A channel selected during fullscreen exit owns the media now. An older
+  // Stop must not detach it or hide its startup feedback when that exit lands.
+  if(serial===LIVE_TV.serial){
+    detachLiveTvMedia();
+    if(host) host.hidden=true;
+  }
   const stopped=await stopping; if(!stopped.ok) throw stopped.error;
   return stopped.value;
 }
 async function watchLiveTv(index,isCompatibilityRetry=false){
   const channel=LIVE_TV.channels[index];
   if(!channel||PlurxLiveTv.channelView(channel).disabled||location.hash!=="#/live-tv") return;
+  // A repeated press joins the visible attempt rather than cancelling its
+  // eventual reply and paying for a second release/tune cycle.
+  if(!isCompatibilityRetry&&LIVE_TV.tuningChannel===channel.id&&
+      (LIVE_TV.starting||(LIVE_TV_LEASE.current&&LIVE_TV.playbackState!=="error"))){
+    if(LIVE_TV.playbackState==="blocked"||LIVE_TV.playbackState==="paused") resumeLiveTv();
+    return;
+  }
   if(!isCompatibilityRetry){ LIVE_TV.compatibilityRetried=false; LIVE_TV.compatibility=null; }
   const serial=++LIVE_TV.serial, generation=PAGE_RENDER_GENERATION;
-  // Two different questions, and conflating them is what stopped the tuner
-  // watchdog the moment the picture docked. `owned` asks "is this still the
-  // session I started" — the only thing the keepalive, the status poll and the
-  // 30-second no-progress release should ever depend on, because they own a
-  // physical tuner and the tuner does not care which route is showing.
-  // `onPage` additionally asks whether this render is still the one on screen,
-  // and gates writes into page DOM that no longer exists.
+  // Session ownership survives route changes: the persistent host carries
+  // startup feedback, media and the tuner watchdog into the dock.
   const owned=()=>serial===LIVE_TV.serial;
-  const onPage=()=>owned()&&generation===PAGE_RENDER_GENERATION&&location.hash==="#/live-tv";
   detachLiveTvMedia();
   if(PLAYER&&PLAYER.fileId) closePlayer();
-  LIVE_TV.lastChannel=index; liveTvMessage(`Starting ${channel.guide_number} · ${channel.guide_name}…`);
+  LIVE_TV.lastChannel=index; LIVE_TV.selected=channel.id; LIVE_TV.tuningChannel=channel.id;
   LIVE_TV.starting=serial;
+  liveTvShowHost();
+  liveTvPlaybackState("starting",`Tuning ${channel.guide_number} · ${channel.guide_name}…`);
   try{
     const info=await LIVE_TV_LEASE.start(channel.id);
     // Deliberately `owned`, not `onPage`. Navigating away during the ~45 s
@@ -56,7 +110,7 @@ async function watchLiveTv(index,isCompatibilityRetry=false){
     // if the route moved on, it is wired up into the dock.
     if(!info||!owned()) return;
     await liveTvAttachSession(info,index,serial,generation);
-  }catch(e){ if(onPage()) liveTvFailure(e); }
+  }catch(e){ if(owned()) liveTvPlaybackFailure(e); }
   finally{ if(LIVE_TV.starting===serial) LIVE_TV.starting=null; }
 }
 // Everything a live capability needs around it — playlist, autoplay, failure
@@ -77,19 +131,41 @@ async function liveTvAttachSession(info,index,serial,generation){
     // Rebuild the same-origin master URL from the capability; its caption
     // declarations must reach both native HLS and hls.js players.
     const playlist=API+`/live-tv/sessions/${encodeURIComponent(info.session_id)}/master.m3u8`;
-    const play=()=>{ if(owned()) video.play().then(()=>{ if(owned()) liveTvMessage("Playing live"); }).catch(()=>{ if(owned()) liveTvMessage("Ready — press Play live within 30 seconds to start audio and video."); }); };
-    const failed=async (error,compatibility=null,retryFresh=false)=>{
+    LIVE_TV.tuningChannel=LIVE_TV.selected;
+    liveTvPlaybackState("buffering","Channel connected. Loading video…");
+    let failing=false;
+    const play=()=>{
       if(!owned()) return;
+      video.play().catch(error=>{
+        if(!owned()||failing||error.name==="AbortError") return;
+        if(error.name==="NotSupportedError"){
+          failed({code:"codec_unsupported"},{failed_video:true,failed_audio:true,failed_container:true});
+        }else liveTvPlaybackState("blocked","Ready — press Play live to start audio and video. The tuner is released after 30 seconds without playback.");
+      });
+    };
+    const failed=async (error,compatibility=null,retryFresh=false)=>{
+      if(!owned()||failing) return;
+      failing=true;
       try{ await LIVE_TV_LEASE.status(); }catch(typed){ error=typed; }
       if(!owned()) return;
-      if((compatibility||retryFresh)&&!LIVE_TV.compatibilityRetried){
-        LIVE_TV.compatibilityRetried=true; LIVE_TV.compatibility=compatibility;
-        await stopLiveTv();
-        if(location.hash==="#/live-tv") await watchLiveTv(index,true);
+      const retry=(compatibility||retryFresh)&&!LIVE_TV.compatibilityRetried&&location.hash==="#/live-tv";
+      if(retry){ LIVE_TV.compatibilityRetried=true; LIVE_TV.compatibility=compatibility; }
+      try{ await stopLiveTv(); }
+      catch(e){
+        if(LIVE_TV.serial===serial+1) liveTvPlaybackState("error","Stream stopped. Owner cleanup is unconfirmed; retry Stop before opening another channel.",{retryable:false});
         return;
       }
-      liveTvFailure(error);
-      stopLiveTv().catch(()=>liveTvMessage("Stream stopped. Owner cleanup is unconfirmed; retry Stop before opening another channel."));
+      if(LIVE_TV.serial!==serial+1) return;
+      if(retry&&location.hash==="#/live-tv") await watchLiveTv(index,true);
+      else liveTvPlaybackFailure(error);
+    };
+    video.onplaying=()=>{ if(owned()&&!failing) liveTvPlaybackState("playing","Playing live"); };
+    video.onwaiting=()=>{
+      if(owned()&&!failing&&LIVE_TV.playbackState!=="blocked"&&LIVE_TV.playbackState!=="paused")
+        liveTvPlaybackState("buffering","Buffering live video…");
+    };
+    video.onpause=()=>{
+      if(owned()&&!failing&&video.paused) liveTvPlaybackState("paused","Paused. Press Play live to resume; the tuner is released after 30 seconds without playback.");
     };
     video.onerror=()=>failed({code:video.error&&[3,4].includes(video.error.code)?"codec_unsupported":"stream_failed"},
       video.error&&[3,4].includes(video.error.code)?{failed_video:true,failed_audio:true,failed_container:true}:null);
@@ -97,12 +173,12 @@ async function liveTvAttachSession(info,index,serial,generation){
     if(window.Hls&&Hls.isSupported()){
       const hls=new Hls({liveSyncDurationCount:2,liveMaxLatencyDurationCount:4,maxBufferLength:12,maxMaxBufferLength:18,backBufferLength:0});
       LIVE_TV.hls=hls;
-      hls.on(Hls.Events.MANIFEST_PARSED,play);
+      hls.on(Hls.Events.MANIFEST_PARSED,()=>{ liveTvRefreshCaptionControls(); play(); });
       hls.on(Hls.Events.ERROR,(_,data)=>{ if(data.fatal) failed({code:data.type===Hls.ErrorTypes.MEDIA_ERROR?"codec_unsupported":"stream_failed"},
         data.type===Hls.ErrorTypes.MEDIA_ERROR?{failed_video:true,failed_audio:true,failed_container:true}:null); });
       hls.loadSource(playlist); hls.attachMedia(video);
     }else if(video.canPlayType("application/vnd.apple.mpegurl")){
-      video.src=playlist; play();
+      video.src=playlist; liveTvRefreshCaptionControls(); play();
     }else{ await failed({code:"codec_unsupported"}); return; }
     LIVE_TV.timer=setInterval(async()=>{
       if(!owned()||LIVE_TV.polling) return;
@@ -121,14 +197,17 @@ async function liveTvAttachSession(info,index,serial,generation){
         if(!advancing){
           if(LIVE_TV.unplayedSince===null) LIVE_TV.unplayedSince=liveTvNow();
           if(liveTvNow()-LIVE_TV.unplayedSince>=30000){
-            await stopLiveTv(); liveTvMessage("Live TV stopped after 30 seconds without playback. Select a channel to resume.");
+            await stopLiveTv();
+            if(LIVE_TV.serial===serial+1) liveTvPlaybackState("error","Live TV stopped after 30 seconds without playback. Try again to reconnect.");
           }
           return;
         }
         if(frames!==null) LIVE_TV.lastFrames=frames;
         LIVE_TV.lastPosition=position; LIVE_TV.unplayedSince=liveTvNow();
         if(document.visibilityState!=="hidden"||liveTvInPip()) await LIVE_TV_LEASE.keepalive();
+        if(!owned()) return;
         const status=await LIVE_TV_LEASE.status();
+        if(!owned()) return;
         if(status&&status.state!=="active") await failed({code:"stream_failed"});
         else if(status){
           if(status.channel&&status.channel.id===LIVE_TV.selected){
@@ -142,7 +221,11 @@ async function liveTvAttachSession(info,index,serial,generation){
       }catch(e){ await failed(e,null,e&&e.code==="source_format_changed"); }
       finally{ LIVE_TV.polling=false; }
     },10000);
-  }catch(e){ if(onPage()) liveTvFailure(e); }
+  }catch(e){
+    if(!owned()) return;
+    try{ await stopLiveTv(); }catch(_){}
+    if(LIVE_TV.serial===serial+1) liveTvPlaybackFailure(e);
+  }
 }
 // Opening Live TV asks the owner about every start this browser still holds a
 // handle for. It rejoins one; it never tunes one. An owner that says the start
@@ -193,13 +276,33 @@ async function liveTvResumeStart(generation,route){
     return;
   }
 }
+function liveTvWatchChannel(id){
+  const channel=LIVE_TV.channels.find(channel=>channel.id===id);
+  if(!channel||PlurxLiveTv.channelView(channel).disabled) return;
+  if(location.hash!=="#/live-tv"){
+    LIVE_TV.watchOnArrival=id; location.hash="#/live-tv";
+  }else liveTvSelect(id);
+}
+function retryLiveTv(){
+  if(LIVE_TV.selected) liveTvWatchChannel(LIVE_TV.selected);
+}
 function resumeLiveTv(){
-  const video=document.getElementById("live-tv-video");
-  if(video&&LIVE_TV_LEASE.current) video.play().catch(()=>liveTvMessage("Playback could not start. Stop and select the channel again."));
+  const video=document.getElementById("live-tv-video"),serial=LIVE_TV.serial;
+  if(!video||!LIVE_TV_LEASE.current||LIVE_TV.playbackState==="starting") return;
+  if(!video.paused&&LIVE_TV.playbackState==="playing") return;
+  liveTvPlaybackState("buffering","Starting live video…");
+  // Called directly by a click, preserving the browser's user activation.
+  video.play().catch(error=>{
+    if(serial===LIVE_TV.serial&&error.name!=="AbortError")
+      liveTvPlaybackState("blocked","Playback could not start. Press Play live to try again, or Stop to release the tuner.");
+  });
 }
 function pauseLiveTv(){
   const video=document.getElementById("live-tv-video");
-  if(video&&LIVE_TV_LEASE.current){ video.pause(); liveTvMessage("Paused. The tuner is released after 30 seconds without playback; resuming has no rewind guarantee."); }
+  if(video&&LIVE_TV_LEASE.current){
+    video.pause();
+    liveTvPlaybackState("paused","Paused. Press Play live to resume; the tuner is released after 30 seconds without playback.");
+  }
 }
 function liveTvSyncMuteButtons(){
   const video=document.getElementById("live-tv-video"); if(!video) return;
