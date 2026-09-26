@@ -1290,6 +1290,16 @@ async fn background_library_publication_requires_both_live_owners() {
                     "{backend}"
                 );
             }
+            let allowance = store.update_provider_budget(plurx_core::store::background_jobs_provider::ProviderBudgetRequest {
+                provider: plurx_core::metadata::Provider::Tmdb,
+                lease: lease.clone(), now_ms: now,
+                action: plurx_core::store::background_jobs_provider::ProviderBudgetAction::Observe { cooldown_ms: 0, interval_ms: None },
+            }).await.expect("joint provider authority");
+            assert_eq!(allowance, if scenario == "live" {
+                plurx_core::store::background_jobs_provider::ProviderBudgetOutcome::Observed
+            } else {
+                plurx_core::store::background_jobs_provider::ProviderBudgetOutcome::LostAuthority
+            }, "{backend}: {scenario}: provider authority follows both owners");
             let replacement = publication_successor(&lease);
             let result = store
                 .put_setting_fenced(
@@ -1729,6 +1739,193 @@ async fn background_provider_contention_does_not_reserve_independent_storage() {
                 "{backend}"
             );
         }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn background_provider_budget_is_shared_charged_once_and_keeps_cooldowns() {
+    use super::acquired;
+    use plurx_core::metadata::Provider;
+    use plurx_core::store::background_jobs_provider::{
+        ProviderBudgetAction as Action, ProviderBudgetOutcome as Outcome,
+        ProviderBudgetRequest as Request,
+    };
+    for_each_backend(|store, backend| async move {
+        let artwork = acquired(
+            store
+                .acquire_lease("provider:artwork", "node-a", 1_000, 200_000)
+                .await
+                .expect("artwork lease"),
+            backend,
+        );
+        let genres = acquired(
+            store
+                .acquire_lease("provider:genres", "node-b", 1_000, 200_000)
+                .await
+                .expect("genre lease"),
+            backend,
+        );
+        let first = Request {
+            provider: Provider::Tmdb,
+            lease: artwork.clone(),
+            now_ms: 1_000,
+            action: Action::Charge,
+        };
+        assert_eq!(
+            store
+                .update_provider_budget(first.clone())
+                .await
+                .expect("dispatch"),
+            Outcome::Charged,
+            "{backend}"
+        );
+        // Replaying a lost acknowledgement never refunds the spent dispatch.
+        assert_eq!(
+            store
+                .update_provider_budget(first)
+                .await
+                .expect("lost reply retry"),
+            Outcome::Wait { until_ms: 1_100 },
+            "{backend}"
+        );
+        let second = Request {
+            provider: Provider::Tmdb,
+            lease: genres,
+            now_ms: 1_099,
+            action: Action::Charge,
+        };
+        assert_eq!(
+            store
+                .update_provider_budget(second.clone())
+                .await
+                .expect("other node"),
+            Outcome::Wait { until_ms: 1_100 },
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .update_provider_budget(Request {
+                    now_ms: 1_100,
+                    ..second.clone()
+                })
+                .await
+                .expect("refill"),
+            Outcome::Charged,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .update_provider_budget(Request {
+                    action: Action::Observe {
+                        cooldown_ms: 60_000,
+                        interval_ms: Some(4_001)
+                    },
+                    now_ms: 1_101,
+                    ..second.clone()
+                })
+                .await
+                .expect("429 cooldown"),
+            Outcome::Observed,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .update_provider_budget(Request {
+                    lease: artwork.clone(),
+                    now_ms: 2_000,
+                    ..second.clone()
+                })
+                .await
+                .expect("shared cooldown"),
+            Outcome::Wait { until_ms: 61_101 },
+            "{backend}"
+        );
+        // An unrelated later response cannot shorten the server's cooldown.
+        store
+            .update_provider_budget(Request {
+                action: Action::Observe {
+                    cooldown_ms: 0,
+                    interval_ms: Some(100),
+                },
+                now_ms: 3_000,
+                ..second.clone()
+            })
+            .await
+            .expect("response");
+        assert_eq!(
+            store
+                .update_provider_budget(Request {
+                    now_ms: 61_100,
+                    ..second.clone()
+                })
+                .await
+                .expect("cooldown retained"),
+            Outcome::Wait { until_ms: 61_101 },
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .update_provider_budget(Request {
+                    now_ms: 61_101,
+                    ..second.clone()
+                })
+                .await
+                .expect("cooldown elapsed"),
+            Outcome::Charged,
+            "{backend}"
+        );
+        // AniList has a separate allowance with conservative non-burst spacing.
+        assert_eq!(
+            store
+                .update_provider_budget(Request {
+                    provider: Provider::AniList,
+                    now_ms: 1_000,
+                    ..second.clone()
+                })
+                .await
+                .expect("anilist"),
+            Outcome::Charged,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .update_provider_budget(Request {
+                    provider: Provider::AniList,
+                    now_ms: 1_001,
+                    ..second.clone()
+                })
+                .await
+                .expect("anilist spacing"),
+            Outcome::Wait { until_ms: 3_100 },
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .update_provider_budget(Request {
+                    now_ms: 200_001,
+                    ..second
+                })
+                .await
+                .expect("expired owner"),
+            Outcome::LostAuthority,
+            "{backend}"
+        );
+        assert!(
+            store
+                .update_provider_budget(Request {
+                    provider: Provider::Tmdb,
+                    lease: plurx_core::cluster::coordination::Lease {
+                        resource: "catalogue:unrelated".into(),
+                        ..artwork
+                    },
+                    now_ms: 300_000,
+                    action: Action::Charge
+                })
+                .await
+                .is_err(),
+            "{backend}"
+        );
     })
     .await;
 }

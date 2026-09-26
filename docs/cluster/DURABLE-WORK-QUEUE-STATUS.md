@@ -17,7 +17,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | M1 durable queue and pre-transcode | Implemented; focused validation passed | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; local exact-recipe offline joining and scheduling implemented; lost-reply and process-expiry regressions written; cross-node transcode convergence belongs to E1 |
 | M2 fragment analysis and hydration | Implemented; focused validation passed | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
 | M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
-| E0 subtitle and library workers | Library dispatch compiled; remaining adapters in progress | Durable admission replaces the in-memory queue and request ring; scans share physical capacity and preserve coalesced hints. Provider/storage budgets, subtitles and learner permissions remain open |
+| E0 subtitle and library workers | Library dispatch and domain budgets committed; provider pacing implemented | Durable intent, results, shared capacity and Developer mapping controls are built. Provider pacing is undergoing construction checks; subtitles and learner permissions remain open |
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
@@ -495,3 +495,12 @@ The failing replicated test is being rerun before the main fast lane starts.
   domains and all-or-none provider contention are written, not executed.
   Rust 1.97.1 workspace/all-target compilation and Clippy with Hiqlite passed.
   Provider rate pacing, subtitles and learner authority remain unfinished.
+
+- E0 provider pacing: appended SQLite 75 / Hiqlite 53. A bounded two-provider
+  ledger charges each maintenance dispatch, shares cooldowns and reported
+  limits, and retains spent allowance after a lost response. Queue-bound
+  library owners and existing artwork/genre publication leases use the same
+  budget; no per-node multiplication. HTTP bodies and retry waits cooperate
+  with queue cancellation. Wrote cross-owner pacing, cooldown, stale-owner
+  transport and populated-backup parity regressions; none executed yet.
+  The replicated state digest now includes all four E0 domain tables.

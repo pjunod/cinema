@@ -1430,7 +1430,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 30] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 31] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1488,6 +1488,7 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS background_job_domain_leases",
             "CREATE TABLE IF NOT EXISTS background_library_requests",
             "CREATE TABLE IF NOT EXISTS background_storage_domains",
+            "CREATE TABLE IF NOT EXISTS background_provider_budgets",
         ];
 
         assert!(

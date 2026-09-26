@@ -7,6 +7,7 @@
 
 pub mod anilist;
 pub mod book;
+pub mod budget;
 pub mod classification;
 pub mod genres;
 pub mod local;
@@ -43,8 +44,9 @@ pub(crate) const PROVIDER_CALL_BUDGET: Duration = Duration::from_secs(60);
 pub(crate) const ITEM_ENRICH_DEADLINE: Duration = Duration::from_secs(120);
 pub(crate) const PROVIDER_JSON_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
-#[derive(Clone, Copy)]
-pub(crate) enum Provider {
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Provider {
     Tmdb,
     AniList,
 }
@@ -167,7 +169,7 @@ pub(crate) async fn bounded_json_response(
     }
     let mut body = response.bytes_stream();
     let mut bytes = Vec::new();
-    while let Some(chunk) = body.next().await {
+    while let Some(chunk) = budget::cancellable(body.next()).await? {
         let chunk = chunk.map_err(request_error)?;
         if bytes.len().saturating_add(chunk.len()) > PROVIDER_JSON_MAX_BYTES as usize {
             return Err(crate::error::MetadataError::BodyBound(
@@ -268,7 +270,7 @@ pub(crate) async fn bounded_artwork_response(
     }
     let mut body = response.bytes_stream();
     let mut bytes = Vec::new();
-    while let Some(chunk) = body.next().await {
+    while let Some(chunk) = budget::cancellable(body.next()).await? {
         let chunk = chunk.map_err(request_error)?;
         if bytes.len().saturating_add(chunk.len()) > MAX_ARTWORK_BYTES as usize {
             return Err(crate::error::MetadataError::BodyBound(MAX_ARTWORK_BYTES));

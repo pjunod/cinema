@@ -5062,7 +5062,8 @@ impl JobManager {
                 .await,
             );
         } else if library.anime {
-            let client = AniListClient::new();
+            let client = AniListClient::new()
+                .with_budget(publisher.provider_budget(Arc::clone(&self.store)));
             outcome.enrich = Some(
                 metadata::enrich_anime_library_with_publication(
                     publisher,
@@ -5078,7 +5079,9 @@ impl JobManager {
         } else {
             match self.store.get_setting(keys::TMDB_API_KEY).await {
                 Ok(Some(key)) if !key.is_empty() => {
-                    let tmdb = self.tmdb_client(key);
+                    let tmdb = self
+                        .tmdb_client(key)
+                        .with_budget(publisher.provider_budget(Arc::clone(&self.store)));
                     outcome.enrich = Some(
                         metadata::enrich_library_for_targets_with_publication(
                             publisher,
@@ -6112,14 +6115,18 @@ impl JobManager {
         // enrich from AniList, which needs none, and those titles are exactly
         // as entitled to genres as the rest.
         let tmdb = match self.store.get_setting(keys::TMDB_API_KEY).await {
-            Ok(Some(key)) if !key.is_empty() => Some(TmdbClient::new(key)),
+            Ok(Some(key)) if !key.is_empty() => Some(
+                TmdbClient::new(key)
+                    .with_budget(publisher.provider_budget(Arc::clone(&self.store))),
+            ),
             Ok(_) => None,
             Err(e) => {
                 tracing::warn!(error = %e, "genre backfill: reading TMDB key");
                 None
             }
         };
-        let anilist = AniListClient::new();
+        let anilist =
+            AniListClient::new().with_budget(publisher.provider_budget(Arc::clone(&self.store)));
         let report = tokio::select! {
             report = metadata::genres::backfill_pass_with_publication(
                 &publisher,

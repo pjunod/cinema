@@ -509,6 +509,7 @@ const SHARED_CACHE_METHODS: &[&str] = &[
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
     "bind_library_job",
+    "update_provider_budget",
     "storage_domains",
     "replace_storage_domains",
     "enqueue_library_work",
@@ -15195,6 +15196,10 @@ fn populated_current_import_fixture(data_dir: &std::path::Path) -> PathBuf {
                   refresh_interval_mins, last_scan_at, last_refresh_at)
                  VALUES (9, 'Imported Shows', 'shows', '[\"/fixture/shows\"]', 0,
                          108, 30, 60, 109, 110);
+             INSERT INTO background_storage_domains (library_id, root_path, domain_id)
+                 VALUES (9, '/fixture/shows', 'fixture-nas');
+             INSERT INTO background_provider_budgets (provider, next_dispatch_ms, interval_ms)
+                 VALUES ('tmdb', 42000, 100), ('ani_list', 63000, 2100);
              INSERT INTO items
                  (id, library_id, kind, parent_id, title, sort_title, year, overview,
                   added_at, updated_at, tags, genres)
@@ -15944,6 +15949,24 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
         .await
         .expect("import populated current backup");
     assert_eq!(report.search_rows, 2);
+    assert_eq!(
+        store
+            .storage_domains()
+            .await
+            .expect("imported storage domains")[0]
+            .domain_id,
+        "fixture-nas"
+    );
+    assert_eq!(
+        report
+            .tables
+            .iter()
+            .find(|table| table.table == "background_provider_budgets")
+            .expect("provider budget parity")
+            .row_count,
+        2
+    );
+
     for table in [
         "background_jobs",
         "background_job_waiters",
@@ -17533,7 +17556,7 @@ fn contract_inventory_matches_every_store_method() {
     // E0 adds the catalogue/queue dual-owner binding.
     // Three library admission/query/completion operations preserve each caller.
     // +2: replicated root-domain observation and atomic replacement.
-    assert_eq!(declared.len(), 422, "review the Store method count");
+    assert_eq!(declared.len(), 423, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

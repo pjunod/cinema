@@ -1593,6 +1593,15 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "background_provider_budgets",
+        columns: &["provider", "next_dispatch_ms", "interval_ms"],
+        order_by: "provider",
+        minimum_schema: super::background_jobs_provider::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "background_storage_domains",
         columns: &["library_id", "root_path", "domain_id"],
         order_by: "library_id, root_path",

@@ -1160,6 +1160,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs_library::SCHEMA,
     // v74: named storage domains and atomic provider/storage reservations.
     super::background_jobs_resources::SCHEMA,
+    // v75: replicated provider request pacing and cooldowns.
+    super::background_jobs_provider::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

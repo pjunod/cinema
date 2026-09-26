@@ -605,6 +605,23 @@ it by node count. Concurrency leases are not rate limits: E0 adds a bounded
 token/refill record when the provider needs a time-based quota. Provider/scanner
 machinery remains unchanged until that adapter is implemented.
 
+The E0 request allowance is a two-row replicated pacing ledger. Maintenance
+clients charge before every HTTP dispatch, including retries and images;
+credits never accumulate into a burst or return after a lost response. Start
+at one TMDB dispatch per 100 ms and one AniList dispatch per 2.1 seconds.
+These are conservative application policies: [TMDB documents a changeable
+soft ceiling](https://developer.themoviedb.org/docs/rate-limiting), while
+[AniList currently documents a degraded 30/minute limit and response
+headers](https://docs.anilist.co/guide/rate-limiting). Rate-limit headers may
+slow pacing; Retry-After and exhausted-window reset times extend a shared
+cooldown (bounded to 24 hours). Each caller waits at most its existing
+60-second provider budget and yields promptly on cooperative cancellation.
+Artwork repair and genre backfill share the same ledger through their
+existing renewable publication leases. The two provider concurrency slots
+apply to queue library jobs; those two existing singleton maintenance passes
+retain their current concurrency owners. Interactive provider search and the
+standalone import CLI retain their existing request policy.
+
 Claim all required shared slots in the same transaction or claim none. Resource
 ordering cannot deadlock a worker halfway through acquiring two domains.
 Renew/release reservations with the job token. A freed shared slot does not
@@ -1129,11 +1146,11 @@ not authorize a production restart or rolling mixed-queue cutover.
 | Unit | Status | Branch/PR | Evidence |
 |---|---|---|---|
 | Implementation plan | review findings addressed 2026-09-25; external review pending | Working-tree documentation only | One independent adversarial review; dispositions in §13; four docs-index tests and explicit new-file link/whitespace checks |
-| M1 queue + pre-transcode | implemented; final evidence pending | PR #532 | Pinned compiler and Clippy; tests deferred |
-| M2 fragment build + hydration | implemented; final evidence pending | PR #532 | Shared build, target hydration, retry ledgers and cutover compiled |
-| M3 operations + recovery | implemented; final evidence pending | PR #532 | Activity, advisory Developer controls, recovery and migration compiled |
-| Core promotion/deployment | not started | — | — |
-| E0 preparation + maintenance adapters | not started | — | — |
+| M1 queue + pre-transcode | merged | PR #532 | Adversarial findings addressed; fast lane 3296 green |
+| M2 fragment build + hydration | merged | PR #532 | Shared build, hydration, retry ledgers and cutover validated |
+| M3 operations + recovery | merged | PR #532 | Activity, Developer controls, recovery and migration validated |
+| Core promotion/deployment | main merged; production unchanged | `b4b488556` | Required gates passed on reviewed candidate; no deployment authorized |
+| E0 preparation + maintenance adapters | in progress | `codex/cluster-work-adapters` | Durable library dispatch and storage/provider concurrency committed; rates, subtitles and learners in progress |
 | E1 reads + cache preparation | not started | — | — |
 | E2 embeddings + batch analysis | not started | — | — |
 | E3 placement + shared ingest | not started | — | — |

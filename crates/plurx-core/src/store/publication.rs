@@ -149,7 +149,51 @@ pub struct PublicationStore<'a> {
     fence: Option<PublicationFence>,
 }
 
+struct FencedProviderBudget {
+    store: Arc<dyn Store>,
+    fence: PublicationFence,
+}
+
+#[async_trait::async_trait]
+impl crate::metadata::budget::ProviderBudget for FencedProviderBudget {
+    async fn update(
+        &self,
+        provider: crate::metadata::Provider,
+        action: super::background_jobs_provider::ProviderBudgetAction,
+    ) -> Result<super::background_jobs_provider::ProviderBudgetOutcome, StoreError> {
+        let publisher = PublicationStore::fenced(self.store.as_ref(), self.fence.clone());
+        let guard = publisher.token().await?;
+        let lease = guard
+            .as_ref()
+            .ok_or_else(|| publisher.invalidated())?
+            .clone();
+        self.store
+            .update_provider_budget(super::background_jobs_provider::ProviderBudgetRequest {
+                provider,
+                lease,
+                now_ms: unix_ms()?,
+                action,
+            })
+            .await
+    }
+}
+
 impl<'a> PublicationStore<'a> {
+    /// A client keeps the same renewable publication fence as its maintenance
+    /// pass. Each dispatched request is charged before sending; waiting does
+    /// not hold the fence's read guard or prevent lease renewal.
+    pub fn provider_budget(
+        &self,
+        store: Arc<dyn Store>,
+    ) -> crate::metadata::budget::SharedProviderBudget {
+        self.fence.as_ref().map(|fence| {
+            Arc::new(FencedProviderBudget {
+                store,
+                fence: fence.clone(),
+            }) as Arc<dyn crate::metadata::budget::ProviderBudget>
+        })
+    }
+
     pub async fn apply_identity_repair(
         &self,
         snapshot: &IdentityRepairSnapshot,

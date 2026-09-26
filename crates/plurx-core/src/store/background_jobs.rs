@@ -919,6 +919,10 @@ pub struct CancelWaiterOutcome {
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    async fn update_provider_budget(
+        &self,
+        request: super::background_jobs_provider::ProviderBudgetRequest,
+    ) -> Result<super::background_jobs_provider::ProviderBudgetOutcome, StoreError>;
     async fn storage_domains(
         &self,
     ) -> Result<Vec<super::background_jobs_resources::StorageDomainMapping>, StoreError>;
@@ -1051,6 +1055,12 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn update_provider_budget(
+        &self,
+        request: super::background_jobs_provider::ProviderBudgetRequest,
+    ) -> Result<super::background_jobs_provider::ProviderBudgetOutcome, StoreError> {
+        super::background_jobs_provider::update(self, request).await
+    }
     async fn storage_domains(
         &self,
     ) -> Result<Vec<super::background_jobs_resources::StorageDomainMapping>, StoreError> {

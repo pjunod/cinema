@@ -597,7 +597,7 @@ async function saveHevcCopy(btn){
 
 function storageDomainsCard(){
   return setCard(`${cardHead("Shared storage budgets","Give mount paths on the same disk or NAS the same domain name.",'<span class="pill">2 readers per domain</span>')}
-    <p class="hint">An empty domain uses the shared default. A library with multiple roots reserves each domain before starting. Provider concurrency is also shared across workers.</p>
+    <p class="hint">An empty domain uses the shared default. A library with multiple roots reserves each domain before starting. Library jobs also share provider concurrency. Maintenance requests are paced across nodes: TMDB at most one dispatch per 100 ms, AniList one per 2.1 seconds, with shared server cooldowns.</p>
     <div id="storage-domain-roots"><button type="button" class="ghost" onclick="loadStorageDomains(this)">Load library roots</button></div>
     <p class="hint">Save identity changes while background jobs are idle so existing reservations keep their meaning. This does not change any feature's enable switch.</p>
     <div id="storage-domain-error" class="err" role="alert"></div>
