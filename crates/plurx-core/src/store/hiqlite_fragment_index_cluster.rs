@@ -1030,10 +1030,57 @@ pub(super) async fn analysis_component_schema_is_current(
     Ok(rows.len() == 1 && rows[0].0 == ANALYSIS_COMPONENT_SCHEMA_OBJECTS)
 }
 
+/// Counts the two tables only v47's step creates. That step is one Raft
+/// transaction, so a tree holding both carries the whole v47 shape (the
+/// rebuilt `analysis_requests` that admits `subtitle_source`, its triggers,
+/// and the publication and repair-epoch ledgers) and a tree holding neither
+/// carries none of it.
+pub(super) const SUBTITLE_SOURCE_SCHEMA_CURRENT_SQL: &str = r#"
+SELECT COUNT(*) AS count FROM sqlite_master
+ WHERE type = 'table'
+   AND name IN ('subtitle_source_publications', 'subtitle_source_repair_epochs')
+"#;
+
+pub(super) const SUBTITLE_SOURCE_SCHEMA_OBJECTS: i64 = 2;
+
+async fn subtitle_source_schema_is_current(client: &hiqlite::Client) -> Result<bool, StoreError> {
+    validate_sql(SUBTITLE_SOURCE_SCHEMA_CURRENT_SQL)?;
+    let rows = client
+        // authority: a stale replica could miss a committed v47 step and replay its table rebuild.
+        .query_consistent_map::<SchemaCountRow, _>(SUBTITLE_SOURCE_SCHEMA_CURRENT_SQL, params!())
+        .await
+        .map_err(database_error)?;
+    Ok(rows.len() == 1 && rows[0].0 == SUBTITLE_SOURCE_SCHEMA_OBJECTS)
+}
+
+/// Install the complete analysis schema on a fresh cluster: the v12-v42 shape
+/// in one transaction, then v47's subtitle-source step in a second.
+///
+/// Bootstrap stamps `cluster_meta` at `AUTH_SCHEMA_VERSION` directly, so every
+/// step the migration chain would have run has to happen here too. A step left
+/// out is never run afterwards, because the stamped version says it already
+/// was. Each half has its own presence guard, so a bootstrap retried after a
+/// cancelled future resumes wherever the first attempt stopped.
+/// `fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree`
+/// holds this to the chain: it fails when a fresh bootstrap and a frozen
+/// schema-42 tree migrated through the real chain differ in any object.
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
-    if analysis_component_schema_is_current(client).await? {
-        return Ok(());
+    if !analysis_component_schema_is_current(client).await? {
+        install_analysis_base_schema(client).await?;
     }
+    if !subtitle_source_schema_is_current(client).await? {
+        client
+            .txn(subtitle_source_schema_migration_statements()?)
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+    }
+    Ok(())
+}
+
+async fn install_analysis_base_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
     let mut statements = fragment_index_schema_migration_statements()?;
     statements.extend(analysis_request_schema_migration_statements()?);
     statements.extend(analysis_history_index_migration_statements()?);
