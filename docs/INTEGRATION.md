@@ -445,6 +445,13 @@ as a column: backoff `5s → 30s → 2m`, batch of 20. Restart plurx mid-retry a
 the retry still happens. A queue that lives in memory loses everything on the
 one event you most want it to survive — a restart.
 
+**Who delivers, and how fast.** In a cluster exactly one voter drains the
+queue (it holds the `watched:outbox` job lease); if it dies another takes
+over within about 105 s. A notification queued on the draining node goes out
+within a second; one queued on another node within about ten seconds. An idle
+queue is checked locally rather than by asking the cluster, so an empty
+outbox costs no replicated writes beyond one forced check every 30 s.
+
 **Where you see it.** Settings → Integrations → Curator card, the queue line
 under **Test connection**: `Watch notifications — 41 sent, 2 waiting, 0
 failed`. And on the Curator side, System → **Connections** lists `plurx` as
@@ -478,6 +485,7 @@ not an error, and plurx correctly does not retry it.
 | `plurx_scan_total{trigger="…"}` | counter | scans started, by what asked for one |
 | `plurx_notify_received_total` | counter | scan requests received from other applications |
 | `plurx_watched_outbox{status="pending\|ok\|failed"}` | gauge | the §5 queue |
+| `plurx_watched_outbox_ticks_total{outcome="skipped_hint\|skipped_unconfigured\|claimed\|empty_claim\|not_owner"}` | counter | why each §5 drain pass did or did not ask the cluster for rows |
 
 `plurx_scan_total{trigger="targeted"}` climbing is the clearest machine-
 readable proof that §1 is live. `plurx_notify_received_total` flat while
