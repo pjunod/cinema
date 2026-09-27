@@ -1,8 +1,8 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 merged; E0 adapters implemented, review pending · **Updated:** 2026-09-26 ·
+**Status:** M1–M3 merged; E0 final adversarial review in progress · **Updated:** 2026-09-26 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` ·
-**Base:** `0386c78ec` · **PR:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532)
+**Base:** `0386c78ec` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/564)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -17,7 +17,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | M1 durable queue and pre-transcode | Implemented; focused validation passed | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; local exact-recipe offline joining and scheduling implemented; lost-reply and process-expiry regressions written; cross-node transcode convergence belongs to E1 |
 | M2 fragment analysis and hydration | Implemented; focused validation passed | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
 | M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
-| E0 subtitle and library workers | Adapters implemented; construction checks passed | Library work, storage/provider budgets, learner authority and all-track subtitle extraction are connected. Final commit/base integration, adversarial review and fast lane remain |
+| E0 subtitle and library workers | Adapters implemented; construction checks passed | Library work, storage/provider budgets, learner authority and all-track subtitle extraction are connected. Integrated current main; PR #564 is in its one adversarial review. Fast lane follows findings |
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
@@ -547,3 +547,9 @@ The failing replicated test is being rerun before the main fast lane starts.
   Main `0386c78ec` merged cleanly into the candidate. The cutover also preserves
   spent subtitle retry allowance and the configured analysis attempt limit.
   Rechecking the integrated source before opening the final review.
+
+- E0 candidate `1f378c4a1` passed the normal hook against main `0386c78ec`.
+  Draft PR #564 is open. Its single independent adversarial review is now
+  examining that frozen source; only this status record changes during review.
+  Draft status keeps the fast lane idle. The desktop cannot attach Forgejo PR
+  artifacts, so the ordinary PR link above is the review entry point.
