@@ -718,11 +718,11 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     spare.playbackRate=intent.playbackRate;
   }catch(e){}
   spare.style.display="";
-  spare.style.position="";
-  spare.style.inset="";
+  // The prepared video already fills the player in its own compositor layer.
+  // Keep that geometry through its first visible frames; removing the absolute
+  // positioning here can make the browser rebuild the layer at exposure.
   spare.style.opacity="";
   spare.style.pointerEvents="";
-  spare.style.zIndex="";
   spare.removeAttribute("aria-hidden");
   retired.style.display="none";
   retired.muted=true;
