@@ -65,11 +65,12 @@ ORDER BY request_scope, request_id LIMIT json_extract($1, '$.limit') + 1
 
 pub(super) const DELIVERIES_SQL: &str = r#"
 SELECT json_object('job_id', job_id, 'target_node_id', target_node_id,
-    'artifact_key', CASE json_extract(result_ref, '$.artifact_kind') WHEN 'fragment_index' THEN 'fragment:' WHEN 'artwork' THEN 'artwork:' END || json_extract(result_ref, '$.artifact_key'),
+    'artifact_key', COALESCE(CASE json_extract(result_ref, '$.artifact_kind') WHEN 'fragment_index' THEN 'fragment:' WHEN 'artwork' THEN 'artwork:' END || json_extract(result_ref, '$.artifact_key'), 'transcode:' || json_extract(result_ref,'$.recipe_hash') || ':' || json_extract(result_ref,'$.manifest_digest')),
     'priority', MAX(priority)) AS result_json
 FROM background_job_waiters WHERE state = 'awaiting_hydration' AND target_node_id IS NOT NULL
     AND (deadline_ms IS NULL OR deadline_ms > json_extract($1, '$.now_ms'))
-    AND CASE WHEN json_valid(result_ref) THEN json_extract(result_ref, '$.artifact_kind') END IN ('fragment_index','artwork')
+    AND CASE WHEN json_valid(result_ref) THEN (json_extract(result_ref, '$.artifact_kind') IN ('fragment_index','artwork')
+      OR (json_extract(result_ref,'$.recipe_hash') IS NOT NULL AND json_extract(result_ref,'$.manifest_digest') IS NOT NULL)) ELSE 0 END
     AND NOT EXISTS (SELECT 1 FROM background_job_waiters delivery
         WHERE delivery.request_scope = 'delivery:' || background_job_waiters.job_id
           AND delivery.request_id = background_job_waiters.target_node_id)

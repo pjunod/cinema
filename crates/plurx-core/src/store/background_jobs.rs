@@ -191,7 +191,7 @@ WITH input AS (SELECT json($1) AS body), request AS (
       SELECT 1 FROM background_job_waiters WHERE job_id = json_extract(body, '$.delivery_parent')
         AND target_node_id = json_extract(body, '$.payload.target_node_id') AND state = 'awaiting_hydration'
         AND (deadline_ms IS NULL OR deadline_ms > json_extract(body, '$.now_ms'))
-        AND CASE WHEN json_valid(result_ref) THEN CASE json_extract(result_ref, '$.artifact_kind') WHEN 'fragment_index' THEN 'fragment:' WHEN 'artwork' THEN 'artwork:' END || json_extract(result_ref, '$.artifact_key') END = json_extract(body, '$.payload.artifact_key')
+        AND CASE WHEN json_valid(result_ref) THEN COALESCE(CASE json_extract(result_ref, '$.artifact_kind') WHEN 'fragment_index' THEN 'fragment:' WHEN 'artwork' THEN 'artwork:' END || json_extract(result_ref, '$.artifact_key'), 'transcode:' || json_extract(result_ref,'$.recipe_hash') || ':' || json_extract(result_ref,'$.manifest_digest')) END = json_extract(body, '$.payload.artifact_key')
     ) THEN 'no_demand'
     WHEN json_type(body, '$.fragment_domain') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM files WHERE id = json_extract(body, '$.fragment_domain.file_id')
@@ -956,6 +956,10 @@ pub struct CancelWaiterOutcome {
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    async fn transcode_copy_sources(
+        &self,
+        artifact_key: &str,
+    ) -> Result<Vec<super::background_jobs_transcode::TranscodeCopySource>, StoreError>;
     /// Immutable producer provenance, including when all advertised holders expired.
     async fn artwork_variant(
         &self,
@@ -1146,6 +1150,12 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn transcode_copy_sources(
+        &self,
+        artifact_key: &str,
+    ) -> Result<Vec<super::background_jobs_transcode::TranscodeCopySource>, StoreError> {
+        super::background_jobs_transcode::sources(self, artifact_key).await
+    }
     async fn artwork_variant(
         &self,
         artifact_key: &str,
@@ -1329,11 +1339,12 @@ impl<T: QueueSql> BackgroundJobStore for T {
     ) -> Result<EnqueueOutcome, StoreError> {
         use sha2::{Digest, Sha256};
         if uuid::Uuid::parse_str(&intent.job_id).is_err()
-            || !intent
+            || !(intent
                 .artifact_key
                 .strip_prefix("fragment:")
                 .or_else(|| intent.artifact_key.strip_prefix("artwork:"))
                 .is_some_and(digest)
+                || super::background_jobs_transcode::parse_key(&intent.artifact_key).is_some())
         {
             return Err(invalid("invalid background delivery intent"));
         }

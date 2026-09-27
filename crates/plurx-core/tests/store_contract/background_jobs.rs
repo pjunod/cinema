@@ -160,6 +160,216 @@ async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_f
 }
 
 #[tokio::test]
+async fn background_transcode_copies_preserve_source_proof_and_settle_only_the_receiving_target() {
+    for_each_backend(|store, backend| async move {
+        use plurx_core::store::background_jobs_transcode::artifact_key;
+        let (_, file_id) = seed_file(&store, "transcode-copies").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let id = uuid::Uuid::new_v4().to_string();
+        let recipe = "a".repeat(64);
+        let manifest = "d".repeat(64);
+        for target in ["node-a", "node-b", "node-c"] {
+            let mut input = preparation_request(&file, &id, 1_000);
+            input.id = uuid::Uuid::new_v4().to_string();
+            input.request.request_id = format!("copy-{target}");
+            input.request.target_node_id = Some(target.into());
+            assert!(matches!(
+                store.enqueue_job(input).await.expect("demand"),
+                EnqueueOutcome::Accepted { .. }
+            ));
+        }
+        let candidate = store
+            .job_candidates(CandidateQuery {
+                node_id: "node-a".into(),
+                kinds: vec![JobKind::TranscodePrepare],
+                after: None,
+                now_ms: 1_001,
+                limit: 8,
+            })
+            .await
+            .expect("candidate")
+            .jobs
+            .remove(0);
+        let parent = candidate.id.clone();
+        let ClaimOutcome::Claimed { job } = store
+            .claim_job(ClaimJob {
+                job_id: parent.clone(),
+                expected_revision: candidate.revision,
+                node_id: "node-a".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::TranscodePrepare,
+                payload_version: 1,
+                now_ms: 1_001,
+                dispatched_at_ms: 1_001,
+            })
+            .await
+            .expect("producer")
+        else {
+            panic!("{backend}: producer not claimed")
+        };
+        let output = TranscodeJobOutput {
+            recipe_hash: recipe.clone(),
+            recipe_version: 1,
+            relative_dir: "aa/original".into(),
+            bytes: 100,
+            expected_previous_bytes: None,
+            manifest_digest: manifest.clone(),
+        };
+        assert!(matches!(
+            store
+                .publish_transcode_job(PublishTranscodeJob {
+                    token: job.token.expect("token"),
+                    output: output.clone(),
+                    now_ms: 1_002,
+                })
+                .await
+                .expect("publish"),
+            JobPublishOutcome::Published { .. }
+        ));
+        let key = artifact_key(&recipe, &manifest);
+        let holders = store.transcode_copy_sources(&key).await.expect("holders");
+        assert_eq!(holders.len(), 1, "{backend}");
+        assert_eq!(holders[0].source_size, file.size);
+        let intents = store.delivery_intents(1_003).await.expect("outbox");
+        assert_eq!(intents.len(), 2, "{backend}: two receiving nodes");
+        for intent in intents {
+            assert_eq!(intent.artifact_key, key);
+            let target = intent.target_node_id.clone();
+            let EnqueueOutcome::Accepted { job_id, .. } = store
+                .enqueue_delivery(intent, 1_003)
+                .await
+                .expect("admit delivery")
+            else {
+                panic!("{backend}: delivery not admitted")
+            };
+            let copy = store
+                .background_job(&job_id)
+                .await
+                .expect("copy")
+                .expect("copy");
+            let ClaimOutcome::Claimed { job } = store
+                .claim_job(ClaimJob {
+                    job_id,
+                    expected_revision: copy.revision,
+                    node_id: target.clone(),
+                    boot_id: uuid::Uuid::new_v4().to_string(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::ArtifactHydrate,
+                    payload_version: 1,
+                    now_ms: 1_004,
+                    dispatched_at_ms: 1_004,
+                })
+                .await
+                .expect("copy claim")
+            else {
+                panic!("{backend}: copy not claimed")
+            };
+            let mut publication = PublishTranscodeJob {
+                token: job.token.expect("copy token"),
+                output: output.clone(),
+                now_ms: 1_005,
+            };
+            publication.output.relative_dir = format!("aa/copy-{target}");
+            if target == "node-b" {
+                let mut stale = publication.clone();
+                stale.token.fence += 1;
+                assert!(matches!(
+                    store.publish_transcode_job(stale).await.expect("stale"),
+                    JobPublishOutcome::LostOwnership
+                ));
+                let mut wrong_manifest = publication.clone();
+                wrong_manifest.output.manifest_digest = "e".repeat(64);
+                assert!(matches!(
+                    store
+                        .publish_transcode_job(wrong_manifest)
+                        .await
+                        .expect("wrong manifest"),
+                    JobPublishOutcome::LostOwnership
+                ));
+                assert!(matches!(
+                    store
+                        .publish_transcode_job(publication.clone())
+                        .await
+                        .expect("copy publish"),
+                    JobPublishOutcome::Published { .. }
+                ));
+                assert!(matches!(
+                    store
+                        .publish_transcode_job(publication)
+                        .await
+                        .expect("ack replay"),
+                    JobPublishOutcome::AlreadyPublished { .. }
+                ));
+                let holders = store
+                    .transcode_copy_sources(&key)
+                    .await
+                    .expect("verified holders");
+                assert_eq!(holders.len(), 2);
+                assert!(holders.iter().all(
+                    |holder| holder.built_by_node_id == "node-a" && holder.built_at_ms == 1_002
+                ));
+                let waiters = store
+                    .job_waiters(WaiterQuery {
+                        job_id: parent.clone(),
+                        after: None,
+                        limit: 8,
+                    })
+                    .await
+                    .expect("waiters");
+                assert_eq!(
+                    waiters
+                        .waiters
+                        .iter()
+                        .find(|waiter| waiter.target_node_id.as_deref() == Some("node-b"))
+                        .expect("B")
+                        .state,
+                    "succeeded"
+                );
+                assert_eq!(
+                    waiters
+                        .waiters
+                        .iter()
+                        .find(|waiter| waiter.target_node_id.as_deref() == Some("node-c"))
+                        .expect("C")
+                        .state,
+                    "awaiting_hydration"
+                );
+            } else {
+                store
+                    .upsert_file(
+                        file.item_id,
+                        file.path.to_str().expect("path"),
+                        file.size + 1,
+                        file.mtime + 1,
+                        &Default::default(),
+                    )
+                    .await
+                    .expect("replace source");
+                assert!(matches!(
+                    store
+                        .publish_transcode_job(publication)
+                        .await
+                        .expect("stale source"),
+                    JobPublishOutcome::SourceChanged
+                ));
+                assert!(store
+                    .transcode_copy_sources(&key)
+                    .await
+                    .expect("current holders")
+                    .is_empty());
+                assert!(store
+                    .cache_hit(&recipe, &target)
+                    .await
+                    .expect("C cache")
+                    .is_none());
+            }
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn background_jobs_one_fragment_build_keeps_remote_delivery_durable() {
     for_each_backend(|store, backend| async move {
         let (_, file_id) = seed_file(&store, "durable-fragment-delivery").await;

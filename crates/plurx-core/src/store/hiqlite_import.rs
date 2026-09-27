@@ -1198,6 +1198,24 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "background_transcode_artifacts",
+        columns: &[
+            "recipe_hash",
+            "manifest_digest",
+            "file_id",
+            "source_size",
+            "source_mtime",
+            "recipe_version",
+            "built_by_node_id",
+            "built_at_ms",
+        ],
+        order_by: "recipe_hash, manifest_digest",
+        minimum_schema: super::background_jobs_transcode::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "cache_storage_members",
         columns: &[
             "storage_id",
@@ -3328,7 +3346,7 @@ mod tests {
             assert!(names.contains(&name));
         }
         assert!(!names.contains(&"classification_fts"));
-        assert_eq!(names.len(), 65, "review every imported durable table");
+        assert_eq!(names.len(), 66, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its
@@ -3782,6 +3800,7 @@ mod tests {
                     "background_storage_domains" => 74,
                     "background_provider_budgets" => 75,
                     "background_artwork_locations" => 77,
+                    "background_transcode_artifacts" => 78,
                     _ => 71,
                 };
                 assert_eq!(table.minimum_schema, introduced, "{}", table.name);

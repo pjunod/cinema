@@ -115,6 +115,7 @@ pub mod background_jobs_resources;
 pub mod background_jobs_subtitle;
 #[cfg(test)]
 mod background_jobs_tests;
+pub mod background_jobs_transcode;
 pub mod classification_schedule;
 pub mod offline_claim;
 pub mod offline_expiry;

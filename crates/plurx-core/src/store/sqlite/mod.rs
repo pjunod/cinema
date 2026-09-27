@@ -1166,6 +1166,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     concat!(include_str!("../background_jobs_subtitle.sql"), "\n", "UPDATE analysis_requests SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL, fence = fence + 1 WHERE component = 'subtitle_source' AND state IN ('running','submitted');"),
     // v77: immutable artwork variants and verified holder publications.
     super::background_jobs_artwork::SCHEMA,
+    super::background_jobs_transcode::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2884,9 +2885,10 @@ mod tests {
         // v69 adds the cluster subtitle-source queue and publication metadata;
         // v70 adds K-05 M5's catalogue read indexes; v71 adds the common queue.
         // v72–v76 add library work, domain leases, source-I/O reservations,
-        // provider dispatch budgets and the subtitle adapter; v77 adds artwork holders.
+        // provider dispatch budgets and the subtitle adapter; v77 adds artwork holders,
+        // and v78 retains portable transcode source/manifest provenance.
         assert_eq!(
-            version, 77,
+            version, 78,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

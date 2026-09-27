@@ -128,7 +128,9 @@ const SUBTITLE_JOBS_SCHEMA_VERSION: i64 = 54;
 const SUBTITLE_JOBS_SCHEMA_MIGRATION_SOURCE: i64 = PROVIDER_BUDGET_SCHEMA_VERSION;
 const ARTWORK_JOBS_SCHEMA_VERSION: i64 = 55;
 const ARTWORK_JOBS_SCHEMA_MIGRATION_SOURCE: i64 = SUBTITLE_JOBS_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = ARTWORK_JOBS_SCHEMA_VERSION;
+const TRANSCODE_COPIES_SCHEMA_VERSION: i64 = 56;
+const TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE: i64 = ARTWORK_JOBS_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = TRANSCODE_COPIES_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -2894,6 +2896,22 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(ARTWORK_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_transcode::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(TRANSCODE_COPIES_SCHEMA_VERSION, now, TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -3081,6 +3099,10 @@ impl HiqliteAuthStore {
         self.telemetry.clear().await?;
         let statements = vec![
             ("DELETE FROM background_job_commands".to_owned(), params!()),
+            (
+                "DELETE FROM background_transcode_artifacts".to_owned(),
+                params!(),
+            ),
             (
                 "DELETE FROM background_artwork_locations".to_owned(),
                 params!(),
@@ -3951,6 +3973,7 @@ impl SettingsStore for HiqliteAuthStore {
         keys: &[&str],
     ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
         let keys = super::selected_settings_json(keys)?;
+        // authority: related playback preferences share one committed settings snapshot.
         let rows = self.client().query_consistent_map::<SettingEntryRow, _>(
             "SELECT key, value FROM settings WHERE key IN (SELECT value FROM json_each($1)) ORDER BY key",
             params!(keys),
@@ -4915,7 +4938,8 @@ fn schema_migration_action(
         | JOB_RESOURCES_SCHEMA_MIGRATION_SOURCE
         | PROVIDER_BUDGET_SCHEMA_MIGRATION_SOURCE
         | SUBTITLE_JOBS_SCHEMA_MIGRATION_SOURCE
-        | ARTWORK_JOBS_SCHEMA_MIGRATION_SOURCE => {
+        | ARTWORK_JOBS_SCHEMA_MIGRATION_SOURCE
+        | TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -6942,9 +6966,9 @@ mod tests {
             "v47 must advance exactly one step to the read-index schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 50,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 51,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v55 step"
+            "this implementation contains every additive v5→v56 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

@@ -688,3 +688,12 @@ continue E1–E3.
 - 2026-09-26: E0 correction `fd0317594` passed its pinned normal commit hook
   and is pushed to PR #564. E1 inherits the fixes, adjusts schema expectations
   for its additional artwork migration, and retains both parents' ownership sites.
+
+- 2026-09-26: E1 portable-transcode storage is in construction. SQLite 78 /
+  Hiqlite 56 retain producer source/manifest provenance independently of queue
+  receipt cleanup; hydration uses the existing fenced cache publication and
+  settles only its receiving target. Bounded upkeep recovers provenance from
+  retained completed jobs, never from a cache path or timestamp alone. Added
+  copy, stale-owner, changed-source, acknowledgement-replay and target-settlement
+  regression coverage; it is written and awaiting final E1 review, not executed.
+  The transfer worker and serving endpoint are the next part of this batch.
