@@ -1381,6 +1381,37 @@ class CorrectiveBoundaryCase(RepositoryFixture):
         )
         self.assertIsNone(landing_commit_title("fix(app): stop the stall"))
 
+    def test_manual_pr_merge_carries_its_corrective_regression(self):
+        """A reviewed manual merge must not strand its fixes on main."""
+
+        root, catalog, coverage = self.repository()
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 1 }\n", encoding="utf-8")
+        self.commit(root, "feat: seed")
+        (root / "src/boundary.txt").write_text("the boundary\n", encoding="utf-8")
+        boundary = self.commit(root, "docs: draw the boundary")
+        base = self.branch(root)
+
+        subprocess.run(["git", "checkout", "-q", "-b", "topic"], cwd=root, check=True)
+        (root / "crates/app.rs").write_text("pub fn a() -> u8 { 2 }\n", encoding="utf-8")
+        (root / "tests/app_test.rs").write_text(
+            "#[test]\nfn the_reader_stops_stalling() { assert!(true); }\n",
+            encoding="utf-8",
+        )
+        fix = self.commit(root, "fix(app): stop the reader stalling")
+        subprocess.run(["git", "checkout", "-q", base], cwd=root, check=True)
+        self.merge(
+            root,
+            "topic",
+            "Merge PR #569: stabilize browser handoff and Apple playback state\n\n"
+            "Regression-Test: tests/app_test.rs::the_reader_stops_stalling\n",
+        )
+
+        report = audit_history(
+            root, catalog, coverage, merge_ledger_path=self.ledger(root, boundary)
+        )
+        self.assertEqual(report.errors, ())
+        self.assertEqual(report.covered_by_trailer, (fix,))
+
     def test_the_merge_ledger_refuses_a_malformed_boundary(self):
         root, _catalog, _coverage = self.repository()
         path = root / "merge-errata.toml"
