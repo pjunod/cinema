@@ -615,6 +615,11 @@
         // preparation is therefore free to inspect the reader registry before
         // End publishes its cleanup marker.
         let terminal_detach_pause = serve.arm_terminal_detach_pause_for_test();
+        let control_applied = serve
+            .shared
+            .test_hooks()
+            .control_applied
+            .arm("vod control applied");
         let pending = {
             let serve = Arc::clone(&serve);
             let session_id = session_id.clone();
@@ -648,6 +653,21 @@
                     .await
             })
         };
+        // The applied point sits after the End commit published the
+        // session-owned cleanup and before that cleanup is spawned.
+        let applied = control_applied.reached().await;
+        assert!(
+            serve.shared.sessions.lock().await[&session_id]
+                .terminal_cleanup
+                .is_some(),
+            "the End commit publishes its cleanup before the applied point"
+        );
+        assert!(
+            !terminal_detach_pause.was_reached(),
+            "the terminal cleanup is spawned after the applied point"
+        );
+        assert!(rendition.readers.lock().await.contains_key(&session_id));
+        applied.release();
         let cleanup = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let cleanup = serve.shared.sessions.lock().await[&session_id]
@@ -895,6 +915,12 @@
             .test_hooks()
             .control_applied
             .arm("vod control applied");
+        // Armed across the whole exchange: only a terminal replay reaches it.
+        let terminal_replay = serve
+            .shared
+            .test_hooks()
+            .terminal_replay
+            .arm("vod terminal replay before the detach fence");
         let accepted = {
             let serve = Arc::clone(&serve);
             let snapshot = snapshot.clone();
@@ -944,6 +970,11 @@
             crate::playback_control::ControlDisposition::Replay
         );
         assert_eq!(rendition.readers.lock().await[VIEWER].frontier, target);
+        assert!(
+            !terminal_replay.was_reached(),
+            "the terminal-replay point follows the lookup that found a terminal replay"
+        );
+        terminal_replay.release();
     }
 
     #[tokio::test]
@@ -1021,6 +1052,67 @@
         assert!(
             !manifest.state(45).expect("target").is_materialized(),
             "opening releases the narrow pin; old destinations do not become permanent retention"
+        );
+    }
+
+    /// The ready point sits before the blocked GET opens its file: a file
+    /// unlinked while the GET is held there is not served, and the GET answers
+    /// pending instead.
+    #[tokio::test]
+    async fn segment_ready_point_precedes_the_file_open() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.attach_reader("viewer", 3).await;
+        let registered = serve
+            .shared
+            .test_hooks()
+            .segment_wait_registered
+            .arm("vod segment wait registered");
+        let ready = serve
+            .shared
+            .test_hooks()
+            .segment_ready
+            .arm("vod segment ready before open");
+        let get = {
+            let serve = Arc::clone(&serve);
+            let rendition = Arc::clone(&rendition);
+            tokio::spawn(async move {
+                serve
+                    .serve_segment(
+                        &rendition,
+                        "viewer",
+                        45,
+                        Duration::from_secs(5),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
+                    .await
+            })
+        };
+        registered.reached().await.release();
+        rendition
+            .dir
+            .materialize(
+                &mut *rendition.manifest.lock().await,
+                45,
+                b"target bytes",
+                now_ms(),
+            )
+            .await
+            .expect("publish");
+        serve.shared.pool.satisfy(&rendition.key, 45);
+        let held = ready.reached().await;
+        tokio::fs::remove_file(rendition.dir.path().join(segment_name(45)))
+            .await
+            .expect("unlink the published file behind the manifest");
+        held.release();
+        let answer = tokio::time::timeout(Duration::from_secs(5), get)
+            .await
+            .expect("the GET answers")
+            .expect("GET task");
+        assert!(
+            matches!(answer, Err(VodError::Pending { .. })),
+            "the GET opens its file after the ready point, so it finds the file gone"
         );
     }
 
