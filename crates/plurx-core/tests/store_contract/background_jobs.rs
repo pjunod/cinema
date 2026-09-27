@@ -3614,6 +3614,18 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                     "{backend}: {scenario}"
                 );
                 assert!(!store.apply_probe_job(apply).await.expect("cannot apply"));
+                // Model the worker's joined retirement before the next case
+                // asks for the same bounded source-I/O lane.
+                store
+                    .settle_job(SettleJob {
+                        token: publication.token,
+                        settlement: JobSettlement::Stop {
+                            error_code: "source_or_interest_changed".into(),
+                        },
+                        now_ms: 1200,
+                    })
+                    .await
+                    .expect("retire refused publication");
             } else {
                 assert!(
                     matches!(result, JobPublishOutcome::Published { .. }),
@@ -3928,13 +3940,20 @@ async fn background_integrity_repairs_retain_producers_and_stop_after_one_rebuil
 
 #[tokio::test]
 async fn background_artwork_verification_repairs_copy_then_rebuild_then_deliver() {
+    artwork_repair_contract(false).await;
+}
+#[tokio::test]
+async fn background_repair_rebuilds_after_last_holder_disappears_after_admission() {
+    artwork_repair_contract(true).await;
+}
+async fn artwork_repair_contract(holder_disappears: bool) {
     use plurx_core::store::{
         background_jobs_artwork::{
             ArtworkLocation, ArtworkVariantSpec, PublishArtworkJob, ARTWORK_PIPELINE,
         },
         background_jobs_integrity::VerifyArtwork,
     };
-    for_each_backend(|store, backend| async move {
+    for_each_backend(move |store, backend| async move {
         let spec = ArtworkVariantSpec {
             source_name: "poster.png".into(),
             source_sha256: "a".repeat(64),
@@ -4058,6 +4077,30 @@ async fn background_artwork_verification_repairs_copy_then_rebuild_then_deliver(
             else {
                 panic!("{backend}: {phase}")
             };
+            if phase == "copy" && holder_disappears {
+                store
+                    .put_setting("internal.cluster_job_owner_removed.node-b", "1")
+                    .await
+                    .expect("holder removed");
+                store
+                    .maintain_jobs(now + 2)
+                    .await
+                    .expect("repair discovers lost holder");
+                assert_eq!(
+                    store.artifact_repairs(true).await.expect("rebuild")[0].phase,
+                    "build"
+                );
+                assert_eq!(
+                    store
+                        .background_job(&job_id)
+                        .await
+                        .expect("copy")
+                        .expect("copy job")
+                        .state,
+                    JobState::Cancelled
+                );
+                continue;
+            }
             let token = integrity_claim(&store, &job_id, kind, now).await;
             if phase == "copy" {
                 store
@@ -4101,7 +4144,7 @@ async fn background_artwork_verification_repairs_copy_then_rebuild_then_deliver(
                 .await
                 .expect("restored")
                 .len(),
-            2
+            if holder_disappears { 1 } else { 2 }
         );
     })
     .await;

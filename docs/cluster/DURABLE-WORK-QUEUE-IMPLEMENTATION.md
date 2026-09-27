@@ -1167,7 +1167,7 @@ not authorize a production restart or rolling mixed-queue cutover.
 | Core promotion/deployment | main merged; production unchanged | `b4b488556` | Required gates passed on reviewed candidate; no deployment authorized |
 | E0 preparation + maintenance adapters | merged | PR #564 | Final review addressed; fast lane 3322 green |
 | E1 reads + cache preparation | implemented and reviewed; fast lane pending | PR #566 | Copy, artwork, prediction and read-after contracts pass; current-main candidate `02b265bdf` resubmitted after lane fixes |
-| E2 embeddings + batch analysis | implementation in final integration | Draft PR #567 | Embeddings, pure leaf probes, admitted verification and finite repair compiled; tests deferred until final review |
+| E2 embeddings + batch analysis | reviewed; fixes in qualification | Draft PR #567 | One review completed; immediate local embeddings, lost-holder repair and probe-page result preservation corrected; focused regressions and fast lane remain |
 | E3 placement + shared ingest | not started | — | — |
 
 **First-release done:** accepted jobs survive restart; both backends enforce

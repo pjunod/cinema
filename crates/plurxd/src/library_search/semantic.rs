@@ -151,6 +151,28 @@ struct Index {
     revision: String,
     rows: BTreeMap<i64, Vector>,
 }
+impl Index {
+    fn install(
+        &mut self,
+        artifact: plurx_core::store::background_jobs_embeddings::SharedEmbedding,
+    ) -> Result<()> {
+        artifact.validate()?;
+        if artifact.model.digest() != model_identity().digest() {
+            bail!("embedding model changed");
+        }
+        if self.rows.len() < MAX_ITEMS || self.rows.contains_key(&artifact.item_id) {
+            self.rows.insert(
+                artifact.item_id,
+                Vector {
+                    source: artifact.content_digest,
+                    digest: artifact.vector_sha256,
+                    embedding: artifact.vector,
+                },
+            );
+        }
+        Ok(())
+    }
+}
 #[derive(Default)]
 struct Runtime {
     encoder: Option<Encoder>,
@@ -363,14 +385,7 @@ async fn step(
         if let Some(artifact) = lookup.artifact {
             let mut r = rt.lock().map_err(|_| anyhow::anyhow!("model lock"))?;
             if ENABLED.load(Ordering::Acquire) && r.encoder.is_some() {
-                r.index.rows.insert(
-                    id,
-                    Vector {
-                        source,
-                        digest: artifact.vector_sha256,
-                        embedding: artifact.vector,
-                    },
-                );
+                r.index.install(artifact)?;
             }
         } else {
             work::enqueue(state, id, &source, lookup.last_completed_job.as_deref()).await?;
@@ -498,6 +513,47 @@ mod tests {
     /// is the only thing its `onig` / `fancy-regex` backend choice changes:
     /// `Split` and `ByteLevel` pre-tokenizers and the `Replace` normalizer.
     const REGEX_BACKED: [&str; 3] = ["Split", "ByteLevel", "Replace"];
+
+    #[test]
+    fn completed_vector_is_available_before_catalogue_discovery_wraps() {
+        use plurx_core::store::background_jobs_embeddings::SharedEmbedding;
+        let mut index = Index::default();
+        let mut vector = vec![0.0; DIM];
+        vector[0] = 1.0;
+        let artifact = SharedEmbedding {
+            item_id: 1,
+            content_digest: "a".repeat(64),
+            model: model_identity(),
+            vector_sha256: SharedEmbedding::vector_digest(&vector),
+            vector: vector.clone(),
+        };
+        index
+            .install(artifact)
+            .expect("install published completion");
+        // Discovery has more pages, but the serving index can already score
+        // the first completed item with the query vector.
+        assert_eq!(index.rows.len(), 1);
+        assert_eq!(
+            index.rows[&1]
+                .embedding
+                .iter()
+                .zip(&vector)
+                .map(|(a, b)| a * b)
+                .sum::<f32>(),
+            1.0
+        );
+        let mut incompatible = model_identity();
+        incompatible.normalization_version = "incompatible".into();
+        let rejected = SharedEmbedding {
+            item_id: 2,
+            content_digest: "b".repeat(64),
+            model: incompatible,
+            vector_sha256: SharedEmbedding::vector_digest(&vector),
+            vector,
+        };
+        assert!(index.install(rejected).is_err());
+        assert!(!index.rows.contains_key(&2));
+    }
 
     fn regex_backed_components(node: &serde_json::Value, found: &mut Vec<String>) {
         match node {

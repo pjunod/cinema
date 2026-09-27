@@ -25,6 +25,15 @@ WHERE EXISTS (SELECT 1 FROM background_predictions WHERE (state = 'pending' AND 
       WHERE waiter.request_scope = 'artifact-repair' AND waiter.request_id = repair.id || ':' ||
         CASE repair.phase WHEN 'copying' THEN 'copy' WHEN 'building' THEN 'build' ELSE 'deliver' END
         AND waiter.state IN ('succeeded','failed','cancelled'))))
+ OR EXISTS (SELECT 1 FROM background_artifact_repairs repair WHERE phase = 'copying' AND EXISTS (SELECT 1 FROM background_job_waiters waiter JOIN background_jobs job ON job.id = waiter.job_id
+        WHERE waiter.request_scope = 'artifact-repair' AND waiter.request_id = repair.id || ':copy'
+          AND waiter.state = 'pending' AND job.state = 'queued')
+      AND NOT EXISTS (SELECT 1 FROM transcode_cache_locations location WHERE location.complete = 1
+        AND 'transcode:' || location.recipe_hash || ':' || location.manifest_digest = repair.artifact_key
+        AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || location.node_id))
+      AND NOT EXISTS (SELECT 1 FROM background_artwork_locations location WHERE 'artwork:' || location.artifact_key = repair.artifact_key
+        AND location.verified_at_ms > json_extract($1,'$.now_ms') - 604800000
+        AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || location.node_id)))
  OR EXISTS (SELECT 1 FROM background_transcode_artifacts artifact WHERE producer_payload IS NULL
     AND EXISTS (SELECT 1 FROM background_jobs job WHERE job.kind = 'transcode_prepare' AND job.state = 'succeeded' AND job.payload_version = 1
       AND json_extract(CASE WHEN json_valid(job.result_ref) THEN job.result_ref ELSE '{}' END,'$.recipe_hash') = artifact.recipe_hash

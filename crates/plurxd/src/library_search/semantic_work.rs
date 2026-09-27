@@ -165,7 +165,17 @@ pub(super) async fn run(
             if cancel.is_cancelled() || shutdown.is_cancelled() || !ENABLED.load(Ordering::Acquire) { return Ok(false); }
             let artifact = SharedEmbedding { item_id, content_digest, model: identity,
                 vector_sha256: SharedEmbedding::vector_digest(&vector), vector };
-            Ok(fence.publish_embedding(artifact, source_json, revision).await?)
+            let published = fence.publish_embedding(artifact.clone(), source_json, revision).await?;
+            if published {
+                // Publication validated the current source/model. Expose each
+                // completion now, independently of the catalogue discovery cursor.
+                let r = runtime();
+                let mut r = r.lock().map_err(|_| anyhow::anyhow!("model lock"))?;
+                if ENABLED.load(Ordering::Acquire) && r.encoder.is_some() {
+                    r.index.install(artifact)?;
+                }
+            }
+            Ok(published)
         }.await;
         if !matches!(result, Ok(true)) {
             let settlement = if cancel.is_cancelled()

@@ -75,8 +75,10 @@ pub(super) async fn publish<T: QueueSql>(
     {
         return Err(StoreError::Task("invalid or oversized probe output".into()));
     }
+    // Match enqueue's canonical object-key ordering for exact payload identity.
+    let body = serde_json::to_value(&input).map_err(|error| StoreError::Task(error.to_string()))?;
     let rows = store
-        .queue_sql(PUBLISH_SQL.into(), encode(&input)?, true, true)
+        .queue_sql(PUBLISH_SQL.into(), encode(&body)?, true, true)
         .await?;
     decode(
         rows.first()

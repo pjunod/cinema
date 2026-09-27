@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 and E0 merged; E1 awaiting fast lane; E2 ready for final review · **Updated:** 2026-09-27 ·
+**Status:** M1–M3 and E0 merged; E1 awaiting fast lane; E2 review fixes in qualification · **Updated:** 2026-09-27 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` · **E1:** `codex/cluster-cache-preparation` ·
 **E2:** `codex/cluster-batch-analysis` · **Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) · **E1:** [#566 — awaiting fast lane](http://192.168.4.7:3000/noirr/plurx/pulls/566) · **E2:** [#567 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/567)
 
@@ -19,7 +19,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
 | E0 subtitle and library workers | Merged | PR #564 merged as `1d70a1fed`; one final review addressed and run 3322 passed all required fast-lane jobs |
 | E1 reads, caches, prediction, artwork | Reviewed; fast lane queued | Read path, artwork, portable transcodes, bounded hot copies and durable predictive analysis implemented. Single final review addressed; focused store, image, copy and cleanup checks passed. Required fast lane remains. Scheduled verification/repair belongs to E2 |
-| E2 embeddings, probes and repair | Implemented; final review next | Portable embeddings, bounded probes, admitted artifact verification and finite repair compiled. One adversarial review precedes E2 tests |
+| E2 embeddings, probes and repair | Reviewed; qualification next | Portable embeddings, bounded probes, admitted artifact verification and finite repair compiled. Three review findings addressed; focused regressions and required fast lane remain |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
 | Final adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
 | Core fast lane | Passed: run 3296 on `3784d5ec5` | Preflight, Rust, Windows, web and main promotion gate all passed |
@@ -867,3 +867,30 @@ continue E1–E3.
   claimed durable verification; each publication is one transaction. Store,
   transaction, placeholder and consistent-read censuses shrink with the removed
   paths. E2 implementation is complete; final review and fast lane remain.
+
+- 2026-09-27: E2's single adversarial review covered `02b265bdf..a43205ab6`
+  and found three P2 issues. Published embedding completions now enter the
+  local serving index immediately; queued repair copies whose final holder
+  disappears advance to one rebuild while cancelling only their own interest;
+  an overdue leaf is reported without discarding later completed probes.
+  Added regressions for all three. Post-review qualification is starting.
+
+- 2026-09-27: post-review probe coverage exposed and corrected canonical JSON
+  ordering at publication (the source identity now serializes the same way as
+  enqueue). The overdue-first-leaf regression passes, as does immediate local
+  embedding installation. Three-voter contracts are running; their first probe
+  run used the prior snapshot and will be rerun with the serialization fix.
+  E1's full fast lane identified stale artwork/readiness inventories and a
+  pagination fixture exceeding the new automatic-demand cap. The fixture now
+  uses explicit manual demand for its 129-row capability scan; the automatic
+  limit itself remains covered and unchanged.
+
+- 2026-09-27: E2 post-review focused qualification passed: 28 shared queue
+  contracts on SQLite and a real local three-voter cluster, followed by the
+  corrected probe contract on the same backends; the migrated distributed
+  pre-transcode and one-consensus-entry verification contracts also pass.
+  Immediate embedding installation and overdue-leaf preservation pass, as do
+  four Store source censuses, four documentation-index checks and seven
+  ownership-inventory checks. E1 run 3353 finished with exactly three failures:
+  the two stale inventories and the pagination demand fixture, all corrected
+  in `7cfafe6cc` with focused regressions passing. No merge is claimed yet.

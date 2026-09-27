@@ -131,6 +131,15 @@ BEGIN
           ELSE artifact_key END,
         phase = CASE
           WHEN expires_ms <= json_extract(NEW.request_json,'$.now_ms') OR EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || target_node_id) OR (phase NOT IN ('ready','failed') AND json_extract(producer_payload,'$.kind') = 'transcode_prepare' AND NOT EXISTS (SELECT 1 FROM files WHERE id = json_extract(producer_payload,'$.file_id') AND size = json_extract(producer_payload,'$.source_size') AND mtime = json_extract(producer_payload,'$.source_mtime'))) THEN 'failed'
+          WHEN phase = 'copying' AND EXISTS (SELECT 1 FROM background_job_waiters waiter JOIN background_jobs job ON job.id = waiter.job_id
+        WHERE waiter.request_scope = 'artifact-repair' AND waiter.request_id = background_artifact_repairs.id || ':copy'
+          AND waiter.state = 'pending' AND job.state = 'queued')
+      AND NOT EXISTS (SELECT 1 FROM transcode_cache_locations location WHERE location.complete = 1
+        AND 'transcode:' || location.recipe_hash || ':' || location.manifest_digest = background_artifact_repairs.artifact_key
+        AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || location.node_id))
+      AND NOT EXISTS (SELECT 1 FROM background_artwork_locations location WHERE 'artwork:' || location.artifact_key = background_artifact_repairs.artifact_key
+        AND location.verified_at_ms > json_extract(NEW.request_json,'$.now_ms') - 604800000
+        AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || location.node_id)) THEN CASE WHEN producer_payload IS NULL THEN 'failed' ELSE 'build' END
           WHEN (SELECT state FROM background_job_waiters waiter WHERE waiter.request_scope = 'artifact-repair'
             AND waiter.request_id = background_artifact_repairs.id || ':' || CASE background_artifact_repairs.phase WHEN 'copying' THEN 'copy' WHEN 'building' THEN 'build' ELSE 'deliver' END) = 'succeeded'
             THEN CASE phase WHEN 'building' THEN 'deliver' ELSE 'ready' END
@@ -139,6 +148,15 @@ BEGIN
     WHERE id IN (SELECT id FROM background_artifact_repairs WHERE phase NOT IN ('ready','failed') AND (expires_ms <= json_extract(NEW.request_json,'$.now_ms')
       OR EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || target_node_id)
       OR (phase NOT IN ('ready','failed') AND json_extract(producer_payload,'$.kind') = 'transcode_prepare' AND NOT EXISTS (SELECT 1 FROM files WHERE id = json_extract(producer_payload,'$.file_id') AND size = json_extract(producer_payload,'$.source_size') AND mtime = json_extract(producer_payload,'$.source_mtime')))
+      OR (phase = 'copying' AND EXISTS (SELECT 1 FROM background_job_waiters waiter JOIN background_jobs job ON job.id = waiter.job_id
+        WHERE waiter.request_scope = 'artifact-repair' AND waiter.request_id = background_artifact_repairs.id || ':copy'
+          AND waiter.state = 'pending' AND job.state = 'queued')
+      AND NOT EXISTS (SELECT 1 FROM transcode_cache_locations location WHERE location.complete = 1
+        AND 'transcode:' || location.recipe_hash || ':' || location.manifest_digest = background_artifact_repairs.artifact_key
+        AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || location.node_id))
+      AND NOT EXISTS (SELECT 1 FROM background_artwork_locations location WHERE 'artwork:' || location.artifact_key = background_artifact_repairs.artifact_key
+        AND location.verified_at_ms > json_extract(NEW.request_json,'$.now_ms') - 604800000
+        AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || location.node_id)))
       OR (phase IN ('copying','building','delivering') AND EXISTS (SELECT 1 FROM background_job_waiters waiter
         WHERE waiter.request_scope = 'artifact-repair' AND waiter.request_id = background_artifact_repairs.id || ':' ||
             CASE background_artifact_repairs.phase WHEN 'copying' THEN 'copy' WHEN 'building' THEN 'build' ELSE 'deliver' END
@@ -182,7 +200,7 @@ END;
 CREATE INDEX IF NOT EXISTS background_verification_locator ON background_jobs(kind,target_node_id,json_extract(payload_json,'$.artifact_key'),updated_at_ms);
 -- next statement
 CREATE TRIGGER IF NOT EXISTS background_artifact_repair_stopped
-AFTER UPDATE OF phase ON background_artifact_repairs WHEN NEW.phase = 'failed' AND OLD.phase IN ('copying','building','delivering')
+AFTER UPDATE OF phase ON background_artifact_repairs WHEN (NEW.phase = 'failed' AND OLD.phase IN ('copying','building','delivering')) OR (NEW.phase = 'build' AND OLD.phase = 'copying')
 BEGIN
     INSERT INTO background_job_commands(id,operation,request_json,result_json)
     SELECT 'repair-stop:' || NEW.id,'cancel_waiter',json_object('scope',waiter.request_scope,'request_id',waiter.request_id,'now_ms',NEW.updated_at_ms),
