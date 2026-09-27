@@ -931,3 +931,11 @@ continue E1–E3.
   remote sessions do not fetch tuner signal directly. Mixed-version ingress
   retains the older local-owner start protocol. All-target compilation passed;
   adversarial review and tests still await the completed E3 batch.
+
+- 2026-09-27: combined fast lane 3358 passed 1,360 core unit tests and
+  all 179 storage contracts, including the real replicated backend. The daemon
+  suite reported `decode_fact_source_shipped_shape`: its non-deadline fixture
+  allowed only 100 ms for process scheduling. Expanded that fixture budget to
+  five seconds while retaining its exact invalid-JSON and permit-release
+  assertions. Integrated current main's Apple Live TV URL repair (`1cbdc8d51`)
+  for the next promotion candidate. E3 remains isolated on its draft branch.
