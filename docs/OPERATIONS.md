@@ -4202,6 +4202,16 @@ reports this node's artifact and catalogue authority separately. Learners
 retain immutable-result execution only; they cannot become scan/provider
 coordinators through the artifact claim path.
 
+Whole-source subtitle preparation uses that same queue. Different selected
+tracks join the existing all-track pass, with immutable representations fetched
+through verified peer transfer. The old analysis row remains its durable demand
+and progress record. A foreground fallback claims this same job and reserves a
+CPU thread from the streaming admission pool. A wait timeout does not start a
+second extractor alongside a running owner. Source replacement, cancellation
+and lease loss prevent later publication; incomplete work restarts under a new
+claim. SQLite 76 / replicated 54 invalidate old subtitle owners during the
+maintenance cutover; queued requests are drained through the bounded outbox.
+
 Workers advertise the capabilities the local daemon actually proved at boot.
 A row that needs an unsupported decoder, encoder family, HLS output contract,
 tone-map path, output grade, or scratch budget stays queued instead of failing

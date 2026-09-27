@@ -522,13 +522,6 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
-        method: "claim_analysis_request_foreground",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::BranchOnRowsAffected,
-    },
-    SqliteTransactionSite {
-        module: "fragment_index_cluster.rs",
         method: "enqueue_analysis_request",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
@@ -1182,7 +1175,8 @@ mod tests {
         // one, and ten more did before this correction.
         // Seven legacy execution boundaries now use the one common queue
         // transaction bridge: six claim/publication methods and submission.
-        assert_eq!(methods.len(), 95);
+        // Subtitle execution now uses the common queue transaction.
+        assert_eq!(methods.len(), 94);
     }
 
     #[test]

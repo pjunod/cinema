@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 merged; E0 library dispatch implemented · **Updated:** 2026-09-26 ·
+**Status:** M1–M3 merged; E0 adapters implemented, review pending · **Updated:** 2026-09-26 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` ·
 **Base:** `b4b488556` · **PR:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532)
 
@@ -17,7 +17,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | M1 durable queue and pre-transcode | Implemented; focused validation passed | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; local exact-recipe offline joining and scheduling implemented; lost-reply and process-expiry regressions written; cross-node transcode convergence belongs to E1 |
 | M2 fragment analysis and hydration | Implemented; focused validation passed | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
 | M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
-| E0 subtitle and library workers | Library dispatch and budgets committed; learner execution implemented | Durable intent, results, shared capacity and Developer mapping controls are built. Provider pacing compiled and committed; learner authority is undergoing construction checks; subtitles remain open |
+| E0 subtitle and library workers | Adapters implemented; construction checks passed | Library work, storage/provider budgets, learner authority and all-track subtitle extraction are connected. Final commit/base integration, adversarial review and fast lane remain |
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
@@ -525,3 +525,19 @@ The failing replicated test is being rerun before the main fast lane starts.
   Role-loss and claim-scope regressions are written, not run. Rust 1.97.1
   workspace Clippy with all targets, Hiqlite and denied warnings passed after
   correcting the fixture import. Subtitle migration remains the E0 remainder.
+
+- E0 subtitle construction: reuse the existing all-track extractor as one
+  computation, including foreground fallback. Analysis records retain durable
+  demand/history; common claims project ownership and fenced artifact writes.
+  SQLite 76 / Hiqlite 54 add the adapter triggers and invalidate legacy owners
+  at maintenance cutover. Store changes compiled; daemon construction checks
+  and regression adaptation are in progress. No E0 tests have run.
+
+- Subtitle adapter now compiles with Rust 1.97.1 workspace/all-target Clippy,
+  Hiqlite and denied warnings. Foreground and background execution share the
+  common job; foreground CPU admission uses the attached TranscodeManager pool.
+  Removed the old independent foreground claim API and adapted its coverage/
+  repair fixtures. Added exact-owner publication, takeover, forged-source,
+  cancellation and lost-completion-acknowledgement regressions. Construction
+  caught fixture-only missing imports and lint violations, all corrected.
+  No E0 regression has been executed; final review precedes the fast lane.

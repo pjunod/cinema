@@ -109,6 +109,18 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
       AND expires_at_ms > json_extract(body, '$.now_ms')
       AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || owner_node_id)
     ) THEN 'producer_fenced'
+    WHEN json_extract(body, '$.payload.kind') = 'subtitle_extract' AND (
+      json_type(body, '$.subtitle_request') IS NULL OR NOT EXISTS (
+        SELECT 1 FROM analysis_requests request JOIN files file ON file.id = request.file_id
+          AND file.size = request.source_size AND file.mtime = request.source_mtime
+        WHERE request.request_id = json_extract(body, '$.subtitle_request.request_id')
+          AND request.request_id = json_extract(body, '$.payload.source_generation')
+          AND request.file_id = json_extract(body, '$.payload.file_id')
+          AND request.pipeline_version = json_extract(body, '$.subtitle_request.pipeline_version')
+          AND request.component = 'subtitle_source' AND request.cancel_requested = 0
+          AND request.state IN ('queued','running')
+          AND request.video_identity = '' AND request.force_rebuild = 0 AND request.target_node_id = ''
+      )) THEN 'request_fenced'
     WHEN prior_job IS NOT NULL AND prior_digest != json_extract(body, '$.request.request_digest') THEN 'conflict'
     WHEN prior_job IS NOT NULL THEN 'existing'
     WHEN json_type(body, '$.library_request') IS NOT NULL AND NOT EXISTS (
@@ -431,7 +443,8 @@ pub enum JobPayload {
     SubtitleExtract {
         file_id: i64,
         source_generation: String,
-        track: u32,
+        /// None prepares every eligible track in the existing one-pass extractor.
+        track: Option<u32>,
         pipeline_digest: String,
     },
     LibraryScan {
@@ -942,6 +955,18 @@ pub struct CancelWaiterOutcome {
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    /// Pending compatibility records are an outbox; only the common queue executes them.
+    async fn subtitle_job_intents(&self, limit: usize) -> Result<Vec<String>, StoreError>;
+    async fn enqueue_subtitle_job(
+        &self,
+        request: super::AnalysisRequest,
+        now_ms: i64,
+    ) -> Result<EnqueueOutcome, StoreError>;
+    async fn write_subtitle_job(
+        &self,
+        request: super::background_jobs_subtitle::WriteSubtitleJob,
+    ) -> Result<bool, StoreError>;
+
     async fn update_provider_budget(
         &self,
         request: super::background_jobs_provider::ProviderBudgetRequest,
@@ -1097,6 +1122,23 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn subtitle_job_intents(&self, limit: usize) -> Result<Vec<String>, StoreError> {
+        super::background_jobs_subtitle::intents(self, limit).await
+    }
+    async fn enqueue_subtitle_job(
+        &self,
+        request: super::AnalysisRequest,
+        now_ms: i64,
+    ) -> Result<EnqueueOutcome, StoreError> {
+        super::background_jobs_subtitle::enqueue(self, request, now_ms).await
+    }
+    async fn write_subtitle_job(
+        &self,
+        request: super::background_jobs_subtitle::WriteSubtitleJob,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_subtitle::write(self, request).await
+    }
+
     async fn update_provider_budget(
         &self,
         request: super::background_jobs_provider::ProviderBudgetRequest,

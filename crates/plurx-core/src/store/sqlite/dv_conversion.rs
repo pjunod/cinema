@@ -1430,7 +1430,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 31] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 32] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1489,6 +1489,8 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS background_library_requests",
             "CREATE TABLE IF NOT EXISTS background_storage_domains",
             "CREATE TABLE IF NOT EXISTS background_provider_budgets",
+            // v76 adds only background-prefixed triggers, removed by the same fixture helper.
+            "CREATE TRIGGER IF NOT EXISTS background_subtitle_claimed",
         ];
 
         assert!(

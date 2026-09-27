@@ -1162,6 +1162,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs_resources::SCHEMA,
     // v75: replicated provider request pacing and cooldowns.
     super::background_jobs_provider::SCHEMA,
+    // v76: subtitle extraction executes under common queue ownership.
+    concat!(include_str!("../background_jobs_subtitle.sql"), "\n", "UPDATE analysis_requests SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL, fence = fence + 1 WHERE component = 'subtitle_source' AND state IN ('running','submitted');"),
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

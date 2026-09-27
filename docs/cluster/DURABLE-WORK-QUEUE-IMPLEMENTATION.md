@@ -858,11 +858,19 @@ identity or the live subtitle-window lifecycle while adding adapters.
 
 **Subtitle preparation.**
 
-Add typed `subtitle_extract` jobs keyed by source generation, selected track,
-normalization options and extractor version. Publish bounded immutable sidecars
-with existing subtitle size limits. Reuse verified peer fetching and retain
-per-request authorization. Two viewers selecting the same track join one job;
-different tracks are different jobs.
+Add typed `subtitle_extract` jobs keyed by source generation and extractor
+version. Publish bounded immutable track representations with the existing
+subtitle size limits, verified peer fetching and per-request authorization.
+
+**Implementation adjustment, 2026-09-26:** K-09 already extracts all eligible
+tracks in one source pass. Keep that computation unit: requests for different
+tracks join one all-track build, while each consumer selects and verifies its
+own representation. Creating one whole-file pass per selected track would
+multiply storage reads. The optional track field is `null` for this adapter;
+workers do not claim future track-specific payloads. Existing analysis records
+become a durable admission outbox and progress history. They cannot claim a
+second worker. Common queue renewal, settlement and cancellation project into
+that history; artifact publication checks the exact queue owner atomically.
 
 Keep the existing immediate local path available when remote preparation cannot
 meet a playback deadline. Both paths must claim/join the same artifact build
@@ -1153,7 +1161,7 @@ not authorize a production restart or rolling mixed-queue cutover.
 | M2 fragment build + hydration | merged | PR #532 | Shared build, hydration, retry ledgers and cutover validated |
 | M3 operations + recovery | merged | PR #532 | Activity, Developer controls, recovery and migration validated |
 | Core promotion/deployment | main merged; production unchanged | `b4b488556` | Required gates passed on reviewed candidate; no deployment authorized |
-| E0 preparation + maintenance adapters | in progress | `codex/cluster-work-adapters` | Durable library dispatch and storage/provider concurrency committed; rates, subtitles and learners in progress |
+| E0 preparation + maintenance adapters | in progress | `codex/cluster-work-adapters` | Library dispatch, storage/provider budgets and learner execution committed; common subtitle adapter in construction |
 | E1 reads + cache preparation | not started | — | — |
 | E2 embeddings + batch analysis | not started | — | — |
 | E3 placement + shared ingest | not started | — | — |

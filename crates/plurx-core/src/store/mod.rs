@@ -111,6 +111,7 @@ pub mod background_jobs_pretranscode;
 pub mod background_jobs_provider;
 mod background_jobs_publication;
 pub mod background_jobs_resources;
+pub mod background_jobs_subtitle;
 #[cfg(test)]
 mod background_jobs_tests;
 pub mod classification_schedule;

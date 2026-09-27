@@ -32,6 +32,9 @@
 //!   filesystem and free-space readings are advisory in Developer settings;
 //!   they never silently override the operator's saved choice.
 
+#[cfg(test)]
+use crate::background_jobs::subtitle_fixture::SubtitleFixture;
+
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::io::Read;
@@ -1979,7 +1982,7 @@ impl RideAlongHarvest {
     ///    under the size cap.
     #[cfg(test)]
     pub(crate) async fn publish(self) -> Result<Manifest, String> {
-        self.publish_internal(None, None, None, || async {})
+        self.publish_internal(None, None, None, None, || async {})
             .await
             .map(|receipt| receipt.manifest)
     }
@@ -2005,6 +2008,7 @@ impl RideAlongHarvest {
             Some((catalog, node_id, source_attestation)),
             guard,
             None,
+            None,
             || async {},
         )
         .await
@@ -2021,6 +2025,7 @@ impl RideAlongHarvest {
         source_attestation: &str,
         lost: &CancellationToken,
         request: &AnalysisRequest,
+        fence: &crate::background_jobs::JobFence,
     ) -> Result<ClusterPublishReceipt, String> {
         if source_attestation.len() != 64
             || !source_attestation
@@ -2033,6 +2038,7 @@ impl RideAlongHarvest {
             Some((catalog, node_id, source_attestation)),
             Some(lost),
             Some(request),
+            Some(fence),
             || async {},
         )
         .await
@@ -2043,6 +2049,7 @@ impl RideAlongHarvest {
         cluster: Option<(&dyn Store, &str, &str)>,
         guard: Option<&CancellationToken>,
         request: Option<&AnalysisRequest>,
+        fence: Option<&crate::background_jobs::JobFence>,
         after_row: F,
     ) -> Result<ClusterPublishReceipt, String>
     where
@@ -2133,7 +2140,7 @@ impl RideAlongHarvest {
         let replaced = store::read_manifest(&dir).await;
         manifest = store::merge_manifest(manifest, replaced.as_ref());
 
-        if !publication_claim_live(cluster, guard, request).await {
+        if !publication_claim_live(cluster, guard, request, fence).await {
             remove_newly_placed(&dir, &placed, replaced.as_ref()).await;
             if replaced.is_none() {
                 let _ = tokio::fs::remove_dir(&dir).await;
@@ -2167,7 +2174,7 @@ impl RideAlongHarvest {
                     {
                         continue;
                     }
-                    if !publication_claim_live(cluster, guard, request).await {
+                    if !publication_claim_live(cluster, guard, request, fence).await {
                         rollback_cluster_publish(
                             catalog,
                             &dir,
@@ -2218,10 +2225,15 @@ impl RideAlongHarvest {
                         // follow a successful durable write.
                         written_rows.push((publication.clone(), prior));
                     }
-                    if let Err(error) = catalog
-                        .upsert_subtitle_source_publication(&publication)
-                        .await
-                    {
+                    let published = if let (Some(fence), Some(request)) = (fence, request) {
+                        fence.write_subtitle(request, plurx_core::store::background_jobs_subtitle::SubtitleJobWrite::Representation { publication }).await
+                            .and_then(|accepted| if accepted { Ok(()) } else { Err(plurx_core::error::StoreError::Task("subtitle owner fenced".into())) })
+                    } else {
+                        catalog
+                            .upsert_subtitle_source_publication(&publication)
+                            .await
+                    };
+                    if let Err(error) = published {
                         if guard.is_some() {
                             rollback_cluster_publish(
                                 catalog,
@@ -2235,7 +2247,7 @@ impl RideAlongHarvest {
                         return Err(format!("publishing subtitle-source row: {error}"));
                     }
                     after_row().await;
-                    if !publication_claim_live(cluster, guard, request).await {
+                    if !publication_claim_live(cluster, guard, request, fence).await {
                         rollback_cluster_publish(
                             catalog,
                             &dir,
@@ -2250,7 +2262,7 @@ impl RideAlongHarvest {
             }
         }
 
-        if !publication_claim_live(cluster, guard, request).await {
+        if !publication_claim_live(cluster, guard, request, fence).await {
             if let Some((catalog, _, _)) = cluster {
                 rollback_cluster_publish(catalog, &dir, replaced.as_ref(), &placed, &written_rows)
                     .await?;
@@ -2268,7 +2280,7 @@ impl RideAlongHarvest {
 
         // (4)
         store::record_access(&dir).await;
-        if !publication_claim_live(cluster, guard, request).await {
+        if !publication_claim_live(cluster, guard, request, fence).await {
             if let Some((catalog, _, _)) = cluster {
                 rollback_cluster_publish(catalog, &dir, replaced.as_ref(), &placed, &written_rows)
                     .await?;
@@ -2291,7 +2303,13 @@ async fn publication_claim_live(
     cluster: Option<(&dyn Store, &str, &str)>,
     guard: Option<&CancellationToken>,
     request: Option<&AnalysisRequest>,
+    fence: Option<&crate::background_jobs::JobFence>,
 ) -> bool {
+    if let Some(fence) = fence {
+        if fence.snapshot().await.is_none() {
+            return false;
+        }
+    }
     if guard.is_some_and(CancellationToken::is_cancelled) {
         return false;
     }
@@ -2437,6 +2455,7 @@ pub(crate) async fn publish_existing_manifest_rows(
     file_id: i64,
     source: &std::fs::File,
     source_attestation: &str,
+    owner: Option<(&crate::background_jobs::JobFence, &AnalysisRequest)>,
 ) -> Result<usize, String> {
     if source_attestation.len() != 64
         || !source_attestation
@@ -2513,10 +2532,15 @@ pub(crate) async fn publish_existing_manifest_rows(
                 bytes,
                 published_at_ms: unix_ms(),
             };
-            catalog
-                .upsert_subtitle_source_publication(&publication)
-                .await
-                .map_err(|error| format!("reconciling subtitle-source row: {error}"))?;
+            let published = if let Some((fence, request)) = owner {
+                fence.write_subtitle(request, plurx_core::store::background_jobs_subtitle::SubtitleJobWrite::Representation { publication }).await
+                    .and_then(|accepted| if accepted { Ok(()) } else { Err(plurx_core::error::StoreError::Task("subtitle owner fenced".into())) })
+            } else {
+                catalog
+                    .upsert_subtitle_source_publication(&publication)
+                    .await
+            };
+            published.map_err(|error| format!("reconciling subtitle-source row: {error}"))?;
             written += 1;
         }
     }
@@ -4643,6 +4667,7 @@ mod tests {
                 Some((&catalog, "nuc4", &"a".repeat(64))),
                 Some(&lost),
                 None,
+                None,
                 || async { lost.cancel() },
             )
             .await;
@@ -4731,7 +4756,7 @@ mod tests {
             .await
             .expect("enqueue");
         let claimed = catalog
-            .claim_analysis_request("nuc4", now, now + 60_000)
+            .claim_subtitle_fixture(&request.request_id, "nuc4", now, now + 60_000)
             .await
             .expect("claim")
             .expect("running");
@@ -4743,6 +4768,7 @@ mod tests {
                 Some((&catalog, "nuc4", &"a".repeat(64))),
                 Some(&lost),
                 Some(&claimed),
+                None,
                 || async {
                     catalog
                         .cancel_analysis_request_admin(&claimed.request_id, now + 1)

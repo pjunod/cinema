@@ -18,6 +18,10 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
+#[path = "../../plurx-core/tests/support/subtitle_jobs.rs"]
+pub(crate) mod subtitle_fixture;
+
+#[cfg(test)]
 #[path = "background_job_faults.rs"]
 mod faults;
 #[path = "background_job_metrics.rs"]
@@ -439,6 +443,44 @@ impl JobFence {
             .await?;
         if result {
             metrics::event(self.0.kind, event);
+            state.token = None;
+        }
+        Ok(result)
+    }
+
+    pub(crate) async fn write_subtitle(
+        &self,
+        request: &plurx_core::store::AnalysisRequest,
+        output: plurx_core::store::background_jobs_subtitle::SubtitleJobWrite,
+    ) -> Result<bool, StoreError> {
+        let mut state = self.0.state.lock().await;
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        let complete = matches!(
+            output,
+            plurx_core::store::background_jobs_subtitle::SubtitleJobWrite::Complete { .. }
+        );
+        let mut write = plurx_core::store::background_jobs_subtitle::WriteSubtitleJob {
+            token,
+            request: request.clone(),
+            output,
+            now_ms: unix_ms()?,
+        };
+        let result = match self.0.store.write_subtitle_job(write.clone()).await {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                    return Err(error);
+                }
+                write.now_ms = unix_ms()?;
+                self.0.store.write_subtitle_job(write).await?
+            }
+        };
+        if result && complete {
             state.token = None;
         }
         Ok(result)
@@ -1124,6 +1166,96 @@ pub(crate) async fn claim_library(
                 kind,
             )?;
             return Ok(Some((job, active, admission)));
+        }
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(None)
+}
+
+/// The caller holds physical admission through execution and cleanup.
+pub(crate) async fn claim_subtitle(
+    store: Arc<dyn Store>,
+    authority: Arc<dyn ClusterJobAuthority>,
+    node: &str,
+    request_filter: Option<&str>,
+    pipeline_digest: &str,
+) -> Result<Option<(BackgroundJob, ActiveBackgroundJob)>, StoreError> {
+    use plurx_core::store::background_jobs::{
+        CandidateQuery, JobKind, JobPayload, MAX_ACTIVE_JOBS, MAX_PAGE_SIZE,
+    };
+    static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
+    if !authority.may_execute_job(JobKind::SubtitleExtract).await {
+        return Ok(None);
+    }
+    let mut cursor = None;
+    for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
+        let page = store
+            .job_candidates(CandidateQuery {
+                node_id: node.into(),
+                kinds: vec![JobKind::SubtitleExtract],
+                after: cursor,
+                now_ms: unix_ms()?,
+                limit: MAX_PAGE_SIZE,
+            })
+            .await?;
+        for candidate in page.jobs {
+            let Ok(JobPayload::SubtitleExtract {
+                file_id,
+                source_generation,
+                track: None,
+                pipeline_digest: expected,
+            }) = candidate.supported_payload()
+            else {
+                continue;
+            };
+            if expected != pipeline_digest
+                || request_filter.is_some_and(|wanted| wanted != source_generation)
+            {
+                continue;
+            }
+            let Some(file) = store.get_file(file_id).await? else {
+                continue;
+            };
+            if tokio::fs::File::open(&file.path).await.is_err() {
+                continue;
+            }
+            if !authority.may_execute_job(JobKind::SubtitleExtract).await {
+                return Ok(None);
+            }
+            let now_ms = unix_ms()?;
+            let Some((job, deadline)) = claim_with_resolution(
+                store.as_ref(),
+                &candidate,
+                ClaimJob {
+                    job_id: candidate.id.clone(),
+                    expected_revision: candidate.revision,
+                    node_id: node.into(),
+                    boot_id: boot.clone(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::SubtitleExtract,
+                    payload_version: 1,
+                    now_ms,
+                    dispatched_at_ms: now_ms,
+                },
+            )
+            .await?
+            else {
+                continue;
+            };
+            let active = ActiveBackgroundJob::start(
+                Arc::clone(&store),
+                Arc::clone(&authority),
+                job.token
+                    .clone()
+                    .ok_or_else(|| StoreError::Task("subtitle claim has no owner".into()))?,
+                deadline,
+                JobKind::SubtitleExtract,
+            )?;
+            return Ok(Some((job, active)));
         }
         cursor = page.next;
         if cursor.is_none() {

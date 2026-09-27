@@ -2080,3 +2080,196 @@ async fn background_artifact_claim_cannot_adopt_catalogue_or_provider_authority(
     })
     .await;
 }
+
+#[tokio::test]
+async fn background_subtitles_share_one_owner_and_publish_with_exact_current_authority() {
+    use super::subtitle_jobs_fixture::SubtitleFixture;
+    use plurx_core::store::background_jobs_subtitle::{SubtitleJobWrite, WriteSubtitleJob};
+    for_each_backend(|store, backend| async move {
+        for (index, scenario) in ["complete", "cancel", "takeover", "forged_source"]
+            .iter()
+            .enumerate()
+        {
+            let now = 1_000 + index as i64 * 100_000;
+            let (_, file_id) = seed_file(&store, &format!("subtitle-common-{scenario}")).await;
+            let stamp = super::subtitle_source_stamp(file_id);
+            let queued = store
+                .enqueue_or_promote_subtitle_source(&stamp, "foreground", now)
+                .await
+                .expect("subtitle ownership contract")
+                .expect("subtitle ownership contract");
+            assert!(
+                store
+                    .claim_analysis_request("node-a", now, now + 1_000)
+                    .await
+                    .expect("subtitle ownership contract")
+                    .is_none(),
+                "{backend}: old scheduler cannot claim subtitles"
+            );
+            assert!(store
+                .subtitle_job_intents(128)
+                .await
+                .expect("subtitle ownership contract")
+                .contains(&queued.request_id));
+            let request = store
+                .claim_subtitle_fixture(&queued.request_id, "node-a", now + 1, now + 1_000)
+                .await
+                .expect("subtitle ownership contract")
+                .expect("subtitle ownership contract");
+            assert!(!store
+                .subtitle_job_intents(128)
+                .await
+                .expect("subtitle ownership contract")
+                .contains(&queued.request_id));
+            assert!(
+                store
+                    .claim_subtitle_fixture(&queued.request_id, "node-b", now + 2, now + 1_000)
+                    .await
+                    .expect("subtitle ownership contract")
+                    .is_none(),
+                "{backend}: joined demand cannot create another owner"
+            );
+            let token = store
+                .subtitle_fixture_token(&request)
+                .await
+                .expect("subtitle ownership contract");
+            assert!(!store
+                .renew_analysis_request(
+                    &request.request_id,
+                    "node-a",
+                    request.fence,
+                    now + 2,
+                    now + 60_000
+                )
+                .await
+                .expect("subtitle ownership contract"));
+            assert!(!store
+                .complete_analysis_request(&request, "old-path", now + 2)
+                .await
+                .expect("subtitle ownership contract"));
+            let mut write = WriteSubtitleJob {
+                token: token.clone(),
+                request: request.clone(),
+                now_ms: now + 3,
+                output: SubtitleJobWrite::Representation {
+                    publication: plurx_core::store::SubtitleSourcePublication {
+                        file_id,
+                        source_size: stamp.source_size,
+                        source_mtime: stamp.source_mtime,
+                        source_attestation: "a".repeat(64),
+                        node_id: "node-a".into(),
+                        ordinal: 0,
+                        kind: "text".into(),
+                        format: "webvtt".into(),
+                        verdict: "kept".into(),
+                        attempts: 1,
+                        origin: "extracted".into(),
+                        sha256: "b".repeat(64),
+                        bytes: 20,
+                        published_at_ms: now + 3,
+                    },
+                },
+            };
+            match *scenario {
+                "cancel" => {
+                    store
+                        .cancel_analysis_request_admin(&request.request_id, now + 3)
+                        .await
+                        .expect("subtitle ownership contract");
+                    assert_eq!(
+                        store
+                            .background_job(&token.job_id)
+                            .await
+                            .expect("subtitle ownership contract")
+                            .expect("subtitle ownership contract")
+                            .state,
+                        JobState::Cancelling
+                    );
+                }
+                "takeover" => {
+                    let later = store
+                        .claim_subtitle_fixture(
+                            &queued.request_id,
+                            "node-b",
+                            now + 40_000,
+                            now + 41_000,
+                        )
+                        .await
+                        .expect("subtitle ownership contract")
+                        .expect("subtitle ownership contract");
+                    assert!(later.fence > request.fence);
+                    write.now_ms = now + 40_001;
+                    assert!(
+                        !store
+                            .write_subtitle_job(write.clone())
+                            .await
+                            .expect("subtitle ownership contract"),
+                        "{backend}: old owner cannot publish after takeover"
+                    );
+                    store
+                        .fail_subtitle_fixture(&later, "fixture_done", now + 40_002)
+                        .await
+                        .expect("subtitle ownership contract");
+                }
+                "forged_source" => {
+                    // Matching an existing request ID/fence is insufficient:
+                    // the complete source tuple must come from that record.
+                    write.request.source_size += 1;
+                    if let SubtitleJobWrite::Representation { publication } = &mut write.output {
+                        publication.source_size += 1;
+                    }
+                }
+                _ => {}
+            }
+            assert_eq!(
+                store
+                    .write_subtitle_job(write)
+                    .await
+                    .expect("subtitle ownership contract"),
+                *scenario == "complete",
+                "{backend}/{scenario}"
+            );
+            if *scenario == "complete" {
+                let completed = WriteSubtitleJob {
+                    token,
+                    request: request.clone(),
+                    now_ms: now + 4,
+                    output: SubtitleJobWrite::Complete {
+                        result_key: "subtitle-test-result".into(),
+                    },
+                };
+                assert!(store
+                    .write_subtitle_job(completed.clone())
+                    .await
+                    .expect("subtitle ownership contract"));
+                assert!(
+                    store
+                        .write_subtitle_job(completed)
+                        .await
+                        .expect("subtitle ownership contract"),
+                    "{backend}: lost completion acknowledgement is idempotent"
+                );
+                assert_eq!(
+                    store
+                        .analysis_request(&request.request_id)
+                        .await
+                        .expect("subtitle ownership contract")
+                        .expect("subtitle ownership contract")
+                        .state,
+                    "ready"
+                );
+            } else {
+                assert!(store
+                    .list_subtitle_source_publications(
+                        file_id,
+                        stamp.source_size,
+                        stamp.source_mtime
+                    )
+                    .await
+                    .expect("subtitle ownership contract")
+                    .is_empty());
+            }
+        }
+    })
+    .await;
+}

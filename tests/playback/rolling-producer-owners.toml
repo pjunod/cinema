@@ -2150,7 +2150,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # into #556: S-14 M8's two test-only sites and K-10 M4's two test-only
 # offline worker spawns coexist unchanged; the merge adds no new site.
 # E0 removes the direct full-scan spawn and process-local retry spawn; the bounded-process cancellation fixture adds one retained test task.
-expected_occurrences = 646
+# E0 subtitles remove the independent foreground analysis heartbeat task;
+# the retained common job heartbeat owns that lifetime.
+expected_occurrences = 645
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -3060,7 +3062,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # virtual-clock test waits coexist unchanged; the merge adds no new site.
 # E0 adds one library playback-pressure timer and three bounded cancellation-fixture observations. Replacing old scan scheduling timers leaves the state.rs total unchanged.
 # E0 adds one bounded Developer worker-authority observation; it owns no work or lease.
-expected_occurrences = 1030
+# E0 subtitles add one common-worker idle poll and one physical-pressure
+# observation. Both remain inside the worker that joins its child on loss.
+expected_occurrences = 1032
 
 [[module_structures]]
 id = "bare-time-constructor"

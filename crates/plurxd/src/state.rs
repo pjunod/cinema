@@ -2,6 +2,8 @@
 
 #[path = "library_work.rs"]
 mod library_work;
+#[path = "subtitle_work.rs"]
+mod subtitle_work;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1450,6 +1452,9 @@ pub struct JobManager {
     live: Mutex<HashMap<i64, Arc<ScanProgress>>>,
     /// Wake durable library consumers promptly after local admission.
     library_wake: tokio::sync::Notify,
+    /// Shared with TranscodeManager when attached; standalone managers have
+    /// no other encoder pool. Foreground subtitles reserve one CPU thread.
+    subtitle_admissions: std::sync::Mutex<crate::admission::Admissions>,
     metrics: Arc<IntegrationMetrics>,
     /// A pre-transcode pass is running. Not a mutex, because the answer wanted
     /// is "is one going" rather than "wait for it": a second pass would fight
@@ -2677,6 +2682,8 @@ fn subtitle_source_argv(
         "-loglevel".to_owned(),
         "error".to_owned(),
         "-copyts".to_owned(),
+        "-threads".to_owned(),
+        "1".to_owned(),
         "-i".to_owned(),
         input.to_owned(),
     ];
@@ -3011,6 +3018,7 @@ impl JobManager {
             statuses: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
             library_wake: tokio::sync::Notify::new(),
+            subtitle_admissions: std::sync::Mutex::new(crate::admission::Admissions::new()),
             metrics: Arc::new(IntegrationMetrics::default()),
             producing: std::sync::atomic::AtomicBool::new(false),
             indexing: std::sync::atomic::AtomicBool::new(false),
@@ -4328,190 +4336,6 @@ impl JobManager {
             .load(Ordering::Relaxed)
     }
 
-    /// After the bounded claim wait, playback may claim its own queued row.
-    /// The same lease and fence protect it as an idle worker, but this one
-    /// claim bypasses `pretranscode_worker_idle`: it is foreground playback.
-    pub(crate) async fn self_claim_subtitle_source(
-        self: &Arc<Self>,
-        request_id: &str,
-        runtime_cache: &Path,
-    ) -> bool {
-        if !self.may_run_cluster_jobs().await || !self.subtitle_source_queue_enabled().await {
-            return false;
-        }
-        let node_id = self.coordinator.node_id().to_owned();
-        let retry_policy = self.analysis_retry_policy().await;
-        let now = clock_ms();
-        let request = match self
-            .store
-            .claim_analysis_request_foreground(
-                request_id,
-                &node_id,
-                now,
-                now.saturating_add(retry_policy.lease_ms),
-            )
-            .await
-        {
-            Ok(Some(request)) => request,
-            Ok(None) => return false,
-            Err(error) => {
-                tracing::warn!(%error, request_id, "self-claiming subtitle_source request");
-                return false;
-            }
-        };
-        crate::telemetry::record_subtitle_source(
-            crate::telemetry::SubtitleSourceMetric::ForegroundSelfClaim,
-        );
-        let _progress = self.start_analysis_progress(
-            (&request.request_id, &request.target_node_id),
-            request.file_id,
-            &request.component,
-            "probing",
-            request.source_size.max(0) as u64,
-            0,
-        );
-        let stop = CancellationToken::new();
-        let lost = CancellationToken::new();
-        let heartbeat = {
-            let store = Arc::clone(&self.store);
-            let request_id = request.request_id.clone();
-            let node_id = node_id.clone();
-            let metrics = Arc::clone(&self.analysis_metrics);
-            let stop = stop.clone();
-            let lost = lost.clone();
-            let fence = request.fence;
-            let beat = LeaseHeartbeat {
-                queue: "analysis-request",
-                row: request.request_id.clone(),
-                fence,
-                attempts: request.attempts,
-                known_expiry_ms: request.lease_expires_ms,
-                lease_ms: retry_policy.lease_ms,
-                renew_every: retry_policy.renew_every(),
-                metrics,
-                stop,
-                lost,
-            };
-            tokio::spawn(async move {
-                beat.run(move |now, expires_at| {
-                    let store = Arc::clone(&store);
-                    let request_id = request_id.clone();
-                    let node_id = node_id.clone();
-                    async move {
-                        store
-                            .renew_analysis_request(&request_id, &node_id, fence, now, expires_at)
-                            .await
-                    }
-                })
-                .await;
-            })
-        };
-        let outcome = if !self
-            .store
-            .record_analysis_request_phase(&request, "source_probe", None, clock_ms())
-            .await
-            .unwrap_or(false)
-        {
-            Err(AnalysisResolutionError::ClaimLost)
-        } else {
-            match self.store.get_file(request.file_id).await {
-                Ok(Some(file))
-                    if file.size == request.source_size && file.mtime == request.source_mtime =>
-                {
-                    self.set_analysis_progress_totals(
-                        &request.request_id,
-                        &request.target_node_id,
-                        file.size.max(0) as u64,
-                        file.duration_ms.unwrap_or_default(),
-                    );
-                    self.resolve_subtitle_source_request(
-                        &request,
-                        &node_id,
-                        &file,
-                        runtime_cache,
-                        None,
-                        &stop,
-                        &lost,
-                    )
-                    .await
-                }
-                Ok(_) => Err(AnalysisResolutionError::Terminal("source_superseded")),
-                Err(_) => Err(AnalysisResolutionError::Retry {
-                    code: "source_catalog_read_failed",
-                    charge_attempt: true,
-                }),
-            }
-        };
-        stop.cancel();
-        let _ = heartbeat.await;
-        match outcome {
-            Ok(()) => true,
-            Err(AnalysisResolutionError::ClaimLost) => false,
-            Err(AnalysisResolutionError::Retry {
-                code,
-                charge_attempt,
-            }) => {
-                let now = clock_ms();
-                let delay_ms =
-                    retry_policy.backoff_ms(&request.request_id, request.attempts.max(1));
-                match self
-                    .store
-                    .retry_analysis_request(
-                        &request,
-                        code,
-                        now,
-                        now.saturating_add(delay_ms),
-                        charge_attempt,
-                    )
-                    .await
-                {
-                    Ok(true) => {
-                        crate::store_result::observe(
-                            crate::store_result::Operation::RecordAnalysisRetryWaitPhase,
-                            crate::store_result::Discard::BestEffort,
-                            self.store
-                                .record_analysis_request_phase(
-                                    &request,
-                                    "retry_wait",
-                                    Some(code),
-                                    now,
-                                )
-                                .await,
-                        );
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        tracing::warn!(%error, request_id, "retrying foreground subtitle_source")
-                    }
-                }
-                false
-            }
-            Err(AnalysisResolutionError::Terminal(code)) => {
-                let now = clock_ms();
-                match self
-                    .store
-                    .fail_analysis_request(&request.request_id, &node_id, request.fence, code, now)
-                    .await
-                {
-                    Ok(true) => {
-                        crate::store_result::observe(
-                            crate::store_result::Operation::RecordAnalysisFailedPhase,
-                            crate::store_result::Discard::BestEffort,
-                            self.store
-                                .record_analysis_request_phase(&request, "failed", Some(code), now)
-                                .await,
-                        );
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        tracing::warn!(%error, request_id, "failing foreground subtitle_source")
-                    }
-                }
-                false
-            }
-        }
-    }
-
     fn start_analysis_progress(
         self: &Arc<Self>,
         identity: (&str, &str),
@@ -5773,7 +5597,14 @@ impl JobManager {
                 }
             }
         };
-        tokio::join!(preparation, fragments, libraries);
+        let subtitles = async {
+            let mut pacing = crate::background_jobs::IdlePoll::new();
+            loop {
+                let progressed = self.work_subtitle_queue(&transcode).await;
+                tokio::time::sleep(pacing.delay(progressed)).await;
+            }
+        };
+        tokio::join!(preparation, fragments, libraries, subtitles);
     }
 
     async fn maintain_background_queue(self: Arc<Self>) {
@@ -8061,7 +7892,7 @@ impl JobManager {
         file: &MediaFile,
         runtime_cache: &Path,
         preempt_when_busy: Option<&TranscodeManager>,
-        stop: &CancellationToken,
+        fence: &crate::background_jobs::JobFence,
         lost: &CancellationToken,
     ) -> Result<(), AnalysisResolutionError> {
         if request.force_rebuild
@@ -8184,7 +8015,7 @@ impl JobManager {
                 file_id = file.id,
                 "subtitle_source request already covered; no source read"
             );
-            self.complete_subtitle_source_request(request, node_id, &result_key, stop)
+            self.complete_subtitle_source_request(request, &result_key, fence)
                 .await?;
             return Ok(());
         }
@@ -8200,7 +8031,7 @@ impl JobManager {
                 .await;
         let Some(plan) = plan else {
             if tracks.is_empty() {
-                self.complete_subtitle_source_request(request, node_id, &result_key, stop)
+                self.complete_subtitle_source_request(request, &result_key, fence)
                     .await?;
                 return Ok(());
             }
@@ -8216,6 +8047,7 @@ impl JobManager {
                 file.id,
                 &attested.handle,
                 &attested.observation.source_sha256,
+                Some((fence, request)),
             )
             .await;
             if let Ok(rows) = self
@@ -8228,7 +8060,7 @@ impl JobManager {
                     .filter(|row| row.source_attestation == attested.observation.source_sha256)
                     .collect();
                 if subtitle_source_covered(&tracks, &rows) {
-                    self.complete_subtitle_source_request(request, node_id, &result_key, stop)
+                    self.complete_subtitle_source_request(request, &result_key, fence)
                         .await?;
                     return Ok(());
                 }
@@ -8239,7 +8071,7 @@ impl JobManager {
             // rather than keeping an immortal queued row.
             return Err(AnalysisResolutionError::Retry {
                 code: "queue_full_or_busy",
-                charge_attempt: true,
+                charge_attempt: false,
             });
         };
         let stage = plan.stage().to_owned();
@@ -8387,6 +8219,7 @@ impl JobManager {
                 &attested.observation.source_sha256,
                 lost,
                 request,
+                fence,
             )
             .await;
         let receipt = match published {
@@ -8427,7 +8260,7 @@ impl JobManager {
             "subtitle_source job published"
         );
         match self
-            .complete_subtitle_source_request(request, node_id, &result_key, stop)
+            .complete_subtitle_source_request(request, &result_key, fence)
             .await
         {
             Ok(()) => {
@@ -8446,14 +8279,16 @@ impl JobManager {
     async fn complete_subtitle_source_request(
         &self,
         request: &AnalysisRequest,
-        _node_id: &str,
         result_key: &str,
-        stop: &CancellationToken,
+        fence: &crate::background_jobs::JobFence,
     ) -> Result<(), AnalysisResolutionError> {
-        stop.cancel();
-        if !self
-            .store
-            .complete_analysis_request(request, result_key, clock_ms())
+        if !fence
+            .write_subtitle(
+                request,
+                plurx_core::store::background_jobs_subtitle::SubtitleJobWrite::Complete {
+                    result_key: result_key.to_owned(),
+                },
+            )
             .await
             .map_err(|_| AnalysisResolutionError::Retry {
                 code: "queue_write_failed",
@@ -8514,17 +8349,7 @@ impl JobManager {
             file.duration_ms.unwrap_or_default(),
         );
         if request.component == "subtitle_source" {
-            return self
-                .resolve_subtitle_source_request(
-                    request,
-                    node_id,
-                    &file,
-                    transcode.runtime_cache_dir(),
-                    Some(transcode),
-                    stop,
-                    lost,
-                )
-                .await;
+            return Err(AnalysisResolutionError::ClaimLost); // Common workers own this component.
         }
         if request.component == "skip_markers" {
             if request.pipeline_version != crate::http::stream::CHAPTER_ANNOTATION_VERSION {
@@ -11237,7 +11062,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn learner_never_claims_a_foreground_subtitle_source_request() {
+    async fn unready_learner_cannot_claim_a_foreground_subtitle_source_request() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let media = tempfile::tempdir().expect("media");
         let artwork = tempfile::tempdir().expect("artwork");
