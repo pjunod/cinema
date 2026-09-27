@@ -1,8 +1,8 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 merged; E0 validating current main; E1 artwork worker in construction · **Updated:** 2026-09-26 ·
+**Status:** M1–M3 and E0 merged; E1 verified cache copies in construction · **Updated:** 2026-09-26 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` · **E1:** `codex/cluster-cache-preparation` ·
-**Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — validating](http://192.168.4.7:3000/noirr/plurx/pulls/564) · **E1:** [#566 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/566)
+**Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) · **E1:** [#566 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/566)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -697,3 +697,18 @@ continue E1–E3.
   copy, stale-owner, changed-source, acknowledgement-replay and target-settlement
   regression coverage; it is written and awaiting final E1 review, not executed.
   The transfer worker and serving endpoint are the next part of this batch.
+
+- 2026-09-26: E1 adds signed manifest-addressed transcode transfers and one
+  durable target worker per node. Objects are bounded, hashed before writing,
+  and staged under exact job/fence ownership. Cache publication is fenced;
+  ambiguous replies leave final bytes for ownership-aware GC. Transfer bodies
+  retain capacity and cache pins until dropped. Up to three holders can supply
+  each verified object; playback pressure cancels and joins the transfer before
+  capacity is released. Authentication, bounded paths, manifest tampering and
+  response lifetime regressions are written; execution remains deferred until
+  E1's single final review. Hot placement, prediction and E2/E3 remain open.
+
+- 2026-09-26: E0 PR #564 merged as `1d70a1fed50da407b05ab2f2ad523d8e2a970195`
+  after the single final adversarial review, fixes, and all required fast-lane
+  jobs passed on `fd0317594` (run 3322). Its merge preserves all 18 regression
+  declarations. E1 remains in construction; no E1 tests have been executed.

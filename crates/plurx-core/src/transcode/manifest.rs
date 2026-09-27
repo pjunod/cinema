@@ -1064,6 +1064,14 @@ where
     Ok(Some(manifest))
 }
 
+/// Authenticate a bounded manifest received from an immutable peer holder.
+pub fn decode(encoded: &[u8]) -> Result<GenerationManifest, String> {
+    if encoded.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err("generation manifest exceeds its size bound".into());
+    }
+    parse_manifest(encoded)
+}
+
 fn parse_manifest(encoded: &[u8]) -> Result<GenerationManifest, String> {
     let manifest: GenerationManifest = serde_json::from_slice(encoded)
         .map_err(|error| format!("parsing generation manifest: {error}"))?;
@@ -1403,6 +1411,31 @@ mod tests {
         let root = std::fs::canonicalize(std::env::temp_dir())
             .expect("canonical system temporary directory");
         tempfile::tempdir_in(root).expect("generation directory")
+    }
+
+    #[tokio::test]
+    async fn portable_manifest_decode_rejects_changed_identity_and_oversized_payloads() {
+        let directory = generation_tempdir();
+        tokio::fs::write(directory.path().join("seg00000.ts"), b"original")
+            .await
+            .expect("manifest fixture");
+        publish(
+            directory.path(),
+            "source-job:fence-1",
+            &["seg00000.ts".into()],
+        )
+        .await
+        .expect("manifest fixture");
+        let encoded = tokio::fs::read(directory.path().join(MANIFEST_FILE))
+            .await
+            .expect("manifest fixture");
+        let portable = decode(&encoded).expect("portable manifest");
+        assert!(portable.verify_bytes("seg00000.ts", b"original"));
+        assert!(!portable.verify_bytes("seg00000.ts", b"corrupt!"));
+        let mut changed = portable;
+        changed.generation_id = "another-generation".into();
+        assert!(decode(&serde_json::to_vec(&changed).expect("manifest fixture")).is_err());
+        assert!(decode(&vec![b' '; MAX_MANIFEST_BYTES as usize + 1]).is_err());
     }
 
     #[tokio::test]

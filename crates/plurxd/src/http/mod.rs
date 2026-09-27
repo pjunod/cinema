@@ -49,6 +49,7 @@ pub(crate) mod stream;
 pub(crate) mod subtitle_downloads;
 pub(crate) mod system;
 mod trakt;
+pub(crate) mod transcode_copies;
 
 /// Unmodified User-Agent strings as the shipping clients actually send them.
 /// Shared with the HTTP wire tests so the write-then-read proof and the
@@ -454,6 +455,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/cluster/join/finalize"
         | "/api/v1/cluster/learner/join/redeem"
         | "/api/v1/cluster/learner/join/finalize"
+        | "/internal/media/cache-copy/{recipe}/{digest}/{object}"
         | "/internal/media/fragment-index/{cache_key}"
         | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
         internal_activity::PATH
@@ -1873,6 +1875,10 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            "/internal/media/cache-copy/{recipe}/{digest}/{object}",
+            get(transcode_copies::serve),
+        )
+        .route(
             "/internal/media/fragment-index/{cache_key}",
             get(internal_media::fragment_index),
         )
@@ -2138,7 +2144,8 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                     if file_id.parse::<i64>().is_ok_and(|value| value > 0)
                     && ordinal.parse::<i64>().is_ok_and(|value| value >= 0))
             });
-    if fragment_index_read
+    if (method == Method::GET && transcode_copies::route_eligible(path))
+        || fragment_index_read
         || subtitle_source_read
         || (method == Method::GET && path == crate::media_pool::SNAPSHOT_PATH)
         || (method == Method::POST
