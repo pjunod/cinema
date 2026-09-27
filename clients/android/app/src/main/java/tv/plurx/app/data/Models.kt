@@ -336,19 +336,6 @@ data class OpenPublicationResponse(
 )
 
 @Serializable
-data class FileGrantRequest(
-    val purpose: String = "open_in",
-    val ttl_secs: Int = 900,
-)
-
-@Serializable
-data class FileGrantResponse(
-    val url: String,
-    val expires_at: Long,
-    val grant_id: String,
-)
-
-@Serializable
 data class ReadingState(
     val file_id: Long,
     val revision: ReadingRevision,

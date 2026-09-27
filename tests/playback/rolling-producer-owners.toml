@@ -1578,6 +1578,10 @@ expected_occurrences = 9
 
 [[module_structures]]
 id = "namespaced-task-spawn"
+# Durable queue: background_jobs.rs adds one ActiveJob-owned heartbeat (joined
+# before retirement), plus two joined race/process fixtures; ffmpeg.rs adds a
+# joined cancellation fixture. main.rs starts the daemon-owned consumer loop.
+# state.rs removes two domain heartbeats and adds guarded upkeep (-1 net).
 pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # 348 since M2: the Dolby Vision facts backfill is spawned from the per-tick
 # maintenance block beside the genre backfill. It is a leased catalogue job
@@ -2124,6 +2128,24 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # test-only: the offline worker loop under test in
 # `offline::tests::claim_a_wake_claims_what_the_local_replica_does_not_show_yet`,
 # aborted before the test returns. No production spawn.
+# 639 -> 641 (measured) with S-04 M2, the frozen Fontconfig environment:
+# `fontenv::blocking`'s `tokio::task::spawn_blocking`, the one bounded
+# filesystem owner that reads and copies the rule files, links the fonts,
+# stats the environment and sweeps a predecessor's directories; every
+# JoinHandle is awaited by its caller and a panicked task is a failure. And
+# the test-only `crate::producer_spawn::spawn(` in
+# `fontenv::tests::a_frozen_environment_names_only_the_captured_fonts`, which
+# runs `fc-list` through the production builder and reaps it before the test
+# returns. Neither owns a producer or a recipe decision.
+# 641 -> 642 (measured by zeroing this row) with #553's review round,
+# test-only: the `tokio::spawn` in
+# `fontenv::tests::a_cancelled_capture_leaves_no_environment_behind`, which
+# runs one capture paused on its test hook, is aborted and then awaited
+# (`is_cancelled`) before the test asserts. The production blocking owner is
+# unchanged: `fontenv::blocking` now also carries the environment's directory
+# guard in and out of each task, so a task that outlives its abandoned caller
+# drops the guard, and removes the directory, when the runtime drops its
+# output. No producer, process or recipe decision.
 # 639 -> 640 with S-14 M8 (`AttemptChild`), measured by zeroing this row:
 # `crate::playback_control::RollingControlHandle::spawn(` in the test-only
 # `attempt_child_shipped_shape`, the ordinary test-actor shape counted many
@@ -2142,10 +2164,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # each aborted before its test returns. No production spawn; the expiry pass
 # runs inside the existing offline worker loop. Neither owns a producer, a
 # process or a recipe decision.
+# 642 + K-10 M4 -> 644 (measured by zeroing this row) on the merge of main
+# into #553: S-04 M2's three occurrences and K-10 M4's two test-only offline
+# worker spawns coexist unchanged; the merge adds no new site.
 # 641 + K-10 M4 -> 643 (measured by zeroing this row) on the merge of main
 # into #556: S-14 M8's two test-only sites and K-10 M4's two test-only
 # offline worker spawns coexist unchanged; the merge adds no new site.
-expected_occurrences = 643
+# 644 + S-14 M8 -> 646 (measured by zeroing this row) on the merge of main
+# into #553 after #556: S-04 M2's three, S-14 M8's two test-only and K-10
+# M4's two test-only sites coexist unchanged; the merge adds no new site.
+# main @ d95503c25 has 647; with S-04 M2's three -> 650 (measured by zeroing this row)
+# on the merge of main into #553 after #532 and #563; the merge adds no new site.
+expected_occurrences = 650
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2154,6 +2184,8 @@ expected_occurrences = 643
 
 [[module_structures]]
 id = "method-spawn"
+# Durable queue removes the state.rs fragment JoinSet launcher. The common
+# consumer now awaits each admitted execution and owns its fence through reap.
 pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # +4 M5b: the JoinSet-owned leased file worker and three bounded subprocess or
 # blocking-I/O owners. Each is awaited, cancellation-bound, or deliberately
@@ -2253,6 +2285,15 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # aborted at the census budget and dropped (aborting any stragglers) when it
 # returns. Each task awaits one bounded, ChildWork-launched ffmpeg that is
 # killed on drop. No rolling-producer owner.
+# 47 -> 48 (measured) with S-04 M2: `handle.spawn_blocking(remove)` in
+# `fontenv::release` (moved there from `FontEnvironment::drop` by #553's review
+# round, count unchanged; it is now also reached from the capture guard
+# `Owned`'s drop), which removes a released or abandoned environment's
+# directory off the runtime worker. Fire-and-forget by design (a drop cannot await);
+# the removal is idempotent, holds no permit, and a removal that never runs
+# is covered by the next process's sweep. It owns no producer or process.
+# main @ d95503c25 has 46; with S-04 M2's one -> 47 (measured by zeroing this row)
+# on the merge of main into #553 after #532 and #563; the merge adds no new site.
 expected_occurrences = 47
 
 [[module_structures]]
@@ -2270,6 +2311,14 @@ expected_occurrences = 10
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Durable queue: background_jobs.rs adds four claim/heartbeat lease timers and
+# three bounded fixture waits (+7); ffmpeg replaces timeout with sleep and adds
+# three fixture waits (+3); fragindex removes two outer waits in favor of the
+# cancellable collector and awaited reap (-2). Developer observations add two
+# bounded read timeouts (+2). state replaces two heartbeat timers with two
+# consumer pacing sleeps and one cancellation poll (+1). produce adds one
+# offline join poll bounded by its existing deadline (+1). No recovery owner
+# is added: ActiveJob owns leases and the existing producer owns media.
 pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
 # 503 since settle_producer_flow_signal_before joined
 # request_producer_flow_before: two tokio::time::timeout_at calls, each
@@ -3029,6 +3078,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # and the zero-length `tokio::time::timeout` in the `#[cfg(test)]`
 # `OfflineManager::take_wake` probe, which only asks whether a wake permit is
 # stored. No production timer.
+# 1009 -> 1011 (measured) with S-04 M2, both test-only: the two
+# `tokio::time::sleep` waits in
+# `fontenv::tests::recipes_frozen_from_one_closure_share_it_until_the_last_is_released`
+# (one fixed 100 ms settle, one 20 ms poll bounded by a 10 s deadline) while
+# the environment's directory removal runs on the blocking pool. No
+# production timer.
+# 1011 -> 1013 (measured by zeroing this row) with #553's review round, both
+# test-only: the `tokio::time::sleep` poll in `fontenv::tests::environments_left`
+# (20 ms steps under a 10 s deadline, waiting for a refused or abandoned
+# capture's removal on the blocking pool), and the 60 s `tokio::time::timeout`
+# in `a_cancelled_capture_leaves_no_environment_behind` bounding the wait for
+# the paused capture to reach its hook. No production timer.
 # 1009 -> 1010 with S-14 M8 (`AttemptChild`), measured by zeroing this row:
 # one `tokio::time::timeout(` in the test-only `attempt_child_shipped_shape`,
 # bounding (5 s) the wait for the supervisor to publish the reap after the
@@ -3040,8 +3101,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # worker's one `tokio::time::sleep(delay)`, now never sleeping past the next
 # 60 s expiry pass on Tokio's clock. No production timer; none paces or
 # bounds a producer.
+# 1013 + K-10 M4 -> 1016 (measured by zeroing this row) on the merge of
+# main into #553: S-04 M2's four test-only waits and K-10 M4's three
+# virtual-clock test waits coexist unchanged; the merge adds no new site.
 # 1010 + K-10 M4 -> 1013 (measured by zeroing this row) on the merge of
 # main into #556: S-14 M8's one test-only timeout and K-10 M4's three
+# 1016 + S-14 M8 -> 1017 (measured by zeroing this row) on the merge of
+# main into #553 after #556: S-14 M8's one test-only timeout joins S-04
+# M2's four and K-10 M4's three test waits; the merge adds no new site.
+# main @ d95503c25 has 1025; with S-04 M2's four -> 1029 (measured by zeroing this row)
+# on the merge of main into #553 after #532 and #563; the merge adds no new site.
 # virtual-clock test waits coexist unchanged; the merge adds no new site.
 # 1013 -> 1015 with C-08 M5 row 4 (start outcomes), measured by zeroing this
 # row on the merge of main into #559: both new sites are test-only in
@@ -3051,7 +3120,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # refresh it. No production timer: the start ledger's deadline is swept from
 # `Instant` comparisons on ledger operations and on the /metrics scrape,
 # never by a timer.
-expected_occurrences = 1015
+# main @ d4fa763c7 has 1029; with C-08 M5 row 4's two test-only sleeps
+# reviewed above -> 1031 (measured by zeroing this row) on the merge of
+# main into #559; the merge adds no new site.
+expected_occurrences = 1031
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3060,11 +3132,16 @@ expected_occurrences = 1
 
 [[module_structures]]
 id = "tokio-time-import"
+# Durable queue imports Instant in background_jobs.rs for the monotonic claim
+# deadline. It does not introduce a separate timer or recovery authority.
 pattern = "use\\s+tokio::time"
-expected_occurrences = 1
+expected_occurrences = 2
 
 [[module_structures]]
 id = "process-command-construction"
+# Durable queue adds two test-only shell children, in background_jobs.rs and
+# ffmpeg.rs. Both run through the production cancellable collector; tests await
+# the collector and verify ESRCH before releasing their retained admission.
 pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # +2: the two HDR10 boot probes in `ffmpeg.rs`
 # (`has_hdr10_passthrough`, `has_hdr10_passthrough_qsv`). Both are one-shot
@@ -3327,10 +3404,27 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # x265 fixture encode, its concat mux, the framemd5 decode and the production
 # copy pipe. Each is collected by testfixtures::run or Command::output before
 # its temporary directory drops. No detached owner.
-expected_occurrences = 188
+# 188 -> 191 (measured) with S-04 M2. One production: `fontenv::build`'s
+# `tokio::process::Command::new(program)`, which constructs the capture-time
+# `fc-conflist` and `fc-list` under the frozen environment's variables and,
+# since #553's review round (count unchanged; its `fc-cache` construction was
+# removed), the one-frame probe burn with the recipe's own encoder; each goes
+# through `ffmpeg::font_probe_output` (the bounded,
+# job-owned engine probe with its 30 s budget), is reaped there, and runs once
+# per recipe capture, never per segment. Two test-only: `fontenv::tests::fc`'s
+# `std::process::Command::new(tool)` for the Fontconfig tools, and the ffmpeg
+# glyph render in
+# `a_frozen_host_environment_matches_and_renders_like_the_live_one`; both
+# `.output()`, waited to completion. The live enumeration's `fc-conflist`
+# construction moved within `font_render_engine_inner`; it is not new.
+# main @ d95503c25 has 190; with S-04 M2's three -> 193 (measured by zeroing this row)
+# on the merge of main into #553 after #532 and #563; the merge adds no new site.
+expected_occurrences = 193
 
 [[module_structures]]
 id = "process-capable-launch-method"
+# Durable queue removes state.rs JoinSet.spawn for the fragment worker. This
+# is the same removed task counted by method-spawn, not an OS child.
 pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +2 for the Android-DV boundary regressions: one test-only finite FFmpeg
 # `.output()` described by the command-construction entry, plus one Axum
@@ -3722,12 +3816,21 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Command::output calls (framemd5 decode, production copy pipe) that collect
 # finite fixture children. The census's own ffmpeg starts through
 # process::bounded::output with ChildWork::realtime.
+# 389 -> 391 (measured) with S-04 M2, both test-only: the `.output()` of
+# the two commands described under `process-command-construction` above
+# (`fontenv::tests::fc` and the glyph render). Same children, counted once in
+# each sentinel; each is spawned, drained and reaped in one call.
+# main @ d95503c25 has 388; with S-04 M2's two -> 390 (measured by zeroing this row)
+# on the merge of main into #553 after #532 and #563; the merge adds no new site.
 # 389 -> 396 with C-08 M5 row 4 (start outcomes), measured from the
 # validation unittests' actual count: seven `Response::status()` reads in
 # the three start-outcome handler tests (`http::tests`), HTTP status codes on
 # in-process `oneshot` responses. No child process, no producer, nothing to
 # own.
-expected_occurrences = 396
+# main @ d4fa763c7 has 390; with C-08 M5 row 4's seven test-only
+# `Response::status()` reads reviewed above -> 397 (measured by zeroing this
+# row) on the merge of main into #559; the merge adds no new site.
+expected_occurrences = 397
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3741,6 +3844,9 @@ expected_occurrences = 0
 
 [[module_structures]]
 id = "process-lifecycle-method"
+# Durable queue adds start_kill and an awaited wait to the ffmpeg collector.
+# Cancellation/expiry retains the child job and caller admission until reap;
+# the normal completion wait remains. There is no second process owner.
 pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # +3: the bounded chapter probe kills and reaps oversized output, and reaps
 # ordinary completion. Cancellation/deadline drops the kill-on-drop child.
@@ -3896,6 +4002,9 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # 405 measured by zeroing this row after merging `origin/main` at
 # `4b112204b` into S-14 M8 (#543): main's 404, reviewed above, plus this
 # branch's one reviewed test-only call.
+# 405 -> 406 (measured) with S-04 M2, test-only: the `.wait()` that reaps
+# the `fc-list` child `a_frozen_environment_names_only_the_captured_fonts`
+# launches through `producer_spawn::spawn`, after its stdout is read.
 # 405 -> 397 with the review round of S-14 M8 (#556, finding 1), measured by
 # zeroing this row. All eight removed calls were `std::sync::Barrier::wait`,
 # in-process test synchronization and never a child-process call: the two
@@ -3905,10 +4014,18 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # (four). Their bounded replacement (`SupervisorPause::hold` /
 # `wait_reached` and a release guard) waits through `Condvar::wait_timeout_while`,
 # which this pattern does not match. No production lifecycle call changed.
-expected_occurrences = 397
+# 397 + S-04 M2 -> 398 (measured by zeroing this row) on the merge of main
+# into #553 after #556: S-14 M8's review round removed eight Barrier waits,
+# and S-04 M2's one test-only fc-list reap remains; no new site.
+# main @ d95503c25 has 399; with S-04 M2's one -> 400 (measured by zeroing this row)
+# on the merge of main into #553 after #532 and #563; the merge adds no new site.
+expected_occurrences = 400
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
+# Durable queue adds two test-only libc::kill(pid, 0) observations, one in
+# background_jobs.rs and one in ffmpeg.rs. They send no signal; ESRCH proves
+# the production collector reaped the child before returning capacity.
 pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe)|(?<![:.\\w])(?:kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe))\\s*\\("
 # 32 -> 33 with M1: `libc::kill` targets the negative process-group id on
 # cancellation or timeout so descendants inheriting the held media descriptor
@@ -3949,7 +4066,7 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # `libc::execv` from inside a `pre_exec`, which reproduces the decode-fact
 # probe's exec-from-`pre_exec` to show that a priority registered after it
 # never runs. The child is owned by `spawn_job_owned` and killed on drop.
-expected_occurrences = 50
+expected_occurrences = 52
 
 [[module_structures]]
 id = "kill-on-drop-construction"

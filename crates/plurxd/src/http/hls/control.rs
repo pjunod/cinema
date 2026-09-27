@@ -2051,6 +2051,7 @@ async fn staged_successor_action(
         deadline_ms: staged.deadline_ms,
         session_id: successor.session_id,
         playlist_url: start.playlist_url,
+        control: start.control.map(Box::new),
         media_origin_ms: successor.media_origin_ms,
         effective_selection: crate::playback_control::EffectiveSelection::from_recipe(
             &recipe,

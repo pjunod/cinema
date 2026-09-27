@@ -11,6 +11,36 @@ describes the state on the day it was written, and
 `tests/operations/test_status_pr_claims.py` keeps holding it to the same
 merged-pull-request rule it held in `STATUS.md`.
 
+## 2026-09-21 · An abandoned replacement held its player's key — reported, diagnosed, fixed
+
+`PR #437`, branch `fix/replacement-gate-supersession`, **merged, NOT deployed**.
+
+Reported from the Android client on the TCL tablet, 2026-09-21 ~18:50 ET,
+playing *Bad Boys: Ride or Die*: `transcode capacity is temporarily
+unavailable: another replacement for this player is still being committed`,
+over a Retry button that could not clear it.
+
+**Orphaned**, not a commit in flight. On m6 the cluster replacement gate for
+that player was held by the detached cleanup of a request that had answered
+the viewer 503 six seconds earlier, and nothing in the tree ages, expires or
+force-releases that registry. What wedged the hold inside the start was a
+402-second subtitle sidecar extraction awaited under the gate with no timeout.
+Node evidence, anchors and the mechanism:
+[docs/playback-control/REPLACEMENT-GATE-SUPERSESSION-RCA.md](REPLACEMENT-GATE-SUPERSESSION-RCA.md).
+
+A key is now reclaimed only from a hold that can be proved not to need it —
+one that has declared itself abandoned, or one past a 120 s ceiling — never on
+the cooperative window, because the work under this gate routinely takes tens
+of seconds and the client's retry ladder re-posts into it. The refusal itself
+became a typed, `Retry-After`-carrying 503 (`transcode_capacity_pending`) so
+the ladder all three clients already carry waits it out instead of showing a
+terminal overlay quoting an internal sentence.
+
+Still open, all in the RCA's §4: `ensure_burn_file` is still awaited under the
+gate unbounded; `Drop for StartedSessionGuard` still releases only after a full
+retirement rather than after the fence; and a hold wedged before it registers
+anything still has nothing to fence. Neither client half has run on hardware.
+
 ## 2026-09-13 · Apple's notice strip was a dead end, and two rows of the readiness card were false
 
 **[#297](http://forge.lan:3000/noirr/plurx/pulls/297), titled `WIP:`.**
