@@ -3484,6 +3484,7 @@ pub(crate) struct LiveTvManager {
     source_formats: StdMutex<HashMap<SourceFormatKey, CachedSourceFormat>>,
     source_facts: StdMutex<HashMap<SourceFormatKey, CachedSourceFacts>>,
     registry: Arc<StdMutex<LiveTvRegistry>>,
+    placements: StdMutex<cluster::Placements>,
     /// Owner-sampled during the DVR loop. Public overview reads this atomic;
     /// they never stat the recording filesystem themselves.
     dvr_storage_free_bytes: AtomicU64,
@@ -3556,6 +3557,7 @@ impl LiveTvManager {
             source_formats: StdMutex::new(HashMap::new()),
             source_facts: StdMutex::new(HashMap::new()),
             registry: Arc::clone(&metrics.registry),
+            placements: StdMutex::new(cluster::Placements::default()),
             dvr_storage_free_bytes: AtomicU64::new(u64::MAX),
             scratch_claims: StdMutex::new(HashSet::new()),
             scratch_sweep_gate: tokio::sync::Mutex::new(()),
@@ -3923,7 +3925,7 @@ impl LiveTvManager {
                 "Run the Live TV readiness check to test the live-TV FFmpeg graph".to_owned(),
             // 3 = client-supplied request ids and the /live-tv/starts/*
             // recovery routes. An ingress intersects this with its own list.
-            start_protocols: vec![1, 2, 3],
+            start_protocols: vec![1, 2, 3, 4],
         })
     }
 
@@ -4019,6 +4021,16 @@ impl LiveTvManager {
         self: &Arc<Self>,
         request: LiveTvStartRequest,
     ) -> Result<LiveTvProvisional, LiveTvError> {
+        if self
+            .placements()
+            .get(request.user_id, &request.request_id)
+            .is_some_and(|e| e.worker != self.node_id)
+        {
+            return Err(LiveTvError::Conflict(
+                "this request is assigned to a remote processor; use the placed start protocol"
+                    .into(),
+            ));
+        }
         self.start_with_ingest(request, None).await
     }
 
@@ -4127,7 +4139,7 @@ impl LiveTvManager {
             device_id,
             output: StdMutex::new(output),
             delivery: StdMutex::new(None),
-            device_ipv4: Some(address),
+            device_ipv4: (!is_remote).then_some(address),
             owner_serving_generation: serving_generation,
             started,
             directory,
@@ -6378,7 +6390,7 @@ pub(crate) fn valid_request_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn validate_start_request(request: &LiveTvStartRequest) -> Result<(), LiveTvError> {
+pub(crate) fn validate_start_request(request: &LiveTvStartRequest) -> Result<(), LiveTvError> {
     if !valid_request_id(&request.request_id) {
         return Err(LiveTvError::InvalidResponse(
             "live-TV request id is invalid".into(),
@@ -13628,7 +13640,7 @@ Output #0, hls, to 'index.m3u8':
             refresh_error: None,
             ffmpeg_graph_ready: false,
             ffmpeg_graph_message: "not probed".to_owned(),
-            start_protocols: vec![1, 2, 3],
+            start_protocols: vec![1, 2, 3, 4],
         }
     }
 

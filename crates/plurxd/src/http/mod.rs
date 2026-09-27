@@ -35,6 +35,7 @@ mod keys;
 mod libraries;
 pub(crate) mod library_channels;
 pub(crate) mod live_tv;
+mod live_tv_cluster;
 mod network;
 mod offline;
 pub(crate) mod peer_transport;
@@ -469,6 +470,8 @@ fn http_route_group(path: &str) -> usize {
         | crate::live_tv::START_PATH
         | crate::live_tv::START_V2_PATH
         | crate::live_tv::ACTIVATE_PATH
+        | crate::live_tv::cluster::PLACEMENT_PATH
+        | crate::live_tv::cluster::PROCESS_PATH
         | crate::live_tv::cluster::INGEST_PATH
         | crate::live_tv::RESOURCE_PATH
         | crate::live_tv::STOP_PATH
@@ -1840,6 +1843,18 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            crate::live_tv::cluster::PLACEMENT_PATH,
+            post(internal_live_tv::placement).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::cluster::PROCESS_PATH,
+            post(internal_live_tv::process).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
             crate::live_tv::cluster::INGEST_PATH,
             post(internal_live_tv::ingest).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
@@ -2046,7 +2061,9 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
             crate::media_sessions::ABORT_PATH
                 | crate::media_sessions::RELAY_PATH
                 | crate::media_sessions::CONTROL_PATH
-                | crate::live_tv::cluster::INGEST_PATH
+                | crate::live_tv::cluster::PLACEMENT_PATH
+        | crate::live_tv::cluster::PROCESS_PATH
+        | crate::live_tv::cluster::INGEST_PATH
         | crate::live_tv::RESOURCE_PATH
                 | crate::live_tv::STOP_PATH
                 // A retire is a stop plus a fence. Refusing it during
@@ -2167,6 +2184,8 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                     | crate::media_sessions::ABORT_PATH
                     | crate::media_sessions::RELAY_PATH
                     | crate::media_sessions::CONTROL_PATH
+                    | crate::live_tv::cluster::PLACEMENT_PATH
+                    | crate::live_tv::cluster::PROCESS_PATH
                     | crate::live_tv::cluster::INGEST_PATH
                     | crate::live_tv::RESOURCE_PATH
                     | crate::live_tv::STOP_PATH

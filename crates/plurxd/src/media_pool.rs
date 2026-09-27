@@ -163,6 +163,8 @@ pub(crate) struct MediaNodeSnapshot {
     pub background_active: bool,
     #[serde(default)]
     pub io: MediaIoObservation,
+    #[serde(default)]
+    pub live_tv_processing: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -695,6 +697,37 @@ impl MediaPool {
             .retain(|_, cached| now <= cached.expires_at);
     }
 
+    /// Observed capacity ranks candidates; the selected worker still reserves
+    /// the actual delivery plan atomically before starting its encoder.
+    pub(crate) async fn live_tv_worker(&self, state: &AppState) -> String {
+        if !self.remote_placement_ready(state).await {
+            return state.node_id.clone();
+        }
+        self.expire().await;
+        let mut nodes = vec![local_snapshot(state).await];
+        nodes.extend(
+            self.snapshots
+                .read()
+                .await
+                .values()
+                .map(|e| e.snapshot.clone()),
+        );
+        nodes
+            .into_iter()
+            .filter(|n| n.live_tv_processing && n.scratch_bytes_free > 64 * 1024 * 1024)
+            .max_by_key(|n| {
+                (
+                    n.hardware_slots_max.saturating_sub(n.hardware_slots_used),
+                    n.software_threads_max
+                        .saturating_sub(n.software_threads_used),
+                    n.scratch_pressure.preference(),
+                    n.egress_pressure.preference(),
+                    n.node_id == state.node_id,
+                )
+            })
+            .map_or_else(|| state.node_id.clone(), |n| n.node_id)
+    }
+
     pub(crate) async fn diagnostics(&self, state: &AppState) -> MediaDirectoryDiagnostics {
         self.expire().await;
         let mut nodes = vec![local_snapshot(state).await];
@@ -1048,6 +1081,8 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
         live_waiting: runtime.live_waiting,
         background_active: runtime.background_active,
         io: media_io_observation(),
+        live_tv_processing: state.serving.is_ready()
+            && !state.membership.local_maintenance_active(),
     }
 }
 
@@ -1497,6 +1532,7 @@ mod tests {
             live_waiting: false,
             background_active: false,
             io: MediaIoObservation::default(),
+            live_tv_processing: true,
         }
     }
 
@@ -1919,6 +1955,7 @@ mod tests {
                     live_waiting: false,
                     background_active: false,
                     io: MediaIoObservation::default(),
+                    live_tv_processing: true,
                 },
                 expires_at: tokio::time::Instant::now() + SNAPSHOT_EXPIRY,
             },

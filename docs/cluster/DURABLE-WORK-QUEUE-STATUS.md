@@ -921,3 +921,13 @@ continue E1–E3.
   recovery routing and remote start authorization remain under construction;
   this is not yet a completed remote playback path. Pinned workspace
   all-target Clippy passes; no E3 tests have run.
+
+- 2026-09-27: connected the new placed-start protocol to the tuner owner's
+  bounded assignment history, worker selection, signed processing/ingest
+  requests, and existing activation/resource/recovery routes. An ambiguous
+  start keeps its worker; retirement fences new ingest before cleanup, and
+  unreachable assignments are retained rather than reassigned. Workers reuse
+  the existing FFmpeg admission, fan-out, source probing and cleanup paths;
+  remote sessions do not fetch tuner signal directly. Mixed-version ingress
+  retains the older local-owner start protocol. All-target compilation passed;
+  adversarial review and tests still await the completed E3 batch.
