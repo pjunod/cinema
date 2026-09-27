@@ -1,8 +1,8 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 and E0 merged; E1 awaiting fast lane; E2 review fixes in qualification · **Updated:** 2026-09-27 ·
+**Status:** M1–M3 and E0 merged; E1–E2 reviewed; combined promotion ready · **Updated:** 2026-09-27 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` · **E1:** `codex/cluster-cache-preparation` ·
-**E2:** `codex/cluster-batch-analysis` · **Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) · **E1:** [#566 — awaiting fast lane](http://192.168.4.7:3000/noirr/plurx/pulls/566) · **E2:** [#567 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/567)
+**E2:** `codex/cluster-batch-analysis` · **Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) · **E1:** [#566 — superseded by combined promotion](http://192.168.4.7:3000/noirr/plurx/pulls/566) · **E2:** [#567 — combined promotion](http://192.168.4.7:3000/noirr/plurx/pulls/567)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -18,8 +18,8 @@ implementation is claimed; “compiled” does not mean tests passed.
 | M2 fragment analysis and hydration | Implemented; focused validation passed | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
 | M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
 | E0 subtitle and library workers | Merged | PR #564 merged as `1d70a1fed`; one final review addressed and run 3322 passed all required fast-lane jobs |
-| E1 reads, caches, prediction, artwork | Reviewed; fast lane queued | Read path, artwork, portable transcodes, bounded hot copies and durable predictive analysis implemented. Single final review addressed; focused store, image, copy and cleanup checks passed. Required fast lane remains. Scheduled verification/repair belongs to E2 |
-| E2 embeddings, probes and repair | Reviewed; qualification next | Portable embeddings, bounded probes, admitted artifact verification and finite repair compiled. Three review findings addressed; focused regressions and required fast lane remain |
+| E1 reads, caches, prediction, artwork | Reviewed; promoting with E2 in #567 | Read path, artwork, portable transcodes, bounded hot copies and durable predictive analysis implemented. Single final review addressed; focused store, image, copy and cleanup checks passed. Required fast lane remains. Scheduled verification/repair belongs to E2 |
+| E2 embeddings, probes and repair | Reviewed; combined fast lane next | Portable embeddings, bounded probes, admitted artifact verification and finite repair compiled. Three review findings addressed; focused regressions and required fast lane remain |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
 | Final adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
 | Core fast lane | Passed: run 3296 on `3784d5ec5` | Preflight, Rust, Windows, web and main promotion gate all passed |
@@ -894,3 +894,12 @@ continue E1–E3.
   ownership-inventory checks. E1 run 3353 finished with exactly three failures:
   the two stale inventories and the pagination demand fixture, all corrected
   in `7cfafe6cc` with focused regressions passing. No merge is claimed yet.
+
+- 2026-09-27: promote E1 and E2 together through #567. Neither is merged yet;
+  requalifying E1 separately would repeat the same full workspace fast lane.
+  #566 returns to draft as superseded and will close after #567 merges. The
+  E1 review and its fixes remain recorded; E2's one review covered its exact
+  additional implementation. This batches the completed commits without a
+  repeat adversarial review. Both inventories, capability pagination, three
+  cache-verification tests and the 445-method Store inventory pass. Candidate
+  `465f16594` passed the normal pinned hook; only promotion bookkeeping follows.
