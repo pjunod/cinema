@@ -2436,38 +2436,34 @@ that the voter can use replicated storage or sees a leader. The private Ansible
 deployment uses `serial: 1`, fails the whole play on the first node error, and
 now gates each Cinema host on `/readyz`.
 
-**Enable bounded catalogue reads only after the rolling update settles.** Keep
-`cluster.bounded_replica_reads = false` while any voter runs an older build.
-After every voter is ready on the same bounded-read protocol, set the following
-identically on every voter and restart them one at a time again:
+**Bounded catalogue reads are the normal replicated read path.** The Developer
+tab's **Local catalogue reads** preference can turn them off or on without
+restarting nodes. Its readiness rows are advisory. A saved preference replicates
+like other settings; a node observes it when that entry applies. The original
+`cluster.bounded_replica_reads` option supplies the initial preference (default
+`true`); the saved Developer preference overrides it. The apply-lag budget
+remains `cluster.bounded_replica_max_lag_entries`, default 64.
 
-```toml
-[cluster]
-bounded_replica_reads = true
-bounded_replica_max_lag_entries = 64
-```
+The optimization covers library browse, item/file lookup, recently-added,
+genre, Home previews and technical aggregates. Authentication, settings APIs,
+membership, leases, jobs, ownership and mutations remain Authority operations.
+Search keeps its existing local derived-index path. Watch reads additionally
+require the browser's latest acknowledged write position: the web client echoes
+`X-Plurx-Commit-Index` as `X-Plurx-Read-After` for 60 seconds, across nodes.
+Unknown write outcomes, unindexed writes and sign-in changes discard that floor.
+Clients without the echo continue to use Authority for watch reads.
 
-The optimization is limited to library browse, item/file lookup,
-recently-added, genre, Home previews, and technical-aggregate calls in the
-native and Plex-compatible read handlers. Authentication, watch state,
-settings, membership, leases, jobs, cache/offline ownership, mutations, and
-every write remain Authority operations. Search remains its existing
-node-local derived-index operation. Write-followed-by-read handlers continue to
-use Authority.
+A local result requires a fresh one-second quorum watermark, matching local
+term/leader/epoch, negotiated protocol and the configured `0..10000` entry lag
+budget before and after the operation. Missing/changing proof or local SQL
+errors discard the local result and use Authority. The preference itself costs
+one local settings lookup inside that proof; it adds no leader round trip.
+Existing multi-statement genre/count and media-shape semantics remain unchanged.
 
-A local result is returned only when a one-second quorum watermark, local
-term/leader/epoch, negotiated protocol, and the configured `0..10000` entry
-lag budget remain valid before and after the complete operation. Missing or
-changing proof and local SQL/mapping errors discard the local result and retry
-Authority. The existing multi-statement genre/count and media-shape operations
-retain their Authority semantics; the permit is not a new cross-statement
-snapshot guarantee.
-
-Set `cluster.bounded_replica_reads = false` on all voters, one at a time, for an
-immediate rollback that changes no schema or membership. `/readyz` removes a
-voter whose quorum proof is absent or whose local apply lag is nonzero; the
-read helper also falls back independently, so bypassing the load balancer does
-not turn an expired proof into a stale response.
+Turn off **Local catalogue reads** in Developer to return eligible reads to
+Authority. This changes no schema or membership. `/readyz` removes a voter whose
+quorum proof is absent or whose apply lag is nonzero; the reader independently
+falls back, so bypassing the proxy does not bypass its consistency checks.
 
 **Use readiness conservatively at the reverse proxy.** `/readyz` is an active
 replicated-store proof, not a free process counter: it checks cluster health and
@@ -3061,7 +3057,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_CREDENTIAL_KEY_FILE` | `cluster.credential_key_file` | `<data_dir>/credentials.key` | Node-local key that encrypts the stored Trakt bearer credential. Minted mode-`0600` on first boot, and required to stay owner-only. **Back it up with the database** — plurx refuses to start if the sealed rows outlive it, or if the key present is not the one that sealed them ([SECURITY.md](SECURITY.md)) |
 | `PLURX_SHARED_CACHE_DIR` | `cluster.shared_cache_dir` | empty | Optional node-local path to a writable cache filesystem mounted on every participating voter. Requires `PLURX_SHARED_CACHE_ID`; a path alone is never trusted as proof of shared storage |
 | `PLURX_SHARED_CACHE_ID` | `cluster.shared_cache_id` | empty | Stable operator name for that shared filesystem: 1–64 ASCII letters, digits, dots, dashes, or underscores. Every voter mounting the same filesystem must use the same value |
-| `PLURX_CLUSTER_BOUNDED_REPLICA_READS` | `cluster.bounded_replica_reads` | `false` | Cluster-wide opt-in and Authority-read kill switch for the named lag-gated catalogue slice. Enable only after every voter advertises the current bounded-read protocol |
+| `PLURX_CLUSTER_BOUNDED_REPLICA_READS` | `cluster.bounded_replica_reads` | `true` | Initial bounded-read preference; the replicated Developer setting overrides it. Each read proves consistency independently |
 | `PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES` | `cluster.bounded_replica_max_lag_entries` | `64` | Maximum quorum-commit to local-applied gap admitted for a bounded catalogue operation; `0..10000`, identical on every voter |
 | `PLURX_CLUSTER_READ_POOL_SIZE` | `cluster.read_pool_size` | `4` | Local replicated-read connection pool, bounded 1–16; tune only with retained 4/8/16 evidence |
 | `PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS` | `cluster.snapshot_chunk_timeout_secs` | `30` | One non-final snapshot chunk RPC in seconds, bounded 5–300; must not exceed the transfer timeout and must match on every voter |

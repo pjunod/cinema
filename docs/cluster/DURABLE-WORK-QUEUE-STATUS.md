@@ -18,7 +18,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | M2 fragment analysis and hydration | Implemented; focused validation passed | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
 | M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
 | E0 subtitle and library workers | Adapters implemented; construction checks passed | Library work, storage/provider budgets, learner authority and all-track subtitle extraction are connected. Integrated current main; PR #564 received five findings; fixes and regressions are implemented. 17 queue contracts and nine cancellation regressions passed; CI pending |
-| E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
+| E1 reads, caches, prediction, artwork | Read path in construction | Browser write-floor echo, normal bounded reads and advisory Developer opt-out implemented; construction checks underway. Cache/prediction/artwork work remains |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
 | Final adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
@@ -602,3 +602,12 @@ continue E1–E3.
   that exact read-only accessor call; direct stores/swaps remain prohibited.
   Rust/Windows did not execute in that failed run. E1 has its own temporary
   branch, `codex/cluster-cache-preparation`, with no implementation changes yet.
+
+- 2026-09-26: E1 construction began on `codex/cluster-cache-preparation` while
+  #564 runs its required fast lane. Added browser write-position echo with
+  monotonic expiry, full-width decimal indexes, auth-generation isolation and
+  out-of-order/unknown-reply handling. Bounded reads become the initial default;
+  a replicated Developer preference overrides the seed without restarts. Its
+  local preference lookup runs inside the existing per-read proof. Auth stays
+  authoritative, and clients without a valid watch floor retain authority reads.
+  New regressions are written, not executed; E1 review and tests remain deferred.

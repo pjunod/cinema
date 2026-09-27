@@ -1728,6 +1728,7 @@ pub struct SettingsDto {
     /// Default-off content-addressed cluster queue and peer hydration for VOD
     /// indexes. The cadence above remains the operator's I/O budget.
     pub vod_index_cluster_cache: bool,
+    pub bounded_replica_reads: bool,
     /// Durable analysis claim/retry policy. These remain operator-visible and
     /// bounded because slow storage may need more time without permitting an
     /// unsupported source to retry forever.
@@ -2151,6 +2152,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         vod_index_mins: setting(keys::VOD_INDEX_MINS).map_or(15, |value| mins(Some(value))),
         vod_index_cluster_cache: setting(keys::VOD_INDEX_CLUSTER_CACHE)
             .is_some_and(|value| value.trim() == "1"),
+        bounded_replica_reads: plurx_core::store::stored_switch(
+            setting(keys::BOUNDED_REPLICA_READS).as_deref(),
+            state.catalogue.bounded_reads_default(),
+        ),
         analysis_max_attempts,
         analysis_lease_secs,
         analysis_backoff_base_secs,
@@ -2418,6 +2423,7 @@ pub struct UpdateSettings {
     pub vod_blocked_get_cap: Option<String>,
     pub vod_index_mins: Option<i64>,
     pub vod_index_cluster_cache: Option<bool>,
+    pub bounded_replica_reads: Option<bool>,
     pub analysis_max_attempts: Option<i64>,
     pub analysis_lease_secs: Option<i64>,
     pub analysis_backoff_base_secs: Option<i64>,
@@ -2582,6 +2588,7 @@ impl UpdateSettings {
             || self.vod_materialize_budget_secs.is_some()
             || self.vod_index_mins.is_some()
             || self.vod_index_cluster_cache.is_some()
+            || self.bounded_replica_reads.is_some()
             || self.analysis_max_attempts.is_some()
             || self.analysis_lease_secs.is_some()
             || self.analysis_backoff_base_secs.is_some()
@@ -3672,6 +3679,12 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::LIVE_TV_DEINTERLACE_OUTPUT, output.as_str())
+            .await?;
+    }
+    if let Some(on) = req.bounded_replica_reads {
+        state
+            .store
+            .put_setting(keys::BOUNDED_REPLICA_READS, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(on) = req.vod_index_cluster_cache {

@@ -1866,6 +1866,7 @@ pub mod keys {
     /// Content-addressed cluster coordination for VOD indexes. Missing/zero is
     /// off so an upgrade never starts full-library reads without the operator's
     /// topology measurement and explicit opt-in.
+    pub const BOUNDED_REPLICA_READS: &str = "cluster.bounded_replica_reads";
     pub const VOD_INDEX_CLUSTER_CACHE: &str = "playback.vod_index_cluster_cache";
     /// Durable analysis retry budget. The settings API constrains this to a
     /// small positive range so an operator can tune slow media without making
@@ -5568,6 +5569,32 @@ impl CatalogueReader {
         }
     }
 
+    /// The initial preference before the operator saves a replicated override.
+    #[must_use]
+    pub fn bounded_reads_default(&self) -> bool {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(bounded) = &self.bounded {
+            return bounded.enabled;
+        }
+        true
+    }
+
+    /// Advisory observation only; every actual read obtains its own permit.
+    /// `None` means this process has no replicated reader (for example SQLite).
+    pub async fn bounded_read_observation(&self) -> Option<bool> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(bounded) = &self.bounded {
+            return Some(
+                bounded
+                    .metrics
+                    .run_bounded_replica_after(bounded.max_apply_lag_entries, 0, || async {})
+                    .await
+                    .is_some(),
+            );
+        }
+        None
+    }
+
     /// Construct the production bounded reader for real seeded-store
     /// contracts outside this module.
     #[cfg(all(feature = "hiqlite-store", feature = "cluster-read-cost-validation"))]
@@ -5636,9 +5663,6 @@ impl CatalogueReader {
         Fut: std::future::Future<Output = Result<T, StoreError>>,
     {
         let bounded = self.bounded.as_ref()?;
-        if !bounded.enabled {
-            return None;
-        }
         let min_applied_index = min_applied_index(&bounded.store)?;
         let store = Arc::clone(&bounded.store);
         #[cfg(feature = "cluster-read-cost-validation")]
@@ -5655,7 +5679,13 @@ impl CatalogueReader {
                 bounded.max_apply_lag_entries,
                 min_applied_index,
                 move || async move {
-                    let result = local_read(store).await;
+                    // A stale preference only chooses between two safe read paths.
+                    // Read it under the same proof, without contacting the leader.
+                    let result = if store.local_bounded_reads_enabled(bounded.enabled).await? {
+                        local_read(store).await.map(Some)
+                    } else {
+                        Ok(None)
+                    };
                     #[cfg(feature = "cluster-read-cost-validation")]
                     if revoke_after_local.swap(false, std::sync::atomic::Ordering::Relaxed) {
                         post_query_metrics.validation_revoke_bounded_proof();
@@ -5665,6 +5695,7 @@ impl CatalogueReader {
             )
             .await?
             .ok()
+            .flatten()
     }
 
     /// Per-user watch state for `item_ids`. Local only behind the

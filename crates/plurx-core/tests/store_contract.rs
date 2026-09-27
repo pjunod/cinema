@@ -23657,6 +23657,33 @@ async fn bounded_catalogue_reader_matches_authority_and_falls_back_exactly_once(
         .await
         .expect("Authority fallback value");
 
+    let preference_reader = CatalogueReader::validation_replicated(
+        Arc::clone(&authority_store),
+        Arc::clone(&store),
+        PassiveRaftMetrics::validation_bounded_ready(),
+        64,
+    );
+    for (saved, expected_authority) in [("0", 1), ("1", 0)] {
+        store
+            .put_setting(plurx_core::store::keys::BOUNDED_REPLICA_READS, saved)
+            .await
+            .expect("save preference without readiness gating");
+        store.validation_reset_operation_counts();
+        let actual = preference_reader
+            .get_item(20)
+            .await
+            .expect("live preference");
+        assert_eq!(
+            serde_json::to_value(actual).expect("result"),
+            serde_json::to_value(&expected).expect("expected")
+        );
+        assert_eq!(
+            store.validation_operation_counts().consistent_query_calls,
+            expected_authority,
+            "saved preference must apply without constructing another reader"
+        );
+    }
+
     store.validation_reset_operation_counts();
     store.validation_fail_next_non_consistent_query();
     let query_error_reader = CatalogueReader::validation_replicated(
@@ -23694,7 +23721,7 @@ async fn bounded_catalogue_reader_matches_authority_and_falls_back_exactly_once(
         serde_json::to_value(&expected).expect("serialize expected item")
     );
     let counts = store.validation_operation_counts();
-    assert_eq!(counts.non_consistent_query_calls, 1);
+    assert_eq!(counts.non_consistent_query_calls, 2); // preference + discarded catalogue query
     assert_eq!(counts.consistent_query_calls, 1);
 
     store.validation_reset_operation_counts();

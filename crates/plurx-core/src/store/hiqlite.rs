@@ -1365,6 +1365,23 @@ pub(super) fn disconnected_test_client() -> TimedClient {
 }
 
 impl HiqliteAuthStore {
+    pub(super) async fn local_bounded_reads_enabled(
+        &self,
+        default: bool,
+    ) -> Result<bool, StoreError> {
+        let rows = self
+            .client()
+            .query_map::<SettingValueRow, _>(
+                "SELECT value FROM settings WHERE key = $1",
+                params!(super::keys::BOUNDED_REPLICA_READS),
+            )
+            .await?;
+        Ok(super::stored_switch(
+            rows.first().map(|row| row.value.as_str()),
+            default,
+        ))
+    }
+
     pub(super) fn client(&self) -> &TimedClient {
         &self.client
     }
