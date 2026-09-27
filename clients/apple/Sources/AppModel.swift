@@ -94,9 +94,53 @@ final class AppModel: ObservableObject {
     // MARK: - Session lifecycle
 
     private func bootstrap() async {
+        #if DEBUG
+        // Physical acceptance must use the argument the lab supplied, not a
+        // previously saved server. Never rediscover another ingress when that
+        // proxy cannot be reached: the resulting playback would be unshaped.
+        let acceptance = PlaybackAcceptanceLaunch.current()
+        let savedOrigin = acceptance?.requestedOrigin ?? settings.origin
+        #else
         let savedOrigin = settings.origin
+        #endif
         let savedToken = settings.token
-        guard !savedOrigin.isEmpty else { phase = .needServer; return }
+        guard !savedOrigin.isEmpty else {
+            #if DEBUG
+            if acceptance != nil {
+                authError = "Acceptance launch has no valid shaping proxy origin."
+                phase = .reconnectFailed
+                return
+            }
+            #endif
+            phase = .needServer
+            return
+        }
+
+        #if DEBUG
+        if acceptance != nil {
+            // A saved bearer belongs to the original server instance. Probe
+            // the proxy without credentials on the device before attaching
+            // that bearer, and refuse a proxy that is unreachable or points
+            // at another server. This is also an on-device route readback:
+            // the proxy must observe this API request before any media starts.
+            do {
+                let server = try await PlurxAPI(origin: savedOrigin).serverInfo()
+                guard let actual = server.instanceId,
+                      let expected = settings.instanceId,
+                      !expected.isEmpty,
+                      actual.caseInsensitiveCompare(expected) == .orderedSame
+                else {
+                    authError = "Acceptance proxy did not match the saved server identity."
+                    phase = .reconnectFailed
+                    return
+                }
+            } catch {
+                authError = "Acceptance proxy API was unreachable on this device."
+                phase = .reconnectFailed
+                return
+            }
+        }
+        #endif
 
         Session.shared.setCredentials(origin: savedOrigin, token: savedToken)
         origin = savedOrigin
@@ -114,12 +158,26 @@ final class AppModel: ObservableObject {
             discovery.stop()
             await loadHome()
         } catch APIError.http(let code) where code == 401 || code == 403 {
+            #if DEBUG
+            if acceptance != nil {
+                authError = "Acceptance proxy refused the saved session (HTTP \(code))."
+                phase = .reconnectFailed
+                return
+            }
+            #endif
             Session.shared.setCredentials(origin: savedOrigin, token: nil) // token rotated / server reset
             settings.clearToken()
             // "Signed out after 90 days of inactivity." when that is why.
             authError = Session.shared.takeSessionExpiryNotice()
             phase = .needLogin
         } catch {
+            #if DEBUG
+            if acceptance != nil {
+                authError = "Acceptance proxy could not be reached. Playback did not start."
+                phase = .reconnectFailed
+                return
+            }
+            #endif
             if let recovered = await rediscoverSavedServer(
                 expectedInstanceId: settings.instanceId,
                 savedOrigin: savedOrigin

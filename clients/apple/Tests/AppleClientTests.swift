@@ -6041,8 +6041,12 @@ final class AppleClientTests: XCTestCase {
         defaults.set(true, forKey: "plurx.acceptance.probe")
 
         XCTAssertEqual(
-            PlaybackAcceptanceLaunch.current(defaults: defaults),
+            PlaybackAcceptanceLaunch.current(
+                defaults: defaults,
+                arguments: ["plurx", "-plurx.origin", "http://192.168.4.143:52773"]
+            ),
             PlaybackAcceptanceLaunch(
+                requestedOrigin: "http://192.168.4.143:52773",
                 itemId: 17,
                 fileId: 42,
                 startMs: 91_000,
@@ -6052,6 +6056,26 @@ final class AppleClientTests: XCTestCase {
                 probesEnabled: true
             )
         )
+
+        let missingProxy = try XCTUnwrap(
+            PlaybackAcceptanceLaunch.current(defaults: defaults, arguments: ["plurx"])
+        )
+        XCTAssertFalse(missingProxy.matchesActiveOrigins(
+            model: "http://192.168.4.7:32400",
+            session: "http://192.168.4.7:32400"
+        ))
+        let launch = try XCTUnwrap(PlaybackAcceptanceLaunch.current(
+            defaults: defaults,
+            arguments: ["plurx", "-plurx.origin", "http://192.168.4.143:52773"]
+        ))
+        XCTAssertTrue(launch.matchesActiveOrigins(
+            model: "http://192.168.4.143:52773",
+            session: "http://192.168.4.143:52773"
+        ))
+        XCTAssertFalse(launch.matchesActiveOrigins(
+            model: "http://192.168.4.143:52773",
+            session: "http://192.168.4.7:32400"
+        ))
     }
 
     func testApplePlaybackProbeCarriesRunwayAndNoCredentialSurface() throws {

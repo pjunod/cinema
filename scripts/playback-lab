@@ -4093,6 +4093,32 @@ async function writeDeviceProxyControlFile(file, document) {
   return resolved;
 }
 
+/** Prove the shaper can forward the public, credential-free server API before a device is launched. */
+async function preflightDeviceProxyAPI(baseUrl, request = fetch) {
+  let response;
+  try {
+    response = await request(`${baseUrl}/api/v1/server`, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch (error) {
+    throw new Error(`device proxy API preflight failed: ${error.message}`);
+  }
+  if (response.status !== 200) {
+    throw new Error(`device proxy API preflight returned HTTP ${response.status}`);
+  }
+  let server;
+  try {
+    server = await response.json();
+  } catch (_) {
+    throw new Error("device proxy API preflight returned invalid JSON");
+  }
+  if (!server || typeof server.instance_id !== "string" || !server.instance_id) {
+    throw new Error("device proxy API preflight returned no server identity");
+  }
+  return server;
+}
+
 async function deviceProxyCommand(options, dependencies = {}) {
   const targetText = requireTextOption(options, "target", "--target");
   const target = new URL(targetText);
@@ -4130,6 +4156,7 @@ async function deviceProxyCommand(options, dependencies = {}) {
   let baseUrl = null;
   try {
     baseUrl = await shaper.start(options.shaper_binder);
+    await (dependencies.preflightProxy || preflightDeviceProxyAPI)(baseUrl);
     resolvedControlFile = await writeDeviceProxyControlFile(controlFile, {
       schema_version: 1,
       pid: process.pid,
@@ -4251,6 +4278,7 @@ async function deviceRunCommand(options, dependencies = {}) {
   let launched = false;
   try {
     baseUrl = await shaper.start(options.shaper_binder);
+    await (dependencies.preflightProxy || preflightDeviceProxyAPI)(baseUrl);
     process.stdout.write(`DEVICE  ${device}\n`);
     process.stdout.write(`SHAPE   ${profile.stages.map((stage) => `${stage.kbps} kb/s`).join(" -> ")}\n`);
     const launchArguments = [
