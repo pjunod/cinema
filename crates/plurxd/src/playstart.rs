@@ -1049,6 +1049,66 @@ mod tests {
         assert_eq!(ours, contract_codes);
     }
 
+    /// §7.8.5, the `method` label (#559 review, finding 3): the method a
+    /// first frame names wins over the opening request's, which is the
+    /// fallback case the override exists for.
+    #[test]
+    fn a_first_frame_names_the_method_its_start_is_counted_under() {
+        let ledger = StartAttempts::new();
+        let t0 = Instant::now();
+        ledger.opened(1, 10, Some(100), "direct_play", t0);
+        ledger.client_event(
+            1,
+            10,
+            "ttff",
+            Some("transcode"),
+            None,
+            t0 + Duration::from_secs(2),
+        );
+        assert_eq!(ledger.count("transcode", "ok"), 1);
+        assert_eq!(ledger.count("direct_play", "ok"), 0);
+    }
+
+    /// §7.8.5 (#559 review, finding 3): a request joining a pending attempt
+    /// re-labels it, so a first frame that names no method, and a refusal
+    /// that ends it, are counted under the method now in use.
+    #[test]
+    fn a_request_joining_a_pending_start_relabels_it() {
+        let ledger = StartAttempts::new();
+        let t0 = Instant::now();
+        ledger.opened(1, 11, Some(101), "direct_play", t0);
+        ledger.opened(1, 11, Some(101), "remux", t0 + Duration::from_secs(1));
+        ledger.client_event(1, 11, "ttff", None, None, t0 + Duration::from_secs(2));
+        assert_eq!(ledger.count("remux", "ok"), 1);
+        assert_eq!(ledger.count("direct_play", "ok"), 0);
+        ledger.opened(1, 12, Some(102), "direct_play", t0);
+        ledger.opened(1, 12, Some(102), "transcode", t0 + Duration::from_secs(1));
+        ledger.refused(1, 12, None, None, t0 + Duration::from_secs(2));
+        assert_eq!(ledger.count("transcode", "refused"), 1);
+        assert_eq!(ledger.count("direct_play", "refused"), 0);
+    }
+
+    /// §7.8.5 (#559 review, finding 3): a first frame on a refusal's
+    /// tombstone pairs with no attempt. It is counted unpaired, never `ok`.
+    #[test]
+    fn a_first_frame_after_a_refusal_is_unpaired() {
+        let ledger = StartAttempts::new();
+        let t0 = Instant::now();
+        ledger.opened(1, 12, Some(102), "transcode", t0);
+        ledger.refused(1, 12, None, None, t0 + Duration::from_secs(1));
+        ledger.client_event(
+            1,
+            12,
+            "ttff",
+            Some("transcode"),
+            None,
+            t0 + Duration::from_secs(3),
+        );
+        assert_eq!(ledger.count("transcode", "refused"), 1);
+        assert_eq!(ledger.count("transcode", "ok"), 0);
+        assert_eq!(ledger.count("unpaired", "ok"), 1);
+    }
+
     #[test]
     fn a_full_ledger_tracks_no_new_attempt_rather_than_evicting_one() {
         let ledger = StartAttempts::new();
