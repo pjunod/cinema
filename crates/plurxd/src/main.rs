@@ -8,6 +8,7 @@ use plurx_core::process::bounded as bounded_process;
 #[path = "../../plurx-core/tests/support/queue_fixture.rs"]
 mod queue_fixture;
 
+mod artifact_integrity;
 mod background_jobs;
 mod backup;
 mod cachekeep;
@@ -2655,6 +2656,10 @@ fn spawn_background_loops(
     tokio::spawn(crate::media_sessions::lease_loop(state.clone()));
     tokio::spawn(crate::media_sessions::takeover_loop(state.clone()));
     tokio::spawn(crate::media_sessions::maintenance_loop(state.clone()));
+    tokio::spawn(crate::artifact_integrity::run(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(crate::source_probe::run(
         state.clone(),
         background_shutdown.clone(),

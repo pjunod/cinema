@@ -142,6 +142,8 @@ fn normalize(mut values: Vec<f32>) -> Result<Vec<f32>> {
 #[derive(Clone, Serialize, Deserialize)]
 struct Vector {
     source: String,
+    #[serde(default)]
+    digest: String,
     embedding: Vec<f32>,
 }
 #[derive(Default, Serialize, Deserialize)]
@@ -293,6 +295,8 @@ async fn step(
                         && cached.rows.len() <= MAX_ITEMS
                         && cached.rows.values().all(|v| {
                             v.embedding.len() == DIM && v.embedding.iter().all(|x| x.is_finite())
+                                && plurx_core::store::background_jobs_embeddings::SharedEmbedding::vector_digest(&v.embedding) == v.digest
+                                && (v.embedding.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>() - 1.0).abs() <= 0.005
                         })
                     {
                         index = cached;
@@ -363,6 +367,7 @@ async fn step(
                     id,
                     Vector {
                         source,
+                        digest: artifact.vector_sha256,
                         embedding: artifact.vector,
                     },
                 );

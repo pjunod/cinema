@@ -7624,6 +7624,17 @@ impl JobManager {
     }
 
     pub(crate) async fn enqueue_artifact_deliveries(&self) {
+        match self.store.artifact_repairs(true).await {
+            Ok(repairs) => {
+                for repair in repairs.into_iter().take(16) {
+                    if let Err(error) = self.store.enqueue_artifact_repair(repair, clock_ms()).await
+                    {
+                        tracing::warn!(%error, "admitting finite artifact repair");
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(%error, "reading artifact repair plans"),
+        }
         match self.store.delivery_intents(clock_ms()).await {
             Ok(intents) => {
                 for intent in intents {

@@ -3677,3 +3677,386 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
     })
     .await;
 }
+
+async fn integrity_claim(
+    store: &std::sync::Arc<dyn plurx_core::store::Store>,
+    id: &str,
+    kind: JobKind,
+    now: i64,
+) -> JobToken {
+    let job = store
+        .background_job(id)
+        .await
+        .expect("lookup")
+        .expect("job");
+    let outcome = store
+        .claim_job(ClaimJob {
+            job_id: id.into(),
+            expected_revision: job.revision,
+            node_id: "node-a".into(),
+            boot_id: uuid::Uuid::new_v4().to_string(),
+            claim_id: uuid::Uuid::new_v4().to_string(),
+            kind,
+            payload_version: 1,
+            now_ms: now,
+            dispatched_at_ms: now,
+        })
+        .await
+        .expect("claim");
+    let ClaimOutcome::Claimed { job } = outcome else {
+        panic!("claim refused: {outcome:?}")
+    };
+    job.token.expect("token")
+}
+async fn integrity_verify_claim(
+    store: &std::sync::Arc<dyn plurx_core::store::Store>,
+    key: &str,
+    now: i64,
+) -> JobToken {
+    let id = uuid::Uuid::new_v4().to_string();
+    store
+        .enqueue_job(EnqueueJob {
+            id: id.clone(),
+            payload: JobPayload::ArtifactVerify {
+                artifact_key: key.into(),
+                target_node_id: "node-a".into(),
+            },
+            dedupe_key: id.clone(),
+            priority: 0,
+            not_before_ms: now,
+            now_ms: now,
+            request: JobRequest {
+                scope: "integrity-contract".into(),
+                request_id: id.clone(),
+                request_digest: "a".repeat(64),
+                consumer_kind: "artifact_verify".into(),
+                consumer_ref: id.clone(),
+                target_node_id: None,
+                deadline_ms: Some(now + 300_000),
+                retain_identity: false,
+            },
+        })
+        .await
+        .expect("admission");
+    integrity_claim(store, &id, JobKind::ArtifactVerify, now).await
+}
+
+#[tokio::test]
+async fn background_integrity_repairs_retain_producers_and_stop_after_one_rebuild() {
+    use plurx_core::store::background_jobs_integrity::VerifyTranscode;
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "integrity-repair").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let id = uuid::Uuid::new_v4().to_string();
+        let input = preparation_request(&file, &id, 1000);
+        let producer = input.payload.clone();
+        store.enqueue_job(input).await.expect("producer");
+        let token = integrity_claim(&store, &id, JobKind::TranscodePrepare, 1000).await;
+        let recipe = "a".repeat(64);
+        let digest = "d".repeat(64);
+        store
+            .publish_transcode_job(PublishTranscodeJob {
+                token,
+                output: TranscodeJobOutput {
+                    recipe_hash: recipe.clone(),
+                    recipe_version: 1,
+                    relative_dir: "aa/first".into(),
+                    bytes: 100,
+                    expected_previous_bytes: None,
+                    manifest_digest: digest.clone(),
+                },
+                now_ms: 1001,
+            })
+            .await
+            .expect("publication");
+        // Retire execution receipts while the cache locator keeps the artifact alive.
+        let now = 700_000_000;
+        for _ in 0..4 {
+            store.maintain_jobs(now).await.expect("retention");
+        }
+        assert!(
+            store
+                .background_job(&id)
+                .await
+                .expect("retired producer")
+                .is_none(),
+            "{backend}"
+        );
+        let location = store
+            .transcode_verification_candidates("node-a", None)
+            .await
+            .expect("locations")
+            .remove(0);
+        let key = format!("transcode:{recipe}:{digest}");
+        let token = integrity_verify_claim(&store, &key, now).await;
+        let verify = VerifyTranscode {
+            token,
+            recipe_hash: recipe.clone(),
+            manifest_digest: digest.clone(),
+            relative_dir: location.relative_dir,
+            publication_generation: location.publication_generation,
+            valid: false,
+            next_object_index: 0,
+            now_ms: now + 1,
+        };
+        let mut stale = verify.clone();
+        stale.publication_generation += 1;
+        assert!(matches!(
+            store
+                .verify_transcode_job(stale)
+                .await
+                .expect("generation fence"),
+            JobPublishOutcome::LostOwnership
+        ));
+        assert!(store
+            .artifact_repairs(false)
+            .await
+            .expect("no plan")
+            .is_empty());
+        assert!(store
+            .cache_hit(&recipe, "node-a")
+            .await
+            .expect("still present")
+            .is_some());
+        assert!(matches!(
+            store
+                .verify_transcode_job(verify.clone())
+                .await
+                .expect("corruption"),
+            JobPublishOutcome::Published { .. }
+        ));
+        assert!(matches!(
+            store
+                .verify_transcode_job(verify)
+                .await
+                .expect("lost acknowledgement"),
+            JobPublishOutcome::AlreadyPublished { .. }
+        ));
+        assert!(store
+            .cache_hit(&recipe, "node-a")
+            .await
+            .expect("retired locator")
+            .is_none());
+        let mut plan = store
+            .artifact_repairs(true)
+            .await
+            .expect("repair")
+            .remove(0);
+        assert_eq!(
+            serde_json::to_value(plan.producer_payload.clone()).expect("stored producer"),
+            serde_json::to_value(Some(producer)).expect("original producer"),
+            "{backend}: producer survives history"
+        );
+        assert_eq!(plan.phase, "copy");
+        let EnqueueOutcome::Accepted { job_id: copy, .. } = store
+            .enqueue_artifact_repair(plan.clone(), now + 2)
+            .await
+            .expect("copy")
+        else {
+            panic!("{backend}: copy admission")
+        };
+        assert!(matches!(
+            store
+                .enqueue_artifact_repair(plan.clone(), now + 2)
+                .await
+                .expect("replay"),
+            EnqueueOutcome::NoDemand | EnqueueOutcome::Existing { .. }
+        ));
+        let token = integrity_claim(&store, &copy, JobKind::ArtifactHydrate, now + 2).await;
+        store
+            .settle_job(SettleJob {
+                token,
+                settlement: JobSettlement::Stop {
+                    error_code: "no_valid_peer".into(),
+                },
+                now_ms: now + 3,
+            })
+            .await
+            .expect("copy exhausted");
+        store.maintain_jobs(now + 4).await.expect("advance");
+        plan = store.artifact_repairs(true).await.expect("build").remove(0);
+        assert_eq!(plan.phase, "build");
+        let EnqueueOutcome::Accepted { job_id: build, .. } = store
+            .enqueue_artifact_repair(plan, now + 5)
+            .await
+            .expect("rebuild")
+        else {
+            panic!("{backend}: build admission")
+        };
+        let token = integrity_claim(&store, &build, JobKind::TranscodePrepare, now + 5).await;
+        store
+            .settle_job(SettleJob {
+                token,
+                settlement: JobSettlement::Stop {
+                    error_code: "producer_failed".into(),
+                },
+                now_ms: now + 6,
+            })
+            .await
+            .expect("build exhausted");
+        store.maintain_jobs(now + 7).await.expect("terminal repair");
+        assert!(store
+            .artifact_repairs(true)
+            .await
+            .expect("no automatic loop")
+            .is_empty());
+        assert_eq!(
+            store
+                .artifact_repairs(false)
+                .await
+                .expect("visible failure")[0]
+                .phase,
+            "failed"
+        );
+        for _ in 0..3 {
+            store.maintain_jobs(now + 8).await.expect("repeat upkeep");
+        }
+        assert!(store
+            .artifact_repairs(true)
+            .await
+            .expect("still stopped")
+            .is_empty());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn background_artwork_verification_repairs_copy_then_rebuild_then_deliver() {
+    use plurx_core::store::{
+        background_jobs_artwork::{
+            ArtworkLocation, ArtworkVariantSpec, PublishArtworkJob, ARTWORK_PIPELINE,
+        },
+        background_jobs_integrity::VerifyArtwork,
+    };
+    for_each_backend(|store, backend| async move {
+        let spec = ArtworkVariantSpec {
+            source_name: "poster.png".into(),
+            source_sha256: "a".repeat(64),
+            width: 300,
+            format: "png".into(),
+            pipeline: ARTWORK_PIPELINE.into(),
+        };
+        let key = spec.artifact_key();
+        let EnqueueOutcome::Accepted { job_id, .. } = store
+            .enqueue_artwork_demand(spec.clone(), "node-a", 1000)
+            .await
+            .expect("demand")
+        else {
+            panic!("{backend}: demand")
+        };
+        let token = integrity_claim(&store, &job_id, JobKind::ArtworkDerivative, 1000).await;
+        let mut location = ArtworkLocation {
+            artifact_key: key.clone(),
+            node_id: "node-a".into(),
+            spec,
+            blob_sha256: "b".repeat(64),
+            bytes: 100,
+            built_by_node_id: "node-a".into(),
+            built_at_ms: 1001,
+            verified_at_ms: 1001,
+        };
+        store
+            .publish_artwork_job(PublishArtworkJob {
+                token,
+                location: location.clone(),
+                now_ms: 1001,
+            })
+            .await
+            .expect("original");
+        let token = integrity_verify_claim(&store, &format!("artwork:{key}"), 1002).await;
+        let observation = VerifyArtwork {
+            token,
+            location: location.clone(),
+            valid: false,
+            now_ms: 1003,
+        };
+        let mut forged = observation.clone();
+        forged.location.verified_at_ms += 1;
+        assert!(matches!(
+            store
+                .verify_artwork_job(forged)
+                .await
+                .expect("locator fence"),
+            JobPublishOutcome::LostOwnership
+        ));
+        assert!(matches!(
+            store
+                .verify_artwork_job(observation.clone())
+                .await
+                .expect("bad bytes"),
+            JobPublishOutcome::Published { .. }
+        ));
+        assert!(matches!(
+            store.verify_artwork_job(observation).await.expect("replay"),
+            JobPublishOutcome::AlreadyPublished { .. }
+        ));
+        assert!(store
+            .artwork_locations(&key, 1004)
+            .await
+            .expect("retired bad holder")
+            .is_empty());
+        for (now, phase, kind) in [
+            (1004, "copy", JobKind::ArtifactHydrate),
+            (1008, "build", JobKind::ArtworkDerivative),
+            (1012, "deliver", JobKind::ArtifactHydrate),
+        ] {
+            let plan = store.artifact_repairs(true).await.expect("plan").remove(0);
+            assert_eq!(plan.phase, phase, "{backend}");
+            let EnqueueOutcome::Accepted { job_id, .. } = store
+                .enqueue_artifact_repair(plan, now)
+                .await
+                .expect("repair admission")
+            else {
+                panic!("{backend}: {phase}")
+            };
+            let token = integrity_claim(&store, &job_id, kind, now).await;
+            if phase == "copy" {
+                store
+                    .settle_job(SettleJob {
+                        token,
+                        settlement: JobSettlement::Stop {
+                            error_code: "no_valid_peer".into(),
+                        },
+                        now_ms: now + 1,
+                    })
+                    .await
+                    .expect("copy failed");
+            } else {
+                if phase == "build" {
+                    location.built_at_ms = now + 1;
+                }
+                location.verified_at_ms = now + 1;
+                assert!(matches!(
+                    store
+                        .publish_artwork_job(PublishArtworkJob {
+                            token,
+                            location: location.clone(),
+                            now_ms: now + 1
+                        })
+                        .await
+                        .expect("repaired bytes"),
+                    JobPublishOutcome::Published { .. }
+                ));
+            }
+            store.maintain_jobs(now + 2).await.expect("advance plan");
+        }
+        assert!(store
+            .artifact_repairs(true)
+            .await
+            .expect("settled")
+            .is_empty());
+        assert_eq!(
+            store.artifact_repairs(false).await.expect("ready")[0].phase,
+            "ready"
+        );
+        assert_eq!(
+            store
+                .artwork_locations(&key, 1020)
+                .await
+                .expect("restored")
+                .len(),
+            1
+        );
+    })
+    .await;
+}

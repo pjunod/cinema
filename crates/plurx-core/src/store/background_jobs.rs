@@ -135,6 +135,23 @@ WITH provided AS (SELECT json($1) AS body), input AS (
           AND request.state IN ('queued','running')
           AND request.video_identity = '' AND request.target_node_id = ''
       )) THEN 'request_fenced'
+    WHEN json_type(body,'$.repair_id') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM background_artifact_repairs repair WHERE repair.id = json_extract(body,'$.repair_id')
+        AND repair.phase = json_extract(body,'$.repair_phase') AND repair.expires_ms > json_extract(body,'$.now_ms')
+        AND json_extract(body,'$.request.scope') = 'artifact-repair'
+        AND json_extract(body,'$.request.request_id') = repair.id || ':' || repair.phase
+        AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || repair.target_node_id)
+        AND ((repair.phase IN ('copy','deliver') AND json_extract(body,'$.payload.kind') = 'artifact_hydrate'
+          AND json_extract(body,'$.payload.artifact_key') = repair.artifact_key
+          AND json_extract(body,'$.payload.target_node_id') = repair.target_node_id)
+          OR (repair.phase = 'build' AND json_extract(body,'$.payload') = repair.producer_payload
+            AND (json_extract(body,'$.payload.kind') = 'artwork_derivative'
+              OR (json_extract(body,'$.payload.kind') = 'transcode_prepare' AND EXISTS (SELECT 1 FROM files
+                WHERE id = json_extract(body,'$.payload.file_id') AND size = json_extract(body,'$.payload.source_size')
+                  AND mtime = json_extract(body,'$.payload.source_mtime'))))))) THEN 'no_demand'
+    WHEN json_type(body,'$.repair_id') IS NOT NULL AND prior_job IS NULL AND active_job IS NULL
+      AND (SELECT COUNT(*) FROM background_job_waiters WHERE request_scope = 'artifact-repair'
+        AND state IN ('pending','awaiting_hydration')) >= 64 THEN 'queue_full'
     WHEN prior_job IS NOT NULL AND prior_digest != json_extract(body, '$.request.request_digest') THEN 'conflict'
     WHEN prior_job IS NOT NULL THEN 'existing'
     WHEN json_extract(body,'$.payload.kind') = 'media_probe' AND NOT EXISTS (SELECT 1 FROM job_leases lease
@@ -1055,6 +1072,32 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         request: super::background_jobs_probe::ApplyProbeJob,
     ) -> Result<bool, StoreError>;
+    async fn transcode_verification_candidates(
+        &self,
+        node_id: &str,
+        artifact_key: Option<&str>,
+    ) -> Result<Vec<super::background_jobs_integrity::TranscodeVerificationCandidate>, StoreError>;
+    async fn artwork_verification_candidates(
+        &self,
+        node_id: &str,
+    ) -> Result<Vec<super::background_jobs_artwork::ArtworkLocation>, StoreError>;
+    async fn verify_artwork_job(
+        &self,
+        request: super::background_jobs_integrity::VerifyArtwork,
+    ) -> Result<JobPublishOutcome, StoreError>;
+    async fn verify_transcode_job(
+        &self,
+        request: super::background_jobs_integrity::VerifyTranscode,
+    ) -> Result<JobPublishOutcome, StoreError>;
+    async fn artifact_repairs(
+        &self,
+        pending_only: bool,
+    ) -> Result<Vec<super::background_jobs_integrity::ArtifactRepair>, StoreError>;
+    async fn enqueue_artifact_repair(
+        &self,
+        repair: super::background_jobs_integrity::ArtifactRepair,
+        now_ms: i64,
+    ) -> Result<EnqueueOutcome, StoreError>;
     async fn sync_predictions(
         &self,
         request: super::background_jobs_predictions::SyncPredictions,
@@ -1290,6 +1333,45 @@ impl<T: QueueSql> BackgroundJobStore for T {
         request: super::background_jobs_probe::ApplyProbeJob,
     ) -> Result<bool, StoreError> {
         super::background_jobs_probe::apply(self, request).await
+    }
+    async fn transcode_verification_candidates(
+        &self,
+        node_id: &str,
+        artifact_key: Option<&str>,
+    ) -> Result<Vec<super::background_jobs_integrity::TranscodeVerificationCandidate>, StoreError>
+    {
+        super::background_jobs_integrity::transcode_candidates(self, node_id, artifact_key).await
+    }
+    async fn artwork_verification_candidates(
+        &self,
+        node_id: &str,
+    ) -> Result<Vec<super::background_jobs_artwork::ArtworkLocation>, StoreError> {
+        super::background_jobs_integrity::artwork_candidates(self, node_id).await
+    }
+    async fn verify_artwork_job(
+        &self,
+        request: super::background_jobs_integrity::VerifyArtwork,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        super::background_jobs_integrity::verify_artwork(self, request).await
+    }
+    async fn verify_transcode_job(
+        &self,
+        request: super::background_jobs_integrity::VerifyTranscode,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        super::background_jobs_integrity::verify_transcode(self, request).await
+    }
+    async fn artifact_repairs(
+        &self,
+        pending_only: bool,
+    ) -> Result<Vec<super::background_jobs_integrity::ArtifactRepair>, StoreError> {
+        super::background_jobs_integrity::repairs(self, pending_only).await
+    }
+    async fn enqueue_artifact_repair(
+        &self,
+        repair: super::background_jobs_integrity::ArtifactRepair,
+        now_ms: i64,
+    ) -> Result<EnqueueOutcome, StoreError> {
+        super::background_jobs_integrity::enqueue_repair(self, repair, now_ms).await
     }
     async fn sync_predictions(
         &self,

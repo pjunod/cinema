@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use plurx_core::domain::{CacheManifestCheck, CachedTranscode};
+use plurx_core::domain::CachedTranscode;
 use plurx_core::store::{keys, Store};
 
 /// Process-local ownership for finished cache entries that are being served.
@@ -249,14 +249,14 @@ impl ActiveCacheReaders {
     /// Unrelated foreground playback must not starve integrity work for the
     /// rest of the cache; the physical and wall-clock budgets bound aggregate
     /// background pressure instead.
-    fn has_readers_besides(&self, recipe: &str) -> bool {
+    pub(crate) fn has_readers_besides(&self, recipe: &str) -> bool {
         matches!(
             self.lock_states().get(recipe),
             Some(CacheActivity::Readers { count, .. }) if *count > 1
         )
     }
 
-    fn has_reader(&self, recipe: &str) -> bool {
+    pub(crate) fn has_reader(&self, recipe: &str) -> bool {
         matches!(
             self.lock_states().get(recipe),
             Some(CacheActivity::Readers { .. })
@@ -333,34 +333,6 @@ pub const STALE_CLAIM_SECS: i64 = 24 * 3600;
 /// enough that Next Up is nearly always warm, small enough to be an obviously
 /// safe default on a NAS.
 pub const DEFAULT_MAX_GB: i64 = 50;
-
-/// A sweep advances only this many generation locations. Successful pages
-/// update `last_seen_at`, so the oldest-first query rotates across the full
-/// inventory without an unbounded filesystem walk.
-const MANIFEST_SCRUB_BATCH: i64 = 128;
-
-/// CPU/syscall ceiling for degenerate manifests containing many tiny objects.
-/// The byte and wall-clock budgets usually stop the scrub first.
-const MANIFEST_SCRUB_MAX_OBJECTS: usize = 4_096;
-const MANIFEST_SCRUB_MAX_WALL: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Physical I/O ceiling for one cleanup pass. The manifest format rejects any
-/// individual object above this same bound, so the first object can never
-/// punch through it.
-// One maximally valid object must still fit after loading the maximally valid
-// manifest and reserving both EOF probes. Otherwise the oldest row can pin the
-// durable cursor forever and starve every later generation.
-const MANIFEST_SCRUB_BYTES: u64 = plurx_core::transcode::manifest::MAX_OBJECT_BYTES
-    + plurx_core::transcode::manifest::MAX_MANIFEST_BYTES
-    + 2;
-
-fn reserve_scrub_bytes(remaining: &mut u64, bytes: u64) -> bool {
-    if bytes > *remaining {
-        return false;
-    }
-    *remaining -= bytes;
-    true
-}
 
 /// Where a producer assembles an entry before publishing it: one directory per
 /// recipe, under the cache root so the publish is a rename on one filesystem.
@@ -833,8 +805,6 @@ pub struct Swept {
     pub stale: usize,
     /// Complete entries evicted to get under budget.
     pub evicted: usize,
-    /// Manifest-fenced locations invalidated before they could be offered.
-    pub corrupt: usize,
     /// Complete entries skipped because an active session is reading them.
     pub protected: usize,
     /// Entries already owned by another sweep in this process.
@@ -844,8 +814,6 @@ pub struct Swept {
     /// Bounded ownership snapshots taken after candidate eviction guards.
     pub ownership_rechecks: usize,
     pub bytes_freed: i64,
-    /// Conservative manifest + media bytes admitted to the integrity scrub.
-    pub scrub_bytes: u64,
     /// What the cache occupies now, by the rows.
     pub bytes_after: i64,
 }
@@ -929,227 +897,7 @@ pub async fn sweep_with_readers(
         Err(e) => tracing::warn!(error = %e, "cache: could not list stale claims"),
     }
 
-    // 2. Authenticate a bounded rotating page of generations. Each location
-    // advances through a bounded object page as it rotates through the
-    // oldest-first durable cursor; requested objects are also verified on the
-    // serving path. Invalidating the exact row first makes a crash leave an
-    // unowned directory, never a durable hit for missing bytes.
-    let mut manifest_checks = Vec::new();
-    let mut scrub_remaining = MANIFEST_SCRUB_BYTES;
-    let scrub_started = std::time::Instant::now();
-    let mut scrubbed_objects = 0usize;
-    match store
-        .cache_manifest_candidates(node_id, MANIFEST_SCRUB_BATCH)
-        .await
-    {
-        Ok(candidates) => {
-            for entry in candidates {
-                let Some(expected_digest) = entry.manifest_digest.as_deref() else {
-                    continue;
-                };
-                // Playback itself refreshes last_used_at, so skipping the same
-                // recipe does not age a valid ready holder out. Unrelated
-                // playback does not suppress this location's cheap heartbeat.
-                if readers.has_reader(&entry.recipe_hash) {
-                    continue;
-                }
-                // A shared read excludes eviction but allows playback to
-                // start. Foreground readers are detected between objects,
-                // which bounds their worst-case wait to one HLS object.
-                let Some(_scrub_reader) = readers.begin_read(&entry.recipe_hash) else {
-                    out.in_flight += 1;
-                    continue;
-                };
-                let directory = validated_entry_dir(root, &entry.relative_dir).await;
-                let manifest_present = match directory.as_deref() {
-                    Some(directory) => {
-                        match plurx_core::fs_secure::open_read_nofollow(
-                            &directory.join(plurx_core::transcode::manifest::MANIFEST_FILE),
-                        )
-                        .await
-                        {
-                            Ok(file) => file.metadata().await.is_ok_and(|metadata| {
-                                metadata.is_file()
-                                    && metadata.len() > 0
-                                    && metadata.len()
-                                        <= plurx_core::transcode::manifest::MAX_MANIFEST_BYTES
-                            }),
-                            Err(_) => false,
-                        }
-                    }
-                    None => false,
-                };
-                let deep_allowed = manifest_present
-                    && scrub_remaining > 0
-                    && scrubbed_objects < MANIFEST_SCRUB_MAX_OBJECTS
-                    && scrub_started.elapsed() < MANIFEST_SCRUB_MAX_WALL;
-                let manifest = if deep_allowed {
-                    match plurx_core::transcode::manifest::load_with_budget(
-                        directory.as_deref().expect("presence requires directory"),
-                        scrub_remaining,
-                    )
-                    .await
-                    {
-                        Ok(Some((manifest, charged_bytes))) => {
-                            debug_assert!(charged_bytes <= scrub_remaining);
-                            scrub_remaining -= charged_bytes;
-                            Some(manifest)
-                        }
-                        // The remaining deep-read budget is too small. The
-                        // descriptor-bound presence heartbeat still rotates
-                        // this holder; a later pass resumes its durable cursor.
-                        Ok(None) => None,
-                        Err(_) => {
-                            // A malformed manifest is corruption, not merely a
-                            // missed deep-scrub opportunity.
-                            // Lost work: a corrupt manifest must not remain a
-                            // durable candidate after the scrub rejected it.
-                            crate::store_result::observe(
-                                crate::store_result::Operation::InvalidateCorruptCacheManifest,
-                                crate::store_result::Discard::LostWork,
-                                store
-                                    .invalidate_cache_entry(
-                                        &entry.recipe_hash,
-                                        node_id,
-                                        &entry.storage_class,
-                                        &entry.relative_dir,
-                                        Some(expected_digest),
-                                    )
-                                    .await,
-                            );
-                            out.corrupt += 1;
-                            continue;
-                        }
-                    }
-                } else {
-                    None
-                };
-                let mut valid = manifest_present
-                    && manifest
-                        .as_ref()
-                        .is_none_or(|manifest| manifest.manifest_digest == expected_digest);
-                let mut checked = 0usize;
-                let mut next_object_index = entry.scrub_object_index.max(0) as usize;
-                if let (Some(directory), Some(manifest)) = (directory.as_deref(), manifest.as_ref())
-                {
-                    if next_object_index >= manifest.objects.len() {
-                        next_object_index = 0;
-                    }
-                    for object in manifest
-                        .objects
-                        .iter()
-                        .cycle()
-                        .skip(next_object_index)
-                        .take(manifest.objects.len())
-                    {
-                        if readers.has_readers_besides(&entry.recipe_hash) {
-                            break;
-                        }
-                        if scrubbed_objects >= MANIFEST_SCRUB_MAX_OBJECTS
-                            || scrub_started.elapsed() >= MANIFEST_SCRUB_MAX_WALL
-                        {
-                            break;
-                        }
-                        let path = directory.join(&object.name);
-                        let metadata = match tokio::fs::symlink_metadata(&path).await {
-                            Ok(metadata)
-                                if metadata.file_type().is_file()
-                                    && !metadata.file_type().is_symlink()
-                                    && metadata.len() == object.bytes =>
-                            {
-                                metadata
-                            }
-                            _ => {
-                                valid = false;
-                                break;
-                            }
-                        };
-                        // Reserve one extra byte: the verifier performs one
-                        // EOF read to prove a same-prefix larger file is not
-                        // accepted, so even a concurrent replacement stays
-                        // within this physical I/O ceiling.
-                        let reserved = metadata.len().saturating_add(1);
-                        if !reserve_scrub_bytes(&mut scrub_remaining, reserved) {
-                            break;
-                        }
-                        match manifest.verify_object(directory, &object.name).await {
-                            Ok(true) => {
-                                checked += 1;
-                                scrubbed_objects += 1;
-                            }
-                            Ok(false) | Err(_) => {
-                                valid = false;
-                                break;
-                            }
-                        }
-                    }
-                }
-                if valid {
-                    let next = if checked > 0 {
-                        let manifest = manifest.as_ref().expect("checked objects need manifest");
-                        let next = (next_object_index + checked) % manifest.objects.len();
-                        next as i64
-                    } else {
-                        entry.scrub_object_index.max(0)
-                    };
-                    manifest_checks.push(CacheManifestCheck {
-                        recipe_hash: entry.recipe_hash.clone(),
-                        node_id: node_id.to_owned(),
-                        storage_class: entry.storage_class.clone(),
-                        relative_dir: entry.relative_dir.clone(),
-                        manifest_digest: expected_digest.to_owned(),
-                        next_object_index: next,
-                        observed_at: now.saturating_add(i64::from(checked > 0)),
-                    });
-                    continue;
-                }
-                match store
-                    .invalidate_cache_entry(
-                        &entry.recipe_hash,
-                        node_id,
-                        &entry.storage_class,
-                        &entry.relative_dir,
-                        Some(expected_digest),
-                    )
-                    .await
-                {
-                    Ok(true) => {
-                        out.corrupt += 1;
-                        if directory.is_none() {
-                            tracing::warn!(
-                                recipe = %entry.recipe_hash,
-                                dir = %entry.relative_dir,
-                                "cache: invalidated an unsafe generation path without touching the filesystem"
-                            );
-                        }
-                        // Bytes become an orphan and are removed only by
-                        // the guarded, ownership-rechecking orphan pass.
-                    }
-                    Ok(false) => tracing::debug!(
-                        recipe = %entry.recipe_hash,
-                        "cache: corrupt manifest belonged to a superseded location"
-                    ),
-                    Err(error) => tracing::error!(
-                        recipe = %entry.recipe_hash,
-                        %error,
-                        "cache: could not invalidate a corrupt generation"
-                    ),
-                }
-            }
-        }
-        Err(error) => {
-            tracing::warn!(%error, "cache: could not list manifest scrub candidates")
-        }
-    }
-    out.scrub_bytes = MANIFEST_SCRUB_BYTES - scrub_remaining;
-    if let Err(error) = store.mark_cache_manifests_checked(&manifest_checks).await {
-        tracing::warn!(
-            checked = manifest_checks.len(),
-            %error,
-            "cache: could not durably advance the manifest scrub cursors"
-        );
-    }
-
+    // Integrity reads run separately through admitted ArtifactVerify jobs.
     // 3. Budget.
     let budget = budget_bytes(store).await;
     let mut used = store.cache_bytes(node_id).await.unwrap_or(0);
@@ -1226,19 +974,15 @@ pub async fn sweep_with_readers(
     out.protected += protected;
     out.in_flight += in_flight;
     out.ownership_rechecks = ownership_rechecks;
-    if out.stale + out.evicted + out.corrupt + out.protected + out.in_flight + out.orphans > 0
-        || out.scrub_bytes > 0
-    {
+    if out.stale + out.evicted + out.protected + out.in_flight + out.orphans > 0 {
         tracing::info!(
             stale = out.stale,
             evicted = out.evicted,
-            corrupt = out.corrupt,
             protected = out.protected,
             in_flight = out.in_flight,
             orphans = out.orphans,
             ownership_rechecks = out.ownership_rechecks,
             freed = out.bytes_freed,
-            scrub_bytes = out.scrub_bytes,
             used = out.bytes_after,
             "cache: swept"
         );
@@ -1652,6 +1396,7 @@ async fn sweep_orphan_dirs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact_integrity::{reserve_scrub_bytes, SCRUB_BYTES as MANIFEST_SCRUB_BYTES};
     use plurx_core::cluster::{open_store, StoreHandle};
     use plurx_core::config::Config;
     use plurx_core::domain::{
@@ -2622,7 +2367,14 @@ mod tests {
 
         let readers = ActiveCacheReaders::default();
         let playback = readers.begin_playback(recipe).expect("playback reader");
-        let skipped = sweep_with_readers(&store, root.path(), NODE, &readers, unix_now()).await;
+        let skipped = crate::artifact_integrity::fixture_verify_and_sweep(
+            &store,
+            root.path(),
+            NODE,
+            &readers,
+            unix_now(),
+        )
+        .await;
         assert_eq!(skipped.scrub_bytes, 0, "scrub competed with playback");
         assert_eq!(
             store
@@ -2635,7 +2387,14 @@ mod tests {
         );
         drop(playback);
 
-        let first = sweep_with_readers(&store, root.path(), NODE, &readers, unix_now()).await;
+        let first = crate::artifact_integrity::fixture_verify_and_sweep(
+            &store,
+            root.path(),
+            NODE,
+            &readers,
+            unix_now(),
+        )
+        .await;
         assert!(first.scrub_bytes <= MANIFEST_SCRUB_BYTES);
         assert_eq!(
             store
@@ -2654,8 +2413,14 @@ mod tests {
             .await
             .expect("corrupt later object");
         let restarted_readers = ActiveCacheReaders::default();
-        let second =
-            sweep_with_readers(&store, root.path(), NODE, &restarted_readers, unix_now()).await;
+        let second = crate::artifact_integrity::fixture_verify_and_sweep(
+            &store,
+            root.path(),
+            NODE,
+            &restarted_readers,
+            unix_now(),
+        )
+        .await;
         assert_eq!(second.corrupt, 1);
         assert!(second.scrub_bytes <= MANIFEST_SCRUB_BYTES);
         assert!(store
@@ -2749,7 +2514,7 @@ mod tests {
             .expect("restore publication guard");
         drop(connection);
 
-        let swept = sweep_with_readers(
+        let swept = crate::artifact_integrity::fixture_verify_and_sweep(
             &store,
             &cache_root,
             NODE,

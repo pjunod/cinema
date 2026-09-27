@@ -58,7 +58,7 @@ pub async fn list(
         valid_id(cursor)?;
     }
     let now_ms = crate::state::clock_ms();
-    let (page, counts, migration) = tokio::try_join!(
+    let (page, counts, migration, repairs) = tokio::try_join!(
         state.store.list_jobs(JobQuery {
             state: query.state,
             kind: query.kind,
@@ -67,6 +67,7 @@ pub async fn list(
         }),
         state.store.job_counts(now_ms),
         state.store.job_migration_status(),
+        state.store.artifact_repairs(false),
     )?;
     let ids = page
         .jobs
@@ -86,7 +87,12 @@ pub async fn list(
             row
         })
         .collect::<Vec<_>>();
-    Ok(Json(json!({"jobs": jobs,
+    let repairs = repairs.iter().map(|repair| json!({
+        "id":repair.id, "kind":repair.original_key.split(':').next().unwrap_or("artifact"),
+        "target_node_id":repair.target_node_id, "phase":repair.phase, "job_id":repair.job_id,
+        "age_ms":now_ms.saturating_sub(repair.created_at_ms).max(0), "updated_at_ms":repair.updated_at_ms,
+    })).collect::<Vec<_>>();
+    Ok(Json(json!({"jobs": jobs, "repairs":repairs,
         "counts": counts, "migration": migration, "next_cursor": page.next_after_id, "observed_at_ms": now_ms})))
 }
 

@@ -610,6 +610,7 @@ paths = [
   "crates/plurxd/src/background_jobs.rs",
   "crates/plurxd/src/library_work.rs",
   "crates/plurxd/src/source_probe.rs",
+  "crates/plurxd/src/artifact_integrity.rs",
   "crates/plurxd/src/subtitle_work.rs",
   "crates/plurxd/src/background_job_metrics.rs",
   "crates/plurxd/src/background_job_faults.rs",

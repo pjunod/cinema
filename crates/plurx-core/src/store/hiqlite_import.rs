@@ -1208,6 +1208,7 @@ const TABLES: &[TablePlan] = &[
             "recipe_version",
             "built_by_node_id",
             "built_at_ms",
+            "producer_payload",
         ],
         order_by: "recipe_hash, manifest_digest",
         minimum_schema: super::background_jobs_transcode::SQLITE_INTRODUCED_SCHEMA,
@@ -1624,6 +1625,27 @@ const TABLES: &[TablePlan] = &[
         columns: &["library_id", "root_path", "domain_id"],
         order_by: "library_id, root_path",
         minimum_schema: super::background_jobs_resources::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_artifact_repairs",
+        columns: &[
+            "id",
+            "original_key",
+            "target_node_id",
+            "location_generation",
+            "artifact_key",
+            "producer_payload",
+            "phase",
+            "job_id",
+            "created_at_ms",
+            "updated_at_ms",
+            "expires_ms",
+        ],
+        order_by: "id",
+        minimum_schema: super::background_jobs_integrity::SQLITE_INTRODUCED_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -2835,6 +2857,8 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 // stored probe JSON crosses with the row and the destination's
                 // bounded backfill recovers a valid tag afterward.
                 "NULL".to_owned()
+            } else if table.name == "background_transcode_artifacts" && *column == "producer_payload" && schema_version < 82 {
+                "NULL".to_owned()
             } else if table.name == "files" && *column == "downloaded_subtitles" && schema_version < 67 {
                 "'[]'".to_owned()
             } else if table.name == "files" && *column == "field_order" && schema_version < 64 {
@@ -3379,7 +3403,7 @@ mod tests {
             assert!(names.contains(&name));
         }
         assert!(!names.contains(&"classification_fts"));
-        assert_eq!(names.len(), 68, "review every imported durable table");
+        assert_eq!(names.len(), 69, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its
@@ -3836,6 +3860,7 @@ mod tests {
                     "background_transcode_artifacts" => 78,
                     "background_predictions" => 79,
                     "background_embeddings" => 80,
+                    "background_artifact_repairs" => 82,
                     _ => 71,
                 };
                 assert_eq!(table.minimum_schema, introduced, "{}", table.name);

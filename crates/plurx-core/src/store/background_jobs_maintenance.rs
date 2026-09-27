@@ -16,6 +16,19 @@ pub(super) const MAINTENANCE_NEEDED: &str = r#"
 SELECT json_object('needed', 1) AS result_json
 WHERE EXISTS (SELECT 1 FROM background_predictions WHERE (state = 'pending' AND expires_ms <= json_extract($1,'$.now_ms'))
     OR (state <> 'pending' AND updated_at_ms <= json_extract($1,'$.now_ms') - 604800000))
+ OR EXISTS (SELECT 1 FROM background_artifact_repairs repair WHERE
+    (phase = 'build' AND json_extract(producer_payload,'$.kind') = 'transcode_prepare' AND NOT EXISTS (SELECT 1 FROM files WHERE id = json_extract(producer_payload,'$.file_id') AND size = json_extract(producer_payload,'$.source_size') AND mtime = json_extract(producer_payload,'$.source_mtime'))) OR
+    (phase NOT IN ('ready','failed') AND (expires_ms <= json_extract($1,'$.now_ms')
+      OR EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || repair.target_node_id)))
+    OR (phase IN ('ready','failed') AND updated_at_ms < json_extract($1,'$.now_ms') - 604800000)
+    OR (phase IN ('copying','building','delivering') AND EXISTS (SELECT 1 FROM background_job_waiters waiter
+      WHERE waiter.request_scope = 'artifact-repair' AND waiter.request_id = repair.id || ':' ||
+        CASE repair.phase WHEN 'copying' THEN 'copy' WHEN 'building' THEN 'build' ELSE 'deliver' END
+        AND waiter.state IN ('succeeded','failed','cancelled'))))
+ OR EXISTS (SELECT 1 FROM background_transcode_artifacts artifact WHERE producer_payload IS NULL
+    AND EXISTS (SELECT 1 FROM background_jobs job WHERE job.kind = 'transcode_prepare' AND job.state = 'succeeded' AND job.payload_version = 1
+      AND json_extract(CASE WHEN json_valid(job.result_ref) THEN job.result_ref ELSE '{}' END,'$.recipe_hash') = artifact.recipe_hash
+      AND json_extract(CASE WHEN json_valid(job.result_ref) THEN job.result_ref ELSE '{}' END,'$.manifest_digest') = artifact.manifest_digest))
  OR EXISTS (SELECT 1 FROM background_artwork_locations location
     WHERE verified_at_ms <= json_extract($1, '$.now_ms') - 604800000
       AND NOT EXISTS (SELECT 1 FROM background_jobs job WHERE job.state IN ('queued','running','cancelling')

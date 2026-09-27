@@ -151,9 +151,9 @@ pub(super) async fn lookup<T: QueueSql>(
     let rows = store
         .queue_sql(
             r#"
-SELECT json_object('artifact', json((SELECT artifact_json FROM background_embeddings
+SELECT json_object('artifact_json', (SELECT artifact_json FROM background_embeddings
  WHERE item_id = json_extract($1,'$.item') AND content_digest = json_extract($1,'$.content')
- AND model_digest = json_extract($1,'$.model'))),
+ AND model_digest = json_extract($1,'$.model')),
  'last_completed_job', (SELECT id FROM background_jobs WHERE kind = 'semantic_embedding'
  AND state = 'succeeded' AND json_extract(payload_json,'$.item_id') = json_extract($1,'$.item')
  AND json_extract(payload_json,'$.content_digest') = json_extract($1,'$.content')
@@ -166,22 +166,37 @@ SELECT json_object('artifact', json((SELECT artifact_json FROM background_embedd
             true,
         )
         .await?;
-    let result: EmbeddingLookup = decode(
+    #[derive(Deserialize)]
+    struct Stored {
+        artifact_json: Option<String>,
+        last_completed_job: Option<String>,
+    }
+    let stored: Stored = decode(
         rows.first()
             .ok_or_else(|| StoreError::Task("missing embedding lookup".into()))?,
     )?;
-    if let Some(artifact) = &result.artifact {
-        artifact.validate()?;
-        if artifact.item_id != item_id
-            || artifact.content_digest != content
-            || artifact.model.digest() != model
-        {
-            return Err(StoreError::Task(
-                "portable embedding identity mismatch".into(),
-            ));
+    let artifact = stored
+        .artifact_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<SharedEmbedding>(raw).ok())
+        .filter(|artifact| {
+            artifact.validate().is_ok()
+                && artifact.item_id == item_id
+                && artifact.content_digest == content
+                && artifact.model.digest() == model
+        });
+    if artifact.is_none() {
+        if let Some(raw) = stored.artifact_json {
+            // Drop only the corrupt version we observed. A concurrent valid
+            // replacement wins this CAS and remains available to the next read.
+            store.queue_sql("DELETE FROM background_embeddings WHERE item_id = json_extract($1,'$.item') AND model_digest = json_extract($1,'$.model') AND content_digest = json_extract($1,'$.content') AND artifact_json = json_extract($1,'$.raw') RETURNING 'true' AS result_json".into(),
+                encode(&serde_json::json!({"item":item_id,"model":model,"content":content,"raw":raw}))?,true,true).await?;
         }
     }
-    Ok(result)
+    Ok(EmbeddingLookup {
+        artifact,
+        last_completed_job: stored.last_completed_job,
+    })
 }
 
 pub(super) async fn publish<T: QueueSql>(

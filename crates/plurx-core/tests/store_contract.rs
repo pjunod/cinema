@@ -518,6 +518,12 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "publish_embedding_job",
     "publish_probe_job",
     "apply_probe_job",
+    "transcode_verification_candidates",
+    "verify_transcode_job",
+    "artwork_verification_candidates",
+    "verify_artwork_job",
+    "artifact_repairs",
+    "enqueue_artifact_repair",
     "pending_predictions",
     "preparation_demands",
     "hot_artifacts",
@@ -17579,7 +17585,7 @@ fn contract_inventory_matches_every_store_method() {
     // Three library admission/query/completion operations preserve each caller.
     // +2: replicated root-domain observation and atomic replacement.
     // E1 adds a bounded named-settings snapshot for playback preferences.
-    assert_eq!(declared.len(), 441, "review the Store method count");
+    assert_eq!(declared.len(), 447, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

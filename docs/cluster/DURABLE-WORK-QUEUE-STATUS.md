@@ -19,7 +19,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
 | E0 subtitle and library workers | Merged | PR #564 merged as `1d70a1fed`; one final review addressed and run 3322 passed all required fast-lane jobs |
 | E1 reads, caches, prediction, artwork | Reviewed; fast lane queued | Read path, artwork, portable transcodes, bounded hot copies and durable predictive analysis implemented. Single final review addressed; focused store, image, copy and cleanup checks passed. Required fast lane remains. Scheduled verification/repair belongs to E2 |
-| E2 embeddings, probes and repair | In construction | Embeddings and bounded leaf probes committed and compiled. Scheduled verification/repair remains |
+| E2 embeddings, probes and repair | In construction | Embeddings and bounded leaf probes committed and compiled. Durable transcode/artwork verification and finite repair implemented locally; contracts and final integration in progress |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
 | Final adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
 | Core fast lane | Passed: run 3296 on `3784d5ec5` | Preflight, Rust, Windows, web and main promotion gate all passed |
@@ -816,3 +816,17 @@ continue E1–E3.
   legacy local work in the page; failed leaves are reported. Workspace Clippy
   and all test-target compilation passed. No E2 tests have run. E1's new run
   3340 is qualifying `20d2a6bcb`; the obsolete run was cancelled automatically.
+
+- 2026-09-27: scheduled transcode scrubbing moved out of cleanup into admitted,
+  node-targeted verification jobs. Exact location generation and worker fencing
+  guard corruption retirement; playback/cancellation yields never report bad
+  bytes. Artwork uses the same queue and existing bounded cache reader. Repair
+  tries a peer copy, then one retained typed producer and delivery; cancellation,
+  source changes and exhausted work stop the plan. Original transcode intent
+  survives job-history retirement. Activity shows bounded, redacted repair
+  observations. SQLite schema 82 / Hiqlite 60 and import mapping are integrated.
+  Shared/local embedding digests now reject corrupt vectors, and fragment reads
+  stop at declared size plus one byte. New contracts cover generation fencing,
+  acknowledgement replay, history retirement and finite repair transitions.
+  Construction checks compile test targets only; no E2 tests have executed.
+  E1 run 3340 passed preflight, Windows and web; its Rust gate remains running.

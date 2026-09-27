@@ -252,6 +252,9 @@ async fn prepare(
     cancel: &CancellationToken,
 ) -> Result<bool, String> {
     let payload = job.supported_payload().map_err(|e| e.to_string())?;
+    if let JobPayload::ArtifactVerify { artifact_key, .. } = &payload {
+        return verify_location(state, artifact_key, fence, cancel).await;
+    }
     let (key, supplied) = match payload {
         JobPayload::ArtworkDerivative { artifact_key, spec } => (artifact_key, Some(spec)),
         JobPayload::ArtifactHydrate { artifact_key, .. } => (
@@ -469,11 +472,101 @@ pub(super) async fn request(state: &AppState, spec: ArtworkVariantSpec) {
     }
 }
 
+async fn verify_location(
+    state: &AppState,
+    key: &str,
+    fence: &crate::background_jobs::JobFence,
+    cancel: &CancellationToken,
+) -> Result<bool, String> {
+    let key = key.strip_prefix("artwork:").ok_or("not artwork")?;
+    let location = state
+        .store
+        .artwork_locations(key, now_ms())
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|location| location.node_id == state.node_id);
+    let Some(location) = location else {
+        fence
+            .settle(JobSettlement::Stop {
+                error_code: "verification_location_retired".into(),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(true);
+    };
+    let name = location_filename(&location).ok_or("invalid artwork locator")?;
+    // Re-hash bytes even if a foreground read populated the disposable digest cache.
+    state.artwork_fetch.forget(&name).await;
+    let result = read_verified_local_artwork(
+        &state.artwork_fetch,
+        state.artwork_dir.join(DERIVED_DIR).join(&name),
+        &name,
+    )
+    .await;
+    if cancel.is_cancelled() {
+        return Ok(false);
+    }
+    let valid = match result {
+        LocalArtworkRead::Capacity => {
+            cancel.cancel();
+            return Ok(false);
+        }
+        LocalArtworkRead::Verified(bytes) => {
+            hex::encode(bytes.digest) == location.blob_sha256
+                && bytes.bytes.len() as i64 == location.bytes
+        }
+        _ => false,
+    };
+    let published = fence
+        .verify_artwork(location, valid)
+        .await
+        .map_err(|error| error.to_string())?;
+    if published {
+        remember(state, key, None).await;
+    }
+    Ok(published)
+}
+
 pub(crate) async fn run(state: AppState) {
     let boot = uuid::Uuid::new_v4().to_string();
     let mut cursor: Option<CandidateCursor> = None;
     let mut pacing = crate::background_jobs::IdlePoll::new();
+    let mut next_verification = Instant::now();
     loop {
+        if Instant::now() >= next_verification
+            && state
+                .jobs
+                .execution_authority()
+                .may_execute_job(JobKind::ArtifactVerify)
+                .await
+        {
+            next_verification = Instant::now() + Duration::from_secs(60);
+            match state
+                .store
+                .artwork_verification_candidates(&state.node_id)
+                .await
+            {
+                Ok(locations) => {
+                    for location in locations.into_iter().take(8) {
+                        let generation =
+                            format!("{}:{}", location.blob_sha256, location.built_at_ms);
+                        if let Err(error) = crate::artifact_integrity::enqueue_artifact(
+                            &state.store,
+                            &state.node_id,
+                            format!("artwork:{}", location.artifact_key),
+                            &generation,
+                            now_ms(),
+                        )
+                        .await
+                        {
+                            tracing::warn!(%error,"artwork verification admission failed");
+                        }
+                    }
+                }
+                Err(error) => tracing::warn!(%error,"artwork verification discovery failed"),
+            }
+        }
         let progressed = pass(&state, &boot, &mut cursor)
             .await
             .unwrap_or_else(|error| {
@@ -496,7 +589,11 @@ async fn pass(
         state.jobs.enqueue_artifact_deliveries().await;
     }
     let mut kinds = Vec::new();
-    for kind in [JobKind::ArtworkDerivative, JobKind::ArtifactHydrate] {
+    for kind in [
+        JobKind::ArtworkDerivative,
+        JobKind::ArtifactHydrate,
+        JobKind::ArtifactVerify,
+    ] {
         if authority.may_execute_job(kind).await {
             kinds.push(kind);
         }
@@ -538,6 +635,12 @@ async fn pass(
                 target_node_id,
             }) if artifact_key.starts_with("artwork:") && target_node_id == state.node_id => {
                 JobKind::ArtifactHydrate
+            }
+            Ok(JobPayload::ArtifactVerify {
+                artifact_key,
+                target_node_id,
+            }) if artifact_key.starts_with("artwork:") && target_node_id == state.node_id => {
+                JobKind::ArtifactVerify
             }
             _ => continue,
         };

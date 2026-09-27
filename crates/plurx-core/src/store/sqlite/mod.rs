@@ -1170,6 +1170,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs_predictions::SCHEMA,
     super::background_jobs_embeddings::SCHEMA,
     super::background_jobs_probe::SCHEMA,
+    super::background_jobs_integrity::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2891,7 +2892,7 @@ mod tests {
         // provider dispatch budgets and the subtitle adapter; v77 adds artwork holders,
         // and v78 retains portable transcode source/manifest provenance.
         assert_eq!(
-            version, 81,
+            version, 82,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
