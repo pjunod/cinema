@@ -53,7 +53,12 @@ impl Encoder {
             tokenizer,
         })
     }
+    /// One sentence vector, computed on [`EMBED_POOL`] rather than on
+    /// whichever rayon registry the caller happens to be in.
     fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        on_embed_pool(|| self.embed_here(text))?
+    }
+    fn embed_here(&self, text: &str) -> Result<Vec<f32>> {
         let tokens = self
             .tokenizer
             .encode(text, true)
@@ -66,6 +71,36 @@ impl Encoder {
             .squeeze(0)?
             .to_vec1::<f32>()?;
         normalize(output)
+    }
+}
+/// Worker threads for inference (K-08 M5, plan §3.7(d)). candle 0.11's
+/// matmul hands `gemm` `Parallelism::Rayon(n)`, and gemm runs those `n` tasks
+/// on the *current* rayon registry. Called from a `spawn_blocking` thread that
+/// registry is rayon's global pool, which the first embedding therefore built
+/// at one thread per logical CPU, so one forward pass could occupy every core
+/// a transcode was using. A pool owned here and entered with `install` bounds
+/// inference to these threads and never builds, sizes or reconfigures the
+/// global pool that any other rayon user would get.
+///
+/// Two is a chosen bound on the cores one forward pass can take, not the
+/// fastest size. With the inference crates optimized, two threads keep three
+/// quarters or more of the best throughput, 23 to 27 ms per text against
+/// 18 to 22 ms at eight threads; `embed_thread_scaling` measures it
+/// and plan §3.7(d) records the runs.
+const EMBED_THREADS: usize = 2;
+static EMBED_POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+fn on_embed_pool<R: Send>(work: impl FnOnce() -> R + Send) -> Result<R> {
+    let pool = EMBED_POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(EMBED_THREADS)
+            .thread_name(|index| format!("plurx-embed-{index}"))
+            .build()
+            .map_err(|error| tracing::warn!(%error, "semantic search could not start its inference threads"))
+            .ok()
+    });
+    match pool {
+        Some(pool) => Ok(pool.install(work)),
+        None => bail!("semantic search inference threads unavailable"),
     }
 }
 /// The tokenizer exactly as inference configures it, shared with the backend
@@ -402,6 +437,38 @@ pub async fn related(state: &AppState, query: &str) -> Vec<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// §3.7(d): inference runs on the embedder's own two named threads, not
+    /// on the global pool (whose size is the machine's CPU count) and not on
+    /// the calling thread.
+    #[test]
+    fn inference_runs_on_its_own_bounded_pool() {
+        let (threads, name) = on_embed_pool(|| {
+            (
+                rayon::current_num_threads(),
+                std::thread::current().name().map(str::to_owned),
+            )
+        })
+        .expect("embed pool");
+        assert_eq!(threads, EMBED_THREADS);
+        let name = name.expect("pool threads are named");
+        assert!(name.starts_with("plurx-embed-"), "ran on {name:?}");
+        // gemm's fan-out lands on the same registry.
+        let fan_out = on_embed_pool(|| {
+            use rayon::prelude::*;
+            (0..64)
+                .into_par_iter()
+                .map(|_| std::thread::current().name().map(str::to_owned))
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .expect("embed pool");
+        assert!(
+            fan_out.iter().all(|name| name
+                .as_deref()
+                .is_some_and(|n| n.starts_with("plurx-embed-"))),
+            "parallel work escaped the embed pool: {fan_out:?}"
+        );
+        assert!(fan_out.len() <= EMBED_THREADS);
+    }
     #[test]
     fn vector_validation_rejects_invalid_model_output() {
         assert!(normalize(vec![0.; DIM]).is_err());
@@ -546,6 +613,64 @@ mod tests {
         }
     }
 
+    /// §3.7(d)'s measurement: embedding latency by inference thread count.
+    /// Prints one line per pool size; asserts only that every size produces
+    /// the same vectors, since the thread count must not change a result.
+    ///
+    /// The timings only mean something with the inference crates optimized,
+    /// as a release build has them. The dev and test profiles leave candle
+    /// and gemm at opt-level 0, which is over ten times slower per text and
+    /// makes more threads look better than they are. Plan §3.7(d)'s numbers
+    /// come from:
+    ///
+    /// ```text
+    /// PLURX_TEST_MINILM_DIR=<verified model dir> cargo test --locked -p plurxd \
+    ///   --bin plurxd --config 'profile.dev.package."*".opt-level=3' \
+    ///   embed_thread_scaling -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs the pinned model (PLURX_TEST_MINILM_DIR) and optimized dependencies; the doc comment has the command"]
+    fn embed_thread_scaling() {
+        let dir = std::env::var("PLURX_TEST_MINILM_DIR").expect("model directory");
+        let encoder = Encoder::load(Path::new(&dir)).expect("load");
+        let texts: Vec<String> = include_str!("testdata/tokenizer_corpus.txt")
+            .lines()
+            .filter(|line| !line.starts_with("# ") && !line.trim().is_empty())
+            .map(str::to_owned)
+            .collect();
+        let cpus = std::thread::available_parallelism().map_or(1, usize::from);
+        let mut reference: Option<Vec<Vec<f32>>> = None;
+        for threads in [1, 2, 4, 8, cpus] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("pool");
+            // One warm-up pass so allocation and page faults are not timed.
+            pool.install(|| encoder.embed_here(&texts[0]))
+                .expect("warm up");
+            let started = std::time::Instant::now();
+            let vectors: Vec<Vec<f32>> = texts
+                .iter()
+                .map(|text| pool.install(|| encoder.embed_here(text)).expect("embed"))
+                .collect();
+            let elapsed = started.elapsed();
+            println!(
+                "embed_thread_scaling: {threads:>2} threads: {} texts in {:.0} ms, {:.2} ms/text",
+                texts.len(),
+                elapsed.as_secs_f64() * 1e3,
+                elapsed.as_secs_f64() * 1e3 / texts.len() as f64
+            );
+            match &reference {
+                None => reference = Some(vectors),
+                Some(reference) => {
+                    for (a, b) in reference.iter().zip(&vectors) {
+                        let dot = a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+                        assert!(dot > 0.99999, "thread count changed a vector: {dot}");
+                    }
+                }
+            }
+        }
+    }
     #[test]
     #[ignore = "downloads are opt-in; set PLURX_TEST_MINILM_DIR to verified model files"]
     fn embedded_model_distinguishes_meaning() {
