@@ -1574,7 +1574,11 @@ expected_occurrences = 9
 [[module_symbols]]
 id = "m4-vod-dormant-purge-settlement"
 pattern = "purge_if_dormant"
-expected_occurrences = 9
+# 9 -> 10 with S-14 M8 (VOD `Shared`), measured from the validation unittests' actual count:
+# `dormant_purge_point_precedes_producer_termination` calls `purge_if_dormant` once, test-only,
+# from a task it awaits within a five-second bound. No production caller was added; the
+# settlement owner is unchanged.
+expected_occurrences = 10
 
 # Whole-module structural sentinels use normalized Rust code rather than a
 # list of today's helper names: comments and literals cannot contribute to or
@@ -2239,7 +2243,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Merge of main @ 319569b6a (#573, 663) into `fix/loaded-runner-flakes` (662):
 # 665 measured by zeroing this row. Both sets retained unchanged (main's +3 and
 # this branch's +2, all test-only, reviewed above); the merge adds no new site.
-expected_occurrences = 665
+# 663 -> 668 with S-14 M8 (`Rendition`, VOD `Shared`), measured from the validation unittests'
+# actual count, all test-only and each awaited by its test: `tokio::spawn` of the attach in
+# `rendition_install_point_precedes_admission`, of the purge in
+# `dormant_purge_point_precedes_producer_termination`, and of the blocked segment GET in
+# `segment_ready_point_precedes_the_file_open` and `vod_shared_shipped_shape`; and
+# `tokio::task::spawn_blocking` of `rendition_shipped_shape`'s wall-clock belief wait. None owns
+# a producer, a process or a recipe decision.
+# Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 670 measured by zeroing this
+# row. Both sets retained unchanged (main's and this branch's, reviewed above); the merge
+# adds no new site.
+expected_occurrences = 670
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -2394,7 +2408,14 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # `/bin/sh` child that writes a test fixture, feeds it the fixture on stdin and
 # waits for it with `wait_with_output` before returning. Test-only
 # (`cfg(all(test, unix))`); it owns no producer and outlives nothing.
-expected_occurrences = 49
+# 48 -> 49 with S-14 M8 (VOD `Shared`), measured from the validation unittests' actual count:
+# the `.spawn()` of `dormant_purge_point_precedes_producer_termination`'s fake `sleep 60`
+# producer, test-only, `kill_on_drop`, attached to the rendition's slot and reaped by the
+# production dormant-purge settlement owner the test drives.
+# Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 50 measured by zeroing this row.
+# Both +1s retained unchanged (main's `write_test_executable` child and this branch's fake
+# dormant producer, reviewed above); the merge adds no new site.
+expected_occurrences = 50
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -3285,7 +3306,19 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Merge of main @ 319569b6a (#573, 1070) into `fix/loaded-runner-flakes` (1072):
 # 1077 measured by zeroing this row. Both sets retained unchanged (main's +5 and
 # this branch's +7, all test-only, reviewed above); the merge adds no new site.
-expected_occurrences = 1077
+# 1070 -> 1075 with S-14 M8 (`Rendition`, VOD `Shared`), measured from the validation
+# unittests' actual count, all test-side: -2 in `http/hls/tests/chunk_01.rs` (the two
+# `tokio::time::timeout` bounds on the VOD detach Barrier waits; the AsyncPause that replaces
+# them is bounded itself); +2 five-second bounds in `rendition_install_point_precedes_admission`
+# and `dormant_purge_point_precedes_producer_termination`; +5 in `vod/tests/chunk_03.rs`:
+# `rendition_shipped_shape`'s `std::thread::sleep` inside its wall-clock belief wait,
+# `vod_shared_shipped_shape`'s three bounds (the Store route read, the wait registration, the
+# GET) and `segment_ready_point_precedes_the_file_open`'s bound on the GET. No production timer
+# was added.
+# Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 1082 measured by zeroing this
+# row. Both sets retained unchanged (main's and this branch's, reviewed above); the merge
+# adds no new site.
+expected_occurrences = 1082
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3596,7 +3629,13 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # completion), and in `a_fixture_executes_at_once_while_other_threads_fork`
 # the `/bin/true` forkers and the fixture it executes, both `.status()`,
 # waited to completion.
-expected_occurrences = 197
+# 194 -> 195 with S-14 M8 (VOD `Shared`), measured from the validation unittests' actual
+# count: `dormant_purge_point_precedes_producer_termination` builds one test-only
+# `tokio::process::Command::new("sleep")`, the fake producer the settlement owner reaps.
+# Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 198 measured by zeroing this
+# row. Both sets retained unchanged (main's and this branch's, reviewed above); the merge
+# adds no new site.
+expected_occurrences = 198
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -4029,7 +4068,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # process-command-construction — `write_test_executable`'s `.spawn()` (fed and
 # waited with `wait_with_output`), and the forkers' and fixture's `.status()`,
 # each waited to completion. No producer, nothing left running.
-expected_occurrences = 405
+# 402 -> 403 with S-14 M8 (VOD `Shared`), measured from the validation unittests' actual
+# count: the same test-only fake producer's `.spawn()`.
+# Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 406 measured by zeroing this
+# row. Both sets retained unchanged (main's and this branch's, reviewed above); the merge
+# adds no new site.
+expected_occurrences = 406
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -4234,7 +4278,13 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # `transcode/tests/chunk_04.rs`, two in `chunk_06.rs`) moved from Barrier
 # pairs to `seam_hooks::AsyncPause` (two waits each). No kill, wait or reap of
 # a process changed.
-expected_occurrences = 352
+# 352 -> 325 with S-14 M8 (`Rendition`, VOD `Shared`; net -27, all `Barrier::wait` calls
+# removed), measured from the validation unittests' actual count: the VOD registry's six
+# pauses left the production functions (`vod/serve/control.rs` -4, `end.rs` -2, `serve.rs` -3,
+# `vod/shared.rs` -4) for `VodSharedHooks`, and their race tests moved from Barrier pairs to
+# `seam_hooks::AsyncPause` (`vod/tests/chunk_02.rs` -4, `chunk_03.rs` -8,
+# `http/hls/tests/chunk_01.rs` -2). No kill, wait or reap of a process changed.
+expected_occurrences = 325
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -4395,7 +4445,9 @@ pattern = "kill_on_drop\\s*\\("
 # 89 -> 90 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
 # zeroing this row: the `kill_on_drop(true)` of that same test child.
-expected_occurrences = 90
+# 90 -> 91 with S-14 M8 (VOD `Shared`), measured from the validation unittests' actual count:
+# the same test-only fake producer is `kill_on_drop(true)`.
+expected_occurrences = 91
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

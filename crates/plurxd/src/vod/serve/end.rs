@@ -16,17 +16,7 @@ impl VodServe {
         let shared = Arc::clone(&self.shared);
         tokio::spawn(async move {
             let _completion = TerminalCleanupGuard(Arc::clone(&cleanup));
-            #[cfg(test)]
-            let terminal_detach_pause = shared
-                .terminal_detach_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            #[cfg(test)]
-            if let Some(pause) = terminal_detach_pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
+            shared.hooks.get().before_terminal_detach().await;
             rendition.detach_reader(&shared.pool, &session_id).await;
             rendition.kick();
             let serve = VodServe { shared };

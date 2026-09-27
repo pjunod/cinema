@@ -1244,19 +1244,16 @@
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(session_id.clone(), Arc::clone(&pause));
-        let detach_pause = Arc::new(tokio::sync::Barrier::new(2));
-        fixture
+        let detach_pause = fixture
             .state
             .transcode
-            .set_vod_terminal_detach_pause_for_test(Arc::clone(&detach_pause));
+            .arm_vod_terminal_detach_pause_for_test();
         let deletion = tokio::spawn({
             let state = fixture.state.clone();
             let session_id = session_id.clone();
             async move { delete(State(state), AxPath(session_id)).await }
         });
-        tokio::time::timeout(Duration::from_secs(5), detach_pause.wait())
-            .await
-            .expect("VOD cleanup reached its pre-detach seam");
+        let detach_held = detach_pause.reached().await;
         tokio::time::timeout(Duration::from_secs(5), pause.wait())
             .await
             .expect("release reached its post-tombstone seam");
@@ -1287,9 +1284,7 @@
             "the cached durable tombstone must refuse media before actor cleanup"
         );
 
-        tokio::time::timeout(Duration::from_secs(5), detach_pause.wait())
-            .await
-            .expect("release VOD detach");
+        detach_held.release();
         tokio::time::timeout(Duration::from_secs(5), pause.wait())
             .await
             .expect("release durable deletion");

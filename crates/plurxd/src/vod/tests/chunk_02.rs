@@ -140,6 +140,102 @@
         drop(released_guard);
     }
 
+    /// The installed-rendition point sits before the attach's admission
+    /// check: a fully adopted rendition held there is installed and accounted
+    /// but not yet admitted, and is admitted once the attach goes on.
+    #[tokio::test]
+    async fn rendition_install_point_precedes_admission() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let source_path = base.path().join("source.mkv");
+        tokio::fs::write(&source_path, b"x")
+            .await
+            .expect("write source fence fixture");
+        let index = synthetic_index(240);
+        let duration_ms = index_video_ms(&index);
+        let identity = SourceIdentity::new(1, 1, "fingerprint");
+        let recipe = Recipe {
+            file: media_file_at(source_path, duration_ms),
+            audio_index: None,
+            aac: true,
+            video: CopyVideoOptions::new(false, false),
+            source_object_version: None,
+            cluster_cache_key: None,
+            encoding: None,
+        };
+        let key = rendition_key(&recipe, &identity);
+        let plan = plurx_core::segplan::plan_copy(
+            &index,
+            &shipped_policy(index.timescale),
+            &track_durations(&index, &recipe, duration_ms),
+        );
+        // Plant every member, so the real adoption path finds no gap and the
+        // attach asks for admission.
+        let dir = RenditionDir::new(base.path().join(&key));
+        dir.create().await.expect("create adopted rendition");
+        let members = u32::try_from(plan.len()).expect("plan length");
+        let mut planted = Manifest::new(plan);
+        for member in 0..members {
+            dir.materialize(&mut planted, member, b"adopted-segment", now_ms())
+                .await
+                .expect("plant adopted segment");
+        }
+        dir.write_init(b"fixture-init")
+            .await
+            .expect("plant adopted init");
+        store_identity(
+            &dir.path().join(IDENTITY_NAME),
+            &InitIdentity {
+                muxer_init: "fixture-muxer".to_owned(),
+                served_init: "fixture-served".to_owned(),
+                promotion: plurx_core::fmp4::PromotionInputs::default(),
+            },
+        )
+        .await
+        .expect("plant adopted identity");
+
+        let install_pause = serve
+            .shared
+            .test_hooks()
+            .rendition_installed
+            .arm("vod rendition installed");
+        let attach = {
+            let shared = Arc::clone(&serve.shared);
+            let key = key.clone();
+            let settings = settings();
+            tokio::spawn(async move {
+                shared
+                    .attach_rendition(&key, &identity, Some(index), recipe, duration_ms, &settings)
+                    .await
+            })
+        };
+        let held = install_pause.reached().await;
+        let installed = serve
+            .shared
+            .renditions
+            .lock()
+            .await
+            .get(&key)
+            .map(Arc::clone)
+            .expect("the attach installed the rendition");
+        assert_eq!(installed.manifest.lock().await.next_gap(0), None);
+        assert!(
+            !installed.manifest.lock().await.is_admitted(),
+            "the installed-rendition point comes before the admission check"
+        );
+        held.release();
+        let attached = tokio::time::timeout(Duration::from_secs(5), attach)
+            .await
+            .expect("the attach completes")
+            .expect("attach task")
+            .expect("attach")
+            .expect("non-empty rendition");
+        assert!(
+            attached.rendition.manifest.lock().await.is_admitted(),
+            "the attach admits a fully adopted rendition after the point"
+        );
+    }
+
     #[tokio::test]
     async fn cancelled_real_attach_is_accounted_reusable_and_purgeable() {
         let base = crate::test_tempdir().expect("base");
@@ -191,12 +287,11 @@
         .await
         .expect("plant adopted identity");
 
-        let install_pause = Arc::new(tokio::sync::Barrier::new(2));
-        *serve
+        let install_pause = serve
             .shared
-            .rendition_install_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&install_pause));
+            .test_hooks()
+            .rendition_installed
+            .arm("vod rendition installed");
         let pending = {
             let shared = Arc::clone(&serve.shared);
             let key = key.clone();
@@ -210,7 +305,7 @@
                     .await
             })
         };
-        install_pause.wait().await;
+        let install_held = install_pause.reached().await;
 
         let installed = serve
             .shared
@@ -235,12 +330,7 @@
             ),
             "attach is cancelled after publication"
         );
-        install_pause.wait().await;
-        *serve
-            .shared
-            .rendition_install_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        install_held.release();
 
         let reused = serve
             .shared
@@ -273,6 +363,58 @@
         );
     }
 
+    /// The dormant-purge point sits in the settlement owner before it
+    /// terminates the producer: a purged rendition held there still has its
+    /// running child, and the child is reaped once the owner goes on.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dormant_purge_point_precedes_producer_termination() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("fake dormant producer");
+        rendition.slot.attach_owned(child, 0, None).await;
+        *rendition.dormant_since.lock().expect("dormant lock") =
+            Some(Instant::now() - Duration::from_secs(1));
+        let key = rendition.key.clone();
+        serve
+            .shared
+            .renditions
+            .lock()
+            .await
+            .insert(key.clone(), Arc::clone(&rendition));
+
+        let pause = serve
+            .shared
+            .test_hooks()
+            .dormant_purge
+            .arm("vod dormant purge removed");
+        let purge = tokio::spawn({
+            let shared = Arc::clone(&serve.shared);
+            let key = key.clone();
+            async move { shared.purge_if_dormant(&key, Duration::ZERO).await }
+        });
+        let held = pause.reached().await;
+        assert!(!serve.shared.renditions.lock().await.contains_key(&key));
+        assert!(
+            matches!(rendition.slot.belief().await, Producer::Running { .. }),
+            "the settlement owner has not terminated the producer at the point"
+        );
+        held.release();
+        tokio::time::timeout(Duration::from_secs(5), purge)
+            .await
+            .expect("the purge settles")
+            .expect("purge task");
+        assert!(
+            matches!(rendition.slot.belief().await, Producer::Absent { .. }),
+            "the settlement owner terminates the producer after the point"
+        );
+    }
+
     #[tokio::test]
     async fn cancelled_dormant_purge_keeps_key_and_accounting_owned_until_settlement() {
         let base = crate::test_tempdir().expect("base");
@@ -301,18 +443,17 @@
             .await
             .insert(key.clone(), Arc::clone(&rendition));
 
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *serve
+        let pause = serve
             .shared
-            .dormant_purge_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+            .test_hooks()
+            .dormant_purge
+            .arm("vod dormant purge removed");
         let caller = tokio::spawn({
             let shared = Arc::clone(&serve.shared);
             let key = key.clone();
             async move { shared.purge_if_dormant(&key, Duration::ZERO).await }
         });
-        pause.wait().await;
+        let held = pause.reached().await;
         assert!(!serve.shared.renditions.lock().await.contains_key(&key));
         assert_eq!(
             serve.shared.working_set.load(Relaxed),
@@ -332,7 +473,7 @@
                 .is_err(),
             "same-key rebuild cannot overlap removed rendition settlement"
         );
-        pause.wait().await;
+        held.release();
         wait_until(
             "detached dormant settlement",
             Duration::from_secs(2),
@@ -351,11 +492,6 @@
             .await
             .expect("same-key rebuild authority releases after exact settlement");
         drop(retry);
-        *serve
-            .shared
-            .dormant_purge_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     #[cfg(unix)]
@@ -650,7 +786,8 @@
         {
             let mut outcomes = serve
                 .shared
-                .terminal_route_test_outcomes
+                .test_hooks()
+                .terminal_route_outcomes
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             for session_id in &ended_ids {

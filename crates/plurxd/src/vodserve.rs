@@ -682,27 +682,156 @@ struct Shared {
     completed_cache: AtomicU64,
     /// Fair starting point for the bounded terminal route-confirmation batch.
     terminal_eviction_cursor: AtomicU64,
-    /// Test-only rendezvous immediately before an exact terminal replay joins
-    /// the session-owned detach fence.
-    #[cfg(test)]
-    terminal_replay_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
-    #[cfg(test)]
-    control_applied_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
-    #[cfg(test)]
-    segment_ready_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Test-only rendezvous immediately before terminal reader detach.
-    #[cfg(test)]
-    terminal_detach_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Test-only rendezvous after a newly built rendition is installed and
-    /// accounted, while its exact build gate is still held.
-    #[cfg(test)]
-    rendition_install_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Test-only rendezvous after exact dormant map removal has transferred
-    /// every cleanup resource to its detached settlement owner.
-    #[cfg(test)]
-    dormant_purge_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
-    #[cfg(test)]
-    terminal_route_test_outcomes: StdMutex<HashMap<String, TerminalRouteTestOutcome>>,
+    /// The registry's test points (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8),
+    /// in every build. Production never fills the slot, so every point reads
+    /// [`NoopVodSharedHooks`] (Decision D-M8-I).
+    hooks: crate::seam_hooks::HookSlot<dyn VodSharedHooks>,
+}
+
+/// The points of the VOD registry ([`Shared`]) that a race test can pause at,
+/// and one it can answer in place of the Store (TRANSCODE-DECOMPOSITION-PLAN
+/// §3.9, M8).
+///
+/// The registry holds these in every build, so its layout and the await
+/// points of the paths below are the same in the test and release binaries.
+/// A paused hook's timing is still a test artefact: what this makes identical
+/// is the struct and the set of await points, not scheduling. `Any` is a
+/// supertrait only so a test can reach the test hooks behind the registry.
+pub(crate) trait VodSharedHooks: std::any::Any + Send + Sync {
+    /// An exact terminal replay holds the session's cleanup and is about to
+    /// join the session-owned detach fence.
+    fn before_terminal_replay_join(&self) -> crate::seam_hooks::HookFuture<'_>;
+    /// A control command's sequence and playback anchor are committed, before
+    /// any cancellable side effect of the command.
+    fn after_control_applied(&self) -> crate::seam_hooks::HookFuture<'_>;
+    /// A blocked segment GET finished its post-registration re-check and is
+    /// about to wait.
+    fn after_segment_wait_registered(&self) -> crate::seam_hooks::HookFuture<'_>;
+    /// A blocked segment GET's wait answered ready, before it opens the file.
+    fn before_segment_ready_open(&self) -> crate::seam_hooks::HookFuture<'_>;
+    /// The session-owned terminal cleanup is about to detach the reader.
+    fn before_terminal_detach(&self) -> crate::seam_hooks::HookFuture<'_>;
+    /// A newly built rendition is installed and accounted, while its exact
+    /// build gate is still held.
+    fn after_rendition_installed(&self) -> crate::seam_hooks::HookFuture<'_>;
+    /// Exact dormant removal has handed every cleanup resource to its detached
+    /// settlement owner, which has not yet terminated the producer.
+    fn after_dormant_purge_removed(&self) -> crate::seam_hooks::HookFuture<'_>;
+    /// The durable route answer for `session_id` in place of the Store read,
+    /// or `None` to read the Store: `Some(true)` for durably not live,
+    /// `Some(false)` to retain the session, as a timeout or a Store error does.
+    fn terminal_route_outcome(&self, session_id: &str) -> Option<bool>;
+}
+
+/// What production installs: every point is already ready, and the route is
+/// always read from the Store.
+pub(crate) struct NoopVodSharedHooks;
+
+impl VodSharedHooks for NoopVodSharedHooks {
+    fn before_terminal_replay_join(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn after_control_applied(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn after_segment_wait_registered(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn before_segment_ready_open(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn before_terminal_detach(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn after_rendition_installed(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn after_dormant_purge_removed(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn terminal_route_outcome(&self, _: &str) -> Option<bool> {
+        None
+    }
+}
+
+/// The registry's test hooks: one armable pause per point and a table of
+/// route answers.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct VodSharedTestHooks {
+    terminal_replay: crate::seam_hooks::PauseSlot,
+    control_applied: crate::seam_hooks::PauseSlot,
+    segment_wait_registered: crate::seam_hooks::PauseSlot,
+    segment_ready: crate::seam_hooks::PauseSlot,
+    terminal_detach: crate::seam_hooks::PauseSlot,
+    rendition_installed: crate::seam_hooks::PauseSlot,
+    dormant_purge: crate::seam_hooks::PauseSlot,
+    terminal_route_outcomes: StdMutex<HashMap<String, TerminalRouteTestOutcome>>,
+}
+
+#[cfg(test)]
+impl VodSharedHooks for VodSharedTestHooks {
+    fn before_terminal_replay_join(&self) -> crate::seam_hooks::HookFuture<'_> {
+        self.terminal_replay.hold()
+    }
+
+    fn after_control_applied(&self) -> crate::seam_hooks::HookFuture<'_> {
+        self.control_applied.hold()
+    }
+
+    fn after_segment_wait_registered(&self) -> crate::seam_hooks::HookFuture<'_> {
+        self.segment_wait_registered.hold()
+    }
+
+    fn before_segment_ready_open(&self) -> crate::seam_hooks::HookFuture<'_> {
+        self.segment_ready.hold()
+    }
+
+    fn before_terminal_detach(&self) -> crate::seam_hooks::HookFuture<'_> {
+        self.terminal_detach.hold()
+    }
+
+    fn after_rendition_installed(&self) -> crate::seam_hooks::HookFuture<'_> {
+        self.rendition_installed.hold()
+    }
+
+    fn after_dormant_purge_removed(&self) -> crate::seam_hooks::HookFuture<'_> {
+        self.dormant_purge.hold()
+    }
+
+    fn terminal_route_outcome(&self, session_id: &str) -> Option<bool> {
+        // Timeout and Store error are both fail-closed retention outcomes;
+        // the distinct variants exist so the regression inventory proves
+        // both paths without depending on SQLite scheduler timing.
+        self.terminal_route_outcomes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .map(|outcome| match outcome {
+                TerminalRouteTestOutcome::Success => true,
+                TerminalRouteTestOutcome::Timeout | TerminalRouteTestOutcome::Error => false,
+            })
+    }
+}
+
+#[cfg(test)]
+impl Shared {
+    /// The registry's test hooks, installed on first use.
+    fn test_hooks(&self) -> &VodSharedTestHooks {
+        let hooks: &dyn std::any::Any = self
+            .hooks
+            .get_or_install(|| Box::new(VodSharedTestHooks::default()));
+        hooks
+            .downcast_ref()
+            .expect("the VOD registry's hook slot holds VodSharedTestHooks")
+    }
 }
 
 pub struct VodServe {

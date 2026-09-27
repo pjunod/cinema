@@ -168,10 +168,7 @@ impl VodServe {
             ahead_hold: AtomicBool::new(false),
             init_notify: Notify::new(),
             wake: Notify::new(),
-            #[cfg(test)]
-            stopped_poll_armed: Notify::new(),
-            #[cfg(test)]
-            stopped_poll_fired: Notify::new(),
+            hooks: Box::new(NoopRenditionHooks),
             gen_epoch: AtomicU64::new(0),
             last_child_pid: AtomicU32::new(0),
             dormant_since: StdMutex::new(None),
@@ -237,13 +234,14 @@ impl VodServe {
         Some(*touch)
     }
 
+    /// Arm the pause before the session-owned terminal cleanup detaches its
+    /// reader.
     #[cfg(test)]
-    pub(crate) fn set_terminal_detach_pause_for_test(&self, pause: Arc<tokio::sync::Barrier>) {
-        *self
-            .shared
-            .terminal_detach_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    pub(crate) fn arm_terminal_detach_pause_for_test(&self) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.shared
+            .test_hooks()
+            .terminal_detach
+            .arm("vod terminal cleanup before reader detach")
     }
 
     #[cfg(test)]
@@ -339,20 +337,7 @@ impl VodServe {
                 working_set: AtomicU64::new(0),
                 completed_cache: AtomicU64::new(0),
                 terminal_eviction_cursor: AtomicU64::new(0),
-                #[cfg(test)]
-                terminal_replay_pause: StdMutex::new(None),
-                #[cfg(test)]
-                control_applied_pause: StdMutex::new(None),
-                #[cfg(test)]
-                segment_ready_pause: StdMutex::new(None),
-                #[cfg(test)]
-                terminal_detach_pause: StdMutex::new(None),
-                #[cfg(test)]
-                rendition_install_pause: StdMutex::new(None),
-                #[cfg(test)]
-                dormant_purge_pause: StdMutex::new(None),
-                #[cfg(test)]
-                terminal_route_test_outcomes: StdMutex::new(HashMap::new()),
+                hooks: crate::seam_hooks::HookSlot::new(&NoopVodSharedHooks),
             }),
         })
     }
