@@ -1420,6 +1420,29 @@ final class LiveTvTests: XCTestCase {
         XCTAssertThrowsError(try api.playlistURL(prefix + "master.m3u8", sessionId: ""))
     }
 
+    func testRealCapabilityMasterIsAcceptedAfterStartAndResume() throws {
+        let capability = "ltv1.bm9kZS0x.12345678-1234-4234-9234-123456789abc"
+        let path = "/api/v1/live-tv/sessions/\(capability)/master.m3u8"
+        let session: [String: Any] = [
+            "session_id": capability, "playlist_url": path, "live": true,
+            "channel": ["id": "7.1", "guide_number": "7.1", "guide_name": "Local"]
+        ]
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let started = try decoder.decode(LiveTvStarted.self,
+            from: JSONSerialization.data(withJSONObject: session))
+        let resumed = try decoder.decode(LiveTvResumeAnswer.self,
+            from: JSONSerialization.data(withJSONObject: ["outcome": "live", "session": session]))
+        let api = LiveTvAPI(origin: "https://media.example", token: "account-secret")
+        for info in [started, try XCTUnwrap(resumed.session)] {
+            let url = try api.playlistURL(info.playlistUrl, sessionId: info.sessionId)
+            XCTAssertEqual(url.absoluteString, "https://media.example" + path)
+            XCTAssertNil(url.query)
+            XCTAssertNil(url.fragment)
+            XCTAssertThrowsError(try api.playlistURL(path, sessionId: capability + "other"))
+        }
+    }
+
     func testStartedSessionDecodesTheServerPlaylistCapability() throws {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
