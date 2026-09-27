@@ -602,3 +602,10 @@ continue E1–E3.
   that exact read-only accessor call; direct stores/swaps remain prohibited.
   Rust/Windows did not execute in that failed run. E1 has its own temporary
   branch, `codex/cluster-cache-preparation`, with no implementation changes yet.
+
+- 2026-09-26: lane [3315](http://192.168.4.7:3000/noirr/plurx/actions/runs/3315)
+  passed the corrected guard inventory, then found the API overview's stale
+  route count (236 versus 237 after storage-domain routes). Corrected the count.
+  A local TypeScript check also found three new storage-input element type
+  errors; annotated those inputs without raising the baseline. Batch these
+  corrections before the next lane run.

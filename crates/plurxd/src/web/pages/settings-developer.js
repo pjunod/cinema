@@ -623,7 +623,7 @@ async function saveStorageDomains(btn){
   const roots=document.getElementById("storage-domain-roots"),error=document.getElementById("storage-domain-error");
   if(error)error.textContent="";
   if(!roots||roots.dataset.loaded!=="true"){if(error)error.textContent="Load library roots before saving.";return;}
-  const mappings=Array.from(roots.querySelectorAll(".storage-domain-input")).map(input=>({library_id:Number(input.dataset.library),root_path:input.dataset.root,domain_id:input.value.trim()})).filter(row=>row.domain_id);
+  const mappings=Array.from(roots.querySelectorAll(".storage-domain-input")).map(element=>{const input=/** @type {HTMLInputElement} */(element);return {library_id:Number(input.dataset.library),root_path:input.dataset.root,domain_id:input.value.trim()};}).filter(row=>row.domain_id);
   btn.disabled=true;
   try{await api("/cluster/work/storage-domains",{method:"PUT",body:mappings});toast("Storage domains saved");}
   catch(e){if(error)error.textContent=e.message||String(e);}
