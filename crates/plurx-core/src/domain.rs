@@ -445,7 +445,7 @@ pub struct SubtitleStream {
 /// default. A file scanned before these columns existed, or one whose ffprobe
 /// emitted no DOVI record, has to be distinguishable from one that genuinely
 /// reported zero.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DolbyVisionFacts {
     /// 4, 5, 7, 8, 9 or 10. The number a client's `dv_profiles` list is
     /// matched against.
@@ -629,7 +629,7 @@ impl MediaFile {
 }
 
 /// Everything the prober learned about one file.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProbeResult {
     pub duration_ms: Option<i64>,
     pub container: Option<String>,
@@ -893,23 +893,6 @@ pub struct CacheConsumerPin {
 pub struct CacheOwnershipInventory {
     pub rows: Vec<CachedTranscode>,
     pub complete: bool,
-}
-
-/// One exact generation cursor advance after a bounded integrity-scrub page.
-/// Backends apply a page of these in one transaction so routine maintenance
-/// costs one consensus write rather than one write per cache location.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CacheManifestCheck {
-    pub recipe_hash: String,
-    pub node_id: String,
-    pub storage_class: String,
-    pub relative_dir: String,
-    pub manifest_digest: String,
-    pub next_object_index: i64,
-    /// Descriptor-bound presence observation. A location that performed deep
-    /// verification is placed one second later than presence-only peers so
-    /// oldest-first pages durably rotate the deep-I/O starting point.
-    pub observed_at: i64,
 }
 
 /// One immutable candidate inserted by the cluster-wide speculative scheduler.

@@ -599,6 +599,7 @@ impl SegmentDelivery {
     /// acknowledgement size against the whole read's duration would report
     /// every healthy large read as a stall.
     pub(crate) fn note_storage_read(&mut self, bytes: u64, elapsed: Duration) {
+        crate::media_pool::observe_media_io(0, 0, Some(elapsed));
         if !storage_read_is_slow(bytes, elapsed) || self.slow_read_reported {
             return;
         }

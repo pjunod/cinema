@@ -140,8 +140,8 @@ pub struct ClusterConfig {
     /// Operator-stable identity for the shared filesystem. Combined with the
     /// replicated cluster id so unrelated clusters cannot alias one mount.
     pub shared_cache_id: String,
-    /// Opt-in/kill switch for lag-gated local catalogue reads. Keep identical
-    /// on every voter during rollout and rollback.
+    /// Initial preference for bounded local catalogue reads. The replicated
+    /// Developer setting overrides this seed without restarting nodes.
     pub bounded_replica_reads: bool,
     /// Maximum quorum-commit to local-applied entry gap admitted for one
     /// bounded catalogue query.
@@ -171,7 +171,7 @@ impl Default for ClusterConfig {
             credential_key_file: PathBuf::new(),
             shared_cache_dir: PathBuf::new(),
             shared_cache_id: String::new(),
-            bounded_replica_reads: false,
+            bounded_replica_reads: true,
             bounded_replica_max_lag_entries: DEFAULT_BOUNDED_REPLICA_MAX_LAG_ENTRIES,
             read_pool_size: 4,
             snapshot_chunk_timeout_secs: DEFAULT_SNAPSHOT_CHUNK_TIMEOUT_SECS,
@@ -464,7 +464,7 @@ mod tests {
         assert_eq!(config.cluster.api_bind.port(), DEFAULT_CLUSTER_API_PORT);
         assert!(config.cluster.join_url.is_empty());
         assert!(config.cluster.artwork_url.is_empty());
-        assert!(!config.cluster.bounded_replica_reads);
+        assert!(config.cluster.bounded_replica_reads);
         assert_eq!(
             config.cluster.bounded_replica_max_lag_entries,
             DEFAULT_BOUNDED_REPLICA_MAX_LAG_ENTRIES

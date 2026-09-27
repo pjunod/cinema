@@ -882,7 +882,8 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // bind exactly as before, so their sites are unchanged.
 // Common queue execution removes three legacy prepared/bound SQL sites.
 // The new bridge uses one JSON argument rather than per-field binding lists.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 93;
+// E2 retires the old separately prepared manifest-candidate query.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 92;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {

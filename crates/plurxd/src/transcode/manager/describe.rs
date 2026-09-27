@@ -897,17 +897,21 @@ impl TranscodeManager {
         &self,
     ) -> Result<plurx_core::tracks::LangPrefs, plurx_core::error::StoreError> {
         let mut prefs = plurx_core::tracks::LangPrefs::default();
-        if let Some(v) = self.store.get_setting(keys::AUDIO_LANG).await? {
+        let settings = self
+            .store
+            .get_settings(&[keys::AUDIO_LANG, keys::SUB_LANG, keys::SUB_MODE])
+            .await?;
+        if let Some(v) = settings.get(keys::AUDIO_LANG) {
             if !v.trim().is_empty() {
                 prefs.audio_lang = v.trim().to_owned();
             }
         }
-        if let Some(v) = self.store.get_setting(keys::SUB_LANG).await? {
+        if let Some(v) = settings.get(keys::SUB_LANG) {
             if !v.trim().is_empty() {
                 prefs.sub_lang = v.trim().to_owned();
             }
         }
-        if let Some(v) = self.store.get_setting(keys::SUB_MODE).await? {
+        if let Some(v) = settings.get(keys::SUB_MODE) {
             prefs.sub_mode = plurx_core::tracks::SubMode::parse(v.trim());
         }
         Ok(prefs)

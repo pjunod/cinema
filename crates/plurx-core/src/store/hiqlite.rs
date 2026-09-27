@@ -126,7 +126,19 @@ const PROVIDER_BUDGET_SCHEMA_VERSION: i64 = 53;
 const PROVIDER_BUDGET_SCHEMA_MIGRATION_SOURCE: i64 = JOB_RESOURCES_SCHEMA_VERSION;
 const SUBTITLE_JOBS_SCHEMA_VERSION: i64 = 54;
 const SUBTITLE_JOBS_SCHEMA_MIGRATION_SOURCE: i64 = PROVIDER_BUDGET_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = SUBTITLE_JOBS_SCHEMA_VERSION;
+const ARTWORK_JOBS_SCHEMA_VERSION: i64 = 55;
+const ARTWORK_JOBS_SCHEMA_MIGRATION_SOURCE: i64 = SUBTITLE_JOBS_SCHEMA_VERSION;
+const TRANSCODE_COPIES_SCHEMA_VERSION: i64 = 56;
+const TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE: i64 = ARTWORK_JOBS_SCHEMA_VERSION;
+const PREDICTIONS_SCHEMA_VERSION: i64 = 57;
+const PREDICTIONS_SCHEMA_MIGRATION_SOURCE: i64 = TRANSCODE_COPIES_SCHEMA_VERSION;
+const EMBEDDINGS_SCHEMA_VERSION: i64 = 58;
+const EMBEDDINGS_SCHEMA_MIGRATION_SOURCE: i64 = PREDICTIONS_SCHEMA_VERSION;
+const PROBE_JOBS_SCHEMA_VERSION: i64 = 59;
+const PROBE_JOBS_SCHEMA_MIGRATION_SOURCE: i64 = EMBEDDINGS_SCHEMA_VERSION;
+const INTEGRITY_JOBS_SCHEMA_VERSION: i64 = 60;
+const INTEGRITY_JOBS_SCHEMA_MIGRATION_SOURCE: i64 = PROBE_JOBS_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = INTEGRITY_JOBS_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -1365,6 +1377,23 @@ pub(super) fn disconnected_test_client() -> TimedClient {
 }
 
 impl HiqliteAuthStore {
+    pub(super) async fn local_bounded_reads_enabled(
+        &self,
+        default: bool,
+    ) -> Result<bool, StoreError> {
+        let rows = self
+            .client()
+            .query_map::<SettingValueRow, _>(
+                "SELECT value FROM settings WHERE key = $1",
+                params!(super::keys::BOUNDED_REPLICA_READS),
+            )
+            .await?;
+        Ok(super::stored_switch(
+            rows.first().map(|row| row.value.as_str()),
+            default,
+        ))
+    }
+
     pub(super) fn client(&self) -> &TimedClient {
         &self.client
     }
@@ -2862,6 +2891,87 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(SUBTITLE_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(ARTWORK_JOBS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_artwork::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(ARTWORK_JOBS_SCHEMA_VERSION, now, ARTWORK_JOBS_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(ARTWORK_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_transcode::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(TRANSCODE_COPIES_SCHEMA_VERSION, now, TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(PREDICTIONS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_predictions::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(PREDICTIONS_SCHEMA_VERSION, now, PREDICTIONS_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(PREDICTIONS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(EMBEDDINGS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_embeddings::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(EMBEDDINGS_SCHEMA_VERSION, now, EMBEDDINGS_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(EMBEDDINGS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(PROBE_JOBS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_probe::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(PROBE_JOBS_SCHEMA_VERSION, now, PROBE_JOBS_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(PROBE_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(INTEGRITY_JOBS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_integrity::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(INTEGRITY_JOBS_SCHEMA_VERSION, now, INTEGRITY_JOBS_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(INTEGRITY_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -3049,6 +3159,20 @@ impl HiqliteAuthStore {
         self.telemetry.clear().await?;
         let statements = vec![
             ("DELETE FROM background_job_commands".to_owned(), params!()),
+            ("DELETE FROM background_predictions".to_owned(), params!()),
+            ("DELETE FROM background_embeddings".to_owned(), params!()),
+            (
+                "DELETE FROM background_artifact_repairs".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM background_transcode_artifacts".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM background_artwork_locations".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM background_job_legacy".to_owned(), params!()),
             ("DELETE FROM background_job_migration".to_owned(), params!()),
             (
@@ -3908,6 +4032,19 @@ impl SettingsStore for HiqliteAuthStore {
             }
         }
         Ok(pair)
+    }
+
+    async fn get_settings(
+        &self,
+        keys: &[&str],
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        let keys = super::selected_settings_json(keys)?;
+        // authority: related playback preferences share one committed settings snapshot.
+        let rows = self.client().query_consistent_map::<SettingEntryRow, _>(
+            "SELECT key, value FROM settings WHERE key IN (SELECT value FROM json_each($1)) ORDER BY key",
+            params!(keys),
+        ).await?;
+        Ok(rows.into_iter().map(|row| (row.key, row.value)).collect())
     }
 
     async fn settings_snapshot(
@@ -4866,7 +5003,13 @@ fn schema_migration_action(
         | LIBRARY_REQUESTS_SCHEMA_MIGRATION_SOURCE
         | JOB_RESOURCES_SCHEMA_MIGRATION_SOURCE
         | PROVIDER_BUDGET_SCHEMA_MIGRATION_SOURCE
-        | SUBTITLE_JOBS_SCHEMA_MIGRATION_SOURCE => {
+        | SUBTITLE_JOBS_SCHEMA_MIGRATION_SOURCE
+        | ARTWORK_JOBS_SCHEMA_MIGRATION_SOURCE
+        | TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE
+        | PREDICTIONS_SCHEMA_MIGRATION_SOURCE
+        | EMBEDDINGS_SCHEMA_MIGRATION_SOURCE
+        | PROBE_JOBS_SCHEMA_MIGRATION_SOURCE
+        | INTEGRITY_JOBS_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -6893,9 +7036,9 @@ mod tests {
             "v47 must advance exactly one step to the read-index schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 49,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 55,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v54 step"
+            "this implementation contains every additive v5→v60 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

@@ -134,6 +134,8 @@ pub(crate) const TRANSPORT_FACTS_MAX_AGE: std::time::Duration = std::time::Durat
 pub(crate) enum TransportOrigin {
     Viewer,
     Recording,
+    /// A processor's bounded connection to the owner, never a device GET.
+    PeerViewer,
 }
 
 /// One tuner GET on one channel of one device, feeding every recording sink
@@ -1578,12 +1580,16 @@ impl LiveTvManager {
                         );
                     }
                 } else if !ours || !live_tv.enabled {
+                    if live_tv.enabled {
+                        // A processor owns peer feeds, not the physical tuner.
+                        // Reconcile former local-device ownership without
+                        // ending the viewer work delegated by the current owner.
+                        self.close_device_transports().await;
+                    } else {
+                        self.close_all_transports().await;
+                    }
                     self.dvr_storage_free_bytes
-                        .store(u64::MAX, Ordering::Relaxed);
-                    // Not this node's work any more, or Live TV switched off.
-                    // Close what we hold rather than leaving a tuner occupied
-                    // by a feature the operator has turned off.
-                    self.close_all_transports().await;
+                        .store(u64::MAX, Ordering::Release);
                 } else if !dvr.enabled {
                     self.dvr_storage_free_bytes
                         .store(u64::MAX, Ordering::Relaxed);
@@ -2439,6 +2445,7 @@ impl LiveTvManager {
                 match registry.transports.get(&row.channel_id).cloned() {
                     Some(transport)
                         if !transport.is_closing()
+                            && transport.origin != TransportOrigin::PeerViewer
                             && transport.same_tuner(&device_id, address)
                             && transport.owner_serving_generation == serving_generation
                             && schedule::may_share_transport(
@@ -2614,6 +2621,15 @@ impl LiveTvManager {
         transport: &Arc<DvrTransport>,
         client: reqwest::Client,
     ) {
+        self.spawn_transport_worker_with_input(transport, client, None);
+    }
+
+    pub(crate) fn spawn_transport_worker_with_input(
+        self: &Arc<Self>,
+        transport: &Arc<DvrTransport>,
+        client: reqwest::Client,
+        peer_response: Option<reqwest::Response>,
+    ) {
         let manager = Arc::downgrade(self);
         let worker_transport = Arc::clone(transport);
         let serving = self.serving.clone();
@@ -2623,6 +2639,7 @@ impl LiveTvManager {
                 manager.clone(),
                 serving,
                 Arc::clone(&worker_transport),
+                peer_response,
             )
             .await;
             worker_transport.finish(&result);
@@ -2877,6 +2894,21 @@ impl LiveTvManager {
         // the orphan sweeper's once this transport is out of the registry.
         let _ = tokio::fs::remove_dir_all(&transport.scratch).await;
         transport.closed.cancel();
+    }
+
+    async fn close_device_transports(&self) {
+        let transports = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .transports
+            .values()
+            .filter(|transport| transport.origin != TransportOrigin::PeerViewer)
+            .cloned()
+            .collect::<Vec<_>>();
+        for transport in transports {
+            self.close_transport_arc(transport).await;
+        }
     }
 
     pub(crate) async fn close_all_transports(&self) {
@@ -3154,14 +3186,18 @@ async fn run_transport(
     manager: std::sync::Weak<LiveTvManager>,
     serving: crate::serving_fence::ServingAuthority,
     transport: Arc<DvrTransport>,
+    peer_response: Option<reqwest::Response>,
 ) -> Result<(), LiveTvError> {
     let guide_number = transport.channel.guide_number.clone();
     let url = pinned_url(transport.address, 5004, &format!("/auto/v{guide_number}"))?;
     let deadline = tokio::time::Instant::now() + super::STARTUP_TIMEOUT;
-    let response = tokio::select! {
-        biased;
-        _ = transport.cancel.cancelled() => return Ok(()),
-        response = open_tuner_stream(&client, url, deadline) => response?,
+    let response = match peer_response {
+        Some(response) => response,
+        None => tokio::select! {
+            biased;
+            _ = transport.cancel.cancelled() => return Ok(()),
+            response = open_tuner_stream(&client, url, deadline) => response?,
+        },
     };
     // A warm opening keeps no prefix: its opener's FFmpeg was planned from
     // cached facts and is fed from the first byte, while the fan-out probes

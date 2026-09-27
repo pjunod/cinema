@@ -1164,6 +1164,13 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs_provider::SCHEMA,
     // v76: subtitle extraction executes under common queue ownership.
     concat!(include_str!("../background_jobs_subtitle.sql"), "\n", "UPDATE analysis_requests SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL, fence = fence + 1 WHERE component = 'subtitle_source' AND state IN ('running','submitted');"),
+    // v77: immutable artwork variants and verified holder publications.
+    super::background_jobs_artwork::SCHEMA,
+    super::background_jobs_transcode::SCHEMA,
+    super::background_jobs_predictions::SCHEMA,
+    super::background_jobs_embeddings::SCHEMA,
+    super::background_jobs_probe::SCHEMA,
+    super::background_jobs_integrity::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2057,6 +2064,20 @@ impl SettingsStore for SqliteStore {
         .await
     }
 
+    async fn get_settings(
+        &self,
+        keys: &[&str],
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        let keys = super::selected_settings_json(keys)?;
+        self.with_read(move |conn| {
+            // Keep the SQL and its binding in one statement so the placeholder
+            // census proves their arity instead of growing the unchecked set.
+            conn.prepare("SELECT key, value FROM settings WHERE key IN (SELECT value FROM json_each(?1)) ORDER BY key")?
+                .query_map(params![keys], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                .collect::<Result<_, _>>().map_err(StoreError::from)
+        }).await
+    }
+
     async fn settings_snapshot(
         &self,
     ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
@@ -2870,9 +2891,10 @@ mod tests {
         // v69 adds the cluster subtitle-source queue and publication metadata;
         // v70 adds K-05 M5's catalogue read indexes; v71 adds the common queue.
         // v72–v76 add library work, domain leases, source-I/O reservations,
-        // provider dispatch budgets and the subtitle adapter.
+        // provider dispatch budgets and the subtitle adapter; v77 adds artwork holders,
+        // and v78 retains portable transcode source/manifest provenance.
         assert_eq!(
-            version, 76,
+            version, 82,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

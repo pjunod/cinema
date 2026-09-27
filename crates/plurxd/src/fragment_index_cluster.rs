@@ -472,8 +472,14 @@ pub(crate) async fn open_verified_local_blob(
     let mut seen = 0_u64;
     let mut buffer = vec![0_u8; HASH_CHUNK];
     loop {
+        plurx_core::process::bounded::check_cancellation().map_err(|error| error.to_string())?;
+        let remaining = expected.saturating_add(1).saturating_sub(seen);
+        if remaining == 0 {
+            return Err("fragment-index blob grew beyond its manifest".into());
+        }
+        let limit = remaining.min(buffer.len() as u64) as usize;
         let read = file
-            .read(&mut buffer)
+            .read(&mut buffer[..limit])
             .await
             .map_err(|error| format!("verify {}: {error}", path.display()))?;
         if read == 0 {

@@ -98,22 +98,29 @@ mod consistent_read_census;
 
 pub mod background_jobs;
 pub use background_jobs::BackgroundJobStore;
+pub mod background_jobs_artwork;
 mod background_jobs_delivery;
 pub mod background_jobs_domain;
+pub mod background_jobs_embeddings;
 mod background_jobs_fragment;
 pub mod background_jobs_fragment_admission;
+pub mod background_jobs_integrity;
 pub mod background_jobs_library;
 mod background_jobs_maintenance;
 mod background_jobs_migration;
 mod background_jobs_observation;
 mod background_jobs_offline;
+pub mod background_jobs_predictions;
+pub mod background_jobs_preparation;
 pub mod background_jobs_pretranscode;
+pub mod background_jobs_probe;
 pub mod background_jobs_provider;
 mod background_jobs_publication;
 pub mod background_jobs_resources;
 pub mod background_jobs_subtitle;
 #[cfg(test)]
 mod background_jobs_tests;
+pub mod background_jobs_transcode;
 pub mod classification_schedule;
 pub mod offline_claim;
 pub mod offline_expiry;
@@ -931,9 +938,9 @@ use async_trait::async_trait;
 
 use crate::cluster::coordination::{Lease, LeaseClaim};
 use crate::domain::{
-    BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheManifestCheck, CacheStorageMember,
-    CachedTranscode, DolbyVisionFacts, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind,
-    ItemPage, ItemSort, Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome,
+    BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheStorageMember, CachedTranscode,
+    DolbyVisionFacts, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind, ItemPage,
+    ItemSort, Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome,
     MediaSessionActivationSettlement, MediaSessionProjectionCompletion, MediaSessionRenewal,
     MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch,
     NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
@@ -1866,6 +1873,7 @@ pub mod keys {
     /// Content-addressed cluster coordination for VOD indexes. Missing/zero is
     /// off so an upgrade never starts full-library reads without the operator's
     /// topology measurement and explicit opt-in.
+    pub const BOUNDED_REPLICA_READS: &str = "cluster.bounded_replica_reads";
     pub const VOD_INDEX_CLUSTER_CACHE: &str = "playback.vod_index_cluster_cache";
     /// Durable analysis retry budget. The settings API constrains this to a
     /// small positive range so an operator can tune slow media without making
@@ -2092,6 +2100,8 @@ pub trait SettingsStore: Send + Sync + 'static {
         first: &str,
         second: &str,
     ) -> Result<(Option<String>, Option<String>), StoreError>;
+    /// Read at most 32 named settings from one snapshot. Missing keys are absent.
+    async fn get_settings(&self, keys: &[&str]) -> Result<BTreeMap<String, String>, StoreError>;
     /// Read the complete settings table from one database snapshot.
     ///
     /// Administrative views render many independent settings at once. A
@@ -2136,6 +2146,15 @@ pub trait SettingsStore: Send + Sync + 'static {
     ) -> Result<bool, StoreError>;
     /// The stable unique id of this logical server.
     async fn instance_id(&self) -> Result<String, StoreError>;
+}
+
+pub(crate) fn selected_settings_json(keys: &[&str]) -> Result<String, StoreError> {
+    if keys.len() > 32 || keys.iter().any(|key| key.is_empty() || key.len() > 256) {
+        return Err(StoreError::Task(
+            "settings read requires at most 32 nonempty bounded keys".into(),
+        ));
+    }
+    serde_json::to_string(keys).map_err(|error| StoreError::Task(error.to_string()))
 }
 
 pub(crate) fn validate_generated_settings(
@@ -3631,24 +3650,6 @@ pub trait TranscodeCacheStore: Send + Sync + 'static {
         node_id: &str,
         limit: i64,
     ) -> Result<Vec<CachedTranscode>, StoreError>;
-
-    /// Bounded set of manifest-fenced local generations for background
-    /// integrity scrubbing. Unlike the eviction view this includes pinned
-    /// offline locations: pinning protects valid bytes from LRU, not corrupt
-    /// bytes from invalidation.
-    async fn cache_manifest_candidates(
-        &self,
-        node_id: &str,
-        limit: i64,
-    ) -> Result<Vec<CachedTranscode>, StoreError>;
-
-    /// Advance the scrub cursor only if the checked immutable publication is
-    /// still current. Reusing `last_seen_at` rotates a bounded oldest-first
-    /// scan without changing the playback LRU clock.
-    async fn mark_cache_manifests_checked(
-        &self,
-        checks: &[CacheManifestCheck],
-    ) -> Result<usize, StoreError>;
 
     /// Claims older than `older_than_unix` that never completed — a producer
     /// that died. Their directories are garbage and their rows are lies.
@@ -5568,6 +5569,32 @@ impl CatalogueReader {
         }
     }
 
+    /// The initial preference before the operator saves a replicated override.
+    #[must_use]
+    pub fn bounded_reads_default(&self) -> bool {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(bounded) = &self.bounded {
+            return bounded.enabled;
+        }
+        true
+    }
+
+    /// Advisory observation only; every actual read obtains its own permit.
+    /// `None` means this process has no replicated reader (for example SQLite).
+    pub async fn bounded_read_observation(&self) -> Option<bool> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(bounded) = &self.bounded {
+            return Some(
+                bounded
+                    .metrics
+                    .run_bounded_replica_after(bounded.max_apply_lag_entries, 0, || async {})
+                    .await
+                    .is_some(),
+            );
+        }
+        None
+    }
+
     /// Construct the production bounded reader for real seeded-store
     /// contracts outside this module.
     #[cfg(all(feature = "hiqlite-store", feature = "cluster-read-cost-validation"))]
@@ -5636,9 +5663,6 @@ impl CatalogueReader {
         Fut: std::future::Future<Output = Result<T, StoreError>>,
     {
         let bounded = self.bounded.as_ref()?;
-        if !bounded.enabled {
-            return None;
-        }
         let min_applied_index = min_applied_index(&bounded.store)?;
         let store = Arc::clone(&bounded.store);
         #[cfg(feature = "cluster-read-cost-validation")]
@@ -5655,7 +5679,13 @@ impl CatalogueReader {
                 bounded.max_apply_lag_entries,
                 min_applied_index,
                 move || async move {
-                    let result = local_read(store).await;
+                    // A stale preference only chooses between two safe read paths.
+                    // Read it under the same proof, without contacting the leader.
+                    let result = if store.local_bounded_reads_enabled(bounded.enabled).await? {
+                        local_read(store).await.map(Some)
+                    } else {
+                        Ok(None)
+                    };
                     #[cfg(feature = "cluster-read-cost-validation")]
                     if revoke_after_local.swap(false, std::sync::atomic::Ordering::Relaxed) {
                         post_query_metrics.validation_revoke_bounded_proof();
@@ -5665,6 +5695,7 @@ impl CatalogueReader {
             )
             .await?
             .ok()
+            .flatten()
     }
 
     /// Per-user watch state for `item_ids`. Local only behind the
