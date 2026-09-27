@@ -830,19 +830,17 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn artwork_cancellation_reaps_the_encoder_before_returning() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = crate::test_tempdir().expect("directory");
         let program = dir.path().join("encoder");
         let announced = dir.path().join("pid");
-        std::fs::write(
+        crate::write_test_executable(
             &program,
             format!(
                 "#!/bin/sh\necho $$ > '{}'\nexec sleep 300\n",
                 announced.display()
             ),
-        )
-        .expect("program");
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).expect("mode");
+            0o700,
+        );
         let source = dir.path().join("source.png");
         tokio::fs::write(&source, b"source").await.expect("source");
         let identity = open_local_artwork(source.clone())

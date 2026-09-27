@@ -10874,12 +10874,11 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn the_producer_answers_only_once_two_segments_are_listed() {
-        use std::os::unix::fs::PermissionsExt;
         use std::sync::atomic::AtomicUsize;
 
         let root = crate::test_tempdir().expect("lifecycle root");
         let ffmpeg = root.path().join("fake-ffmpeg");
-        std::fs::write(
+        crate::write_test_executable(
             &ffmpeg,
             r#"#!/bin/sh
 for output do playlist="$output"; done
@@ -10893,20 +10892,16 @@ printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENC
 mv "$playlist.tmp" "$playlist"
 exec /bin/cat >/dev/null
 "#,
-        )
-        .expect("fake FFmpeg");
-        std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o755))
-            .expect("executable fake FFmpeg");
+            0o755,
+        );
         let ffprobe = root.path().join("fake-ffprobe");
-        std::fs::write(
+        crate::write_test_executable(
             &ffprobe,
             r#"#!/bin/sh
 printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width":1920,"height":1080,"field_order":"progressive"},{"codec_type":"audio","codec_name":"ac3","channels":2}]}'
 "#,
-        )
-        .expect("fake FFprobe");
-        std::fs::set_permissions(&ffprobe, std::fs::Permissions::from_mode(0o755))
-            .expect("executable fake FFprobe");
+            0o755,
+        );
         let system = SystemInfo {
             ffmpeg: ffmpeg.to_string_lossy().into_owned(),
             ffprobe: ffprobe.to_string_lossy().into_owned(),
@@ -11230,25 +11225,15 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
         lineup_gate: usize,
         node: &str,
     ) -> (Arc<LiveTvManager>, FixtureTuner) {
-        use std::os::unix::fs::PermissionsExt;
-
         let ffmpeg_path = root.join("fake-ffmpeg");
-        std::fs::write(&ffmpeg_path, format!("#!/bin/sh\n{ffmpeg}\n")).expect("fake FFmpeg");
-        std::fs::set_permissions(&ffmpeg_path, std::fs::Permissions::from_mode(0o755))
-            .expect("executable fake FFmpeg");
+        crate::write_test_executable(&ffmpeg_path, format!("#!/bin/sh\n{ffmpeg}\n"), 0o755);
         let ffprobe_path = root.join("fake-ffprobe");
-        std::fs::write(
-            &ffprobe_path,
-            format!(
+        crate::write_test_executable(&ffprobe_path, format!(
                 "#!/bin/sh\n[ -f '{slow}' ] && /bin/sleep 1\n[ -f '{answer}' ] || exit 1\n/bin/cat '{answer}'\nstatus=$?\n/bin/date +%s%N >> '{finished}'\nexit $status\n",
                 slow = root.join("probe.slow").display(),
                 answer = root.join("probe.json").display(),
                 finished = root.join("probe.finished").display(),
-            ),
-        )
-        .expect("fake FFprobe");
-        std::fs::set_permissions(&ffprobe_path, std::fs::Permissions::from_mode(0o755))
-            .expect("executable fake FFprobe");
+            ), 0o755);
         let system = SystemInfo {
             ffmpeg: ffmpeg_path.to_string_lossy().into_owned(),
             ffprobe: ffprobe_path.to_string_lossy().into_owned(),

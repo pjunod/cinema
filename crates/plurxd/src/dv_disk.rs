@@ -6747,8 +6747,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn descriptor_bound_probe_rejects_a_pathname_swap_that_changes_inode_facts() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = crate::test_tempdir().expect("descriptor probe root");
         let source = root.path().join("movie.mkv");
         let moved = root.path().join("held.mkv");
@@ -6778,9 +6776,7 @@ mod tests {
             "#!/bin/sh\nlast=''\nfor arg in \"$@\"; do last=\"$arg\"; done\ncat \"$last\" > '{}'\nprintf '%s\\n' '{{\"format\":{{\"duration\":\"1.0\"}},\"streams\":[],\"chapters\":[]}}'\n",
             captured.display()
         );
-        std::fs::write(&ffprobe, script).expect("probe script");
-        std::fs::set_permissions(&ffprobe, std::fs::Permissions::from_mode(0o700))
-            .expect("probe executable");
+        crate::write_test_executable(&ffprobe, script, 0o700);
 
         let error = probe_bound_with(
             ffprobe.to_str().expect("UTF-8 script"),
@@ -6805,17 +6801,13 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn descriptor_probe_deadline_kills_a_blocked_process() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = crate::test_tempdir().expect("probe deadline root");
         let source = root.path().join("movie.mkv");
         let ffprobe = root.path().join("blocked-ffprobe");
         tokio::fs::write(&source, b"held bytes")
             .await
             .expect("source");
-        std::fs::write(&ffprobe, "#!/bin/sh\nexec sleep 30\n").expect("script");
-        std::fs::set_permissions(&ffprobe, std::fs::Permissions::from_mode(0o700))
-            .expect("executable");
+        crate::write_test_executable(&ffprobe, "#!/bin/sh\nexec sleep 30\n", 0o700);
         let parent = SecureDirectory::open(root.path()).await.expect("parent");
         let held = bind_child(&parent, "movie.mkv", "deadline probe media")
             .await
@@ -6836,17 +6828,13 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn descriptor_probe_cancellation_kills_a_blocked_process() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = crate::test_tempdir().expect("probe cancellation root");
         let source = root.path().join("movie.mkv");
         let ffprobe = root.path().join("blocked-ffprobe");
         tokio::fs::write(&source, b"held bytes")
             .await
             .expect("source");
-        std::fs::write(&ffprobe, "#!/bin/sh\nexec sleep 30\n").expect("script");
-        std::fs::set_permissions(&ffprobe, std::fs::Permissions::from_mode(0o700))
-            .expect("executable");
+        crate::write_test_executable(&ffprobe, "#!/bin/sh\nexec sleep 30\n", 0o700);
         let parent = SecureDirectory::open(root.path()).await.expect("parent");
         let held = bind_child(&parent, "movie.mkv", "cancelled probe media")
             .await
@@ -6873,17 +6861,13 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn descriptor_probe_output_is_bounded_while_the_process_runs() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = crate::test_tempdir().expect("probe output root");
         let source = root.path().join("movie.mkv");
         let ffprobe = root.path().join("noisy-ffprobe");
         tokio::fs::write(&source, b"held bytes")
             .await
             .expect("source");
-        std::fs::write(&ffprobe, "#!/bin/sh\nexec yes x\n").expect("script");
-        std::fs::set_permissions(&ffprobe, std::fs::Permissions::from_mode(0o700))
-            .expect("executable");
+        crate::write_test_executable(&ffprobe, "#!/bin/sh\nexec yes x\n", 0o700);
         let parent = SecureDirectory::open(root.path()).await.expect("parent");
         let held = bind_child(&parent, "movie.mkv", "bounded probe media")
             .await
@@ -7317,21 +7301,15 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn capability_probe_rejects_an_old_dovi_tool() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = crate::test_tempdir().expect("tool root");
         let dovi = root.path().join("dovi-tool");
         let mkvmerge = root.path().join("mkvmerge");
-        std::fs::write(&dovi, "#!/bin/sh\necho 'dovi_tool 2.2.0'\n").expect("dovi script");
-        std::fs::write(
+        crate::write_test_executable(&dovi, "#!/bin/sh\necho 'dovi_tool 2.2.0'\n", 0o700);
+        crate::write_test_executable(
             &mkvmerge,
             "#!/bin/sh\necho \"mkvmerge v74.0.0 ('You Oughta Know') 64-bit\"\n",
-        )
-        .expect("mkvmerge script");
-        std::fs::set_permissions(&dovi, std::fs::Permissions::from_mode(0o700))
-            .expect("dovi executable");
-        std::fs::set_permissions(&mkvmerge, std::fs::Permissions::from_mode(0o700))
-            .expect("mkvmerge executable");
+            0o700,
+        );
         let tools = DvDiskTools::new(
             "ffmpeg".to_owned(),
             dovi.display().to_string(),
@@ -7491,13 +7469,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn conversion_tool_output_is_bounded_while_the_process_is_running() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = crate::test_tempdir().expect("noisy conversion tool root");
         let tool = root.path().join("noisy-tool");
-        std::fs::write(&tool, "#!/bin/sh\nexec yes noisy-output\n").expect("tool script");
-        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700))
-            .expect("executable tool");
+        crate::write_test_executable(&tool, "#!/bin/sh\nexec yes noisy-output\n", 0o700);
         let error = run_tool_with_timeout(
             tool.to_str().expect("UTF-8 tool"),
             &[],
@@ -7512,13 +7486,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn conversion_tool_deadline_kills_a_hung_process() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = crate::test_tempdir().expect("hung conversion tool root");
         let tool = root.path().join("hung-tool");
-        std::fs::write(&tool, "#!/bin/sh\nexec sleep 60\n").expect("tool script");
-        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700))
-            .expect("executable tool");
+        crate::write_test_executable(&tool, "#!/bin/sh\nexec sleep 60\n", 0o700);
         let started = tokio::time::Instant::now();
         let error = run_tool_with_timeout(
             tool.to_str().expect("UTF-8 tool"),
@@ -7550,8 +7520,6 @@ mod tests {
 
     #[cfg(unix)]
     async fn assert_bound_source_tool_survives_transient_swap(role: &'static str) {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = crate::test_tempdir().expect("descriptor-bound tool root");
         let source_path = root.path().join("source.mkv");
         let saved_source = root.path().join("source.saved");
@@ -7571,13 +7539,7 @@ mod tests {
         tokio::fs::write(&attacker_path, b"pathname-swap attacker bytes")
             .await
             .expect("attacker bytes");
-        std::fs::write(
-            &tool,
-            "#!/bin/sh\nset -eu\n: > \"$3\"\nwhile [ ! -e \"$4\" ]; do sleep 0.005; done\ncat \"$1\" > \"$2\"\n: > \"$5\"\nwhile [ ! -e \"$6\" ]; do sleep 0.005; done\n",
-        )
-        .expect("tool script");
-        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700))
-            .expect("executable tool");
+        crate::write_test_executable(&tool, "#!/bin/sh\nset -eu\n: > \"$3\"\nwhile [ ! -e \"$4\" ]; do sleep 0.005; done\ncat \"$1\" > \"$2\"\n: > \"$5\"\nwhile [ ! -e \"$6\" ]; do sleep 0.005; done\n", 0o700);
 
         let parent = SecureDirectory::open(root.path()).await.expect("parent");
         let source = bind_child(&parent, "source.mkv", role)

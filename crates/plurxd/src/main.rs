@@ -122,6 +122,117 @@ pub(crate) fn test_tempdir() -> std::io::Result<tempfile::TempDir> {
     tempfile::tempdir_in(root)
 }
 
+/// Create an executable test fixture (a script standing in for FFmpeg, a
+/// tool, a probe) that this process can execute at once.
+///
+/// Writing it here with `std::fs::write` and then executing it races every
+/// other test thread: a child forked anywhere in this process while the write
+/// descriptor is open inherits it, and until that child reaches `exec` (which
+/// closes it, being close-on-exec) the kernel refuses to execute the file with
+/// `ETXTBSY` ("Text file busy"). On a loaded runner that window is long enough
+/// to hit. So this process never opens the file for writing at all: a `/bin/sh`
+/// child writes it and sets its mode, and the only writable descriptor lives
+/// and dies in that child's process tree before this returns.
+#[cfg(all(test, unix))]
+pub(crate) fn write_test_executable(
+    path: impl AsRef<std::path::Path>,
+    contents: impl AsRef<[u8]>,
+    mode: u32,
+) {
+    use std::io::Write;
+
+    let path = path.as_ref();
+    let mut writer = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("cat > \"$1\" && chmod \"$2\" \"$1\"")
+        .arg("write_test_executable")
+        .arg(path)
+        .arg(format!("{mode:o}"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("spawn a writer for {}: {error}", path.display()));
+    writer
+        .stdin
+        .take()
+        .expect("writer stdin")
+        .write_all(contents.as_ref())
+        .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+    let output = writer
+        .wait_with_output()
+        .unwrap_or_else(|error| panic!("wait for the writer of {}: {error}", path.display()));
+    assert!(
+        output.status.success(),
+        "writing {} failed: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(all(test, unix))]
+mod test_executable_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// The race `write_test_executable` exists for, run on purpose: other
+    /// threads fork continuously while fixtures are written and executed at
+    /// once. Written in-process (`std::fs::write` then `set_permissions`),
+    /// this fails with `ETXTBSY` within a few hundred iterations on a busy
+    /// host; written by the helper, no descriptor of this process is ever
+    /// writable on the fixture, so every exec succeeds.
+    #[test]
+    fn a_fixture_executes_at_once_while_other_threads_fork() {
+        let root = crate::test_tempdir().expect("root");
+        let stop = Arc::new(AtomicBool::new(false));
+        let forkers: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Acquire) {
+                        let _ = std::process::Command::new("/bin/true").status();
+                    }
+                })
+            })
+            .collect();
+        let outcome = std::panic::catch_unwind(|| {
+            for index in 0..300 {
+                let path = root.path().join(format!("fixture-{index}"));
+                crate::write_test_executable(&path, "#!/bin/sh\nexit 7\n", 0o700);
+                let status = std::process::Command::new(&path)
+                    .status()
+                    .unwrap_or_else(|error| panic!("fixture {index} did not execute: {error}"));
+                assert_eq!(status.code(), Some(7), "fixture {index} ran its own body");
+            }
+        });
+        stop.store(true, Ordering::Release);
+        for forker in forkers {
+            forker.join().expect("forker");
+        }
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn a_fixture_gets_exactly_the_mode_asked_for() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = crate::test_tempdir().expect("root");
+        for mode in [0o700, 0o755, 0o500] {
+            let path = root.path().join(format!("mode-{mode:o}"));
+            crate::write_test_executable(&path, "#!/bin/sh\n", mode);
+            let actual = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o7777;
+            assert_eq!(actual, mode, "{}", path.display());
+            assert_eq!(std::fs::read(&path).expect("contents"), b"#!/bin/sh\n");
+        }
+    }
+}
+
 /// A scoped tracing subscriber for one test, with a global default behind it.
 ///
 /// `tracing::subscriber::set_default` alone is not enough in a parallel test

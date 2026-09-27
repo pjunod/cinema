@@ -4725,10 +4725,7 @@ mod tests {
 
     #[cfg(unix)]
     fn executable(path: &std::path::Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, body).expect("write probe");
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-            .expect("make probe executable");
+        crate::write_test_executable(path, body, 0o700);
     }
 
     #[cfg(target_os = "linux")]
