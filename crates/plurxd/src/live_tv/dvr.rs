@@ -2614,6 +2614,15 @@ impl LiveTvManager {
         transport: &Arc<DvrTransport>,
         client: reqwest::Client,
     ) {
+        self.spawn_transport_worker_with_input(transport, client, None);
+    }
+
+    pub(crate) fn spawn_transport_worker_with_input(
+        self: &Arc<Self>,
+        transport: &Arc<DvrTransport>,
+        client: reqwest::Client,
+        peer_response: Option<reqwest::Response>,
+    ) {
         let manager = Arc::downgrade(self);
         let worker_transport = Arc::clone(transport);
         let serving = self.serving.clone();
@@ -2623,6 +2632,7 @@ impl LiveTvManager {
                 manager.clone(),
                 serving,
                 Arc::clone(&worker_transport),
+                peer_response,
             )
             .await;
             worker_transport.finish(&result);
@@ -3154,14 +3164,18 @@ async fn run_transport(
     manager: std::sync::Weak<LiveTvManager>,
     serving: crate::serving_fence::ServingAuthority,
     transport: Arc<DvrTransport>,
+    peer_response: Option<reqwest::Response>,
 ) -> Result<(), LiveTvError> {
     let guide_number = transport.channel.guide_number.clone();
     let url = pinned_url(transport.address, 5004, &format!("/auto/v{guide_number}"))?;
     let deadline = tokio::time::Instant::now() + super::STARTUP_TIMEOUT;
-    let response = tokio::select! {
-        biased;
-        _ = transport.cancel.cancelled() => return Ok(()),
-        response = open_tuner_stream(&client, url, deadline) => response?,
+    let response = match peer_response {
+        Some(response) => response,
+        None => tokio::select! {
+            biased;
+            _ = transport.cancel.cancelled() => return Ok(()),
+            response = open_tuner_stream(&client, url, deadline) => response?,
+        },
     };
     // A warm opening keeps no prefix: its opener's FFmpeg was planned from
     // cached facts and is fed from the first byte, while the fan-out probes

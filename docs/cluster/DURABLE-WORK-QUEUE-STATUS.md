@@ -912,3 +912,12 @@ continue E1–E3.
   storage-read latency, client delivery and peer throughput are bounded node
   observations; missing samples never refuse work. Shared remote Live TV
   processing remains unfinished. No E3 tests have run.
+
+- 2026-09-27: E3 draft [#572](http://192.168.4.7:3000/noirr/plurx/pulls/572)
+  contains advisory placement controls and recent I/O ranking. Added an
+  exact-authenticated raw Live TV consumer using the existing shared tuner
+  transport and bounded per-consumer queue. Viewer execution can consume a
+  peer response through its existing process/admission lifecycle. Placement,
+  recovery routing and remote start authorization remain under construction;
+  this is not yet a completed remote playback path. Pinned workspace
+  all-target Clippy passes; no E3 tests have run.

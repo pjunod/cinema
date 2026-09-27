@@ -27,6 +27,7 @@ use crate::live_tv_delivery::{
 };
 use crate::state::SystemInfo;
 
+pub(crate) mod cluster;
 pub(crate) mod dvr;
 pub(crate) mod guide;
 
@@ -4018,9 +4019,18 @@ impl LiveTvManager {
         self: &Arc<Self>,
         request: LiveTvStartRequest,
     ) -> Result<LiveTvProvisional, LiveTvError> {
+        self.start_with_ingest(request, None).await
+    }
+
+    pub(crate) async fn start_with_ingest(
+        self: &Arc<Self>,
+        request: LiveTvStartRequest,
+        remote: Option<(LiveTvSnapshot, reqwest::Response)>,
+    ) -> Result<LiveTvProvisional, LiveTvError> {
         let started = tokio::time::Instant::now();
         validate_start_request(&request)?;
-        if request.expected_owner_node_id != self.node_id {
+        let is_remote = remote.is_some();
+        if !is_remote && request.expected_owner_node_id != self.node_id {
             return Err(LiveTvError::OwnerUnavailable(
                 "the start request names a different tuner owner".to_owned(),
             ));
@@ -4029,7 +4039,7 @@ impl LiveTvManager {
             LiveTvError::OwnerUnavailable(crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned())
         })?;
         let config = self.config().await?;
-        validate_start_config(&config, &request, &self.node_id)?;
+        validate_start_config(&config, &request, &request.expected_owner_node_id)?;
 
         let key = LiveTvRequestKey::from(&request);
         if let Some(session) = self.session_for_request(&key, &request)? {
@@ -4042,16 +4052,27 @@ impl LiveTvManager {
         // A start never rides the five-minute stale projection. The owner
         // refreshes this exact row immediately before admission so a removed
         // or newly protected channel cannot consume a tuner.
-        let snapshot = tokio::time::timeout_at(
-            started + STARTUP_TIMEOUT,
-            self.local_snapshot(&config, true, false),
-        )
-        .await
-        .map_err(|_| {
-            LiveTvError::StartupTimeout(
-                "the fresh tuner lineup exceeded the live-TV startup deadline".into(),
-            )
-        })??;
+        let (snapshot, peer_response) = match remote {
+            Some((snapshot, response)) => (snapshot, Some(response)),
+            None => (
+                tokio::time::timeout_at(
+                    started + STARTUP_TIMEOUT,
+                    self.local_snapshot(&config, true, false),
+                )
+                .await
+                .map_err(|_| {
+                    LiveTvError::StartupTimeout(
+                        "the fresh tuner lineup exceeded the live-TV startup deadline".into(),
+                    )
+                })??,
+                None,
+            ),
+        };
+        if snapshot.generation != config.generation {
+            return Err(LiveTvError::Conflict(
+                "the remote tuner snapshot changed generation".into(),
+            ));
+        }
         if snapshot.freshness != SnapshotFreshness::Fresh {
             return Err(LiveTvError::DeviceUnavailable(
                 "a fresh HDHomeRun lineup is required to start Live TV".to_owned(),
@@ -4288,7 +4309,7 @@ impl LiveTvManager {
             (None, _) => LiveStartKind::Joined,
         };
         if let Some(transport) = opened {
-            self.spawn_transport_worker(&transport, client);
+            self.spawn_transport_worker_with_input(&transport, client, peer_response);
         }
 
         let manager = Arc::downgrade(self);
@@ -4348,7 +4369,11 @@ impl LiveTvManager {
             ));
         }
         let config = self.config().await?;
-        validate_start_config(&config, &session.request, &self.node_id)?;
+        validate_start_config(
+            &config,
+            &session.request,
+            &session.request.expected_owner_node_id,
+        )?;
         if !self.serving.is_current(session.owner_serving_generation) {
             session.cancel.cancel();
             return Err(LiveTvError::OwnerUnavailable(
@@ -7215,7 +7240,11 @@ async fn ensure_session_fence(
         ));
     }
     let config = manager.config_read_at(SettingsReadSite::Fence).await?;
-    validate_start_config(&config, &session.request, &manager.node_id)
+    validate_start_config(
+        &config,
+        &session.request,
+        &session.request.expected_owner_node_id,
+    )
 }
 
 /// The per-second fence every live session takes while it runs.
@@ -7239,7 +7268,11 @@ async fn ensure_session_fence_from_observation(
         ));
     }
     let observation = manager.fence.validated()?;
-    validate_start_config(&observation.config, &session.request, &manager.node_id)
+    validate_start_config(
+        &observation.config,
+        &session.request,
+        &session.request.expected_owner_node_id,
+    )
 }
 
 async fn open_tuner_stream(

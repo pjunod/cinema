@@ -477,3 +477,36 @@ async fn authorize_voter(
         Err(StatusCode::UNAUTHORIZED)
     }
 }
+
+/// Exact-signed raw consumer; it shares the configured owner's existing tuner.
+pub(crate) async fn ingest(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    use crate::live_tv::cluster::INGEST_PATH;
+    if !state.serving.is_ready() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    if let Err(status) = authorize_voter(&state, &headers, &body, INGEST_PATH, None).await {
+        return status.into_response();
+    }
+    let request = match serde_json::from_slice::<LiveTvStartRequest>(&body) {
+        Ok(request) => request,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let Some(_admission) = state.serving.try_restart_admission().await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match state.live_tv.shared_ingest(&request).await {
+        Ok(body) => (
+            [
+                (header::CONTENT_TYPE, "video/mp2t"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            body,
+        )
+            .into_response(),
+        Err(error) => signed_wire_error(&state, &headers, INGEST_PATH, error),
+    }
+}

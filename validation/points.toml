@@ -899,6 +899,7 @@ paths = [
   "crates/plurx-core/src/store/sqlite/dvr.rs",
   "crates/plurxd/src/http/dvr.rs",
   "crates/plurxd/src/live_tv/dvr.rs",
+  "crates/plurxd/src/live_tv/cluster.rs",
   "crates/plurxd/src/live_tv/schedule.rs",
   "crates/plurxd/src/live_tv/webhook.rs",
   "docs/features/LIVE-TV-DVR-AND-REMINDERS-OPTIONS.md",
