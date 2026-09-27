@@ -641,11 +641,12 @@ function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
     return false;
   }
   let settled=false,priorMediaTime=null,advancingSteps=0;
+  let videoCallbacks=0,audioCallbacks=0,badFrames=0,lastFrameAt=null;
   state.overlapPhase="video";
   const live=()=>PLAYER===p&&preparedState(p)===state
     &&document.getElementById("video")===v&&preparedVideoElement()===spare
     &&playbackOwnsAttachedMedia(p);
-  const finish=(ready)=>{
+  const finish=(ready,reason="frame-proof")=>{
     if(settled) return;
     settled=true;
     if(state.exposeFrameTimer!=null){ clearTimeout(state.exposeFrameTimer); state.exposeFrameTimer=null; }
@@ -653,15 +654,45 @@ function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
       try{ spare.cancelVideoFrameCallback(state.exposeFrameCallbackId); }catch(e){}
     state.exposeFrameCallbackId=null;
     if(!live()) return;
-    if(ready) exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
-    else failPreparedReplacement(p,state,"successor frames did not advance during overlap");
+    if(ready){
+      exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
+      return;
+    }
+    const phase=state.overlapPhase;
+    const target=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
+    const driftMs=Math.round(Math.abs((spare.currentTime||0)-target)*1000);
+    const buffered=preparedAlignedBuffered(spare);
+    const callbackAgeMs=lastFrameAt==null?null:Math.round(performance.now()-lastFrameAt);
+    const diagnostic=`phase=${phase} video_callbacks=${videoCallbacks} `+
+      `audio_callbacks=${audioCallbacks} bad_frames=${badFrames} `+
+      `last_frame_age_ms=${callbackAgeMs==null?"none":callbackAgeMs} `+
+      `drift_ms=${driftMs} ready_state=${spare.readyState} buffered=${buffered}`;
+    // An occluded layer can stop issuing callbacks while its media clock and
+    // buffered decoder remain healthy. The old direct prepared exposure is
+    // safer than destroying that valid successor and restarting the film.
+    // A bad frame, changed viewer intent, or failed play is never excused.
+    const intent=state.overlapIntent;
+    const unchangedIntent=!intent||(v.muted&&v.volume===intent.volume
+      &&v.playbackRate===intent.playbackRate
+      &&(p.wantsPlayback!==false)===intent.wantsPlayback);
+    const direct=reason==="deadline"&&badFrames===0
+      &&(phase==="video"||phase==="audio")&&unchangedIntent
+      &&state.buffered&&state.warmFrameReady&&buffered
+      &&spare.readyState>=3&&!spare.error&&!spare.paused&&!spare.seeking
+      &&!v.paused&&!v.seeking&&driftMs<=PREPARED_ALIGN_SLACK_MS;
+    if(direct){
+      clientLog(Object.assign({level:"info",event:"prepared_replacement",
+        detail:"overlap_timeout_direct",
+        message:`prepared overlap used direct exposure: ${diagnostic}`},playbackContext()));
+      exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
+    }else failPreparedReplacement(p,state,`${reason}: ${diagnostic}`);
   };
   const requestFrame=()=>{
     try{ state.exposeFrameCallbackId=spare.requestVideoFrameCallback(observe); }
-    catch(e){ finish(false); }
+    catch(e){ finish(false,"frame-callback-error"); }
   };
   const transferAudio=()=>{
-    if(!live()||v.paused||v.seeking){ finish(false); return; }
+    if(!live()||v.paused||v.seeking){ finish(false,"viewer-intent"); return; }
     state.overlapIntent={wantsPlayback:p.wantsPlayback!==false,muted:!!v.muted,
       volume:v.volume,playbackRate:v.playbackRate,
       defaultPlaybackRate:v.defaultPlaybackRate};
@@ -681,12 +712,15 @@ function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
         state.overlapPhase="audio";
         priorMediaTime=null;advancingSteps=0;
         requestFrame();
-      },()=>finish(false));
-    }catch(e){ finish(false); }
+      },()=>finish(false,"successor-play-rejected"));
+    }catch(e){ finish(false,"successor-play-error"); }
   };
   const observe=(now,meta)=>{
     state.exposeFrameCallbackId=null;
-    if(!live()){ finish(false); return; }
+    if(!live()){ finish(false,"stale-owner"); return; }
+    lastFrameAt=performance.now();
+    if(state.overlapPhase==="video") videoCallbacks++;
+    else if(state.overlapPhase==="audio") audioCallbacks++;
     const mediaTime=Number(meta&&meta.mediaTime);
     // A seek may leave old-position frames queued after `seeked`. Increasing
     // timestamps alone can then prove the wrong position. Keep the incumbent
@@ -694,6 +728,7 @@ function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
     const target=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
     if(Number.isFinite(mediaTime)
        &&Math.abs(mediaTime-target)*1000<=PREPARED_ALIGN_SLACK_MS){
+      if(priorMediaTime!=null&&mediaTime<=priorMediaTime) badFrames++;
       advancingSteps=priorMediaTime!=null&&mediaTime>priorMediaTime
         ?advancingSteps+1:0;
       priorMediaTime=mediaTime;
@@ -703,24 +738,25 @@ function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
         return;
       }
     }else{
+      badFrames++;
       priorMediaTime=null;
       advancingSteps=0;
     }
     requestFrame();
   };
   const intentChanged=()=>{
-    if(!live()||v.paused||v.seeking){ finish(false); return; }
+    if(!live()||v.paused||v.seeking){ finish(false,"viewer-intent"); return; }
     const intent=state.overlapIntent;
     if(intent&&state.overlapAudioTransferred
        &&(!v.muted||v.volume!==intent.volume
           ||v.playbackRate!==intent.playbackRate
-          ||p.wantsPlayback===false)) finish(false);
+          ||p.wantsPlayback===false)) finish(false,"viewer-intent");
   };
   state.overlapListeners=[["pause",intentChanged],["seeking",intentChanged],
     ["volumechange",intentChanged],["ratechange",intentChanged]];
   for(const [name,listener] of state.overlapListeners)
     v.addEventListener(name,listener);
-  state.exposeFrameTimer=setTimeout(()=>finish(false),PREPARED_FRAME_PROOF_MS);
+  state.exposeFrameTimer=setTimeout(()=>finish(false,"deadline"),PREPARED_FRAME_PROOF_MS);
   requestFrame();
   return true;
 }
