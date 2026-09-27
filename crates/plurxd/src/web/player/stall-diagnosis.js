@@ -310,6 +310,15 @@ async function switchAutoRung(currentHeight,decision){
     // than the same Auto it has been reading all along.
     p.autoRequestedHeight=decision.height;
     p.abr.switching=true;
+    if(decision.reason==="bandwidth cliff"){
+      const decidedAtMs=performance.now();
+      clientLog(Object.assign({level:"info",event:"auto_quality_signal",
+        detail:"severe_estimate",
+        message:`severe Auto estimate sample_at_ms=${Math.round(p.abr.recentEstimateAtMs)} `+
+          `decision_at_ms=${Math.round(decidedAtMs)} `+
+          `sample_kbps=${Math.round(p.abr.recentEstimateKbps)} `+
+          `from=${currentHeight}p to=${decision.height}p`},playbackContext()));
+    }
     const outcome=await requestQualityChange(p,"auto-quality",reopen,
       {from:currentHeight,to:decision.height,switchReason:decision.reason});
     if(outcome==="prepared"&&p.directedChange&&!p.directedChange.settled){

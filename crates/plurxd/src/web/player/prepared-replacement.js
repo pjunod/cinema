@@ -275,13 +275,25 @@ function beginPreparedReplacement(p,action){
   // seconds ahead when the incumbent already has enough runway to play
   // until that second. The buffer gate below still requires overlap with the
   // actual incumbent position before exposure, so this cannot skip content.
-  const startLeadMs=Math.min(PREPARED_BUFFER_LEAD_MS+1000,
+  const autoMove=p.directedChange&&p.directedChange.autoMove;
+  const emergencyDownshift=autoMove&&autoMove.switchReason==="bandwidth cliff"
+    &&Number(autoMove.to)<Number(autoMove.from);
+  const ordinaryStartLeadMs=Math.min(PREPARED_BUFFER_LEAD_MS+1000,
     Math.max(0,Math.round((bufferRunway(v)-3)*1000)));
+  // At an emergency downshift the link has already been measured below this
+  // rung's safe rate. A three-second head start makes the buffer-overlap gate
+  // wait for the incumbent to catch the successor while that link is draining.
+  // One second still avoids starting behind the moving playhead; the ordinary
+  // overlap, two-second runway and decoded-frame proofs decide exposure.
+  const startLeadMs=emergencyDownshift
+    ?Math.min(1000,ordinaryStartLeadMs):ordinaryStartLeadMs;
+  const stageAtMs=performance.now();
   const state={actionId:action.action_id,sessionId:action.session_id,
     playlistUrl:action.playlist_url,controlBootstrap:action.control||null,
     mediaOriginMs:originMs,offeredOriginMs,
     selection:action.effective_selection,
     startAtSec:preparedLocalPositionMs(filmMs+startLeadMs,originMs)/1000,
+    stageAtMs,bufferReadyAtMs:null,overlapProofReadyAtMs:null,
     state:"building",hls:null,metadata:false,buffered:false,
     warmFrameReady:false,warmFrameCallbackId:null,
     exposeFrameTimer:null,exposeFrameCallbackId:null,
@@ -293,7 +305,8 @@ function beginPreparedReplacement(p,action){
   p.prepared=state;
   clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"staged",
     message:`preparing ${action.session_id} at film ${Math.round(filmMs/1000)}s `+
-      `(origin ${Math.round(offeredOriginMs/1000)}s, ${preparedSelectionText(action.effective_selection)})`},
+      `(origin ${Math.round(offeredOriginMs/1000)}s, ${preparedSelectionText(action.effective_selection)}) `+
+      `stage_at_ms=${Math.round(stageAtMs)} start_lead_ms=${startLeadMs}`},
     playbackContext()));
   try{
     spare.muted=true;
@@ -528,6 +541,11 @@ function notePreparedBuffer(p,state){
   if(!state.buffered){
     state.buffered=true;
     state.state="buffer_ready";
+    state.bufferReadyAtMs=performance.now();
+    clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"buffer_ready",
+      message:`prepared ${state.sessionId} buffer ready at_ms=${Math.round(state.bufferReadyAtMs)} `+
+        `stage_elapsed_ms=${Math.round(state.bufferReadyAtMs-state.stageAtMs)} `+
+        `through_ms=${through} film_ms=${Math.round(filmMs)}`},playbackContext()));
     queuePlaybackControlAcknowledgement(p,state.actionId,"buffer_ready",
       {buffered_through_ms:through});
   }
@@ -655,6 +673,12 @@ function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
     state.exposeFrameCallbackId=null;
     if(!live()) return;
     if(ready){
+      state.overlapProofReadyAtMs=performance.now();
+      clientLog(Object.assign({level:"info",event:"prepared_replacement",
+        detail:"proof_ready",
+        message:`prepared ${state.sessionId} overlap proof ready at_ms=${Math.round(state.overlapProofReadyAtMs)} `+
+          `buffer_elapsed_ms=${Math.round(state.overlapProofReadyAtMs-state.bufferReadyAtMs)} `+
+          `video_callbacks=${videoCallbacks} audio_callbacks=${audioCallbacks}`},playbackContext()));
       exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
       return;
     }
@@ -872,8 +896,12 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     retirePreparedPredecessor(p,state);
     queuePlaybackControlAcknowledgement(p,state.actionId,"committed",
       {first_frame_unix_ms:unixMs,committed_media_origin_ms:state.offeredOriginMs});
+    const committedAtMs=performance.now();
     clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"committed",
-      message:`switched to ${state.sessionId} at film ${Math.round(filmMs/1000)}s`},
+      message:`switched to ${state.sessionId} at film ${Math.round(filmMs/1000)}s `+
+        `commit_at_ms=${Math.round(committedAtMs)} `+
+        `stage_elapsed_ms=${Math.round(committedAtMs-state.stageAtMs)} `+
+        `proof_elapsed_ms=${state.overlapProofReadyAtMs==null?"none":Math.round(committedAtMs-state.overlapProofReadyAtMs)}`},
       playbackContext()));
   },()=>{
     // Switched, and nothing rendered. The honest answer is `failed`: the
