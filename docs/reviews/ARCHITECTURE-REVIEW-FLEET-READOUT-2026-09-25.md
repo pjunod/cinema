@@ -2,6 +2,8 @@
 
 **Status:** first-hour readout, mixed builds · **Starting build:** `f600d28230222005441cfc62301c306785c852ce` · **Observed:** 2026-09-25 02:24–03:29 UTC
 
+**Main movement:** PR #533 merged as `0915b3ee9e62` at 21:52 UTC; PRs #528, #511, #530 and #405 advanced main to `ea215603f` by 2026-09-26 00:03 UTC; the S-14/K-03 ledger correction #538 reached `71d1c1ecd` at 00:20 UTC. Independent merges including W-02 type checking #554 and the Live TV controls repair #560 reached `e680849fb` at 20:59 UTC. D-03 #534 then merged as `116559cb876`; independent cluster worker PR #532 advanced main to `b4b488556ce` before A-04 #527 finished qualification. Documentation-only Silo plan PR #563 then advanced main to `d95503c2523`, requiring A-04 to requalify again; neither merge was deployed to this fleet. A-04 #527 qualified on that base and merged as `52ab4ef79869`; its D3 trace matrix remains open, and this latest main is not yet deployed. The four nodes later changed independently: at 2026-09-26 21:31 UTC all checkouts were `abb6fe647`, while all running OCI labels/binaries were `42ea7a9af`. Physical installs remained on the earlier `8ae8cab1e136` builds. The closed 8ae8 hour is historical exact-build evidence; no 24-hour, seven-day or final-main acceptance carries over. Redeployment waits for final code/evidence merge.
+
 This appendix records read-only evidence for [K-02](../cluster/RAFT-SNAPSHOT-CADENCE-AND-CONSISTENT-CUT.md), [C-05](../server/DETAIL-READS-AND-STORAGE-AVAILABILITY.md), [C-08](../server/OBSERVABILITY-BASELINE.md), [P-02](../ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md), and [S-11](../streaming/CODEC-AND-GPU-QUALIFICATION.md). It supplements the [deployment record](ARCHITECTURE-REVIEW-FLEET-EVIDENCE-2026-09-24.md) on the integration branch. The four current nodes are `nynuc` (192.168.5.236), `m6` (192.168.4.14), `nuc4` (192.168.4.8), and learner `nuc3` (192.168.4.7); older plan aliases are not additional machines.
 
 ## Collection — a bounded history, not a completed window
@@ -525,3 +527,404 @@ rate and duration from the scan type: 29.97 fps/10 s for 1080i and
 including source cue times, transcoded cue times, positive advertisement and
 source-height mismatch. This is local code evidence, not an on-air drawn-text
 pass; exact-head fast lane and deployment remain owed.
+## Exact-main physical Release installs — 20:54–21:00 UTC
+
+After [PR #524](http://192.168.4.7:3000/noirr/plurx/pulls/524) merged,
+remote `main` and the independent deployment clone resolved to exact
+`8ae8cab1e136d0ac59fb9905f10b4a846b67ea5d`. The signed iOS and tvOS
+Release archives built from that source with Apple team `YHK542LK23`, passed
+`codesign --verify --deep --strict`, and installed in place on all six reachable
+physical Apple devices: `17air`, `17promax`, Bedroom Apple TV, iPad Mini,
+iPad Pro, and iPhone. Independent CoreDevice app queries found bundle
+`tv.plurx.app`, version `0.3.0`, build **185** on all six. All six app data
+containers remained accessible and held root entries last modified before
+the install; no uninstall or data reset was requested. The build/install log
+and sanitized independent device receipt are local at
+`/private/tmp/codex-apple-main8ae8-rollout-20260925.log` and
+`/private/tmp/codex-apple-main8ae8-physical-20260925.json` (receipt SHA-256
+`edd908aabc51a5f4ace78ede63731c39f1c3da4147cc6c6787c6740358bc5b6a`).
+Direct CoreDevice launches of the six Release apps were refused as locked or
+request denied at this point. Installation and retained-container observations
+do not prove A-02 controller playback, A-03 paging, L-03 captions, or A-04
+adaptive quality.
+
+The Android physical deployment on the same exact source built one
+lineage-signed, non-debuggable Release APK, versionCode **128**, SHA-256
+`0e8c90c9fce830ed114adf449b70b14fcb1f6af5a3499ab916a9ff4d4d70056b`.
+It was installed with `adb install -r` on five distinct reachable devices:
+TCL 9445X, Google TV Streamer, Pixel 10 Pro Fold, Pixel 11 Pro XL, and
+Motorola razr ultra 2025. The installed base APK hash and effective release
+signer `52c046be28f437ca19601b728617c6d4d1c85a13726092e06ac7d66738ff6c37`
+matched on every device; none remained debuggable, and each
+`firstInstallTime` was unchanged. No uninstall or data clear occurred.
+Sanitized receipt `/private/tmp/codex-android-release128-physical-20260925.json`
+has SHA-256 `64d7ec0a3616105110fa417282ce95e86f8439bfbbfdd111b9eadf4cccf8e88f`.
+
+Four Android phones were locked on the immediate revisit. The unlocked Google
+TV Streamer launched the signed Release main activity in 564 ms, with a
+resumed activity, running process and a 75-node UI tree owned by the package.
+That proves a cold launch, not D-02 lifecycle recovery, A-03 paging or D-03
+offline retention. The sanitized interaction receipt is
+`/private/tmp/codex-android-release128-interaction-20260925.json` (SHA-256
+`b8407738257ea1dc46e548c6073ccbbf19530234bbfb3eef8de454b5d22b1209`).
+Xiaomi 25019PNF3C, Lenovo TB322FC and iPhone 16 Pro were absent from the
+physical inventory and received no install.
+
+## Bedroom Apple TV Release remote paging — 21:03–21:04 UTC
+
+The exact `8ae8cab1e136` source also built a signed **Release**
+`plurx-tvOS-physical` UI-test runner. On the physical Bedroom Apple TV,
+`testLibraryPagingWithRemote` passed one test with zero failures in 73.97 s:
+XCUIRemote entered the Movies collection and moved focus until the loaded
+count rose beyond its first page. An independent post-test CoreDevice query
+still found `tv.plurx.app` 0.3.0, build 185. The result bundle is local at
+`/private/tmp/codex-apple-main8ae8-tvos-release-paging.xcresult`; the bounded
+run log SHA-256 is
+`e64fc2848e0e6fbd751770b97ba647e9b0650d1e9af2258237d9f61e93b173dc`.
+This closes the Apple TV Release remote-paging interaction check for A-03.
+Server request counts, frame times, filtering, and other devices remain open.
+The existing remote playback/caption tests use `DEBUG`-only fixture launch
+arguments, so this Release paging run does not test A-02 playback or L-03
+caption rendering.
+
+## A-04 candidate-branch Chrome two-cliff revisit — 21:12 UTC
+
+On the A-04 candidate branch based on merged main `8ae8cab1e136`, a
+Chrome run using binary `v0.3.0-4346-g96dfaa95a` shaped the two stages to 1099.3 and 349.1 kb/s with zero shaper errors. The first cliff
+**failed** its recovery check: a prepared-handoff `commit_timeout` led to a
+reopen, 12.009 s to first downshift, two restarts and a 5.0665 s maximum
+video gap. The second cliff passed its local check. Concurrent fleet and
+mobile builds were active during this run, so it is a failed candidate trace,
+not a complete D3 baseline. Raw, normalized and JUnit private receipts are
+`/private/tmp/codex-a04-exact-main8ae8-20260925/raw.json` (SHA-256
+`703901043f2a227a172f39d4a375f7882ff72fdbb9fa2afcd2c13f3b3385d9d6`),
+normalized SHA-256 `533882e8d91085281b156ee9ff31b0a33765fc4f300dbe522c5ea24406ee9dec`,
+and JUnit SHA-256 `5ff9d9bec5afa19164b91c83c8ce210a5a3d5d2b6540092bcab19cdefaa9a3`.
+A merged-main binary trace and the other browser/native/HDR rows remain owed.
+
+The idle-host rerun used the same candidate-branch binary
+`v0.3.0-4346-g96dfaa95a` after the concurrent builds ended. It measured
+7999.9, 1099.3 and 349.1 kb/s across baseline and both cliffs, with zero
+shaper errors. Both local recovery checks **passed**: 720→240p in 5.4614 s
+with a 100 ms maximum video gap, then 240→144p in 6.8382 s with a 66.8 ms
+maximum gap. Both sampled baselines were at least 0.998×; there were zero
+restarts, waits, stalls or hitches. The raw receipt is
+`/private/tmp/codex-a04-idle8ae8-20260925/raw.json` (SHA-256
+`201f361345c9b4534859579e8497a87b10ae9cf75331348e0d25e66ec784bc69`),
+normalized SHA-256 `78ef88f3e4ca2629936e6fc967b0eb01342e650eac5202580903e6362ba6746a`,
+and JUnit SHA-256 `bfd72f0894f4e6512b86568272ba6f51b31b24c93f02faf57bc5889c73ca5d4d`.
+The loaded-host failure and idle-host pass show a load-sensitive candidate;
+they do not constitute a binary trace of merged main `8ae8cab1e136` or
+complete the stable D3 platform matrix. A final exact-base trace
+is due after downstream merges.
+
+## W-02 exact-main browser checks — 21:13–21:17 UTC
+
+On `8ae8cab1e136`, an Acorn AST check measured `attachHls` at 15 lines
+(`player.js` 521–535) and `play` at 28 (`decode-tiers.js` 611–638), within
+the 5.4/5.5 orchestration limits. A real Chrome
+`scripts/web-hls-startup-browser-check` passed worker/fallback, local seek
+and reporter observations (log SHA-256
+`a2cb1fd711694b5f0c082f56db6d15ba83f09ced6f38b024afdfb730ec7c8c4d`; fixture
+SHA-256 `3e26afeaeeb2c3c053fdbcc720736a499254d3a971618d36b29c98a4fe80ca58`).
+The two first frames took 25.644 and 25.557 s; local +10 s seek logged
+zero new sessions, while the reporter named missing `core/cards.js` in its
+banner and reports.
+`scripts/subtitle-readiness-browser-check` passed a 0→1 cue transition
+within one session (log SHA-256
+`6703149bca4f2a9a8b5b9fce7cb92a7f57fabf06468adf729a5e8777df3798ac`; fixture
+SHA-256 `12c26f0692cd4764483b295ce9af32d98bb19bba0539f970368c8dbf66870961`).
+It recorded two empty subtitle-segment requests and one sidecar request.
+Logs are local under `/private/tmp/codex-w02-*-8ae8cab1e.log`.
+
+The full `make web-check` stopped at settings-sections case 30/31 on this
+tree because its Developer fixture omitted the shipped
+`subtitlePlaybackRangesCard` (`/private/tmp/codex-w02-web-check-8ae8cab1e.log`,
+SHA-256 `ce3c52956d1bc3ee93dab62039cdb8b2e55bb49e1a046112ea5af05fd479c739`).
+Fix `dac82e9e89c4` is queued for batched PR #527; no post-fix run is claimed
+here. The 5.1–5.3 `scripts/web-types` checker and baselines are absent, so
+the type-ratchet and full 5.4/5.5 acceptance remain open. Physical TV
+input evidence is also owed.
+
+## Exact main four-node rollout and interim observation — 21:22 UTC
+
+Pinned `8ae8cab1e136d0ac59fb9905f10b4a846b67ea5d` was deployed serially
+to the three voters (`nynuc`, `m6`, `nuc4`) and then to learner `nuc3` after
+the voter quorum, leader and apply lag remained healthy. Both Ansible plays
+finished with zero failed or unreachable hosts. At 21:22:28 UTC an
+independent SSH check of every node found both checkout and running OCI
+revision equal to that SHA, stamped binary `v0.3.0-4315-g8ae8cab1e`, Docker
+healthy with zero restarts, `/readyz` and `/metrics` HTTP 200, three fresh
+voters, zero stale voters, one learner, quorum available, leader known and
+apply lag zero. The sanitized four-node receipt is
+`/private/tmp/codex-fleet-main8ae8-after-rollout-20260925.json` (SHA-256
+`80bcdb418588e520e45b9fec1145ff721c72907aee8b8c97036a8ee20a7b661d`).
+The voter and learner deployment logs are local under
+`/private/tmp/codex-fleet-main8ae8-{voters,learner}-20260925.log`;
+their SHA-256 digests are
+`f1f53e1f9d14e618cbaa164b61bf92737bcea0ed41dbf814b4fbd24a74b98331`
+and `ab647c5ba79161a27cd1a1d4d68c421413c9169efa0fa6cc9a83ebb407a83d36`.
+
+This point sample also found a 524,288 soft/hard open-file limit on each
+container, 49–71 open FDs, OOM adjustment zero, NTP synchronized, and no
+`metadata_ahead_of_wal`, `EMFILE` or panic strings in each node's last ten
+minutes of Plurxd logs. All four exported DB/WAL/snapshot/log size gauges,
+backfill result counters and encoder/tone-map session families; the latter
+two had zero sessions at this idle point. The `/metrics` bodies were
+approximately 394 KiB. These are point observations, not the named active
+backfill, normal-use hour, busy-evening, clock-uncertainty or duration passes.
+
+An agent-owned, read-only **interim** collector started after the exact-build
+check at 21:25 UTC. Its single fleet process records all four nodes every
+30 seconds with UTC timestamps, exact build, quorum/raft and selected storage,
+backfill and encoder/tone-map metrics; every fifth minute it also records
+SSH-verified checkout/OCI, health, restart count, readiness, FD/open-file
+limits and recent WAL/EMFILE/panic counts. A separate bounded C-08 process
+records full `/metrics` HTTP status, body size, scrape duration and selected
+exposition hygiene every five minutes for one hour. The fleet process stops
+after seven days or at a shared 256 MiB file cap. Its first four HTTP ticks
+and first four SSH checks passed exact build/OCI and health; the C-08 first
+four scrapes were HTTP 200 and exact build. Files and bounded configuration
+are under
+`/Users/pjunod/code/plurx-agent/codex-fleet-main8ae8-observation-20260925/`.
+An initial launchd attempt had no route to the LAN; those failed ticks were
+discarded before the network-capable observation window began. Downstream
+main merges will require a new exact-main rollout and a fresh uniform-build
+window; this `8ae8cab1e136` observation cannot count toward the final-main
+one-hour, 24-hour or seven-day duration acceptance.
+
+## Signed Release physical interaction follow-up — 21:34 UTC
+
+On the Google TV Streamer, exact-main Android Release code128 showed an
+authenticated, populated Home. Selecting an existing title and Resume opened
+player controls. The Android media session reported `PLAYING`, but position
+remained `-1` and speed `0.0` before Home, one second after Home, and on
+return. This does **not** prove decoded playback or D-02 owner pause/resume.
+Movies View all showed 377 of 459 items loaded and 331 matching; selecting
+Unwatched showed 459 of 459 loaded and 328 matching, stable after four
+seconds. That is a bounded Android TV library/filter observation, not the
+named Lenovo, end-scroll, server-request or frame trace pass for A-03. Four
+phones were locked. No app was uninstalled or cleared and no credential or
+private content was read. Sanitized receipt:
+`/private/tmp/codex-android-release128-google-tv-acceptance-20260925.json`,
+SHA-256 `9018c904acb52ee6748e9fba0951dc2a3ef9d668981f29e3f011d86b10867c51`.
+
+The existing signed Release Bedroom Apple TV XCUIResult contains a UI
+activity timeline: app launch at 21:03:11.810 UTC, first wait for the
+library summary at 21:03:53.374, 58 remote Down activities between
+21:03:45.771 and 21:04:18.503, and a paging screenshot attachment at
+21:04:19.534. The passing assertion confirms the loaded count exceeded its
+initial page. The sanitized activity summary is
+`/private/tmp/codex-apple-main8ae8-tvos-release-activity-summary-20260925.json`
+(SHA-256 `74ae9263952a07893eaa5df29573779fd2f9a44182b7771223c1f6dd8b310cde`).
+Read-only server audit found no retained access-log file on the four nodes.
+The surviving `nynuc` Plurxd log had 15 lines in the test interval, with no
+GET/POST, library/collection, cursor or page entry; the other three current
+containers started after that interval. It cannot supply request/page or
+frame timing attribution. Sanitized audit SHA-256:
+`0efa8df36ae4f5254a9ae61ae25d7ce48a7336c62556d2b17bb7100ad9b324d9`.
+No Apple app reinstall or further test was performed. The existing Apple
+playback/caption test fixture enters through `#if DEBUG`, so it does not
+establish signed Release A-02 playback or L-03 captions; request/frame,
+filter and controller playback evidence remain owed.
+
+## Exact-main read-only acceptance surface audit — 21:39 UTC
+
+A four-node `/metrics` point audit returned HTTP 200, exact build and
+394,086–394,828-byte bodies. The selected K-02 size, snapshot and commit
+families, C-05 backfill counters, S-11 encoder availability/session and
+tone-map session families, and seven C-08 M5 release-evidence families were
+present. Targeted checks found zero route UUID, session/token/file-ID label,
+mount-path or ANSI hits in metric samples. Software and VA-API boot probes
+were available on all four; QSV was available on `nynuc`, `nuc4` and `nuc3`,
+while NVENC and VideoToolbox were unavailable. Encoder/tone-map session
+counters were zero at this idle point. `plurx_index_status`, the C-05 M3
+storage-availability family and `plurx_cluster_clock_*` had zero exported
+series on all four; the named C-05 availability and K-06 clock measurements
+therefore remain open. Sanitized point audit:
+`/private/tmp/codex-fleet-main8ae8-owed-point-audit-20260925.json`, SHA-256
+`4e24ab997d23cd9dd9170bc64f9bb2cc7949884df2b0d4a8c7f3a7caf77536a2`.
+
+On `m6`, read-only `GET /api/v1/server` returned a 32-character safe
+`x-request-id` both normally and when given the plan's deliberately unsafe
+header; the unsafe value was not echoed. Private sanitized probe SHA-256:
+`8b9a8fd9bf5c5e2566a09ba7d72892dc185154613365b7d8d45cca7ee6254283`.
+The most recent 200 Docker log lines on every node had zero ANSI escapes or
+mentions of that unsafe path; log-hygiene receipt SHA-256
+`210a6e23a85e407830712cbffa9dab98cfa9ba28c6d86128b9258ac91d09d2e0`.
+This checks the safe point surfaces of C-08. At that audit, JSON-mode
+restart, client play/seek, active backfill/availability, busy P-02 load and
+duration windows had not been exercised. The later bounded play/seek is
+recorded below.
+
+For S-11, a separate read-only exact-build inventory found the container's
+FFmpeg compiled H.264 and HEVC NVENC, QSV and VA-API encoders on all four
+nodes, and no VideoToolbox encoder. Host PCI inventory identified Intel
+Arrow Lake Arc Pro on `nynuc`, AMD Phoenix1 on `m6`, and Intel Alder Lake Iris
+Xe on `nuc4`/`nuc3`. This is distinct from the boot probe above: compiled
+NVENC remains unavailable without NVIDIA hardware, and `m6`'s compiled QSV
+is not probe accepted. Sanitized inventory:
+`/private/tmp/codex-s11-main8ae8-encoder-compiled-inventory-20260925.json`,
+SHA-256 `9717b6008e960c66360feff14d02c7d5431a33dd9dea1ed8fccdccce21f415d6`.
+Actual selected family, accepted-session increments and the reset-aware
+seven-day table remain owed.
+
+## Bounded active client and device observations — 21:46–21:53 UTC
+
+An existing authenticated Chrome session on exact-main `nynuc` opened one
+existing 1080p H.264/EAC3 item. Resume rendered 1920×816 video; one Forward
+10 seconds action was made. The video element was ready with `readyState=4`,
+and its time advanced from 1091.08 to 1107.53 seconds during brief resumed
+playback. The player later showed Pause without a visible error and was
+closed. The item title and identifier were omitted from the sanitized receipt
+`/private/tmp/codex-main8ae8-chrome-active-flow-20260925.json` (SHA-256
+`d7894b5a75070a855867dcff63001fc7c074069e8136db62b9e3754e9b60831b`).
+Between the 21:47:36 and 21:50:25 `nynuc` metric samples, item GET 2xx rose
+37, playback GET 2xx 50, playback POST 2xx 68, playback DELETE 2xx one,
+Chrome remux TTFF count one, remux delivered bytes 201,191,996 and remux
+watched seconds 111.226. Playback POST 4xx rose five. Encoder-session,
+tone-map-session, seek and stalled-second counters did not rise. These are
+node-wide counters with other active sessions; none of the full deltas can be
+assigned solely to this Chrome flow. The bounded visual play/seek supports a
+C-05 detail-read and C-08 client-flow point, but supplies no per-request
+latency, active backfill/availability, JSON-mode logging, or normal-use hour.
+It also does not establish selected hardware use for S-11.
+
+The Google TV Streamer on exact-main signed Android Release code128 provided
+stronger D-02 playback evidence than the earlier media-session reading:
+finite-title elapsed labels advanced 1:47→1:58→2:16→2:40; Plurx's AVC decoder
+reported 3,543 rendered/2 dropped frames before Home and 377 rendered/zero
+dropped after return. Home at 21:50:38 entered BUFFERING, then PAUSED by
+21:50:45; return at 21:50:54 resumed PLAYING, with the elapsed label reaching
+2:40 by 21:51:06. An explicit Home plus media-pause at 21:51:37 stayed
+PAUSED after return at 21:51:45. `media_session` position `-1`/speed `0` was
+therefore an insufficient playback oracle. This is a partial Google TV case:
+the named Pixel one-second Home pause and notification, audiobook, Lenovo,
+Shield and failover cases remain open. Sanitized receipt SHA-256
+`4846f3d827fe0e3be858263a32f617335becede099a2f767c2b366250a78138f`.
+
+During the overlapping 21:45:10–21:50:10 C-08 scrapes, total HTTP requests
+rose 1,064/1,309/655/593 on `nynuc`/`m6`/`nuc4`/`nuc3`. All four still had
+315 RED series and exact-build HTTP 200 responses. The 30-second uniform
+samples through 21:51:10 showed no encoder-session or tone-map-session
+increase on any node. Multiple clients overlapped, so these counters do not
+attribute the Google TV frames to a particular server request or prove an
+accepted hardware session. They are interim current-main activity only.
+
+At 21:52 UTC, CoreDevice still showed Bedroom Apple TV paired, booted and
+tunnel-connected. Launching its already-installed signed Release185 app was
+denied by the device with `System is asleep - foreground app launch
+forbidden`. No reinstall or further UI test occurred; A-02 Release playback
+and L-03 native caption interaction remain owed.
+
+The A-04 platform prerequisite probe used a temporary FFmpeg build with
+`zscale`/encoders and a cached Firefox 156.0.1 plus geckodriver 0.37.1 in
+`/private/tmp`; a Firefox WebDriver session returned HTTP 200 after temporary
+profile redirects. Safari automation was enabled and GET status returned
+HTTP 200, but POST session failed with HTTP 500 after 30.01 seconds, before
+playback. No Firefox, Safari or HDR acceptance run occurred. Sanitized
+prerequisite receipt SHA-256
+`ca2efa75ca55978ed5ca347e4b39f942f1fa474c635ca0a15b9282b5d23abe8b`.
+The same Safari POST/session failure persisted in a temporary `gui/501` Aqua
+LaunchAgent with Window Server bootstrap/TCC errors; that job and its port
+were removed. Its follow-up receipt SHA-256 is
+`c35b67a42f1c8d2dba79fad5cc061f24241631b87bc77ec7b063720f91dcff81`.
+
+## Historical `8ae8cab1e136` hour — closed at 22:26 UTC
+
+The bounded `8ae8cab1e136` collector ended cleanly after main had advanced
+to `0915b3ee9e62`. It recorded 122 uniform ticks per node from 21:25:40 to
+22:26:10 UTC (3,630 seconds), with a maximum 30-second gap. Every tick had
+the pinned build, HTTP 200, quorum, known leader and zero apply lag; none had
+an uptime reset or collection error. Thirteen independent SSH health ticks
+per node covered at least 3,600 seconds with maximum 301–302-second gaps.
+Every health tick had exact checkout/running OCI, Docker healthy, zero
+restarts and readyz/metrics 200; the sampled ten-minute logs had zero WAL,
+EMFILE or panic alerts.
+
+| Node | FD range | Commit-index increase | Snapshot builds | Build p50/p99 bucket ceilings |
+|---|---:|---:|---:|---|
+| `nynuc` | 49–64 | 37,353 | 4 | 1 s / 1 s |
+| `m6` | 55–75 | 37,352 | 4 | 0.5 s / 0.5 s |
+| `nuc4` | 62–76 | 37,352 | 4 | 0.5 s / 0.5 s |
+| `nuc3` | 47–50 | 37,351 | 4 | 0.25 s / 0.5 s |
+
+The build quantiles are histogram bucket ceilings from four builds per node,
+not measured 24-hour percentiles. All sampled apply lag values were zero,
+including at builds. The receipt also records first/last/min/max DB, WAL,
+snapshot and log bytes per node. K-02 still needs a single final-build
+24-hour B/E/S/W window and a prepared follower restart/catch-up rate A.
+
+The C-08 scraper recorded 14 samples per node from 21:25:47 to 22:26:09 UTC
+(3,622 seconds), including a supplementary post-hour sample. All 56 had
+exact build, HTTP 200, 315 RED series and zero targeted hygiene hits.
+Exposition bodies ranged from 394,049 to 395,071 bytes; the slowest scrape
+was 0.133429 seconds, below the plan's 2 MB / 500 ms flags. Total HTTP
+requests rose 10,485/14,389/7,238/7,156 on
+`nynuc`/`m6`/`nuc4`/`nuc3`. The browser and Google TV flows above supplied
+bounded activity inside this interval. They do not establish a whole
+normal-use hour, JSON-mode logs, or source-attributed failure-path counters;
+C-08 remains open on final main.
+
+The one-hour sanitized summary is
+`/private/tmp/codex-fleet-main8ae8-interim-hour-summary-20260925.json`
+(SHA-256 `0359130f02e929c397e938c08a980fa120dd72edee5a44dba59ffbf9328e55f2`).
+It names the immutable raw compressed uniform SHA-256
+`2f76a293eaaef9b0d1bd35674b04f9fef83aec96f6552c3d138f900392350b7d`,
+health SHA-256
+`402f5c643d177771764ca9df95d73252ea7561cf8a4408b07764f645e47a31ed`,
+and C-08 JSONL SHA-256
+`e74aacdcabac20ecc9d4e3b57f9fc5417db535b5e54ce6b62a6324e9f910b025`.
+No 24-hour, seven-day, busy-evening, clock-uncertainty or final-main pass is
+claimed from this closed historical interval.
+
+At 21:58:20–21:58:21 UTC, a separate read-only C-05 sidecar query on the
+still-running `8ae8cab1e136` nodes found schema v10 and zero pending or
+negative `fragment_indexes` markers everywhere: positive/total counts were
+2,270 on `nynuc`, 1,518 on `m6`, 4,327 on `nuc4` and zero on learner `nuc3`.
+Zero pending markers do not prove active postdeploy backfill or M3 storage
+availability. Sanitized receipt SHA-256
+`cab73129961001ddc1c3a80650441c20143d4e05172f26888a9fd689e250d350`.
+
+## Historical Google TV library revisit — 22:33–22:40 UTC
+
+On the signed Release128 Google TV Streamer still running source
+`8ae8cab1e136`, the Movies grid already had all 459 items cached. Four
+Everything↔Unwatched cycles held 459/459 loaded with 459 versus 328 matching
+items, without a premature empty state. After 100 rapid vertical swipes,
+the end viewport contained three clickable cards, consistent with 459 items
+in four columns; ten further swipes left that viewport unchanged.
+
+`dumpsys gfxinfo` over the grid/filter window recorded 561 frames, 43 janky
+(7.66%), with p50/p90/p95/p99 frame times of 16/25/36/48 ms. This was on
+Google TV, not the named Lenovo 6,000-title category, and the p95/p99 values
+do not meet a 16 ms bar. The category cache prevented a fresh first-page
+request observation. The historical collector had stopped before this visit
+and retained aggregate HTTP counts only, so it cannot supply per-route
+offset/page counts; a full 459-item order/duplicate scan was not performed.
+A-03 acceptance remains open. Sanitized receipt SHA-256
+`f33299ff467954e487863c12e4fe6201341488507fc774ccc06a079552f2f221`.
+
+## A-04 integrated Firefox repeat — 2026-09-26 00:58 UTC
+
+The unmerged A-04 integrated release candidate based on main `71d1c1ecd` plus the reviewed D-03 candidate produced a second Firefox two-cliff trace. Its earlier Firefox run reached playback but exceeded the first 100 ms video-gap limit at 134.26 ms while the second gap was 99.94 ms. The repeat failed more substantially: in the 1,100 kb/s stage, measured media delivery was 613.2 kb/s; Auto first moved 720→144p at 3.248 s and later upgraded 144→240p at 68.235 s. In the 350 kb/s stage it moved 240→144p at 10.874 s with one restart, a 1.733 s maximum video gap, one wait and two hitches. This is variable candidate behavior and does not qualify D3 or current main. Local raw report `/private/tmp/codex-a04-firefox-integrated-20260926.json` SHA-256 `82f79e6a333dc4503a8748c7d2f5608a7e8e8e0a1d5d31b542a8eb6c6e061a4f`.
+
+## Four-node later mixed-source point — 2026-09-26 21:31 UTC
+
+A read-only SSH/OCI/HTTP probe found all four nodes at checkout `abb6fe64729e` (the #557 workboard merge) while the running image revision and binary stamp were `42ea7a9af48d` (the #547 HEVC merge). Containers started between 03:10 and 03:25 UTC. All four were Docker healthy with zero restarts, `/readyz` and `/metrics` HTTP 200, quorum and leader known, zero apply lag and NTP synchronized; their last ten-minute logs had no `metadata_ahead_of_wal` or EMFILE hit. The deployment controller for this transition is unknown. This is a mixed checkout/runtime point on two historical commits, not current main `e680849fb`, and supplies no continuous 24-hour or seven-day acceptance. The previous 8ae8 one-hour receipt retains its own exact-build interval and does not extend to this point. Sanitized local receipt `/private/tmp/codex-fleet-8ae8cab1e136-after-rollout-20260926.json` SHA-256 `041d3ed8a621ef88d1a76536ab5badeda5f3feaf5cff709d09e90300cf844d35`.
+
+A bounded read-only journal/process check of 03:00–03:35 UTC found SSH from the controller Mac to `nynuc`, `m6` and `nuc3`, and three Ansible module sudo invocations on `m6`. `nuc4` received SSH from `nuc3` before its 03:24 container start. No rollout controller was still active at the 21:35 UTC check. These observations suggest Ansible activity but do not identify the initiating task or prove that a single controller performed all four changes. Final rollout must confirm the current SHA, absence of a competing controller, and quorum/WAL health before and after each serial node. Sanitized attribution receipt `/private/tmp/codex-fleet-42ea-controller-attribution-20260926.json` SHA-256 `2de4cd863e3e4bd8457936e2921affcad5ba0dc2430b3200ccb2b3874758686a`.
+
+## A-04 policy-patch Firefox and Safari — 2026-09-26
+
+The unmerged source-exact `9ee9817d4` Firefox two-cliff run failed: first stage moved 720→144p at 5.978 seconds, then upgraded 144→240p at 69.915 seconds under the link cap, with a 216.66 ms video gap; the second moved 240→144p at 11.811 seconds, restarted once, and had a 1,766.68 ms gap, three waits and four hitches. Raw, normalized and JUnit SHA-256 values are `90365609622681e73bb7e03d9e9539275b27a40396953b7cccd1731250875435`, `71eea0dc10c31fa72ad7c605f841fb92ea344f42c6ff57befda3fae0ac771b7d` and `514a536fa72e2feb29d6fc15fee43d3793ba0952e717d8b91e72548c6f383850`. A source-exact Safari attempt returned GET status 200, then POST session 500 after 30.011 seconds before playback; it was not retried. These are failed candidate/prerequisite observations, not final-main D3 or Safari acceptance.
+
+## A-04 later Chrome candidate — 2026-09-26
+
+The unmerged source-exact `4d1c1c5ce` Chrome candidate downshifted 720→240p at the first cliff (first target frame 5.502 seconds, downshift 7.215 seconds, 1,099.3/1,100 kb/s media/link) and 240→144p at the second (first frame 6.026 seconds, downshift 7.672 seconds, 349.1/350 kb/s). It had zero restarts, upgrades, waits, stalls and hitches, but 133.30 and 166.70 ms maximum frame gaps exceeded the strict 100 ms limit. The earlier candidate Chrome pass was not repeatable, and D3 remains open. Raw, normalized and JUnit SHA-256 values are `82aa71ea978a4ad777dacab7ed5d4d29386afee6566a3e1aa3cdd5594536c68b`, `78f88a803ba5d53a6a454c8cf8db28d43bd3c0de6b4feb0d439fa8130f0f3985` and `b868b3f2ceac7c8d3a691529b27893ff59c3966e61002ab3a82b5139e5633fb0`. This is candidate evidence, not final-main or platform-matrix acceptance.
+
+A corrected-probe continuity repeat against the same exact `4d1c1c5ce` binary also failed the unchanged 100 ms criterion: 6.973/7.849-second downshifts and 133.3/166.6 ms gaps, first within one 240p session and second across 240→144p. Restarts, upgrades, waits, stalls and hitches remained zero. The result does not support a probe-only explanation for the failure. Raw, normalized and JUnit SHA-256 values are `cbdfbe3ef2f0ae0be48fa60e8fcccf8ac3680cf2a8cb327a5434907030e28a6b`, `78f88a803ba5d53a6a454c8cf8db28d43bd3c0de6b4feb0d439fa8130f0f3985` and `6de214fcef0d554722303edc2df23df2f9b29d6d7c3d7dff2a37abd291e36ca6`. No unproved probe or player change is included in #527.
+
+## A-04 native/HDR feasibility — 2026-09-26
+
+A read-only CoreDevice audit found Bedroom Apple TV and 17 Pro Max connected, both with historical signed Plurx Release build185 rather than the unmerged A-04 candidate build188. No app was launched or installed and no trace was collected. Source-exact Apple TV and iPhone 8→1.5 and 8→1.1→0.35 Mb/s physical HDR traces, Dolby Vision grade observation and stalled seconds, Auto switches, first-frame gap, recovery time, HDR→SDR and delivered/advertised-rate metrics remain owed after final-main signing/install. Sanitized feasibility receipt SHA-256 `8ce536157272135c2955f4070d32de86b32d02cd9dcb0ca7343a1a1ae35db0f8`.
