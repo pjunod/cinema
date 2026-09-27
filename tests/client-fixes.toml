@@ -1,6 +1,16 @@
 version = 1
 enforce_after = "e8a910f"
 
+# A-04 physical shaping acceptance refuses a saved-server fallback when the
+# explicit Debug launch proxy is absent or does not match the server identity.
+[[fixes]]
+id = "apple.physical-acceptance-proxy-origin"
+commits = ["31a5a4697"]
+source = "clients/apple/Sources/AppModel.swift"
+source_anchor = "let acceptance = PlaybackAcceptanceLaunch.current()"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPhysicalDeviceAcceptanceLaunchReadsOnlyExplicitDebugDefaults"
+
 # D-03's internal reader corrections need a durable source-to-test bridge.
 # The Android PDF checks below are source contracts; simulator/device behavior
 # remains separate acceptance evidence on the D-03 workboard.
