@@ -39,7 +39,9 @@ const PREPARED_ALIGN_ATTEMPTS=2;
 // queue. Prove the successor advances monotonically before it takes the
 // picture; the incumbent remains visible while these frames are checked.
 const PREPARED_MONOTONIC_FRAME_STEPS=3;
-const PREPARED_FRAME_PROOF_MS=500;
+// Two four-frame observations (before and after audio transfer) need roughly
+// one third of a second at 24 fps; leave a bounded margin for callback jitter.
+const PREPARED_FRAME_PROOF_MS=800;
 // A switch that never renders is a failed preparation, and the server is owed
 // that answer rather than a 330-second silence.
 const PREPARED_FIRST_FRAME_MS=8000;
@@ -283,6 +285,9 @@ function beginPreparedReplacement(p,action){
     state:"building",hls:null,metadata:false,buffered:false,
     warmFrameReady:false,warmFrameCallbackId:null,
     exposeFrameTimer:null,exposeFrameCallbackId:null,
+    overlapPhase:null,overlapIntent:null,overlapAudioTransferred:false,
+    overlapListeners:null,incumbentElement:v,
+    incumbentStyle:{position:v.style.position,inset:v.style.inset,zIndex:v.style.zIndex},
     incumbentHls:null,incumbentLoadPaused:false,incumbentResumeTimer:null,
     frameTimer:null,framePollTimer:null,frameListener:null,startedAt:Date.now()};
   p.prepared=state;
@@ -292,12 +297,15 @@ function beginPreparedReplacement(p,action){
     playbackContext()));
   try{
     spare.muted=true;
-    // Keep the prepared decoder in the compositor under a nearly transparent
-    // overlay. display:none can suspend its video frames in Chrome, so the
-    // first visible frame may cost several more frame intervals.
+    // Both pictures keep their final geometry while the successor decodes.
+    // The incumbent remains the visible and authoritative layer until the
+    // successor has advanced under it after the audio handoff.
+    v.style.position="absolute";
+    v.style.inset="0";
+    v.style.zIndex="2";
     spare.style.position="absolute";
     spare.style.inset="0";
-    spare.style.opacity="0.001";
+    spare.style.opacity="";
     spare.style.pointerEvents="none";
     spare.style.zIndex="1";
     spare.style.display="";
@@ -626,9 +634,14 @@ function preparedAlignedBuffered(spare){
 // otherwise step the visible picture backward just after the switch. A browser
 // that does not render the warm layer keeps the immediate path.
 function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
-  if(!state.warmFrameReady||typeof spare.requestVideoFrameCallback!=="function")
+  if(typeof spare.requestVideoFrameCallback!=="function")
     return exposePreparedReplacement(p,state,v,spare,filmMs);
+  if(!state.warmFrameReady){
+    failPreparedReplacement(p,state,"occluded successor produced no frame callback");
+    return false;
+  }
   let settled=false,priorMediaTime=null,advancingSteps=0;
+  state.overlapPhase="video";
   const live=()=>PLAYER===p&&preparedState(p)===state
     &&document.getElementById("video")===v&&preparedVideoElement()===spare
     &&playbackOwnsAttachedMedia(p);
@@ -641,7 +654,35 @@ function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
     state.exposeFrameCallbackId=null;
     if(!live()) return;
     if(ready) exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
-    else failPreparedReplacement(p,state,"successor frames did not advance before exposure");
+    else failPreparedReplacement(p,state,"successor frames did not advance during overlap");
+  };
+  const requestFrame=()=>{
+    try{ state.exposeFrameCallbackId=spare.requestVideoFrameCallback(observe); }
+    catch(e){ finish(false); }
+  };
+  const transferAudio=()=>{
+    if(!live()||v.paused||v.seeking){ finish(false); return; }
+    state.overlapIntent={wantsPlayback:p.wantsPlayback!==false,muted:!!v.muted,
+      volume:v.volume,playbackRate:v.playbackRate,
+      defaultPlaybackRate:v.defaultPlaybackRate};
+    state.overlapPhase="audio-starting";
+    // The old picture stays on top while the successor's audible clock starts.
+    // This absorbs a decoder resync before any successor frame is exposed.
+    v.muted=true;
+    state.overlapAudioTransferred=true;
+    spare.muted=state.overlapIntent.muted;
+    try{
+      spare.volume=state.overlapIntent.volume;
+      spare.defaultPlaybackRate=state.overlapIntent.defaultPlaybackRate;
+      spare.playbackRate=state.overlapIntent.playbackRate;
+      const started=spare.play();
+      Promise.resolve(started).then(()=>{
+        if(settled||!live()) return;
+        state.overlapPhase="audio";
+        priorMediaTime=null;advancingSteps=0;
+        requestFrame();
+      },()=>finish(false));
+    }catch(e){ finish(false); }
   };
   const observe=(now,meta)=>{
     state.exposeFrameCallbackId=null;
@@ -656,17 +697,31 @@ function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
       advancingSteps=priorMediaTime!=null&&mediaTime>priorMediaTime
         ?advancingSteps+1:0;
       priorMediaTime=mediaTime;
-      if(advancingSteps>=PREPARED_MONOTONIC_FRAME_STEPS){ finish(true); return; }
+      if(advancingSteps>=PREPARED_MONOTONIC_FRAME_STEPS){
+        if(state.overlapPhase==="video") transferAudio();
+        else finish(true);
+        return;
+      }
     }else{
       priorMediaTime=null;
       advancingSteps=0;
     }
-    try{ state.exposeFrameCallbackId=spare.requestVideoFrameCallback(observe); }
-    catch(e){ finish(false); }
+    requestFrame();
   };
+  const intentChanged=()=>{
+    if(!live()||v.paused||v.seeking){ finish(false); return; }
+    const intent=state.overlapIntent;
+    if(intent&&state.overlapAudioTransferred
+       &&(!v.muted||v.volume!==intent.volume
+          ||v.playbackRate!==intent.playbackRate
+          ||p.wantsPlayback===false)) finish(false);
+  };
+  state.overlapListeners=[["pause",intentChanged],["seeking",intentChanged],
+    ["volumechange",intentChanged],["ratechange",intentChanged]];
+  for(const [name,listener] of state.overlapListeners)
+    v.addEventListener(name,listener);
   state.exposeFrameTimer=setTimeout(()=>finish(false),PREPARED_FRAME_PROOF_MS);
-  try{ state.exposeFrameCallbackId=spare.requestVideoFrameCallback(observe); }
-  catch(e){ finish(false); }
+  requestFrame();
   return true;
 }
 // Phase two: the exposure, unchanged. Intent is sampled at the last reversible
@@ -685,19 +740,22 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
   // Intent is sampled at the last reversible boundary. Preparation can take
   // seconds, during which the viewer may pause, mute, or change rate; copying
   // the earlier snapshot would overwrite that newer choice.
-  const intent={
+  const intent=state.overlapIntent||{
     wantsPlayback:p.wantsPlayback!==false,
     muted:!!retired.muted,
     volume:retired.volume,
     playbackRate:retired.playbackRate,
     defaultPlaybackRate:retired.defaultPlaybackRate
   };
+  detachPreparedOverlapListeners(state);
+  state.overlapAudioTransferred=false;
+  state.overlapPhase="exposed";
   state.predecessor={hls:predecessor,element:retired,sessionId:p.sessionId,
     probeUrl:p.probeUrl,offset:p.offset,wantsPlayback:p.wantsPlayback,
     health:p.health,healthObservedAt:p.healthObservedAt,
     presentationAdvancedAt:p.presentationAdvancedAt,
-    muted:retired.muted,volume:retired.volume,playbackRate:retired.playbackRate,
-    defaultPlaybackRate:retired.defaultPlaybackRate};
+    muted:intent.muted,volume:intent.volume,playbackRate:intent.playbackRate,
+    defaultPlaybackRate:intent.defaultPlaybackRate};
   // Authoritative before visible, so anything that reads PLAYER.hls during the
   // swap reads the instance that owns the picture.
   p.hls=state.hls;
@@ -724,9 +782,8 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
   }catch(e){}
   spare.style.display="";
   // The prepared video already fills the player in its own compositor layer.
-  // Keep that geometry through its first visible frames; removing the absolute
-  // positioning here can make the browser rebuild the layer at exposure.
-  spare.style.opacity="";
+  // Keep its geometry and opacity through the exposure; only the incumbent
+  // layer leaves the picture after successor frames were proven beneath it.
   spare.style.pointerEvents="";
   spare.removeAttribute("aria-hidden");
   retired.style.display="none";
