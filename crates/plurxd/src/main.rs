@@ -122,6 +122,117 @@ pub(crate) fn test_tempdir() -> std::io::Result<tempfile::TempDir> {
     tempfile::tempdir_in(root)
 }
 
+/// Create an executable test fixture (a script standing in for FFmpeg, a
+/// tool, a probe) that this process can execute at once.
+///
+/// Writing it here with `std::fs::write` and then executing it races every
+/// other test thread: a child forked anywhere in this process while the write
+/// descriptor is open inherits it, and until that child reaches `exec` (which
+/// closes it, being close-on-exec) the kernel refuses to execute the file with
+/// `ETXTBSY` ("Text file busy"). On a loaded runner that window is long enough
+/// to hit. So this process never opens the file for writing at all: a `/bin/sh`
+/// child writes it and sets its mode, and the only writable descriptor lives
+/// and dies in that child's process tree before this returns.
+#[cfg(all(test, unix))]
+pub(crate) fn write_test_executable(
+    path: impl AsRef<std::path::Path>,
+    contents: impl AsRef<[u8]>,
+    mode: u32,
+) {
+    use std::io::Write;
+
+    let path = path.as_ref();
+    let mut writer = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("cat > \"$1\" && chmod \"$2\" \"$1\"")
+        .arg("write_test_executable")
+        .arg(path)
+        .arg(format!("{mode:o}"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("spawn a writer for {}: {error}", path.display()));
+    writer
+        .stdin
+        .take()
+        .expect("writer stdin")
+        .write_all(contents.as_ref())
+        .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+    let output = writer
+        .wait_with_output()
+        .unwrap_or_else(|error| panic!("wait for the writer of {}: {error}", path.display()));
+    assert!(
+        output.status.success(),
+        "writing {} failed: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(all(test, unix))]
+mod test_executable_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// The race `write_test_executable` exists for, run on purpose: other
+    /// threads fork continuously while fixtures are written and executed at
+    /// once. Written in-process (`std::fs::write` then `set_permissions`),
+    /// this fails with `ETXTBSY` within a few hundred iterations on a busy
+    /// host; written by the helper, no descriptor of this process is ever
+    /// writable on the fixture, so every exec succeeds.
+    #[test]
+    fn a_fixture_executes_at_once_while_other_threads_fork() {
+        let root = crate::test_tempdir().expect("root");
+        let stop = Arc::new(AtomicBool::new(false));
+        let forkers: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Acquire) {
+                        let _ = std::process::Command::new("/bin/true").status();
+                    }
+                })
+            })
+            .collect();
+        let outcome = std::panic::catch_unwind(|| {
+            for index in 0..300 {
+                let path = root.path().join(format!("fixture-{index}"));
+                crate::write_test_executable(&path, "#!/bin/sh\nexit 7\n", 0o700);
+                let status = std::process::Command::new(&path)
+                    .status()
+                    .unwrap_or_else(|error| panic!("fixture {index} did not execute: {error}"));
+                assert_eq!(status.code(), Some(7), "fixture {index} ran its own body");
+            }
+        });
+        stop.store(true, Ordering::Release);
+        for forker in forkers {
+            forker.join().expect("forker");
+        }
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn a_fixture_gets_exactly_the_mode_asked_for() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = crate::test_tempdir().expect("root");
+        for mode in [0o700, 0o755, 0o500] {
+            let path = root.path().join(format!("mode-{mode:o}"));
+            crate::write_test_executable(&path, "#!/bin/sh\n", mode);
+            let actual = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o7777;
+            assert_eq!(actual, mode, "{}", path.display());
+            assert_eq!(std::fs::read(&path).expect("contents"), b"#!/bin/sh\n");
+        }
+    }
+}
+
 /// A scoped tracing subscriber for one test, with a global default behind it.
 ///
 /// `tracing::subscriber::set_default` alone is not enough in a parallel test
@@ -3853,6 +3964,49 @@ mod startup_tests {
         (address, stop, served)
     }
 
+    /// How long a timeout test waits for a response before calling it a
+    /// hang.
+    const TIMEOUT_TEST_HANG_GUARD: Duration = Duration::from_secs(20);
+
+    /// How long a header-timer test waits for the server to close the socket.
+    /// The server under test closes it on the 80 ms header timer from
+    /// [`test_http_timeouts`]. This bound must separate that timer from two
+    /// failures: no timer at all (nothing else closes an idle HTTP/1
+    /// connection), and `serve_http` ignoring the timeouts it was given and
+    /// applying the production [`HEADER_READ_TIMEOUT`] of 15 s. So it stays
+    /// well below the production value (asserted at compile time below), and
+    /// the tests also check the elapsed time against it. It is still far above
+    /// 80 ms: a sub-second bound failed on loaded runners with the timer
+    /// working, because a current-thread test runtime that is not scheduled
+    /// cannot read the EOF.
+    const HEADER_TIMER_CLOSE_BOUND: Duration = Duration::from_secs(5);
+    const _: () = assert!(
+        HEADER_TIMER_CLOSE_BOUND.as_millis() * 3 <= HEADER_READ_TIMEOUT.as_millis(),
+        "the close bound must stay far below the production header timer"
+    );
+
+    /// Wait for the server to close `stream` (EOF) within
+    /// [`HEADER_TIMER_CLOSE_BOUND`].
+    async fn expect_header_timer_close(stream: &mut tokio::net::TcpStream, context: &str) {
+        let started = tokio::time::Instant::now();
+        let mut byte = [0u8; 1];
+        let read = tokio::time::timeout(HEADER_TIMER_CLOSE_BOUND, stream.read(&mut byte))
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "{context}: the configured header timer must close the socket \
+                     within {HEADER_TIMER_CLOSE_BOUND:?} (production's is {HEADER_READ_TIMEOUT:?})"
+                )
+            })
+            .expect("read");
+        assert_eq!(read, 0, "{context}: the socket must end at EOF");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < HEADER_TIMER_CLOSE_BOUND,
+            "{context}: closed after {elapsed:?}, not by the configured header timer"
+        );
+    }
+
     fn test_http_timeouts() -> HttpTimeouts {
         HttpTimeouts {
             header_read: Duration::from_millis(80),
@@ -3970,12 +4124,7 @@ mod startup_tests {
             .await
             .expect("partial request head");
 
-        let mut byte = [0u8; 1];
-        let read = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut byte))
-            .await
-            .expect("header timeout must close the socket")
-            .expect("read");
-        assert_eq!(read, 0, "a partial request head must end at EOF");
+        expect_header_timer_close(&mut stream, "a partial request head").await;
         stop_timeout_test_server(stop, served).await;
     }
 
@@ -3993,7 +4142,7 @@ mod startup_tests {
         let mut response = Vec::new();
         while !response.ends_with(b"ok") {
             let mut chunk = [0u8; 256];
-            let read = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut chunk))
+            let read = tokio::time::timeout(TIMEOUT_TEST_HANG_GUARD, stream.read(&mut chunk))
                 .await
                 .expect("response arrives")
                 .expect("read response");
@@ -4001,12 +4150,7 @@ mod startup_tests {
             response.extend_from_slice(&chunk[..read]);
         }
 
-        let mut byte = [0u8; 1];
-        let read = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut byte))
-            .await
-            .expect("the next-head timeout must close an idle keep-alive socket")
-            .expect("read");
-        assert_eq!(read, 0, "idle keep-alive must end at EOF");
+        expect_header_timer_close(&mut stream, "an idle keep-alive connection").await;
         stop_timeout_test_server(stop, served).await;
     }
 
