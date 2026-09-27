@@ -2,7 +2,7 @@
 
 **Status:** M1–M3 merged; E0 fast lane: isolated lockfile correction · **Updated:** 2026-09-26 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` ·
-**Base:** `0386c78ec` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — validating](http://192.168.4.7:3000/noirr/plurx/pulls/564)
+**Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — validating](http://192.168.4.7:3000/noirr/plurx/pulls/564)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -639,3 +639,9 @@ continue E1–E3.
   create a different one. The cross-backend contract is written, not executed.
   HTTP admission, byte transfer and the worker are still under construction;
   this storage commit alone does not move image generation off requests.
+
+- 2026-09-26: main advanced to `2b09d7a32` with the frozen Fontconfig
+  environment implementation. Integrated that source into E0 before promotion;
+  the normal pinned hook validates the combined tree before its next lane run.
+  The prior lane's result cannot qualify this new tree. Preserved both parents'
+  process and timer inventory entries in the only merge conflict.

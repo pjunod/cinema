@@ -19,6 +19,7 @@ mod delivery;
 mod dv_disk;
 mod dvpipe;
 mod ffmpeg;
+mod fontenv;
 mod fragindex;
 mod fragment_index_cluster;
 mod hevc_census;
