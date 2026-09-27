@@ -1049,11 +1049,10 @@
             .vod_playlist("vod-authority")
             .await
             .expect("VOD publication fixture");
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *manager
-            .vod_publication_admission_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let pause = manager
+            .test_hooks()
+            .vod_publication_admission
+            .arm("vod_publication_admission");
 
         let authorization = tokio::spawn({
             let manager = Arc::clone(&manager);
@@ -1068,9 +1067,9 @@
                     .await
             }
         });
-        pause.wait().await;
+        let held = pause.reached().await;
         fence.validation_set_ready(false).await;
-        pause.wait().await;
+        held.release();
 
         assert!(matches!(
             authorization.await.expect("VOD authorization task"),
@@ -1079,6 +1078,61 @@
         assert!(
             manager.serving_ready.load(Acquire),
             "the async teardown mirror is not needed for in-flight rejection"
+        );
+    }
+
+    /// S-14 M8 point position: the VOD publication point follows the serving
+    /// authority's admission, so a publication the authority refuses never
+    /// reaches it. (That it precedes the owner check is
+    /// `in_flight_vod_publication_rechecks_direct_serving_authority`.)
+    #[tokio::test]
+    async fn vod_publication_point_follows_the_serving_admission() {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("VOD admission root");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let fence =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let manager = Arc::new(
+            TranscodeManager::new(
+                Arc::clone(&store),
+                root.path().join("manager"),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            )
+            .with_serving_authority(fence.authority()),
+        );
+        manager
+            .install_vod_http_test_session("vod-admission", file_id, root.path())
+            .await;
+        let publication = manager
+            .vod_playlist("vod-admission")
+            .await
+            .expect("VOD publication fixture");
+        let point = manager
+            .test_hooks()
+            .vod_publication_admission
+            .arm("vod_publication_admission");
+        fence.validation_set_ready(false).await;
+        assert!(matches!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                manager.authorize_response_publication(
+                    "vod-admission",
+                    &publication.owner,
+                    MediaResponsePublication::attempt_media("playlist", Some("index.m3u8")),
+                    Instant::now() + Duration::from_secs(1),
+                ),
+            )
+            .await
+            .expect("a refused admission answers without waiting"),
+            Err(MediaResponsePublicationRejection::StateChanged)
+        ));
+        assert!(
+            !point.was_reached(),
+            "the serving admission comes before the point"
         );
     }
 

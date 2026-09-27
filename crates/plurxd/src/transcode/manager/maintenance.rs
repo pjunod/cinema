@@ -448,25 +448,9 @@ impl TranscodeManager {
             .insert(session_id.to_owned(), session);
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_subtitle_playlist_commit_pause(&self, pause: Arc<tokio::sync::Barrier>) {
-        *self
-            .subtitle_playlist_commit_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn pause_subtitle_playlist_commit_for_test(&self) {
-        let pause = self
-            .subtitle_playlist_commit_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(pause) = pause {
-            pause.wait().await;
-            pause.wait().await;
-        }
+    /// The manager's points, for the HTTP paths that hold one.
+    pub(crate) fn hooks(&self) -> &dyn TranscodeManagerHooks {
+        self.hooks.get()
     }
 
     #[cfg(test)]

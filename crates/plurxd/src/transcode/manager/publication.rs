@@ -385,19 +385,8 @@ impl TranscodeManager {
         let MediaResponseOwnerKind::Vod(vod_owner) = &owner.0 else {
             unreachable!("rolling response owner returned above")
         };
-        #[cfg(test)]
-        let admission_pause = self
-            .vod_publication_admission_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        #[cfg(test)]
-        if let Some(admission_pause) = admission_pause {
-            require_publication_authority!();
-            admission_pause.wait().await;
-            admission_pause.wait().await;
-            require_publication_authority!();
-        }
+        require_publication_authority!();
+        self.hooks.get().after_vod_publication_admission().await;
         require_publication_authority!();
         let owner_is_current = match publication.binding {
             MediaResponsePublicationBinding::AttemptStatus => tokio::time::timeout_at(

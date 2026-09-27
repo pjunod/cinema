@@ -1986,11 +1986,12 @@
         let dir = crate::test_tempdir().expect("session directory");
         let mut fixture = HlsDeliveryFixture::publish(dir.path(), "subtitle-handoff").await;
         add_http_text_subtitle(&mut fixture, "subtitle-handoff").await;
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        fixture
+        let pause = fixture
             .state
             .transcode
-            .set_subtitle_playlist_commit_pause(Arc::clone(&pause));
+            .test_hooks()
+            .subtitle_playlist_commit
+            .arm("subtitle_playlist_commit");
         let owner_pause = fixture.pause_playlist_publication();
         let mut predecessor = String::from("#EXTM3U\n#EXT-X-TARGETDURATION:4\n");
         for index in 0..12 {
@@ -2014,16 +2015,17 @@
             "published media permanently closes in-place producer replacement"
         );
         owner_held.release();
-        tokio::time::timeout(Duration::from_secs(5), pause.wait())
-            .await
-            .expect("subtitle response reached the exact-owner commit seam");
+        let held = pause.reached().await;
         assert!(
             !waiting.is_finished(),
             "subtitle response reached the exact-owner commit seam"
         );
-        tokio::time::timeout(Duration::from_secs(5), pause.wait())
-            .await
-            .expect("release subtitle response commit");
+        assert_ne!(
+            fixture.last_renewal_kind().await,
+            "subtitle-playlist",
+            "the subtitle response commits after the point"
+        );
+        held.release();
         let response = waiting
             .await
             .expect("subtitle task")
@@ -2039,6 +2041,39 @@
         assert_eq!(fixture.last_renewal_kind().await, "subtitle-playlist");
     }
 
+    /// S-14 M8 point position: the subtitle playlist's commit point follows
+    /// the track's resolution, so a request for a track the file does not have
+    /// is refused without reaching it.
+    #[tokio::test]
+    async fn subtitle_playlist_point_follows_the_track_resolution() {
+        let dir = crate::test_tempdir().expect("VOD subtitle directory");
+        let mut fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;
+        add_http_text_subtitle(&mut fixture, "rolling-unused").await;
+        let session_id = "vod-subtitle-missing-track";
+        let _owner = install_vod_http_session(&fixture, dir.path(), session_id).await;
+        let point = fixture
+            .state
+            .transcode
+            .test_hooks()
+            .subtitle_playlist_commit
+            .arm("subtitle_playlist_commit");
+        let state = fixture.state.clone();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                subtitle_playlist_local(&state, session_id, 5),
+            )
+            .await
+            .expect("a missing track is refused without waiting")
+            .is_err(),
+            "the file has no subtitle track 5"
+        );
+        assert!(
+            !point.was_reached(),
+            "the track is resolved before the point"
+        );
+    }
+
     #[tokio::test]
     async fn real_subtitle_playlist_cannot_commit_after_vod_same_id_reattachment() {
         let dir = crate::test_tempdir().expect("VOD subtitle directory");
@@ -2046,14 +2081,15 @@
         add_http_text_subtitle(&mut fixture, "rolling-unused").await;
         let session_id = "vod-subtitle-replaced";
         let _predecessor = install_vod_http_session(&fixture, dir.path(), session_id).await;
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        fixture
+        let pause = fixture
             .state
             .transcode
-            .set_subtitle_playlist_commit_pause(Arc::clone(&pause));
+            .test_hooks()
+            .subtitle_playlist_commit
+            .arm("subtitle_playlist_commit");
         let state = fixture.state.clone();
         let pending = tokio::spawn(async move { subtitle_playlist_local(&state, session_id, 0).await });
-        pause.wait().await;
+        let held = pause.reached().await;
 
         let _successor = install_vod_http_session(&fixture, dir.path(), session_id).await;
         let successor_touch = fixture
@@ -2062,7 +2098,7 @@
             .vod_last_touch_for_test(session_id)
             .await
             .expect("successor touch");
-        pause.wait().await;
+        held.release();
 
         assert!(
             pending.await.expect("subtitle task").is_err(),

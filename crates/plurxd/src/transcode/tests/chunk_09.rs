@@ -1740,3 +1740,61 @@
         held.release();
         await_scratch_removed(&dir).await;
     }
+
+    /// M8's shipped-shape test for the transcode manager: the production
+    /// constructor leaves its hook slot on [`NoopTranscodeManagerHooks`]; both
+    /// pause points are ready at their first poll, nothing is overridden or
+    /// injected, and the real artifact-qualification publisher runs through
+    /// its record point without filling the slot.
+    #[tokio::test]
+    async fn transcode_manager_shipped_shape() {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("manager root");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let hooks = manager.hooks();
+        let installed: &dyn std::any::Any = hooks;
+        assert!(
+            installed.is::<NoopTranscodeManagerHooks>(),
+            "the production constructor leaves the manager on the no-op hooks"
+        );
+        let waker = futures_util::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        for (point, mut hook) in [
+            (
+                "before_subtitle_playlist_commit",
+                hooks.before_subtitle_playlist_commit(),
+            ),
+            (
+                "after_vod_publication_admission",
+                hooks.after_vod_publication_admission(),
+            ),
+        ] {
+            assert!(
+                hook.as_mut().poll(&mut context).is_ready(),
+                "the production {point} point is ready at its first poll"
+            );
+        }
+        assert!(!hooks.forces_artifact_qualification());
+        assert!(hooks.scripted_offline_outcome("any-recipe").is_none());
+        assert!(hooks.offline_recovery_begin_fault().is_none());
+
+        let readiness = tokio::time::timeout(
+            Duration::from_secs(5),
+            manager.publish_artifact_qualification(),
+        )
+        .await
+        .expect("the publisher answers");
+        assert!(!readiness.requested, "nothing requested verified artifacts");
+        let installed: &dyn std::any::Any = manager.hooks();
+        assert!(
+            installed.is::<NoopTranscodeManagerHooks>(),
+            "no production path fills the slot"
+        );
+    }

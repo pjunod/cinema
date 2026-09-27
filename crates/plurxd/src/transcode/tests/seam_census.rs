@@ -867,7 +867,14 @@ fn seam_census_of_the_workspace() {
                     "TranscodeManager::hls_session_control_with_terminal",
                     "TranscodeManager::ensure_flow_worker",
                     "TranscodeManager::commit_resolved_media_before",
-                    "TranscodeManager::playlist_with_owner_for_session_before",
+                    "TranscodeManager::publish_artifact_qualification",
+                    "TranscodeManager::resolve_movie_plan_with_facts",
+                    "TranscodeManager::resolve_held_movie_plan",
+                    "TranscodeManager::ensure_offline",
+                    "TranscodeManager::produce_normalized",
+                    "TranscodeManager::produce_offline_candidate",
+                    "TranscodeManager::authorize_response_publication",
+                    "complete_subtitle_playlist_response",
                 ]
                 .iter()
                 .any(|owner| site.owner == *owner || site.owner.starts_with(&format!("{owner}::")))
@@ -877,6 +884,20 @@ fn seam_census_of_the_workspace() {
     assert!(
         migrated.is_empty(),
         "M8-migrated owners keep no test-only seams: {migrated:?}"
+    );
+    // `TranscodeManager` itself keeps no gated field or initialiser; its one
+    // remaining site is the test-build decoder fallback in
+    // `resolve_movie_plan_with_qualification`, which every test-built manager
+    // relies on rather than one a test arms (the plan's execution log).
+    let manager: Vec<&Site> = sites
+        .iter()
+        .filter(|site| site.owner.starts_with("TranscodeManager"))
+        .collect();
+    assert!(
+        manager
+            .iter()
+            .all(|site| site.owner == "TranscodeManager::resolve_movie_plan_with_qualification"),
+        "TranscodeManager keeps only its test-build decoder fallback: {manager:?}"
     );
     // The control actor keeps only the arms that apply the six test-driver
     // commands (`RollingControlCommand`'s test-only variants), which no
