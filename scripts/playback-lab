@@ -2052,6 +2052,7 @@ function playerSnapshotExpression() {
         position:p.recoveringStall.position??null,
         target_height:p.recoveringStall.targetHeight??null}:null,
       hitches:{back:h.back||0,held:h.held||0,late:h.late||0,drop:h.drop||0,gap:h.gap||0,slow:h.slow||0,rate:h.rate==null?null:h.rate},
+      hitch_faults:(h.faults||[]).slice(-16).map(fault=>({...fault})),
       decode:p.decodeInfo||null, health:p.health||null,
       source:p.source||null, audio_count:(p.audio||[]).length, subtitle_count:(p.subs||[]).length,
       current_audio:p.curAudio==null?null:p.curAudio, current_subtitle:p.curSub==null?null:p.curSub,
@@ -2187,6 +2188,7 @@ async function setCasePreferences(driver, quality) {
           globalThis.__plurxLabElementSequence=
             Number(globalThis.__plurxLabElementSequence||0)+1;
           element.__plurxLabElementId=globalThis.__plurxLabElementSequence;
+          element.dataset.plurxLabElementId=String(element.__plurxLabElementId);
         }
         globalThis.__plurxLabInstallVideoProbe(element);
       }
@@ -2555,6 +2557,7 @@ function sampleFrom(snapshot, atMs) {
     stalls_by_kind: snapshot.stalls_by_kind || null,
     stall_recoveries: snapshot.stall_recoveries || 0,
     hitches: hitchTotal(snapshot),
+    hitch_last: snapshot.hitch_faults?.at(-1) || null,
     lifetime_hitches: snapshot.lifetime_hitches || 0,
     ttff_ms: snapshot.ttff_ms ?? null,
     method: snapshot.method || null,
