@@ -85,12 +85,9 @@ pub(super) struct Rendition {
     /// The driver's kick: wait registration, segment GETs, attach/detach,
     /// maintain ticks.
     pub(super) wake: Notify,
-    /// Deterministic observation point for tests that must prove the driver's
-    /// stopped-encoder poll, rather than a direct `driver_pass`, caused work.
-    #[cfg(test)]
-    pub(super) stopped_poll_armed: Notify,
-    #[cfg(test)]
-    pub(super) stopped_poll_fired: Notify,
+    /// The driver's observation points (TRANSCODE-DECOMPOSITION-PLAN §3.9,
+    /// M8), held in every build and chosen where the rendition is built.
+    pub(super) hooks: Box<dyn RenditionHooks>,
     /// Bumped whenever the driver kills or replaces the producer, so a
     /// generation that ends can tell "I died on my own" from "I was told to".
     pub(super) gen_epoch: AtomicU64,
@@ -112,6 +109,62 @@ pub(super) struct Rendition {
     pub(super) handoff_expiry_armed: AtomicBool,
     /// First blocked demand per plan entry, retained across HTTP 503 retries.
     pub(super) demand_since: StdMutex<HashMap<u32, MaterializeClock>>,
+}
+
+/// The points of a [`Rendition`]'s driver that a test observes
+/// (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
+///
+/// A rendition holds one of these in every build, so its layout is the same in
+/// the test and release binaries. Both points are records: synchronous, and
+/// the no-op that production installs ([`NoopRenditionHooks`]) does nothing.
+/// Tests that must prove the driver's stopped-encoder poll, rather than a
+/// direct `driver_pass`, caused work install [`RenditionTestHooks`]. `Any` is
+/// a supertrait only so a test can reach the test hooks behind a rendition.
+pub(super) trait RenditionHooks: std::any::Any + Send + Sync {
+    /// The driver chose the stopped-encoder poll and is about to wait on it.
+    fn stopped_poll_armed(&self);
+    /// The driver's stopped-encoder wait ended, by the poll or by a kick.
+    fn stopped_poll_fired(&self);
+}
+
+/// What production installs: both points do nothing.
+pub(super) struct NoopRenditionHooks;
+
+impl RenditionHooks for NoopRenditionHooks {
+    fn stopped_poll_armed(&self) {}
+
+    fn stopped_poll_fired(&self) {}
+}
+
+/// The test hooks: each point notifies, so a test can wait for the driver to
+/// arm its stopped-encoder timer before it moves a paused clock.
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct RenditionTestHooks {
+    pub(super) stopped_poll_armed: Notify,
+    pub(super) stopped_poll_fired: Notify,
+}
+
+#[cfg(test)]
+impl RenditionTestHooks {
+    /// The test hooks of a rendition a test built with them.
+    pub(super) fn of(rendition: &Rendition) -> &Self {
+        let hooks: &dyn std::any::Any = &*rendition.hooks;
+        hooks
+            .downcast_ref()
+            .expect("the rendition was built with RenditionTestHooks")
+    }
+}
+
+#[cfg(test)]
+impl RenditionHooks for RenditionTestHooks {
+    fn stopped_poll_armed(&self) {
+        self.stopped_poll_armed.notify_one();
+    }
+
+    fn stopped_poll_fired(&self) {
+        self.stopped_poll_fired.notify_one();
+    }
 }
 
 impl Rendition {

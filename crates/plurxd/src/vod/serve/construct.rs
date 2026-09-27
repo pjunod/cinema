@@ -168,10 +168,7 @@ impl VodServe {
             ahead_hold: AtomicBool::new(false),
             init_notify: Notify::new(),
             wake: Notify::new(),
-            #[cfg(test)]
-            stopped_poll_armed: Notify::new(),
-            #[cfg(test)]
-            stopped_poll_fired: Notify::new(),
+            hooks: Box::new(NoopRenditionHooks),
             gen_epoch: AtomicU64::new(0),
             last_child_pid: AtomicU32::new(0),
             dormant_since: StdMutex::new(None),

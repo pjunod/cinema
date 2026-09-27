@@ -849,6 +849,8 @@ fn seam_census_of_the_workspace() {
                     "RollingProducerIngressState",
                     "StartedSessionCleanup",
                     "StartedSessionGuard",
+                    "Rendition",
+                    "spawn_driver",
                 ]
                 .iter()
                 .any(|owner| site.owner == *owner || site.owner.starts_with(&format!("{owner}::")))
