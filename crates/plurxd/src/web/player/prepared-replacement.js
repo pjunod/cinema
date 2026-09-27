@@ -286,7 +286,7 @@ function beginPreparedReplacement(p,action){
     stageAtMs,bufferReadyAtMs:null,overlapProofReadyAtMs:null,
     state:"building",hls:null,metadata:false,buffered:false,
     warmFrameReady:false,warmFrameCallbackId:null,
-    exposeFrameTimer:null,exposeFrameCallbackId:null,
+    exposeFrameTimer:null,exposeFrameCallbackId:null,handoffFrameCallbackId:null,
     overlapPhase:null,
     overlapListeners:null,incumbentElement:v,
     incumbentStyle:{position:v.style.position,inset:v.style.inset,zIndex:v.style.zIndex},
@@ -662,6 +662,9 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
     if(state.exposeFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
       try{ spare.cancelVideoFrameCallback(state.exposeFrameCallbackId); }catch(e){}
     state.exposeFrameCallbackId=null;
+    if(state.handoffFrameCallbackId!=null&&typeof v.cancelVideoFrameCallback==="function")
+      try{ v.cancelVideoFrameCallback(state.handoffFrameCallbackId); }catch(e){}
+    state.handoffFrameCallbackId=null;
     if(!live()) return;
     if(ready){
       state.overlapProofReadyAtMs=performance.now();
@@ -690,6 +693,29 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
     try{ state.exposeFrameCallbackId=spare.requestVideoFrameCallback(observe); }
     catch(e){ finish(false,"frame-callback-error"); }
   };
+  const exposeAfterIncumbentFrame=()=>{
+    // A successor callback can arrive just after the incumbent's last frame.
+    // Revealing it there discards the incumbent's next queued picture, so a
+    // delayed first successor frame can exceed the visible 100 ms boundary.
+    // Keep the old picture and audio through one more incumbent frame callback,
+    // then make the same synchronous, reversible swap.
+    state.overlapPhase="incumbent-frame";
+    try{
+      state.handoffFrameCallbackId=v.requestVideoFrameCallback(()=>{
+        state.handoffFrameCallbackId=null;
+        if(!live()){ finish(false,"stale-owner"); return; }
+        if(v.paused||v.seeking||spare.paused||spare.seeking||p.wantsPlayback===false){
+          finish(false,"viewer-intent"); return;
+        }
+        const wanted=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
+        if(!preparedAlignedBuffered(spare)
+          ||Math.abs((spare.currentTime||0)-wanted)*1000>PREPARED_ALIGN_SLACK_MS){
+          finish(false,"lost-alignment"); return;
+        }
+        finish(true);
+      });
+    }catch(e){ finish(false,"incumbent-frame-callback-error"); }
+  };
   const observe=(now,meta)=>{
     state.exposeFrameCallbackId=null;
     if(!live()){ finish(false,"stale-owner"); return; }
@@ -711,7 +737,8 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
           finish(false,"viewer-intent");
           return;
         }
-        finish(true);
+        if(typeof v.requestVideoFrameCallback==="function") exposeAfterIncumbentFrame();
+        else finish(true);
         return;
       }
     }else{
@@ -811,10 +838,12 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
   resetPlaybackTransportEvents(spare);
   p.wantsPlayback=intent.wantsPlayback;
   if(intent.wantsPlayback){
-    // Un-muting without a user gesture pauses the element on WebKit, and the
-    // last gesture was minutes ago. Ask again: a switch whose picture never
-    // advances is reported as a failure eight seconds later and rolled back.
-    try{ const resumed=spare.play(); if(resumed&&resumed.catch) resumed.catch(()=>{}); }catch(e){}
+    // Native WebKit can pause on unmute without a new gesture. Its resume is
+    // needed; the already-playing hls.js successor needs no second play call
+    // at the compositor boundary, where reactivating its audio can delay the
+    // first visible frame. The first-frame watchdog still owns rollback.
+    if(preferNativeHls(spare)||spare.paused)
+      try{ const resumed=spare.play(); if(resumed&&resumed.catch) resumed.catch(()=>{}); }catch(e){}
   }else{
     try{ spare.pause(); }catch(e){}
   }

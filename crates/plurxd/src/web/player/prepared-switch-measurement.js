@@ -307,6 +307,11 @@ function freePreparedReplacement(p,state){
   if(spare&&state.exposeFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
     try{ spare.cancelVideoFrameCallback(state.exposeFrameCallbackId); }catch(e){}
   state.exposeFrameCallbackId=null;
+  const incumbent=state.incumbentElement;
+  if(incumbent&&state.handoffFrameCallbackId!=null
+    &&typeof incumbent.cancelVideoFrameCallback==="function")
+    try{ incumbent.cancelVideoFrameCallback(state.handoffFrameCallbackId); }catch(e){}
+  state.handoffFrameCallbackId=null;
   if(spare&&state.warmFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
     try{ spare.cancelVideoFrameCallback(state.warmFrameCallbackId); }catch(e){}
   state.warmFrameCallbackId=null;
