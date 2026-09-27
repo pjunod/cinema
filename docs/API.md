@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 238
+One binary serves everything on one port (`:32400` by default). plurx has 241
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -2964,6 +2964,9 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | POST | `/_internal/v1/live-tv/snapshot` | 16 KiB | Tuner readiness and lineup for the current generation |
 | POST | `/_internal/v1/live-tv/guide` | 16 KiB | The owner's cached programme guide, relayed verbatim. Deliberately not gated on the Live TV protocol capability: an owner that predates the guide answers 404 and the ingress renders "no guide yet" rather than taking Live TV down across a mixed fleet |
 | POST | `/_internal/v1/live-tv/start`, `/_internal/v2/live-tv/start`, `/_internal/v1/live-tv/activate` | 16 KiB | Starts and activates a tuner session on the owner; v2 carries the exact signed live playback envelope |
+| POST | `/_internal/v1/live-tv/placement` | 16 KiB | Protocol 4 placed start on the configured tuner owner. Retains the selected compatible processor and nonce across retries; accepts the signed start and playback envelope |
+| POST | `/_internal/v1/live-tv/process` | 16 KiB | The configured tuner owner asks its assigned voter to process a viewer from shared peer ingest. Returns an ordinary provisional capability owned by that processor; existing admission and activation apply |
+| POST | `/_internal/v1/live-tv/ingest` | 16 KiB | Assigned processor requests a nonce-bound raw feed from the configured owner. Returns a bounded consumer of the shared tuner transport; slow consumers are evicted independently and dropping the body detaches that consumer |
 | POST | `/_internal/v1/live-tv/resource` | 16 KiB | Fetches a playlist, segment or status for an owned capability |
 | POST | `/_internal/v1/live-tv/stop`, `/_internal/v1/live-tv/drain` | 16 KiB | Releases a capability; drains below a generation |
 | POST | `/_internal/v1/live-tv/retire`, `/_internal/v1/live-tv/resume`, `/_internal/v1/live-tv/start-state` | 1 KiB | Retires a viewer's public start id on the owner, hands back the session it still owns, or reports what became of it. Three paths rather than one with a mode flag: `resume` selects a session, cancels the others and fences an id it has never seen, and a status read may do none of that. New paths rather than new fields on the signed start bodies: an owner that predates them answers 404, which an ingress renders as a typed answer that proves nothing about the tuner |

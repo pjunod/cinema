@@ -980,3 +980,9 @@ continue E1–E3.
   `python3 -m unittest tests.validation.test_rolling_producer_ownership_inventory
   tests.operations.test_docs_index`. PR #572 now targets main; #567 is draft
   pending supersession. The final required fast lane is next.
+
+- Fast lane 3361 stopped at API documentation parity: the three new internal
+  Live TV routes were absent from the maintained API table and its route count.
+  Added the signed placement, processing and bounded ingest entries and updated
+  the count to 241. No runtime failure was reported; downstream compile/unit
+  jobs correctly did not start after preflight failed.
