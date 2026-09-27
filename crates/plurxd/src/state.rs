@@ -1452,6 +1452,7 @@ pub struct JobManager {
     live: Mutex<HashMap<i64, Arc<ScanProgress>>>,
     /// Wake durable library consumers promptly after local admission.
     library_wake: tokio::sync::Notify,
+    library_readiness: crate::background_jobs::LibraryReadiness,
     /// Shared with TranscodeManager when attached; standalone managers have
     /// no other encoder pool. Foreground subtitles reserve one CPU thread.
     subtitle_admissions: std::sync::Mutex<crate::admission::Admissions>,
@@ -3018,6 +3019,7 @@ impl JobManager {
             statuses: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
             library_wake: tokio::sync::Notify::new(),
+            library_readiness: Default::default(),
             subtitle_admissions: std::sync::Mutex::new(crate::admission::Admissions::new()),
             metrics: Arc::new(IntegrationMetrics::default()),
             producing: std::sync::atomic::AtomicBool::new(false),
@@ -14121,6 +14123,7 @@ mod tests {
         ));
 
         jobs.run_due_jobs(&transcode).await.expect("scheduler tick");
+        assert!(jobs.work_library_queue(&transcode, Some(library.id)).await);
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 if jobs

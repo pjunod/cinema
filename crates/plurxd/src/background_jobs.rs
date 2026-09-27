@@ -1061,6 +1061,35 @@ pub(crate) async fn claim_fragment(
     Ok(None)
 }
 
+/// Bounded, node-local eligibility observations. They never settle durable work:
+/// another member may have a readable mount while this one does not.
+#[derive(Default)]
+pub(crate) struct LibraryReadiness(std::sync::Mutex<std::collections::BTreeMap<i64, String>>);
+impl LibraryReadiness {
+    fn record(&self, library_id: i64, problem: Option<String>) {
+        let mut rows = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(problem) = problem {
+            if rows.len() >= 128 && !rows.contains_key(&library_id) {
+                rows.pop_first();
+            }
+            rows.insert(library_id, problem.chars().take(512).collect());
+        } else {
+            rows.remove(&library_id);
+        }
+    }
+
+    pub(crate) fn problem(&self, library_id: i64) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&library_id)
+            .cloned()
+    }
+}
+
 /// Library coordinators share the same physical heavy-work admission as
 /// preparation/indexing. Source checks happen before claiming; domain-lease
 /// contention is resolved by the caller through an uncharged yield.
@@ -1070,6 +1099,7 @@ pub(crate) async fn claim_library(
     transcode: &crate::transcode::TranscodeManager,
     node: &str,
     library_filter: Option<i64>,
+    readiness: &LibraryReadiness,
 ) -> Result<
     Option<(
         BackgroundJob,
@@ -1118,15 +1148,21 @@ pub(crate) async fn claim_library(
             }
             let library = store.get_library(library_id).await?;
             // A deleted library still needs its accepted requests settled.
-            let mut readable = library
+            let mut problem = library
                 .as_ref()
-                .is_none_or(|library| !library.paths.is_empty());
+                .filter(|library| library.paths.is_empty())
+                .map(|_| {
+                    "This node observed no library roots; waiting for a compatible worker."
+                        .to_owned()
+                });
             for path in library.iter().flat_map(|library| &library.paths) {
-                if tokio::fs::read_dir(path).await.is_err() {
-                    readable = false;
+                if let Err(error) = tokio::fs::read_dir(path).await {
+                    problem = Some(format!("This node could not read library root {}: {error}. Waiting for a compatible worker.", path.display()));
                     break;
                 }
             }
+            let readable = problem.is_none();
+            readiness.record(library_id, problem);
             if !readable {
                 continue;
             }

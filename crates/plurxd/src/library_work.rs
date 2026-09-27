@@ -145,11 +145,14 @@ impl JobManager {
                 continue;
             }
             let pending = record.state == "pending";
-            let (last_scan, error) = match record.result {
+            let (last_scan, mut error) = match record.result {
                 Some(LibraryWorkResult::Completed { scan }) => (Some(scan.report), None),
                 Some(LibraryWorkResult::Failed { error }) => (None, Some(error)),
                 None => (None, record.error_code),
             };
+            if pending && error.is_none() {
+                error = self.library_readiness.problem(record.library_id);
+            }
             statuses.insert(
                 record.library_id,
                 ScanStatus {
@@ -177,6 +180,7 @@ impl JobManager {
             transcode,
             self.coordinator.node_id(),
             library_filter,
+            &self.library_readiness,
         )
         .await
         {

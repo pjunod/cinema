@@ -621,3 +621,25 @@ continue E1–E3.
   the normal pinned hook validates the combined tree before its next lane run.
   The prior lane's result cannot qualify this new tree. Preserved both parents'
   process and timer inventory entries in the only merge conflict.
+
+- 2026-09-26: E0 fast lane 3320 passed preflight, Windows and web; Rust
+  reported stale schema/import/census assertions, an old subtitle claim fixture,
+  missing scan consumers in HTTP/scheduler fixtures, an unclassified storage-domain
+  route and two discarded subtitle cancellation results. Fixes are being checked
+  against the pinned compiler before the next candidate. No merge is claimed.
+  E1 remains in [draft PR #566](http://192.168.4.7:3000/noirr/plurx/pulls/566);
+  portable transcode copies, prediction and E2–E3 remain outstanding.
+
+- 2026-09-26: the missing-root regression exposed a visibility gap. An unreadable
+  node correctly leaves accepted scan work for another member, but the status
+  did not explain why. Added a bounded node-local readiness observation to the
+  existing scan status; it names the last local read failure without settling
+  the durable job or spending an attempt. The regression now asserts pending
+  work, a visible explanation and zero claims/failures on an unreadable node.
+
+- 2026-09-26: E0 correction evidence: 376 store tests passed on the first
+  focused run; its two census failures passed after tightening the ratchet
+  (five census/import cases rerun). The subtitle transient-repair contract
+  passed SQLite and real three-voter Hiqlite. All 16 selected daemon
+  regressions pass with the missing-root visibility fix. Ownership inventory:
+  seven passed. Full fast-lane confirmation remains required before merge.

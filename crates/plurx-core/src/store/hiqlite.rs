@@ -6893,9 +6893,9 @@ mod tests {
             "v47 must advance exactly one step to the read-index schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 44,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 49,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v49 step"
+            "this implementation contains every additive v5→v54 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

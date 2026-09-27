@@ -44,10 +44,13 @@ impl JobManager {
                                 || !request.target_node_id.is_empty()
                             {
                                 // Malformed legacy demand must not poison the next outbox page.
-                                let _ = self
-                                    .store
-                                    .cancel_analysis_request_admin(&id, clock_ms())
-                                    .await;
+                                crate::store_result::observe(
+                                    crate::store_result::Operation::CancelStaleSubtitleIntent,
+                                    crate::store_result::Discard::BestEffort,
+                                    self.store
+                                        .cancel_analysis_request_admin(&id, clock_ms())
+                                        .await,
+                                );
                                 continue;
                             }
                             match self.store.enqueue_subtitle_job(request, clock_ms()).await {
@@ -61,10 +64,13 @@ impl JobManager {
                                 ) => {
                                     // Immutable intent no longer matches a claimable source.
                                     // Retire it so a full page of stale rows cannot starve demand.
-                                    let _ = self
-                                        .store
-                                        .cancel_analysis_request_admin(&id, clock_ms())
-                                        .await;
+                                    crate::store_result::observe(
+                                        crate::store_result::Operation::CancelStaleSubtitleIntent,
+                                        crate::store_result::Discard::BestEffort,
+                                        self.store
+                                            .cancel_analysis_request_admin(&id, clock_ms())
+                                            .await,
+                                    );
                                 }
                                 Ok(_) => {}
                                 Err(error) => {

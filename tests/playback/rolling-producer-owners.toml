@@ -2179,7 +2179,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # main @ d95503c25 has 647; with S-04 M2's three -> 650 (measured by zeroing this row)
 # on the merge of main into #553 after #532 and #563; the merge adds no new site.
 # Combined E0 and S-04 M2 ownership sites; neither parent is discarded.
-expected_occurrences = 648
+# E0 HTTP scan fixtures retain a consumer handle and abort it on teardown.
+expected_occurrences = 649
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the

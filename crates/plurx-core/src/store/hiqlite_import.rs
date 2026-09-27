@@ -3301,8 +3301,16 @@ mod tests {
         assert!(names.contains(&"dvr_reminders"));
         assert!(names.contains(&"media_classifications"));
         assert!(names.contains(&"file_grants"));
+        for name in [
+            "background_library_requests",
+            "background_job_domain_leases",
+            "background_provider_budgets",
+            "background_storage_domains",
+        ] {
+            assert!(names.contains(&name));
+        }
         assert!(!names.contains(&"classification_fts"));
-        assert_eq!(names.len(), 60, "review every imported durable table");
+        assert_eq!(names.len(), 64, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its
@@ -3750,7 +3758,14 @@ mod tests {
                 .copied()
                 .filter(|table| table.name.starts_with("background_"))
             {
-                assert_eq!(table.minimum_schema, 71);
+                let introduced = match table.name {
+                    "background_job_domain_leases" => 72,
+                    "background_library_requests" => 73,
+                    "background_storage_domains" => 74,
+                    "background_provider_budgets" => 75,
+                    _ => 71,
+                };
+                assert_eq!(table.minimum_schema, introduced, "{}", table.name);
                 let rows = if version >= table.minimum_schema {
                     reader
                         .import_chunk(table, version, SourceChunk::Offset(0))
