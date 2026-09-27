@@ -3581,7 +3581,11 @@ mod tests {
         .await
     }
 
-    #[tokio::test]
+    // Paused time: the 10 ms deadline and the handler's 40 ms sleep are both
+    // Tokio timers, so the clock reaches the deadline first by construction.
+    // On the wall clock a loaded runner could park this thread past both, and
+    // `timeout` polls the finished handler before its own expired timer.
+    #[tokio::test(start_paused = true)]
     async fn json_short_handler_deadline_answers_503() {
         let app = Router::new()
             .route("/short", axum::routing::get(slow_test_handler))

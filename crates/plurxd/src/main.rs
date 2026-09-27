@@ -3964,6 +3964,15 @@ mod startup_tests {
         (address, stop, served)
     }
 
+    /// How long a timeout test waits for the socket to close before calling
+    /// it a hang. The server under test closes it on an 80 ms header timer;
+    /// nothing else in [`test_http_timeouts`] would ever close an idle HTTP/1
+    /// connection, so without that timer the read waits here and fails. The
+    /// wait is long because it only has to catch that hang: a sub-second
+    /// bound failed on loaded runners with the timer working, because a
+    /// current-thread test runtime that is not scheduled cannot read the EOF.
+    const TIMEOUT_TEST_HANG_GUARD: Duration = Duration::from_secs(20);
+
     fn test_http_timeouts() -> HttpTimeouts {
         HttpTimeouts {
             header_read: Duration::from_millis(80),
@@ -4082,7 +4091,7 @@ mod startup_tests {
             .expect("partial request head");
 
         let mut byte = [0u8; 1];
-        let read = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut byte))
+        let read = tokio::time::timeout(TIMEOUT_TEST_HANG_GUARD, stream.read(&mut byte))
             .await
             .expect("header timeout must close the socket")
             .expect("read");
@@ -4104,7 +4113,7 @@ mod startup_tests {
         let mut response = Vec::new();
         while !response.ends_with(b"ok") {
             let mut chunk = [0u8; 256];
-            let read = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut chunk))
+            let read = tokio::time::timeout(TIMEOUT_TEST_HANG_GUARD, stream.read(&mut chunk))
                 .await
                 .expect("response arrives")
                 .expect("read response");
@@ -4113,7 +4122,7 @@ mod startup_tests {
         }
 
         let mut byte = [0u8; 1];
-        let read = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut byte))
+        let read = tokio::time::timeout(TIMEOUT_TEST_HANG_GUARD, stream.read(&mut byte))
             .await
             .expect("the next-head timeout must close an idle keep-alive socket")
             .expect("read");
