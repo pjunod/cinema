@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 pub use super::background_jobs_delivery::{
-    DeliveryIntent, JobWaiter, WaiterCursor, WaiterPage, WaiterQuery,
+    hydration_identity, DeliveryIntent, JobWaiter, WaiterCursor, WaiterPage, WaiterQuery,
 };
 use super::background_jobs_delivery::{DELIVERIES_SQL, WAITERS_SQL};
 pub use super::background_jobs_domain::BindLibraryJob;
@@ -56,8 +56,25 @@ pub(crate) const SCHEMA: &str = include_str!("background_jobs_schema.sql");
 // Both backends execute the same admission statement and schema trigger.
 // The returned snapshot is the verdict that authorized the mutation, not a
 // follow-up read which might observe a different concurrent request.
+// These single-row stages must remain materialized: flattening the repeated
+// verdict fields duplicates correlated subqueries into tens of thousands of
+// planner operations, making migration and ordinary admission needlessly slow.
 pub(super) const ENQUEUE_SQL: &str = r#"
-WITH request AS (SELECT json($1) AS body), snapshot AS (
+WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
+ SELECT CASE WHEN EXISTS (SELECT 1 FROM background_predictions WHERE state = 'pending'
+   AND request_id = COALESCE(json_extract(body,'$.subtitle_request.request_id'),json_extract(body,'$.analysis_request.request_id')))
+ THEN json_set(body, '$.request.deadline_ms', (SELECT expires_ms FROM background_predictions
+   WHERE request_id = COALESCE(json_extract(body,'$.subtitle_request.request_id'),json_extract(body,'$.analysis_request.request_id'))),
+   '$.request.retain_identity', json('false')) ELSE body END AS body FROM provided
+), request AS MATERIALIZED (
+ SELECT CASE WHEN json_extract(body, '$.artwork_demand') = 1 THEN json_set(body, '$.request.request_id',
+   COALESCE((SELECT request_id FROM background_job_waiters
+     WHERE request_scope = json_extract(body, '$.request.scope')
+       AND consumer_ref = json_extract(body, '$.request.consumer_ref')
+       AND (state IN ('pending','awaiting_hydration') OR updated_at_ms > json_extract(body, '$.now_ms') - 3600000)
+     ORDER BY updated_at_ms DESC, request_id DESC LIMIT 1), json_extract(body, '$.request.request_id')))
+ ELSE body END AS body FROM input
+), snapshot AS MATERIALIZED (
   SELECT body,
     (SELECT job_id FROM background_job_waiters
       WHERE request_scope = json_extract(body, '$.request.scope')
@@ -90,7 +107,7 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
               AND json_extract(mapped.snapshot_json, '$.cache_key') = json_extract(body, '$.payload.cache_key')))))
       ORDER BY CASE WHEN state IN ('queued','running','cancelling') THEN 0 ELSE 1 END, created_at_ms DESC, id LIMIT 1) AS active_payload
   FROM request
-), classified AS (
+), classified AS MATERIALIZED (
   SELECT *, CASE
     WHEN json_type(body, '$.legacy_key') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM background_job_legacy WHERE legacy_key = json_extract(body, '$.legacy_key')
@@ -121,8 +138,53 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
           AND request.state IN ('queued','running')
           AND request.video_identity = '' AND request.target_node_id = ''
       )) THEN 'request_fenced'
+    WHEN json_type(body,'$.repair_id') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM background_artifact_repairs repair WHERE repair.id = json_extract(body,'$.repair_id')
+        AND repair.phase = json_extract(body,'$.repair_phase') AND repair.expires_ms > json_extract(body,'$.now_ms')
+        AND json_extract(body,'$.request.scope') = 'artifact-repair'
+        AND json_extract(body,'$.request.request_id') = repair.id || ':' || repair.phase
+        AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || repair.target_node_id)
+        AND ((repair.phase IN ('copy','deliver') AND json_extract(body,'$.payload.kind') = 'artifact_hydrate'
+          AND json_extract(body,'$.payload.artifact_key') = repair.artifact_key
+          AND json_extract(body,'$.payload.target_node_id') = repair.target_node_id)
+          OR (repair.phase = 'build' AND json_extract(body,'$.payload') = repair.producer_payload
+            AND (json_extract(body,'$.payload.kind') = 'artwork_derivative'
+              OR (json_extract(body,'$.payload.kind') = 'transcode_prepare' AND EXISTS (SELECT 1 FROM files
+                WHERE id = json_extract(body,'$.payload.file_id') AND size = json_extract(body,'$.payload.source_size')
+                  AND mtime = json_extract(body,'$.payload.source_mtime'))))))) THEN 'no_demand'
+    WHEN json_type(body,'$.repair_id') IS NOT NULL AND prior_job IS NULL AND active_job IS NULL
+      AND (SELECT COUNT(*) FROM background_job_waiters WHERE request_scope = 'artifact-repair'
+        AND state IN ('pending','awaiting_hydration')) >= 64 THEN 'queue_full'
     WHEN prior_job IS NOT NULL AND prior_digest != json_extract(body, '$.request.request_digest') THEN 'conflict'
     WHEN prior_job IS NOT NULL THEN 'existing'
+    WHEN json_extract(body,'$.payload.kind') = 'media_probe' AND NOT EXISTS (SELECT 1 FROM job_leases lease
+ WHERE lease.resource = json_extract(json_extract(body,'$.payload'),'$.coordinator.resource')
+ AND lease.owner_node_id = json_extract(json_extract(body,'$.payload'),'$.coordinator.node_id')
+ AND lease.fence = json_extract(json_extract(body,'$.payload'),'$.coordinator.fence')
+ AND lease.expires_at_ms > json_extract(body,'$.now_ms')
+ AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || lease.owner_node_id)
+ AND NOT EXISTS (SELECT 1 FROM background_job_domain_leases binding WHERE binding.resource = lease.resource
+   AND (binding.domain_fence != lease.fence OR NOT EXISTS (SELECT 1 FROM background_jobs parent
+    WHERE parent.id = binding.job_id AND parent.fence = binding.job_fence AND parent.state = 'running'
+     AND parent.owner_node_id = binding.node_id AND parent.owner_boot_id = binding.boot_id AND parent.claim_id = binding.claim_id
+     AND parent.lease_expires_ms > json_extract(body,'$.now_ms'))))) THEN 'producer_fenced'
+    WHEN json_extract(body,'$.payload.kind') = 'media_probe' AND NOT EXISTS (SELECT 1 FROM files file JOIN items item ON item.id = file.item_id
+ WHERE file.id = json_extract(json_extract(body,'$.payload'),'$.file_id')
+ AND file.size = json_extract(json_extract(body,'$.payload'),'$.source_size') AND file.mtime = json_extract(json_extract(body,'$.payload'),'$.source_mtime')
+ AND (json_extract(json_extract(body,'$.payload'),'$.coordinator.resource') = 'repair:probe'
+   OR json_extract(json_extract(body,'$.payload'),'$.coordinator.resource') = 'scan:library:' || item.library_id)) THEN 'source_changed'
+    WHEN json_extract(body,'$.payload.kind') = 'media_probe' AND active_job IS NULL
+      AND (SELECT COUNT(*) FROM background_jobs WHERE kind = 'media_probe' AND state IN ('queued','running','cancelling')
+        AND json_extract(payload_json,'$.coordinator') = json_extract(body,'$.payload.coordinator')) >= 128 THEN 'queue_full'
+    WHEN json_extract(body,'$.payload.kind') = 'semantic_embedding' AND NOT EXISTS (
+      SELECT 1 FROM items WHERE id = json_extract(body,'$.payload.item_id')) THEN 'source_changed'
+    WHEN json_extract(body,'$.payload.kind') = 'semantic_embedding' AND EXISTS (
+      SELECT 1 FROM background_embeddings WHERE item_id = json_extract(body,'$.payload.item_id')
+        AND content_digest = json_extract(body,'$.payload.content_digest')
+        AND model_digest = json_extract(body,'$.payload.model_digest')) THEN 'no_demand'
+    WHEN json_extract(body,'$.payload.kind') = 'semantic_embedding' AND active_job IS NULL
+      AND (SELECT COUNT(*) FROM background_jobs WHERE kind = 'semantic_embedding'
+        AND state IN ('queued','running','cancelling')) >= 64 THEN 'queue_full'
     WHEN json_type(body, '$.library_request') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM libraries WHERE id = json_extract(body, '$.payload.library_id')) THEN 'source_changed'
     WHEN json_type(body, '$.library_request') IS NOT NULL AND (SELECT COUNT(*) FROM background_library_requests request
@@ -178,12 +240,17 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
         SELECT 1 FROM cluster_fragment_index_artifacts artifact JOIN files file ON file.id = artifact.file_id
           AND file.size = artifact.source_size AND file.mtime = artifact.source_mtime
         WHERE 'fragment:' || artifact.cache_key = json_extract(body, '$.payload.artifact_key')
+      UNION ALL SELECT 1 FROM background_artwork_locations artifact
+        WHERE 'artwork:' || artifact.artifact_key = json_extract(body, '$.payload.artifact_key')
+      UNION ALL SELECT 1 FROM background_transcode_artifacts artifact JOIN files file ON file.id = artifact.file_id
+          AND file.size = artifact.source_size AND file.mtime = artifact.source_mtime
+        WHERE 'transcode:' || artifact.recipe_hash || ':' || artifact.manifest_digest = json_extract(body, '$.payload.artifact_key')
     ) THEN 'source_changed'
     WHEN json_type(body, '$.delivery_parent') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM background_job_waiters WHERE job_id = json_extract(body, '$.delivery_parent')
         AND target_node_id = json_extract(body, '$.payload.target_node_id') AND state = 'awaiting_hydration'
         AND (deadline_ms IS NULL OR deadline_ms > json_extract(body, '$.now_ms'))
-        AND CASE WHEN json_valid(result_ref) THEN 'fragment:' || json_extract(result_ref, '$.artifact_key') END = json_extract(body, '$.payload.artifact_key')
+        AND CASE WHEN json_valid(result_ref) THEN COALESCE(CASE json_extract(result_ref, '$.artifact_kind') WHEN 'fragment_index' THEN 'fragment:' WHEN 'artwork' THEN 'artwork:' END || json_extract(result_ref, '$.artifact_key'), 'transcode:' || json_extract(result_ref,'$.recipe_hash') || ':' || json_extract(result_ref,'$.manifest_digest')) END = json_extract(body, '$.payload.artifact_key')
     ) THEN 'no_demand'
     WHEN json_type(body, '$.fragment_domain') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM files WHERE id = json_extract(body, '$.fragment_domain.file_id')
@@ -223,10 +290,14 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
           AND state IN ('failed','cancelled')
           AND (COALESCE(last_error_code, '') != 'queue_expired' OR index_retry_deadline_ms != 0)) THEN 'domain_terminal'
     WHEN active_state = 'cancelling' THEN 'job_cancelling'
-    WHEN active_job IS NOT NULL AND json_remove(active_payload, '$.reason') != json_remove(json_extract(body, '$.payload'), '$.reason') THEN 'conflict'
+    WHEN active_job IS NOT NULL AND json_remove(active_payload, '$.reason', '$.spec.source_name') != json_remove(json_extract(body, '$.payload'), '$.reason', '$.spec.source_name') THEN 'conflict'
     WHEN json_type(body, '$.legacy_key') IS NULL AND EXISTS (SELECT 1 FROM background_jobs WHERE id = json_extract(body, '$.id')) THEN 'conflict'
     WHEN json_type(body, '$.legacy_key') IS NULL AND json_extract(body, '$.priority') < 2
       AND EXISTS (SELECT 1 FROM background_job_legacy WHERE state = 'awaiting_import') THEN 'queue_full'
+    WHEN json_extract(body, '$.request.scope') IN ('automatic:transcode','automatic:transcode-repair','automatic:hot-copy')
+      AND (SELECT COUNT(*) FROM background_job_waiters WHERE request_scope IN ('automatic:transcode','automatic:transcode-repair','automatic:hot-copy')
+        AND state IN ('pending','awaiting_hydration') AND (deadline_ms IS NULL OR deadline_ms > json_extract(body, '$.now_ms')))
+        + (SELECT COUNT(*) FROM background_predictions WHERE state = 'pending' AND expires_ms > json_extract(body,'$.now_ms')) >= 64 THEN 'queue_full'
     WHEN (SELECT COUNT(*) FROM background_job_waiters) >= 16384 THEN 'queue_full'
     WHEN json_extract(body, '$.request.scope') LIKE 'user:%' AND (SELECT COUNT(*) FROM background_job_waiters
       WHERE request_scope = json_extract(body, '$.request.scope')
@@ -283,6 +354,22 @@ UPDATE background_jobs SET
 WHERE id = json_extract($1, '$.job_id')
   AND revision = json_extract($1, '$.expected_revision')
   AND kind = json_extract($1, '$.kind') AND payload_version = json_extract($1, '$.payload_version')
+  AND (kind != 'media_probe' OR (EXISTS (SELECT 1 FROM job_leases lease
+ WHERE lease.resource = json_extract(background_jobs.payload_json,'$.coordinator.resource')
+ AND lease.owner_node_id = json_extract(background_jobs.payload_json,'$.coordinator.node_id')
+ AND lease.fence = json_extract(background_jobs.payload_json,'$.coordinator.fence')
+ AND lease.expires_at_ms > json_extract($1,'$.now_ms')
+ AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || lease.owner_node_id)
+ AND NOT EXISTS (SELECT 1 FROM background_job_domain_leases binding WHERE binding.resource = lease.resource
+   AND (binding.domain_fence != lease.fence OR NOT EXISTS (SELECT 1 FROM background_jobs parent
+    WHERE parent.id = binding.job_id AND parent.fence = binding.job_fence AND parent.state = 'running'
+     AND parent.owner_node_id = binding.node_id AND parent.owner_boot_id = binding.boot_id AND parent.claim_id = binding.claim_id
+     AND parent.lease_expires_ms > json_extract($1,'$.now_ms')))))
+  AND EXISTS (SELECT 1 FROM files file JOIN items item ON item.id = file.item_id
+ WHERE file.id = json_extract(background_jobs.payload_json,'$.file_id')
+ AND file.size = json_extract(background_jobs.payload_json,'$.source_size') AND file.mtime = json_extract(background_jobs.payload_json,'$.source_mtime')
+ AND (json_extract(background_jobs.payload_json,'$.coordinator.resource') = 'repair:probe'
+   OR json_extract(background_jobs.payload_json,'$.coordinator.resource') = 'scan:library:' || item.library_id))))
   AND (target_node_id IS NULL OR target_node_id = json_extract($1, '$.node_id'))
   AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))
   AND (retry_deadline_ms = 0 OR retry_deadline_ms > json_extract($1, '$.now_ms'))
@@ -461,8 +548,7 @@ pub enum JobPayload {
     },
     ArtworkDerivative {
         artifact_key: String,
-        width: u32,
-        height: u32,
+        spec: super::background_jobs_artwork::ArtworkVariantSpec,
     },
     SemanticEmbedding {
         item_id: i64,
@@ -473,6 +559,9 @@ pub enum JobPayload {
         file_id: i64,
         source_generation: String,
         probe_digest: String,
+        source_size: i64,
+        source_mtime: i64,
+        coordinator: super::background_jobs_probe::ProbeCoordinator,
     },
 }
 
@@ -527,7 +616,10 @@ impl JobPayload {
                     && (1..=8_640).contains(target_height)
                     && identifier(policy_generation)
                     && requirements.validate()
-                    && matches!(reason.as_str(), "in_progress" | "next_up" | "recent")
+                    && matches!(
+                        reason.as_str(),
+                        "in_progress" | "next_up" | "recent" | "recent_demand" | "channel_next"
+                    )
             }
             Self::FragmentIndexBuild {
                 file_id,
@@ -555,7 +647,23 @@ impl JobPayload {
                 file_id,
                 source_generation,
                 probe_digest,
-            } => *file_id > 0 && identifier(source_generation) && digest(probe_digest),
+                source_size,
+                source_mtime,
+                coordinator,
+            } => {
+                *file_id > 0
+                    && *source_size >= 0
+                    && digest(probe_digest)
+                    && coordinator.validate()
+                    && *source_generation
+                        == super::background_jobs_probe::generation(
+                            *file_id,
+                            *source_size,
+                            *source_mtime,
+                            coordinator,
+                            probe_digest,
+                        )
+            }
             Self::ArtifactHydrate {
                 artifact_key,
                 target_node_id,
@@ -572,14 +680,8 @@ impl JobPayload {
                 library_id,
                 generation,
             } => *library_id > 0 && identifier(generation),
-            Self::ArtworkDerivative {
-                artifact_key,
-                width,
-                height,
-            } => {
-                identifier(artifact_key)
-                    && (1..=8_192).contains(width)
-                    && (1..=8_192).contains(height)
+            Self::ArtworkDerivative { artifact_key, spec } => {
+                spec.validate().is_ok() && *artifact_key == spec.artifact_key()
             }
             Self::SemanticEmbedding {
                 item_id,
@@ -955,6 +1057,91 @@ pub struct CancelWaiterOutcome {
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    async fn embedding_for(
+        &self,
+        item_id: i64,
+        content_digest: &str,
+        model_digest: &str,
+    ) -> Result<super::background_jobs_embeddings::EmbeddingLookup, StoreError>;
+    async fn publish_embedding_job(
+        &self,
+        request: super::background_jobs_embeddings::PublishEmbeddingJob,
+    ) -> Result<JobPublishOutcome, StoreError>;
+    async fn publish_probe_job(
+        &self,
+        request: super::background_jobs_probe::PublishProbeJob,
+    ) -> Result<JobPublishOutcome, StoreError>;
+    async fn apply_probe_job(
+        &self,
+        request: super::background_jobs_probe::ApplyProbeJob,
+    ) -> Result<bool, StoreError>;
+    async fn transcode_verification_candidates(
+        &self,
+        node_id: &str,
+        artifact_key: Option<&str>,
+    ) -> Result<Vec<super::background_jobs_integrity::TranscodeVerificationCandidate>, StoreError>;
+    async fn artwork_verification_candidates(
+        &self,
+        node_id: &str,
+    ) -> Result<Vec<super::background_jobs_artwork::ArtworkLocation>, StoreError>;
+    async fn verify_artwork_job(
+        &self,
+        request: super::background_jobs_integrity::VerifyArtwork,
+    ) -> Result<JobPublishOutcome, StoreError>;
+    async fn verify_transcode_job(
+        &self,
+        request: super::background_jobs_integrity::VerifyTranscode,
+    ) -> Result<JobPublishOutcome, StoreError>;
+    async fn artifact_repairs(
+        &self,
+        pending_only: bool,
+    ) -> Result<Vec<super::background_jobs_integrity::ArtifactRepair>, StoreError>;
+    async fn enqueue_artifact_repair(
+        &self,
+        repair: super::background_jobs_integrity::ArtifactRepair,
+        now_ms: i64,
+    ) -> Result<EnqueueOutcome, StoreError>;
+    async fn sync_predictions(
+        &self,
+        request: super::background_jobs_predictions::SyncPredictions,
+    ) -> Result<(), StoreError>;
+    async fn pending_predictions(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<super::NewAnalysisRequest>, StoreError>;
+    async fn preparation_demands(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<super::background_jobs_preparation::PreparationDemand>, StoreError>;
+    async fn hot_artifacts(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<super::background_jobs_preparation::HotArtifact>, StoreError>;
+    async fn transcode_copy_sources(
+        &self,
+        artifact_key: &str,
+    ) -> Result<Vec<super::background_jobs_transcode::TranscodeCopySource>, StoreError>;
+    /// Immutable producer provenance, including when all advertised holders expired.
+    async fn artwork_variant(
+        &self,
+        artifact_key: &str,
+    ) -> Result<Option<super::background_jobs_artwork::ArtworkLocation>, StoreError>;
+    async fn enqueue_artwork_demand(
+        &self,
+        spec: super::background_jobs_artwork::ArtworkVariantSpec,
+        node_id: &str,
+        now_ms: i64,
+    ) -> Result<EnqueueOutcome, StoreError>;
+    async fn artwork_locations(
+        &self,
+        artifact_key: &str,
+        now_ms: i64,
+    ) -> Result<Vec<super::background_jobs_artwork::ArtworkLocation>, StoreError>;
+    async fn publish_artwork_job(
+        &self,
+        request: super::background_jobs_artwork::PublishArtworkJob,
+    ) -> Result<JobPublishOutcome, StoreError>;
+
     /// Pending compatibility records are an outbox; only the common queue executes them.
     async fn subtitle_job_intents(&self, limit: usize) -> Result<Vec<String>, StoreError>;
     async fn enqueue_subtitle_job(
@@ -1124,6 +1311,129 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn embedding_for(
+        &self,
+        item_id: i64,
+        content_digest: &str,
+        model_digest: &str,
+    ) -> Result<super::background_jobs_embeddings::EmbeddingLookup, StoreError> {
+        super::background_jobs_embeddings::lookup(self, item_id, content_digest, model_digest).await
+    }
+    async fn publish_embedding_job(
+        &self,
+        request: super::background_jobs_embeddings::PublishEmbeddingJob,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        super::background_jobs_embeddings::publish(self, request).await
+    }
+    async fn publish_probe_job(
+        &self,
+        request: super::background_jobs_probe::PublishProbeJob,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        super::background_jobs_probe::publish(self, request).await
+    }
+    async fn apply_probe_job(
+        &self,
+        request: super::background_jobs_probe::ApplyProbeJob,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_probe::apply(self, request).await
+    }
+    async fn transcode_verification_candidates(
+        &self,
+        node_id: &str,
+        artifact_key: Option<&str>,
+    ) -> Result<Vec<super::background_jobs_integrity::TranscodeVerificationCandidate>, StoreError>
+    {
+        super::background_jobs_integrity::transcode_candidates(self, node_id, artifact_key).await
+    }
+    async fn artwork_verification_candidates(
+        &self,
+        node_id: &str,
+    ) -> Result<Vec<super::background_jobs_artwork::ArtworkLocation>, StoreError> {
+        super::background_jobs_integrity::artwork_candidates(self, node_id).await
+    }
+    async fn verify_artwork_job(
+        &self,
+        request: super::background_jobs_integrity::VerifyArtwork,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        super::background_jobs_integrity::verify_artwork(self, request).await
+    }
+    async fn verify_transcode_job(
+        &self,
+        request: super::background_jobs_integrity::VerifyTranscode,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        super::background_jobs_integrity::verify_transcode(self, request).await
+    }
+    async fn artifact_repairs(
+        &self,
+        pending_only: bool,
+    ) -> Result<Vec<super::background_jobs_integrity::ArtifactRepair>, StoreError> {
+        super::background_jobs_integrity::repairs(self, pending_only).await
+    }
+    async fn enqueue_artifact_repair(
+        &self,
+        repair: super::background_jobs_integrity::ArtifactRepair,
+        now_ms: i64,
+    ) -> Result<EnqueueOutcome, StoreError> {
+        super::background_jobs_integrity::enqueue_repair(self, repair, now_ms).await
+    }
+    async fn sync_predictions(
+        &self,
+        request: super::background_jobs_predictions::SyncPredictions,
+    ) -> Result<(), StoreError> {
+        super::background_jobs_predictions::sync(self, request).await
+    }
+    async fn pending_predictions(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<super::NewAnalysisRequest>, StoreError> {
+        super::background_jobs_predictions::pending(self, now_ms).await
+    }
+    async fn preparation_demands(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<super::background_jobs_preparation::PreparationDemand>, StoreError> {
+        super::background_jobs_preparation::demands(self, now_ms).await
+    }
+    async fn hot_artifacts(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<super::background_jobs_preparation::HotArtifact>, StoreError> {
+        super::background_jobs_preparation::hot_artifacts(self, now_ms).await
+    }
+    async fn transcode_copy_sources(
+        &self,
+        artifact_key: &str,
+    ) -> Result<Vec<super::background_jobs_transcode::TranscodeCopySource>, StoreError> {
+        super::background_jobs_transcode::sources(self, artifact_key).await
+    }
+    async fn artwork_variant(
+        &self,
+        artifact_key: &str,
+    ) -> Result<Option<super::background_jobs_artwork::ArtworkLocation>, StoreError> {
+        super::background_jobs_artwork::canonical(self, artifact_key).await
+    }
+    async fn enqueue_artwork_demand(
+        &self,
+        spec: super::background_jobs_artwork::ArtworkVariantSpec,
+        node_id: &str,
+        now_ms: i64,
+    ) -> Result<EnqueueOutcome, StoreError> {
+        super::background_jobs_artwork::enqueue(self, spec, node_id, now_ms).await
+    }
+    async fn artwork_locations(
+        &self,
+        artifact_key: &str,
+        now_ms: i64,
+    ) -> Result<Vec<super::background_jobs_artwork::ArtworkLocation>, StoreError> {
+        super::background_jobs_artwork::locations(self, artifact_key, now_ms).await
+    }
+    async fn publish_artwork_job(
+        &self,
+        request: super::background_jobs_artwork::PublishArtworkJob,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        super::background_jobs_artwork::publish(self, request).await
+    }
+
     async fn subtitle_job_intents(&self, limit: usize) -> Result<Vec<String>, StoreError> {
         super::background_jobs_subtitle::intents(self, limit).await
     }
@@ -1277,20 +1587,20 @@ impl<T: QueueSql> BackgroundJobStore for T {
         intent: DeliveryIntent,
         now_ms: i64,
     ) -> Result<EnqueueOutcome, StoreError> {
-        use sha2::{Digest, Sha256};
         if uuid::Uuid::parse_str(&intent.job_id).is_err()
-            || !intent
+            || !(intent
                 .artifact_key
                 .strip_prefix("fragment:")
+                .or_else(|| intent.artifact_key.strip_prefix("artwork:"))
                 .is_some_and(digest)
+                || super::background_jobs_transcode::parse_key(&intent.artifact_key).is_some())
         {
             return Err(invalid("invalid background delivery intent"));
         }
-        let payload = JobPayload::ArtifactHydrate {
-            artifact_key: intent.artifact_key.clone(),
-            target_node_id: intent.target_node_id.clone(),
-        };
-        let request_digest = hex::encode(Sha256::digest(encode(&payload)?.as_bytes()));
+        let (payload, request_digest) = super::background_jobs_delivery::hydration_identity(
+            &intent.artifact_key,
+            &intent.target_node_id,
+        )?;
         let request = EnqueueJob {
             id: uuid::Uuid::new_v4().to_string(),
             payload,
@@ -1352,7 +1662,9 @@ impl<T: QueueSql> BackgroundJobStore for T {
         let rows = self
             .queue_sql(
                 "SELECT json_quote(id) AS result_json FROM background_jobs job
-            WHERE kind = 'transcode_prepare' AND state IN ('queued','running','cancelling')
+            WHERE (kind = 'transcode_prepare' OR (kind = 'artifact_hydrate'
+                AND json_extract(payload_json, '$.artifact_key') LIKE 'transcode:%'))
+            AND state IN ('queued','running','cancelling')
             AND ((job.fence = 0 AND json_extract(job.checkpoint_json, '$.staging_node_id') = json_extract($1, '$.node_id'))
                 OR EXISTS (SELECT 1 FROM background_job_attempts attempt WHERE attempt.job_id = job.id
                 AND attempt.fence = job.fence AND attempt.owner_node_id = json_extract($1, '$.node_id')))

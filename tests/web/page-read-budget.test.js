@@ -1768,7 +1768,7 @@ test("stale authorization responses cannot revoke or feed a newer session", asyn
     `let API="/api/v1",TOKEN="old",AUTH_GENERATION=1,logoutCount=0;
      const PlaybackPolicy={parseStreamFailure:()=>null};
      function logout(){logoutCount++;TOKEN=null;AUTH_GENERATION++;}
-     ${shippedSource("api")};
+     ${(require("./shell-source.js").apiPrelude()+shippedSource("api"))};
      return {api,login:(token)=>{TOKEN=token;AUTH_GENERATION++;},state:()=>({TOKEN,AUTH_GENERATION,logoutCount})};`,
   )(fetch);
   const first=harness.api("/hubs"), second=harness.api("/home/previews");

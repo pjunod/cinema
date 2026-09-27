@@ -46,9 +46,9 @@ scan_prune_percent = 10
 # advertise_host = ""
 # join_token_file = ""
 # trusted_network = ""
-# Opt in cluster-wide only after every voter advertises the same bounded-read
-# protocol. False is the immediate Authority-read kill switch.
-# bounded_replica_reads = false
+# Initial preference; Developer settings can override it cluster-wide.
+# Each read verifies current replica freshness or uses Authority automatically.
+# bounded_replica_reads = true
 # Fresh local reads also require commit-to-apply lag at or below this value.
 # Range: 0..10000 entries. Keep identical on every voter.
 # bounded_replica_max_lag_entries = 64

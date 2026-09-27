@@ -213,6 +213,16 @@ pub(crate) async fn readiness(
         observed_at_ms: crate::state::clock_ms(),
         items: vec![
             durable_cluster_work(&state).await,
+            bounded_catalogue_reads(
+                &state,
+                plurx_core::store::stored_switch(
+                    settings
+                        .get(plurx_core::store::keys::BOUNDED_REPLICA_READS)
+                        .map(String::as_str),
+                    state.catalogue.bounded_reads_default(),
+                ),
+            )
+            .await,
             cluster_backup(
                 &state,
                 settings.get(plurx_core::store::keys::BACKUP_DESTINATION),
@@ -257,6 +267,26 @@ pub(crate) async fn readiness(
             source_probe_comparison().await,
         ],
     }))
+}
+
+async fn bounded_catalogue_reads(state: &AppState, enabled: bool) -> DeveloperEnableItem {
+    let observed = state.catalogue.bounded_read_observation().await;
+    DeveloperEnableItem {
+        id: "bounded_catalogue_reads", title: "Local catalogue reads", enabled: Some(enabled),
+        setting: Some("bounded_replica_reads"),
+        requirements: vec![DeveloperRequirement {
+            id: "replica_proof", title: "Fresh replica proof",
+            status: match observed { Some(true) => RequirementStatus::Met, Some(false) => RequirementStatus::Unmet, None => RequirementStatus::Unobservable },
+            evidence: match observed {
+                Some(true) => "This node currently has a fresh quorum watermark, matching Raft term and acceptable apply lag. Each read revalidates that proof before returning.",
+                Some(false) => "This node cannot currently prove a bounded local read. Reads automatically use authority until the proof recovers.",
+                None => "This process uses the ordinary Store reader; standalone SQLite needs no replica optimization.",
+            }.into(),
+        }, DeveloperRequirement {
+            id: "watch_floor", title: "Watch state consistency", status: RequirementStatus::Met,
+            evidence: "Watch reads require a valid client write-position echo and a sufficiently applied replica. Missing, expired or unknown positions use authority; authentication always uses authority.".into(),
+        }],
+    }
 }
 
 /// Facts only: these observations are never consulted by settings updates.

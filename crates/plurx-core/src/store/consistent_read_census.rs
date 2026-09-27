@@ -36,12 +36,12 @@ use super::placeholder_census::STORE_SOURCES;
 
 /// Consistent-read call sites per replicated slice, production code only.
 const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
-    ("hiqlite.rs", 26),
+    ("hiqlite.rs", 27),
     ("hiqlite_background_jobs.rs", 1),
     ("hiqlite_catalog.rs", 2),
     ("hiqlite_classification.rs", 1),
     ("hiqlite_coordination.rs", 2),
-    ("hiqlite_durable.rs", 29),
+    ("hiqlite_durable.rs", 28),
     ("hiqlite_dv_conversion.rs", 13),
     ("hiqlite_dvr.rs", 19),
     ("hiqlite_fragment_index_cluster.rs", 30),
@@ -67,7 +67,8 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
 // Durable queue removes three unannotated legacy execution reads. Its
 // authority bridge is separately inventoried and carries its reason.
 // E0 removes the legacy subtitle ownership read as well.
-const UNANNOTATED_CEILING: usize = 237;
+// E2 retires the old unfenced manifest-candidate query.
+const UNANNOTATED_CEILING: usize = 236;
 
 const SITE: &str = "query_consistent";
 const REASON: &str = "// authority:";

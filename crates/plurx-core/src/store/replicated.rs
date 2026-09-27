@@ -341,13 +341,6 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "cache.rs",
-        method: "mark_cache_manifests_checked",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::VerbatimBatch,
-    },
-    SqliteTransactionSite {
-        module: "cache.rs",
         method: "invalidate_cache_entry",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
@@ -1176,7 +1169,8 @@ mod tests {
         // Seven legacy execution boundaries now use the one common queue
         // transaction bridge: six claim/publication methods and submission.
         // Subtitle execution now uses the common queue transaction.
-        assert_eq!(methods.len(), 94);
+        // E2 retires the unfenced manifest-cursor transaction.
+        assert_eq!(methods.len(), 93);
     }
 
     #[test]

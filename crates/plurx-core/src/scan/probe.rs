@@ -24,6 +24,15 @@ fn ffprobe_bin() -> String {
         .unwrap_or_else(|| "ffprobe".to_owned())
 }
 
+/// Exact parser/reporter identity used by portable leaf work.
+pub async fn pipeline_digest() -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let reporter = reporter_identity_of(&ffprobe_bin()).await?;
+    Some(hex::encode(Sha256::digest(format!(
+        "leaf-probe-v1:{reporter}"
+    ))))
+}
+
 /// A scan probe may read a large media file across a cold NAS mount. This is a
 /// hang ceiling, not a healthy-probe latency target.
 const SCAN_PROBE_TIMEOUT: Duration = Duration::from_secs(60);

@@ -40,6 +40,30 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     for result in timeout_store(client.batch(super::background_jobs_provider::SCHEMA)).await? {
         result.map_err(database_error)?;
     }
+    validate_sql(super::background_jobs_artwork::SCHEMA)?;
+    for result in timeout_store(client.batch(super::background_jobs_artwork::SCHEMA)).await? {
+        result.map_err(database_error)?;
+    }
+    validate_sql(super::background_jobs_transcode::SCHEMA)?;
+    for result in timeout_store(client.batch(super::background_jobs_transcode::SCHEMA)).await? {
+        result.map_err(database_error)?;
+    }
+    validate_sql(super::background_jobs_embeddings::SCHEMA)?;
+    for result in timeout_store(client.batch(super::background_jobs_embeddings::SCHEMA)).await? {
+        result.map_err(database_error)?;
+    }
+    validate_sql(super::background_jobs_probe::SCHEMA)?;
+    for result in timeout_store(client.batch(super::background_jobs_probe::SCHEMA)).await? {
+        result.map_err(database_error)?;
+    }
+    validate_sql(super::background_jobs_integrity::SCHEMA)?;
+    for result in timeout_store(client.batch(super::background_jobs_integrity::SCHEMA)).await? {
+        result.map_err(database_error)?;
+    }
+    validate_sql(super::background_jobs_predictions::SCHEMA)?;
+    for result in timeout_store(client.batch(super::background_jobs_predictions::SCHEMA)).await? {
+        result.map_err(database_error)?;
+    }
     Ok(())
 }
 

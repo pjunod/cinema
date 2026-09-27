@@ -1,5 +1,7 @@
 //! Shared application state and the background job manager.
 
+#[path = "cache_preparation.rs"]
+mod cache_preparation;
 #[path = "library_work.rs"]
 mod library_work;
 #[path = "subtitle_work.rs"]
@@ -2208,15 +2210,9 @@ impl Drop for ProducingGuard {
     }
 }
 
-/// How many rows to take off each rail, per user. A rail is a prediction and
-/// the tail of one is a weak prediction; the head is where the value is.
-const PRODUCE_RAIL: i64 = 5;
-
 /// Ceiling on what one pass will attempt, across every user and rail.
 const PRODUCE_MAX_PER_PASS: usize = 12;
-/// Hard fan-out bounds for one singleton discovery pass. The rotating user
-/// cursor gives every account a turn without an all-users allocation.
-const PRODUCE_USER_PAGE: i64 = 64;
+/// Hard fan-out bound after the shared demand snapshot has been ranked.
 const PRODUCE_DISCOVERY_ITEMS: usize = 64;
 
 /// How long one pass may spend. A bound rather than "until the list is done"
@@ -5498,6 +5494,12 @@ impl JobManager {
             tracing::debug!("skipping a scheduler tick: this node is not a committed voter");
             return false;
         }
+        if let Err(error) = self.prepare_predictions().await {
+            tracing::warn!(%error, "predictive preparation deferred");
+        }
+        if let Err(error) = self.prepare_hot_copies().await {
+            tracing::warn!(%error, "hot artifact placement deferred");
+        }
         if let Err(e) = self.run_due_jobs(transcode).await {
             tracing::warn!(error = %e, "scheduler tick failed");
         }
@@ -5580,7 +5582,7 @@ impl JobManager {
                     // Outbox admission is still voter-owned; learners only
                     // consume already-authorized immutable work for a target.
                     if self.may_run_cluster_jobs().await {
-                        self.enqueue_fragment_deliveries().await;
+                        self.enqueue_artifact_deliveries().await;
                     }
                     self.drain_cluster_fragment_index_slot(Arc::clone(&transcode))
                         .await;
@@ -6007,97 +6009,28 @@ impl JobManager {
         self.stamp(keys::JOB_LAST_CACHE_PRODUCE, &publisher).await;
         let lost = lease.loss_token();
         use crate::produce;
-        let user_cursor = publisher
-            .get_setting(keys::CACHE_PRETRANSCODE_USER_CURSOR)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|value| value.parse::<i64>().ok())
-            .filter(|value| *value >= 0)
-            .unwrap_or(0);
-        let mut users = match self
-            .store
-            .list_users_page(user_cursor, PRODUCE_USER_PAGE)
-            .await
-        {
-            Ok(users) => users,
-            Err(e) => {
-                tracing::warn!(error = %e, "candidate generator cannot page users");
+        let discoveries = match self.prediction_discoveries().await {
+            Ok(discoveries) => discoveries,
+            Err(error) => {
+                tracing::warn!(%error, "candidate generator could not read demand");
                 drop(publisher);
                 let _ = lease.release().await;
                 return;
             }
         };
-        if users.is_empty() && user_cursor > 0 {
-            users = self
-                .store
-                .list_users_page(0, PRODUCE_USER_PAGE)
-                .await
-                .unwrap_or_default();
-        }
-        let next_user_cursor = if users.len() < PRODUCE_USER_PAGE as usize {
-            0
-        } else {
-            users.last().map_or(0, |user| user.id)
-        };
-        if let Err(error) = publisher
-            .put_setting(
-                keys::CACHE_PRETRANSCODE_USER_CURSOR,
-                &next_user_cursor.to_string(),
-            )
-            .await
-        {
-            tracing::warn!(%error, "candidate generator could not advance its user cursor");
-        }
-        let mut rails: Vec<Vec<produce::DiscoveryCandidate>> = Vec::new();
-        let mut in_progress = Vec::new();
-        let mut next_up = Vec::new();
-        for user in &users {
-            if let Ok(rows) = self.store.continue_watching(user.id, PRODUCE_RAIL).await {
-                in_progress.extend(rows.into_iter().map(|r| (r.item.id, r.item.title)));
-            }
-            if let Ok(rows) = self.store.next_up(user.id, PRODUCE_RAIL).await {
-                next_up.extend(rows.into_iter().map(|r| (r.item.id, r.item.title)));
-            }
-        }
-        // The fallback rail, and the only one a brand-new server has: nobody
-        // has watch history on day one, but a 4K film that landed yesterday is
-        // still the most likely thing to be played tonight.
-        let recent: Vec<(i64, String)> = self
-            .store
-            .recently_added(None, PRODUCE_RAIL)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|r| (r.item.id, r.item.title))
-            .collect();
-
-        for (reason, items) in [
-            (produce::REASON_IN_PROGRESS, in_progress),
-            (produce::REASON_NEXT_UP, next_up),
-            (produce::REASON_RECENT, recent),
-        ] {
-            let mut rail = Vec::new();
-            for (item_id, title) in items {
-                rail.push(produce::DiscoveryCandidate {
-                    item_id,
-                    title,
-                    reason,
-                });
-            }
-            rails.push(rail);
-        }
-
-        // Dedupe/rank cheap item ids first, then perform at most one bounded
-        // file lookup per globally selected item. This is O(1) store fan-out
-        // as users/history grow: 64 users, 129 rail reads, and 64 file reads.
-        let discoveries = produce::rank_discovery(&rails, PRODUCE_DISCOVERY_ITEMS);
         let mut candidates = Vec::with_capacity(PRODUCE_MAX_PER_PASS);
-        for discovery in discoveries {
-            let Ok(files) = self.store.files_for_item(discovery.item_id).await else {
-                continue;
+        for prediction in discoveries {
+            let discovery = prediction.discovery;
+            let file = if let Some(file_id) = prediction.file_id {
+                self.store.get_file(file_id).await.ok().flatten()
+            } else {
+                self.store
+                    .files_for_item(discovery.item_id)
+                    .await
+                    .ok()
+                    .and_then(|files| files.into_iter().next())
             };
-            let Some(file) = files.into_iter().next() else {
+            let Some(file) = file else {
                 continue;
             };
             if !produce::worth_producing(&file) {
@@ -7679,23 +7612,38 @@ impl JobManager {
             return;
         }
 
-        self.enqueue_fragment_deliveries().await;
+        self.enqueue_artifact_deliveries().await;
         let built = self.drain_cluster_fragment_index_slot(transcode).await;
         if built > 0 {
             tracing::info!(built, "cluster fragment-index queue pass finished");
         }
     }
 
-    async fn enqueue_fragment_deliveries(&self) {
+    pub(crate) fn execution_authority(&self) -> Arc<dyn ClusterJobAuthority> {
+        Arc::clone(&self.job_authority)
+    }
+
+    pub(crate) async fn enqueue_artifact_deliveries(&self) {
+        match self.store.artifact_repairs(true).await {
+            Ok(repairs) => {
+                for repair in repairs.into_iter().take(16) {
+                    if let Err(error) = self.store.enqueue_artifact_repair(repair, clock_ms()).await
+                    {
+                        tracing::warn!(%error, "admitting finite artifact repair");
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(%error, "reading artifact repair plans"),
+        }
         match self.store.delivery_intents(clock_ms()).await {
             Ok(intents) => {
                 for intent in intents {
                     if let Err(error) = self.store.enqueue_delivery(intent, clock_ms()).await {
-                        tracing::warn!(%error, "admitting fragment delivery");
+                        tracing::warn!(%error, "admitting artifact delivery");
                     }
                 }
             }
-            Err(error) => tracing::warn!(%error, "reading fragment delivery obligations"),
+            Err(error) => tracing::warn!(%error, "reading artifact delivery obligations"),
         }
     }
 

@@ -916,7 +916,11 @@ normal catalogue path once implemented. Preserve strong auth and user
 read-after-write behavior. Move any remaining opt-out to Developer; no receipt
 is consulted by request handling.
 
-Add `artifact_hydrate`, `artifact_verify` and `artwork_variant` jobs. Reuse
+Add `artifact_hydrate` and `artwork_variant` jobs. The 2026-09-26 execution
+decision keeps scheduled `artifact_verify` pages with their repair consumer in
+E2 (§9.3), so verification failure has its recovery path in the same batch.
+E1 verifies bytes at transfer and serving boundaries and preserves the existing
+cache integrity sweep. Reuse
 existing manifests and holder APIs; share a transfer helper rather than
 rewriting every artifact store. Select one producer, then copy to a second
 healthy holder for currently demanded/hot artifacts when space permits. Keep
@@ -983,8 +987,8 @@ existing recovery/handoff protocol changes ownership.
 
 Implement the shared-ingest portion of
 [LIVE-TV-SHARED-TRANSPORT.md](../features/LIVE-TV-SHARED-TRANSPORT.md): one owner
-per `(device, channel, configuration_generation)`, separate bounded queues for
-viewer and recording consumers, and exact last-consumer cleanup. Other nodes
+per `(device identity/address, channel, serving generation)`, separate bounded queues for
+viewer and recording consumers, and exact last-consumer cleanup. Existing M1 transport identity deliberately survives unrelated settings saves (shared-transport decision D7); configuration changes still fence sessions and explicit owner drains. Other nodes
 can perform compatible viewer processing from that ingest using bounded peer
 streaming. One slow peer must be dropped independently; it cannot stall the
 tuner reader, DVR sink or other viewers. Transport occupancy, not viewer count,
@@ -1002,6 +1006,37 @@ The former needs shared producer/session semantics; the latter needs reachable
 public origins, capability URLs and client transport handling. The first E3
 delivery keeps the existing proxy contract and states that ingress egress
 bandwidth is therefore still consumed.
+
+**E3 implementation:** placement and takeover preferences are saved independently
+in the Developer tab. Fleet protocol coverage is an observation; individual
+workers still need the protocol and actual source/codec/resource capability.
+Recent storage latency, delivered bytes and peer bytes expire after 30 seconds.
+Unknown observations are ranking inputs, never a certification requirement.
+
+Live TV protocol 4 adds placed starts without changing v1/v2 signed bodies. The
+configured tuner owner selects a compatible voter from fresh media snapshots
+and retains the request's worker and nonce before contacting it. At most 1,024
+assigned placement/recovery records are retained; unknown retirements use a
+separate eight-entry per-user allowance. Configuration generations advance
+monotonically, so a delayed older start cannot remove newer ownership. New work is refused when ambiguous
+owners fill that bound. Retries do not choose another worker. Explicit retirement
+fences later ingest before the worker exchange; confirmed terminal records live
+for another minute. Admission sweeps at most eight old records inside 200 ms;
+an unreachable worker remains owned. These records are process-local because
+owner restart closes its tuner feeds; the existing client recovery protocol then
+reports the lost session and starts with a new request identity.
+
+The selected worker opens an exact-signed, nonce-bound raw feed from the tuner
+owner and runs the existing viewer session lifecycle. The tuner owner joins its
+ordinary bounded transport queue; peer-backed viewer transports are distinct
+from physical-device transports during DVR reconciliation. The worker shares one such feed for viewers
+of the same channel. Dropping a response detaches only that consumer, and a
+slow consumer is evicted independently. Existing source observations, serving
+fences, configuration/drain checks, physical encoder admission, process reaping,
+activation authorization and bounded media proxying remain authoritative.
+A processor does not fetch tuner signal directly. Older ingress keeps its local
+owner start protocol. Direct redirects and shared encodes remain outside E3.
+
 
 ## 10. Implementation and evidence — prove the queue once, extend the corpus
 
@@ -1161,10 +1196,10 @@ not authorize a production restart or rolling mixed-queue cutover.
 | M2 fragment build + hydration | merged | PR #532 | Shared build, hydration, retry ledgers and cutover validated |
 | M3 operations + recovery | merged | PR #532 | Activity, Developer controls, recovery and migration validated |
 | Core promotion/deployment | main merged; production unchanged | `b4b488556` | Required gates passed on reviewed candidate; no deployment authorized |
-| E0 preparation + maintenance adapters | implemented; final validation | PR #564 | One adversarial review, five fixes; 17 queue contracts passed across SQLite/Hiqlite; fast lane pending |
-| E1 reads + cache preparation | not started | — | — |
-| E2 embeddings + batch analysis | not started | — | — |
-| E3 placement + shared ingest | not started | — | — |
+| E0 preparation + maintenance adapters | merged | PR #564 | Final review addressed; fast lane 3322 green |
+| E1 reads + cache preparation | reviewed; combined qualification | PR #572 | Copy, artwork, prediction and read-after contracts pass; review findings addressed |
+| E2 embeddings + batch analysis | reviewed; combined qualification | PR #572 | Review findings addressed; shared queue, embedding, probe and repair regressions passed |
+| E3 placement + shared ingest | reviewed; three findings addressed | PR #572 | Remote transport lifetime, per-user retirement capacity and monotonic placement generations corrected; 13 focused daemon regressions and 11 docs/ownership checks passed; final lane remains |
 
 **First-release done:** accepted jobs survive restart; both backends enforce
 exclusive publication; compatible nodes share real work; cancellation and

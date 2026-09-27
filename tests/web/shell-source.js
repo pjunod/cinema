@@ -95,4 +95,8 @@ function shellSource() {
   };
 }
 
-module.exports = {shellSource, WEB, SIDECARS};
+// Fixtures that execute only api() also need its session-scoped fence helpers.
+function apiPrelude(){
+  return fs.readFileSync(path.join(WEB,"core/api.js"),"utf8").split("async function api(")[0];
+}
+module.exports = {shellSource, apiPrelude, WEB, SIDECARS};
