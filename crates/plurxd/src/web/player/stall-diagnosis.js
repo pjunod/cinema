@@ -351,6 +351,7 @@ async function switchAutoRung(currentHeight,decision){
         detail:"severe_estimate",
         message:`severe Auto estimate sample_at_ms=${Math.round(p.abr.recentEstimateAtMs)} `+
           `decision_at_ms=${Math.round(decidedAtMs)} `+
+          `sample_source=${p.abr.recentEstimateSource||"unknown"} `+
           `sample_kbps=${Math.round(p.abr.recentEstimateKbps)} `+
           `from=${currentHeight}p to=${decision.height}p`},playbackContext()));
     }

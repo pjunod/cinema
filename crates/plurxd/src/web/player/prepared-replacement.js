@@ -429,6 +429,7 @@ function createPreparedHlsLoader(StockLoader,p,state){
             p.abr.recentEstimateAtMs=now;
             p.abr.recentEstimateSource='progress';
             p.abr.recentEstimateUrl=String(context.url||'');
+            scheduleUrgentAutoControllerTick(p,kbps,now);
           }
         });
       }
@@ -455,6 +456,7 @@ function notePreparedHlsFragmentLoaded(p,state,d){
   p.abr.recentEstimateAtMs=now;
   p.abr.recentEstimateSource='complete';
   p.abr.recentEstimateUrl=url;
+  if(d.frag.type==='main') scheduleUrgentAutoControllerTick(p,kbps,now);
 }
 function resumePreparedIncumbentLoad(p,state){
   if(!state) return;

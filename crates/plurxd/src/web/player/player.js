@@ -1014,6 +1014,7 @@ function wireHlsObservers(hls,startup,video,observesCurrent){
         p.abr.recentEstimateAtMs=now;
         p.abr.recentEstimateSource='complete';
         p.abr.recentEstimateUrl=String(d.frag&&d.frag.url||'');
+        if(d.frag.type==='main') scheduleUrgentAutoControllerTick(p,sampleKbps,now);
       }
     }
     if(b<=(p.segBytes|0)) return;
