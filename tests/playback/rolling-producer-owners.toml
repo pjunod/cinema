@@ -1079,7 +1079,13 @@ pattern = "media_session_route_for_playback"
 # 22 -> 23 with M0's commit-lifecycle test: one test-only read of the
 # pointer, asserting a committed successor is still the current generation after
 # its predecessor retires. No shipped reader is added.
-expected_occurrences = 23
+# 23 -> 25 with S-14 M8's HLS route hooks (D-M8-J): two test-only pointer
+# reads. `hls_route_shipped_shape` proves a release through the
+# production-shaped state reached its durable End, and
+# `a_settlement_delayed_past_its_retry_budget_expires_uncommitted` proves the
+# expired settlement left the predecessor current. Neither is a shipped read;
+# the store's CAS stays the only pointer authority.
+expected_occurrences = 25
 
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
@@ -1192,7 +1198,13 @@ pattern = "publication_ready_at_ms"
 # activation fixture asks for and moves no shipped fence.
 # +1: the retired promise the seek-scratch release path shortens is read
 # alongside the publication-ready fence when the exact DELETE lands.
-expected_occurrences = 89
+# 89 -> 93 with S-14 M8's HLS route hooks (D-M8-J): three test-only
+# activations (the route group's shipped-shape test and the release-fence
+# and release-tombstone position tests), each setting the fence to zero like
+# any first activation, and one assertion that the ended row's projection is
+# armed while a release is held after its durable proof. No shipped fence
+# moves.
+expected_occurrences = 93
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -1224,7 +1236,11 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # remains the sole authority that decides whether the row may be announced.
 # 26 -> 27 with the same remote prepared-activation validation. The target
 # compares the durable row with the blocked sentinel and does not publish it.
-expected_occurrences = 27
+# 27 -> 28 with S-14 M8's release-tombstone position test: it asserts the
+# ended row has left the sentinel while the release is held at its point.
+# Test-only; no shipped path writes or clears the sentinel that did not
+# before.
+expected_occurrences = 28
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
@@ -2253,7 +2269,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 670 measured by zeroing this
 # row. Both sets retained unchanged (main's and this branch's, reviewed above); the merge
 # adds no new site.
-expected_occurrences = 670
+# 670 -> 673 with S-14 M8's HLS route position tests: the dispatch-answer,
+# release-fence and release-tombstone tests each run the exchange or the
+# release on a task the test joins, so it can hold it at its point.
+# Test-only; no shipped task is added.
+expected_occurrences = 673
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3318,7 +3338,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 1082 measured by zeroing this
 # row. Both sets retained unchanged (main's and this branch's, reviewed above); the merge
 # adds no new site.
-expected_occurrences = 1082
+# 1082 -> 1083 with S-14 M8's HLS route hooks (D-M8-J): the three test
+# delays in control.rs and preparation.rs (-3) become the one sleep in
+# `HlsRouteTestHooks`' delay points (+1); the old barrier and oneshot waits
+# in the release and create tests lose three timeouts (-3), and the new
+# shipped-shape and position tests bound their joins and waits with six
+# (+6). All test-only; no shipped timer is added.
+expected_occurrences = 1083
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -4284,7 +4310,11 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # `vod/shared.rs` -4) for `VodSharedHooks`, and their race tests moved from Barrier pairs to
 # `seam_hooks::AsyncPause` (`vod/tests/chunk_02.rs` -4, `chunk_03.rs` -8,
 # `http/hls/tests/chunk_01.rs` -2). No kill, wait or reap of a process changed.
-expected_occurrences = 325
+# 325 -> 317 with S-14 M8's HLS route hooks (D-M8-J): the eight
+# `Barrier::wait` calls of the two release pauses (four in release.rs's
+# gated blocks, four in their tests) become `AsyncPause` holds, which are
+# not process methods. No process owner changes.
+expected_occurrences = 317
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
