@@ -4318,7 +4318,9 @@ async function main() {
     assert.equal(h.spare.paused, true, "a pause during preparation survives the switch");
     assert.equal(h.spare.style.display, "", "…and visible only after the switch");
     assert.equal(h.spare.style.opacity, "", "…without the warm overlay's opacity");
-    assert.equal(h.live.style.display, "none");
+    assert.equal(h.spare.style.zIndex, "3", "…above the still-live predecessor layer");
+    assert.equal(h.live.style.display, "", "the predecessor remains displayed until idle retirement");
+    assert.equal(h.live.style.pointerEvents, "none", "the hidden predecessor cannot take controls");
     assert.equal(h.live.muted, true);
     assert.equal(p.prepared, null, "the slot is free once the switch is made");
     assert.equal(latest(h).state, "buffer_ready",

@@ -92,18 +92,23 @@ function deferPreparedPredecessorRetirement(p,state,successor){
   state.retireFrameCallbackId=null;
   state.retireIdleCallbackId=null;
   state.retireIdleTimer=null;
-  state.retireDeadlineTimer=setTimeout(
-    ()=>retirePreparedPredecessor(p,state),PREPARED_RETIRE_MAX_MS);
   const current=()=>p.preparedRetiring===state&&state.predecessor;
+  const finish=()=>{
+    if(!current()) return;
+    retirePreparedPredecessor(p,state);
+    if(PLAYER===p&&p.sessionId===state.sessionId
+      &&document.getElementById("video")===successor) renderPlayerInfo();
+  };
+  state.retireDeadlineTimer=setTimeout(finish,PREPARED_RETIRE_MAX_MS);
   const idle=()=>{
     if(!current()||state.retireIdleCallbackId!=null||state.retireIdleTimer!=null) return;
     if(typeof window.requestIdleCallback==="function"){
       state.retireIdleCallbackId=window.requestIdleCallback(
-        ()=>retirePreparedPredecessor(p,state),
+        finish,
         {timeout:PREPARED_RETIRE_IDLE_TIMEOUT_MS});
     }else{
       // Do not do decoder teardown inside a frame callback on older engines.
-      state.retireIdleTimer=setTimeout(()=>retirePreparedPredecessor(p,state),120);
+      state.retireIdleTimer=setTimeout(finish,120);
     }
   };
   if(typeof successor.requestVideoFrameCallback!=="function"){
@@ -164,6 +169,7 @@ function restorePreparedOverlap(state){
     v.style.position=state.incumbentStyle.position;
     v.style.inset=state.incumbentStyle.inset;
     v.style.zIndex=state.incumbentStyle.zIndex;
+    v.style.pointerEvents=state.incumbentStyle.pointerEvents;
   }
   state.overlapPhase=null;
 }

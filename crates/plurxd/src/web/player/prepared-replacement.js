@@ -302,7 +302,8 @@ function beginPreparedReplacement(p,action){
     exposeFrameTimer:null,exposeFrameCallbackId:null,handoffFrameCallbackId:null,
     overlapPhase:null,
     overlapListeners:null,incumbentElement:v,
-    incumbentStyle:{position:v.style.position,inset:v.style.inset,zIndex:v.style.zIndex},
+    incumbentStyle:{position:v.style.position,inset:v.style.inset,
+      zIndex:v.style.zIndex,pointerEvents:v.style.pointerEvents},
     incumbentHls:null,incumbentLoadPaused:false,incumbentResumeTimer:null,
     frameTimer:null,framePollTimer:null,frameListener:null,startedAt:Date.now()};
   p.prepared=state;
@@ -846,11 +847,14 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
   }catch(e){}
   spare.style.display="";
   // The prepared video already fills the player in its own compositor layer.
-  // Keep its geometry and opacity through the exposure; only the incumbent
-  // layer leaves the picture after successor frames were proven beneath it.
+  // Put it above the incumbent without removing the old media layer from
+  // layout: Gecko can defer the first visible successor frame when display:none
+  // tears down that layer in the same turn as the reveal. Idle retirement will
+  // remove the muted old element after the successor is advancing visibly.
   spare.style.pointerEvents="";
+  spare.style.zIndex="3";
   spare.removeAttribute("aria-hidden");
-  retired.style.display="none";
+  retired.style.pointerEvents="none";
   retired.muted=true;
   retired.setAttribute("aria-hidden","true");
   // The element the rest of the page addresses is `#video`. Swapping the ids
@@ -886,7 +890,9 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
   // of it. Two assignments, no await, nothing read back by anything that
   // decides anything.
   notePreparedSwitchCommit(p,retired,spare);
-  renderPlayerInfo();
+  // Rebuilding the title/badge DOM is presentation work. The successor is
+  // already authoritative for telemetry; paint the changed badges with the
+  // bounded idle retirement instead of blocking its first visible frame.
   preparedFirstFrame(p,state,spare,unixMs=>{
     notePreparedSwitchFirstFrame(p);
     state.state="committed";
