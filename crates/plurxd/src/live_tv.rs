@@ -11208,6 +11208,16 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
         ffmpeg: &str,
         lineup_gate: usize,
     ) -> (Arc<LiveTvManager>, FixtureTuner) {
+        start_path_fixture_for_node(root, ffmpeg, lineup_gate, "node-a").await
+    }
+
+    #[cfg(unix)]
+    async fn start_path_fixture_for_node(
+        root: &Path,
+        ffmpeg: &str,
+        lineup_gate: usize,
+        node: &str,
+    ) -> (Arc<LiveTvManager>, FixtureTuner) {
         use std::os::unix::fs::PermissionsExt;
 
         let ffmpeg_path = root.join("fake-ffmpeg");
@@ -11233,6 +11243,7 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
             ..SystemInfo::default()
         };
         let mut manager = test_manager_with_system(root, system);
+        Arc::get_mut(&mut manager).expect("unique manager").node_id = node.into();
         seed_test_config(&manager).await;
         let (client, mut tuner) = fixture_tuner(lineup_gate).await;
         Arc::get_mut(&mut manager)
@@ -11929,6 +11940,199 @@ exec /bin/cat > {sink}"#,
             "the start pruned the expired tombstones"
         );
         manager.shutdown().await.expect("shutdown");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_processing_shares_one_owner_ingest_and_stopping_one_preserves_other_viewers() {
+        let owner_root = crate::test_tempdir().expect("owner root");
+        let worker_root = crate::test_tempdir().expect("worker root");
+        let (owner, tuner) = start_path_fixture(
+            owner_root.path(),
+            &publishing_ffmpeg(owner_root.path(), false),
+            1,
+        )
+        .await;
+        let (worker, worker_tuner) = start_path_fixture_for_node(
+            worker_root.path(),
+            &publishing_ffmpeg(worker_root.path(), false),
+            1,
+            "node-b",
+        )
+        .await;
+        for root in [owner_root.path(), worker_root.path()] {
+            std::fs::write(root.join("probe.json"), PROBED_480).expect("source facts");
+        }
+        owner.observe_fence().await;
+        worker.observe_fence().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("peer listener");
+        let address = listener.local_addr().expect("peer address");
+        let app = axum::Router::new()
+            .route(
+                "/ingest",
+                axum::routing::post(
+                    |axum::extract::State(manager): axum::extract::State<Arc<LiveTvManager>>,
+                     axum::Json(request): axum::Json<LiveTvStartRequest>| async move {
+                        manager
+                            .shared_ingest(&request)
+                            .await
+                            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+                    },
+                ),
+            )
+            .with_state(Arc::clone(&owner));
+        struct PeerServer(tokio::task::JoinHandle<()>);
+        impl Drop for PeerServer {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let _peer = PeerServer(tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("peer serve");
+        }));
+        let local = owner
+            .start_local(fixture_request(1))
+            .await
+            .expect("owner viewer");
+        let config = owner.config().await.expect("config");
+        let snapshot = owner
+            .local_snapshot(&config, true, false)
+            .await
+            .expect("snapshot");
+        let client = reqwest::Client::new();
+        let mut remotes = Vec::new();
+        for user in [2, 3] {
+            let request = fixture_request(user);
+            let response = client
+                .post(format!("http://{address}/ingest"))
+                .json(&request)
+                .send()
+                .await
+                .expect("peer feed");
+            assert!(response.status().is_success());
+            let remote = worker
+                .start_with_ingest(request, Some((snapshot.clone(), response)))
+                .await
+                .expect("remote viewer");
+            assert_eq!(
+                capability_owner(&remote.capability).expect("worker cap"),
+                "node-b"
+            );
+            worker
+                .activate_local(
+                    &LiveTvActivateRequest {
+                        expected_owner_node_id: "node-b".into(),
+                        capability: remote.capability.clone(),
+                        activation_token: remote.activation_token.clone(),
+                        config_generation: 1,
+                        source_serving_generation: 0,
+                    },
+                    "node-a",
+                )
+                .await
+                .expect("ingress activates assigned worker");
+            remotes.push(remote);
+        }
+        assert_eq!(
+            tuner.gets.load(Ordering::Acquire),
+            1,
+            "all three viewers use one tuner GET"
+        );
+        assert_eq!(
+            worker_tuner.gets.load(Ordering::Acquire),
+            0,
+            "a processor never opens the device"
+        );
+        worker
+            .stop_local(&remotes[0].capability)
+            .await
+            .expect("stop one remote");
+        assert!(!worker
+            .session(&remotes[1].capability)
+            .expect("other remote")
+            .cancel
+            .is_cancelled());
+        assert!(!owner
+            .session(&local.capability)
+            .expect("local viewer")
+            .cancel
+            .is_cancelled());
+        owner
+            .stop_local(&local.capability)
+            .await
+            .expect("stop local viewer");
+        assert!(!worker
+            .session(&remotes[1].capability)
+            .expect("last remote")
+            .cancel
+            .is_cancelled());
+        assert_eq!(tuner.gets.load(Ordering::Acquire), 1);
+        worker
+            .stop_local(&remotes[1].capability)
+            .await
+            .expect("stop final remote");
+        worker
+            .shutdown()
+            .await
+            .expect("worker shutdown joins processes");
+        owner
+            .shutdown()
+            .await
+            .expect("owner shutdown joins tuner reader");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slow_peer_ingest_is_evicted_without_stalling_the_other_consumer() {
+        let root = crate::test_tempdir().expect("root");
+        let (owner, tuner) =
+            start_path_fixture(root.path(), &publishing_ffmpeg(root.path(), false), 1).await;
+        std::fs::write(root.path().join("probe.json"), PROBED_480).expect("facts");
+        owner.observe_fence().await;
+        let slow = owner
+            .shared_ingest(&fixture_request(1))
+            .await
+            .expect("slow peer");
+        let mut fast = owner
+            .shared_ingest(&fixture_request(2))
+            .await
+            .expect("fast peer")
+            .into_data_stream();
+        let transport = owner
+            .registry
+            .lock()
+            .expect("registry")
+            .transports
+            .values()
+            .next()
+            .cloned()
+            .expect("shared transport");
+        let slow_consumer = transport.live_viewers()[0].clone();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while slow_consumer.evicted().is_none() {
+                let bytes = fast
+                    .next()
+                    .await
+                    .expect("other consumer stays open")
+                    .expect("bytes");
+                assert!(!bytes.is_empty());
+            }
+            assert!(!fast
+                .next()
+                .await
+                .expect("continues after peer eviction")
+                .expect("bytes")
+                .is_empty());
+        })
+        .await
+        .expect("bounded eviction");
+        assert_eq!(tuner.gets.load(Ordering::Acquire), 1);
+        assert_eq!(transport.live_viewers().len(), 1);
+        drop(slow);
+        drop(fast);
+        owner.shutdown().await.expect("cleanup");
     }
 
     fn fixture_request(user_id: i64) -> LiveTvStartRequest {

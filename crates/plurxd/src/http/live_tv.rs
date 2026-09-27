@@ -974,6 +974,9 @@ async fn owner_start_within(
             // owner can name them. A relayed refusal keeps the code and loses
             // the detail, which is the honest thing for an ingress to say.
             .map_err(|error| {
+                if matches!(error, LiveTvError::OwnerUnavailable(_)) {
+                    return api_error_from(error, Decided::Ingress);
+                }
                 capacity_error(
                     error,
                     state.live_tv.transport_holders(),
@@ -1698,9 +1701,9 @@ async fn resolve_owner_peer(
 /// An error the owner signed, turned into the same envelope a locally minted
 /// one gets. The two extra fields are functions of *where the body came from*
 /// and *what the code is*, so they are produced here rather than added to the
-/// internal wire: a body that arrived as a signed owner response is
-/// owner-decided, whatever its code — including one this function folds into
-/// `owner_unavailable`, because the owner still answered.
+/// internal wire. Legacy owner responses are decided. A placement coordinator
+/// can explicitly report an ambiguous processor exchange; preserve that false
+/// verdict so the client retains its recovery id after a lost worker reply.
 pub(super) fn wire_api_error(status: reqwest::StatusCode, body: &[u8]) -> ApiError {
     let wire = serde_json::from_slice::<WireError>(body).ok();
     let code = wire
@@ -1722,7 +1725,11 @@ pub(super) fn wire_api_error(status: reqwest::StatusCode, body: &[u8]) -> ApiErr
         .ok()
         .map(|detail| detail.holders)
         .filter(|holders| !holders.is_empty());
-    let decided_by_owner = wire.is_some();
+    let decided_by_owner = wire.is_some()
+        && serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v.get("owner_decided").and_then(serde_json::Value::as_bool))
+            .unwrap_or(true);
     let stable = match code.as_str() {
         "live_tv_disabled" => "live_tv_disabled",
         "tuner_capacity" => "tuner_capacity",
@@ -2148,6 +2155,14 @@ mod tests {
             body_of(api_error(LiveTvError::Capacity("full".into()))).await["retry"],
             "later"
         );
+    }
+
+    #[tokio::test]
+    async fn a_signed_placement_timeout_preserves_the_clients_recovery_identity() {
+        let answer = body_of(wire_api_error(reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            br#"{"code":"owner_unavailable","message":"processor reply lost","owner_decided":false}"#)).await;
+        assert_eq!(answer["owner_decided"], false);
+        assert_eq!(answer["retry"], "now");
     }
 
     #[tokio::test]

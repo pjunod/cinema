@@ -36,7 +36,27 @@ async fn exchange<T: serde::de::DeserializeOwned>(
         .await
         .map_err(|_| unavailable())?;
     if !response.status.is_success() {
-        return Err(unavailable());
+        let value = serde_json::from_slice::<serde_json::Value>(&response.body)
+            .map_err(|_| unavailable())?;
+        let code = value
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let message = value
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .filter(|m| m.len() <= 2048)
+            .unwrap_or("the assigned Live TV processor refused this request")
+            .to_owned();
+        return Err(match code {
+            "tuner_capacity" => LiveTvError::Capacity(message),
+            "codec_unsupported" => LiveTvError::CodecUnsupported(message),
+            "settings_conflict" => LiveTvError::Conflict(message),
+            "stream_failed" => LiveTvError::StreamFailed(message),
+            "startup_timeout" => LiveTvError::StartupTimeout(message),
+            "capability_expired" => LiveTvError::CapabilityExpired(message),
+            _ => unavailable(),
+        });
     }
     serde_json::from_slice(&response.body).map_err(|_| unavailable())
 }
@@ -72,6 +92,18 @@ pub(super) async fn start(
     let due = state.live_tv.placements().due();
     let sweep_deadline = deadline_after(Duration::from_millis(200));
     for entry in due {
+        if entry.retiring {
+            let _ = tokio::time::timeout_at(
+                sweep_deadline,
+                retire(state, entry.request.user_id, &entry.request.request_id),
+            )
+            .await;
+            if tokio::time::Instant::now() >= sweep_deadline {
+                break;
+            }
+            continue;
+        }
+
         let answer = tokio::time::timeout_at(
             sweep_deadline,
             start_state(state, entry.request.user_id, &entry.request.request_id),
@@ -191,8 +223,7 @@ pub(super) async fn retire(
     user: i64,
     request: &str,
 ) -> Result<LiveTvRetireOutcome, LiveTvError> {
-    state.live_tv.placements().begin_retire(user, request);
-    let held = state.live_tv.placements().get(user, request);
+    let held = state.live_tv.placements().begin_retire(user, request)?;
     let result = match held.filter(|e| e.worker != state.node_id) {
         Some(entry) => {
             exchange(

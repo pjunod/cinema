@@ -703,6 +703,14 @@ impl MediaPool {
         if !self.remote_placement_ready(state).await {
             return state.node_id.clone();
         }
+        let voters = match self.membership.activity_peers().await {
+            Ok(peers) => peers
+                .into_iter()
+                .filter(|p| p.reachable)
+                .map(|p| p.node_id)
+                .collect::<BTreeSet<_>>(),
+            Err(_) => return state.node_id.clone(),
+        };
         self.expire().await;
         let mut nodes = vec![local_snapshot(state).await];
         nodes.extend(
@@ -712,20 +720,7 @@ impl MediaPool {
                 .values()
                 .map(|e| e.snapshot.clone()),
         );
-        nodes
-            .into_iter()
-            .filter(|n| n.live_tv_processing && n.scratch_bytes_free > 64 * 1024 * 1024)
-            .max_by_key(|n| {
-                (
-                    n.hardware_slots_max.saturating_sub(n.hardware_slots_used),
-                    n.software_threads_max
-                        .saturating_sub(n.software_threads_used),
-                    n.scratch_pressure.preference(),
-                    n.egress_pressure.preference(),
-                    n.node_id == state.node_id,
-                )
-            })
-            .map_or_else(|| state.node_id.clone(), |n| n.node_id)
+        select_live_tv_worker(nodes, &voters, &state.node_id)
     }
 
     pub(crate) async fn diagnostics(&self, state: &AppState) -> MediaDirectoryDiagnostics {
@@ -919,6 +914,29 @@ impl MediaPool {
             offers,
         }
     }
+}
+
+fn select_live_tv_worker(
+    nodes: Vec<MediaNodeSnapshot>,
+    voters: &BTreeSet<String>,
+    local_node_id: &str,
+) -> String {
+    nodes
+        .into_iter()
+        .filter(|n| {
+            (n.node_id == local_node_id || voters.contains(&n.node_id)) && n.live_tv_processing
+        })
+        .max_by_key(|n| {
+            (
+                n.hardware_slots_max.saturating_sub(n.hardware_slots_used),
+                n.software_threads_max
+                    .saturating_sub(n.software_threads_used),
+                n.scratch_pressure.preference(),
+                n.egress_pressure.preference(),
+                n.node_id == local_node_id,
+            )
+        })
+        .map_or_else(|| local_node_id.to_owned(), |n| n.node_id)
 }
 
 fn remote_directory_ready(
@@ -1368,7 +1386,9 @@ fn compare_offer(
                 right_snapshot.and_then(|node| node.io.storage_read_micros),
             ) {
                 (Some(left), Some(right)) => right.cmp(&left),
-                _ => Ordering::Equal,
+                (Some(_), None) => Ordering::Greater,
+                (None, Some(_)) => Ordering::Less,
+                (None, None) => Ordering::Equal,
             }
         })
         .then_with(|| compare_speed(left.recent_speed, right.recent_speed))
@@ -1909,6 +1929,31 @@ mod tests {
             8
         );
         task.abort();
+    }
+
+    #[test]
+    fn a_busy_tuner_owner_uses_a_free_processor_despite_an_incompatible_peer() {
+        let mut busy = snapshot("owner", &["h264"], 1080);
+        busy.hardware_slots_max = 1;
+        busy.hardware_slots_used = 1;
+        busy.software_threads_max = 4;
+        busy.software_threads_used = 4;
+        let mut free = snapshot("free", &["h264"], 1080);
+        free.hardware_slots_max = 1;
+        free.hardware_slots_used = 0;
+        free.io = MediaIoObservation::default();
+        let mut old = free.clone();
+        old.node_id = "old".into();
+        old.live_tv_processing = false;
+        old.hardware_slots_max = 100;
+        let mut learner = free.clone();
+        learner.node_id = "learner".into();
+        learner.hardware_slots_max = 100;
+        let voters = BTreeSet::from(["free".into(), "old".into()]);
+        assert_eq!(
+            select_live_tv_worker(vec![busy, free, old, learner], &voters, "owner"),
+            "free"
+        );
     }
 
     #[test]

@@ -2061,9 +2061,6 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
             crate::media_sessions::ABORT_PATH
                 | crate::media_sessions::RELAY_PATH
                 | crate::media_sessions::CONTROL_PATH
-                | crate::live_tv::cluster::PLACEMENT_PATH
-        | crate::live_tv::cluster::PROCESS_PATH
-        | crate::live_tv::cluster::INGEST_PATH
         | crate::live_tv::RESOURCE_PATH
                 | crate::live_tv::STOP_PATH
                 // A retire is a stop plus a fence. Refusing it during
@@ -2184,9 +2181,6 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                     | crate::media_sessions::ABORT_PATH
                     | crate::media_sessions::RELAY_PATH
                     | crate::media_sessions::CONTROL_PATH
-                    | crate::live_tv::cluster::PLACEMENT_PATH
-                    | crate::live_tv::cluster::PROCESS_PATH
-                    | crate::live_tv::cluster::INGEST_PATH
                     | crate::live_tv::RESOURCE_PATH
                     | crate::live_tv::STOP_PATH
             ))
@@ -4021,6 +4015,9 @@ mod tests {
             (Method::GET, "/api/v1/developer/readiness"),
             (Method::POST, "/api/v1/live-tv/guide/refresh"),
             (Method::POST, crate::live_tv::SNAPSHOT_PATH),
+            (Method::POST, crate::live_tv::cluster::PLACEMENT_PATH),
+            (Method::POST, crate::live_tv::cluster::PROCESS_PATH),
+            (Method::POST, crate::live_tv::cluster::INGEST_PATH),
             (Method::POST, crate::live_tv::START_PATH),
             (Method::POST, crate::live_tv::ACTIVATE_PATH),
             (Method::POST, crate::live_tv::DRAIN_PATH),
@@ -8017,6 +8014,30 @@ mod tests {
         assert_eq!(saved["live_tv_config_generation"], 11);
         assert_eq!(saved["live_tv_transition_from_owner_node_id"], "");
         assert_eq!(saved["live_tv_transition_drain_before"], 0);
+    }
+
+    #[tokio::test]
+    async fn live_tv_placement_and_ingest_refuse_household_bearers_before_admission() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let request = json!({"expected_owner_node_id":state.node_id,"source_node_id":state.node_id,
+            "user_id":1,"user_name":"viewer","request_id":"0123456789abcdef0123456789abcdef",
+            "channel_id":"7.1","config_generation":1,"source_serving_generation":0});
+        let placed = json!({"request":request,"playback":null});
+        let process = json!({"start":placed,"worker":state.node_id,"nonce":"test"});
+        for (path, body) in [
+            (crate::live_tv::cluster::PLACEMENT_PATH, placed),
+            (crate::live_tv::cluster::PROCESS_PATH, process.clone()),
+            (crate::live_tv::cluster::INGEST_PATH, process),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(post(path, Some(&admin), body))
+                .await
+                .expect("peer response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+        assert!(state.live_tv.activities().is_empty());
     }
 
     #[tokio::test]

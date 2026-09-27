@@ -1,8 +1,8 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 and E0 merged; E1–E2 reviewed; combined promotion ready · **Updated:** 2026-09-27 ·
+**Status:** M1–M3 and E0 merged; E1–E2 qualifying; E3 ready for final review · **Updated:** 2026-09-27 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` · **E1:** `codex/cluster-cache-preparation` ·
-**E2:** `codex/cluster-batch-analysis` · **Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) · **E1:** [#566 — superseded by combined promotion](http://192.168.4.7:3000/noirr/plurx/pulls/566) · **E2:** [#567 — combined promotion](http://192.168.4.7:3000/noirr/plurx/pulls/567)
+**E2:** `codex/cluster-batch-analysis` · **E3:** `codex/cluster-media-placement` · **Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) · **E1:** [#566 — superseded by combined promotion](http://192.168.4.7:3000/noirr/plurx/pulls/566) · **E2:** [#567 — combined promotion](http://192.168.4.7:3000/noirr/plurx/pulls/567)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -19,8 +19,8 @@ implementation is claimed; “compiled” does not mean tests passed.
 | M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
 | E0 subtitle and library workers | Merged | PR #564 merged as `1d70a1fed`; one final review addressed and run 3322 passed all required fast-lane jobs |
 | E1 reads, caches, prediction, artwork | Reviewed; promoting with E2 in #567 | Read path, artwork, portable transcodes, bounded hot copies and durable predictive analysis implemented. Single final review addressed; focused store, image, copy and cleanup checks passed. Required fast lane remains. Scheduled verification/repair belongs to E2 |
-| E2 embeddings, probes and repair | Reviewed; combined fast lane next | Portable embeddings, bounded probes, admitted artifact verification and finite repair compiled. Three review findings addressed; focused regressions and required fast lane remain |
-| E3 placement and shared Live TV ingest | In construction | Fleet gates removed from placement/takeover and settings persistence; advisory Developer enable controls and recent I/O observations added. Remote viewer processing remains |
+| E2 embeddings, probes and repair | Reviewed; fast lane 3360 running | Three final findings addressed; focused regressions passed. Candidate `b01b58416` includes current main and the daemon fixture deadline correction |
+| E3 placement and shared Live TV ingest | Implementation complete; final review next | Advisory enable controls, observed-resource ranking, stable remote Live TV placement and bounded shared ingest implemented. Regression targets compiled; no E3 tests executed |
 | Final adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
 | Core fast lane | Passed: run 3296 on `3784d5ec5` | Preflight, Rust, Windows, web and main promotion gate all passed |
 | Core merge | Complete | PR #532 merged as `b4b488556`; E0–E3 continue in the agent clone |
@@ -939,3 +939,13 @@ continue E1–E3.
   five seconds while retaining its exact invalid-JSON and permit-release
   assertions. Integrated current main's Apple Live TV URL repair (`1cbdc8d51`)
   for the next promotion candidate. E3 remains isolated on its draft branch.
+
+
+- 2026-09-27: E3 implementation and regression-writing complete. New coverage
+  exercises one owner ingest with three viewers across two processing nodes,
+  independent slow-peer eviction, retry/retirement ownership, bounded assignment
+  pressure, household-bearer refusal, maintenance admission, missing metrics
+  and incompatible peers. Static ownership counters record the additional
+  bounded peer/recovery deadlines and the retained test HTTP server. No E3
+  tests have run. Next: the one final adversarial review, findings, then the
+  fast lane. E1–E2 candidate `b01b58416` runs separately in fast lane 3360.

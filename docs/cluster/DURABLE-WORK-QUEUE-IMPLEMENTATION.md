@@ -1007,6 +1007,34 @@ public origins, capability URLs and client transport handling. The first E3
 delivery keeps the existing proxy contract and states that ingress egress
 bandwidth is therefore still consumed.
 
+**E3 implementation:** placement and takeover preferences are saved independently
+in the Developer tab. Fleet protocol coverage is an observation; individual
+workers still need the protocol and actual source/codec/resource capability.
+Recent storage latency, delivered bytes and peer bytes expire after 30 seconds.
+Unknown observations are ranking inputs, never a certification requirement.
+
+Live TV protocol 4 adds placed starts without changing v1/v2 signed bodies. The
+configured tuner owner selects a compatible voter from fresh media snapshots
+and retains the request's worker and nonce before contacting it. At most 1,024
+placement/recovery records are retained; new work is refused when ambiguous
+owners fill that bound. Retries do not choose another worker. Explicit retirement
+fences later ingest before the worker exchange; confirmed terminal records live
+for another minute. Admission sweeps at most eight old records inside 200 ms;
+an unreachable worker remains owned. These records are process-local because
+owner restart closes its tuner feeds; the existing client recovery protocol then
+reports the lost session and starts with a new request identity.
+
+The selected worker opens an exact-signed, nonce-bound raw feed from the tuner
+owner and runs the existing viewer session lifecycle. The tuner owner joins its
+ordinary bounded transport queue; the worker shares one such feed for viewers
+of the same channel. Dropping a response detaches only that consumer, and a
+slow consumer is evicted independently. Existing source observations, serving
+fences, configuration/drain checks, physical encoder admission, process reaping,
+activation authorization and bounded media proxying remain authoritative.
+A processor does not fetch tuner signal directly. Older ingress keeps its local
+owner start protocol. Direct redirects and shared encodes remain outside E3.
+
+
 ## 10. Implementation and evidence — prove the queue once, extend the corpus
 
 ### 10.1 Milestone ownership and completion

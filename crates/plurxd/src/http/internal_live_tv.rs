@@ -395,6 +395,7 @@ fn signed_wire_error(
         &serde_json::json!({
             "code": error.code(),
             "message": error.to_string(),
+            "owner_decided": !(path == crate::live_tv::cluster::PLACEMENT_PATH && matches!(error, crate::live_tv::LiveTvError::OwnerUnavailable(_))),
         }),
     )
     .unwrap_or_else(IntoResponse::into_response)

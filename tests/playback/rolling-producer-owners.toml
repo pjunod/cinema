@@ -979,7 +979,8 @@ pattern = "ServingAuthority"
 # `VodServingAdmission::with_hooks`, the production constructor `new` now
 # delegates to. It carries the same authority into the same struct field; no
 # new projection reader.
-expected_occurrences = 35
+# E3: one shared-ingest body carries the existing serving authority; it owns no task.
+expected_occurrences = 36
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -2206,7 +2207,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # E2 adds one daemon-owned leaf-probe consumer; bounded subprocesses are reaped before admission release.
 # E2 integrity adds one daemon-owned consumer; all admitted reads finish before release.
 # E2 integration retains and counts both E1/S-14 and the admitted analysis/integrity owners.
-expected_occurrences = 658
+# E3: bounded peer-ingest/read/recovery deadlines and retained two-node test server.
+expected_occurrences = 659
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3177,7 +3179,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # E2 adds a probe idle poll, pressure observation and coordinator result wait, all bounded by their owner.
 # E2 admitted integrity worker owns its bounded read window and idle wait.
 # E2 integration retains and counts both E1/S-14 and the admitted analysis/integrity owners.
-expected_occurrences = 1056
+# E3: bounded peer-ingest/read/recovery deadlines and retained two-node test server.
+expected_occurrences = 1062
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # virtual-clock test waits coexist unchanged; the merge adds no new site.
 # 1013 -> 1021 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
@@ -3909,7 +3912,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # on the merge of main into #562. Main's additions and this branch's coexist unchanged; the merge adds no new site.
 # E1 plus S-14 M8: both reviewed fixture ownership sets retained.
 # E2 integration retains and counts both E1/S-14 and the admitted analysis/integrity owners.
-expected_occurrences = 392
+# E3: bounded peer-ingest/read/recovery deadlines and retained two-node test server.
+expected_occurrences = 395
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

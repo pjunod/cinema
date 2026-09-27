@@ -202,11 +202,12 @@ pub(crate) struct Placement {
     created: tokio::time::Instant,
     checked: tokio::time::Instant,
     finished: Option<tokio::time::Instant>,
-    retiring: bool,
+    pub retiring: bool,
 }
 #[derive(Default)]
 pub(crate) struct Placements {
     entries: BTreeMap<(i64, String), Placement>,
+    retired: BTreeMap<(i64, String), tokio::time::Instant>,
 }
 impl Placements {
     pub fn get(&self, user: i64, request: &str) -> Option<Placement> {
@@ -218,6 +219,16 @@ impl Placements {
         worker: String,
     ) -> Result<Placement, LiveTvError> {
         let now = tokio::time::Instant::now();
+        self.retired
+            .retain(|_, at| now.duration_since(*at) < Duration::from_secs(60));
+        if self
+            .retired
+            .contains_key(&(request.user_id, request.request_id.clone()))
+        {
+            return Err(LiveTvError::Conflict(
+                "the Live TV request was retired before admission".into(),
+            ));
+        }
         self.entries.retain(|_, entry| {
             entry.request.config_generation == request.config_generation
                 && entry
@@ -232,7 +243,7 @@ impl Placements {
             }
             return Ok(held);
         }
-        if self.entries.len() >= 1024 {
+        if self.entries.len() + self.retired.len() >= 1024 {
             return Err(LiveTvError::Capacity(
                 "Live TV placement recovery history is full".into(),
             ));
@@ -250,10 +261,26 @@ impl Placements {
             .insert((request.user_id, request.request_id.clone()), entry.clone());
         Ok(entry)
     }
-    pub fn begin_retire(&mut self, user: i64, request: &str) {
-        if let Some(entry) = self.entries.get_mut(&(user, request.to_owned())) {
+    pub fn begin_retire(
+        &mut self,
+        user: i64,
+        request: &str,
+    ) -> Result<Option<Placement>, LiveTvError> {
+        let key = (user, request.to_owned());
+        if let Some(entry) = self.entries.get_mut(&key) {
             entry.retiring = true;
+            return Ok(Some(entry.clone()));
         }
+        let now = tokio::time::Instant::now();
+        self.retired
+            .retain(|_, at| now.duration_since(*at) < Duration::from_secs(60));
+        if !self.retired.contains_key(&key) && self.entries.len() + self.retired.len() >= 1024 {
+            return Err(LiveTvError::Capacity(
+                "Live TV retirement history is full".into(),
+            ));
+        }
+        self.retired.insert(key, now);
+        Ok(None)
     }
     pub fn finish(&mut self, user: i64, request: &str) {
         if let Some(entry) = self.entries.get_mut(&(user, request.to_owned())) {
@@ -323,5 +350,77 @@ impl LiveTvManager {
             }
             None => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn request(id: u32) -> LiveTvStartRequest {
+        LiveTvStartRequest {
+            expected_owner_node_id: "tuner".into(),
+            source_node_id: "ingress".into(),
+            user_id: 7,
+            user_name: "viewer".into(),
+            request_id: format!("{id:032x}"),
+            channel_id: "7.1".into(),
+            config_generation: 1,
+            source_serving_generation: 1,
+            playback: None,
+        }
+    }
+    #[test]
+    fn ambiguous_start_keeps_its_worker_and_retirement_fences_late_ingest() {
+        let mut placements = Placements::default();
+        let start = request(1);
+        let first = placements.assign(&start, "worker-a".into()).expect("admit");
+        let replay = placements
+            .assign(&start, "worker-b".into())
+            .expect("recover after a lost reply");
+        assert_eq!(replay.worker, first.worker);
+        assert_eq!(replay.nonce, first.nonce);
+        assert!(placements.authorizes(&start, "worker-a", &first.nonce));
+        assert!(!placements.authorizes(&start, "worker-b", &first.nonce));
+        let mut other_user = start.clone();
+        other_user.user_id += 1;
+        assert!(!placements.authorizes(&other_user, "worker-a", &first.nonce));
+        placements
+            .begin_retire(start.user_id, &start.request_id)
+            .expect("fence before remote exchange");
+        assert!(!placements.authorizes(&start, "worker-a", &first.nonce));
+        assert!(placements.assign(&start, "worker-b".into()).is_err());
+        let late = request(2);
+        placements
+            .begin_retire(late.user_id, &late.request_id)
+            .expect("retire an unknown start");
+        assert!(
+            placements.assign(&late, "worker-b".into()).is_err(),
+            "retirement wins before the first placement"
+        );
+    }
+    #[test]
+    fn full_placement_history_refuses_new_work_without_evicting_ambiguous_owners() {
+        let mut placements = Placements::default();
+        for id in 0..1024 {
+            placements
+                .assign(&request(id), "worker-a".into())
+                .expect("bounded history");
+        }
+        assert!(matches!(
+            placements.assign(&request(1024), "worker-b".into()),
+            Err(LiveTvError::Capacity(_))
+        ));
+        assert_eq!(
+            placements
+                .assign(&request(0), "worker-b".into())
+                .expect("original still recoverable")
+                .worker,
+            "worker-a"
+        );
+        let held = placements
+            .begin_retire(7, &request(0).request_id)
+            .expect("full history still retires existing")
+            .expect("owned");
+        assert!(!placements.authorizes(&request(0), &held.worker, &held.nonce));
     }
 }
