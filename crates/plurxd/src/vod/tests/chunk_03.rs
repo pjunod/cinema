@@ -1501,22 +1501,16 @@
             .expect("reader")
             .frontier = before_low_water;
 
-        // If this pass incorrectly asks for admission, the production test
-        // seam rendezvous with `try_permit` and makes the defect observable
-        // before a real ffmpeg can spawn.
-        let admission = Arc::new(tokio::sync::Barrier::new(2));
-        *encoding
-            .admission_pause
-            .lock()
-            .expect("admission test seam") = Some(Arc::clone(&admission));
-        let observer = Arc::clone(&admission);
-        let mut admission_reached = tokio::spawn(async move { observer.wait().await });
+        // If this pass incorrectly asks for admission, the encoding's
+        // admission hook holds `try_permit` at its pause and makes the defect
+        // observable before a real ffmpeg can spawn.
+        let admission = encoding.pause_next_admission();
         rendition.kick();
         for _ in 0..20 {
             tokio::task::yield_now().await;
         }
         assert!(
-            !admission_reached.is_finished(),
+            !admission.was_reached(),
             "the rendition must not re-admit above the low-water line"
         );
         assert!(matches!(
@@ -1532,16 +1526,14 @@
             .expect("reader")
             .frontier = through.saturating_sub(resume);
         rendition.kick();
-        tokio::time::timeout(Duration::from_secs(1), &mut admission_reached)
-            .await
-            .expect("low-water crossing reaches admission")
-            .expect("admission observer");
+        // The low-water crossing reaches admission.
+        let held = admission.reached().await;
 
-        // Close before releasing the second rendezvous: the assertion is the
-        // attempted re-admission at the exact boundary, not a real encoder
-        // generation beyond this lifecycle test's scope.
+        // Close before releasing the pause: the assertion is the attempted
+        // re-admission at the exact boundary, not a real encoder generation
+        // beyond this lifecycle test's scope.
         rendition.closed.store(true, Release);
-        admission.wait().await;
+        held.release();
         rendition.kick();
         driver.await.expect("test driver exits");
     }
@@ -1927,21 +1919,11 @@
             .encoding
             .as_ref()
             .expect("encoded predecessor");
-        let admission = Arc::new(tokio::sync::Barrier::new(2));
-        *predecessor_encoding
-            .admission_pause
-            .lock()
-            .expect("admission test seam") = Some(Arc::clone(&admission));
-        let observer = Arc::clone(&admission);
-        let admission_reached = tokio::spawn(async move { observer.wait().await });
+        let admission = predecessor_encoding.pause_next_admission();
         driver_pass(&fixture.serve.shared, &fixture.predecessor).await;
-        assert!(!admission_reached.is_finished());
-        admission_reached.abort();
-        predecessor_encoding
-            .admission_pause
-            .lock()
-            .expect("admission test seam")
-            .take();
+        assert!(!admission.was_reached());
+        // Disarm: a released pause passes its next admission straight through.
+        admission.release();
 
         let permit = fixture
             .successor_encoding
@@ -2133,26 +2115,18 @@
             .encoding
             .as_ref()
             .expect("encoded predecessor");
-        let admission = Arc::new(tokio::sync::Barrier::new(2));
-        *predecessor_encoding
-            .admission_pause
-            .lock()
-            .expect("admission test seam") = Some(Arc::clone(&admission));
-        let observer = Arc::clone(&admission);
-        let admission_reached = tokio::spawn(async move { observer.wait().await });
+        let admission = predecessor_encoding.pause_next_admission();
         let pass = tokio::spawn({
             let shared = Arc::clone(&fixture.serve.shared);
             let predecessor = Arc::clone(&fixture.predecessor);
             async move { driver_pass(&shared, &predecessor).await }
         });
-        tokio::time::timeout(Duration::from_secs(1), admission_reached)
-            .await
-            .expect("the released predecessor reaches admission on its next pass")
-            .expect("admission observer");
+        // The released predecessor reaches admission on its next pass.
+        let held = admission.reached().await;
         // Stop before a real generation: after admission the pass re-reads
         // `closed` and returns, dropping whatever permit it took.
         fixture.predecessor.closed.store(true, Release);
-        admission.wait().await;
+        held.release();
         pass.await.expect("predecessor pass");
     }
 

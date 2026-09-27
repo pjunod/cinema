@@ -499,8 +499,31 @@ pub(crate) struct VodServingAdmission {
     authority: crate::serving_fence::ServingAuthority,
     generation: u64,
     deadline: Instant,
-    #[cfg(test)]
-    pause_before_commit: Option<Arc<tokio::sync::Barrier>>,
+    hooks: Box<dyn VodServingAdmissionHooks>,
+}
+
+/// The points of a [`VodServingAdmission`] that a test can pause at
+/// (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
+///
+/// The admission holds one of these in every build, so its layout and the
+/// await points of its final commit are the same in the test and release
+/// binaries. Production installs [`NoopVodServingAdmissionHooks`]; the race
+/// test installs a pausing implementation. A paused hook's timing is still a
+/// test artefact: what this makes identical is the struct and the set of await
+/// points, not scheduling.
+pub(crate) trait VodServingAdmissionHooks: Send + Sync {
+    /// The final reader/registry attachment asked for the commit guard, before
+    /// the serving generation is checked again.
+    fn before_commit(&self) -> crate::seam_hooks::HookFuture<'_>;
+}
+
+/// What production installs: the point is already ready.
+pub(crate) struct NoopVodServingAdmissionHooks;
+
+impl VodServingAdmissionHooks for NoopVodServingAdmissionHooks {
+    fn before_commit(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
 }
 
 struct VodCreateFences<'a> {
@@ -514,27 +537,30 @@ impl VodServingAdmission {
         generation: u64,
         deadline: Instant,
     ) -> Self {
+        Self::with_hooks(
+            authority,
+            generation,
+            deadline,
+            Box::new(NoopVodServingAdmissionHooks),
+        )
+    }
+
+    pub(crate) fn with_hooks(
+        authority: crate::serving_fence::ServingAuthority,
+        generation: u64,
+        deadline: Instant,
+        hooks: Box<dyn VodServingAdmissionHooks>,
+    ) -> Self {
         Self {
             authority,
             generation,
             deadline,
-            #[cfg(test)]
-            pause_before_commit: None,
+            hooks,
         }
-    }
-
-    #[cfg(test)]
-    fn with_pause_before_commit(mut self, pause: Arc<tokio::sync::Barrier>) -> Self {
-        self.pause_before_commit = Some(pause);
-        self
     }
 
     async fn commit_guard_before(&self) -> Option<tokio::sync::OwnedRwLockReadGuard<()>> {
-        #[cfg(test)]
-        if let Some(pause) = self.pause_before_commit.as_ref() {
-            pause.wait().await;
-            pause.wait().await;
-        }
+        self.hooks.before_commit().await;
         self.authority
             .commit_guard_before(self.generation, self.deadline)
             .await
