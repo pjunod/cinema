@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 and E0 merged; E1 awaiting fast lane; E2 in construction · **Updated:** 2026-09-26 ·
+**Status:** M1–M3 and E0 merged; E1 awaiting fast lane; E2 in construction · **Updated:** 2026-09-27 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` · **E1:** `codex/cluster-cache-preparation` ·
 **Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) · **E1:** [#566 — awaiting fast lane](http://192.168.4.7:3000/noirr/plurx/pulls/566)
 
@@ -789,3 +789,15 @@ continue E1–E3.
   physical capacity before claiming and joins inference before releasing it.
   New contracts cover cross-node reuse, cancellation, wrong identity and stale
   publication. E2 tests have not run; compiler/lint evidence is in progress.
+
+- 2026-09-27: committed shared embeddings as `535969244`; the normal hook
+  passed. Leaf probes now carry the coordinator lease generation, parser/reporter
+  identity and exact file snapshot. The existing re-probe pass admits at most
+  128 leaves, uses completed remote facts, and keeps local fallback for work
+  not yet started. Filesystem discovery and identity placement stay unchanged.
+  Worker publication and coordinator application are separate atomic fences;
+  a changed source or coordinator rejects either transition. Contracts are
+  written and workspace Clippy passed; E2 tests remain deferred. Semantic jobs
+  use background priority and no longer reserve source-media I/O slots.
+  Scheduled artifact verification/repair remains to be built. E1 run 3337 has
+  green preflight, Windows and web checks; the Rust gate is still running.

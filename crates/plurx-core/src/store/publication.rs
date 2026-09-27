@@ -658,6 +658,76 @@ impl<'a> PublicationStore<'a> {
             .await
     }
 
+    /// Pure probe demand is tied to the current coordinator generation.
+    pub async fn enqueue_probe(
+        &self,
+        file: &crate::domain::MediaFile,
+        pipeline: &str,
+    ) -> Result<Option<String>, StoreError> {
+        use super::background_jobs::{EnqueueJob, EnqueueOutcome, JobPayload, JobRequest};
+        use super::background_jobs_probe::{generation, ProbeCoordinator};
+        if self.fence.is_none() {
+            return Ok(None);
+        }
+        let guard = self.token().await?;
+        let lease = guard.as_ref().ok_or_else(|| self.invalidated())?;
+        let coordinator = ProbeCoordinator::from_lease(lease);
+        if !coordinator.validate() {
+            return Ok(None);
+        }
+        let generation = generation(file.id, file.size, file.mtime, &coordinator, pipeline);
+        let now = unix_ms()?;
+        let result = self
+            .store
+            .enqueue_job(EnqueueJob {
+                id: uuid::Uuid::new_v4().to_string(),
+                dedupe_key: format!("probe:{generation}"),
+                priority: 1,
+                not_before_ms: now,
+                now_ms: now,
+                payload: JobPayload::MediaProbe {
+                    file_id: file.id,
+                    source_size: file.size,
+                    source_mtime: file.mtime,
+                    source_generation: generation.clone(),
+                    probe_digest: pipeline.into(),
+                    coordinator,
+                },
+                request: JobRequest {
+                    scope: "probe".into(),
+                    request_id: generation.clone(),
+                    request_digest: generation,
+                    consumer_kind: "probe".into(),
+                    consumer_ref: file.id.to_string(),
+                    target_node_id: None,
+                    deadline_ms: Some(now.saturating_add(300_000)),
+                    retain_identity: false,
+                },
+            })
+            .await?;
+        Ok(match result {
+            EnqueueOutcome::Accepted { job_id, .. }
+            | EnqueueOutcome::Existing {
+                job_id,
+                cancelled: false,
+                ..
+            } => Some(job_id),
+            _ => None,
+        })
+    }
+
+    pub async fn apply_probe(&self, job_id: &str) -> Result<bool, StoreError> {
+        let guard = self.token().await?;
+        let lease = guard.as_ref().ok_or_else(|| self.invalidated())?.clone();
+        self.store
+            .apply_probe_job(super::background_jobs_probe::ApplyProbeJob {
+                job_id: job_id.into(),
+                lease,
+                now_ms: unix_ms()?,
+            })
+            .await
+    }
+
     pub async fn upsert_file(
         &self,
         item_id: i64,

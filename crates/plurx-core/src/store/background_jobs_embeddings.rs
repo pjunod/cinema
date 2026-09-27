@@ -228,6 +228,9 @@ WITH input AS (SELECT json($1) AS body), observation AS (
   AND job.lease_expires_ms = json_extract(body,'$.token.lease_expires_ms')
   AND job.lease_expires_ms > json_extract(body,'$.now_ms')
   AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || job.owner_node_id)
+  AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required WHERE required.job_id = job.id
+    AND NOT EXISTS (SELECT 1 FROM background_job_reservations held WHERE held.job_id = job.id AND held.fence = job.fence
+      AND held.resource_key = required.resource_key AND held.expires_at_ms >= job.lease_expires_ms))
   AND json_extract(job.payload_json,'$.item_id') = json_extract(body,'$.artifact.item_id')
   AND json_extract(job.payload_json,'$.content_digest') = json_extract(body,'$.artifact.content_digest')
   AND json_extract(job.payload_json,'$.model_digest') = json_extract(body,'$.model_digest')

@@ -134,7 +134,9 @@ const PREDICTIONS_SCHEMA_VERSION: i64 = 57;
 const PREDICTIONS_SCHEMA_MIGRATION_SOURCE: i64 = TRANSCODE_COPIES_SCHEMA_VERSION;
 const EMBEDDINGS_SCHEMA_VERSION: i64 = 58;
 const EMBEDDINGS_SCHEMA_MIGRATION_SOURCE: i64 = PREDICTIONS_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = EMBEDDINGS_SCHEMA_VERSION;
+const PROBE_JOBS_SCHEMA_VERSION: i64 = 59;
+const PROBE_JOBS_SCHEMA_MIGRATION_SOURCE: i64 = EMBEDDINGS_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = PROBE_JOBS_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -2942,6 +2944,19 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(EMBEDDINGS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(PROBE_JOBS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_probe::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(PROBE_JOBS_SCHEMA_VERSION, now, PROBE_JOBS_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(PROBE_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -4973,7 +4988,8 @@ fn schema_migration_action(
         | ARTWORK_JOBS_SCHEMA_MIGRATION_SOURCE
         | TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE
         | PREDICTIONS_SCHEMA_MIGRATION_SOURCE
-        | EMBEDDINGS_SCHEMA_MIGRATION_SOURCE => {
+        | EMBEDDINGS_SCHEMA_MIGRATION_SOURCE
+        | PROBE_JOBS_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -7000,9 +7016,9 @@ mod tests {
             "v47 must advance exactly one step to the read-index schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 53,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 54,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v58 step"
+            "this implementation contains every additive v5→v59 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

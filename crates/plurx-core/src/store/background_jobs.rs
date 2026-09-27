@@ -137,6 +137,25 @@ WITH provided AS (SELECT json($1) AS body), input AS (
       )) THEN 'request_fenced'
     WHEN prior_job IS NOT NULL AND prior_digest != json_extract(body, '$.request.request_digest') THEN 'conflict'
     WHEN prior_job IS NOT NULL THEN 'existing'
+    WHEN json_extract(body,'$.payload.kind') = 'media_probe' AND NOT EXISTS (SELECT 1 FROM job_leases lease
+ WHERE lease.resource = json_extract(json_extract(body,'$.payload'),'$.coordinator.resource')
+ AND lease.owner_node_id = json_extract(json_extract(body,'$.payload'),'$.coordinator.node_id')
+ AND lease.fence = json_extract(json_extract(body,'$.payload'),'$.coordinator.fence')
+ AND lease.expires_at_ms > json_extract(body,'$.now_ms')
+ AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || lease.owner_node_id)
+ AND NOT EXISTS (SELECT 1 FROM background_job_domain_leases binding WHERE binding.resource = lease.resource
+   AND (binding.domain_fence != lease.fence OR NOT EXISTS (SELECT 1 FROM background_jobs parent
+    WHERE parent.id = binding.job_id AND parent.fence = binding.job_fence AND parent.state = 'running'
+     AND parent.owner_node_id = binding.node_id AND parent.owner_boot_id = binding.boot_id AND parent.claim_id = binding.claim_id
+     AND parent.lease_expires_ms > json_extract(body,'$.now_ms'))))) THEN 'producer_fenced'
+    WHEN json_extract(body,'$.payload.kind') = 'media_probe' AND NOT EXISTS (SELECT 1 FROM files file JOIN items item ON item.id = file.item_id
+ WHERE file.id = json_extract(json_extract(body,'$.payload'),'$.file_id')
+ AND file.size = json_extract(json_extract(body,'$.payload'),'$.source_size') AND file.mtime = json_extract(json_extract(body,'$.payload'),'$.source_mtime')
+ AND (json_extract(json_extract(body,'$.payload'),'$.coordinator.resource') = 'repair:probe'
+   OR json_extract(json_extract(body,'$.payload'),'$.coordinator.resource') = 'scan:library:' || item.library_id)) THEN 'source_changed'
+    WHEN json_extract(body,'$.payload.kind') = 'media_probe' AND active_job IS NULL
+      AND (SELECT COUNT(*) FROM background_jobs WHERE kind = 'media_probe' AND state IN ('queued','running','cancelling')
+        AND json_extract(payload_json,'$.coordinator') = json_extract(body,'$.payload.coordinator')) >= 128 THEN 'queue_full'
     WHEN json_extract(body,'$.payload.kind') = 'semantic_embedding' AND NOT EXISTS (
       SELECT 1 FROM items WHERE id = json_extract(body,'$.payload.item_id')) THEN 'source_changed'
     WHEN json_extract(body,'$.payload.kind') = 'semantic_embedding' AND EXISTS (
@@ -315,6 +334,22 @@ UPDATE background_jobs SET
 WHERE id = json_extract($1, '$.job_id')
   AND revision = json_extract($1, '$.expected_revision')
   AND kind = json_extract($1, '$.kind') AND payload_version = json_extract($1, '$.payload_version')
+  AND (kind != 'media_probe' OR (EXISTS (SELECT 1 FROM job_leases lease
+ WHERE lease.resource = json_extract(background_jobs.payload_json,'$.coordinator.resource')
+ AND lease.owner_node_id = json_extract(background_jobs.payload_json,'$.coordinator.node_id')
+ AND lease.fence = json_extract(background_jobs.payload_json,'$.coordinator.fence')
+ AND lease.expires_at_ms > json_extract($1,'$.now_ms')
+ AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || lease.owner_node_id)
+ AND NOT EXISTS (SELECT 1 FROM background_job_domain_leases binding WHERE binding.resource = lease.resource
+   AND (binding.domain_fence != lease.fence OR NOT EXISTS (SELECT 1 FROM background_jobs parent
+    WHERE parent.id = binding.job_id AND parent.fence = binding.job_fence AND parent.state = 'running'
+     AND parent.owner_node_id = binding.node_id AND parent.owner_boot_id = binding.boot_id AND parent.claim_id = binding.claim_id
+     AND parent.lease_expires_ms > json_extract($1,'$.now_ms')))))
+  AND EXISTS (SELECT 1 FROM files file JOIN items item ON item.id = file.item_id
+ WHERE file.id = json_extract(background_jobs.payload_json,'$.file_id')
+ AND file.size = json_extract(background_jobs.payload_json,'$.source_size') AND file.mtime = json_extract(background_jobs.payload_json,'$.source_mtime')
+ AND (json_extract(background_jobs.payload_json,'$.coordinator.resource') = 'repair:probe'
+   OR json_extract(background_jobs.payload_json,'$.coordinator.resource') = 'scan:library:' || item.library_id))))
   AND (target_node_id IS NULL OR target_node_id = json_extract($1, '$.node_id'))
   AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))
   AND (retry_deadline_ms = 0 OR retry_deadline_ms > json_extract($1, '$.now_ms'))
@@ -504,6 +539,9 @@ pub enum JobPayload {
         file_id: i64,
         source_generation: String,
         probe_digest: String,
+        source_size: i64,
+        source_mtime: i64,
+        coordinator: super::background_jobs_probe::ProbeCoordinator,
     },
 }
 
@@ -589,7 +627,23 @@ impl JobPayload {
                 file_id,
                 source_generation,
                 probe_digest,
-            } => *file_id > 0 && identifier(source_generation) && digest(probe_digest),
+                source_size,
+                source_mtime,
+                coordinator,
+            } => {
+                *file_id > 0
+                    && *source_size >= 0
+                    && digest(probe_digest)
+                    && coordinator.validate()
+                    && *source_generation
+                        == super::background_jobs_probe::generation(
+                            *file_id,
+                            *source_size,
+                            *source_mtime,
+                            coordinator,
+                            probe_digest,
+                        )
+            }
             Self::ArtifactHydrate {
                 artifact_key,
                 target_node_id,
@@ -993,6 +1047,14 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         request: super::background_jobs_embeddings::PublishEmbeddingJob,
     ) -> Result<JobPublishOutcome, StoreError>;
+    async fn publish_probe_job(
+        &self,
+        request: super::background_jobs_probe::PublishProbeJob,
+    ) -> Result<JobPublishOutcome, StoreError>;
+    async fn apply_probe_job(
+        &self,
+        request: super::background_jobs_probe::ApplyProbeJob,
+    ) -> Result<bool, StoreError>;
     async fn sync_predictions(
         &self,
         request: super::background_jobs_predictions::SyncPredictions,
@@ -1216,6 +1278,18 @@ impl<T: QueueSql> BackgroundJobStore for T {
         request: super::background_jobs_embeddings::PublishEmbeddingJob,
     ) -> Result<JobPublishOutcome, StoreError> {
         super::background_jobs_embeddings::publish(self, request).await
+    }
+    async fn publish_probe_job(
+        &self,
+        request: super::background_jobs_probe::PublishProbeJob,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        super::background_jobs_probe::publish(self, request).await
+    }
+    async fn apply_probe_job(
+        &self,
+        request: super::background_jobs_probe::ApplyProbeJob,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_probe::apply(self, request).await
     }
     async fn sync_predictions(
         &self,

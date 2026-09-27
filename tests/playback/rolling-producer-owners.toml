@@ -2185,7 +2185,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # request/body deadlines and pressure polling are bounded by that consumer.
 # The response status inspection launches no process.
 # E1 copy-body regression owns one local HTTP server and aborts/joins it.
-expected_occurrences = 652
+# E2 adds one daemon-owned leaf-probe consumer; bounded subprocesses are reaped before admission release.
+expected_occurrences = 653
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -3133,7 +3134,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # The response status inspection launches no process.
 # E1 copy-body regression bounds cancellation completion with one timeout.
 # E2 semantic work adds one bounded pressure observation; the consumer joins CPU inference before release.
-expected_occurrences = 1044
+# E2 adds a probe idle poll, pressure observation and coordinator result wait, all bounded by their owner.
+expected_occurrences = 1047
 
 [[module_structures]]
 id = "bare-time-constructor"

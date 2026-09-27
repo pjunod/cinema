@@ -35,7 +35,7 @@ pub(super) async fn enqueue(
             id: uuid::Uuid::new_v4().to_string(),
             payload,
             dedupe_key: format!("embedding:{digest}"),
-            priority: 3,
+            priority: 0,
             not_before_ms: now,
             now_ms: now,
             request: JobRequest {

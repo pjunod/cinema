@@ -56,6 +56,7 @@ mod scratch_ledger;
 mod scratch_put;
 mod serving_fence;
 mod shared_cache;
+mod source_probe;
 mod state;
 mod store_result;
 mod storeprobe;
@@ -2654,6 +2655,10 @@ fn spawn_background_loops(
     tokio::spawn(crate::media_sessions::lease_loop(state.clone()));
     tokio::spawn(crate::media_sessions::takeover_loop(state.clone()));
     tokio::spawn(crate::media_sessions::maintenance_loop(state.clone()));
+    tokio::spawn(crate::source_probe::run(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(crate::library_search::semantic::worker(
         state.clone(),
         background_shutdown.clone(),

@@ -112,6 +112,7 @@ mod background_jobs_offline;
 pub mod background_jobs_predictions;
 pub mod background_jobs_preparation;
 pub mod background_jobs_pretranscode;
+pub mod background_jobs_probe;
 pub mod background_jobs_provider;
 mod background_jobs_publication;
 pub mod background_jobs_resources;

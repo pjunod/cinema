@@ -754,6 +754,56 @@ impl JobFence {
         Ok(published)
     }
 
+    pub(crate) async fn publish_probe(
+        &self,
+        output: plurx_core::store::background_jobs_probe::ProbeOutput,
+    ) -> Result<bool, StoreError> {
+        let mut state = self.0.state.lock().await;
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+            metrics::event(self.0.kind, Event::FencedPublication);
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            metrics::event(self.0.kind, Event::FencedPublication);
+            return Ok(false);
+        };
+        let now_ms = unix_ms()?;
+        let mut request = plurx_core::store::background_jobs_probe::PublishProbeJob {
+            token,
+            output,
+            now_ms,
+        };
+        let reply = self.0.store.publish_probe_job(request.clone()).await;
+        #[cfg(test)]
+        let reply = faults::after_commit(faults::PUBLISH, reply);
+        let result = match reply {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                self.0.store.publish_probe_job(request).await?
+            }
+        };
+        let published = matches!(
+            result,
+            JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
+        );
+        metrics::event(
+            self.0.kind,
+            if published {
+                Event::Published
+            } else {
+                Event::FencedPublication
+            },
+        );
+        if published {
+            state.token = None;
+        }
+        Ok(published)
+    }
+
     pub(crate) async fn fail_fragment(
         &self,
         code: plurx_core::content_analysis::IndexFailureCode,

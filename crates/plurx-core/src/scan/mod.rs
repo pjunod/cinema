@@ -11,6 +11,7 @@ pub mod home;
 pub mod nfo;
 pub mod parse;
 pub mod probe;
+mod probe_batch;
 pub mod recordings;
 
 use std::collections::{BTreeMap, HashSet};
@@ -487,45 +488,66 @@ pub async fn reprobe_files_with_publication(
     files: &[crate::domain::MediaFile],
 ) -> Result<ReprobeReport, StoreError> {
     let mut report = ReprobeReport::default();
-    for file in files {
-        check_scan_cancellation()?;
-        report.attempted += 1;
-        let path_str = file.path.to_string_lossy().into_owned();
-        // Re-stat rather than trusting the stored size/mtime: if the file has
-        // changed since, the fresh values are what belong in the record.
-        let (size, mtime) = match file_stat(&file.path).await {
-            Ok(stat) => stat,
-            Err(e) => {
-                report.gone += 1;
-                tracing::warn!(path = %path_str, error = %e, "cannot stat file during re-probe");
-                report.problems.push(format!(
-                    "`{path_str}` could not be read at all: {e} — check that the path still \
+    let pipeline = probe::pipeline_digest().await;
+    for batch in files.chunks(128) {
+        let pending = probe_batch::enqueue(store, batch, pipeline.as_deref()).await?;
+        for file in batch {
+            check_scan_cancellation()?;
+            report.attempted += 1;
+            let path_str = file.path.to_string_lossy().into_owned();
+            // Re-stat rather than trusting the stored size/mtime: if the file has
+            // changed since, the fresh values are what belong in the record.
+            let (size, mtime) = match file_stat(&file.path).await {
+                Ok(stat) => stat,
+                Err(e) => {
+                    report.gone += 1;
+                    tracing::warn!(path = %path_str, error = %e, "cannot stat file during re-probe");
+                    report.problems.push(format!(
+                        "`{path_str}` could not be read at all: {e} — check that the path still \
                      exists and is readable by the plurx user"
-                ));
-                continue;
+                    ));
+                    continue;
+                }
+            };
+            if let Some(job_id) = pending.get(&file.id) {
+                match probe_batch::consume(store, file, job_id).await? {
+                    Some(true) => {
+                        report.repaired += 1;
+                        continue;
+                    }
+                    Some(false) => {
+                        report.gone += 1;
+                        continue;
+                    }
+                    None => {}
+                }
             }
-        };
-        match probe_with_outcome(&file.path).await {
-            Ok(probe) => {
-                store
-                    .upsert_file(file.item_id, &path_str, size, mtime, &probe)
-                    .await?;
-                report.repaired += 1;
-                tracing::info!(path = %path_str, "media details recovered");
-            }
-            Err(e @ ProbeError::Transient { .. }) => {
-                report.still_failing += 1;
-                tracing::error!(path = %path_str, error = %e, "re-probe did not finish");
-                report.problems.push(format!(
+            match probe_with_outcome(&file.path).await {
+                Ok(probe) => {
+                    if file_stat(&file.path).await.ok() != Some((size, mtime)) {
+                        report.gone += 1;
+                        continue;
+                    }
+                    store
+                        .upsert_file(file.item_id, &path_str, size, mtime, &probe)
+                        .await?;
+                    report.repaired += 1;
+                    tracing::info!(path = %path_str, "media details recovered");
+                }
+                Err(e @ ProbeError::Transient { .. }) => {
+                    report.still_failing += 1;
+                    tracing::error!(path = %path_str, error = %e, "re-probe did not finish");
+                    report.problems.push(format!(
                     "`{path_str}` still has no media details because its probe did not finish: {e}"
                 ));
-            }
-            Err(e) => {
-                report.still_failing += 1;
-                tracing::error!(path = %path_str, error = %e, "re-probe failed");
-                report
-                    .problems
-                    .push(format!("`{path_str}` still has no media details: {e}"));
+                }
+                Err(e) => {
+                    report.still_failing += 1;
+                    tracing::error!(path = %path_str, error = %e, "re-probe failed");
+                    report
+                        .problems
+                        .push(format!("`{path_str}` still has no media details: {e}"));
+                }
             }
         }
     }

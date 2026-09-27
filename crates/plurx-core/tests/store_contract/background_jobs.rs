@@ -1819,11 +1819,7 @@ async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
             store
                 .enqueue_job(EnqueueJob {
                     id: id.clone(),
-                    payload: JobPayload::MediaProbe {
-                        file_id,
-                        source_generation: "source:1".into(),
-                        probe_digest: "a".repeat(64),
-                    },
+                    payload: probe_fixture(&store, file_id).await,
                     dedupe_key: format!("storage-probe:{index}"),
                     priority: 1,
                     not_before_ms: 1_000,
@@ -1994,11 +1990,7 @@ async fn background_provider_contention_does_not_reserve_independent_storage() {
             store
                 .enqueue_job(EnqueueJob {
                     id: id.clone(),
-                    payload: JobPayload::MediaProbe {
-                        file_id: files[2],
-                        source_generation: "source:1".into(),
-                        probe_digest: "c".repeat(64),
-                    },
+                    payload: probe_fixture(&store, files[2]).await,
                     dedupe_key: format!("provider-probe:{index}"),
                     priority: 1,
                     not_before_ms: 1_000,
@@ -2248,11 +2240,7 @@ async fn background_artifact_claim_cannot_adopt_catalogue_or_provider_authority(
                 library_id,
                 generation: "library-work-v1".into(),
             },
-            JobPayload::MediaProbe {
-                file_id,
-                source_generation: "source:1".into(),
-                probe_digest: "c".repeat(64),
-            },
+            probe_fixture(&store, file_id).await,
         ]
         .into_iter()
         .enumerate()
@@ -3474,6 +3462,216 @@ async fn background_embeddings_share_verified_vectors_and_fence_source_changes()
                     .expect("absent")
                     .artifact
                     .is_none());
+            }
+        }
+    })
+    .await;
+}
+
+async fn probe_fixture(
+    store: &std::sync::Arc<dyn plurx_core::store::Store>,
+    file_id: i64,
+) -> JobPayload {
+    use plurx_core::store::background_jobs_probe::{generation, ProbeCoordinator};
+    let coordinator = match store
+        .acquire_lease("repair:probe", "probe-coordinator", 1000, 200_000)
+        .await
+        .expect("coordinator")
+    {
+        plurx_core::cluster::coordination::LeaseClaim::Acquired(lease) => {
+            ProbeCoordinator::from_lease(&lease)
+        }
+        plurx_core::cluster::coordination::LeaseClaim::Held {
+            owner_node_id,
+            fence,
+            ..
+        } => ProbeCoordinator {
+            resource: "repair:probe".into(),
+            node_id: owner_node_id,
+            fence,
+        },
+    };
+    let file = store.get_file(file_id).await.expect("file").expect("file");
+    let probe_digest = "a".repeat(64);
+    JobPayload::MediaProbe {
+        file_id,
+        source_generation: generation(file_id, file.size, file.mtime, &coordinator, &probe_digest),
+        probe_digest,
+        source_size: file.size,
+        source_mtime: file.mtime,
+        coordinator,
+    }
+}
+
+#[tokio::test]
+async fn background_probe_facts_require_current_source_and_coordinator_to_apply() {
+    use plurx_core::store::background_jobs_probe::{ApplyProbeJob, ProbeOutput, PublishProbeJob};
+    for_each_backend(|store, backend| async move {
+        let coordinator = super::acquired(
+            store
+                .acquire_lease("repair:probe", "probe-coordinator", 1000, 200_000)
+                .await
+                .expect("coordinator"),
+            backend,
+        );
+        for scenario in [
+            "published",
+            "source_changed",
+            "cancelled",
+            "wrong_coordinator",
+        ] {
+            let (_, file_id) = seed_file(&store, &format!("leaf-{scenario}")).await;
+            let file = store.get_file(file_id).await.expect("file").expect("file");
+            let payload = probe_fixture(&store, file_id).await;
+            let id = uuid::Uuid::new_v4().to_string();
+            let accepted = store
+                .enqueue_job(EnqueueJob {
+                    id: id.clone(),
+                    payload: payload.clone(),
+                    dedupe_key: format!("leaf:{file_id}"),
+                    priority: 1,
+                    not_before_ms: 1000,
+                    now_ms: 1000,
+                    request: JobRequest {
+                        scope: "probe-contract".into(),
+                        request_id: id.clone(),
+                        request_digest: "b".repeat(64),
+                        consumer_kind: "probe".into(),
+                        consumer_ref: file_id.to_string(),
+                        target_node_id: None,
+                        deadline_ms: None,
+                        retain_identity: false,
+                    },
+                })
+                .await
+                .expect("admit");
+            assert!(
+                matches!(accepted, EnqueueOutcome::Accepted { .. }),
+                "{backend}"
+            );
+            let ClaimOutcome::Claimed { job } = store
+                .claim_artifact_job(ClaimJob {
+                    job_id: id.clone(),
+                    expected_revision: 0,
+                    node_id: "leaf-worker".into(),
+                    boot_id: uuid::Uuid::new_v4().to_string(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::MediaProbe,
+                    payload_version: 1,
+                    now_ms: 1000,
+                    dispatched_at_ms: 1000,
+                })
+                .await
+                .expect("claim")
+            else {
+                panic!("{backend}: claim");
+            };
+            let publication = PublishProbeJob {
+                token: job.token.expect("token"),
+                output: ProbeOutput {
+                    source: payload,
+                    probe: plurx_core::domain::ProbeResult {
+                        duration_ms: Some(123456),
+                        video_codec: Some("hevc".into()),
+                        raw_json: Some("{}".into()),
+                        ..Default::default()
+                    },
+                },
+                now_ms: 1100,
+            };
+            if scenario == "source_changed" {
+                store
+                    .upsert_file(
+                        file.item_id,
+                        file.path.to_str().expect("path"),
+                        file.size + 1,
+                        file.mtime + 1,
+                        &Default::default(),
+                    )
+                    .await
+                    .expect("replace");
+            } else if scenario == "cancelled" {
+                store
+                    .cancel_job(CancelJob {
+                        job_id: id.clone(),
+                        now_ms: 1050,
+                    })
+                    .await
+                    .expect("cancel");
+            }
+            let result = store
+                .publish_probe_job(publication.clone())
+                .await
+                .expect("publish");
+            let mut apply = ApplyProbeJob {
+                job_id: id,
+                lease: coordinator.clone(),
+                now_ms: 1200,
+            };
+            if matches!(scenario, "source_changed" | "cancelled") {
+                assert!(
+                    matches!(result, JobPublishOutcome::LostOwnership),
+                    "{backend}: {scenario}"
+                );
+                assert!(!store.apply_probe_job(apply).await.expect("cannot apply"));
+            } else {
+                assert!(
+                    matches!(result, JobPublishOutcome::Published { .. }),
+                    "{backend}: {scenario}"
+                );
+                assert!(matches!(
+                    store.publish_probe_job(publication).await.expect("replay"),
+                    JobPublishOutcome::AlreadyPublished { .. }
+                ));
+                assert_ne!(
+                    store
+                        .get_file(file_id)
+                        .await
+                        .expect("file")
+                        .expect("file")
+                        .duration_ms,
+                    Some(123456),
+                    "worker must not publish catalogue facts"
+                );
+                if scenario == "wrong_coordinator" {
+                    apply.lease.fence += 1;
+                    assert!(!store
+                        .apply_probe_job(apply)
+                        .await
+                        .expect("stale coordinator"));
+                } else {
+                    assert!(store
+                        .apply_probe_job(apply.clone())
+                        .await
+                        .expect("coordinator applies"));
+                    assert!(store
+                        .apply_probe_job(apply.clone())
+                        .await
+                        .expect("application replay"));
+                    assert_eq!(
+                        store
+                            .get_file(file_id)
+                            .await
+                            .expect("file")
+                            .expect("file")
+                            .duration_ms,
+                        Some(123456)
+                    );
+                    store
+                        .upsert_file(
+                            file.item_id,
+                            file.path.to_str().expect("path"),
+                            file.size + 1,
+                            file.mtime + 1,
+                            &Default::default(),
+                        )
+                        .await
+                        .expect("replace after publication");
+                    assert!(!store
+                        .apply_probe_job(apply)
+                        .await
+                        .expect("cannot apply old facts to replacement"));
+                }
             }
         }
     })

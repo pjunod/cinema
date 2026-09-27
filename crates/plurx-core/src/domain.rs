@@ -445,7 +445,7 @@ pub struct SubtitleStream {
 /// default. A file scanned before these columns existed, or one whose ffprobe
 /// emitted no DOVI record, has to be distinguishable from one that genuinely
 /// reported zero.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DolbyVisionFacts {
     /// 4, 5, 7, 8, 9 or 10. The number a client's `dv_profiles` list is
     /// matched against.
@@ -629,7 +629,7 @@ impl MediaFile {
 }
 
 /// Everything the prober learned about one file.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProbeResult {
     pub duration_ms: Option<i64>,
     pub container: Option<String>,
