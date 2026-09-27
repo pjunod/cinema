@@ -11,6 +11,16 @@ source_anchor = "let acceptance = PlaybackAcceptanceLaunch.current()"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testPhysicalDeviceAcceptanceLaunchReadsOnlyExplicitDebugDefaults"
 
+# The release-input correction is a separate client commit, so its counter
+# claim needs a direct policy-test bridge as well as the original proxy fix.
+[[fixes]]
+id = "apple.a04-release-counter-after-proxy-fix"
+commits = ["ac51adb13"]
+source = "clients/apple/project.yml"
+source_anchor = "CURRENT_PROJECT_VERSION:"
+test = "tests/validation/test_mobile_versions.py"
+test_anchor = "test_apple_counter_the_target_already_ships_fails_against_the_target"
+
 # D-03's internal reader corrections need a durable source-to-test bridge.
 # The Android PDF checks below are source contracts; simulator/device behavior
 # remains separate acceptance evidence on the D-03 workboard.
