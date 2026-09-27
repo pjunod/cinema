@@ -442,7 +442,13 @@ also_in = ["crates/plurxd/src/transcode"]
 # HEVC color repair: -1 test-only log-polling sleep. The old rolling-copy
 # argv fixture is replaced by direct refusal/override admission assertions;
 # no production timer or recovery owner changed.
-expected_occurrences = 47
+# 47 -> 48 with the loaded-runner flake fixes (`fix/loaded-runner-flakes`),
+# measured by zeroing this row: `wait_for_stand_in` in
+# `transcode/tests/chunk_05.rs` polls every 5 ms, inside a 30 s hang guard,
+# for the marker the hardware-encoder stand-in writes when it starts. Test-only;
+# the stand-in producer is started and stopped by the manager under test, and
+# the poll owns no producer, process or recovery decision.
+expected_occurrences = 48
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -2209,7 +2215,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # E2 integration retains and counts both E1/S-14 and the admitted analysis/integrity owners.
 # E3: bounded peer-ingest/read/recovery deadlines and retained two-node test server.
 # E3 final-review regression retains and joins the production DVR loop; its bounded wait proves reconciliation completed.
-expected_occurrences = 660
+# 660 -> 662 with the loaded-runner flake fixes (`fix/loaded-runner-flakes`),
+# measured by zeroing this row. Both test-only: the 1 Hz settings-observer
+# loop `the_producer_answers_only_once_two_segments_are_listed` now runs as
+# `start_path_fixture` does (it holds only a `Weak` manager, ends with it, and
+# is aborted at the end of the test), and the four `std::thread::spawn`
+# forkers of `a_fixture_executes_at_once_while_other_threads_fork` in
+# main.rs, each joined before the test returns. Neither owns a producer.
+expected_occurrences = 662
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -2348,7 +2361,12 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # starts so the production `HeadChildOwner::new` has a process to reap.
 # main @ `d4fa763c7` has 47; with S-14 M8's +1 (above) -> 48, measured by zeroing this row
 # on the merge of main into #562. Main's additions and this branch's coexist unchanged; the merge adds no new site.
-expected_occurrences = 48
+# 48 -> 49 with the loaded-runner flake fixes (`fix/loaded-runner-flakes`),
+# measured by zeroing this row: `write_test_executable` in main.rs spawns the
+# `/bin/sh` child that writes a test fixture, feeds it the fixture on stdin and
+# waits for it with `wait_with_output` before returning. Test-only
+# (`cfg(all(test, unix))`); it owns no producer and outlives nothing.
+expected_occurrences = 49
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -3216,7 +3234,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # main @ 82df7f59e (#572) has 1063; with C-08 M5 row 4's two test-only sleeps reviewed above
 # -> 1065, measured by zeroing this row on the merge of main into #559; #572's E1-E3 sites and
 # this branch's coexist unchanged; the merge adds no new site.
-expected_occurrences = 1065
+# 1065 -> 1072 with the loaded-runner flake fixes (`fix/loaded-runner-flakes`),
+# measured by zeroing this row, all test-only or `cfg(test)`:
+# live_tv.rs +5 — the two-segments test's hang-guard sleep in its `select!`
+# and its settings-observer's 1 s sleep, the `linger_after_warm_reap` seam's
+# 5 ms poll and 500 ms linger (compiled only under test, run only when a test
+# sets the flag), and the start timeout of
+# `a_warm_restart_holds_its_tuner_seat_through_a_slow_reap`;
+# transcode/tests/chunk_05.rs +2 — `wait_for_stand_in`'s 30 s guard and 5 ms
+# poll. The fixed 700 ms/2 s waits these tests replaced became guard constants
+# at the same sites, so they are not counted twice. None owns a producer, a
+# process or a recovery decision.
+expected_occurrences = 1072
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3521,7 +3550,13 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # `head_child_owner_shipped_shape`; test-only, reaped by the owner under test.
 # main @ `d4fa763c7` has 193; with S-14 M8's +1 (above) -> 194, measured by zeroing this row
 # on the merge of main into #562. Main's additions and this branch's coexist unchanged; the merge adds no new site.
-expected_occurrences = 194
+# 194 -> 197 with the loaded-runner flake fixes (`fix/loaded-runner-flakes`),
+# measured by zeroing this row, all in main.rs and test-only: the `/bin/sh`
+# child `write_test_executable` writes each fixture through (waited to
+# completion), and in `a_fixture_executes_at_once_while_other_threads_fork`
+# the `/bin/true` forkers and the fixture it executes, both `.status()`,
+# waited to completion.
+expected_occurrences = 197
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -3949,7 +3984,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # main @ 82df7f59e (#572) has 395; with C-08 M5 row 4's seven test-only `Response::status()`
 # reads reviewed above -> 402, measured by zeroing this row on the merge of main into #559;
 # #572's owners and this branch's reads coexist unchanged; the merge adds no new site.
-expected_occurrences = 402
+# 402 -> 405 with the loaded-runner flake fixes (`fix/loaded-runner-flakes`),
+# measured by zeroing this row: the same three main.rs test-only children as
+# process-command-construction — `write_test_executable`'s `.spawn()` (fed and
+# waited with `wait_with_output`), and the forkers' and fixture's `.status()`,
+# each waited to completion. No producer, nothing left running.
+expected_occurrences = 405
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
