@@ -9,6 +9,10 @@
 #![allow(clippy::disallowed_methods)]
 #[path = "support/queue_fixture.rs"]
 mod queue_fixture;
+#[path = "support/subtitle_jobs.rs"]
+mod subtitle_jobs_fixture;
+use subtitle_jobs_fixture::SubtitleFixture;
+
 use queue_fixture::QueueFixture;
 
 #[path = "store_contract/background_jobs.rs"]
@@ -508,6 +512,16 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    "bind_library_job",
+    "update_provider_budget",
+    "subtitle_job_intents",
+    "enqueue_subtitle_job",
+    "write_subtitle_job",
+    "storage_domains",
+    "replace_storage_domains",
+    "enqueue_library_work",
+    "library_work_requests",
+    "complete_library_work",
     "bind_transcode_job_recipe",
     "join_offline_job",
     "import_legacy_jobs",
@@ -522,6 +536,7 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "enqueue_job_fenced",
     "retry_background_job",
     "claim_job",
+    "claim_artifact_job",
     "resolve_claim",
     "job_labels",
     "job_counts",
@@ -15189,6 +15204,10 @@ fn populated_current_import_fixture(data_dir: &std::path::Path) -> PathBuf {
                   refresh_interval_mins, last_scan_at, last_refresh_at)
                  VALUES (9, 'Imported Shows', 'shows', '[\"/fixture/shows\"]', 0,
                          108, 30, 60, 109, 110);
+             INSERT INTO background_storage_domains (library_id, root_path, domain_id)
+                 VALUES (9, '/fixture/shows', 'fixture-nas');
+             INSERT INTO background_provider_budgets (provider, next_dispatch_ms, interval_ms)
+                 VALUES ('tmdb', 42000, 100), ('ani_list', 63000, 2100);
              INSERT INTO items
                  (id, library_id, kind, parent_id, title, sort_title, year, overview,
                   added_at, updated_at, tags, genres)
@@ -15938,6 +15957,24 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
         .await
         .expect("import populated current backup");
     assert_eq!(report.search_rows, 2);
+    assert_eq!(
+        store
+            .storage_domains()
+            .await
+            .expect("imported storage domains")[0]
+            .domain_id,
+        "fixture-nas"
+    );
+    assert_eq!(
+        report
+            .tables
+            .iter()
+            .find(|table| table.table == "background_provider_budgets")
+            .expect("provider budget parity")
+            .row_count,
+        2
+    );
+
     for table in [
         "background_jobs",
         "background_job_waiters",
@@ -17524,7 +17561,10 @@ fn contract_inventory_matches_every_store_method() {
     // `offline_expiry_hint_matches_the_sweep_and_nothing_expires_early_or_late`
     // covers it on both backends. No new trait or supertrait of `Store`.
     // Shared queue replaces legacy execution and adds 20 net Store methods.
-    assert_eq!(declared.len(), 416, "review the Store method count");
+    // E0 adds the catalogue/queue dual-owner binding.
+    // Three library admission/query/completion operations preserve each caller.
+    // +2: replicated root-domain observation and atomic replacement.
+    assert_eq!(declared.len(), 427, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -32571,12 +32611,12 @@ async fn subtitle_backfill_never_selects_active_or_unexpired_terminal_request() 
             .expect("terminal enqueue")
             .expect("request");
         let running = store
-            .claim_analysis_request_foreground(&queued.request_id, "node-a", 11, 1000)
+            .claim_subtitle_fixture(&queued.request_id, "node-a", 11, 1000)
             .await
             .expect("claim")
             .expect("running");
         assert!(store
-            .complete_analysis_request(&running, "stamp", 12)
+            .complete_subtitle_fixture(&running, "stamp", 12)
             .await
             .expect("complete"));
         let candidates = store
@@ -32777,7 +32817,7 @@ async fn subtitle_source_foreground_join_promotes_queued_normal_in_place_and_lea
         assert_eq!(promoted.request_id, queued.request_id, "{backend}");
         assert_eq!(promoted.priority, "foreground", "{backend}");
         let running = store
-            .claim_analysis_request_foreground(&queued.request_id, "node-a", 12, 1000)
+            .claim_subtitle_fixture(&queued.request_id, "node-a", 12, 1000)
             .await
             .expect("self claim")
             .expect("running");
@@ -32794,7 +32834,7 @@ async fn subtitle_source_foreground_join_promotes_queued_normal_in_place_and_lea
 }
 
 #[tokio::test]
-async fn subtitle_source_promoted_row_is_claimed_before_forced_and_normal() {
+async fn subtitle_source_promoted_row_uses_common_claim_and_leaves_legacy_order_intact() {
     for_each_backend(|store, backend| async move {
         let (_, subtitle_file) = seed_file(&store, "subtitle-m2-order-subtitle").await;
         let (_, forced_file) = seed_file(&store, "subtitle-m2-order-forced").await;
@@ -32833,7 +32873,7 @@ async fn subtitle_source_promoted_row_is_claimed_before_forced_and_normal() {
             .await
             .expect("promote");
         let first = store
-            .claim_analysis_request("analysis-node", 3, 1000)
+            .claim_subtitle_fixture(&stamp.generation(0), "analysis-node", 3, 1000)
             .await
             .expect("claim first")
             .expect("first");
@@ -32903,7 +32943,7 @@ async fn subtitle_source_retiring_ready_reenqueues_new_generation_and_fourth_rep
                 "{backend}"
             );
             let running = store
-                .claim_analysis_request_foreground(
+                .claim_subtitle_fixture(
                     &queued.request_id,
                     "node-a",
                     11 + epoch * 10,
@@ -32914,7 +32954,7 @@ async fn subtitle_source_retiring_ready_reenqueues_new_generation_and_fourth_rep
                 .expect("running");
             assert!(
                 store
-                    .complete_analysis_request(&running, "stamp", 12 + epoch * 10)
+                    .complete_subtitle_fixture(&running, "stamp", 12 + epoch * 10)
                     .await
                     .expect("complete"),
                 "{backend}"
@@ -32956,7 +32996,7 @@ async fn subtitle_source_partial_ready_uncovered_ordinal_gets_foreground_repair_
             .expect("initial enqueue")
             .expect("initial request");
         let running = store
-            .claim_analysis_request_foreground(&initial.request_id, "node-a", 11, 1_000)
+            .claim_subtitle_fixture(&initial.request_id, "node-a", 11, 1_000)
             .await
             .expect("initial claim")
             .expect("running");
@@ -32965,7 +33005,7 @@ async fn subtitle_source_partial_ready_uncovered_ordinal_gets_foreground_repair_
             .await
             .expect("PGS publication");
         assert!(store
-            .complete_analysis_request(&running, "stamp", 12)
+            .complete_subtitle_fixture(&running, "stamp", 12)
             .await
             .expect("complete partial request"));
 
@@ -33024,7 +33064,7 @@ async fn subtitle_source_live_foreground_ordinal_absent_from_scanner_repairs_par
             .expect("initial enqueue")
             .expect("request");
         let running = store
-            .claim_analysis_request_foreground(&initial.request_id, "node-a", 11, 1_000)
+            .claim_subtitle_fixture(&initial.request_id, "node-a", 11, 1_000)
             .await
             .expect("claim")
             .expect("running");
@@ -33036,7 +33076,7 @@ async fn subtitle_source_live_foreground_ordinal_absent_from_scanner_repairs_par
             .await
             .expect("scanner track publication");
         assert!(store
-            .complete_analysis_request(&running, "stamp", 12)
+            .complete_subtitle_fixture(&running, "stamp", 12)
             .await
             .expect("complete"));
         let ready = store
@@ -33089,7 +33129,7 @@ async fn subtitle_source_foreground_repair_ignores_stale_digest_at_same_size_and
             .expect("initial enqueue")
             .expect("request");
         let running = store
-            .claim_analysis_request_foreground(&initial.request_id, "node-a", 11, 1_000)
+            .claim_subtitle_fixture(&initial.request_id, "node-a", 11, 1_000)
             .await
             .expect("claim")
             .expect("running");
@@ -33101,7 +33141,7 @@ async fn subtitle_source_foreground_repair_ignores_stale_digest_at_same_size_and
             .await
             .expect("stale publication");
         assert!(store
-            .complete_analysis_request(&running, "stamp", 12)
+            .complete_subtitle_fixture(&running, "stamp", 12)
             .await
             .expect("complete"));
         assert!(store
@@ -33134,12 +33174,12 @@ async fn subtitle_source_repair_epoch_stays_monotonic_after_daily_allowance_rese
             .expect("first enqueue")
             .expect("first request");
         let running = store
-            .claim_analysis_request_foreground(&first.request_id, "node-a", 11, 1_000)
+            .claim_subtitle_fixture(&first.request_id, "node-a", 11, 1_000)
             .await
             .expect("first claim")
             .expect("running");
         assert!(store
-            .complete_analysis_request(&running, "stamp", 12)
+            .complete_subtitle_fixture(&running, "stamp", 12)
             .await
             .expect("first complete"));
         assert!(store
@@ -33184,7 +33224,7 @@ async fn subtitle_source_repair_epoch_and_daily_budget_survive_terminal_history_
                 first_id = queued.request_id.clone();
             }
             let running = store
-                .claim_analysis_request_foreground(
+                .claim_subtitle_fixture(
                     &queued.request_id,
                     "node-a",
                     11 + epoch * 10,
@@ -33194,7 +33234,7 @@ async fn subtitle_source_repair_epoch_and_daily_budget_survive_terminal_history_
                 .expect("claim")
                 .expect("running");
             assert!(store
-                .complete_analysis_request(&running, "stamp", 12 + epoch * 10)
+                .complete_subtitle_fixture(&running, "stamp", 12 + epoch * 10)
                 .await
                 .expect("complete"));
             assert!(store
@@ -33257,7 +33297,12 @@ async fn subtitle_source_transient_ready_is_repaired_by_later_backfill_until_set
                 "{backend}"
             );
             let running = store
-                .claim_analysis_request("node-a", 11 + epoch * 130_000, 1_000 + epoch * 130_000)
+                .claim_subtitle_fixture(
+                    &queued.request_id,
+                    "node-a",
+                    11 + epoch * 130_000,
+                    1_000 + epoch * 130_000,
+                )
                 .await
                 .expect("worker claim")
                 .expect("running");
@@ -33274,7 +33319,7 @@ async fn subtitle_source_transient_ready_is_repaired_by_later_backfill_until_set
                 .await
                 .expect("transient publication");
             assert!(store
-                .complete_analysis_request(&running, "stamp", 12 + epoch * 130_000)
+                .complete_subtitle_fixture(&running, "stamp", 12 + epoch * 130_000)
                 .await
                 .expect("complete request"));
             let candidates = store

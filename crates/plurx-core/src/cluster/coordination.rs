@@ -77,6 +77,12 @@ impl Lease {
 #[async_trait::async_trait]
 pub trait ClusterJobAuthority: Send + Sync {
     async fn may_run_cluster_jobs(&self) -> bool;
+
+    /// Execution is separate from singleton discovery/catalogue authority.
+    /// Implementors without live learner evidence retain voter-only behavior.
+    async fn may_execute_job(&self, _kind: crate::store::background_jobs::JobKind) -> bool {
+        self.may_run_cluster_jobs().await
+    }
 }
 
 /// The authority for a process that has no cluster membership handle: an

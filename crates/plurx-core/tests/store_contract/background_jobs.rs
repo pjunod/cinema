@@ -1094,6 +1094,7 @@ async fn background_offline_join_preserves_recipe_authority_and_independent_inte
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn background_jobs_v70_backup_import_seals_legacy_work() {
+    use plurx_core::store::ClusterFragmentIndexStore;
     use sha2::{Digest, Sha256};
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
@@ -1122,6 +1123,12 @@ async fn background_jobs_v70_backup_import_seals_legacy_work() {
             rusqlite::params![uuid::Uuid::new_v4().to_string(), serde_json::json!({"version":1,"decoder":"h264",
                 "acceptable_encoder_families":["software"],"output_contract":"hls-v1","tone_map":false,
                 "output_grade":"sdr","scratch_bytes":1024}).to_string()]).expect("accepted legacy work");
+        connection.execute("INSERT INTO analysis_requests
+            (request_id, file_id, source_size, source_mtime, component, pipeline_version, force_rebuild, target_node_id,
+             state, owner_node_id, lease_expires_ms, fence, attempts, not_before_ms, created_at_ms, updated_at_ms)
+            SELECT 'legacy-running-subtitle', id, size, mtime, 'subtitle_source', 'subtitle-source-v1', 0, '',
+             'running', 'dead-owner', 999999, 7, 2, 0, 1, 1 FROM files ORDER BY id LIMIT 1", [])
+            .expect("legacy running subtitle");
         connection
             .pragma_update(None, "user_version", 70)
             .expect("v70 marker");
@@ -1136,6 +1143,16 @@ async fn background_jobs_v70_backup_import_seals_legacy_work() {
         .await
         .expect("v70 import");
     assert_eq!(report.source_schema_version, 70);
+    let recovered = store
+        .analysis_request("legacy-running-subtitle")
+        .await
+        .expect("cutover")
+        .expect("legacy subtitle");
+    assert_eq!(recovered.state, "queued");
+    assert!(recovered.owner_node_id.is_empty());
+    assert_eq!(recovered.fence, 8);
+    assert_eq!(recovered.attempts, 2);
+
     assert!(report
         .tables
         .iter()
@@ -1159,4 +1176,1209 @@ async fn background_jobs_v70_backup_import_seals_legacy_work() {
             .materialized
             > 0
     );
+    let admitted = store
+        .enqueue_subtitle_job(recovered, 1000)
+        .await
+        .expect("recovered admission");
+    let EnqueueOutcome::Accepted { job_id, .. } = admitted else {
+        panic!("legacy subtitle must be admitted: {admitted:?}");
+    };
+    assert_eq!(
+        store
+            .background_job(&job_id)
+            .await
+            .expect("common job")
+            .expect("job")
+            .failed_attempts,
+        2
+    );
+}
+
+#[tokio::test]
+async fn background_library_publication_requires_both_live_owners() {
+    use super::{acquired, publication_successor};
+    for_each_backend(|store, backend| async move {
+        for scenario in ["live", "cancelled", "expired", "taken_over", "roots_changed"] {
+            let (_, file_id) = seed_file(&store, &format!("dual-owner-{scenario}")).await;
+            let file = store
+                .get_file(file_id)
+                .await
+                .expect("file read")
+                .expect("file");
+            let library_id = store
+                .get_item(file.item_id)
+                .await
+                .expect("item read")
+                .expect("item")
+                .library_id;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_millis() as i64;
+            let claim_time = if scenario == "expired" {
+                now - 31_000
+            } else {
+                now
+            };
+            if scenario == "roots_changed" {
+                let library = store.get_library(library_id).await.expect("library").expect("library");
+                assert!(store.replace_storage_domains(vec![plurx_core::store::background_jobs_resources::StorageDomainMapping {
+                    library_id, root_path: library.paths[0].to_string_lossy().into_owned(), domain_id: "old-nas".into(),
+                }], now).await.expect("map original storage"));
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            let admitted = store
+                .enqueue_job(EnqueueJob {
+                    id: id.clone(),
+                    payload: JobPayload::LibraryScan {
+                        library_id,
+                        generation: "full-v1".into(),
+                    },
+                    dedupe_key: format!("scan:{library_id}"),
+                    priority: 2,
+                    not_before_ms: claim_time,
+                    now_ms: claim_time,
+                    request: JobRequest {
+                        scope: "binding-fixture".into(),
+                        request_id: id.clone(),
+                        request_digest: "a".repeat(64),
+                        consumer_kind: "library_scan".into(),
+                        consumer_ref: library_id.to_string(),
+                        target_node_id: None,
+                        deadline_ms: None,
+                        retain_identity: false,
+                    },
+                })
+                .await
+                .expect("admission");
+            assert!(
+                matches!(admitted, EnqueueOutcome::Accepted { .. }),
+                "{backend}"
+            );
+            let ClaimOutcome::Claimed { job } = store
+                .claim_job(ClaimJob {
+                    job_id: id.clone(),
+                    expected_revision: 0,
+                    node_id: "node-a".into(),
+                    boot_id: uuid::Uuid::new_v4().to_string(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::LibraryScan,
+                    payload_version: 1,
+                    now_ms: claim_time,
+                    dispatched_at_ms: claim_time,
+                })
+                .await
+                .expect("claim")
+            else {
+                panic!("{backend}: claim refused");
+            };
+            let token = job.token.expect("token");
+            let lease = acquired(
+                store
+                    .acquire_lease(
+                        &format!("scan:library:{library_id}"),
+                        "node-a",
+                        now,
+                        now + 90_000,
+                    )
+                    .await
+                    .expect("domain lease"),
+                backend,
+            );
+            let binding = BindLibraryJob {
+                token: token.clone(),
+                lease: lease.clone(),
+                now_ms: claim_time,
+            };
+            assert!(
+                store.bind_library_job(binding.clone()).await.expect("bind"),
+                "{backend}"
+            );
+            assert!(
+                store
+                    .bind_library_job(binding)
+                    .await
+                    .expect("binding replay"),
+                "{backend}"
+            );
+            if scenario == "cancelled" {
+                store
+                    .cancel_job(CancelJob {
+                        job_id: id.clone(),
+                        now_ms: now + 1,
+                    })
+                    .await
+                    .expect("cancel");
+            } else if scenario == "taken_over" {
+                let takeover = store
+                    .claim_job(ClaimJob {
+                        job_id: id.clone(),
+                        expected_revision: token.revision,
+                        node_id: "node-b".into(),
+                        boot_id: uuid::Uuid::new_v4().to_string(),
+                        claim_id: uuid::Uuid::new_v4().to_string(),
+                        kind: JobKind::LibraryScan,
+                        payload_version: 1,
+                        now_ms: token.lease_expires_ms + 1,
+                        dispatched_at_ms: token.lease_expires_ms + 1,
+                    })
+                    .await
+                    .expect("takeover");
+                assert!(
+                    matches!(takeover, ClaimOutcome::Claimed { .. }),
+                    "{backend}"
+                );
+            }
+            if scenario == "roots_changed" {
+                let library = store.get_library(library_id).await.expect("library").expect("library");
+                store.update_library(library_id, &plurx_core::domain::NewLibrary {
+                    name: library.name, kind: library.kind, paths: vec![std::path::PathBuf::from("/new-unmapped-storage")], anime: library.anime,
+                }).await.expect("change library root");
+                let renewed = store.renew_jobs(RenewJobs { tokens: vec![token.clone()], now_ms: now }).await.expect("renewal verdict");
+                assert!(matches!(renewed.as_slice(), [RenewOutcome::LostOwnership { .. }]), "{backend}: old slots cannot renew new storage work");
+                assert!(matches!(store.resolve_claim(ResolveClaim { job_id: id.clone(), node_id: token.node_id.clone(),
+                    boot_id: token.boot_id.clone(), claim_id: token.claim_id.clone(), fence: Some(token.fence),
+                    dispatched_at_ms: now, now_ms: now }).await.expect("reconcile refusal"), ClaimResolution::LostOwnership),
+                    "{backend}: acknowledgement recovery cannot restore invalid resource ownership");
+
+            }
+            let allowance = store.update_provider_budget(plurx_core::store::background_jobs_provider::ProviderBudgetRequest {
+                provider: plurx_core::metadata::Provider::Tmdb,
+                lease: lease.clone(), now_ms: now,
+                action: plurx_core::store::background_jobs_provider::ProviderBudgetAction::Observe { cooldown_ms: 0, interval_ms: None },
+            }).await.expect("joint provider authority");
+            assert_eq!(allowance, if scenario == "live" {
+                plurx_core::store::background_jobs_provider::ProviderBudgetOutcome::Observed
+            } else {
+                plurx_core::store::background_jobs_provider::ProviderBudgetOutcome::LostAuthority
+            }, "{backend}: {scenario}: provider authority follows both owners");
+            let replacement = publication_successor(&lease);
+            let result = store
+                .put_setting_fenced(
+                    &format!("dual-owner:{scenario}"),
+                    "published",
+                    &lease,
+                    &replacement,
+                )
+                .await;
+            if scenario == "live" {
+                result.expect("both owners live");
+                // A domain publication advances its revision independently of
+                // queue renewal. The stable binding must still authorize it.
+                store
+                    .put_setting_fenced(
+                        &format!("dual-owner:{scenario}"),
+                        "second",
+                        &replacement,
+                        &publication_successor(&replacement),
+                    )
+                    .await
+                    .expect("domain revision advanced");
+                store
+                    .cancel_job(CancelJob {
+                        job_id: id.clone(),
+                        now_ms: now + 1,
+                    })
+                    .await
+                    .expect("cleanup");
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(plurx_core::error::StoreError::FenceRejected { .. })
+                    ),
+                    "{backend}: {scenario}: {result:?}"
+                );
+                assert!(
+                    store
+                        .get_setting(&format!("dual-owner:{scenario}"))
+                        .await
+                        .expect("read")
+                        .is_none(),
+                    "{backend}"
+                );
+            }
+            // Release expired reservations between scenarios without rewriting
+            // or removing the binding: retirement must not restore authority.
+            store.cancel_job(CancelJob { job_id: id, now_ms: now + 120_000 }).await.expect("retire scenario owner");
+            store.maintain_jobs(now + 120_000).await.expect("upkeep");
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn background_library_intents_preserve_hints_and_do_not_settle_late_arrivals() {
+    use super::acquired;
+    use plurx_core::store::background_jobs_library::{
+        LibraryIdHints, LibraryWorkInput, LibraryWorkResult,
+    };
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "durable-library-intents").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let library_id = store.get_item(file.item_id).await.expect("item").expect("item").library_id;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock").as_millis() as i64;
+        let input = NewLibraryWork {
+            request_id: "scan-request-one".into(), library_id, now_ms: now,
+            input: LibraryWorkInput::Targeted {
+                path: file.path.clone(), ids: Some(LibraryIdHints { tmdb: Some(123), ..Default::default() }),
+                book: None, correlation_id: Some("caller-one".into()), source: Some("integration".into()),
+            },
+        };
+        let EnqueueOutcome::Accepted { job_id, .. } = store.enqueue_library_work(input.clone()).await.expect("enqueue")
+            else { panic!("{backend}: first admission refused"); };
+        assert!(matches!(store.enqueue_library_work(input.clone()).await.expect("replay"), EnqueueOutcome::Existing { .. }), "{backend}");
+        let mut different = input.clone();
+        different.input = LibraryWorkInput::Targeted { path: file.path.clone(),
+            ids: Some(LibraryIdHints { tmdb: Some(456), ..Default::default() }), book: None,
+            correlation_id: Some("caller-two".into()), source: Some("integration".into()) };
+        assert!(matches!(store.enqueue_library_work(different.clone()).await.expect("identity conflict"), EnqueueOutcome::Conflict), "{backend}");
+        different.request_id = "scan-request-two".into();
+        let ClaimOutcome::Claimed { job } = store.claim_job(ClaimJob {
+            job_id: job_id.clone(), expected_revision: 0, node_id: "node-a".into(),
+            boot_id: uuid::Uuid::new_v4().to_string(), claim_id: uuid::Uuid::new_v4().to_string(),
+            kind: JobKind::LibraryScan, payload_version: 1, now_ms: now, dispatched_at_ms: now,
+        }).await.expect("claim") else { panic!("{backend}: claim refused"); };
+        let token = job.token.expect("token");
+        let lease = acquired(store.acquire_lease(&format!("scan:library:{library_id}"), "node-a", now, now + 90_000)
+            .await.expect("domain lease"), backend);
+        assert!(store.bind_library_job(BindLibraryJob { token: token.clone(), lease: lease.clone(), now_ms: now })
+            .await.expect("bind"), "{backend}");
+        // Arrives after the worker took its first snapshot, with a distinct
+        // hint for the same path. It joins the computation but owes its own work.
+        assert!(matches!(store.enqueue_library_work(different).await.expect("late join"),
+            EnqueueOutcome::Accepted { job_id: joined, .. } if joined == job_id), "{backend}");
+        let completion = CompleteLibraryWork { token: token.clone(), lease: lease.clone(),
+            request_id: input.request_id.clone(), now_ms: now + 1,
+            result: LibraryWorkResult::Completed { scan: plurx_core::scan::TargetedScan {
+                report: plurx_core::scan::ScanReport::default(), items: vec![] } },
+        };
+        assert!(store.complete_library_work(completion.clone()).await.expect("first completion"), "{backend}");
+        assert!(!store.complete_library_work(completion.clone()).await.expect("completion replay"), "{backend}");
+        assert_eq!(store.background_job(&job_id).await.expect("job").expect("job").state, JobState::Running, "{backend}");
+        let pending = store.library_work_requests(LibraryWorkQuery {
+            job_id: Some(job_id.clone()), pending_only: true, limit: 256, ..Default::default()
+        }).await.expect("pending");
+        assert_eq!(pending.len(), 1, "{backend}");
+        assert_eq!(pending[0].request_id, "scan-request-two", "{backend}");
+        assert!(matches!(&pending[0].input, LibraryWorkInput::Targeted { ids: Some(ids), .. } if ids.tmdb == Some(456)), "{backend}");
+        let second = CompleteLibraryWork { request_id: "scan-request-two".into(), ..completion };
+        assert!(store.complete_library_work(second).await.expect("second completion"), "{backend}");
+        assert_eq!(store.background_job(&job_id).await.expect("job").expect("job").state, JobState::Succeeded, "{backend}");
+        let results = store.library_work_requests(LibraryWorkQuery { job_id: Some(job_id), limit: 256, ..Default::default() })
+            .await.expect("durable results");
+        assert_eq!(results.len(), 2, "{backend}");
+        assert!(results.iter().all(|row| row.state == "succeeded" && row.result.is_some()), "{backend}");
+    }).await;
+}
+
+#[tokio::test]
+async fn background_library_accepted_intent_survives_database_reopen() {
+    use plurx_core::store::background_jobs_library::{LibraryTrigger, LibraryWorkInput};
+    use plurx_core::store::{SqliteStore, Store};
+    use std::sync::Arc;
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("durable-library.sqlite");
+    let original: Arc<dyn Store> = Arc::new(SqliteStore::open(&path).expect("open"));
+    let (_, file_id) = seed_file(&original, "library-restart").await;
+    let file = original
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("file");
+    let library_id = original
+        .get_item(file.item_id)
+        .await
+        .expect("item")
+        .expect("item")
+        .library_id;
+    let input = NewLibraryWork {
+        request_id: "restart-request".into(),
+        library_id,
+        input: LibraryWorkInput::Full {
+            refresh: true,
+            trigger: LibraryTrigger::Manual,
+        },
+        now_ms: 1_000,
+    };
+    let EnqueueOutcome::Accepted { job_id, .. } = original
+        .enqueue_library_work(input.clone())
+        .await
+        .expect("admission")
+    else {
+        panic!("admission refused");
+    };
+    drop(original);
+    let reopened = SqliteStore::open(&path).expect("reopen");
+    let rows = reopened
+        .library_work_requests(LibraryWorkQuery {
+            request_id: Some(input.request_id.clone()),
+            limit: 1,
+            ..Default::default()
+        })
+        .await
+        .expect("persisted request");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].job_id, job_id);
+    assert_eq!(rows[0].state, "pending");
+    assert!(matches!(
+        rows[0].input,
+        LibraryWorkInput::Full { refresh: true, .. }
+    ));
+    assert!(matches!(
+        reopened
+            .enqueue_library_work(input)
+            .await
+            .expect("replay after restart"),
+        EnqueueOutcome::Existing { .. }
+    ));
+}
+
+#[tokio::test]
+async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
+    use plurx_core::store::background_jobs_resources::StorageDomainMapping;
+    for_each_backend(|store, backend| async move {
+        let mut files = Vec::new();
+        let mut mappings = Vec::new();
+        for (index, domain) in ["nas", "nas", "nas", "other"].into_iter().enumerate() {
+            let prefix = format!("storage-domain-{index}");
+            let (_, file_id) = seed_file(&store, &prefix).await;
+            let file = store.get_file(file_id).await.expect("file").expect("file");
+            let item = store
+                .get_item(file.item_id)
+                .await
+                .expect("item")
+                .expect("item");
+            mappings.push(StorageDomainMapping {
+                library_id: item.library_id,
+                root_path: format!("/{prefix}"),
+                domain_id: domain.into(),
+            });
+            files.push(file_id);
+        }
+        assert!(
+            store
+                .replace_storage_domains(mappings.clone(), 1_000)
+                .await
+                .expect("map"),
+            "{backend}"
+        );
+        assert_eq!(
+            store.storage_domains().await.expect("mappings"),
+            mappings,
+            "{backend}"
+        );
+        let mut claims = Vec::new();
+        for (index, file_id) in files.into_iter().enumerate() {
+            let id = uuid::Uuid::new_v4().to_string();
+            store
+                .enqueue_job(EnqueueJob {
+                    id: id.clone(),
+                    payload: JobPayload::MediaProbe {
+                        file_id,
+                        source_generation: "source:1".into(),
+                        probe_digest: "a".repeat(64),
+                    },
+                    dedupe_key: format!("storage-probe:{index}"),
+                    priority: 1,
+                    not_before_ms: 1_000,
+                    now_ms: 1_000,
+                    request: JobRequest {
+                        scope: "storage-test".into(),
+                        request_id: id.clone(),
+                        request_digest: "b".repeat(64),
+                        consumer_kind: "probe".into(),
+                        consumer_ref: id.clone(),
+                        target_node_id: None,
+                        deadline_ms: None,
+                        retain_identity: false,
+                    },
+                })
+                .await
+                .expect("enqueue");
+            let claim = ClaimJob {
+                job_id: id.clone(),
+                expected_revision: 0,
+                node_id: format!("node-{index}"),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::MediaProbe,
+                payload_version: 1,
+                now_ms: 1_000,
+                dispatched_at_ms: 1_000,
+            };
+            let outcome = store.claim_job(claim.clone()).await.expect("claim");
+            assert_eq!(
+                matches!(outcome, ClaimOutcome::Claimed { .. }),
+                index != 2,
+                "{backend}: alias {index}"
+            );
+            if index == 2 {
+                assert!(
+                    store.job_attempts(&id).await.expect("attempts").is_empty(),
+                    "{backend}: contention must not create an attempt"
+                );
+            }
+            claims.push(claim);
+        }
+        assert!(
+            !store
+                .replace_storage_domains(vec![], 1_001)
+                .await
+                .expect("busy remap"),
+            "{backend}"
+        );
+        assert_eq!(
+            store.storage_domains().await.expect("unchanged"),
+            mappings,
+            "{backend}"
+        );
+        let job = store
+            .background_job(&claims[0].job_id)
+            .await
+            .expect("job")
+            .expect("job");
+        store
+            .settle_job(SettleJob {
+                token: job.token.expect("token"),
+                now_ms: 1_002,
+                settlement: JobSettlement::Yield {
+                    checkpoint: None,
+                    not_before_ms: 5_000,
+                },
+            })
+            .await
+            .expect("yield");
+        assert!(
+            matches!(
+                store
+                    .claim_job(ClaimJob {
+                        now_ms: 1_003,
+                        dispatched_at_ms: 1_003,
+                        ..claims[2].clone()
+                    })
+                    .await
+                    .expect("freed alias slot"),
+                ClaimOutcome::Claimed { .. }
+            ),
+            "{backend}"
+        );
+        assert!(
+            store
+                .replace_storage_domains(vec![], 100_000)
+                .await
+                .expect("expired owners no longer block remap"),
+            "{backend}"
+        );
+        assert!(store.storage_domains().await.expect("cleared").is_empty());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn background_provider_contention_does_not_reserve_independent_storage() {
+    use plurx_core::store::background_jobs_library::{LibraryTrigger, LibraryWorkInput};
+    use plurx_core::store::background_jobs_resources::StorageDomainMapping;
+    for_each_backend(|store, backend| async move {
+        let mut libraries = Vec::new();
+        let mut files = Vec::new();
+        let mut mappings = Vec::new();
+        for index in 0..3 {
+            let prefix = format!("provider-slot-{index}");
+            let (_, file_id) = seed_file(&store, &prefix).await;
+            let file = store.get_file(file_id).await.expect("file").expect("file");
+            let library_id = store
+                .get_item(file.item_id)
+                .await
+                .expect("item")
+                .expect("item")
+                .library_id;
+            mappings.push(StorageDomainMapping {
+                library_id,
+                root_path: format!("/{prefix}"),
+                domain_id: prefix,
+            });
+            libraries.push(library_id);
+            files.push(file_id);
+        }
+        assert!(store
+            .replace_storage_domains(mappings, 1_000)
+            .await
+            .expect("map"));
+        for (index, library_id) in libraries.into_iter().enumerate() {
+            let request_id = format!("provider-work-{index}");
+            let EnqueueOutcome::Accepted { job_id, .. } = store
+                .enqueue_library_work(NewLibraryWork {
+                    request_id,
+                    library_id,
+                    now_ms: 1_000,
+                    input: LibraryWorkInput::Full {
+                        refresh: true,
+                        trigger: LibraryTrigger::Manual,
+                    },
+                })
+                .await
+                .expect("enqueue")
+            else {
+                panic!("{backend}: refused");
+            };
+            let result = store
+                .claim_job(ClaimJob {
+                    job_id,
+                    expected_revision: 0,
+                    node_id: format!("node-{index}"),
+                    boot_id: uuid::Uuid::new_v4().to_string(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::MetadataRefresh,
+                    payload_version: 1,
+                    now_ms: 1_000,
+                    dispatched_at_ms: 1_000,
+                })
+                .await
+                .expect("claim");
+            assert_eq!(
+                matches!(result, ClaimOutcome::Claimed { .. }),
+                index < 2,
+                "{backend}"
+            );
+        }
+        // Both independent storage slots must remain available after the third
+        // metadata claim lost provider contention in its all-or-none transaction.
+        for index in 0..2 {
+            let id = uuid::Uuid::new_v4().to_string();
+            store
+                .enqueue_job(EnqueueJob {
+                    id: id.clone(),
+                    payload: JobPayload::MediaProbe {
+                        file_id: files[2],
+                        source_generation: "source:1".into(),
+                        probe_digest: "c".repeat(64),
+                    },
+                    dedupe_key: format!("provider-probe:{index}"),
+                    priority: 1,
+                    not_before_ms: 1_000,
+                    now_ms: 1_000,
+                    request: JobRequest {
+                        scope: "provider-test".into(),
+                        request_id: id.clone(),
+                        request_digest: "d".repeat(64),
+                        consumer_kind: "probe".into(),
+                        consumer_ref: id.clone(),
+                        target_node_id: None,
+                        deadline_ms: None,
+                        retain_identity: false,
+                    },
+                })
+                .await
+                .expect("probe enqueue");
+            assert!(
+                matches!(
+                    store
+                        .claim_job(ClaimJob {
+                            job_id: id,
+                            expected_revision: 0,
+                            node_id: format!("probe-{index}"),
+                            boot_id: uuid::Uuid::new_v4().to_string(),
+                            claim_id: uuid::Uuid::new_v4().to_string(),
+                            kind: JobKind::MediaProbe,
+                            payload_version: 1,
+                            now_ms: 1_000,
+                            dispatched_at_ms: 1_000
+                        })
+                        .await
+                        .expect("probe claim"),
+                    ClaimOutcome::Claimed { .. }
+                ),
+                "{backend}"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn background_provider_budget_is_shared_charged_once_and_keeps_cooldowns() {
+    use super::acquired;
+    use plurx_core::metadata::Provider;
+    use plurx_core::store::background_jobs_provider::{
+        ProviderBudgetAction as Action, ProviderBudgetOutcome as Outcome,
+        ProviderBudgetRequest as Request,
+    };
+    for_each_backend(|store, backend| async move {
+        let artwork = acquired(
+            store
+                .acquire_lease("provider:artwork", "node-a", 1_000, 200_000)
+                .await
+                .expect("artwork lease"),
+            backend,
+        );
+        let genres = acquired(
+            store
+                .acquire_lease("provider:genres", "node-b", 1_000, 200_000)
+                .await
+                .expect("genre lease"),
+            backend,
+        );
+        let first = Request {
+            provider: Provider::Tmdb,
+            lease: artwork.clone(),
+            now_ms: 1_000,
+            action: Action::Charge,
+        };
+        assert_eq!(
+            store
+                .update_provider_budget(first.clone())
+                .await
+                .expect("dispatch"),
+            Outcome::Charged,
+            "{backend}"
+        );
+        // Replaying a lost acknowledgement never refunds the spent dispatch.
+        assert_eq!(
+            store
+                .update_provider_budget(first)
+                .await
+                .expect("lost reply retry"),
+            Outcome::Wait { until_ms: 1_100 },
+            "{backend}"
+        );
+        let second = Request {
+            provider: Provider::Tmdb,
+            lease: genres,
+            now_ms: 1_099,
+            action: Action::Charge,
+        };
+        assert_eq!(
+            store
+                .update_provider_budget(second.clone())
+                .await
+                .expect("other node"),
+            Outcome::Wait { until_ms: 1_100 },
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .update_provider_budget(Request {
+                    now_ms: 1_100,
+                    ..second.clone()
+                })
+                .await
+                .expect("refill"),
+            Outcome::Charged,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .update_provider_budget(Request {
+                    action: Action::Observe {
+                        cooldown_ms: 60_000,
+                        interval_ms: Some(4_001)
+                    },
+                    now_ms: 1_101,
+                    ..second.clone()
+                })
+                .await
+                .expect("429 cooldown"),
+            Outcome::Observed,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .update_provider_budget(Request {
+                    lease: artwork.clone(),
+                    now_ms: 2_000,
+                    ..second.clone()
+                })
+                .await
+                .expect("shared cooldown"),
+            Outcome::Wait { until_ms: 61_101 },
+            "{backend}"
+        );
+        // An unrelated later response cannot shorten the server's cooldown.
+        store
+            .update_provider_budget(Request {
+                action: Action::Observe {
+                    cooldown_ms: 0,
+                    interval_ms: Some(100),
+                },
+                now_ms: 3_000,
+                ..second.clone()
+            })
+            .await
+            .expect("response");
+        assert_eq!(
+            store
+                .update_provider_budget(Request {
+                    now_ms: 61_100,
+                    ..second.clone()
+                })
+                .await
+                .expect("cooldown retained"),
+            Outcome::Wait { until_ms: 61_101 },
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .update_provider_budget(Request {
+                    now_ms: 61_101,
+                    ..second.clone()
+                })
+                .await
+                .expect("cooldown elapsed"),
+            Outcome::Charged,
+            "{backend}"
+        );
+        // AniList has a separate allowance with conservative non-burst spacing.
+        assert_eq!(
+            store
+                .update_provider_budget(Request {
+                    provider: Provider::AniList,
+                    now_ms: 1_000,
+                    ..second.clone()
+                })
+                .await
+                .expect("anilist"),
+            Outcome::Charged,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .update_provider_budget(Request {
+                    provider: Provider::AniList,
+                    now_ms: 1_001,
+                    ..second.clone()
+                })
+                .await
+                .expect("anilist spacing"),
+            Outcome::Wait { until_ms: 3_100 },
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .update_provider_budget(Request {
+                    now_ms: 200_001,
+                    ..second
+                })
+                .await
+                .expect("expired owner"),
+            Outcome::LostAuthority,
+            "{backend}"
+        );
+        assert!(
+            store
+                .update_provider_budget(Request {
+                    provider: Provider::Tmdb,
+                    lease: plurx_core::cluster::coordination::Lease {
+                        resource: "catalogue:unrelated".into(),
+                        ..artwork
+                    },
+                    now_ms: 300_000,
+                    action: Action::Charge
+                })
+                .await
+                .is_err(),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn background_artifact_claim_cannot_adopt_catalogue_or_provider_authority() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "artifact-only-claim").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let library_id = store
+            .get_item(file.item_id)
+            .await
+            .expect("item")
+            .expect("item")
+            .library_id;
+        for (index, payload) in [
+            JobPayload::LibraryScan {
+                library_id,
+                generation: "library-work-v1".into(),
+            },
+            JobPayload::MetadataRefresh {
+                library_id,
+                generation: "library-work-v1".into(),
+            },
+            JobPayload::MediaProbe {
+                file_id,
+                source_generation: "source:1".into(),
+                probe_digest: "c".repeat(64),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let kind = payload.kind();
+            let id = uuid::Uuid::new_v4().to_string();
+            store
+                .enqueue_job(EnqueueJob {
+                    id: id.clone(),
+                    payload,
+                    dedupe_key: format!("artifact-scope:{index}"),
+                    priority: 1,
+                    not_before_ms: 1_000,
+                    now_ms: 1_000,
+                    request: JobRequest {
+                        scope: "artifact-scope".into(),
+                        request_id: id.clone(),
+                        request_digest: "d".repeat(64),
+                        consumer_kind: "test".into(),
+                        consumer_ref: id.clone(),
+                        target_node_id: None,
+                        deadline_ms: None,
+                        retain_identity: false,
+                    },
+                })
+                .await
+                .expect("enqueue");
+            let request = ClaimJob {
+                job_id: id.clone(),
+                expected_revision: 0,
+                node_id: "artifact-worker".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind,
+                payload_version: 1,
+                now_ms: 1_000,
+                dispatched_at_ms: 1_000,
+            };
+            if kind.permits_artifact_execution() {
+                assert!(
+                    matches!(
+                        store
+                            .claim_artifact_job(request)
+                            .await
+                            .expect("artifact scope"),
+                        ClaimOutcome::Claimed { .. }
+                    ),
+                    "{backend}"
+                );
+            } else {
+                assert!(
+                    store.claim_artifact_job(request.clone()).await.is_err(),
+                    "{backend}: {kind:?}"
+                );
+                assert!(
+                    store
+                        .job_attempts(&id)
+                        .await
+                        .expect("no attempt")
+                        .is_empty(),
+                    "{backend}"
+                );
+                assert!(matches!(
+                    store
+                        .claim_job(request.clone())
+                        .await
+                        .expect("voter coordinator"),
+                    ClaimOutcome::Claimed { .. }
+                ));
+                // Even knowing a live coordinator's exact claim identity cannot
+                // smuggle it through artifact acknowledgement replay.
+                assert!(
+                    matches!(
+                        store
+                            .claim_artifact_job(ClaimJob {
+                                kind: JobKind::MediaProbe,
+                                ..request
+                            })
+                            .await
+                            .expect("wrong-kind replay"),
+                        ClaimOutcome::Unsupported
+                    ),
+                    "{backend}"
+                );
+                let token = store
+                    .background_job(&id)
+                    .await
+                    .expect("job")
+                    .expect("job")
+                    .token
+                    .expect("token");
+                store
+                    .settle_job(SettleJob {
+                        token,
+                        settlement: JobSettlement::Stop {
+                            error_code: "scope_fixture_complete".into(),
+                        },
+                        now_ms: 1_001,
+                    })
+                    .await
+                    .expect("cleanup");
+            }
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn background_subtitles_share_one_owner_and_publish_with_exact_current_authority() {
+    use super::subtitle_jobs_fixture::SubtitleFixture;
+    use plurx_core::store::background_jobs_subtitle::{SubtitleJobWrite, WriteSubtitleJob};
+    for_each_backend(|store, backend| async move {
+        for (index, scenario) in ["complete", "cancel", "takeover", "forged_source"]
+            .iter()
+            .enumerate()
+        {
+            let now = 1_000 + index as i64 * 100_000;
+            let (_, file_id) = seed_file(&store, &format!("subtitle-common-{scenario}")).await;
+            let stamp = super::subtitle_source_stamp(file_id);
+            let queued = store
+                .enqueue_or_promote_subtitle_source(&stamp, "foreground", now)
+                .await
+                .expect("subtitle ownership contract")
+                .expect("subtitle ownership contract");
+            assert!(
+                store
+                    .claim_analysis_request("node-a", now, now + 1_000)
+                    .await
+                    .expect("subtitle ownership contract")
+                    .is_none(),
+                "{backend}: old scheduler cannot claim subtitles"
+            );
+            assert!(store
+                .subtitle_job_intents(128)
+                .await
+                .expect("subtitle ownership contract")
+                .contains(&queued.request_id));
+            let request = store
+                .claim_subtitle_fixture(&queued.request_id, "node-a", now + 1, now + 1_000)
+                .await
+                .expect("subtitle ownership contract")
+                .expect("subtitle ownership contract");
+            assert!(!store
+                .subtitle_job_intents(128)
+                .await
+                .expect("subtitle ownership contract")
+                .contains(&queued.request_id));
+            assert!(
+                store
+                    .claim_subtitle_fixture(&queued.request_id, "node-b", now + 2, now + 1_000)
+                    .await
+                    .expect("subtitle ownership contract")
+                    .is_none(),
+                "{backend}: joined demand cannot create another owner"
+            );
+            let token = store
+                .subtitle_fixture_token(&request)
+                .await
+                .expect("subtitle ownership contract");
+            assert!(!store
+                .renew_analysis_request(
+                    &request.request_id,
+                    "node-a",
+                    request.fence,
+                    now + 2,
+                    now + 60_000
+                )
+                .await
+                .expect("subtitle ownership contract"));
+            assert!(!store
+                .complete_analysis_request(&request, "old-path", now + 2)
+                .await
+                .expect("subtitle ownership contract"));
+            let mut write = WriteSubtitleJob {
+                token: token.clone(),
+                request: request.clone(),
+                now_ms: now + 3,
+                output: SubtitleJobWrite::Representation {
+                    publication: plurx_core::store::SubtitleSourcePublication {
+                        file_id,
+                        source_size: stamp.source_size,
+                        source_mtime: stamp.source_mtime,
+                        source_attestation: "a".repeat(64),
+                        node_id: "node-a".into(),
+                        ordinal: 0,
+                        kind: "text".into(),
+                        format: "webvtt".into(),
+                        verdict: "kept".into(),
+                        attempts: 1,
+                        origin: "extracted".into(),
+                        sha256: "b".repeat(64),
+                        bytes: 20,
+                        published_at_ms: now + 3,
+                    },
+                },
+            };
+            match *scenario {
+                "cancel" => {
+                    store
+                        .cancel_analysis_request_admin(&request.request_id, now + 3)
+                        .await
+                        .expect("subtitle ownership contract");
+                    assert_eq!(
+                        store
+                            .background_job(&token.job_id)
+                            .await
+                            .expect("subtitle ownership contract")
+                            .expect("subtitle ownership contract")
+                            .state,
+                        JobState::Cancelling
+                    );
+                }
+                "takeover" => {
+                    let later = store
+                        .claim_subtitle_fixture(
+                            &queued.request_id,
+                            "node-b",
+                            now + 40_000,
+                            now + 41_000,
+                        )
+                        .await
+                        .expect("subtitle ownership contract")
+                        .expect("subtitle ownership contract");
+                    assert!(later.fence > request.fence);
+                    write.now_ms = now + 40_001;
+                    assert!(
+                        !store
+                            .write_subtitle_job(write.clone())
+                            .await
+                            .expect("subtitle ownership contract"),
+                        "{backend}: old owner cannot publish after takeover"
+                    );
+                    store
+                        .fail_subtitle_fixture(&later, "fixture_done", now + 40_002)
+                        .await
+                        .expect("subtitle ownership contract");
+                }
+                "forged_source" => {
+                    // Matching an existing request ID/fence is insufficient:
+                    // the complete source tuple must come from that record.
+                    write.request.source_size += 1;
+                    if let SubtitleJobWrite::Representation { publication } = &mut write.output {
+                        publication.source_size += 1;
+                    }
+                }
+                _ => {}
+            }
+            assert_eq!(
+                store
+                    .write_subtitle_job(write)
+                    .await
+                    .expect("subtitle ownership contract"),
+                *scenario == "complete",
+                "{backend}/{scenario}"
+            );
+            if *scenario == "complete" {
+                let completed = WriteSubtitleJob {
+                    token: token.clone(),
+                    request: request.clone(),
+                    now_ms: now + 4,
+                    output: SubtitleJobWrite::Complete {
+                        result_key: "subtitle-test-result".into(),
+                    },
+                };
+                assert!(store
+                    .write_subtitle_job(completed.clone())
+                    .await
+                    .expect("subtitle ownership contract"));
+                assert!(
+                    store
+                        .write_subtitle_job(completed)
+                        .await
+                        .expect("subtitle ownership contract"),
+                    "{backend}: lost completion acknowledgement is idempotent"
+                );
+                let waiters = store
+                    .job_waiters(WaiterQuery {
+                        job_id: token.job_id,
+                        after: None,
+                        limit: 10,
+                    })
+                    .await
+                    .expect("retired subtitle receipts");
+                assert_eq!(waiters.waiters.len(), 1, "{backend}");
+                assert_eq!(waiters.waiters[0].state, "succeeded", "{backend}");
+                assert_eq!(
+                    waiters.waiters[0].result_ref.as_deref(),
+                    Some("subtitle-test-result"),
+                    "{backend}"
+                );
+                assert_eq!(
+                    store
+                        .analysis_request(&request.request_id)
+                        .await
+                        .expect("subtitle ownership contract")
+                        .expect("subtitle ownership contract")
+                        .state,
+                    "ready"
+                );
+            } else {
+                assert!(store
+                    .list_subtitle_source_publications(
+                        file_id,
+                        stamp.source_size,
+                        stamp.source_mtime
+                    )
+                    .await
+                    .expect("subtitle ownership contract")
+                    .is_empty());
+            }
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn background_subtitle_admin_retry_and_later_intents_remain_admissible() {
+    use super::subtitle_jobs_fixture::SubtitleFixture;
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "subtitle-retry-outbox").await;
+        let original = store
+            .enqueue_or_promote_subtitle_source(
+                &super::subtitle_source_stamp(file_id),
+                "normal",
+                1000,
+            )
+            .await
+            .expect("enqueue")
+            .expect("request");
+        store
+            .cancel_analysis_request_admin(&original.request_id, 1001)
+            .await
+            .expect("cancel");
+        let retry = store
+            .retry_analysis_request_admin(&original.request_id, "subtitle-admin-successor", 1002)
+            .await
+            .expect("retry")
+            .expect("successor");
+        assert!(retry.force_rebuild, "{backend}: exercise real Retry input");
+        let (_, later_file) = seed_file(&store, "subtitle-later-outbox").await;
+        let later = store
+            .enqueue_or_promote_subtitle_source(
+                &super::subtitle_source_stamp(later_file),
+                "normal",
+                1003,
+            )
+            .await
+            .expect("later")
+            .expect("request");
+        for request in [retry, later] {
+            let claimed = store
+                .claim_subtitle_fixture(&request.request_id, "node-a", 1004, 2000)
+                .await
+                .expect("admit retry and later demand")
+                .expect("common owner");
+            assert!(
+                store
+                    .complete_subtitle_fixture(&claimed, "retry-result", 1005)
+                    .await
+                    .expect("complete"),
+                "{backend}"
+            );
+        }
+        assert!(
+            store
+                .subtitle_job_intents(128)
+                .await
+                .expect("outbox")
+                .is_empty(),
+            "{backend}"
+        );
+    })
+    .await;
 }

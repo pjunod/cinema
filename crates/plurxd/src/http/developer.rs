@@ -261,6 +261,8 @@ pub(crate) async fn readiness(
 
 /// Facts only: these observations are never consulted by settings updates.
 async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
+    use plurx_core::cluster::coordination::ClusterJobAuthority;
+    use plurx_core::store::background_jobs::JobKind;
     use RequirementStatus::{Met, Unavailable, Unknown, Unmet};
     let (queue_status, queue_evidence) = match tokio::time::timeout(
         std::time::Duration::from_secs(3), state.store.job_migration_status()
@@ -287,9 +289,20 @@ async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
         Ok(Err(error)) => (Unavailable, format!("The peer directory could not be observed: {error}")),
         Err(_) => (Unavailable, "The peer directory did not answer within the three-second observation budget.".into()),
     };
+    let (role_status, role_evidence) = match tokio::time::timeout(
+        std::time::Duration::from_secs(3), async {
+            tokio::join!(state.membership.may_execute_job(JobKind::FragmentIndexBuild),
+                state.membership.may_run_cluster_jobs())
+        }
+    ).await {
+        Ok((artifact, catalogue)) => (if artifact { Met } else { Unmet }, format!(
+            "This node currently has artifact execution authority: {artifact}; catalogue/provider coordination authority: {catalogue}. Ready learners may execute immutable preparation, but scans and provider ownership remain voter work.")),
+        Err(_) => (Unavailable, "Worker authority did not answer within the three-second observation budget.".into()),
+    };
     DeveloperEnableItem {
         id: "durable_cluster_work", title: "Durable cluster work", enabled: None, setting: None,
         requirements: vec![
+            DeveloperRequirement { id: "durable_role", title: "Current worker authority", status: role_status, evidence: role_evidence },
             DeveloperRequirement { id: "durable_store", title: "Durable queue storage", status: queue_status, evidence: queue_evidence },
             DeveloperRequirement { id: "durable_tools", title: "Worker tool inventory", status: inventory_status,
                 evidence: format!("This worker reports {} boot-probed decoders and {} encoder families. Each job still needs its exact pipeline and output recipe.", capabilities.decoders.len(), capabilities.encoder_families.len()) },

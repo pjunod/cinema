@@ -1,6 +1,11 @@
 //! Shared application state and the background job manager.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+#[path = "library_work.rs"]
+mod library_work;
+#[path = "subtitle_work.rs"]
+mod subtitle_work;
+
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -1448,15 +1453,12 @@ pub struct JobManager {
     statuses: Mutex<HashMap<i64, ScanStatus>>,
     /// Live counters for in-flight scans, sampled by `all_statuses`.
     live: Mutex<HashMap<i64, Arc<ScanProgress>>>,
-    /// Targeted scans waiting for a library's running scan to finish,
-    /// per library. See [`JobManager::request_scan`].
-    pending: Mutex<HashMap<i64, Vec<ScanRequest>>>,
-    /// At most one delayed remote-lease retry per library. Without this,
-    /// several integration requests arriving during the same remote scan
-    /// would each perpetuate its own two-second retry task.
-    pending_retries: Mutex<HashSet<i64>>,
-    /// Recent targeted-scan requests and their outcomes, newest last.
-    requests: Mutex<VecDeque<ScanRequestRecord>>,
+    /// Wake durable library consumers promptly after local admission.
+    library_wake: tokio::sync::Notify,
+    library_readiness: crate::background_jobs::LibraryReadiness,
+    /// Shared with TranscodeManager when attached; standalone managers have
+    /// no other encoder pool. Foreground subtitles reserve one CPU thread.
+    subtitle_admissions: std::sync::Mutex<crate::admission::Admissions>,
     metrics: Arc<IntegrationMetrics>,
     /// A pre-transcode pass is running. Not a mutex, because the answer wanted
     /// is "is one going" rather than "wait for it": a second pass would fight
@@ -2240,32 +2242,9 @@ fn needs_artwork_retry(item: &Item) -> bool {
         ) && item.backdrop_path.is_none())
 }
 
-/// Ids the caller already knows, so plurx does not have to guess.
-///
-/// Without these, matching is title+year parsed off a filename — the step
-/// that puts the wrong poster on a remake. The caller grabbed a specific
-/// TMDB id; telling plurx costs nothing and ends the ambiguity.
-#[derive(Clone, Debug, Default)]
-pub struct IdHints {
-    pub tmdb: Option<i64>,
-    pub imdb: Option<String>,
-    /// For an episode, the SHOW's id — an episode's own id is not what
-    /// identifies the series it belongs to.
-    pub series_tmdb: Option<i64>,
-    /// The ids belong to an ancestor (a show), not to the placed item.
-    pub episodeish: bool,
-}
-
-/// Validated Curator facts carried by one targeted book scan.
-#[derive(Clone, Debug)]
-pub struct BookHints {
-    pub title: Option<String>,
-    pub author: Option<String>,
-    pub medium: ItemKind,
-    pub work_id: String,
-    pub edition_id: String,
-    pub cover_url: Option<String>,
-}
+pub use plurx_core::store::background_jobs_library::{
+    LibraryBookHints as BookHints, LibraryIdHints as IdHints,
+};
 
 fn curator_pairing_can_advance(
     current_edition: Option<&str>,
@@ -2274,12 +2253,6 @@ fn curator_pairing_can_advance(
     replacement_cover_ready: bool,
 ) -> bool {
     !current_provider_cover || current_edition == Some(requested_edition) || replacement_cover_ready
-}
-
-impl IdHints {
-    fn is_empty(&self) -> bool {
-        self.tmdb.is_none() && self.imdb.is_none() && self.series_tmdb.is_none()
-    }
 }
 
 /// One "scan exactly this" ask.
@@ -2379,15 +2352,11 @@ fn parse_dv_disk_parallel(raw: Option<&str>) -> usize {
         .clamp(1, 8)
 }
 
-/// How many request records are kept. A debugging surface — "what happened
-/// last night" — not an audit log, and deliberately in memory: persisting it
-/// would mean a schema, a retention policy and a growth problem, for data
-/// whose value expires in hours.
-const MAX_REQUESTS: usize = 256;
-/// One library can attract a burst of integration callbacks while another
-/// node owns its scan. Bound retained waiter state independently of the
-/// request-history ring; overflow is terminal and visible to the caller.
-const MAX_PENDING_PER_LIBRARY: usize = 256;
+/// Bounded observation page; durable receipts outlive this page for seven days.
+const MAX_REQUESTS: usize = plurx_core::store::background_jobs_library::MAX_LIBRARY_REQUESTS;
+/// Independent requests admitted for one library before callers retry later.
+const MAX_PENDING_PER_LIBRARY: usize =
+    plurx_core::store::background_jobs_library::MAX_LIBRARY_REQUESTS;
 
 const PRETRANSCODE_REFUSAL_TTL_MS: i64 = 10 * 60 * 1_000;
 // The store admits at most 4,096 active queue rows. Retaining that entire
@@ -2717,6 +2686,8 @@ fn subtitle_source_argv(
         "-loglevel".to_owned(),
         "error".to_owned(),
         "-copyts".to_owned(),
+        "-threads".to_owned(),
+        "1".to_owned(),
         "-i".to_owned(),
         input.to_owned(),
     ];
@@ -3050,9 +3021,9 @@ impl JobManager {
             tmdb_base: None,
             statuses: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
-            pending: Mutex::new(HashMap::new()),
-            pending_retries: Mutex::new(HashSet::new()),
-            requests: Mutex::new(VecDeque::new()),
+            library_wake: tokio::sync::Notify::new(),
+            library_readiness: Default::default(),
+            subtitle_admissions: std::sync::Mutex::new(crate::admission::Admissions::new()),
             metrics: Arc::new(IntegrationMetrics::default()),
             producing: std::sync::atomic::AtomicBool::new(false),
             indexing: std::sync::atomic::AtomicBool::new(false),
@@ -4370,190 +4341,6 @@ impl JobManager {
             .load(Ordering::Relaxed)
     }
 
-    /// After the bounded claim wait, playback may claim its own queued row.
-    /// The same lease and fence protect it as an idle worker, but this one
-    /// claim bypasses `pretranscode_worker_idle`: it is foreground playback.
-    pub(crate) async fn self_claim_subtitle_source(
-        self: &Arc<Self>,
-        request_id: &str,
-        runtime_cache: &Path,
-    ) -> bool {
-        if !self.may_run_cluster_jobs().await || !self.subtitle_source_queue_enabled().await {
-            return false;
-        }
-        let node_id = self.coordinator.node_id().to_owned();
-        let retry_policy = self.analysis_retry_policy().await;
-        let now = clock_ms();
-        let request = match self
-            .store
-            .claim_analysis_request_foreground(
-                request_id,
-                &node_id,
-                now,
-                now.saturating_add(retry_policy.lease_ms),
-            )
-            .await
-        {
-            Ok(Some(request)) => request,
-            Ok(None) => return false,
-            Err(error) => {
-                tracing::warn!(%error, request_id, "self-claiming subtitle_source request");
-                return false;
-            }
-        };
-        crate::telemetry::record_subtitle_source(
-            crate::telemetry::SubtitleSourceMetric::ForegroundSelfClaim,
-        );
-        let _progress = self.start_analysis_progress(
-            (&request.request_id, &request.target_node_id),
-            request.file_id,
-            &request.component,
-            "probing",
-            request.source_size.max(0) as u64,
-            0,
-        );
-        let stop = CancellationToken::new();
-        let lost = CancellationToken::new();
-        let heartbeat = {
-            let store = Arc::clone(&self.store);
-            let request_id = request.request_id.clone();
-            let node_id = node_id.clone();
-            let metrics = Arc::clone(&self.analysis_metrics);
-            let stop = stop.clone();
-            let lost = lost.clone();
-            let fence = request.fence;
-            let beat = LeaseHeartbeat {
-                queue: "analysis-request",
-                row: request.request_id.clone(),
-                fence,
-                attempts: request.attempts,
-                known_expiry_ms: request.lease_expires_ms,
-                lease_ms: retry_policy.lease_ms,
-                renew_every: retry_policy.renew_every(),
-                metrics,
-                stop,
-                lost,
-            };
-            tokio::spawn(async move {
-                beat.run(move |now, expires_at| {
-                    let store = Arc::clone(&store);
-                    let request_id = request_id.clone();
-                    let node_id = node_id.clone();
-                    async move {
-                        store
-                            .renew_analysis_request(&request_id, &node_id, fence, now, expires_at)
-                            .await
-                    }
-                })
-                .await;
-            })
-        };
-        let outcome = if !self
-            .store
-            .record_analysis_request_phase(&request, "source_probe", None, clock_ms())
-            .await
-            .unwrap_or(false)
-        {
-            Err(AnalysisResolutionError::ClaimLost)
-        } else {
-            match self.store.get_file(request.file_id).await {
-                Ok(Some(file))
-                    if file.size == request.source_size && file.mtime == request.source_mtime =>
-                {
-                    self.set_analysis_progress_totals(
-                        &request.request_id,
-                        &request.target_node_id,
-                        file.size.max(0) as u64,
-                        file.duration_ms.unwrap_or_default(),
-                    );
-                    self.resolve_subtitle_source_request(
-                        &request,
-                        &node_id,
-                        &file,
-                        runtime_cache,
-                        None,
-                        &stop,
-                        &lost,
-                    )
-                    .await
-                }
-                Ok(_) => Err(AnalysisResolutionError::Terminal("source_superseded")),
-                Err(_) => Err(AnalysisResolutionError::Retry {
-                    code: "source_catalog_read_failed",
-                    charge_attempt: true,
-                }),
-            }
-        };
-        stop.cancel();
-        let _ = heartbeat.await;
-        match outcome {
-            Ok(()) => true,
-            Err(AnalysisResolutionError::ClaimLost) => false,
-            Err(AnalysisResolutionError::Retry {
-                code,
-                charge_attempt,
-            }) => {
-                let now = clock_ms();
-                let delay_ms =
-                    retry_policy.backoff_ms(&request.request_id, request.attempts.max(1));
-                match self
-                    .store
-                    .retry_analysis_request(
-                        &request,
-                        code,
-                        now,
-                        now.saturating_add(delay_ms),
-                        charge_attempt,
-                    )
-                    .await
-                {
-                    Ok(true) => {
-                        crate::store_result::observe(
-                            crate::store_result::Operation::RecordAnalysisRetryWaitPhase,
-                            crate::store_result::Discard::BestEffort,
-                            self.store
-                                .record_analysis_request_phase(
-                                    &request,
-                                    "retry_wait",
-                                    Some(code),
-                                    now,
-                                )
-                                .await,
-                        );
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        tracing::warn!(%error, request_id, "retrying foreground subtitle_source")
-                    }
-                }
-                false
-            }
-            Err(AnalysisResolutionError::Terminal(code)) => {
-                let now = clock_ms();
-                match self
-                    .store
-                    .fail_analysis_request(&request.request_id, &node_id, request.fence, code, now)
-                    .await
-                {
-                    Ok(true) => {
-                        crate::store_result::observe(
-                            crate::store_result::Operation::RecordAnalysisFailedPhase,
-                            crate::store_result::Discard::BestEffort,
-                            self.store
-                                .record_analysis_request_phase(&request, "failed", Some(code), now)
-                                .await,
-                        );
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        tracing::warn!(%error, request_id, "failing foreground subtitle_source")
-                    }
-                }
-                false
-            }
-        }
-    }
-
     fn start_analysis_progress(
         self: &Arc<Self>,
         identity: (&str, &str),
@@ -4834,7 +4621,13 @@ impl JobManager {
     /// to any scan currently running.
     pub async fn all_statuses(&self) -> HashMap<i64, ScanStatus> {
         let mut map = self.statuses.lock().await.clone();
+        let durable = self.durable_library_statuses().await;
         let live = self.live.lock().await;
+        for (library, status) in durable {
+            if !live.contains_key(&library) {
+                map.insert(library, status);
+            }
+        }
         for (id, progress) in live.iter() {
             if let Some(status) = map.get_mut(id) {
                 if status.running {
@@ -4845,8 +4638,8 @@ impl JobManager {
         map
     }
 
-    /// Kick off a scan for `library_id` unless one is already running. Returns
-    /// `true` if a scan was started, `false` if one was already in flight.
+    /// Durably admit a library scan, joining compatible work already queued.
+    /// `true` means accepted; an eligible worker may execute on another node.
     pub async fn trigger_scan(self: &Arc<Self>, library_id: i64) -> bool {
         self.trigger_scan_as(library_id, ScanTrigger::Manual).await
     }
@@ -4877,157 +4670,12 @@ impl JobManager {
         self.trigger(library_id, true, why).await
     }
 
-    async fn trigger(
-        self: &Arc<Self>,
-        library_id: i64,
-        force_metadata: bool,
-        why: ScanTrigger,
-    ) -> bool {
-        let resource = format!("scan:library:{library_id}");
-        let lease = match self.acquire_job(resource).await {
-            Ok(Some(lease)) => lease,
-            Ok(None) => return false,
-            Err(error) => {
-                tracing::warn!(
-                    library = library_id,
-                    stage = "acquire_lease",
-                    error = %error,
-                    "acquiring scan lease failed"
-                );
-                return false;
-            }
-        };
-        {
-            let mut statuses = self.statuses.lock().await;
-            let entry = statuses.entry(library_id).or_default();
-            if entry.running {
-                drop(statuses);
-                let _ = lease.release().await;
-                return false;
-            }
-            self.metrics.count_scan(why);
-            *entry = ScanStatus {
-                running: true,
-                phase: Some("scanning".to_owned()),
-                started_at: Some(now()),
-                ..Default::default()
-            };
-        }
-        let progress = Arc::new(ScanProgress::default());
-        self.live
-            .lock()
-            .await
-            .insert(library_id, Arc::clone(&progress));
-
-        let manager = Arc::clone(self);
-        tokio::spawn(async move {
-            let lost = lease.loss_token();
-            tokio::select! {
-                () = manager.run_scan(library_id, progress, force_metadata, &lease) => {}
-                () = lost.cancelled() => {
-                    tracing::warn!(
-                        library = library_id,
-                        stage = "lease",
-                        "library scan failed because its cluster lease was lost"
-                    );
-                    let mut status = manager
-                        .statuses
-                        .lock()
-                        .await
-                        .get(&library_id)
-                        .cloned()
-                        .unwrap_or_default();
-                    status.error = Some("cluster scan lease was lost".to_owned());
-                    manager.finish(library_id, status).await;
-                }
-            }
-            let _ = lease.release().await;
-            // Whatever queued up while this ran is work someone was
-            // promised. A full scan covers the same files a targeted one
-            // would have, but the CALLER is still owed its answer — the
-            // item ids it asked for — so the queue drains rather than
-            // being discarded as redundant.
-            manager.drain_pending(library_id).await;
-        });
-        true
-    }
-
-    /// Ask for a targeted scan of one path.
-    ///
-    /// Returns `Ok(Some(scan))` when it ran now, or `Ok(None)` when the
-    /// library was already scanning and the request was queued — the caller
-    /// polls `scan_request` for the outcome.
-    ///
-    /// **Requests are queued, never dropped.** `trigger` returns false
-    /// while a scan runs, which is right for "the user pressed Scan twice"
-    /// and wrong here: importing a season fires one request per episode
-    /// within seconds, and dropping N−1 of them would leave most of the
-    /// season unindexed with nothing anywhere saying so. Duplicates by path
-    /// collapse (scanning the same folder twice is the same work), and the
-    /// rest are drained when the running scan finishes.
-    pub async fn request_scan(
-        self: &Arc<Self>,
-        req: ScanRequest,
-    ) -> Result<Option<TargetedScan>, TargetError> {
-        self.record_request(&req, "running", None, None).await;
-
-        let busy = {
-            let statuses = self.statuses.lock().await;
-            statuses.get(&req.library_id).is_some_and(|s| s.running)
-        };
-        if busy {
-            if let Err(error) = self.queue_targeted(req.clone()).await {
-                self.record_request(&req, "failed", None, Some(error.to_string()))
-                    .await;
-                return Err(error);
-            }
-            self.set_request_status(&req.id, "queued").await;
-            return Ok(None);
-        }
-
-        let lease = match self
-            .acquire_job(format!("scan:library:{}", req.library_id))
-            .await
-            .map_err(TargetError::Store)?
-        {
-            Some(lease) => lease,
-            None => {
-                if let Err(error) = self.queue_targeted(req.clone()).await {
-                    self.record_request(&req, "failed", None, Some(error.to_string()))
-                        .await;
-                    return Err(error);
-                }
-                self.set_request_status(&req.id, "queued").await;
-                self.schedule_pending_retry(req.library_id).await;
-                return Ok(None);
-            }
-        };
-        let lost = lease.loss_token();
-        let publisher = lease.publisher(self.store.as_ref());
-        let out = tokio::select! {
-            out = self.run_targeted(std::slice::from_ref(&req), &publisher) => out,
-            () = lost.cancelled() => Err(TargetError::Store(StoreError::Task(
-                "cluster scan lease was lost".to_owned(),
-            ))),
-        };
-        let _ = lease.release().await;
-        match &out {
-            Ok(scan) => {
-                self.record_request(&req, "done", Some(scan), None).await;
-            }
-            Err(e) => {
-                self.record_request(&req, "failed", None, Some(e.to_string()))
-                    .await;
-            }
-        }
-        out.map(Some)
-    }
-
     async fn run_targeted(
         &self,
         requests: &[ScanRequest],
         publisher: &PublicationStore<'_>,
     ) -> Result<TargetedScan, TargetError> {
+        library_work::check_active()?;
         let req = requests.first().ok_or_else(|| {
             TargetError::Store(StoreError::Task(
                 "targeted scan group contained no waiters".to_owned(),
@@ -5055,6 +4703,7 @@ impl JobManager {
         );
         let mut out = scan::scan_path_with_publication(publisher, &library, &req.path).await?;
         for request in requests {
+            library_work::check_active()?;
             for problem in self.apply_ids(request, &out.items, publisher).await {
                 out.report.add_problem(problem);
             }
@@ -5106,6 +4755,7 @@ impl JobManager {
         } else {
             placed.clone()
         };
+        library_work::check_active()?;
         let outcome = self
             .enrich(
                 publisher,
@@ -5117,6 +4767,7 @@ impl JobManager {
             )
             .await;
         for request in requests {
+            library_work::check_active()?;
             self.apply_book_hints(request, &out.items, publisher).await;
         }
         tracing::info!(
@@ -5127,6 +4778,7 @@ impl JobManager {
             correlation_id = req.correlation_id.as_deref().unwrap_or("-"),
             "targeted scan enriched what it placed"
         );
+        library_work::check_active()?;
         Ok(out)
     }
 
@@ -5239,7 +4891,8 @@ impl JobManager {
                 .await,
             );
         } else if library.anime {
-            let client = AniListClient::new();
+            let client = AniListClient::new()
+                .with_budget(publisher.provider_budget(Arc::clone(&self.store)));
             outcome.enrich = Some(
                 metadata::enrich_anime_library_with_publication(
                     publisher,
@@ -5255,7 +4908,9 @@ impl JobManager {
         } else {
             match self.store.get_setting(keys::TMDB_API_KEY).await {
                 Ok(Some(key)) if !key.is_empty() => {
-                    let tmdb = self.tmdb_client(key);
+                    let tmdb = self
+                        .tmdb_client(key)
+                        .with_budget(publisher.provider_budget(Arc::clone(&self.store)));
                     outcome.enrich = Some(
                         metadata::enrich_library_for_targets_with_publication(
                             publisher,
@@ -5697,188 +5352,13 @@ impl JobManager {
         Some(current.id)
     }
 
-    async fn queue_targeted(&self, req: ScanRequest) -> Result<(), TargetError> {
-        let mut pending = self.pending.lock().await;
-        // The path is only the physical scan target. Request ids, caller ids,
-        // curator book hints, correlation ids, and terminal status are all
-        // per waiter; discarding a same-path request would strand its record
-        // in `queued` forever and silently lose its metadata payload.
-        let queue = pending.entry(req.library_id).or_default();
-        if queue.len() >= MAX_PENDING_PER_LIBRARY {
-            return Err(TargetError::Store(StoreError::Task(format!(
-                "targeted scan queue for library {} is full ({MAX_PENDING_PER_LIBRARY} waiters)",
-                req.library_id
-            ))));
-        }
-        queue.push(req);
-        Ok(())
-    }
-
-    async fn schedule_pending_retry(self: &Arc<Self>, library_id: i64) {
-        if !self.pending_retries.lock().await.insert(library_id) {
-            return;
-        }
-        let manager = Arc::clone(self);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                if manager.drain_pending_once(library_id).await {
-                    continue;
-                }
-                // Close the empty-observation/removal race with request_scan:
-                // it queues while holding `pending`, then tries
-                // `pending_retries`. Holding the first lock while removing
-                // from the second makes an enqueue land wholly before this
-                // check (and loop again) or wholly after removal (and install
-                // a new retry task).
-                let pending = manager.pending.lock().await;
-                if pending
-                    .get(&library_id)
-                    .is_some_and(|queue| !queue.is_empty())
-                {
-                    continue;
-                }
-                manager.pending_retries.lock().await.remove(&library_id);
-                break;
-            }
-        });
-    }
-
-    /// Run whatever queued up while a library was scanning. Called once a
-    /// scan finishes; the work a caller was promised must not be forgotten
-    /// just because it arrived at a busy moment.
-    async fn drain_pending(self: &Arc<Self>, library_id: i64) {
-        if self.drain_pending_once(library_id).await {
-            self.schedule_pending_retry(library_id).await;
-        }
-    }
-
-    /// Attempt one drain. `true` asks the caller's single-flight retry loop to
-    /// try again after the remote owner has had time to make progress.
-    async fn drain_pending_once(self: &Arc<Self>, library_id: i64) -> bool {
-        let queued = {
-            let mut pending = self.pending.lock().await;
-            pending.remove(&library_id).unwrap_or_default()
-        };
-        if queued.is_empty() {
-            return false;
-        }
-        let lease = match self.acquire_job(format!("scan:library:{library_id}")).await {
-            Ok(Some(lease)) => lease,
-            Ok(None) => {
-                for req in queued {
-                    if let Err(error) = self.queue_targeted(req.clone()).await {
-                        self.record_request(&req, "failed", None, Some(error.to_string()))
-                            .await;
-                    }
-                }
-                return true;
-            }
-            Err(error) => {
-                tracing::warn!(library = library_id, error = %error, "targeted scan lease retry failed");
-                for req in queued {
-                    if let Err(error) = self.queue_targeted(req.clone()).await {
-                        self.record_request(&req, "failed", None, Some(error.to_string()))
-                            .await;
-                    }
-                }
-                return true;
-            }
-        };
-        let lost = lease.loss_token();
-        let publisher = lease.publisher(self.store.as_ref());
-        let mut groups: BTreeMap<PathBuf, Vec<ScanRequest>> = BTreeMap::new();
-        for req in queued {
-            let normalized = req.path.canonicalize().unwrap_or_else(|_| req.path.clone());
-            groups.entry(normalized).or_default().push(req);
-        }
-        for requests in groups.into_values() {
-            let out = tokio::select! {
-                out = self.run_targeted(&requests, &publisher) => out,
-                () = lost.cancelled() => Err(TargetError::Store(StoreError::Task(
-                    "cluster scan lease was lost".to_owned(),
-                ))),
-            };
-            for req in requests {
-                match &out {
-                    Ok(scan) => self.record_request(&req, "done", Some(scan), None).await,
-                    Err(e) => {
-                        self.record_request(&req, "failed", None, Some(e.to_string()))
-                            .await
-                    }
-                }
-            }
-        }
-        drop(publisher);
-        let _ = lease.release().await;
-        false
-    }
-
-    /// The recent request ring, newest last.
-    pub async fn scan_requests(&self) -> Vec<ScanRequestRecord> {
-        self.requests.lock().await.iter().cloned().collect()
-    }
-
-    pub async fn scan_request(&self, id: &str) -> Option<ScanRequestRecord> {
-        self.requests
-            .lock()
-            .await
-            .iter()
-            .find(|r| r.request_id == id)
-            .cloned()
-    }
-
-    async fn record_request(
-        &self,
-        req: &ScanRequest,
-        status: &str,
-        scan: Option<&TargetedScan>,
-        error: Option<String>,
-    ) {
-        let mut ring = self.requests.lock().await;
-        if let Some(existing) = ring.iter_mut().find(|r| r.request_id == req.id) {
-            existing.status = status.to_owned();
-            existing.report = scan.map(|s| s.report.clone());
-            existing.items = scan.map(|s| s.items.clone());
-            existing.error = error;
-            return;
-        }
-        if ring.len() == MAX_REQUESTS {
-            ring.pop_front();
-        }
-        ring.push_back(ScanRequestRecord {
-            request_id: req.id.clone(),
-            at: now(),
-            library_id: req.library_id,
-            path: req.path.display().to_string(),
-            correlation_id: req.correlation_id.clone(),
-            source: req.source.clone(),
-            status: status.to_owned(),
-            report: scan.map(|s| s.report.clone()),
-            items: scan.map(|s| s.items.clone()),
-            error,
-        });
-    }
-
-    async fn set_request_status(&self, id: &str, status: &str) {
-        if let Some(r) = self
-            .requests
-            .lock()
-            .await
-            .iter_mut()
-            .find(|r| r.request_id == id)
-        {
-            r.status = status.to_owned();
-        }
-    }
-
     async fn run_scan(
         &self,
         library_id: i64,
         progress: Arc<ScanProgress>,
         force_metadata: bool,
         lease: &ActiveJobLease,
-    ) {
+    ) -> Result<TargetedScan, StoreError> {
         let mut status = ScanStatus {
             running: true,
             started_at: Some(now()),
@@ -5890,7 +5370,7 @@ impl JobManager {
             Ok(None) => {
                 self.finish(library_id, error_status("library not found"))
                     .await;
-                return;
+                return Err(StoreError::Task("library not found".into()));
             }
             Err(e) => {
                 tracing::warn!(
@@ -5900,7 +5380,7 @@ impl JobManager {
                     "library scan failed"
                 );
                 self.finish(library_id, error_status(&e.to_string())).await;
-                return;
+                return Err(e);
             }
         };
 
@@ -5922,7 +5402,7 @@ impl JobManager {
                     "library scan failed"
                 );
                 self.finish(library_id, error_status(&e.to_string())).await;
-                return;
+                return Err(e);
             }
         }
 
@@ -5961,9 +5441,16 @@ impl JobManager {
                 stage = "stamp_completion",
                 "recording the library scan completion time failed"
             );
+            self.finish(library_id, error_status(&e.to_string())).await;
+            return Err(e);
         }
         crate::http::library_channels::notify_catalogue_mutation();
+        let result = TargetedScan {
+            report: status.last_scan.clone().unwrap_or_default(),
+            items: Vec::new(),
+        };
         self.finish(library_id, status).await;
+        Ok(result)
     }
 
     /// The scheduler: ask [`crate::schedule::due_jobs`] once a minute, dispatch
@@ -6066,7 +5553,10 @@ impl JobManager {
             loop {
                 let kinds = [JobKind::TranscodePrepare];
                 let before = crate::background_jobs::accepted_claims(&kinds);
-                if self.may_run_cluster_jobs().await
+                if self
+                    .job_authority
+                    .may_execute_job(JobKind::TranscodePrepare)
+                    .await
                     && self.job_interval(keys::JOB_CACHE_PRODUCE_MINS).await > 0
                 {
                     Arc::clone(&self)
@@ -6082,12 +5572,19 @@ impl JobManager {
             loop {
                 let kinds = [JobKind::FragmentIndexBuild, JobKind::ArtifactHydrate];
                 let before = crate::background_jobs::accepted_claims(&kinds);
-                if self.may_run_cluster_jobs().await
+                if self
+                    .job_authority
+                    .may_execute_job(JobKind::FragmentIndexBuild)
+                    .await
                     && self.cluster_fragment_index_enabled().await
                     && !self.cluster_index_working.swap(true, Ordering::AcqRel)
                 {
                     let _guard = ClusterIndexWorkingGuard(Arc::clone(&self));
-                    self.enqueue_fragment_deliveries().await;
+                    // Outbox admission is still voter-owned; learners only
+                    // consume already-authorized immutable work for a target.
+                    if self.may_run_cluster_jobs().await {
+                        self.enqueue_fragment_deliveries().await;
+                    }
                     self.drain_cluster_fragment_index_slot(Arc::clone(&transcode))
                         .await;
                 }
@@ -6095,7 +5592,24 @@ impl JobManager {
                 tokio::time::sleep(pacing.delay(progressed)).await;
             }
         };
-        tokio::join!(preparation, fragments);
+        let libraries = async {
+            let mut pacing = crate::background_jobs::IdlePoll::new();
+            loop {
+                let progressed = self.work_library_queue(&transcode, None).await;
+                tokio::select! {
+                    () = self.library_wake.notified() => {},
+                    () = tokio::time::sleep(pacing.delay(progressed)) => {},
+                }
+            }
+        };
+        let subtitles = async {
+            let mut pacing = crate::background_jobs::IdlePoll::new();
+            loop {
+                let progressed = self.work_subtitle_queue(&transcode).await;
+                tokio::time::sleep(pacing.delay(progressed)).await;
+            }
+        };
+        tokio::join!(preparation, fragments, libraries, subtitles);
     }
 
     async fn maintain_background_queue(self: Arc<Self>) {
@@ -6447,14 +5961,18 @@ impl JobManager {
         // enrich from AniList, which needs none, and those titles are exactly
         // as entitled to genres as the rest.
         let tmdb = match self.store.get_setting(keys::TMDB_API_KEY).await {
-            Ok(Some(key)) if !key.is_empty() => Some(TmdbClient::new(key)),
+            Ok(Some(key)) if !key.is_empty() => Some(
+                TmdbClient::new(key)
+                    .with_budget(publisher.provider_budget(Arc::clone(&self.store))),
+            ),
             Ok(_) => None,
             Err(e) => {
                 tracing::warn!(error = %e, "genre backfill: reading TMDB key");
                 None
             }
         };
-        let anilist = AniListClient::new();
+        let anilist =
+            AniListClient::new().with_budget(publisher.provider_budget(Arc::clone(&self.store)));
         let report = tokio::select! {
             report = metadata::genres::backfill_pass_with_publication(
                 &publisher,
@@ -8379,11 +7897,10 @@ impl JobManager {
         file: &MediaFile,
         runtime_cache: &Path,
         preempt_when_busy: Option<&TranscodeManager>,
-        stop: &CancellationToken,
+        fence: &crate::background_jobs::JobFence,
         lost: &CancellationToken,
     ) -> Result<(), AnalysisResolutionError> {
-        if request.force_rebuild
-            || !request.video_identity.is_empty()
+        if !request.video_identity.is_empty()
             || !request.target_node_id.is_empty()
             || request.pipeline_version != subtitle_source_pipeline_version().await
         {
@@ -8502,7 +8019,7 @@ impl JobManager {
                 file_id = file.id,
                 "subtitle_source request already covered; no source read"
             );
-            self.complete_subtitle_source_request(request, node_id, &result_key, stop)
+            self.complete_subtitle_source_request(request, &result_key, fence)
                 .await?;
             return Ok(());
         }
@@ -8518,7 +8035,7 @@ impl JobManager {
                 .await;
         let Some(plan) = plan else {
             if tracks.is_empty() {
-                self.complete_subtitle_source_request(request, node_id, &result_key, stop)
+                self.complete_subtitle_source_request(request, &result_key, fence)
                     .await?;
                 return Ok(());
             }
@@ -8534,6 +8051,7 @@ impl JobManager {
                 file.id,
                 &attested.handle,
                 &attested.observation.source_sha256,
+                Some((fence, request)),
             )
             .await;
             if let Ok(rows) = self
@@ -8546,7 +8064,7 @@ impl JobManager {
                     .filter(|row| row.source_attestation == attested.observation.source_sha256)
                     .collect();
                 if subtitle_source_covered(&tracks, &rows) {
-                    self.complete_subtitle_source_request(request, node_id, &result_key, stop)
+                    self.complete_subtitle_source_request(request, &result_key, fence)
                         .await?;
                     return Ok(());
                 }
@@ -8557,7 +8075,7 @@ impl JobManager {
             // rather than keeping an immortal queued row.
             return Err(AnalysisResolutionError::Retry {
                 code: "queue_full_or_busy",
-                charge_attempt: true,
+                charge_attempt: false,
             });
         };
         let stage = plan.stage().to_owned();
@@ -8705,6 +8223,7 @@ impl JobManager {
                 &attested.observation.source_sha256,
                 lost,
                 request,
+                fence,
             )
             .await;
         let receipt = match published {
@@ -8745,7 +8264,7 @@ impl JobManager {
             "subtitle_source job published"
         );
         match self
-            .complete_subtitle_source_request(request, node_id, &result_key, stop)
+            .complete_subtitle_source_request(request, &result_key, fence)
             .await
         {
             Ok(()) => {
@@ -8764,14 +8283,16 @@ impl JobManager {
     async fn complete_subtitle_source_request(
         &self,
         request: &AnalysisRequest,
-        _node_id: &str,
         result_key: &str,
-        stop: &CancellationToken,
+        fence: &crate::background_jobs::JobFence,
     ) -> Result<(), AnalysisResolutionError> {
-        stop.cancel();
-        if !self
-            .store
-            .complete_analysis_request(request, result_key, clock_ms())
+        if !fence
+            .write_subtitle(
+                request,
+                plurx_core::store::background_jobs_subtitle::SubtitleJobWrite::Complete {
+                    result_key: result_key.to_owned(),
+                },
+            )
             .await
             .map_err(|_| AnalysisResolutionError::Retry {
                 code: "queue_write_failed",
@@ -8832,17 +8353,7 @@ impl JobManager {
             file.duration_ms.unwrap_or_default(),
         );
         if request.component == "subtitle_source" {
-            return self
-                .resolve_subtitle_source_request(
-                    request,
-                    node_id,
-                    &file,
-                    transcode.runtime_cache_dir(),
-                    Some(transcode),
-                    stop,
-                    lost,
-                )
-                .await;
+            return Err(AnalysisResolutionError::ClaimLost); // Common workers own this component.
         }
         if request.component == "skip_markers" {
             if request.pipeline_version != crate::http::stream::CHAPTER_ANNOTATION_VERSION {
@@ -11366,6 +10877,32 @@ mod tests {
         );
     }
 
+    async fn drain_library(jobs: &Arc<JobManager>, library_id: i64) {
+        let scratch = crate::test_tempdir().expect("library worker scratch");
+        let transcode = TranscodeManager::new(
+            Arc::clone(&jobs.store),
+            scratch.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        assert!(
+            jobs.work_library_queue(&transcode, Some(library_id)).await,
+            "durable worker claimed library"
+        );
+    }
+
+    async fn completed_scan(
+        jobs: &Arc<JobManager>,
+        request: ScanRequest,
+    ) -> Result<Option<TargetedScan>, TargetError> {
+        let result = jobs.request_scan(request.clone()).await?;
+        if result.is_some() {
+            return Ok(result);
+        }
+        drain_library(jobs, request.library_id).await;
+        jobs.request_scan(request).await
+    }
+
     fn manager(store: Arc<dyn Store>, artwork: &std::path::Path) -> Arc<JobManager> {
         Arc::new(JobManager::new(store, artwork.to_path_buf()))
     }
@@ -11529,7 +11066,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn learner_never_claims_a_foreground_subtitle_source_request() {
+    async fn unready_learner_cannot_claim_a_foreground_subtitle_source_request() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let media = tempfile::tempdir().expect("media");
         let artwork = tempfile::tempdir().expect("artwork");
@@ -13837,87 +13374,53 @@ mod tests {
     async fn targeted_request_failures_queue_every_waiter_and_stay_bounded() {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let artwork = crate::test_tempdir().expect("artwork");
+        let media = crate::test_tempdir().expect("media");
         let jobs = manager(Arc::clone(&store), artwork.path());
-
-        let missing = scan_request_fixture("missing", 404);
-        assert!(jobs.request_scan(missing).await.is_err());
-        let failed = jobs.scan_request("missing").await.expect("failed record");
-        assert_eq!(failed.status, "failed");
-        assert!(failed
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("not under any root")));
-
-        jobs.statuses.lock().await.insert(
-            405,
-            ScanStatus {
-                running: true,
-                ..Default::default()
-            },
-        );
         assert!(jobs
-            .request_scan(scan_request_fixture("queued-1", 405))
+            .request_scan(scan_request_fixture("missing", 404))
             .await
-            .expect("queue first")
-            .is_none());
-        assert!(jobs
-            .request_scan(scan_request_fixture("queued-2", 405))
-            .await
-            .expect("queue duplicate path waiter")
-            .is_none());
-        assert_eq!(
-            jobs.pending.lock().await.get(&405).expect("pending").len(),
-            2
-        );
-        assert_eq!(
-            jobs.scan_request("queued-1")
-                .await
-                .expect("queued record")
-                .status,
-            "queued"
-        );
-        assert_eq!(
-            jobs.scan_request("queued-2")
-                .await
-                .expect("coalesced record")
-                .status,
-            "queued"
-        );
-        jobs.drain_pending(405).await;
-        assert_eq!(
-            jobs.scan_request("queued-1")
-                .await
-                .expect("drained record")
-                .status,
-            "failed"
-        );
-        assert_eq!(
-            jobs.scan_request("queued-2")
-                .await
-                .expect("second drained record")
-                .status,
-            "failed"
-        );
-
-        for index in 0..=MAX_REQUESTS {
-            let request = scan_request_fixture(format!("ring-{index}"), 1);
-            jobs.record_request(&request, "queued", None, None).await;
-        }
-        let records = jobs.scan_requests().await;
-        assert_eq!(records.len(), MAX_REQUESTS);
+            .is_err());
         assert!(
-            jobs.scan_request("ring-0").await.is_none(),
-            "oldest record was evicted"
+            jobs.scan_request("missing").await.is_none(),
+            "rejected work has no acceptance receipt"
         );
-        let newest = scan_request_fixture(format!("ring-{MAX_REQUESTS}"), 1);
-        jobs.record_request(&newest, "done", None, None).await;
-        assert_eq!(
-            jobs.scan_request(&format!("ring-{MAX_REQUESTS}"))
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Durable".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![media.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        for id in ["queued-1", "queued-2"] {
+            assert!(jobs
+                .request_scan(scan_request_fixture(id, library.id))
                 .await
-                .expect("updated newest")
-                .status,
-            "done"
-        );
+                .expect("durable admission")
+                .is_none());
+        }
+        // Reconstruct the manager with no process-local request ring.
+        let restarted = manager(store, artwork.path());
+        for id in ["queued-1", "queued-2"] {
+            assert_eq!(
+                restarted
+                    .scan_request(id)
+                    .await
+                    .expect("survived restart")
+                    .status,
+                "queued"
+            );
+        }
+        drain_library(&restarted, library.id).await;
+        for id in ["queued-1", "queued-2"] {
+            let record = restarted.scan_request(id).await.expect("durable result");
+            assert_eq!(record.status, "failed");
+            assert!(record
+                .error
+                .expect("path error")
+                .contains("not under any root"));
+        }
     }
 
     #[tokio::test]
@@ -13975,7 +13478,7 @@ mod tests {
             .expect("queue second")
             .is_none());
         jobs.statuses.lock().await.remove(&library.id);
-        jobs.drain_pending(library.id).await;
+        drain_library(&jobs, library.id).await;
 
         for request_id in ["same-path-first", "same-path-second"] {
             assert_eq!(
@@ -14079,7 +13582,7 @@ mod tests {
             .expect("queue request")
             .is_none());
         jobs.statuses.lock().await.remove(&library.id);
-        jobs.drain_pending(library.id).await;
+        drain_library(&jobs, library.id).await;
 
         let request = jobs
             .scan_request("scan-identity-queued")
@@ -14273,8 +13776,9 @@ mod tests {
         std::fs::create_dir_all(&season_two).expect("season two");
         std::fs::write(season_two.join("Beacon Field S02E01.mkv"), b"video").expect("episode two");
         let jobs = manager(store.clone(), artwork.path());
-        let scan = jobs
-            .request_scan(ScanRequest {
+        let scan = completed_scan(
+            &jobs,
+            ScanRequest {
                 id: "scan-identity-hint-conflict".into(),
                 library_id: library.id,
                 path: season_two,
@@ -14286,10 +13790,11 @@ mod tests {
                 book: None,
                 correlation_id: Some("hint-conflict".into()),
                 source: Some("fixture".into()),
-            })
-            .await
-            .expect("targeted scan")
-            .expect("ran immediately");
+            },
+        )
+        .await
+        .expect("targeted scan")
+        .expect("ran immediately");
 
         assert_eq!(
             scan.items.len(),
@@ -14357,7 +13862,7 @@ mod tests {
                 .is_none());
         }
         jobs.statuses.lock().await.remove(&library.id);
-        jobs.drain_pending(library.id).await;
+        drain_library(&jobs, library.id).await;
 
         let second = jobs
             .scan_request("ordered-second")
@@ -14399,44 +13904,44 @@ mod tests {
     async fn targeted_waiter_queue_is_bounded_and_overflow_is_terminal() {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let artwork = crate::test_tempdir().expect("artwork");
-        let jobs = manager(store, artwork.path());
-        let library_id = 406;
-        jobs.statuses.lock().await.insert(
-            library_id,
-            ScanStatus {
-                running: true,
-                ..Default::default()
-            },
-        );
+        let media = crate::test_tempdir().expect("media");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Bounded".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![media.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let jobs = manager(store.clone(), artwork.path());
         for index in 0..MAX_PENDING_PER_LIBRARY {
             assert!(jobs
-                .request_scan(scan_request_fixture(format!("bounded-{index}"), library_id))
+                .request_scan(scan_request_fixture(format!("bounded-{index}"), library.id))
                 .await
-                .expect("waiter within bound")
+                .expect("within bound")
                 .is_none());
         }
-        let overflow = scan_request_fixture("bounded-overflow", library_id);
         let error = jobs
-            .request_scan(overflow)
+            .request_scan(scan_request_fixture("bounded-overflow", library.id))
             .await
-            .expect_err("overflow is explicit");
-        assert!(error.to_string().contains("queue for library 406 is full"));
-        assert_eq!(
-            jobs.pending
-                .lock()
-                .await
-                .get(&library_id)
-                .expect("bounded queue")
-                .len(),
-            MAX_PENDING_PER_LIBRARY
+            .expect_err("overflow explicit");
+        assert!(error.to_string().contains("QueueFull"));
+        assert!(
+            jobs.scan_request("bounded-overflow").await.is_none(),
+            "rejection must not claim durable acceptance"
         );
-        assert_eq!(
-            jobs.scan_request("bounded-overflow")
-                .await
-                .expect("overflow record")
-                .status,
-            "failed"
-        );
+        let rows = store
+            .library_work_requests(
+                plurx_core::store::background_jobs_library::LibraryWorkQuery {
+                    limit: MAX_PENDING_PER_LIBRARY,
+                    pending_only: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("durable pending requests");
+        assert_eq!(rows.len(), MAX_PENDING_PER_LIBRARY);
     }
 
     #[tokio::test]
@@ -14444,27 +13949,10 @@ mod tests {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let artwork = crate::test_tempdir().expect("artwork");
         let jobs = manager(store, artwork.path());
-        assert!(jobs.trigger_refresh_as(999, ScanTrigger::Scheduled).await);
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                let status = jobs.all_statuses().await.remove(&999);
-                if status.as_ref().is_some_and(|status| !status.running) {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("missing library scan finished");
-        let status = jobs.all_statuses().await.remove(&999).expect("status");
-        assert_eq!(status.error.as_deref(), Some("library not found"));
-        let (counts, _) = jobs.metrics().snapshot();
-        assert_eq!(
-            counts
-                .into_iter()
-                .find(|(trigger, _)| *trigger == "scheduled")
-                .map(|(_, count)| count),
-            Some(1)
+        assert!(!jobs.trigger_refresh_as(999, ScanTrigger::Scheduled).await);
+        assert!(
+            jobs.scan_requests().await.is_empty(),
+            "missing library was never accepted"
         );
     }
 
@@ -14503,6 +13991,7 @@ mod tests {
         startup.await.expect("startup task");
 
         tokio::time::resume();
+        drain_library(&jobs, library.id).await;
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 if jobs
@@ -14562,7 +14051,15 @@ mod tests {
             Pipeline::Cpu,
         ));
 
-        let scheduler = tokio::spawn(Arc::clone(&jobs).schedule_loop(transcode));
+        let scheduler = tokio::spawn(Arc::clone(&jobs).schedule_loop(Arc::clone(&transcode)));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while jobs.scan_requests().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("scheduler durably admitted scan");
+        assert!(jobs.work_library_queue(&transcode, Some(library.id)).await);
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 if jobs
@@ -14629,6 +14126,7 @@ mod tests {
         ));
 
         jobs.run_due_jobs(&transcode).await.expect("scheduler tick");
+        assert!(jobs.work_library_queue(&transcode, Some(library.id)).await);
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 if jobs
@@ -14711,8 +14209,9 @@ mod tests {
             .expect("lib");
 
         let jobs = manager(store.clone(), artwork.path());
-        let scan = jobs
-            .request_scan(ScanRequest {
+        let scan = completed_scan(
+            &jobs,
+            ScanRequest {
                 id: "req-1".into(),
                 library_id: lib.id,
                 path: media.path().join("Holiday"),
@@ -14720,10 +14219,11 @@ mod tests {
                 book: None,
                 correlation_id: None,
                 source: Some("monarr".into()),
-            })
-            .await
-            .expect("scan ran")
-            .expect("not queued");
+            },
+        )
+        .await
+        .expect("scan ran")
+        .expect("not queued");
         assert_eq!(scan.items.len(), 1, "the clip was placed");
 
         let clip = store
@@ -14792,8 +14292,9 @@ mod tests {
             ..Default::default()
         });
 
-        let first = jobs
-            .request_scan(ScanRequest {
+        let first = completed_scan(
+            &jobs,
+            ScanRequest {
                 id: "s1".into(),
                 library_id: lib.id,
                 path: season_one,
@@ -14801,10 +14302,11 @@ mod tests {
                 book: None,
                 correlation_id: None,
                 source: Some("monarr".into()),
-            })
-            .await
-            .expect("first scan")
-            .expect("first ran");
+            },
+        )
+        .await
+        .expect("first scan")
+        .expect("first ran");
         let first_episode = store
             .get_item(first.items[0].item_id)
             .await
@@ -14829,8 +14331,9 @@ mod tests {
         let season_two = show.join("Season 02");
         std::fs::create_dir_all(&season_two).expect("mkdir s2");
         std::fs::write(season_two.join("Severance.S02E01.mkv"), b"video").expect("episode 2");
-        let second = jobs
-            .request_scan(ScanRequest {
+        let second = completed_scan(
+            &jobs,
+            ScanRequest {
                 id: "s2".into(),
                 library_id: lib.id,
                 path: season_two,
@@ -14838,10 +14341,11 @@ mod tests {
                 book: None,
                 correlation_id: None,
                 source: Some("monarr".into()),
-            })
-            .await
-            .expect("second scan")
-            .expect("second ran");
+            },
+        )
+        .await
+        .expect("second scan")
+        .expect("second ran");
         let second_episode = store
             .get_item(second.items[0].item_id)
             .await

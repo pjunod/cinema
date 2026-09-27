@@ -1752,14 +1752,6 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         now_ms: i64,
     ) -> Result<Option<AnalysisRequest>, StoreError>;
 
-    async fn claim_analysis_request_foreground(
-        &self,
-        request_id: &str,
-        node_id: &str,
-        now_ms: i64,
-        lease_expires_ms: i64,
-    ) -> Result<Option<AnalysisRequest>, StoreError>;
-
     async fn retire_subtitle_source_ready(
         &self,
         stamp: &SubtitleSourceStamp,

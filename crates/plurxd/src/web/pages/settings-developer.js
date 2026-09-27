@@ -324,6 +324,7 @@ function durableQueueCard(settings,readiness){
     <input type="hidden" id="durable-cadence" value="${cadence>0?cadence:360}">
     <p class="hint">Pre-transcoding still uses the configured <a href="#/settings/maintenance">cache disk budget</a>. A zero budget leaves no room for production. Queue cleanup and cancellation remain active while workers are paused.</p>
     <details class="setdetails" open><summary>Requirements and current observations</summary><div class="setdetails-body">
+      ${devReq(readiness,"durable_cluster_work","durable_role","Worker authority","Ready learners can prepare immutable artifacts. Library scans and provider coordination remain voter work.")}
       ${devReq(readiness,"durable_cluster_work","durable_store","Durable storage responds","Accepted work needs the replicated Store, or the local Store on a standalone server.")}
       ${devReq(readiness,"durable_cluster_work","durable_tools","Compatible tools","A worker needs decoders and the exact output recipe required by its job.")}
       ${devReq(readiness,"durable_cluster_work","durable_capacity","Spare capacity","Live playback takes precedence. Heavy jobs share one local lane and bounded source I/O across the cluster.")}
@@ -359,7 +360,7 @@ function developerPanel(settings,readiness){
       ${directedChangeDeveloperRows()}`,{local:true});
   return `${setHead("Developer","Experimental features still awaiting device qualification.")}
       ${destinations}
-      <div class="setsection"><h2>Cluster work</h2><p>Shared preparation and durable job history.</p></div>${durableQueueCard(settings,readiness)}
+      <div class="setsection"><h2>Cluster work</h2><p>Shared preparation and durable job history.</p></div>${durableQueueCard(settings,readiness)}${storageDomainsCard()}
       <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
       <div class="setsection"><h2>Live TV video</h2><p>Output choices whose device and node capacity evidence remains advisory.</p></div>${liveTvDeinterlaceCard(settings)}
       <div class="setsection"><h2>Recovery</h2><p>Portable backup scheduling and visible readiness. Saving is never gated by these observations.</p></div>${clusterBackupCard(settings,readiness)}
@@ -595,4 +596,36 @@ async function saveHevcCopy(btn){
     const card=document.getElementById("hevc-copy-card"); if(card)card.outerHTML=hevcCopyCard(saved);
     toast("HEVC copy preference saved");
   }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
+}
+
+function storageDomainsCard(){
+  return setCard(`${cardHead("Shared storage budgets","Give mount paths on the same disk or NAS the same domain name.",'<span class="pill">2 readers per domain</span>')}
+    <p class="hint">An empty domain uses the shared default. A library with multiple roots reserves each domain before starting. Library jobs also share provider concurrency. Maintenance requests are paced across nodes: TMDB at most one dispatch per 100 ms, AniList one per 2.1 seconds, with shared server cooldowns.</p>
+    <div id="storage-domain-roots"><button type="button" class="ghost" onclick="loadStorageDomains(this)">Load library roots</button></div>
+    <p class="hint">Save identity changes while background jobs are idle so existing reservations keep their meaning. This does not change any feature's enable switch.</p>
+    <div id="storage-domain-error" class="err" role="alert"></div>
+    <button type="button" class="ghost" onclick="saveStorageDomains(this)">Save storage domains</button>`);
+}
+async function loadStorageDomains(btn){
+  btn.disabled=true;
+  const error=document.getElementById("storage-domain-error");if(error)error.textContent="";
+  try{
+    const data=await api("/cluster/work/storage-domains");
+    const roots=document.getElementById("storage-domain-roots");if(!roots)return;
+    roots.innerHTML=(data.libraries||[]).flatMap(library=>(library.paths||[]).map(root=>{
+      const mapping=(data.mappings||[]).find(row=>String(row.library_id)===String(library.id)&&row.root_path===root);
+      return `<label class="field">${esc(library.name)} · ${esc(root)}<input class="storage-domain-input" data-library="${esc(String(library.id))}" data-root="${esc(root)}" maxlength="64" value="${esc(mapping?mapping.domain_id:"")}" placeholder="Shared default"></label>`;
+    })).join("")||'<p class="hint">No library roots configured.</p>';
+    roots.dataset.loaded="true";
+  }catch(e){if(error)error.textContent=e.message||String(e);btn.disabled=false;}
+}
+async function saveStorageDomains(btn){
+  const roots=document.getElementById("storage-domain-roots"),error=document.getElementById("storage-domain-error");
+  if(error)error.textContent="";
+  if(!roots||roots.dataset.loaded!=="true"){if(error)error.textContent="Load library roots before saving.";return;}
+  const mappings=Array.from(roots.querySelectorAll(".storage-domain-input")).map(element=>{const input=/** @type {HTMLInputElement} */(element);return {library_id:Number(input.dataset.library),root_path:input.dataset.root,domain_id:input.value.trim()};}).filter(row=>row.domain_id);
+  btn.disabled=true;
+  try{await api("/cluster/work/storage-domains",{method:"PUT",body:mappings});toast("Storage domains saved");}
+  catch(e){if(error)error.textContent=e.message||String(e);}
+  finally{btn.disabled=false;}
 }
