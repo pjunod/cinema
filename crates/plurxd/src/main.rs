@@ -54,6 +54,7 @@ mod renditiondir;
 mod schedule;
 mod scratch_ledger;
 mod scratch_put;
+mod seam_hooks;
 mod serving_fence;
 mod shared_cache;
 mod state;

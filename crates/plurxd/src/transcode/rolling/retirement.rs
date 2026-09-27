@@ -244,11 +244,7 @@ pub(super) struct RollingRetirementOutcome {
     pub(super) cause: Arc<str>,
 }
 
-/// The future a lifecycle hook returns. Boxed so each owner's hook set is one
-/// trait object in every build; see [`RetirementSettlementHooks`] and
-/// `AttemptChildHooks`.
-pub(super) type HookFuture<'a> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+pub(super) use crate::seam_hooks::{HookFuture, HookReady};
 
 /// The points of the rolling retirement settlement below that a test can
 /// pause at (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
@@ -267,18 +263,6 @@ pub(super) trait RetirementSettlementHooks: Send + Sync {
 
 /// What production installs: every point is already ready.
 pub(super) struct NoopRetirementSettlementHooks;
-
-/// A zero-sized, already-ready future, so boxing it allocates nothing and
-/// awaiting it costs one poll. Every owner's no-op hooks return it.
-pub(super) struct HookReady;
-
-impl std::future::Future for HookReady {
-    type Output = ();
-
-    fn poll(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<()> {
-        std::task::Poll::Ready(())
-    }
-}
 
 impl RetirementSettlementHooks for NoopRetirementSettlementHooks {
     fn before_await_settled(&self) -> HookFuture<'_> {

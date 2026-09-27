@@ -801,3 +801,8 @@ continue E1–E3.
   All six migration regressions pass in 47.35 seconds; the placeholder census
   passes separately. Main advanced to `c61bb6409`; integrate and qualify that
   candidate before resubmission. No green merge is claimed.
+
+- 2026-09-27: integrated current main `c61bb6409` (S-14 M8 playback
+  ownership seams). Ownership-census conflicts retain both parents' comments
+  and count their combined source. Current candidate compilation and the
+  affected queue contracts precede the next required fast-lane run.
