@@ -11008,7 +11008,7 @@ mod tests {
         let ledger = std::sync::Arc::clone(&state.start_attempts);
         let opened = std::time::Instant::now();
         ledger.opened(user, s.file, Some(s.movie), "direct_play", opened);
-        ledger.client_event(user, s.file, "ttff", None, opened);
+        ledger.client_event(user, s.file, "ttff", None, None, opened);
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         let (status, body) = call(
             &app,

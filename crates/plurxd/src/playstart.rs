@@ -133,13 +133,51 @@ impl StartNotifier {
 /// bucket still resolves as `ok` rather than being given up on first.
 pub(crate) const START_DEADLINE: Duration = Duration::from_secs(180);
 
-/// How long a play that reached its first frame stays one play with no
-/// sign of the viewer. Every later request for the same file, every client
-/// beacon about it and every progress beat for its item refresh it; a player
-/// open on that title beats every 5-10 s, paused or not, so this is only
-/// reached once the player is gone. The same window [`START_DEDUP`] gives a
-/// Trakt announcement, for the same reason.
+/// How long a play that reached its first frame may go with no sign of its
+/// viewer and still have a media request for it join it outright. Every
+/// later request for the file, every client beacon about it and every live
+/// progress beat for its item refresh it. Only the web beats while paused (a
+/// 60 s floor); Apple and Android beat only while playing, so a native pause
+/// is silent however long it lasts. A request after this much silence is
+/// therefore either that pause ending or a new open of the same title, and
+/// the ledger does not guess: it opens a *possible resume*
+/// ([`StartPhase::Pending`] with `after_play`), which only an explicit start
+/// signal turns into an attempt. The same window [`START_DEDUP`] gives a
+/// Trakt announcement.
 pub(crate) const PLAY_QUIET: Duration = START_DEDUP;
+
+/// How long a play is remembered at all with no sign of its viewer: long
+/// enough that a native player left paused overnight still resumes into the
+/// play it was, rather than into a start nobody reports a first frame for.
+/// Forgetting it at [`PLAY_QUIET`] made every native pause past five minutes
+/// a phantom start (#559 review, finding 2).
+pub(crate) const PLAY_FORGET: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The `code`s a start request is refused with that mean "not yet, ask
+/// again": exactly the `create_503_not_yet` row of
+/// `tests/playback/playback-surface-contract.json`, which all three clients
+/// retry on their 1 s / 2 s / 4 s ladder with the same request, and which
+/// the web answers for `vod_index_pending` by falling back to a progressive
+/// remux. Such a refusal does not end the attempt: it keeps it pending, so
+/// the retry or the fallback that follows joins it (#559 review, finding 1).
+pub(crate) const START_NOT_YET_CODES: [&str; 5] = [
+    "startup_timeout",
+    "media_owner_transition",
+    "vod_index_pending",
+    "vod_engine_unattested",
+    "transcode_capacity_pending",
+];
+
+/// The `reason`s a `ttff` beacon gives for a player that was just opened, as
+/// all three clients name them: `cold-start` from the beginning, `resume`
+/// from a saved position. Every other reason (`seek`, `quality`, `audio`,
+/// `selection`, `fallback`, `stall-*`) is a picture inside a play already
+/// running. A beacon with no reason is an older client's open.
+const START_REASONS: [&str; 2] = ["cold-start", "resume"];
+
+fn starts_a_play(reason: Option<&str>) -> bool {
+    reason.is_none_or(|reason| START_REASONS.contains(&reason))
+}
 
 /// Bound on tracked (viewer, file) pairs. A viewer arriving at a full ledger
 /// is not tracked, rather than evicting an attempt that is still in flight:
@@ -164,7 +202,22 @@ pub(crate) const START_FAILURE_EVENTS: [&str; 6] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StartPhase {
     /// Media was requested and nothing has settled the attempt yet.
-    Pending { opened: Instant },
+    ///
+    /// `not_yet`: the server's last answer to it was one of
+    /// [`START_NOT_YET_CODES`] and no media has been served since, so the
+    /// client is expected to ask again. Reaching the deadline like that is a
+    /// `refused` start, not a `cancelled` one: the server never served it.
+    ///
+    /// `after_play`: it was opened by a request for a play that had gone
+    /// quiet for [`PLAY_QUIET`], so it may be nothing but that play's resume.
+    /// Only a first frame reported as a start, a failure report or a refusal
+    /// makes it an attempt; a first frame for any other reason, or the
+    /// deadline, returns it to the play uncounted.
+    Pending {
+        opened: Instant,
+        not_yet: bool,
+        after_play: bool,
+    },
     /// The attempt reached a first frame; later requests are the same play.
     Playing,
     /// The attempt failed or was refused. Kept briefly so the client's own
@@ -196,9 +249,15 @@ struct StartEntry {
 /// one of [`START_FAILURE_EVENTS`] (`failed`); the server answering a start
 /// request for that file with an error (`refused`); or [`START_DEADLINE`]
 /// passing with none of them (`cancelled` — the viewer left, or the player
-/// hung without saying so). The beacons are paired by the authenticated user
-/// and the `file_id` every first-party beacon already carries, so no client
-/// change is needed.
+/// hung without saying so). A refusal the clients retry
+/// ([`START_NOT_YET_CODES`]) keeps the attempt pending instead. The beacons
+/// are paired by the authenticated user and the `file_id` every first-party
+/// beacon already carries, so no client change is needed.
+///
+/// **After a first frame it is one play** until [`PLAY_FORGET`] with no sign
+/// of the viewer. A request after [`PLAY_QUIET`] of silence (a native pause
+/// ending, or the title opened again) becomes an attempt only on an explicit
+/// start signal, and otherwise rejoins the play.
 ///
 /// **Known bound.** The ledger is node-local, like the direct-play registry
 /// it sits beside. HLS is held to one node and the web client's cookie pins
@@ -262,15 +321,29 @@ impl StartAttempts {
     /// still reports the attempt that was abandoned last.
     fn sweep_locked(&self, entries: &mut HashMap<(i64, i64), StartEntry>, now: Instant) {
         entries.retain(|_, entry| match entry.phase {
-            StartPhase::Pending { opened } => {
-                if now.saturating_duration_since(opened) >= START_DEADLINE {
+            StartPhase::Pending {
+                opened,
+                not_yet,
+                after_play,
+            } => {
+                if now.saturating_duration_since(opened) < START_DEADLINE {
+                    true
+                } else if not_yet {
+                    // The client stopped asking after being told "not yet":
+                    // the server never served this attempt.
+                    self.resolve(entry.method, "refused");
+                    false
+                } else if after_play {
+                    // A quiet play's request and no start signal after it:
+                    // the pause ended, silently, as a native player's does.
+                    entry.phase = StartPhase::Playing;
+                    true
+                } else {
                     self.resolve(entry.method, "cancelled");
                     false
-                } else {
-                    true
                 }
             }
-            StartPhase::Playing => now.saturating_duration_since(entry.last_seen) < PLAY_QUIET,
+            StartPhase::Playing => now.saturating_duration_since(entry.last_seen) < PLAY_FORGET,
             StartPhase::Closed { at } => now.saturating_duration_since(at) < START_DEADLINE,
         });
     }
@@ -282,7 +355,8 @@ impl StartAttempts {
     }
 
     /// Media was requested for `file_id`: open an attempt, or join the one in
-    /// flight, or refresh the play it belongs to.
+    /// flight, or refresh the play it belongs to, or (for a play quiet for
+    /// [`PLAY_QUIET`]) hold a possible resume of it.
     pub fn opened(
         &self,
         user_id: i64,
@@ -298,15 +372,32 @@ impl StartAttempts {
         let method = start_method(Some(method));
         let key = (user_id, file_id);
         if let Some(entry) = entries.get_mut(&key) {
-            match entry.phase {
-                StartPhase::Pending { .. } => {
+            match &mut entry.phase {
+                StartPhase::Pending { not_yet, .. } => {
+                    // The joining request names the method now in use: a
+                    // fallback's, or the one a retried create has decided.
+                    // Media is being served, so no longer "not yet".
+                    *not_yet = false;
                     entry.method = method;
                     entry.last_seen = now;
                     entry.item_id = item_id.or(entry.item_id);
                     return;
                 }
-                StartPhase::Playing => {
+                StartPhase::Playing
+                    if now.saturating_duration_since(entry.last_seen) < PLAY_QUIET =>
+                {
                     entry.last_seen = now;
+                    return;
+                }
+                StartPhase::Playing => {
+                    entry.phase = StartPhase::Pending {
+                        opened: now,
+                        not_yet: false,
+                        after_play: true,
+                    };
+                    entry.method = method;
+                    entry.last_seen = now;
+                    entry.item_id = item_id.or(entry.item_id);
                     return;
                 }
                 StartPhase::Closed { .. } => {}
@@ -319,7 +410,11 @@ impl StartAttempts {
             StartEntry {
                 item_id,
                 method,
-                phase: StartPhase::Pending { opened: now },
+                phase: StartPhase::Pending {
+                    opened: now,
+                    not_yet: false,
+                    after_play: false,
+                },
                 last_seen: now,
             },
         );
@@ -327,13 +422,16 @@ impl StartAttempts {
 
     /// A client beacon about `file_id`. Only `ttff` and
     /// [`START_FAILURE_EVENTS`] can resolve an attempt; any beacon about a
-    /// play in progress keeps that play alive.
+    /// play in progress keeps that play alive. `reason` is the beacon's own
+    /// (why its playback attempt began), which tells a possible resume that
+    /// became a new open from one that was a resume after all.
     pub fn client_event(
         &self,
         user_id: i64,
         file_id: i64,
         event: &str,
         method: Option<&str>,
+        reason: Option<&str>,
         now: Instant,
     ) {
         let first_frame = event == "ttff";
@@ -351,6 +449,14 @@ impl StartAttempts {
             return;
         };
         match entry.phase {
+            StartPhase::Pending {
+                after_play: true, ..
+            } if first_frame && !starts_a_play(reason) => {
+                // A seek's or a stall's picture after a quiet play's request:
+                // that play resumed, and it is not a start.
+                entry.phase = StartPhase::Playing;
+                entry.last_seen = now;
+            }
             StartPhase::Pending { .. } if first_frame => {
                 // The method the client says it is playing through: a
                 // fallback may have moved it since the request that opened
@@ -378,20 +484,73 @@ impl StartAttempts {
         }
     }
 
-    /// The server answered a start request for `file_id` with an error. A
-    /// pending attempt is refused; with none in flight the request was an
-    /// attempt of its own, refused at once. A play already showing a picture
-    /// is not a start, so a refused replacement for it is not counted here.
-    pub fn refused(&self, user_id: i64, file_id: i64, method: Option<&str>, now: Instant) {
+    /// The server answered a start request for `file_id` with an error,
+    /// carrying the typed `code` when it has one.
+    ///
+    /// A code in [`START_NOT_YET_CODES`] tells the client to ask again, so it
+    /// keeps the attempt pending (or opens one) for that retry, or the
+    /// fallback it takes instead, to join. Any other refusal ends a pending
+    /// attempt `refused`; with none in flight the request was an attempt of
+    /// its own, refused at once. A play already showing a picture is not a
+    /// start, so a refused replacement for it is not counted here.
+    pub fn refused(
+        &self,
+        user_id: i64,
+        file_id: i64,
+        method: Option<&str>,
+        code: Option<&str>,
+        now: Instant,
+    ) {
         let Ok(mut entries) = self.entries.lock() else {
             return;
         };
         self.sweep_locked(&mut entries, now);
         let key = (user_id, file_id);
+        if code.is_some_and(|code| START_NOT_YET_CODES.contains(&code)) {
+            let waiting = StartPhase::Pending {
+                opened: now,
+                not_yet: true,
+                after_play: false,
+            };
+            let room = entries.len() < START_LEDGER_CAP;
+            match entries.get_mut(&key) {
+                Some(entry) if matches!(entry.phase, StartPhase::Playing) => {}
+                Some(entry) => {
+                    match &mut entry.phase {
+                        StartPhase::Pending { not_yet, .. } => *not_yet = true,
+                        // After a failed or refused attempt: a new one, waiting.
+                        phase => {
+                            *phase = waiting;
+                            entry.method = start_method(method);
+                        }
+                    }
+                    entry.last_seen = now;
+                }
+                None if room => {
+                    entries.insert(
+                        key,
+                        StartEntry {
+                            item_id: None,
+                            method: start_method(method),
+                            phase: waiting,
+                            last_seen: now,
+                        },
+                    );
+                }
+                None => {}
+            }
+            return;
+        }
         match entries.get_mut(&key) {
             Some(entry) if matches!(entry.phase, StartPhase::Playing) => {}
             Some(entry) if matches!(entry.phase, StartPhase::Pending { .. }) => {
-                self.resolve(entry.method, "refused");
+                // An attempt only a refused request has touched has the
+                // refusing request's method, not `unknown`.
+                let method = match entry.method {
+                    "unknown" => start_method(method),
+                    known => known,
+                };
+                self.resolve(method, "refused");
                 entry.phase = StartPhase::Closed { at: now };
             }
             Some(entry) => {
@@ -586,6 +745,7 @@ mod tests {
             10,
             "ttff",
             Some("direct_play"),
+            None,
             t0 + Duration::from_secs(2),
         );
         ledger.client_event(
@@ -593,9 +753,17 @@ mod tests {
             10,
             "ttff",
             Some("direct_play"),
+            None,
             t0 + Duration::from_secs(3),
         );
-        ledger.client_event(1, 10, "playback_error", None, t0 + Duration::from_secs(4));
+        ledger.client_event(
+            1,
+            10,
+            "playback_error",
+            None,
+            None,
+            t0 + Duration::from_secs(4),
+        );
         assert_eq!(ledger.count("direct_play", "ok"), 1);
         assert_eq!(
             ledger.count("direct_play", "failed"),
@@ -609,6 +777,7 @@ mod tests {
             11,
             "stream_rejected",
             Some("direct_play"),
+            None,
             t0 + Duration::from_secs(1),
         );
         ledger.opened(1, 11, Some(101), "transcode", t0 + Duration::from_secs(2));
@@ -617,6 +786,7 @@ mod tests {
             11,
             "ttff",
             Some("transcode"),
+            None,
             t0 + Duration::from_secs(5),
         );
         assert_eq!(ledger.count("direct_play", "failed"), 1);
@@ -624,12 +794,13 @@ mod tests {
         // refused while pending, and the client's own report of it is not a
         // second outcome or an unpaired one.
         ledger.opened(1, 12, Some(102), "remux", t0);
-        ledger.refused(1, 12, Some("remux"), t0 + Duration::from_secs(1));
+        ledger.refused(1, 12, Some("remux"), None, t0 + Duration::from_secs(1));
         ledger.client_event(
             1,
             12,
             "stream_refused",
             Some("remux"),
+            None,
             t0 + Duration::from_secs(1),
         );
         assert_eq!(ledger.count("remux", "refused"), 1);
@@ -642,7 +813,7 @@ mod tests {
             Some(StartPhase::Pending { .. })
         ));
         // refused with nothing in flight: an attempt refused at its request.
-        ledger.refused(1, 13, None, t0);
+        ledger.refused(1, 13, None, None, t0);
         assert_eq!(ledger.count("unknown", "refused"), 1);
         // cancelled: nothing arrives before the deadline.
         ledger.opened(2, 10, Some(100), "transcode", t0);
@@ -652,44 +823,230 @@ mod tests {
         assert_eq!(ledger.count("transcode", "cancelled"), 1);
         assert_eq!(ledger.phase(2, 10), None);
         // A first frame the deadline already gave up on is not a second outcome.
-        ledger.client_event(2, 10, "ttff", Some("transcode"), t0 + START_DEADLINE);
+        ledger.client_event(2, 10, "ttff", Some("transcode"), None, t0 + START_DEADLINE);
         assert_eq!(ledger.count("transcode", "ok"), 1);
         assert_eq!(ledger.count("unpaired", "ok"), 1);
     }
 
-    /// A play stays one play while its viewer is in front of it, paused or
-    /// not, and a request after the viewer has gone is a new attempt.
+    /// A play stays one play while its viewer is in front of it, whether or
+    /// not the player beats while paused: the web beats (a 60 s floor),
+    /// Apple and Android do not. Silence alone does not forget it; only a day
+    /// with no sign of the viewer does.
     #[test]
-    fn a_play_is_kept_by_its_progress_beats_and_forgotten_when_they_stop() {
+    fn a_play_is_kept_by_its_progress_beats_and_held_through_a_silent_pause() {
         let ledger = StartAttempts::new();
         let t0 = Instant::now();
         ledger.opened(1, 10, Some(100), "direct_play", t0);
-        ledger.client_event(1, 10, "ttff", None, t0 + Duration::from_secs(1));
+        ledger.client_event(1, 10, "ttff", None, None, t0 + Duration::from_secs(1));
         assert_eq!(ledger.phase(1, 10), Some(StartPhase::Playing));
-        // Paused far longer than the quiet window, beating every 10 s.
+        // Web: paused far longer than the quiet window, beating every 60 s.
         let mut now = t0 + Duration::from_secs(1);
         while now < t0 + PLAY_QUIET * 3 {
-            now += Duration::from_secs(10);
+            now += Duration::from_secs(60);
             ledger.progress_beat(1, 100, now);
             ledger.sweep(now);
         }
-        // The resume's range request joins the play instead of opening a
-        // start nobody will report a first frame for.
+        // The resume's range request joins the play outright.
         ledger.opened(1, 10, Some(100), "direct_play", now);
         assert_eq!(ledger.phase(1, 10), Some(StartPhase::Playing));
         ledger.sweep(now + START_DEADLINE);
         assert_eq!(ledger.count("direct_play", "cancelled"), 0);
-        // A beat for another item, or another viewer, keeps nothing alive.
-        let later = now + PLAY_QUIET;
+        // A beat for another item, or another viewer, keeps nothing alive,
+        // but going quiet does not end a play: a native pause is quiet.
+        let later = now + START_DEADLINE + PLAY_QUIET;
         ledger.progress_beat(1, 999, later);
         ledger.progress_beat(2, 100, later);
         ledger.sweep(later);
+        assert_eq!(ledger.phase(1, 10), Some(StartPhase::Playing));
+        // A day of silence does, and the next request is an attempt of its own.
+        let gone = now + PLAY_FORGET;
+        ledger.sweep(gone);
         assert_eq!(ledger.phase(1, 10), None);
-        ledger.opened(1, 10, Some(100), "direct_play", later);
+        ledger.opened(1, 10, Some(100), "direct_play", gone);
         assert!(matches!(
             ledger.phase(1, 10),
-            Some(StartPhase::Pending { .. })
+            Some(StartPhase::Pending {
+                after_play: false,
+                ..
+            })
         ));
+    }
+
+    /// #559 review, finding 2: Apple and Android send no progress beat while
+    /// paused, and no `ttff` when the viewer unpauses. A native pause of any
+    /// length must resume into the same play, not into a start that resolves
+    /// `cancelled` (or, after an Android seek, a second `ok`).
+    #[test]
+    fn a_native_pause_with_no_beats_resumes_into_the_same_play() {
+        let ledger = StartAttempts::new();
+        let t0 = Instant::now();
+        ledger.opened(1, 10, Some(100), "direct_play", t0);
+        ledger.client_event(
+            1,
+            10,
+            "ttff",
+            Some("direct_play"),
+            Some("cold-start"),
+            t0 + Duration::from_secs(1),
+        );
+        // Paused for ten minutes: no beat, no request.
+        let resume = t0 + PLAY_QUIET * 2;
+        ledger.sweep(resume);
+        assert_eq!(ledger.phase(1, 10), Some(StartPhase::Playing));
+        // The unpause's range request, and nothing after it.
+        ledger.opened(1, 10, Some(100), "direct_play", resume);
+        ledger.sweep(resume + START_DEADLINE);
+        assert_eq!(
+            ledger.count("direct_play", "cancelled"),
+            0,
+            "a resume is not an abandoned start"
+        );
+        assert_eq!(ledger.count("direct_play", "ok"), 1);
+        assert_eq!(ledger.phase(1, 10), Some(StartPhase::Playing));
+        // Android: a seek right after the resume reports a `ttff` for the
+        // seek. That picture is inside the play, not a second start.
+        let again = resume + START_DEADLINE + PLAY_QUIET * 2;
+        ledger.opened(1, 10, Some(100), "direct_play", again);
+        ledger.client_event(
+            1,
+            10,
+            "ttff",
+            Some("direct_play"),
+            Some("seek"),
+            again + Duration::from_secs(20),
+        );
+        assert_eq!(
+            ledger.count("direct_play", "ok"),
+            1,
+            "a seek's picture is not a start"
+        );
+        assert_eq!(ledger.phase(1, 10), Some(StartPhase::Playing));
+        // The same title opened again later is a start, and is counted...
+        let reopened = again + PLAY_QUIET * 2;
+        ledger.opened(1, 10, Some(100), "remux", reopened);
+        ledger.client_event(
+            1,
+            10,
+            "ttff",
+            Some("remux"),
+            Some("resume"),
+            reopened + Duration::from_secs(2),
+        );
+        assert_eq!(ledger.count("remux", "ok"), 1);
+        // ...and so is one that fails before its picture.
+        let failing = reopened + PLAY_QUIET * 2;
+        ledger.opened(1, 10, Some(100), "direct_play", failing);
+        ledger.client_event(
+            1,
+            10,
+            "playback_error",
+            None,
+            None,
+            failing + Duration::from_secs(3),
+        );
+        assert_eq!(ledger.count("direct_play", "failed"), 1);
+    }
+
+    /// #559 review, finding 1: the server's own "not yet, ask again" answers
+    /// are not refused starts. Three `transcode_capacity_pending` 503s on the
+    /// clients' 1 s / 2 s / 4 s ladder, then the create that plays, are one
+    /// `ok` and no `refused`.
+    #[test]
+    fn a_not_yet_refusal_keeps_the_start_open_for_the_retry_that_plays() {
+        let ledger = StartAttempts::new();
+        let t0 = Instant::now();
+        for at in [0, 1, 3] {
+            ledger.refused(
+                1,
+                10,
+                None,
+                Some("transcode_capacity_pending"),
+                t0 + Duration::from_secs(at),
+            );
+            assert!(matches!(
+                ledger.phase(1, 10),
+                Some(StartPhase::Pending { not_yet: true, .. })
+            ));
+        }
+        ledger.opened(1, 10, Some(100), "transcode", t0 + Duration::from_secs(7));
+        ledger.client_event(
+            1,
+            10,
+            "ttff",
+            Some("transcode"),
+            Some("cold-start"),
+            t0 + Duration::from_secs(9),
+        );
+        assert_eq!(ledger.count("transcode", "ok"), 1);
+        for method in ["unknown", "transcode", "remux", "direct_play"] {
+            assert_eq!(ledger.count(method, "refused"), 0, "{method}");
+        }
+        // The web answers `vod_index_pending` on a copy create with a
+        // progressive remux: one start, `ok`, under the method that played.
+        ledger.refused(1, 11, None, Some("vod_index_pending"), t0);
+        ledger.opened(1, 11, Some(101), "remux", t0 + Duration::from_secs(1));
+        ledger.client_event(
+            1,
+            11,
+            "ttff",
+            None,
+            Some("cold-start"),
+            t0 + Duration::from_secs(3),
+        );
+        assert_eq!(ledger.count("remux", "ok"), 1);
+        assert_eq!(ledger.count("unknown", "refused"), 0);
+        // A client that stops asking after "not yet" was never served: one
+        // `refused` at the deadline, not `cancelled`.
+        ledger.refused(1, 12, None, Some("startup_timeout"), t0);
+        ledger.refused(
+            1,
+            12,
+            None,
+            Some("startup_timeout"),
+            t0 + Duration::from_secs(1),
+        );
+        // Served after a "not yet" and then abandoned before a picture: the
+        // server did serve it, so it is `cancelled`, not `refused`.
+        ledger.refused(1, 14, None, Some("transcode_capacity_pending"), t0);
+        ledger.opened(1, 14, Some(104), "transcode", t0 + Duration::from_secs(2));
+        ledger.sweep(t0 + START_DEADLINE);
+        assert_eq!(ledger.count("unknown", "refused"), 1);
+        assert_eq!(ledger.count("unknown", "cancelled"), 0);
+        assert_eq!(ledger.count("transcode", "cancelled"), 1);
+        assert_eq!(ledger.count("transcode", "refused"), 0);
+        // A refusal that is not a "not yet" still ends its attempt at once.
+        ledger.refused(1, 13, None, Some("vod_disabled"), t0);
+        assert!(matches!(
+            ledger.phase(1, 13),
+            Some(StartPhase::Closed { .. })
+        ));
+        assert_eq!(ledger.count("unknown", "refused"), 2);
+    }
+
+    /// The not-yet codes are the contract's `create_503_not_yet` row, the
+    /// codes every client retries, and nothing else.
+    #[test]
+    fn start_not_yet_codes_are_the_contract_row_the_clients_retry() {
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/playback/playback-surface-contract.json"
+        ))
+        .expect("the surface contract parses");
+        let row = contract["sources"]
+            .as_array()
+            .expect("sources")
+            .iter()
+            .find(|source| source["id"] == "create_503_not_yet")
+            .expect("the create_503_not_yet row");
+        let mut contract_codes: Vec<&str> = row["codes"]
+            .as_array()
+            .expect("codes")
+            .iter()
+            .map(|code| code.as_str().expect("a code is a string"))
+            .collect();
+        let mut ours = START_NOT_YET_CODES.to_vec();
+        contract_codes.sort_unstable();
+        ours.sort_unstable();
+        assert_eq!(ours, contract_codes);
     }
 
     #[test]

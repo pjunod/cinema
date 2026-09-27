@@ -1210,9 +1210,10 @@ pub async fn create(
     let created = create_with_purpose(user, state, id, headers, remote, req, None).await;
     // A start request the server refused (C-08 M5 row 4). The method is not
     // known until the create has decided it, so a refusal with no attempt in
-    // flight is `unknown`.
-    if created.is_err() {
-        start_attempts.refused(user_id, id, None, std::time::Instant::now());
+    // flight is `unknown`. A "not yet" code keeps the attempt open for the
+    // client's retry of this same create to join.
+    if let Err(error) = &created {
+        start_attempts.refused(user_id, id, None, error.code(), std::time::Instant::now());
     }
     created
 }

@@ -1626,6 +1626,83 @@
         ));
     }
 
+    /// C-08 M5 row 4 (#559 review, finding 1): every create answer the
+    /// clients' retry ladder waits out carries a code the start ledger keeps
+    /// pending, so the retry that plays is one `ok`; a refusal that is not a
+    /// wait still ends the attempt `refused`.
+    #[test]
+    fn every_create_not_yet_answer_keeps_its_start_attempt_open() {
+        let not_yet = [
+            session_start_error(
+                42,
+                format!(
+                    "{}the source is still being read for this track",
+                    crate::subtitles::SIDECAR_PENDING_PREFIX
+                ),
+            ),
+            session_start_error(
+                42,
+                "transcode capacity is temporarily unavailable: waiting for this player's \
+                 previous start: held"
+                    .to_owned(),
+            ),
+            session_start_error(
+                42,
+                crate::transcode::vod_refusal_error("vod_index_pending", "indexing"),
+            ),
+            session_start_error(
+                42,
+                crate::transcode::vod_refusal_error("vod_engine_unattested", "probing"),
+            ),
+            super::segment::media_owner_transition(),
+        ];
+        for error in &not_yet {
+            let ledger = crate::playstart::StartAttempts::new();
+            let t0 = std::time::Instant::now();
+            for at in [0, 1, 3] {
+                ledger.refused(
+                    1,
+                    42,
+                    None,
+                    error.code(),
+                    t0 + std::time::Duration::from_secs(at),
+                );
+            }
+            ledger.opened(
+                1,
+                42,
+                Some(7),
+                "transcode",
+                t0 + std::time::Duration::from_secs(7),
+            );
+            ledger.client_event(
+                1,
+                42,
+                "ttff",
+                None,
+                Some("cold-start"),
+                t0 + std::time::Duration::from_secs(9),
+            );
+            assert_eq!(ledger.count("transcode", "ok"), 1, "{error:?}");
+            assert_eq!(ledger.count("unknown", "refused"), 0, "{error:?}");
+        }
+        for error in [
+            session_start_error(
+                42,
+                crate::transcode::vod_refusal_error("vod_disabled", "off"),
+            ),
+            session_start_error(
+                42,
+                "transcode capacity is temporarily unavailable: background encoding did not yield"
+                    .to_owned(),
+            ),
+        ] {
+            let ledger = crate::playstart::StartAttempts::new();
+            ledger.refused(1, 42, None, error.code(), std::time::Instant::now());
+            assert_eq!(ledger.count("unknown", "refused"), 1, "{error:?}");
+        }
+    }
+
     #[test]
     fn bounded_admission_failure_is_a_retryable_503() {
         let capacity =

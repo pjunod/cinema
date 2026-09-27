@@ -874,6 +874,7 @@ pub async fn client_log(
             file_id,
             &event.event,
             event.method.as_deref(),
+            event.reason.as_deref(),
             std::time::Instant::now(),
         );
     }

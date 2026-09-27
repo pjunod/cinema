@@ -2579,12 +2579,13 @@ pub async fn direct(
 ) -> Result<Response, ApiError> {
     // A GET the server could not serve at all is a refused start (C-08 M5
     // row 4); a HEAD carries no media and is not a start.
-    let refused = |state: &AppState| {
+    let refused = |state: &AppState, error: &ApiError| {
         if method == Method::GET {
             state.start_attempts.refused(
                 user.id,
                 id,
                 Some("direct_play"),
+                error.code(),
                 std::time::Instant::now(),
             );
         }
@@ -2592,7 +2593,7 @@ pub async fn direct(
     let file = match load_file(&state, id).await {
         Ok(file) => file,
         Err(error) => {
-            refused(&state);
+            refused(&state, &error);
             return Err(error);
         }
     };
@@ -2617,9 +2618,9 @@ pub async fn direct(
         Ok(_) => {}
         // The open failed, so whatever the availability cache believes is
         // wrong — the unmounted-share case, arriving as it actually arrives.
-        Err(_) => {
+        Err(error) => {
             state.availability.forget(id);
-            refused(&state);
+            refused(&state, error);
         }
     }
     if method == Method::GET {
@@ -2815,8 +2816,14 @@ pub async fn stream_mp4(
     let (user_id, start_attempts) = (auth.0.id, std::sync::Arc::clone(&state.start_attempts));
     let served = serve_stream_mp4(auth, State(state), AxPath(id), query).await;
     // A start request the server refused (C-08 M5 row 4).
-    if served.is_err() {
-        start_attempts.refused(user_id, id, Some("remux"), std::time::Instant::now());
+    if let Err(error) = &served {
+        start_attempts.refused(
+            user_id,
+            id,
+            Some("remux"),
+            error.code(),
+            std::time::Instant::now(),
+        );
     }
     served
 }
