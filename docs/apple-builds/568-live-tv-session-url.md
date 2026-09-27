@@ -1,5 +1,7 @@
 # Live TV station startup
 
+**Status:** built
+
 Build: 189
 Issue: #568
 
