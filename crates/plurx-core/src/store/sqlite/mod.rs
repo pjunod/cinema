@@ -2883,8 +2883,10 @@ mod tests {
         // downloaded captions to files. v68 adds external-reader file grants;
         // v69 adds the cluster subtitle-source queue and publication metadata;
         // v70 adds K-05 M5's catalogue read indexes; v71 adds the common queue.
+        // v72–v76 add library work, domain leases, source-I/O reservations,
+        // provider dispatch budgets and the subtitle adapter; v77 adds artwork holders.
         assert_eq!(
-            version, 71,
+            version, 77,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

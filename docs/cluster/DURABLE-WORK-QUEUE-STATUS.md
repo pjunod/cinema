@@ -2,7 +2,7 @@
 
 **Status:** M1–M3 merged; E0 validating current main; E1 artwork worker in construction · **Updated:** 2026-09-26 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` · **E1:** `codex/cluster-cache-preparation` ·
-**Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — validating](http://192.168.4.7:3000/noirr/plurx/pulls/564)
+**Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — validating](http://192.168.4.7:3000/noirr/plurx/pulls/564) · **E1:** [#566 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/566)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -663,3 +663,28 @@ continue E1–E3.
 
 - Agent-only cleanup removed 164 obsolete incremental compiler directories
   (about 35 GiB), preserving the dependency cache, source and all commits.
+- 2026-09-26: E0 fast lane 3320 passed preflight, Windows and web; Rust
+  reported stale schema/import/census assertions, an old subtitle claim fixture,
+  missing scan consumers in HTTP/scheduler fixtures, an unclassified storage-domain
+  route and two discarded subtitle cancellation results. Fixes are being checked
+  against the pinned compiler before the next candidate. No merge is claimed.
+  E1 remains in [draft PR #566](http://192.168.4.7:3000/noirr/plurx/pulls/566);
+  portable transcode copies, prediction and E2–E3 remain outstanding.
+
+- 2026-09-26: the missing-root regression exposed a visibility gap. An unreadable
+  node correctly leaves accepted scan work for another member, but the status
+  did not explain why. Added a bounded node-local readiness observation to the
+  existing scan status; it names the last local read failure without settling
+  the durable job or spending an attempt. The regression now asserts pending
+  work, a visible explanation and zero claims/failures on an unreadable node.
+
+- 2026-09-26: E0 correction evidence: 376 store tests passed on the first
+  focused run; its two census failures passed after tightening the ratchet
+  (five census/import cases rerun). The subtitle transient-repair contract
+  passed SQLite and real three-voter Hiqlite. All 16 selected daemon
+  regressions pass with the missing-root visibility fix. Ownership inventory:
+  seven passed. Full fast-lane confirmation remains required before merge.
+
+- 2026-09-26: E0 correction `fd0317594` passed its pinned normal commit hook
+  and is pushed to PR #564. E1 inherits the fixes, adjusts schema expectations
+  for its additional artwork migration, and retains both parents' ownership sites.

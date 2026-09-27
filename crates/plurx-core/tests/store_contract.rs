@@ -33355,7 +33355,12 @@ async fn subtitle_source_transient_ready_is_repaired_by_later_backfill_until_set
                 "{backend}"
             );
             let running = store
-                .claim_analysis_request("node-a", 11 + epoch * 130_000, 1_000 + epoch * 130_000)
+                .claim_subtitle_fixture(
+                    &queued.request_id,
+                    "node-a",
+                    11 + epoch * 130_000,
+                    1_000 + epoch * 130_000,
+                )
                 .await
                 .expect("worker claim")
                 .expect("running");
