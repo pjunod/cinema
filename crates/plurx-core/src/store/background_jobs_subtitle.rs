@@ -54,7 +54,6 @@ pub(super) async fn enqueue<T: QueueSql>(
     now_ms: i64,
 ) -> Result<EnqueueOutcome, StoreError> {
     if input.component != "subtitle_source"
-        || input.force_rebuild
         || !input.video_identity.is_empty()
         || !input.target_node_id.is_empty()
     {

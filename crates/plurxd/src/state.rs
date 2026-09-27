@@ -7895,8 +7895,7 @@ impl JobManager {
         fence: &crate::background_jobs::JobFence,
         lost: &CancellationToken,
     ) -> Result<(), AnalysisResolutionError> {
-        if request.force_rebuild
-            || !request.video_identity.is_empty()
+        if !request.video_identity.is_empty()
             || !request.target_node_id.is_empty()
             || request.pipeline_version != subtitle_source_pipeline_version().await
         {

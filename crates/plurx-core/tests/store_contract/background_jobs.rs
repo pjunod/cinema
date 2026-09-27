@@ -1094,6 +1094,7 @@ async fn background_offline_join_preserves_recipe_authority_and_independent_inte
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn background_jobs_v70_backup_import_seals_legacy_work() {
+    use plurx_core::store::ClusterFragmentIndexStore;
     use sha2::{Digest, Sha256};
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
@@ -1122,6 +1123,12 @@ async fn background_jobs_v70_backup_import_seals_legacy_work() {
             rusqlite::params![uuid::Uuid::new_v4().to_string(), serde_json::json!({"version":1,"decoder":"h264",
                 "acceptable_encoder_families":["software"],"output_contract":"hls-v1","tone_map":false,
                 "output_grade":"sdr","scratch_bytes":1024}).to_string()]).expect("accepted legacy work");
+        connection.execute("INSERT INTO analysis_requests
+            (request_id, file_id, source_size, source_mtime, component, pipeline_version,
+             state, owner_node_id, lease_expires_ms, fence, attempts, not_before_ms, created_at_ms, updated_at_ms)
+            SELECT 'legacy-running-subtitle', id, size, mtime, 'subtitle_source', 'subtitle-source-v1',
+             'running', 'dead-owner', 999999, 7, 2, 0, 1, 1 FROM files ORDER BY id LIMIT 1", [])
+            .expect("legacy running subtitle");
         connection
             .pragma_update(None, "user_version", 70)
             .expect("v70 marker");
@@ -1136,6 +1143,32 @@ async fn background_jobs_v70_backup_import_seals_legacy_work() {
         .await
         .expect("v70 import");
     assert_eq!(report.source_schema_version, 70);
+    let recovered = store
+        .analysis_request("legacy-running-subtitle")
+        .await
+        .expect("cutover")
+        .expect("legacy subtitle");
+    assert_eq!(recovered.state, "queued");
+    assert!(recovered.owner_node_id.is_empty());
+    assert_eq!(recovered.fence, 8);
+    assert_eq!(recovered.attempts, 2);
+    let EnqueueOutcome::Accepted { job_id, .. } = store
+        .enqueue_subtitle_job(recovered, 1000)
+        .await
+        .expect("recovered admission")
+    else {
+        panic!("legacy subtitle must be admitted");
+    };
+    assert_eq!(
+        store
+            .background_job(&job_id)
+            .await
+            .expect("common job")
+            .expect("job")
+            .failed_attempts,
+        2
+    );
+
     assert!(report
         .tables
         .iter()
@@ -1434,7 +1467,7 @@ async fn background_library_intents_preserve_hints_and_do_not_settle_late_arriva
         let results = store.library_work_requests(LibraryWorkQuery { job_id: Some(job_id), limit: 256, ..Default::default() })
             .await.expect("durable results");
         assert_eq!(results.len(), 2, "{backend}");
-        assert!(results.iter().all(|row| row.state == "completed" && row.result.is_some()), "{backend}");
+        assert!(results.iter().all(|row| row.state == "succeeded" && row.result.is_some()), "{backend}");
     }).await;
 }
 
@@ -2231,7 +2264,7 @@ async fn background_subtitles_share_one_owner_and_publish_with_exact_current_aut
             );
             if *scenario == "complete" {
                 let completed = WriteSubtitleJob {
-                    token,
+                    token: token.clone(),
                     request: request.clone(),
                     now_ms: now + 4,
                     output: SubtitleJobWrite::Complete {
@@ -2248,6 +2281,21 @@ async fn background_subtitles_share_one_owner_and_publish_with_exact_current_aut
                         .await
                         .expect("subtitle ownership contract"),
                     "{backend}: lost completion acknowledgement is idempotent"
+                );
+                let waiters = store
+                    .job_waiters(WaiterQuery {
+                        job_id: token.job_id,
+                        after: None,
+                        limit: 10,
+                    })
+                    .await
+                    .expect("retired subtitle receipts");
+                assert_eq!(waiters.waiters.len(), 1, "{backend}");
+                assert_eq!(waiters.waiters[0].state, "succeeded", "{backend}");
+                assert_eq!(
+                    waiters.waiters[0].result_ref.as_deref(),
+                    Some("subtitle-test-result"),
+                    "{backend}"
                 );
                 assert_eq!(
                     store
@@ -2270,6 +2318,66 @@ async fn background_subtitles_share_one_owner_and_publish_with_exact_current_aut
                     .is_empty());
             }
         }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn background_subtitle_admin_retry_and_later_intents_remain_admissible() {
+    use super::subtitle_jobs_fixture::SubtitleFixture;
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "subtitle-retry-outbox").await;
+        let original = store
+            .enqueue_or_promote_subtitle_source(
+                &super::subtitle_source_stamp(file_id),
+                "normal",
+                1000,
+            )
+            .await
+            .expect("enqueue")
+            .expect("request");
+        store
+            .cancel_analysis_request_admin(&original.request_id, 1001)
+            .await
+            .expect("cancel");
+        let retry = store
+            .retry_analysis_request_admin(&original.request_id, "subtitle-admin-successor", 1002)
+            .await
+            .expect("retry")
+            .expect("successor");
+        assert!(retry.force_rebuild, "{backend}: exercise real Retry input");
+        let (_, later_file) = seed_file(&store, "subtitle-later-outbox").await;
+        let later = store
+            .enqueue_or_promote_subtitle_source(
+                &super::subtitle_source_stamp(later_file),
+                "normal",
+                1003,
+            )
+            .await
+            .expect("later")
+            .expect("request");
+        for request in [retry, later] {
+            let claimed = store
+                .claim_subtitle_fixture(&request.request_id, "node-a", 1004, 2000)
+                .await
+                .expect("admit retry and later demand")
+                .expect("common owner");
+            assert!(
+                store
+                    .complete_subtitle_fixture(&claimed, "retry-result", 1005)
+                    .await
+                    .expect("complete"),
+                "{backend}"
+            );
+        }
+        assert!(
+            store
+                .subtitle_job_intents(128)
+                .await
+                .expect("outbox")
+                .is_empty(),
+            "{backend}"
+        );
     })
     .await;
 }

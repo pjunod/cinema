@@ -40,9 +40,22 @@ impl JobManager {
                 Ok(intents) => {
                     for id in intents {
                         if let Ok(Some(request)) = self.store.analysis_request(&id).await {
-                            if let Err(error) = self.admit_subtitle_intent(request).await {
-                                tracing::debug!(%error, "subtitle outbox deferred");
-                                break;
+                            if !request.video_identity.is_empty()
+                                || !request.target_node_id.is_empty()
+                            {
+                                // Malformed legacy demand must not poison the next outbox page.
+                                let _ = self
+                                    .store
+                                    .cancel_analysis_request_admin(&id, clock_ms())
+                                    .await;
+                                continue;
+                            }
+                            match self.store.enqueue_subtitle_job(request, clock_ms()).await {
+                                Ok(EnqueueOutcome::QueueFull) => break,
+                                Ok(_) => {}
+                                Err(error) => {
+                                    tracing::debug!(%error, request_id = %id, "subtitle outbox entry deferred")
+                                }
                             }
                         }
                     }

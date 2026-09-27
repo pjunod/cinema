@@ -103,5 +103,11 @@ BEGIN
         owner_node_id = NULL, owner_boot_id = NULL, claim_id = NULL, lease_expires_ms = NULL
     WHERE id = json_extract(NEW.request_json, '$.token.job_id') AND state = 'running'
         AND NEW.result_json = 'true' AND json_extract(NEW.request_json, '$.output.kind') = 'complete';
+    UPDATE background_job_waiters SET state = 'succeeded',
+        result_ref = json_extract(NEW.request_json, '$.output.result_key'),
+        updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
+    WHERE job_id = json_extract(NEW.request_json, '$.token.job_id') AND request_scope = 'subtitle'
+        AND state = 'pending' AND NEW.result_json = 'true'
+        AND json_extract(NEW.request_json, '$.output.kind') = 'complete';
     DELETE FROM background_job_commands WHERE id = NEW.id;
 END;

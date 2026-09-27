@@ -46,7 +46,7 @@ AFTER UPDATE OF result_json ON background_library_requests
 WHEN OLD.result_json IS NULL AND NEW.result_json IS NOT NULL
 BEGIN
     UPDATE background_job_waiters SET
-        state = CASE json_extract(NEW.result_json, '$.outcome') WHEN 'completed' THEN 'completed' ELSE 'failed' END,
+        state = CASE json_extract(NEW.result_json, '$.outcome') WHEN 'completed' THEN 'succeeded' ELSE 'failed' END,
         result_ref = 'library-request:' || NEW.request_id,
         last_error_code = CASE json_extract(NEW.result_json, '$.outcome') WHEN 'failed' THEN 'library_request_failed' END,
         updated_at_ms = NEW.completed_at_ms

@@ -512,7 +512,7 @@ fn request_record(record: LibraryWorkRecord) -> ScanRequestRecord {
         correlation_id,
         source,
         status: match record.state.as_str() {
-            "completed" => "done",
+            "succeeded" => "done",
             "pending" => "queued",
             other => other,
         }

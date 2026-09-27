@@ -119,7 +119,7 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
           AND request.pipeline_version = json_extract(body, '$.subtitle_request.pipeline_version')
           AND request.component = 'subtitle_source' AND request.cancel_requested = 0
           AND request.state IN ('queued','running')
-          AND request.video_identity = '' AND request.force_rebuild = 0 AND request.target_node_id = ''
+          AND request.video_identity = '' AND request.target_node_id = ''
       )) THEN 'request_fenced'
     WHEN prior_job IS NOT NULL AND prior_digest != json_extract(body, '$.request.request_digest') THEN 'conflict'
     WHEN prior_job IS NOT NULL THEN 'existing'

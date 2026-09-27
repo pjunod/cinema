@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 merged; E0 final adversarial review in progress · **Updated:** 2026-09-26 ·
+**Status:** M1–M3 merged; E0 review fixes implemented; validation pending · **Updated:** 2026-09-26 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` ·
 **Base:** `0386c78ec` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/564)
 
@@ -17,7 +17,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | M1 durable queue and pre-transcode | Implemented; focused validation passed | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; local exact-recipe offline joining and scheduling implemented; lost-reply and process-expiry regressions written; cross-node transcode convergence belongs to E1 |
 | M2 fragment analysis and hydration | Implemented; focused validation passed | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
 | M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
-| E0 subtitle and library workers | Adapters implemented; construction checks passed | Library work, storage/provider budgets, learner authority and all-track subtitle extraction are connected. Integrated current main; PR #564 is in its one adversarial review. Fast lane follows findings |
+| E0 subtitle and library workers | Adapters implemented; construction checks passed | Library work, storage/provider budgets, learner authority and all-track subtitle extraction are connected. Integrated current main; PR #564 received five findings; fixes and regressions are implemented. Compiler and fast lane evidence pending |
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
@@ -553,3 +553,28 @@ The failing replicated test is being rerun before the main fast lane starts.
   examining that frozen source; only this status record changes during review.
   Draft status keeps the fast lane idle. The desktop cannot attach Forgejo PR
   artifacts, so the ordinary PR link above is the review entry point.
+
+
+## E0 adversarial review and corrections
+
+The single review of `1f378c4a1` against `0386c78ec` requested five changes.
+All are corrected in the candidate; validation is pending.
+
+1. Library success now uses the permitted `succeeded` waiter state; the
+   existing durable-result projection and regression use the same state.
+2. Subtitle completion atomically settles its receipts and result reference,
+   allowing bounded retention to retire completed jobs.
+3. Activity Retry successors can enter the common queue. Retrying reuses valid
+   immutable representations and retries missing work. Unsupported legacy
+   demand is cancelled; individual admission errors do not stop an outbox page.
+   Only shared queue capacity stops the page early.
+4. Imports from SQLite schemas before 76 revoke legacy running/submitted
+   subtitle owners after parity verification, preserving spent attempts. The
+   old-backup import regression now includes a running subtitle owner.
+5. Audiobook cover extraction uses the cancellable process-group collector,
+   joins killed children, and checks cancellation between audiobook parts.
+   A stalled-child regression enforces the five-second release budget.
+
+No second review is planned. Run the focused regressions with replicated-store
+coverage and the required fast lane, address failures, then merge #564 and
+continue E1–E3.

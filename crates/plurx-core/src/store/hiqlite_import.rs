@@ -1909,6 +1909,14 @@ impl HiqliteAuthStore {
             super::hiqlite_background_jobs::seal_legacy(self.client()).await?;
         }
 
+        if schema_version < 76 {
+            // Parity describes the imported snapshot. Only after proving it do
+            // we revoke pre-common-queue owners; their spent attempts survive.
+            self.client()
+                .execute(super::background_jobs_subtitle::RESET_LEGACY, params!())
+                .await?;
+        }
+
         Ok(SqliteImportReport {
             source_schema_version: schema_version,
             backup_sha256: metadata.backup_sha256,
