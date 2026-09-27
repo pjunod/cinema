@@ -2120,18 +2120,33 @@ async function setCasePreferences(driver, quality) {
         v.__plurxLabFrameProbe=true;
         if(!globalThis.__plurxLabFrameProbe||!globalThis.__plurxLabFrameProbe.supported)
           globalThis.__plurxLabFrameProbe={supported:true,sequence:0,last_frame_at_ms:null,
-            maximum_gap_ms:0,frames:0,last_frame:null,auto_presentations:[]};
+            maximum_gap_ms:0,maximum_gap_detail:null,frames:0,last_frame:null,auto_presentations:[]};
         const frame=(now,metadata)=>{
-          if(document.getElementById('video')!==v) return;
+          // A prepared successor already renders while hidden. Keep its callback
+          // armed so the first visible frame after the id swap is measured,
+          // even when the next WebDriver snapshot has not yet installed a probe.
+          // Hidden frames must never count as visible playback.
+          if(document.getElementById('video')!==v){
+            v.requestVideoFrameCallback(frame);
+            return;
+          }
           const probe=globalThis.__plurxLabFrameProbe;
           if(probe){
-            if(probe.last_frame_at_ms!=null)
-              probe.maximum_gap_ms=Math.max(probe.maximum_gap_ms,now-probe.last_frame_at_ms);
+            const priorFrame=probe.last_frame;
+            const gap=probe.last_frame_at_ms==null?0:now-probe.last_frame_at_ms;
+            if(gap>probe.maximum_gap_ms){
+              probe.maximum_gap_ms=gap;
+              probe.maximum_gap_detail={start_at_ms:probe.last_frame_at_ms,
+                end_at_ms:now,from_element:priorFrame?.element_id||null,
+                to_element:v.__plurxLabElementId||null,
+                from_session_id:priorFrame?.session_id||null};
+            }
             probe.last_frame_at_ms=now;
             probe.frames+=1;
             probe.sequence+=1;
             const p=(typeof PLAYER!=='undefined'&&PLAYER)||{};
             const presented={sequence:probe.sequence,at_ms:now,
+              element_id:v.__plurxLabElementId||null,
               media_time:metadata&&Number.isFinite(metadata.mediaTime)?metadata.mediaTime:null,
               absolute_time:metadata&&Number.isFinite(metadata.mediaTime)
                 ?Number(p.offset||0)+metadata.mediaTime:null,
@@ -2139,6 +2154,8 @@ async function setCasePreferences(driver, quality) {
               height:metadata&&Number.isFinite(metadata.height)?metadata.height:v.videoHeight,
               method:p.method||null,session_id:p.sessionId||null,attempt_id:p.attemptId||null};
             probe.last_frame=presented;
+            if(probe.maximum_gap_detail&&probe.maximum_gap_detail.end_at_ms===now)
+              probe.maximum_gap_detail.to_session_id=presented.session_id;
             if(!Array.isArray(probe.auto_presentations)) probe.auto_presentations=[];
             const switches=p.abr&&Array.isArray(p.abr.switches)?p.abr.switches:[];
             for(let index=switches.length-1;index>=0;index--){
@@ -2161,6 +2178,23 @@ async function setCasePreferences(driver, quality) {
         globalThis.__plurxLabFrameProbe={supported:false,last_frame_at_ms:null,maximum_gap_ms:0,frames:0};
       }
     };
+    if(globalThis.__plurxLabVideoObserver) globalThis.__plurxLabVideoObserver.disconnect();
+    const observeVideos=()=>{
+      for(const id of ['video','video-prepared']){
+        const element=document.getElementById(id);
+        if(!element) continue;
+        if(!element.__plurxLabElementId){
+          globalThis.__plurxLabElementSequence=
+            Number(globalThis.__plurxLabElementSequence||0)+1;
+          element.__plurxLabElementId=globalThis.__plurxLabElementSequence;
+        }
+        globalThis.__plurxLabInstallVideoProbe(element);
+      }
+    };
+    globalThis.__plurxLabVideoObserver=new MutationObserver(observeVideos);
+    globalThis.__plurxLabVideoObserver.observe(document.body,
+      {childList:true,subtree:true,attributes:true,attributeFilter:['id']});
+    observeVideos();
     globalThis.__plurxLabInstallVideoProbe(document.getElementById('video'));
     localStorage.setItem('plurx_quality', ${JSON.stringify(quality)});
     localStorage.setItem('plurx_autonext', '0');
@@ -2293,7 +2327,7 @@ async function performOperation(driver, testCase, start) {
       `outgoing frame before quality switch to ${quality}`, 50);
       await driver.exec(`
         { const probe=globalThis.__plurxLabFrameProbe;
-          if(probe){probe.maximum_gap_ms=0;probe.frames=0;}
+          if(probe){probe.maximum_gap_ms=0;probe.maximum_gap_detail=null;probe.frames=0;}
         }
         return true;
       `);
@@ -2440,6 +2474,7 @@ function transitionMetrics(before, after) {
     event_count: events.length,
     expected_event_count: expectedEvents,
     maximum_video_gap_ms: maximumGapMs,
+    frame_probe_gap_detail: probe.maximum_gap_detail || null,
     wait_events: events.filter((event) => event.event === "waiting" || event.event === "stalled").length,
     reopen_events: events.filter((event) => event.event === "emptied" || event.event === "abort").length,
     stalls: Math.max(0, Number(after?.lifetime_stalls || 0) - Number(before?.lifetime_stalls || 0)),
@@ -2600,7 +2635,7 @@ async function observeShapedCliff(driver, shaper, testCase, start) {
   for (let cliffIndex = 1; cliffIndex < shaper.profile.stages.length; cliffIndex += 1) {
     await driver.exec(`
       { const probe=globalThis.__plurxLabFrameProbe;
-        if(probe){probe.maximum_gap_ms=0;probe.frames=0;}
+          if(probe){probe.maximum_gap_ms=0;probe.maximum_gap_detail=null;probe.frames=0;}
       }
       return true;
     `);
