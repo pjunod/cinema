@@ -3964,14 +3964,48 @@ mod startup_tests {
         (address, stop, served)
     }
 
-    /// How long a timeout test waits for the socket to close before calling
-    /// it a hang. The server under test closes it on an 80 ms header timer;
-    /// nothing else in [`test_http_timeouts`] would ever close an idle HTTP/1
-    /// connection, so without that timer the read waits here and fails. The
-    /// wait is long because it only has to catch that hang: a sub-second
-    /// bound failed on loaded runners with the timer working, because a
-    /// current-thread test runtime that is not scheduled cannot read the EOF.
+    /// How long a timeout test waits for a response before calling it a
+    /// hang.
     const TIMEOUT_TEST_HANG_GUARD: Duration = Duration::from_secs(20);
+
+    /// How long a header-timer test waits for the server to close the socket.
+    /// The server under test closes it on the 80 ms header timer from
+    /// [`test_http_timeouts`]. This bound must separate that timer from two
+    /// failures: no timer at all (nothing else closes an idle HTTP/1
+    /// connection), and `serve_http` ignoring the timeouts it was given and
+    /// applying the production [`HEADER_READ_TIMEOUT`] of 15 s. So it stays
+    /// well below the production value (asserted at compile time below), and
+    /// the tests also check the elapsed time against it. It is still far above
+    /// 80 ms: a sub-second bound failed on loaded runners with the timer
+    /// working, because a current-thread test runtime that is not scheduled
+    /// cannot read the EOF.
+    const HEADER_TIMER_CLOSE_BOUND: Duration = Duration::from_secs(5);
+    const _: () = assert!(
+        HEADER_TIMER_CLOSE_BOUND.as_millis() * 3 <= HEADER_READ_TIMEOUT.as_millis(),
+        "the close bound must stay far below the production header timer"
+    );
+
+    /// Wait for the server to close `stream` (EOF) within
+    /// [`HEADER_TIMER_CLOSE_BOUND`].
+    async fn expect_header_timer_close(stream: &mut tokio::net::TcpStream, context: &str) {
+        let started = tokio::time::Instant::now();
+        let mut byte = [0u8; 1];
+        let read = tokio::time::timeout(HEADER_TIMER_CLOSE_BOUND, stream.read(&mut byte))
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "{context}: the configured header timer must close the socket \
+                     within {HEADER_TIMER_CLOSE_BOUND:?} (production's is {HEADER_READ_TIMEOUT:?})"
+                )
+            })
+            .expect("read");
+        assert_eq!(read, 0, "{context}: the socket must end at EOF");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < HEADER_TIMER_CLOSE_BOUND,
+            "{context}: closed after {elapsed:?}, not by the configured header timer"
+        );
+    }
 
     fn test_http_timeouts() -> HttpTimeouts {
         HttpTimeouts {
@@ -4090,12 +4124,7 @@ mod startup_tests {
             .await
             .expect("partial request head");
 
-        let mut byte = [0u8; 1];
-        let read = tokio::time::timeout(TIMEOUT_TEST_HANG_GUARD, stream.read(&mut byte))
-            .await
-            .expect("header timeout must close the socket")
-            .expect("read");
-        assert_eq!(read, 0, "a partial request head must end at EOF");
+        expect_header_timer_close(&mut stream, "a partial request head").await;
         stop_timeout_test_server(stop, served).await;
     }
 
@@ -4121,12 +4150,7 @@ mod startup_tests {
             response.extend_from_slice(&chunk[..read]);
         }
 
-        let mut byte = [0u8; 1];
-        let read = tokio::time::timeout(TIMEOUT_TEST_HANG_GUARD, stream.read(&mut byte))
-            .await
-            .expect("the next-head timeout must close an idle keep-alive socket")
-            .expect("read");
-        assert_eq!(read, 0, "idle keep-alive must end at EOF");
+        expect_header_timer_close(&mut stream, "an idle keep-alive connection").await;
         stop_timeout_test_server(stop, served).await;
     }
 
