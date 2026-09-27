@@ -1060,8 +1060,26 @@ overturn**; the alternative is named with it. Premises were re-read at
   (`player/Controller.kt:887`, `:1882`, `:2171`); Apple
   `avplayer_item_failed` (`PlayerController.swift:33`).
 - The live progress beat already refreshes the direct-play registry per
-  viewer and item (`http/watch.rs:79`), every 5-10 s while a player is open,
-  paused or not.
+  viewer and item (`http/watch.rs:79`). **Only the web beats while paused**
+  (a 60 s floor, `web/player/stats.js:546`). Apple beats only while playing
+  (`clients/apple/Sources/PlayerController.swift:7133`), Android likewise
+  (`player/PlayerScreen.kt:1300`), and neither sends a `ttff` on unpause, so
+  a native pause is silence however long it lasts. (Corrected after the
+  #559 review, which found the first version of this bullet, "paused or
+  not", true of the web only.)
+- The clients' own "not yet, ask again" create answers are the
+  `create_503_not_yet` row of `tests/playback/playback-surface-contract.json`
+  (`startup_timeout`, `media_owner_transition`, `vod_index_pending`,
+  `vod_engine_unattested`, `transcode_capacity_pending`). All three clients
+  re-post the same create on a 1 s / 2 s / 4 s ladder (web
+  `openSessionRetryingNotYet`, `web/player/directed-change.js:604`; Android
+  `PlaybackPolicy.kt:241`), and the web answers `vod_index_pending` on a copy
+  create by falling back to `stream.mp4` (`web/player/decode-tiers.js:1337`).
+- Every `ttff` beacon carries the `reason` its playback attempt began for,
+  and all three clients name a player just opened `cold-start` or `resume`
+  (web `web/player/decode-tiers.js:963`, Android `player/Controller.kt:1226`,
+  Apple `PlayerController.swift:2685`); every other reason (`seek`,
+  `quality`, `audio`, `selection`, `stall-*`) is a picture inside a play.
 - `/metrics` reads a `MetricsState` sub-state (`http/system.rs:4960`) that
   may hold no Store; the handler is `:5387`, and the new family renders from
   `telemetry::prometheus()`, so the handler's `format!` is untouched.
@@ -1080,7 +1098,17 @@ overturn**; the alternative is named with it. Premises were re-read at
 2. **It resolves exactly once**, on the first of: `ttff` → `ok`; one of the
    six start-failure beacons above → `failed`; the server answering an HLS
    create, a `stream.mp4` or a direct-play GET for that file with an error →
-   `refused`; 180 s with none of those → `cancelled`. 180 s is above the top
+   `refused`; 180 s with none of those → `cancelled`. **Except a "not yet"**:
+   an error whose code is in the `create_503_not_yet` row does not resolve
+   the attempt. It keeps it pending (or opens one), so the client's retry of
+   the same create, or the web's `stream.mp4` fallback, joins it, and a
+   ladder of three 503s followed by a create that plays is one `ok`. If the
+   client stops asking and nothing is served before the deadline, the
+   attempt is `refused` (the server's last answer was a refusal), not
+   `cancelled`. Media served after a "not yet" clears it. (Added after the
+   #559 review, finding 1: the first version counted every rung of the
+   ladder as a `refused` start, so one start that played read as 75%
+   failed.) 180 s is above the top
    `plurx_ttff_ms` bucket (120 s), so a start slow enough to be in that
    bucket is still `ok`. A `cancelled` attempt is either a viewer who left
    before the picture or a player that hung and said nothing; the family
@@ -1088,19 +1116,37 @@ overturn**; the alternative is named with it. Premises were re-read at
 3. **The unit is the attempt, not the viewer's play.** A decoder refusal
    followed by the client's own fallback to a transcode is one `failed` and
    one `ok`, and each refused request is its own `refused` attempt (a create
-   the server refuses with nothing in flight is still one attempt). The
+   the server refuses with nothing in flight is still one attempt), except
+   the "not yet" answers of point 2, which the client's retry joins. The
    plan's row names attempts, and the viewer-level figure is recoverable
    from the sidecar rows. *Alternative:* hold a failure open until the start
    deadline and let a later first frame turn it into `ok`, which counts
    viewer-visible failed plays instead.
-4. **After a first frame, the play stays one play** while any request,
-   beacon or progress beat for it arrives within five minutes (the Trakt
-   dedupe window, `START_DEDUP`). A quality switch, a seek restart or a
-   resume after a long pause joins it instead of opening a start that no
-   client reports a first frame for, and a failure or a refused replacement
-   during it is a mid-play failure, not a failed start. The client's own
-   report of a refusal the server already counted is absorbed by a short
-   tombstone rather than counted twice.
+4. **After a first frame, the play stays one play.** A request, beacon or
+   progress beat within five minutes of the last one (`PLAY_QUIET`, the
+   Trakt dedupe window) joins it outright: a quality switch, a seek restart,
+   a web resume after any pause (the web beats while paused). A request
+   after five minutes of silence is either a native pause ending (Apple and
+   Android are silent while paused) or the same title opened again, and the
+   ledger does not guess: it holds a *possible resume*. Only an explicit
+   start signal makes that an attempt: a `ttff` whose `reason` is
+   `cold-start` or `resume` (`ok`), a start-failure beacon (`failed`) or a
+   refusal (`refused`). A `ttff` for any other reason (an Android seek right
+   after the resume) or the 180 s deadline returns it to the play,
+   uncounted. A play is forgotten only after 24 hours with no sign of its
+   viewer (`PLAY_FORGET`), so a native player paused overnight still
+   resumes into it. A failure or a refused replacement during a play is a
+   mid-play failure, not a failed start. The client's own report of a
+   refusal the server already counted is absorbed by a short tombstone
+   rather than counted twice. (Rewritten after the #559 review, finding 2:
+   the first version forgot a play after five minutes without a beat, so
+   every native pause longer than that became a phantom start, `cancelled`
+   or, after an Android seek, a second `ok`.) **Known bounds of this rule:**
+   the same title opened again within five minutes of the last sign of the
+   old play joins it and is not counted; one opened again after that and
+   abandoned before its picture is not counted either (the deadline cannot
+   tell it from a resume); and a native player that fails right after
+   resuming from a long pause counts one `failed` start.
 5. **`method`** is the method the `ttff` beacon names when it names one, else
    the method of the request that opened the attempt; a refused HLS create
    with nothing in flight is `unknown`, because the create had not decided
@@ -1135,9 +1181,16 @@ execution log): `a_first_frame_beacon_settles_the_start_its_direct_play_opened`,
 `a_start_request_the_server_refuses_is_a_refused_start`,
 `a_progress_beat_keeps_a_started_play_alive`,
 `a_scrape_settles_a_start_past_its_deadline_as_cancelled`,
-`start_outcome_families_render_exactly_their_enumerated_labels`; the ledger's
+`start_outcome_families_render_exactly_their_enumerated_labels`,
+`every_create_not_yet_answer_keeps_its_start_attempt_open`; the ledger's
 own rules by `a_start_attempt_resolves_once_by_its_first_terminal`,
-`a_play_is_kept_by_its_progress_beats_and_forgotten_when_they_stop` and
+`a_play_is_kept_by_its_progress_beats_and_held_through_a_silent_pause`,
+`a_native_pause_with_no_beats_resumes_into_the_same_play`,
+`a_not_yet_refusal_keeps_the_start_open_for_the_retry_that_plays`,
+`start_not_yet_codes_are_the_contract_row_the_clients_retry`,
+`a_first_frame_names_the_method_its_start_is_counted_under`,
+`a_request_joining_a_pending_start_relabels_it`,
+`a_first_frame_after_a_refusal_is_unpaired` and
 `a_full_ledger_tracks_no_new_attempt_rather_than_evicting_one`.
 
 ### 7.9 Client work this plan needs and does not build — GPT prompt
@@ -1255,6 +1308,16 @@ C-08 M5 row 4 (plan/C-08-3, PR #559) deployed:
    sum(unpaired ok) should be 5; sum(unpaired ok) is the size of the
    cross-node error. Report it: if it is more than one in five, say so --
    that is the evidence for a replicated attempt row (§7.8.7).
+6. A native pause (§7.8.4): on the Apple TV and on the Android device
+   against nynuc directly, save the grep, play a direct-play title to its
+   first frame, pause it for 7 minutes, resume and let it play 30 s, stop,
+   wait 4 minutes, grep. Expect ok +1 per device and cancelled +0. Repeat on
+   Android with a 10 s seek straight after resuming: still ok +1 only.
+7. A "not yet" ladder (§7.8.2): in Chrome, open a copy-HLS title whose VOD
+   index is not built yet (Settings shows it pending; or right after adding
+   a file), so the create answers vod_index_pending and the player falls
+   back to the progressive remux. Expect ok{method="remux"} +1 and
+   refused +0 for that one start.
 Restart nothing.
 ```
 
@@ -1286,3 +1349,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 row 4 — failed starts per attempt | [PR #559](http://192.168.4.7:3000/noirr/plurx/pulls/559) (draft, `plan/C-08-3`) | Built from `origin/main` at `abb6fe647` with its own design (§7.8): `playstart::StartAttempts`, one attempt per viewer and file opened by the first media request in `note_playback_started` (never `/decision`), resolved once into `plurx_start_outcomes_total{method,outcome}` (16 fixed series) by `ttff` → `ok`, a start-failure beacon → `failed`, a server error on an HLS create / `stream.mp4` / direct GET → `refused`, or 180 s with none → `cancelled`; progress beats keep a started play one play; unpaired beacons are counted in `plurx_start_outcomes_unpaired_total{outcome}`, the size of the design's one known (cross-node) error. The `/metrics` handler sweeps expired attempts in memory before rendering; its `format!` is untouched. OPERATIONS.md carries the row-4 expression and both reading rows, held by `tests/operations/test_release_evidence_metrics.py` (the name moved from reserved to rendered). Each production hunk shown failing on nuc3 with it reverted (log confirmed `Compiling plurxd … /work/hc8/…` every run): client-log pairing → `a_first_frame_beacon_settles_the_start_its_direct_play_opened` (ok 0 ≠ 1); the open in `note_playback_started` → same test (no attempt opened); HLS create refusal → `a_start_request_the_server_refuses_is_a_refused_start` (0 ≠ 1, "HLS create"); `stream.mp4` refusal → same (0 ≠ 1); direct GET `load_file` refusal → same (0 ≠ 1, "direct GET only"); direct open-failure refusal → same (1 ≠ 2); progress-beat refresh → `a_progress_beat_keeps_a_started_play_alive`; the scrape sweep → `a_scrape_settles_a_start_past_its_deadline_as_cancelled` (0 ≠ 1); the exposition push → `start_outcome_families_render_exactly_their_enumerated_labels`. The ledger is new code, pinned by `a_start_attempt_resolves_once_by_its_first_terminal`, `a_play_is_kept_by_its_progress_beats_and_forgotten_when_they_stop` and `a_full_ledger_tracks_no_new_attempt_rather_than_evicting_one`; three mutations of it were run: counting a failure during a play fails the first (1 ≠ 0), dropping the beat refresh fails the second (`Pending` ≠ `Playing`), and turning a refusal's tombstone into a play **survived** the first round — the test gained "a retry after a refusal is a new attempt", and the mutation then fails it. Gate results are in the PR body. |
 | | | | | | `needs:` §7.10 (families on a deployed node, one `ok`/`cancelled`/`refused` each, and the cross-node unpaired measurement through the Android client on the cluster address). Nothing deployed or scraped. Client work for rows 2 and 8 is §7.9's GPT prompt, unbuilt here by instruction. |
 | 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 row 4 — merge of main | [PR #559](http://192.168.4.7:3000/noirr/plurx/pulls/559) | Merged `origin/main` at `e680849fb` (S-14 M8, W-02 5.1-5.3, #539, #560) as `6a6d6fba5`. One conflict, `tests/playback/rolling-producer-owners.toml` `namespaced-time-constructor`: main's merge review and this branch's two test-only sleeps both kept, the row re-measured by zeroing it at 1015; `process-capable-launch-method` measures 396 on the merged tree. On `6a6d6fba5`, every gate exits 0: `make history-check`, `make validation-lint`, the validation unittests (247), `make operations-check`, `make spike-lock-check`, `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked -D warnings`, and `cargo test --locked --no-fail-fast -p plurxd` (2,970 passed, 0 failed, 14 ignored; the eight start-outcome tests among them, the log showing `Compiling plurxd … /work/hc8/…`). |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 row 4 — review round | [PR #559](http://192.168.4.7:3000/noirr/plurx/pulls/559) | The one adversarial review ([comment 5514](http://192.168.4.7:3000/noirr/plurx/pulls/559#issuecomment-5514)) raised two P1s and one P2; all three are fixed. First merged `origin/main` at `d4fa763c7` as `de86825f1` (conflicts: the C-08 work-board row, and two `rolling-producer-owners.toml` counts re-measured by zeroing the rows, 1031 and 397); the merge built and `cargo test -p plurxd` passed 2,999 before any change. **P1 1, not-yet retries counted as refused** (§7.8.2): a refusal whose code is in the `create_503_not_yet` row keeps the attempt pending for the retry or the web `stream.mp4` fallback to join; a client that stops asking is one `refused` at the deadline; `ApiError::code()` carries the code from all three start routes. Pinned by `a_not_yet_refusal_keeps_the_start_open_for_the_retry_that_plays` (the reviewer's ladder: three `transcode_capacity_pending` then a create that plays is `ok`=1, `refused`=0), `every_create_not_yet_answer_keeps_its_start_attempt_open` (the real `session_start_error` / `media_owner_transition` answers) and `start_not_yet_codes_are_the_contract_row_the_clients_retry` (the code list equals the contract row). **P1 2, a native pause became a phantom start** (§7.8.4, and the "paused or not" premise corrected here, in `PLAY_QUIET`'s comment and in OPERATIONS.md): a play is remembered for 24 h (`PLAY_FORGET`); a request after five quiet minutes is a possible resume that only a `cold-start`/`resume` `ttff`, a failure beacon or a refusal turns into an attempt. Pinned by `a_native_pause_with_no_beats_resumes_into_the_same_play` (no beats while paused, resume, deadline: `cancelled`=0; an Android seek `ttff` after the resume: still one `ok`) and `a_play_is_kept_by_its_progress_beats_and_held_through_a_silent_pause` (replaces the web-only `a_play_is_kept_by_its_progress_beats_and_forgotten_when_they_stop`). **P2, method rules unpinned** (§7.8.5): `a_first_frame_names_the_method_its_start_is_counted_under`, `a_request_joining_a_pending_start_relabels_it`, `a_first_frame_after_a_refusal_is_unpaired`. Revert proofs on nuc3, three builds, each log showing `Compiling plurxd … /work/hc2/…`: (A) not-yet branch off, play forgotten at `PLAY_QUIET`, beacon method ignored, tombstone unpaired dropped → exactly six tests fail: the ladder test (phase not `Pending{not_yet}`), `every_create…` (`unknown` refused 3 ≠ 0), both pause tests (phase `None` ≠ `Playing`), the method test (0 ≠ 1), the unpaired test (0 ≠ 1); (B) join relabel dropped, seek-reason arm dropped → the relabel test (0 ≠ 1), the native test ("a seek's picture is not a start", 2 ≠ 1), and the two not-yet tests through their fallback leg; (C) possible resume cancelled at the deadline, not-yet flag kept after media was served → the native test (`cancelled` 1 ≠ 0) and the ladder test (served-then-abandoned is `cancelled`, 0 ≠ 1). **Not changed:** the reviewer's reasoned, unreproduced race (a `stream.mp4` that fails after `note_playback_started` has spawned can count `refused` and then `cancelled` for one request) is left as a known bound; closing it means moving the note behind the remux spawn. **Known bounds added by P1 2**, in §7.8.4: a reopen within five minutes of the old play joins it; a reopen abandoned before its picture is not counted; a native failure just after a long pause counts one `failed`. `needs:` §7.10 steps 6 (native pause) and 7 (a `vod_index_pending` fallback). |
