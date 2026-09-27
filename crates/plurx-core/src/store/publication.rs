@@ -1070,6 +1070,27 @@ impl<'a> PublicationStore<'a> {
         .await
     }
 
+    pub async fn sync_predictions(
+        &self,
+        requests: Vec<super::NewAnalysisRequest>,
+        desired_files: Vec<i64>,
+    ) -> Result<(), StoreError> {
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .sync_predictions(super::background_jobs_predictions::SyncPredictions {
+                        requests,
+                        desired_files,
+                        lease,
+                        replacement,
+                        now_ms: unix_ms()?,
+                    })
+                    .await
+            })
+        })
+        .await
+    }
+
     /// Admit one hot-copy interest under the discovery lease. Worker execution
     /// remains owned by the common queue, never by this planner lease.
     pub async fn enqueue_hot_copy(

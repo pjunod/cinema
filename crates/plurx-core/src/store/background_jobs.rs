@@ -57,7 +57,13 @@ pub(crate) const SCHEMA: &str = include_str!("background_jobs_schema.sql");
 // The returned snapshot is the verdict that authorized the mutation, not a
 // follow-up read which might observe a different concurrent request.
 pub(super) const ENQUEUE_SQL: &str = r#"
-WITH input AS (SELECT json($1) AS body), request AS (
+WITH provided AS (SELECT json($1) AS body), input AS (
+ SELECT CASE WHEN EXISTS (SELECT 1 FROM background_predictions WHERE state = 'pending'
+   AND request_id = COALESCE(json_extract(body,'$.subtitle_request.request_id'),json_extract(body,'$.analysis_request.request_id')))
+ THEN json_set(body, '$.request.deadline_ms', (SELECT expires_ms FROM background_predictions
+   WHERE request_id = COALESCE(json_extract(body,'$.subtitle_request.request_id'),json_extract(body,'$.analysis_request.request_id'))),
+   '$.request.retain_identity', json('false')) ELSE body END AS body FROM provided
+), request AS (
  SELECT CASE WHEN json_extract(body, '$.artwork_demand') = 1 THEN json_set(body, '$.request.request_id',
    COALESCE((SELECT request_id FROM background_job_waiters
      WHERE request_scope = json_extract(body, '$.request.scope')
@@ -242,7 +248,8 @@ WITH input AS (SELECT json($1) AS body), request AS (
       AND EXISTS (SELECT 1 FROM background_job_legacy WHERE state = 'awaiting_import') THEN 'queue_full'
     WHEN json_extract(body, '$.request.scope') IN ('automatic:transcode','automatic:transcode-repair','automatic:hot-copy')
       AND (SELECT COUNT(*) FROM background_job_waiters WHERE request_scope IN ('automatic:transcode','automatic:transcode-repair','automatic:hot-copy')
-        AND state IN ('pending','awaiting_hydration') AND (deadline_ms IS NULL OR deadline_ms > json_extract(body, '$.now_ms'))) >= 64 THEN 'queue_full'
+        AND state IN ('pending','awaiting_hydration') AND (deadline_ms IS NULL OR deadline_ms > json_extract(body, '$.now_ms')))
+        + (SELECT COUNT(*) FROM background_predictions WHERE state = 'pending' AND expires_ms > json_extract(body,'$.now_ms')) >= 64 THEN 'queue_full'
     WHEN (SELECT COUNT(*) FROM background_job_waiters) >= 16384 THEN 'queue_full'
     WHEN json_extract(body, '$.request.scope') LIKE 'user:%' AND (SELECT COUNT(*) FROM background_job_waiters
       WHERE request_scope = json_extract(body, '$.request.scope')
@@ -967,6 +974,14 @@ pub struct CancelWaiterOutcome {
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    async fn sync_predictions(
+        &self,
+        request: super::background_jobs_predictions::SyncPredictions,
+    ) -> Result<(), StoreError>;
+    async fn pending_predictions(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<super::NewAnalysisRequest>, StoreError>;
     async fn preparation_demands(
         &self,
         now_ms: i64,
@@ -1169,6 +1184,18 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn sync_predictions(
+        &self,
+        request: super::background_jobs_predictions::SyncPredictions,
+    ) -> Result<(), StoreError> {
+        super::background_jobs_predictions::sync(self, request).await
+    }
+    async fn pending_predictions(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<super::NewAnalysisRequest>, StoreError> {
+        super::background_jobs_predictions::pending(self, now_ms).await
+    }
     async fn preparation_demands(
         &self,
         now_ms: i64,

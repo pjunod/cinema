@@ -13,6 +13,8 @@ pub enum PreparationDemand {
     },
     Viewer {
         user_id: i64,
+        next_item_id: Option<i64>,
+        next_title: Option<String>,
     },
     Channel {
         channel_id: String,
@@ -51,9 +53,22 @@ pub(super) async fn demands<T: QueueSql>(
     let sql = format!(
         r#"
 WITH hot AS ({HOT_ITEMS}), viewers AS (
- SELECT user_id, MAX(updated_at_ms) AS last_active FROM media_sessions
- WHERE state = 'active' AND lease_expires_at_ms > json_extract($1, '$.now_ms')
- GROUP BY user_id ORDER BY last_active DESC, user_id LIMIT 64
+ SELECT user_id, CASE WHEN json_valid(recipe_json) THEN json_extract(recipe_json,'$.request.file_id') END AS file_id
+ FROM (SELECT user_id, recipe_json, updated_at_ms,
+   ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY updated_at_ms DESC, incarnation_id) AS ordinal
+   FROM media_sessions WHERE state = 'active' AND lease_expires_at_ms > json_extract($1, '$.now_ms'))
+ WHERE ordinal = 1 ORDER BY updated_at_ms DESC, user_id LIMIT 64
+), viewer_next AS (
+ SELECT viewer.user_id, (SELECT candidate.id FROM files playing
+   JOIN items episode ON episode.id = playing.item_id AND episode.kind = 'episode'
+   JOIN items season ON season.id = episode.parent_id
+   JOIN items next_season ON next_season.parent_id = season.parent_id AND next_season.kind = 'season'
+   JOIN items candidate ON candidate.parent_id = next_season.id AND candidate.kind = 'episode'
+   WHERE playing.id = viewer.file_id
+     AND (next_season.season_number, candidate.episode_number) > (season.season_number, episode.episode_number)
+     AND EXISTS (SELECT 1 FROM files WHERE item_id = candidate.id)
+   ORDER BY next_season.season_number, candidate.episode_number, candidate.id LIMIT 1) AS next_item_id
+ FROM viewers viewer
 ), channels AS (
  SELECT id,
  CASE WHEN pending_epoch_ms <= json_extract($1, '$.now_ms') THEN pending_generation_id ELSE active_generation_id END AS generation_id,
@@ -77,7 +92,8 @@ WITH hot AS ({HOT_ITEMS}), viewers AS (
 )
 SELECT json_object('kind','item','item_id',item.id,'title',item.title) AS result_json
  FROM hot JOIN items item ON item.id = hot.item_id
-UNION ALL SELECT json_object('kind','viewer','user_id',user_id) FROM viewers
+UNION ALL SELECT json_object('kind','viewer','user_id',user_id,'next_item_id',next_item_id,'next_title',item.title)
+ FROM viewer_next LEFT JOIN items item ON item.id = viewer_next.next_item_id
 UNION ALL SELECT json_object('kind','channel','channel_id',channel_id,'generation_id',generation_id,
  'file_id',file_id,'item_id',item_id,'title',item.title)
  FROM next_entries JOIN items item ON item.id = next_entries.item_id

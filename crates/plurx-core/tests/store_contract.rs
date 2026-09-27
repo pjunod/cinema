@@ -513,6 +513,8 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    "sync_predictions",
+    "pending_predictions",
     "preparation_demands",
     "hot_artifacts",
     "bind_library_job",
@@ -17573,7 +17575,7 @@ fn contract_inventory_matches_every_store_method() {
     // Three library admission/query/completion operations preserve each caller.
     // +2: replicated root-domain observation and atomic replacement.
     // E1 adds a bounded named-settings snapshot for playback preferences.
-    assert_eq!(declared.len(), 435, "review the Store method count");
+    assert_eq!(declared.len(), 437, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

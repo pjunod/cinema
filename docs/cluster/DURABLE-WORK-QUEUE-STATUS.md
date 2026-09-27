@@ -724,3 +724,15 @@ continue E1–E3.
   16 copies. Dormant-user, demand-expiry, target stability, and foreground
   capacity contracts are written/compiled, not run. Predictive index/subtitle
   lifecycle and repair are still outstanding; this is not an E1 completion claim.
+
+- 2026-09-26: Predictive index/subtitle preparation now persists at most 64
+  shared admission intents before creating existing typed analysis requests.
+  SQLite 79 / Hiqlite 57 carry their bounded lifecycle and import/digest support.
+  Demand changes and a 24-hour deadline cancel only prediction-owned interests;
+  a real subtitle request can atomically adopt an in-flight extraction. Finished
+  analyses release intent capacity. A stale planner or delayed outbox insert
+  cannot revive retired work. Source/recipe changes remain fenced by the normal
+  workers. Prediction uses the existing bounded all-track subtitle extractor
+  instead of adding a second extraction path; this preserves its one-read and
+  cancellation behavior. Contracts for ownership, adoption, lease loss and the
+  active viewer's following episode are written and compile-only so far.

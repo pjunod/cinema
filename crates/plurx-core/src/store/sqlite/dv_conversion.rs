@@ -1430,7 +1430,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 34] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 35] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1493,6 +1493,7 @@ mod tests {
             "CREATE TRIGGER IF NOT EXISTS background_subtitle_claimed",
             "CREATE TABLE IF NOT EXISTS background_artwork_locations",
             "CREATE TABLE IF NOT EXISTS background_transcode_artifacts",
+            "CREATE TABLE IF NOT EXISTS background_predictions",
         ];
 
         assert!(

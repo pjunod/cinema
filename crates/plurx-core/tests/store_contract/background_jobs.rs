@@ -2918,3 +2918,298 @@ async fn background_preparation_demand_expires_after_one_day_and_dormant_users_a
         assert!(store.hot_artifacts(now).await.expect("empty artifact snapshot").is_empty(), "{backend}: demand alone is not proof of stored bytes");
     }).await;
 }
+
+#[tokio::test]
+async fn background_prediction_lifecycle_cancels_only_owned_work_and_playback_adopts_subtitles() {
+    use plurx_core::cluster::coordination::LeaseClaim;
+    use plurx_core::store::background_jobs_predictions::SyncPredictions;
+    use plurx_core::store::{NewAnalysisRequest, SubtitleSourceStamp};
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "prediction-lifecycle").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis() as i64;
+        let LeaseClaim::Acquired(lease) = store
+            .acquire_lease("candidate:prediction", "node-a", now, now + 90_000)
+            .await
+            .expect("lease")
+        else {
+            panic!("{backend}: lease")
+        };
+        let replacement = lease.publication_successor().expect("replacement");
+        let request = |id: char, component: &str| NewAnalysisRequest {
+            request_id: id.to_string().repeat(64),
+            file_id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            component: component.into(),
+            pipeline_version: "prediction-pipeline".into(),
+            video_identity: String::new(),
+            requested_generation: format!("predict:{}", id.to_string().repeat(64)),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            force_rebuild: false,
+            target_node_id: if component == "fragment_index" {
+                "node-a".into()
+            } else {
+                String::new()
+            },
+            not_before_ms: now,
+            created_at_ms: now,
+        };
+        let index = request('a', "fragment_index");
+        let subtitle = request('b', "subtitle_source");
+        store
+            .sync_predictions(SyncPredictions {
+                requests: vec![index.clone(), subtitle.clone()],
+                desired_files: vec![file_id],
+                lease: lease.clone(),
+                replacement: replacement.clone(),
+                now_ms: now,
+            })
+            .await
+            .expect("persist predictions");
+        assert_eq!(
+            store.pending_predictions(now).await.expect("outbox").len(),
+            2,
+            "{backend}"
+        );
+        store
+            .enqueue_analysis_request(&index)
+            .await
+            .expect("index intent");
+        let analysis = store
+            .enqueue_analysis_request(&subtitle)
+            .await
+            .expect("subtitle intent");
+        let admitted = store
+            .enqueue_subtitle_job(analysis, now)
+            .await
+            .expect("subtitle job");
+        let EnqueueOutcome::Accepted { job_id, .. } = admitted else {
+            panic!("{backend}: subtitle job")
+        };
+        let waiters = || WaiterQuery {
+            job_id: job_id.clone(),
+            after: None,
+            limit: 128,
+        };
+        assert_eq!(
+            store.job_waiters(waiters()).await.expect("waiters").waiters[0].deadline_ms,
+            Some(now + 86_400_000)
+        );
+        let adopted = store
+            .enqueue_or_promote_subtitle_source(
+                &SubtitleSourceStamp {
+                    file_id,
+                    source_size: file.size,
+                    source_mtime: file.mtime,
+                    pipeline_version: subtitle.pipeline_version.clone(),
+                },
+                "foreground",
+                now + 1,
+            )
+            .await
+            .expect("playback adopts")
+            .expect("analysis");
+        assert_eq!(adopted.request_id, subtitle.request_id, "{backend}");
+        assert_eq!(
+            store.job_waiters(waiters()).await.expect("waiters").waiters[0].deadline_ms,
+            None,
+            "{backend}: actual playback outlives prediction"
+        );
+        let third = replacement.publication_successor().expect("successor");
+        store
+            .sync_predictions(SyncPredictions {
+                requests: vec![],
+                desired_files: vec![],
+                lease: replacement.clone(),
+                replacement: third.clone(),
+                now_ms: now + 2,
+            })
+            .await
+            .expect("demand disappeared");
+        assert_eq!(
+            store
+                .analysis_request(&index.request_id)
+                .await
+                .expect("index")
+                .expect("index")
+                .state,
+            "cancelled",
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .analysis_request(&subtitle.request_id)
+                .await
+                .expect("subtitle")
+                .expect("subtitle")
+                .state,
+            "queued",
+            "{backend}: adopted request remains ordinary work"
+        );
+        assert_eq!(
+            store
+                .background_job(&job_id)
+                .await
+                .expect("job")
+                .expect("job")
+                .state,
+            JobState::Queued,
+            "{backend}"
+        );
+        assert!(
+            store
+                .sync_predictions(SyncPredictions {
+                    requests: vec![],
+                    desired_files: vec![],
+                    lease,
+                    replacement,
+                    now_ms: now + 3
+                })
+                .await
+                .is_err(),
+            "{backend}: stale discovery cannot mutate predictions"
+        );
+
+        // A crash between intent persistence and domain admission is safe in
+        // both directions: another pass can drain it, and a retired intent
+        // cannot be materialized by the old producer's delayed request.
+        let mut delayed = request('c', "fragment_index");
+        delayed.pipeline_version = "delayed-pipeline".into();
+        let fourth = third.publication_successor().expect("successor");
+        store
+            .sync_predictions(SyncPredictions {
+                requests: vec![delayed.clone()],
+                desired_files: vec![file_id],
+                lease: third,
+                replacement: fourth.clone(),
+                now_ms: now + 4,
+            })
+            .await
+            .expect("new outbox intent");
+        assert_eq!(
+            store
+                .pending_predictions(now + 4)
+                .await
+                .expect("outbox")
+                .len(),
+            1
+        );
+        let fifth = fourth.publication_successor().expect("successor");
+        store
+            .sync_predictions(SyncPredictions {
+                requests: vec![],
+                desired_files: vec![],
+                lease: fourth,
+                replacement: fifth,
+                now_ms: now + 5,
+            })
+            .await
+            .expect("retire before dispatch");
+        delayed.created_at_ms = now + 6;
+        delayed.not_before_ms = now + 6;
+        assert!(
+            store.enqueue_analysis_request(&delayed).await.is_err(),
+            "{backend}: no orphan speculative request after retire"
+        );
+        assert!(
+            store
+                .analysis_request(&delayed.request_id)
+                .await
+                .expect("delayed request")
+                .is_none(),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn background_next_episode_uses_the_active_session_before_watch_completion() {
+    use plurx_core::domain::{MediaSessionActivation, MEDIA_SESSION_PUBLICATION_BLOCKED};
+    use plurx_core::store::background_jobs_preparation::PreparationDemand;
+    for_each_backend(|store, backend| async move {
+        let fixture = super::seed_watch_fence_fixture(&store, "prediction-next").await;
+        let mut files = Vec::new();
+        for (number, episode) in fixture.episodes.iter().enumerate() {
+            files.push(
+                store
+                    .upsert_file(
+                        *episode,
+                        &format!("/prediction-next/{number}.mkv"),
+                        100,
+                        1,
+                        &Default::default(),
+                    )
+                    .await
+                    .expect("episode file"),
+            );
+        }
+        assert!(
+            store
+                .next_up(fixture.user, 1)
+                .await
+                .expect("normal rail")
+                .is_empty(),
+            "{backend}: no completed episodes yet"
+        );
+        let activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
+            expected_desired_revision: None,
+            incarnation_id: uuid::Uuid::new_v4().to_string(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            user_id: fixture.user,
+            playback_id: "prediction-next-playback".into(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: None,
+            request_fingerprint: "a".repeat(64),
+            owner_node_id: "node-a".into(),
+            recipe_json: serde_json::json!({"request":{"file_id":files[0]}}).to_string(),
+            response_json: "{}".into(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 1000,
+            lease_expires_at_ms: 91_000,
+        };
+        store
+            .activate_media_session(&activation)
+            .await
+            .expect("activate")
+            .expect("route");
+        super::confirm_media_activation(store.as_ref(), &activation, 0, backend).await;
+        let viewers = store
+            .preparation_demands(1001)
+            .await
+            .expect("snapshot")
+            .into_iter()
+            .filter_map(|demand| match demand {
+                PreparationDemand::Viewer {
+                    user_id,
+                    next_item_id,
+                    ..
+                } => Some((user_id, next_item_id)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            viewers,
+            vec![(fixture.user, Some(fixture.episodes[1]))],
+            "{backend}: exactly one following episode"
+        );
+        assert!(
+            !store
+                .preparation_demands(91_001)
+                .await
+                .expect("expired viewer")
+                .iter()
+                .any(|demand| matches!(demand, PreparationDemand::Viewer { .. })),
+            "{backend}"
+        );
+    })
+    .await;
+}

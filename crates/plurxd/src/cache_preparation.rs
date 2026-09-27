@@ -46,7 +46,11 @@ impl JobManager {
                     },
                     file_id: Some(file_id),
                 }),
-                PreparationDemand::Viewer { user_id } => {
+                PreparationDemand::Viewer {
+                    user_id,
+                    next_item_id,
+                    next_title,
+                } => {
                     // One coherent read and at most one next episode for each
                     // currently leased viewer; dormant accounts add no work.
                     let rails = self.store.progress_rails(user_id, 1).await?;
@@ -61,11 +65,15 @@ impl JobManager {
                         ),
                         (
                             produce::REASON_NEXT_UP,
-                            rails
-                                .next_up
-                                .into_iter()
-                                .map(|row| row.item)
-                                .collect::<Vec<_>>(),
+                            if next_item_id.is_some() {
+                                Vec::new()
+                            } else {
+                                rails
+                                    .next_up
+                                    .into_iter()
+                                    .map(|row| row.item)
+                                    .collect::<Vec<_>>()
+                            },
                         ),
                     ] {
                         immediate.extend(items.into_iter().map(|item| Prediction {
@@ -76,6 +84,16 @@ impl JobManager {
                             },
                             file_id: None,
                         }));
+                    }
+                    if let (Some(item_id), Some(title)) = (next_item_id, next_title) {
+                        immediate.push(Prediction {
+                            discovery: DiscoveryCandidate {
+                                item_id,
+                                title,
+                                reason: produce::REASON_NEXT_UP,
+                            },
+                            file_id: None,
+                        });
                     }
                 }
             }
@@ -98,6 +116,68 @@ impl JobManager {
                 discovery,
             })
             .collect())
+    }
+
+    pub(super) async fn prepare_predictions(&self) -> Result<(), StoreError> {
+        use plurx_core::store::NewAnalysisRequest;
+        let Some(lease) = self.acquire_job("candidate:prediction".into()).await? else {
+            return Ok(());
+        };
+        let publisher = lease.publisher(self.store.as_ref());
+        let result: Result<(), StoreError> = async {
+            let predictions = self.prediction_discoveries().await?;
+            let mut nodes = if let Some(membership) = &self.membership {
+                membership.operations_peers().await.map_err(|error| StoreError::Task(error.to_string()))?
+                    .into_iter().map(|peer| peer.node_id).collect::<Vec<_>>()
+            } else { Vec::new() };
+            nodes.push(self.coordinator.node_id().into());
+            nodes.sort(); nodes.dedup();
+            let target = nodes.first().expect("local node exists");
+            let indexes = self.cluster_fragment_index_enabled().await;
+            let subtitles = self.subtitle_source_queue_enabled().await;
+            let index_pipeline = if indexes { crate::ffmpeg::fragment_index_engine_digest().await } else { String::new() };
+            let subtitle_pipeline = if subtitles { super::subtitle_source_pipeline_version().await } else { String::new() };
+            let now = clock_ms();
+            let mut requests = Vec::new();
+            let mut desired_files = Vec::new();
+            for prediction in predictions {
+                let file = if let Some(id) = prediction.file_id {
+                    self.store.get_file(id).await?
+                } else {
+                    self.store.files_for_item(prediction.discovery.item_id).await?.into_iter().next()
+                };
+                let Some(file) = file else { continue; };
+                desired_files.push(file.id);
+                for (component, pipeline, node, needed) in [
+                    ("fragment_index", &index_pipeline, target.as_str(), indexes && file.video_codec.is_some()),
+                    ("subtitle_source", &subtitle_pipeline, "", subtitles && !file.subtitle_streams.is_empty()),
+                ] {
+                    if !needed || requests.len() >= 64 { continue; }
+                    let id = hex::encode(Sha256::digest(format!("plurx/prediction/v1:{}:{}:{}:{component}:{pipeline}:{node}", file.id, file.size, file.mtime)));
+                    requests.push(NewAnalysisRequest {
+                        request_id: id.clone(), file_id: file.id, source_size: file.size, source_mtime: file.mtime,
+                        component: component.into(), pipeline_version: pipeline.clone(), video_identity: String::new(),
+                        requested_generation: format!("predict:{id}"), priority: "normal".into(), trigger: "background".into(),
+                        force_rebuild: false, target_node_id: node.into(), not_before_ms: now, created_at_ms: now,
+                    });
+                }
+            }
+            publisher.sync_predictions(requests, desired_files).await?;
+            // The replicated intent precedes domain admission. If this owner
+            // crashes here another pass drains the same outbox; a retired
+            // intent cannot pass either backend's insert predicate.
+            for request in self.store.pending_predictions(clock_ms()).await? {
+                match self.store.enqueue_analysis_request(&request).await {
+                    Ok(_) => {},
+                    Err(error) => tracing::debug!(%error, file = request.file_id, component = request.component, "prediction outbox deferred"),
+                }
+            }
+            Ok(())
+        }.await;
+        drop(publisher);
+        let release = lease.release().await;
+        result?;
+        release.map(|_| ())
     }
 
     pub(super) async fn prepare_hot_copies(&self) -> Result<(), StoreError> {

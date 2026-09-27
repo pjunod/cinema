@@ -14,7 +14,9 @@ RETURNING result_json
 
 pub(super) const MAINTENANCE_NEEDED: &str = r#"
 SELECT json_object('needed', 1) AS result_json
-WHERE EXISTS (SELECT 1 FROM background_artwork_locations location
+WHERE EXISTS (SELECT 1 FROM background_predictions WHERE (state = 'pending' AND expires_ms <= json_extract($1,'$.now_ms'))
+    OR (state <> 'pending' AND updated_at_ms <= json_extract($1,'$.now_ms') - 604800000))
+ OR EXISTS (SELECT 1 FROM background_artwork_locations location
     WHERE verified_at_ms <= json_extract($1, '$.now_ms') - 604800000
       AND NOT EXISTS (SELECT 1 FROM background_jobs job WHERE job.state IN ('queued','running','cancelling')
         AND ((job.kind = 'artwork_derivative' AND json_extract(job.payload_json,'$.artifact_key') = location.artifact_key)

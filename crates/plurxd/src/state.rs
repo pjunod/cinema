@@ -5494,6 +5494,9 @@ impl JobManager {
             tracing::debug!("skipping a scheduler tick: this node is not a committed voter");
             return false;
         }
+        if let Err(error) = self.prepare_predictions().await {
+            tracing::warn!(%error, "predictive preparation deferred");
+        }
         if let Err(error) = self.prepare_hot_copies().await {
             tracing::warn!(%error, "hot artifact placement deferred");
         }

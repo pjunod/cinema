@@ -428,6 +428,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 params![stamp.file_id, stamp.source_size, stamp.source_mtime, stamp.pipeline_version], request_from_row,
             ).optional()?;
             if let Some(mut request) = existing {
+                tx.execute("UPDATE background_predictions SET state = 'adopted', updated_at_ms = ?1 WHERE request_id = ?2 AND state = 'pending'", params![now_ms, request.request_id])?;
                 if priority == "foreground" && request.state == "queued" && request.priority == "normal" {
                     tx.execute("UPDATE analysis_requests SET priority = 'foreground', trigger = 'playback', updated_at_ms = ?1 WHERE request_id = ?2 AND state = 'queued'", params![now_ms, request.request_id])?;
                     request.priority = "foreground".to_owned();
@@ -610,6 +611,15 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         NULL, 0, ?15, ?15
                   WHERE EXISTS (SELECT 1 FROM files
                                  WHERE id = ?2 AND size = ?3 AND mtime = ?4)
+                    AND (?8 NOT LIKE 'predict:%' OR EXISTS (
+                    SELECT 1 FROM background_predictions prediction WHERE prediction.request_id = ?1
+                      AND prediction.state = 'pending' AND prediction.expires_ms > ?15
+                      AND prediction.file_id = ?2
+                      AND json_extract(prediction.request_json,'$.source_size') = ?3
+                      AND json_extract(prediction.request_json,'$.source_mtime') = ?4
+                      AND json_extract(prediction.request_json,'$.component') = ?5
+                      AND json_extract(prediction.request_json,'$.pipeline_version') = ?6
+                      AND json_extract(prediction.request_json,'$.target_node_id') = ?12))
                     AND (SELECT COUNT(*) FROM analysis_requests
                           WHERE state IN ('queued', 'running', 'submitted')) < ?16
                     AND (?11 = 0 OR ?5 <> 'fragment_index' OR NOT EXISTS (
