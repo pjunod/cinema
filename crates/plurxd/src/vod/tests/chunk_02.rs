@@ -432,6 +432,39 @@
         write.await.expect("bounded head writer");
     }
 
+    /// The race test's hooks: the reaper holds the pause before its wait.
+    struct HeadReapPause(Arc<crate::seam_hooks::AsyncPause>);
+
+    impl crate::vodserve::session::HeadChildOwnerHooks for HeadReapPause {
+        fn before_reap(&self) -> crate::seam_hooks::HookFuture<'_> {
+            Box::pin(async move {
+                self.0.hold().await;
+            })
+        }
+    }
+
+    /// The race test's owner through the production constructor: the no-op
+    /// hook is ready at once, so terminating reaps the child promptly.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn head_child_owner_shipped_shape() {
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("deterministic head child");
+        let pid = child.id().expect("head child pid");
+        let mut owner = HeadChildOwner::new(child);
+        tokio::time::timeout(Duration::from_secs(5), owner.terminate_and_reap())
+            .await
+            .expect("the production reaper waits for the exit without pausing");
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn cancelled_build_waiter_cannot_release_same_key_before_confirmed_head_reap() {
@@ -439,7 +472,7 @@
         let serve = bare_serve(base.path());
         let key = "cancelled-head-key";
         let gate = serve.shared.rendition_build_gate(key);
-        let reap_pause = Arc::new(tokio::sync::Barrier::new(2));
+        let reap_pause = crate::seam_hooks::AsyncPause::new("head child before reap");
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let result = spawn_cancellation_independent({
             let reap_pause = Arc::clone(&reap_pause);
@@ -451,14 +484,18 @@
                     .spawn()
                     .expect("deterministic head child");
                 let pid = child.id().expect("head child pid");
-                let mut owner = HeadChildOwner::with_reap_pause(child, reap_pause);
+                let mut owner = HeadChildOwner::with_hooks(
+                    child,
+                    None,
+                    Arc::new(HeadReapPause(reap_pause)),
+                );
                 let _ = started_tx.send(pid);
                 owner.terminate_and_reap().await;
             }
         });
         let pid = started_rx.await.expect("head child started");
         drop(result); // the request waiting for the build result is cancelled
-        reap_pause.wait().await;
+        let held = reap_pause.reached().await;
 
         let retry_gate = serve.shared.rendition_build_gate(key);
         assert!(
@@ -467,7 +504,7 @@
                 .is_err(),
             "same-key retry cannot acquire spawn authority while reap is paused"
         );
-        reap_pause.wait().await;
+        held.release();
         let retry_gate = serve.shared.rendition_build_gate(key);
         let retry = tokio::time::timeout(Duration::from_secs(2), retry_gate.lock_owned())
             .await
@@ -1878,6 +1915,49 @@
         assert!(!serve.owns("sess-a").await);
     }
 
+    /// The race test's hooks: the final attachment holds the pause before
+    /// its commit check.
+    struct CommitPause(Arc<crate::seam_hooks::AsyncPause>);
+
+    impl crate::vodserve::VodServingAdmissionHooks for CommitPause {
+        fn before_commit(&self) -> crate::seam_hooks::HookFuture<'_> {
+            Box::pin(async move {
+                self.0.hold().await;
+            })
+        }
+    }
+
+    /// The race test's admission through the production constructor: the
+    /// no-op hook is ready at once, so the commit check answers for the
+    /// current serving generation and refuses once serving is lost.
+    #[tokio::test]
+    async fn vod_serving_admission_shipped_shape() {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+
+        let fence =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let authority = fence.authority();
+        let generation = authority.admit().expect("initial serving authority");
+        let admission = VodServingAdmission::new(
+            authority,
+            generation,
+            Instant::now() + Duration::from_secs(30),
+        );
+        let guard = tokio::time::timeout(Duration::from_secs(5), admission.commit_guard_before())
+            .await
+            .expect("the production hook does not hold the commit")
+            .expect("the current generation commits");
+        drop(guard);
+        fence.validation_set_ready(false).await;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), admission.commit_guard_before())
+                .await
+                .expect("the production hook does not hold the commit")
+                .is_none(),
+            "a lost serving generation is refused at the commit"
+        );
+    }
+
     #[tokio::test]
     async fn serving_loss_racing_final_cluster_attachment_leaves_no_session() {
         use plurx_core::cluster::migration::status::ReplicationMonitor;
@@ -1888,7 +1968,7 @@
             crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
         let authority = fence.authority();
         let generation = authority.admit().expect("initial serving authority");
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        let pause = crate::seam_hooks::AsyncPause::new("vod serving admission before commit");
         let create = tokio::spawn({
             let serve = Arc::clone(&serve);
             let file = file.clone();
@@ -1905,20 +1985,20 @@
                             supersession_user: "[\"user_id\",1]",
                         },
                         "cluster-fenced-session".to_owned(),
-                        VodServingAdmission::new(
+                        VodServingAdmission::with_hooks(
                             authority,
                             generation,
                             Instant::now() + Duration::from_secs(30),
-                        )
-                        .with_pause_before_commit(pause),
+                            Box::new(CommitPause(pause)),
+                        ),
                     )
                     .await
             }
         });
 
-        pause.wait().await;
+        let held = pause.reached().await;
         fence.validation_set_ready(false).await;
-        pause.wait().await;
+        held.release();
         let error = create
             .await
             .expect("cluster create task")

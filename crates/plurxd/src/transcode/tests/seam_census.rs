@@ -835,6 +835,15 @@ fn seam_census_of_the_workspace() {
                 || site.owner.starts_with("AttemptChild")
                 || site.owner.starts_with("RollingRetirementSettlement")
                 || site.owner.starts_with("DecodeFactSource")
+                || [
+                    "Encoding",
+                    "RollingFlowSync",
+                    "TerminalCleanup",
+                    "HeadChildOwner",
+                    "VodServingAdmission",
+                ]
+                .iter()
+                .any(|owner| site.owner == *owner || site.owner.starts_with(&format!("{owner}::")))
         })
         .collect();
     assert!(

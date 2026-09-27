@@ -329,6 +329,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn admission_query_plan_stays_bounded_as_adapters_are_added() {
+        let (_directory, _path, connection) = legacy_database();
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {ENQUEUE_SQL}"))
+            .expect("admission plan");
+        let steps = statement
+            .query_map(["{}"], |_| Ok(()))
+            .expect("plan rows")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("plan")
+            .len();
+        assert!(
+            steps <= 512,
+            "admission expanded into {steps} planner steps; materialize repeated single-row stages"
+        );
+    }
+
     #[tokio::test]
     async fn migration_overflow_retains_all_accepted_work_until_capacity_frees() {
         let (_directory, path, connection) = legacy_database();
@@ -369,6 +387,10 @@ mod tests {
             "foreground headroom remains available"
         );
         assert_eq!(full.awaiting_import, 260);
+        // Free precisely the overflow. Cancelling all 3,840 accepted jobs
+        // repeats unrelated cancellation coverage and dominates the fast lane;
+        // retaining the others also proves draining does not discard them.
+        let mut remaining = full.awaiting_import as usize;
         let mut cursor = None;
         loop {
             let page = store
@@ -380,7 +402,7 @@ mod tests {
                 })
                 .await
                 .expect("page");
-            for job in page.jobs {
+            for job in page.jobs.into_iter().take(remaining) {
                 store
                     .cancel_job(CancelJob {
                         job_id: job.id,
@@ -388,12 +410,14 @@ mod tests {
                     })
                     .await
                     .expect("free capacity");
+                remaining -= 1;
             }
             cursor = page.next_after_id;
-            if cursor.is_none() {
+            if remaining == 0 || cursor.is_none() {
                 break;
             }
         }
+        assert_eq!(remaining, 0, "freed the overflow capacity");
         for _ in 0..16 {
             store.import_legacy_jobs(3_000).await.expect("drain");
         }

@@ -2070,9 +2070,11 @@ impl SettingsStore for SqliteStore {
     ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
         let keys = super::selected_settings_json(keys)?;
         self.with_read(move |conn| {
-            let mut statement = conn.prepare("SELECT key, value FROM settings WHERE key IN (SELECT value FROM json_each(?1)) ORDER BY key")?;
-            let rows = statement.query_map(params![keys], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
-            rows.collect::<Result<_, _>>().map_err(StoreError::from)
+            // Keep the SQL and its binding in one statement so the placeholder
+            // census proves their arity instead of growing the unchecked set.
+            conn.prepare("SELECT key, value FROM settings WHERE key IN (SELECT value FROM json_each(?1)) ORDER BY key")?
+                .query_map(params![keys], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                .collect::<Result<_, _>>().map_err(StoreError::from)
         }).await
     }
 

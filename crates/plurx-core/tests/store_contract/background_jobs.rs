@@ -3866,7 +3866,7 @@ async fn background_integrity_repairs_retain_producers_and_stop_after_one_rebuil
         store
             .settle_job(SettleJob {
                 token,
-                settlement: JobSettlement::Stop {
+                settlement: JobSettlement::Fail {
                     error_code: "no_valid_peer".into(),
                 },
                 now_ms: now + 3,
@@ -3887,7 +3887,7 @@ async fn background_integrity_repairs_retain_producers_and_stop_after_one_rebuil
         store
             .settle_job(SettleJob {
                 token,
-                settlement: JobSettlement::Stop {
+                settlement: JobSettlement::Fail {
                     error_code: "producer_failed".into(),
                 },
                 now_ms: now + 6,
@@ -4014,7 +4014,7 @@ async fn background_artwork_verification_repairs_copy_then_rebuild_then_deliver(
                 store
                     .settle_job(SettleJob {
                         token,
-                        settlement: JobSettlement::Stop {
+                        settlement: JobSettlement::Fail {
                             error_code: "no_valid_peer".into(),
                         },
                         now_ms: now + 1,
