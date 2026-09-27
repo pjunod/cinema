@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 and E0 merged; E1 verified cache copies in construction · **Updated:** 2026-09-26 ·
+**Status:** M1–M3 and E0 merged; E1 verified cache copies in construction · **Updated:** 2026-09-27 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` · **E1:** `codex/cluster-cache-preparation` ·
 **Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) · **E1:** [#566 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/566)
 
@@ -780,3 +780,10 @@ continue E1–E3.
   sites now load the shared prelude; the full playback-control, player-DOM and
   Live TV web checks pass. This is a harness correction, with no product change
   and no second adversarial review. The corrected candidate must rerun the lane.
+
+- 2026-09-27: main advanced to `24a268339` with K-08's bounded semantic
+  inference pool while E1 run 3337 was executing. Integrated that current main
+  into E1 without conflicts. The prior candidate has green preflight, Windows
+  and web jobs; Rust was still running. The merged candidate requires a fresh
+  fast lane. E2's embeddings and leaf probes are committed separately on
+  `codex/cluster-batch-analysis` in draft PR #567; scheduled repair remains open.
