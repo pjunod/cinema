@@ -1611,6 +1611,24 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "background_artwork_locations",
+        columns: &[
+            "artifact_key",
+            "node_id",
+            "spec_json",
+            "blob_sha256",
+            "bytes",
+            "built_by_node_id",
+            "built_at_ms",
+            "verified_at_ms",
+        ],
+        order_by: "artifact_key, node_id",
+        minimum_schema: super::background_jobs_artwork::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "background_library_requests",
         columns: &[
             "request_id",

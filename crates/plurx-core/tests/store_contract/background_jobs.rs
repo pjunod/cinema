@@ -2382,3 +2382,235 @@ async fn background_subtitle_admin_retry_and_later_intents_remain_admissible() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn background_artwork_publication_fences_builds_and_completes_verified_delivery() {
+    use plurx_core::store::background_jobs_artwork::{
+        ArtworkLocation, ArtworkVariantSpec, PublishArtworkJob, ARTWORK_PIPELINE,
+    };
+    for_each_backend(|store, backend| async move {
+        let spec = ArtworkVariantSpec {
+            source_name: "poster.png".into(),
+            source_sha256: "a".repeat(64),
+            width: 300,
+            format: "png".into(),
+            pipeline: ARTWORK_PIPELINE.into(),
+        };
+        let key = spec.artifact_key();
+        let id = uuid::Uuid::new_v4().to_string();
+        for (index, node) in ["node-a", "node-b"].iter().enumerate() {
+            let mut alias = spec.clone();
+            if index == 1 {
+                alias.source_name = "alias.png".into();
+            }
+            assert_eq!(alias.artifact_key(), key);
+            let admitted = store
+                .enqueue_job(EnqueueJob {
+                    id: if index == 0 {
+                        id.clone()
+                    } else {
+                        uuid::Uuid::new_v4().to_string()
+                    },
+                    payload: JobPayload::ArtworkDerivative {
+                        artifact_key: key.clone(),
+                        spec: alias,
+                    },
+                    dedupe_key: format!("artwork:{key}"),
+                    priority: 1,
+                    not_before_ms: 1000,
+                    now_ms: 1000,
+                    request: JobRequest {
+                        scope: "artwork".into(),
+                        request_id: node.to_string(),
+                        request_digest: key.clone(),
+                        consumer_kind: "artwork".into(),
+                        consumer_ref: key.clone(),
+                        target_node_id: Some(node.to_string()),
+                        deadline_ms: Some(100_000),
+                        retain_identity: false,
+                    },
+                })
+                .await
+                .expect("enqueue");
+            assert!(
+                matches!(admitted, EnqueueOutcome::Accepted { job_id, .. } if job_id == id),
+                "{backend}"
+            );
+        }
+        let ClaimOutcome::Claimed { job } = store
+            .claim_job(ClaimJob {
+                job_id: id.clone(),
+                expected_revision: 0,
+                node_id: "node-a".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::ArtworkDerivative,
+                payload_version: 1,
+                now_ms: 1000,
+                dispatched_at_ms: 1000,
+            })
+            .await
+            .expect("claim")
+        else {
+            panic!("{backend}: claim")
+        };
+        let publication = PublishArtworkJob {
+            token: job.token.expect("token"),
+            now_ms: 2000,
+            location: ArtworkLocation {
+                artifact_key: key.clone(),
+                node_id: "node-a".into(),
+                spec: spec.clone(),
+                blob_sha256: "b".repeat(64),
+                bytes: 123,
+                built_by_node_id: "node-a".into(),
+                built_at_ms: 2000,
+                verified_at_ms: 2000,
+            },
+        };
+        let mut forged = publication.clone();
+        forged.token.fence += 1;
+        assert!(matches!(
+            store.publish_artwork_job(forged).await.expect("fenced"),
+            JobPublishOutcome::LostOwnership
+        ));
+        assert!(store
+            .artwork_locations(&key, 2000)
+            .await
+            .expect("empty")
+            .is_empty());
+        assert!(matches!(
+            store
+                .publish_artwork_job(publication.clone())
+                .await
+                .expect("publish"),
+            JobPublishOutcome::Published { .. }
+        ));
+        let mut replay = publication.clone();
+        replay.now_ms += 1;
+        replay.location.verified_at_ms += 1;
+        assert!(matches!(
+            store.publish_artwork_job(replay).await.expect("lost reply"),
+            JobPublishOutcome::AlreadyPublished { .. }
+        ));
+        let waiters = store
+            .job_waiters(WaiterQuery {
+                job_id: id.clone(),
+                after: None,
+                limit: 10,
+            })
+            .await
+            .expect("waiters")
+            .waiters;
+        assert_eq!(
+            waiters
+                .iter()
+                .find(|w| w.request_id == "node-a")
+                .expect("local")
+                .state,
+            "succeeded"
+        );
+        assert_eq!(
+            waiters
+                .iter()
+                .find(|w| w.request_id == "node-b")
+                .expect("remote")
+                .state,
+            "awaiting_hydration"
+        );
+        let intents = store.delivery_intents(3000).await.expect("outbox");
+        let delivery = intents
+            .into_iter()
+            .find(|i| i.artifact_key == format!("artwork:{key}"))
+            .expect("artwork delivery");
+        let EnqueueOutcome::Accepted {
+            job_id: hydration, ..
+        } = store
+            .enqueue_delivery(delivery, 3000)
+            .await
+            .expect("admit delivery")
+        else {
+            panic!("delivery")
+        };
+        let claim = ClaimJob {
+            job_id: hydration.clone(),
+            expected_revision: 0,
+            node_id: "node-a".into(),
+            boot_id: uuid::Uuid::new_v4().to_string(),
+            claim_id: uuid::Uuid::new_v4().to_string(),
+            kind: JobKind::ArtifactHydrate,
+            payload_version: 1,
+            now_ms: 3000,
+            dispatched_at_ms: 3000,
+        };
+        assert!(!matches!(
+            store.claim_job(claim.clone()).await.expect("wrong target"),
+            ClaimOutcome::Claimed { .. }
+        ));
+        let ClaimOutcome::Claimed { job } = store
+            .claim_job(ClaimJob {
+                node_id: "node-b".into(),
+                ..claim
+            })
+            .await
+            .expect("hydrate")
+        else {
+            panic!("hydrate claim")
+        };
+        let mut received = publication.clone();
+        received.token = job.token.expect("token");
+        received.now_ms = 4000;
+        received.location.node_id = "node-b".into();
+        received.location.verified_at_ms = 4000;
+        let mut corrupt = received.clone();
+        corrupt.location.blob_sha256 = "c".repeat(64);
+        assert!(!matches!(
+            store
+                .publish_artwork_job(corrupt)
+                .await
+                .expect("corrupt transfer"),
+            JobPublishOutcome::Published { .. }
+        ));
+        assert!(matches!(
+            store
+                .publish_artwork_job(received)
+                .await
+                .expect("verified copy"),
+            JobPublishOutcome::Published { .. }
+        ));
+        assert_eq!(
+            store
+                .artwork_locations(&key, 4000)
+                .await
+                .expect("two holders")
+                .len(),
+            2
+        );
+        assert!(store
+            .job_waiters(WaiterQuery {
+                job_id: id,
+                after: None,
+                limit: 10
+            })
+            .await
+            .expect("receipts")
+            .waiters
+            .iter()
+            .all(|w| w.state == "succeeded"));
+        assert!(store
+            .delivery_intents(4000)
+            .await
+            .expect("drained")
+            .is_empty());
+        let mut future = spec;
+        future.pipeline = "ffmpeg-lanczos-fit-v2".into();
+        assert_ne!(future.artifact_key(), key);
+        store.maintain_jobs(700_000_000).await.expect("retention");
+        assert!(store
+            .artwork_locations(&key, 700_000_000)
+            .await
+            .expect("expired")
+            .is_empty());
+    })
+    .await;
+}

@@ -183,7 +183,7 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
       SELECT 1 FROM background_job_waiters WHERE job_id = json_extract(body, '$.delivery_parent')
         AND target_node_id = json_extract(body, '$.payload.target_node_id') AND state = 'awaiting_hydration'
         AND (deadline_ms IS NULL OR deadline_ms > json_extract(body, '$.now_ms'))
-        AND CASE WHEN json_valid(result_ref) THEN 'fragment:' || json_extract(result_ref, '$.artifact_key') END = json_extract(body, '$.payload.artifact_key')
+        AND CASE WHEN json_valid(result_ref) THEN CASE json_extract(result_ref, '$.artifact_kind') WHEN 'fragment_index' THEN 'fragment:' WHEN 'artwork' THEN 'artwork:' END || json_extract(result_ref, '$.artifact_key') END = json_extract(body, '$.payload.artifact_key')
     ) THEN 'no_demand'
     WHEN json_type(body, '$.fragment_domain') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM files WHERE id = json_extract(body, '$.fragment_domain.file_id')
@@ -223,7 +223,7 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
           AND state IN ('failed','cancelled')
           AND (COALESCE(last_error_code, '') != 'queue_expired' OR index_retry_deadline_ms != 0)) THEN 'domain_terminal'
     WHEN active_state = 'cancelling' THEN 'job_cancelling'
-    WHEN active_job IS NOT NULL AND json_remove(active_payload, '$.reason') != json_remove(json_extract(body, '$.payload'), '$.reason') THEN 'conflict'
+    WHEN active_job IS NOT NULL AND json_remove(active_payload, '$.reason', '$.spec.source_name') != json_remove(json_extract(body, '$.payload'), '$.reason', '$.spec.source_name') THEN 'conflict'
     WHEN json_type(body, '$.legacy_key') IS NULL AND EXISTS (SELECT 1 FROM background_jobs WHERE id = json_extract(body, '$.id')) THEN 'conflict'
     WHEN json_type(body, '$.legacy_key') IS NULL AND json_extract(body, '$.priority') < 2
       AND EXISTS (SELECT 1 FROM background_job_legacy WHERE state = 'awaiting_import') THEN 'queue_full'
@@ -461,8 +461,7 @@ pub enum JobPayload {
     },
     ArtworkDerivative {
         artifact_key: String,
-        width: u32,
-        height: u32,
+        spec: super::background_jobs_artwork::ArtworkVariantSpec,
     },
     SemanticEmbedding {
         item_id: i64,
@@ -572,14 +571,8 @@ impl JobPayload {
                 library_id,
                 generation,
             } => *library_id > 0 && identifier(generation),
-            Self::ArtworkDerivative {
-                artifact_key,
-                width,
-                height,
-            } => {
-                identifier(artifact_key)
-                    && (1..=8_192).contains(width)
-                    && (1..=8_192).contains(height)
+            Self::ArtworkDerivative { artifact_key, spec } => {
+                spec.validate().is_ok() && *artifact_key == spec.artifact_key()
             }
             Self::SemanticEmbedding {
                 item_id,
@@ -955,6 +948,16 @@ pub struct CancelWaiterOutcome {
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    async fn artwork_locations(
+        &self,
+        artifact_key: &str,
+        now_ms: i64,
+    ) -> Result<Vec<super::background_jobs_artwork::ArtworkLocation>, StoreError>;
+    async fn publish_artwork_job(
+        &self,
+        request: super::background_jobs_artwork::PublishArtworkJob,
+    ) -> Result<JobPublishOutcome, StoreError>;
+
     /// Pending compatibility records are an outbox; only the common queue executes them.
     async fn subtitle_job_intents(&self, limit: usize) -> Result<Vec<String>, StoreError>;
     async fn enqueue_subtitle_job(
@@ -1124,6 +1127,20 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn artwork_locations(
+        &self,
+        artifact_key: &str,
+        now_ms: i64,
+    ) -> Result<Vec<super::background_jobs_artwork::ArtworkLocation>, StoreError> {
+        super::background_jobs_artwork::locations(self, artifact_key, now_ms).await
+    }
+    async fn publish_artwork_job(
+        &self,
+        request: super::background_jobs_artwork::PublishArtworkJob,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        super::background_jobs_artwork::publish(self, request).await
+    }
+
     async fn subtitle_job_intents(&self, limit: usize) -> Result<Vec<String>, StoreError> {
         super::background_jobs_subtitle::intents(self, limit).await
     }
@@ -1282,6 +1299,7 @@ impl<T: QueueSql> BackgroundJobStore for T {
             || !intent
                 .artifact_key
                 .strip_prefix("fragment:")
+                .or_else(|| intent.artifact_key.strip_prefix("artwork:"))
                 .is_some_and(digest)
         {
             return Err(invalid("invalid background delivery intent"));

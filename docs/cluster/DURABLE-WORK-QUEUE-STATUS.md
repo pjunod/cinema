@@ -18,7 +18,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | M2 fragment analysis and hydration | Implemented; focused validation passed | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
 | M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
 | E0 subtitle and library workers | Adapters implemented; construction checks passed | Library work, storage/provider budgets, learner authority and all-track subtitle extraction are connected. Integrated current main; PR #564 received five findings; fixes and regressions are implemented. 17 queue contracts and nine cancellation regressions passed; CI pending |
-| E1 reads, caches, prediction, artwork | Read path in construction | Browser write-floor echo, normal bounded reads and advisory Developer opt-out implemented; construction checks underway. Cache/prediction/artwork work remains |
+| E1 reads, caches, prediction, artwork | Read path and artwork storage in construction | Browser write-floor echo, normal bounded reads and advisory Developer opt-out implemented; construction checks underway. Cache/prediction/artwork work remains |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
 | Final adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
@@ -631,3 +631,11 @@ continue E1–E3.
   the isolated Hiqlite spike lockfile lacked core's new cancellation dependency.
   Refreshed only that workspace dependency list; both isolated lockfiles pass
   `make spike-lock-check` with Rust 1.97.1. No dependency version changed.
+
+- 2026-09-26: E1 adds typed immutable artwork identities, bounded verified-holder
+  records, exact-attempt publication and target-specific delivery receipts on
+  SQLite 77 / Hiqlite 55. Import, replicated-state digest and retention include
+  the new records. Source aliases share a content identity; pipeline changes
+  create a different one. The cross-backend contract is written, not executed.
+  HTTP admission, byte transfer and the worker are still under construction;
+  this storage commit alone does not move image generation off requests.
