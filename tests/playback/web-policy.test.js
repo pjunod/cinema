@@ -2601,11 +2601,14 @@ test("healthy producer capacity evidence survives an empty-runway urgency signal
 });
 
 test("recovery holds for 45 seconds, moves up once, and respects pixel height", () => {
+  // The next 1080p rung peaks at 12,160 kb/s. Recovery needs 1.8x fresh
+  // measured peak headroom, so 16,000 kb/s cannot start the hold anymore.
+  const recoveredKbps = 24_000;
   const first = policy.decideRung({
     ladder: serverLadder,
     currentHeight: 720,
-    estimateKbps: 16_000,
-    recentEstimateKbps: 16_000,
+    estimateKbps: recoveredKbps,
+    recentEstimateKbps: recoveredKbps,
     recentEstimateAtMs: 59_000,
     runwaySeconds: 20,
     nowMs: 60_000,
@@ -2617,8 +2620,8 @@ test("recovery holds for 45 seconds, moves up once, and respects pixel height", 
   const upgrade = policy.decideRung({
     ladder: serverLadder,
     currentHeight: 720,
-    estimateKbps: 16_000,
-    recentEstimateKbps: 16_000,
+    estimateKbps: recoveredKbps,
+    recentEstimateKbps: recoveredKbps,
     recentEstimateAtMs: 104_000,
     runwaySeconds: 20,
     nowMs: 105_000,
@@ -2631,8 +2634,8 @@ test("recovery holds for 45 seconds, moves up once, and respects pixel height", 
   const dwell = policy.decideRung({
     ladder: serverLadder,
     currentHeight: 720,
-    estimateKbps: 16_000,
-    recentEstimateKbps: 16_000,
+    estimateKbps: recoveredKbps,
+    recentEstimateKbps: recoveredKbps,
     recentEstimateAtMs: 114_000,
     runwaySeconds: 20,
     nowMs: 115_000,
@@ -2644,8 +2647,8 @@ test("recovery holds for 45 seconds, moves up once, and respects pixel height", 
   const capped = policy.decideRung({
     ladder: serverLadder,
     currentHeight: 480,
-    estimateKbps: 16_000,
-    recentEstimateKbps: 16_000,
+    estimateKbps: recoveredKbps,
+    recentEstimateKbps: recoveredKbps,
     recentEstimateAtMs: 119_000,
     runwaySeconds: 20,
     playerHeight: 700,
@@ -5771,6 +5774,8 @@ test("an upgrade needs encode headroom, not just a bandwidth estimate", () => {
     ladder,
     currentHeight: 720,
     estimateKbps: 200_000,
+    recentEstimateKbps: 200_000,
+    recentEstimateAtMs: 499_000,
     runwaySeconds: 40,
     previousRunwaySeconds: 40,
     nowMs: 500_000,

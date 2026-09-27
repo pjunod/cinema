@@ -657,7 +657,7 @@ function preparedAlignedBuffered(spare){
 // a queued pre-seek frame can otherwise step the visible picture backward.
 // Keep the incumbent's audio with its visible picture through this proof.
 function exposePreparedReplacementAtFrame(p,state,v,spare){
-  if(typeof spare.requestVideoFrameCallback!=="function")
+  if(!streamHasVideo(p,spare)||typeof spare.requestVideoFrameCallback!=="function")
     return exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
   // Buffer readiness can precede the first warm callback. The aligned,
   // advancing frame proof below is the actual presentation evidence; rejecting
