@@ -639,7 +639,10 @@ expected_occurrences = 8
 [[module_symbols]]
 id = "m4-decision-transport"
 pattern = "RollingDecisionTransport"
-expected_occurrences = 6
+# 6 -> 7 with S-14 M8's control group: the owner's name as a string in
+# `seam_census_of_the_workspace`'s migrated-owner list. No transport was
+# constructed and nothing new holds one.
+expected_occurrences = 7
 
 [[module_symbols]]
 id = "m4-first-media-publication-handoff"
@@ -1600,7 +1603,7 @@ id = "namespaced-task-spawn"
 # before retirement), plus two joined race/process fixtures; ffmpeg.rs adds a
 # joined cancellation fixture. main.rs starts the daemon-owned consumer loop.
 # state.rs removes two domain heartbeats and adds guarded upkeep (-1 net).
-pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
+pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # 348 since M2: the Dolby Vision facts backfill is spawned from the per-tick
 # maintenance block beside the genre backfill. It is a leased catalogue job
 # (`catalogue:dv-facts`) that walks a node-local cursor and writes columns —
@@ -2211,7 +2214,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # on the merge of main into #562. Main's additions and this branch's coexist unchanged; the merge adds no new site.
 # main @ 1d70a1fed has 649; with S-14 M8's +4 reviewed above -> 653, measured by zeroing this row
 # on the merge of main into #562. Main's E0 fixtures and this branch's coexist unchanged; the merge adds no new site.
-expected_occurrences = 653
+# S-14 M8 control group: the pattern also matches `::spawn_for_test(`, the
+# test constructors that build a `RollingControlHandle` with the test hooks
+# (`spawn_for_test`, `spawn_prepublication_producer_for_test`,
+# `spawn_prepublication_transcode_for_test`). They spawn the same actor task
+# (and, for `spawn_for_test`, the same passive executor) as the production
+# constructors, so the 47 test call sites renamed from `::spawn(` stay counted
+# here; without the alias the count would have fallen to 607 while the tasks
+# stayed. 653 -> 654: `rolling_control_group_shipped_shape` builds one handle
+# through the production `RollingControlHandle::spawn`; the handle is dropped
+# and its actor exits through the exit fence before the test returns.
+expected_occurrences = 654
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -3172,7 +3185,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # on the merge of main into #562. Main's additions and this branch's coexist unchanged; the merge adds no new site.
 # main @ 1d70a1fed has 1036; with S-14 M8's +8 reviewed above -> 1044, measured by zeroing this row
 # on the merge of main into #562. Main's E0 sites and this branch's coexist unchanged; the merge adds no new site.
-expected_occurrences = 1044
+# 1044 -> 1049 with S-14 M8: four `tokio::time::timeout` bounds in
+# `rolling_control_group_shipped_shape` (the attempt, the decision install,
+# the terminal command and the exit fence's retirement) and one in
+# `started_session_cleanup_shipped_shape` (the race test's one-second bound on
+# reacquiring the replacement gate). All are test-side bounds; no production
+# timer was added.
+expected_occurrences = 1049
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -4080,7 +4099,14 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # added or removed.
 # main @ `d4fa763c7` has 400; with S-14 M8's -24 (above) -> 376, measured by zeroing this row
 # on the merge of main into #562. Main's additions and this branch's coexist unchanged; the merge adds no new site.
-expected_occurrences = 376
+# 376 -> 352 with S-14 M8 (net -24, all `Barrier::wait` calls removed): the
+# executor's two pauses (two waits each) and the deferred attempt reply's
+# pause (two waits) left the production functions for the control group's
+# hooks, and nine race tests (six in `playback_control.rs`, one in
+# `transcode/tests/chunk_04.rs`, two in `chunk_06.rs`) moved from Barrier
+# pairs to `seam_hooks::AsyncPause` (two waits each). No kill, wait or reap of
+# a process changed.
+expected_occurrences = 352
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
