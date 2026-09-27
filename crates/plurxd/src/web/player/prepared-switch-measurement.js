@@ -98,6 +98,7 @@ function rollbackPreparedReplacement(p,state,successor){
   const retired=predecessor.element, successorHls=state.hls;
   state.predecessor=null;
   p.hls=predecessor.hls;
+  resumePreparedIncumbentLoad(p,state);
   p.sessionId=predecessor.sessionId;
   p.probeUrl=predecessor.probeUrl;
   p.offset=predecessor.offset;
@@ -276,10 +277,18 @@ function abandonPreparedReplacement(p,ackState,reason){
 }
 function freePreparedReplacement(p,state){
   if(preparedState(p)!==state) return;
+  resumePreparedIncumbentLoad(p,state);
   p.prepared=null;
   markPreparedSettlement(p,state.actionId);
   const spare=preparedVideoElement();
   if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+  if(state.exposeFrameTimer!=null){ clearTimeout(state.exposeFrameTimer); state.exposeFrameTimer=null; }
+  if(spare&&state.exposeFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
+    try{ spare.cancelVideoFrameCallback(state.exposeFrameCallbackId); }catch(e){}
+  state.exposeFrameCallbackId=null;
+  if(spare&&state.warmFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
+    try{ spare.cancelVideoFrameCallback(state.warmFrameCallbackId); }catch(e){}
+  state.warmFrameCallbackId=null;
   if(state.framePollTimer!=null){ clearTimeout(state.framePollTimer); state.framePollTimer=null; }
   if(state.frameListener&&spare){
     try{ spare.removeEventListener("timeupdate",state.frameListener); }catch(e){}

@@ -1951,7 +1951,13 @@ class FirefoxDriver {
   }
 
   exec(script, args = []) {
-    return this.wd("POST", `/session/${this.sessionId}/execute/sync`, { script, args });
+    // Firefox WebDriver evaluates in an isolated realm, where top-level `let`
+    // bindings such as CAPS_Q are invisible. window.eval enters the page realm.
+    const source = `(function(){${script}\n}).apply(null,${JSON.stringify(args)})`;
+    return this.wd("POST", `/session/${this.sessionId}/execute/sync`, {
+      script: "return window.eval(arguments[0]);",
+      args: [source],
+    });
   }
 
   eval(expression) {
@@ -2002,6 +2008,8 @@ function playerSnapshotExpression() {
       playerGeneration=labPlayers.ids.get(playerObject);
     }
     const v=document.getElementById('video');
+    if(v&&globalThis.__plurxLabInstallVideoProbe)
+      globalThis.__plurxLabInstallVideoProbe(v);
     const h=p.hitches||{};
     const hitchCount=(h.back||0)+(h.held||0)+(h.late||0)+(h.drop||0)+(h.gap||0);
     if(!labPlayers.rollup) labPlayers.rollup={object:null,closed_stalls:0,closed_hitches:0,
@@ -2035,7 +2043,14 @@ function playerSnapshotExpression() {
       lifetime_hitches:typeof PLAYBACK_LIFETIME_HITCHES==='undefined'
         ?rollup.closed_hitches+rollup.last_hitches:PLAYBACK_LIFETIME_HITCHES,
       stalls_by_kind:p.stallsByKind||{supply:0,decode:0}, buffer_limits:p.bufferLimits||{},
-      stall_recoveries:p.stallRecoveries||0, recovering_stall:p.recoveringStall||null,
+      stall_recoveries:p.stallRecoveries||0,
+      // The runtime snapshot contains player:p and therefore a cycle.
+      // WebDriver serializes this return value; copying the runtime object
+      // aborts the entire trace exactly when a persistent stall is observed.
+      recovering_stall:p.recoveringStall?{
+        kind:p.recoveringStall.kind||null,action:p.recoveringStall.action||null,
+        position:p.recoveringStall.position??null,
+        target_height:p.recoveringStall.targetHeight??null}:null,
       hitches:{back:h.back||0,held:h.held||0,late:h.late||0,drop:h.drop||0,gap:h.gap||0,slow:h.slow||0,rate:h.rate==null?null:h.rate},
       decode:p.decodeInfo||null, health:p.health||null,
       source:p.source||null, audio_count:(p.audio||[]).length, subtitle_count:(p.subs||[]).length,
@@ -2069,7 +2084,14 @@ async function prepareBrowser(driver, token) {
   // `play` and `CAPS_Q` live in decode-tiers.js, ten rows before the watch
   // presentation declares the bindings that play() reads. A shaped proxy can
   // still be delivering those later rows after the early functions exist.
-  await waitFor(() => driver.eval("document.readyState === 'complete' && typeof play === 'function' && typeof CAPS_Q === 'string' && typeof watchPrepare === 'function' && typeof render === 'function'"), 30_000, "complete player code");
+  try {
+    await waitFor(() => driver.eval("document.readyState === 'complete' && typeof play === 'function' && typeof CAPS_Q === 'string' && typeof watchPrepare === 'function' && typeof render === 'function'"), 30_000, "complete player code");
+  } catch (error) {
+    const state = await driver.eval(`({ready:document.readyState,
+      play:typeof play,caps:typeof CAPS_Q,prepare:typeof watchPrepare,
+      render:typeof render,scripts:document.scripts.length})`).catch(() => null);
+    throw new Error(`${error.message}; browser state ${JSON.stringify(state)}`);
+  }
   return driver.eval(`({browser:browserLabel(),user_agent:navigator.userAgent,caps:PLAY_CAPS,caps_q:CAPS_Q,
     native_hls:useNativeHls(document.getElementById('video')),mse:!!(window.MediaSource&&window.Hls&&Hls.isSupported())})`);
 }
@@ -2079,11 +2101,12 @@ async function setCasePreferences(driver, quality) {
     try{closePlayer()}catch(e){}
     globalThis.__plurxLabMediaEvents=[];
     globalThis.__plurxLabMediaEventSeq=globalThis.__plurxLabMediaEventSeq||0;
-    { const v=document.getElementById('video');
+    globalThis.__plurxLabInstallVideoProbe=(v)=>{
       if(v&&!v.__plurxLabEvents){
         v.__plurxLabEvents=true;
         for(const event of ['play','playing','pause','waiting','stalled','suspend','ended','abort','emptied'])
           v.addEventListener(event,()=>{
+            if(document.getElementById('video')!==v) return;
             const p=(typeof PLAYER!=='undefined'&&PLAYER)||{};
             globalThis.__plurxLabMediaEvents.push({seq:++globalThis.__plurxLabMediaEventSeq,
               event,at_ms:Math.round(performance.now()),
@@ -2095,9 +2118,11 @@ async function setCasePreferences(driver, quality) {
       }
       if(v&&typeof v.requestVideoFrameCallback==='function'&&!v.__plurxLabFrameProbe){
         v.__plurxLabFrameProbe=true;
-        globalThis.__plurxLabFrameProbe={supported:true,sequence:0,last_frame_at_ms:null,
-          maximum_gap_ms:0,frames:0,last_frame:null,auto_presentations:[]};
+        if(!globalThis.__plurxLabFrameProbe||!globalThis.__plurxLabFrameProbe.supported)
+          globalThis.__plurxLabFrameProbe={supported:true,sequence:0,last_frame_at_ms:null,
+            maximum_gap_ms:0,frames:0,last_frame:null,auto_presentations:[]};
         const frame=(now,metadata)=>{
+          if(document.getElementById('video')!==v) return;
           const probe=globalThis.__plurxLabFrameProbe;
           if(probe){
             if(probe.last_frame_at_ms!=null)
@@ -2135,7 +2160,8 @@ async function setCasePreferences(driver, quality) {
       }else if(!globalThis.__plurxLabFrameProbe){
         globalThis.__plurxLabFrameProbe={supported:false,last_frame_at_ms:null,maximum_gap_ms:0,frames:0};
       }
-    }
+    };
+    globalThis.__plurxLabInstallVideoProbe(document.getElementById('video'));
     localStorage.setItem('plurx_quality', ${JSON.stringify(quality)});
     localStorage.setItem('plurx_autonext', '0');
     localStorage.setItem('plurx_autoskip', '0');

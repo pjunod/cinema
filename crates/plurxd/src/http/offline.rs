@@ -2261,7 +2261,14 @@ mod tests {
         assert_eq!(available.file_id, fixture.file.id);
         assert_eq!(available.recommended_audio_index, Some(1));
         assert_eq!(available.recommended_subtitle_index, Some(4));
-        assert_eq!(available.qualities.len(), 4);
+        assert_eq!(
+            available
+                .qualities
+                .iter()
+                .map(|quality| quality.height)
+                .collect::<Vec<_>>(),
+            vec![1080, 720, 480, 360, 240, 144],
+        );
         assert_eq!(available.qualities[0].height, 1080);
         assert_eq!(available.qualities[0].label, "High");
         assert!(available.qualities[0].reserved_bytes > available.qualities[0].estimated_bytes);
