@@ -725,13 +725,14 @@ throughput as a fraction of the best size in the same run:
 | Review disposition, run 1 | 2.3 before, 3.2 after | 34.6 | 23.0 | 19.9 | 18.0 | 18.7 | 78% |
 | Review disposition, run 2 | 3.2 before, 4.0 after | 34.0 | 23.7 | 20.1 | 18.0 | 17.6 | 74% |
 | Review disposition, just after a build | 2.5 before, 6.2 after | 38.7 | 26.8 | 24.7 | 21.7 | 23.6 | 81% |
+| Review disposition, final gate run with the other two model tests | not recorded | 34.7 | 24.1 | 21.5 | 20.6 | 20.7 | 86% |
 | Same command without the `--config` override | 6.2 after | 801.8 | 360.3 | 225.0 | 166.0 | 128.5 | 28% |
 
-So, optimized, two threads keep about three quarters of the best
-throughput (74% to 81% across four runs). Eight threads are the fastest
-and sixteen buy nothing more, because a title-length input gives gemm
-little to split. The price of the bound is about 5 ms per text, around
-23 ms instead of 18 ms, which is far inside `related`'s 2 s timeout. In
+So, optimized, two threads keep three quarters or more of the best
+throughput (74% to 86% across five runs). Eight threads are the fastest
+or level with sixteen, because a title-length input gives gemm
+little to split. The price of the bound is 3.5 to 6 ms per text (23 to
+27 ms instead of 18 to 22 ms), far inside `related`'s 2 s timeout. In
 exchange, one forward pass can take at most two cores from a concurrent
 transcode. Without the override the curve is still falling at sixteen
 threads and argues the opposite choice, so an unoptimized run is not
@@ -1165,7 +1166,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 (d) · `65334fed8` | [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558) | `on_embed_pool`: inference runs on two named `plurx-embed` threads through `install`; the global pool is never built. `inference_runs_on_its_own_bounded_pool` passes, and fails with the pool bypassed (`current_num_threads()` is not 2). `embed_thread_scaling`: 45.5 / 37.0 / 34.8 / 34.7 / 36.1 ms per text at 1 / 2 / 4 / 8 / 16 threads. `rg build_global crates/` is empty. Fleet check: the (d) GPT prompt in §5.6. |
 | 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 (b), (c) | [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558) | Declined on M0's numbers (§3.7(c) decision): cold workspace check 102.6 s shipped vs 101.6 s lean, warm-cache plurxd rebuild 82.1 s vs 85.9 s, and (c)'s required second check would make the lane do more work, not less. Lean probe `73acf4feb` was measurement only; its branch is deleted. `onig` stays until candle stops forcing it. |
 | 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 | [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558) | Unchanged: needs public upstream issues/PRs for the generic rows (owner). |
-| 2026-09-27 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | review ([comment 5513](http://192.168.4.7:3000/noirr/plurx/pulls/558#issuecomment-5513)) | [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558) | One P2, taken. The M5 (d) row's thread-scaling numbers were measured at opt-level 3 applied outside the tree, and a plain run of the committed test (opt-level 0) gives 802 / 360 / 225 / 166 / 129 ms per text, which argues for more threads. The exact command (`--config 'profile.dev.package."*".opt-level=3'`) is now in the test's doc comment and ignore reason and in §3.7(d), and it was rerun that way three times on the merged head: two threads keep 74% to 81% of the best throughput, not 94%. `EMBED_THREADS = 2` is now described as a chosen CPU bound whose cost is measured (about 5 ms per text), not a near-optimum. No code behaviour changed. |
+| 2026-09-27 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | review ([comment 5513](http://192.168.4.7:3000/noirr/plurx/pulls/558#issuecomment-5513)) | [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558) | One P2, taken. The M5 (d) row's thread-scaling numbers were measured at opt-level 3 applied outside the tree, and a plain run of the committed test (opt-level 0) gives 802 / 360 / 225 / 166 / 129 ms per text, which argues for more threads. The exact command (`--config 'profile.dev.package."*".opt-level=3'`) is now in the test's doc comment and ignore reason and in §3.7(d), and it was rerun that way four times on the merged head: two threads keep 74% to 86% of the best throughput, not 94%. `EMBED_THREADS = 2` is now described as a chosen CPU bound whose cost is measured (3.5 to 6 ms per text), not a near-optimum. No code behaviour changed. |
 
 M4 lab-corpus corroboration (optional; the structural result already covers
 every input):

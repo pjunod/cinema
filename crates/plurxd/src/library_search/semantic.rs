@@ -83,10 +83,10 @@ impl Encoder {
 /// global pool that any other rayon user would get.
 ///
 /// Two is a chosen bound on the cores one forward pass can take, not the
-/// fastest size. With the inference crates optimized, two threads keep about
-/// three quarters of the best throughput, around 23 ms per text against 18 ms
-/// at eight threads; `embed_thread_scaling` measures it and plan §3.7(d)
-/// records the runs.
+/// fastest size. With the inference crates optimized, two threads keep three
+/// quarters or more of the best throughput, 23 to 27 ms per text against
+/// 18 to 22 ms at eight threads; `embed_thread_scaling` measures it
+/// and plan §3.7(d) records the runs.
 const EMBED_THREADS: usize = 2;
 static EMBED_POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
 fn on_embed_pool<R: Send>(work: impl FnOnce() -> R + Send) -> Result<R> {
