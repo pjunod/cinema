@@ -1356,6 +1356,21 @@ impl GenerationManifest {
 
     /// Verify only the object a reader is about to serve.
     pub async fn verify_object(&self, root: &Path, name: &str) -> Result<bool, String> {
+        self.verify_object_cooperative(root, name, || true).await
+    }
+
+    /// Stop between bounded reads when the owning worker loses admission or
+    /// reaches its deadline. An in-flight read is awaited before returning;
+    /// callers retain their physical admission and reader pin until then.
+    pub async fn verify_object_cooperative(
+        &self,
+        root: &Path,
+        name: &str,
+        can_continue: impl Fn() -> bool,
+    ) -> Result<bool, String> {
+        if !can_continue() {
+            return Ok(false);
+        }
         let Some(expected) = self.object(name) else {
             return Ok(false);
         };
@@ -1373,30 +1388,44 @@ impl GenerationManifest {
         {
             return Ok(false);
         }
-        let mut hasher = Sha256::new();
-        let mut read_bytes = 0_u64;
-        let mut buffer = vec![0_u8; 128 * 1024];
-        loop {
-            let read_limit = expected
-                .bytes
-                .saturating_sub(read_bytes)
-                .saturating_add(1)
-                .min(buffer.len() as u64) as usize;
-            let read = file
-                .read(&mut buffer[..read_limit])
-                .await
-                .map_err(|error| format!("reading {}: {error}", path.display()))?;
-            if read == 0 {
-                break;
-            }
-            read_bytes = read_bytes.saturating_add(read as u64);
-            if read_bytes > expected.bytes {
-                return Ok(false);
-            }
-            hasher.update(&buffer[..read]);
-        }
-        Ok(read_bytes == expected.bytes && hex::encode(hasher.finalize()) == expected.sha256)
+        verify_reader_cooperative(&mut file, expected, can_continue).await
     }
+}
+
+async fn verify_reader_cooperative(
+    file: &mut (impl tokio::io::AsyncRead + Unpin),
+    expected: &GenerationObject,
+    can_continue: impl Fn() -> bool,
+) -> Result<bool, String> {
+    let mut hasher = Sha256::new();
+    let mut read_bytes = 0_u64;
+    let mut buffer = vec![0_u8; 128 * 1024];
+    loop {
+        if !can_continue() {
+            return Ok(false);
+        }
+        let read_limit = expected
+            .bytes
+            .saturating_sub(read_bytes)
+            .saturating_add(1)
+            .min(buffer.len() as u64) as usize;
+        let read = file
+            .read(&mut buffer[..read_limit])
+            .await
+            .map_err(|error| format!("reading manifest object: {error}"))?;
+        if !can_continue() {
+            return Ok(false);
+        }
+        if read == 0 {
+            break;
+        }
+        read_bytes = read_bytes.saturating_add(read as u64);
+        if read_bytes > expected.bytes {
+            return Ok(false);
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(read_bytes == expected.bytes && hex::encode(hasher.finalize()) == expected.sha256)
 }
 
 #[cfg(test)]
@@ -1406,6 +1435,49 @@ mod tests {
         PRODUCER_HEALTH_RECEIPT_VERSION,
     };
     use super::*;
+
+    #[tokio::test]
+    async fn cooperative_verification_joins_the_current_read_before_releasing_admission() {
+        let (mut writer, mut reader) = tokio::io::duplex(8);
+        writer.write_all(b"first").await.expect("first bytes");
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let admission = Arc::new(tokio::sync::Semaphore::new(1));
+        let held = admission
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("physical admission");
+        let object = GenerationObject {
+            name: "segment.ts".into(),
+            bytes: 128 * 1024 * 1024,
+            sha256: "a".repeat(64),
+        };
+        let work = async {
+            let _held = held;
+            verify_reader_cooperative(&mut reader, &object, || {
+                !cancelled.load(std::sync::atomic::Ordering::Acquire)
+            })
+            .await
+        };
+        tokio::pin!(work);
+        assert!(futures_util::poll!(&mut work).is_pending());
+        cancelled.store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(
+            admission.available_permits(),
+            0,
+            "in-flight read still owns admission"
+        );
+        writer
+            .write_all(b"next")
+            .await
+            .expect("complete current bounded read");
+        assert!(!work.await.expect("cancelled verification"));
+        assert_eq!(
+            admission.available_permits(),
+            1,
+            "no wait for the remaining object or EOF"
+        );
+    }
 
     fn generation_tempdir() -> tempfile::TempDir {
         let root = std::fs::canonicalize(std::env::temp_dir())

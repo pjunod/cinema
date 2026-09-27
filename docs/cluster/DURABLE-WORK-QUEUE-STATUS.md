@@ -749,3 +749,14 @@ continue E1–E3.
   together in E2, as one recovery path. E1 retains verified serving/transfers and
   the existing integrity sweep. This changes batch ownership, not programme
   scope. No fleet performance gain or production rollout is claimed.
+
+- 2026-09-26: E1's single final adversarial review of `d4064bb21` returned
+  two actionable findings. P1: local transcode reuse hashed a whole object
+  before observing playback cancellation. Verification now checks between
+  bounded reads, awaits the current read before releasing ownership, and uses
+  the copy-wide deadline from before local reuse. Copy writes likewise check
+  between bounded chunks and join temporary cleanup. P2: hot-copy and ordinary
+  delivery used different identities, duplicating work and rejecting long node
+  IDs. Both now use the same fixed-length payload hash. The backend contract
+  covers both admission orders, independent cancellation and a 256-byte node.
+  Regression execution follows these fixes; no second review is scheduled.

@@ -168,10 +168,11 @@ async fn background_transcode_copies_preserve_source_proof_and_settle_only_the_r
         let id = uuid::Uuid::new_v4().to_string();
         let recipe = "a".repeat(64);
         let manifest = "d".repeat(64);
-        for target in ["node-a", "node-b", "node-c"] {
+        let long_target = "z".repeat(256);
+        for target in ["node-a", "node-b", long_target.as_str()] {
             let mut input = preparation_request(&file, &id, 1_000);
             input.id = uuid::Uuid::new_v4().to_string();
-            input.request.request_id = format!("copy-{target}");
+            input.request.request_id = uuid::Uuid::new_v4().to_string();
             input.request.target_node_id = Some(target.into());
             assert!(matches!(
                 store.enqueue_job(input).await.expect("demand"),
@@ -236,6 +237,19 @@ async fn background_transcode_copies_preserve_source_proof_and_settle_only_the_r
         for intent in intents {
             assert_eq!(intent.artifact_key, key);
             let target = intent.target_node_id.clone();
+            let (payload, digest) = plurx_core::store::background_jobs::hydration_identity(&key, &target).expect("shared identity");
+            let hot_request_id = uuid::Uuid::new_v4().to_string();
+            let hot = EnqueueJob {
+                id: uuid::Uuid::new_v4().to_string(), payload,
+                dedupe_key: format!("hydrate:{digest}"), priority: 0,
+                not_before_ms: 1_003, now_ms: 1_003,
+                request: JobRequest {
+                    scope: "automatic:hot-copy".into(), request_id: hot_request_id.clone(),
+                    request_digest: digest, consumer_kind: "hot_copy".into(), consumer_ref: key.clone(),
+                    target_node_id: Some(target.clone()), deadline_ms: Some(1_000_000), retain_identity: false,
+                },
+            };
+            let before = if target == "node-b" { Some(store.enqueue_job(hot.clone()).await.expect("hot first")) } else { None };
             let EnqueueOutcome::Accepted { job_id, .. } = store
                 .enqueue_delivery(intent, 1_003)
                 .await
@@ -243,6 +257,19 @@ async fn background_transcode_copies_preserve_source_proof_and_settle_only_the_r
             else {
                 panic!("{backend}: delivery not admitted")
             };
+            let hot_outcome = match before {
+                Some(outcome) => outcome,
+                None => store.enqueue_job(hot).await.expect("hot second"),
+            };
+            let EnqueueOutcome::Accepted { job_id: hot_job, .. } = hot_outcome else { panic!("{backend}: hot interest refused") };
+            assert_eq!(hot_job, job_id, "{backend}: both admission orders share one hydration job, including a 256-byte target");
+            store.cancel_waiter(CancelWaiter {
+                scope: "automatic:hot-copy".into(), request_id: hot_request_id, now_ms: 1_003,
+            }).await.expect("cancel only forecast");
+            let waiters = store.job_waiters(WaiterQuery { job_id: job_id.clone(), after: None, limit: 8 }).await.expect("independent interests");
+            assert_eq!(waiters.waiters.len(), 2);
+            assert!(waiters.waiters.iter().any(|waiter| waiter.scope.starts_with("delivery:") && waiter.state == "pending"));
+            assert!(waiters.waiters.iter().any(|waiter| waiter.scope == "automatic:hot-copy" && waiter.state == "cancelled"));
             let copy = store
                 .background_job(&job_id)
                 .await
@@ -338,7 +365,7 @@ async fn background_transcode_copies_preserve_source_proof_and_settle_only_the_r
                     waiters
                         .waiters
                         .iter()
-                        .find(|waiter| waiter.target_node_id.as_deref() == Some("node-c"))
+                        .find(|waiter| waiter.target_node_id.as_deref() == Some(long_target.as_str()))
                         .expect("C")
                         .state,
                     "awaiting_hydration"

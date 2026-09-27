@@ -609,6 +609,32 @@ impl SecureDirectory {
     where
         F: FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send + 'static,
     {
+        self.atomic_write_child_controlled(destination, bytes, || true, commit)
+            .await
+    }
+
+    /// Cooperatively stop between bounded writes, and join the blocking writer
+    /// before returning. Interrupted output is removed before releasing ownership.
+    pub async fn atomic_write_child_cooperative(
+        &self,
+        destination: &str,
+        bytes: &[u8],
+        can_continue: impl Fn() -> bool + Send + 'static,
+    ) -> io::Result<()> {
+        self.atomic_write_child_controlled(destination, bytes, can_continue, |rename| rename())
+            .await
+    }
+
+    async fn atomic_write_child_controlled<F>(
+        &self,
+        destination: &str,
+        bytes: &[u8],
+        can_continue: impl Fn() -> bool + Send + 'static,
+        commit: F,
+    ) -> io::Result<()>
+    where
+        F: FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send + 'static,
+    {
         let directory = Arc::clone(&self.file);
         let destination = destination.to_owned();
         let bytes = bytes.to_vec();
@@ -636,8 +662,28 @@ impl SecureDirectory {
             }
             let mut file = File::from(unsafe { OwnedFd::from_raw_fd(raw) });
             let result = (|| {
-                file.write_all(&bytes)?;
+                for chunk in bytes.chunks(128 * 1024) {
+                    if !can_continue() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "write cancelled",
+                        ));
+                    }
+                    file.write_all(chunk)?;
+                }
+                if !can_continue() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "write cancelled",
+                    ));
+                }
                 file.sync_all()?;
+                if !can_continue() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "write cancelled",
+                    ));
+                }
                 commit(&mut || {
                     if unsafe {
                         libc::renameat(
@@ -2781,6 +2827,27 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
     use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
+
+    #[tokio::test]
+    async fn cooperative_write_reclaims_partial_output_before_returning() {
+        let temporary = tempfile::tempdir().expect("root");
+        let path = std::fs::canonicalize(temporary.path()).expect("canonical root");
+        let root = SecureDirectory::open(&path).await.expect("capability");
+        let chunks = std::sync::atomic::AtomicUsize::new(0);
+        let error = root
+            .atomic_write_child_cooperative("copy.ts", &vec![7; 1024 * 1024], move || {
+                chunks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 2
+            })
+            .await
+            .expect_err("interrupted partial write");
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(!path.join("copy.ts").exists());
+        assert_eq!(
+            std::fs::read_dir(&path).expect("directory").count(),
+            0,
+            "joined writer must remove its temporary before admission is released"
+        );
+    }
 
     /// Pin the complete descriptor contract used by authenticated response
     /// snapshots on every supported platform. This catches both a macOS

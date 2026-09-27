@@ -250,8 +250,12 @@ async fn receive_body(
 async fn local_output(
     state: &AppState,
     source: &TranscodeCopySource,
+    deadline: Instant,
     cancel: &CancellationToken,
 ) -> Option<TranscodeJobOutput> {
+    if cancel.is_cancelled() || Instant::now() >= deadline {
+        return None;
+    }
     let (root, node) = state.transcode.cache_location()?;
     if source.node_id != node {
         return None;
@@ -268,7 +272,9 @@ async fn local_output(
     for object in &manifest.objects {
         if cancel.is_cancelled()
             || !manifest
-                .verify_object(&directory, &object.name)
+                .verify_object_cooperative(&directory, &object.name, || {
+                    !cancel.is_cancelled() && Instant::now() < deadline
+                })
                 .await
                 .ok()?
         {
@@ -298,6 +304,7 @@ async fn prepare(
     else {
         return Err("not a cache copy".into());
     };
+    let deadline = Instant::now() + Duration::from_secs(600);
     let (recipe, digest) = parse_key(&key).ok_or("invalid cache copy identity")?;
     // Pin the recipe through verification and publication, including reuse of
     // an already-local generation. GC cannot remove it in that interval.
@@ -312,7 +319,7 @@ async fn prepare(
         .await
         .map_err(|error| error.to_string())?;
     for source in &sources {
-        if let Some(output) = local_output(state, source, cancel).await {
+        if let Some(output) = local_output(state, source, deadline, cancel).await {
             if cancel.is_cancelled() {
                 return Ok(false);
             }
@@ -322,7 +329,7 @@ async fn prepare(
                 .map_err(|error| error.to_string());
         }
     }
-    if cancel.is_cancelled() {
+    if cancel.is_cancelled() || Instant::now() >= deadline {
         return Ok(false);
     }
     let (root, node) = state
@@ -361,7 +368,6 @@ async fn prepare(
         .take(3)
         .collect::<Vec<_>>();
     let mut received: Option<(GenerationManifest, Vec<u8>, usize)> = None;
-    let deadline = Instant::now() + Duration::from_secs(600);
     for (index, (source, base)) in holders.iter().enumerate() {
         if cancel.is_cancelled() {
             return Ok(false);
@@ -459,8 +465,11 @@ async fn prepare(
             if cancel.is_cancelled() {
                 return Ok(false);
             }
+            let write_cancel = cancel.clone();
             staging
-                .atomic_write_child(&object.name, &bytes)
+                .atomic_write_child_cooperative(&object.name, &bytes, move || {
+                    !write_cancel.is_cancelled() && Instant::now() < deadline
+                })
                 .await
                 .map_err(|error| error.to_string())?;
         }

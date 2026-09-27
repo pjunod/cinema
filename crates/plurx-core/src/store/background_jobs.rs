@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 pub use super::background_jobs_delivery::{
-    DeliveryIntent, JobWaiter, WaiterCursor, WaiterPage, WaiterQuery,
+    hydration_identity, DeliveryIntent, JobWaiter, WaiterCursor, WaiterPage, WaiterQuery,
 };
 use super::background_jobs_delivery::{DELIVERIES_SQL, WAITERS_SQL};
 pub use super::background_jobs_domain::BindLibraryJob;
@@ -1395,7 +1395,6 @@ impl<T: QueueSql> BackgroundJobStore for T {
         intent: DeliveryIntent,
         now_ms: i64,
     ) -> Result<EnqueueOutcome, StoreError> {
-        use sha2::{Digest, Sha256};
         if uuid::Uuid::parse_str(&intent.job_id).is_err()
             || !(intent
                 .artifact_key
@@ -1406,11 +1405,10 @@ impl<T: QueueSql> BackgroundJobStore for T {
         {
             return Err(invalid("invalid background delivery intent"));
         }
-        let payload = JobPayload::ArtifactHydrate {
-            artifact_key: intent.artifact_key.clone(),
-            target_node_id: intent.target_node_id.clone(),
-        };
-        let request_digest = hex::encode(Sha256::digest(encode(&payload)?.as_bytes()));
+        let (payload, request_digest) = super::background_jobs_delivery::hydration_identity(
+            &intent.artifact_key,
+            &intent.target_node_id,
+        )?;
         let request = EnqueueJob {
             id: uuid::Uuid::new_v4().to_string(),
             payload,

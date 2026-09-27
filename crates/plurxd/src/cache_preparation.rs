@@ -1,7 +1,7 @@
 //! Singleton bounded placement; the ordinary durable consumers own all I/O.
 use super::{clock_ms, JobManager};
 use plurx_core::error::StoreError;
-use plurx_core::store::background_jobs::{EnqueueJob, EnqueueOutcome, JobPayload, JobRequest};
+use plurx_core::store::background_jobs::{EnqueueJob, EnqueueOutcome, JobRequest};
 use sha2::{Digest, Sha256};
 
 fn choose_target<'a>(key: &str, nodes: &'a [String], holders: &[String]) -> Option<&'a str> {
@@ -256,13 +256,12 @@ impl JobManager {
                     now / 3_600_000
                 )));
                 let key = artifact.artifact_key;
+                let (payload, digest) =
+                    plurx_core::store::background_jobs::hydration_identity(&key, target)?;
                 let request = EnqueueJob {
                     id: uuid::Uuid::new_v4().to_string(),
-                    payload: JobPayload::ArtifactHydrate {
-                        artifact_key: key.clone(),
-                        target_node_id: target.into(),
-                    },
-                    dedupe_key: format!("hydrate:{key}:{target}"),
+                    payload,
+                    dedupe_key: format!("hydrate:{digest}"),
                     priority: 0,
                     not_before_ms: now,
                     now_ms: now,

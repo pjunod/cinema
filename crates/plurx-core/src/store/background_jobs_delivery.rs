@@ -76,3 +76,20 @@ FROM background_job_waiters WHERE state = 'awaiting_hydration' AND target_node_i
           AND delivery.request_id = background_job_waiters.target_node_id)
 GROUP BY job_id, target_node_id, result_ref ORDER BY MIN(updated_at_ms), job_id, target_node_id LIMIT 128
 "#;
+
+/// One computation identity for ordinary target delivery and predictive copies.
+/// Keep the existing payload serialization so already accepted jobs still join.
+pub fn hydration_identity(
+    artifact_key: &str,
+    target_node_id: &str,
+) -> Result<(super::background_jobs::JobPayload, String), crate::error::StoreError> {
+    use super::background_jobs::{encode, JobPayload};
+    use sha2::{Digest, Sha256};
+    let payload = JobPayload::ArtifactHydrate {
+        artifact_key: artifact_key.into(),
+        target_node_id: target_node_id.into(),
+    };
+    payload.validate()?;
+    let digest = hex::encode(Sha256::digest(encode(&payload)?.as_bytes()));
+    Ok((payload, digest))
+}
