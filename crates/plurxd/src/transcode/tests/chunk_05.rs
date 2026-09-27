@@ -1909,6 +1909,8 @@
     /// authorizing two encoders, which is the contention the cap exists to
     /// prevent. What it must do instead is reserve the CPU the pipeline has
     /// started spending, which before this milestone it did not do at all.
+    // The encoder stand-in is a /bin/sh script.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_retry_that_keeps_its_encoder_keeps_its_slot_and_pays_for_its_decode() {
         super::require_ffmpeg();

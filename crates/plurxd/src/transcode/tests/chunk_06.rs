@@ -114,6 +114,8 @@
     /// potentially a whole film. And the admission record must flip to the
     /// software class, or every speed measured from the replacement encoder
     /// is filed as evidence about hardware.
+    // The encoder stand-in is a /bin/sh script.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_fallback_to_software_frees_the_hardware_slot_at_once() {
         super::require_ffmpeg();
