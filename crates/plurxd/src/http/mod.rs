@@ -429,6 +429,7 @@ fn http_route_group(path: &str) -> usize {
         // Cluster administration and authenticated internal transport.
         "/api/v1/cluster/nodes"
         | "/api/v1/cluster/status"
+        | "/api/v1/cluster/work/storage-domains"
         | "/api/v1/cluster/jobs"
         | "/api/v1/cluster/jobs/{id}"
         | "/api/v1/cluster/jobs/{id}/cancel"
@@ -1349,6 +1350,10 @@ pub fn router(state: AppState) -> Router {
         .route("/cluster/nodes", get(cluster::nodes))
         .route("/cluster/status", get(cluster_operations::aggregate))
         .route("/cluster/jobs", get(background_jobs::list))
+        .route(
+            "/cluster/work/storage-domains",
+            get(background_jobs::storage_domains),
+        )
         .route("/cluster/jobs/{id}", get(background_jobs::detail))
         .route("/cluster/ingress", get(cluster::ingress))
         .route("/cluster/media", get(internal_media::directory))
@@ -1504,6 +1509,10 @@ pub fn router(state: AppState) -> Router {
             post(cluster::enter_maintenance).delete(cluster::exit_maintenance),
         )
         .route("/cluster/election", post(cluster::force_election))
+        .route(
+            "/cluster/work/storage-domains",
+            put(background_jobs::replace_storage_domains),
+        )
         .route("/cluster/jobs/{id}/cancel", post(background_jobs::cancel))
         .route("/cluster/jobs/{id}/retry", post(background_jobs::retry))
         .route("/cluster/backups", post(crate::backup::create))
@@ -4671,6 +4680,24 @@ mod tests {
         (router(state.clone()), state)
     }
 
+    // HTTP scan fixtures run the production durable consumer independently.
+    // Aborting the owner at fixture teardown prevents a leaked polling loop.
+    struct ScanWorker(tokio::task::JoinHandle<()>);
+    impl Drop for ScanWorker {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    fn scan_worker(state: &AppState) -> ScanWorker {
+        ScanWorker(tokio::spawn(
+            state
+                .jobs
+                .clone()
+                .background_work_loop(state.transcode.clone()),
+        ))
+    }
+
     async fn call(app: &Router, req: Request<Body>) -> (StatusCode, Value) {
         let resp = app.clone().oneshot(req).await.expect("response");
         let status = resp.status();
@@ -5847,7 +5874,8 @@ mod tests {
     /// of the season unindexed with nothing anywhere saying so.
     #[tokio::test]
     async fn a_request_during_a_running_scan_is_queued_and_still_answered() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -5883,7 +5911,8 @@ mod tests {
     /// the answer in the response rather than a promise to look later.
     #[tokio::test]
     async fn a_scan_returns_the_report_and_what_it_placed() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -5961,7 +5990,8 @@ mod tests {
     /// the only evidence Cinema uses to relate text and audio editions.
     #[tokio::test]
     async fn a_curator_book_import_reaches_the_books_library() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -6718,6 +6748,7 @@ mod tests {
     #[tokio::test]
     async fn scans_and_notifications_are_counted_by_what_asked_for_them() {
         let (app, state) = test_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -6801,6 +6832,7 @@ mod tests {
     #[tokio::test]
     async fn an_item_that_arrives_with_an_id_is_still_queued_for_enrichment() {
         let (app, state) = test_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -6850,6 +6882,7 @@ mod tests {
     #[tokio::test]
     async fn a_series_only_id_reaches_the_show_row() {
         let (app, state) = test_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -6929,7 +6962,8 @@ mod tests {
     /// the core, because it is the one that would destroy data.
     #[tokio::test]
     async fn a_targeted_scan_leaves_the_rest_of_the_library_alone() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -9428,6 +9462,7 @@ mod tests {
                 // probed a build.
                 "chapter_thumbs_work",
                 "durable_queue",
+                "durable_role",
                 "rolling_contract_built",
                 "runtime",
                 "server_preparation_is_real",
@@ -11163,14 +11198,15 @@ mod tests {
 
     #[tokio::test]
     async fn scan_status_requires_auth_and_reports_problems() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
+        let _worker = scan_worker(&state);
         // Unauthenticated → 401.
         let (status, _) = call(&app, get("/api/v1/scan/status", None)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
         let admin = setup_admin(&app).await;
         // Create a library pointing at a path that does not exist — the auto
-        // scan must finish with a visible problem, not a silent all-zero.
+        // work must stay available to another node and show this node's problem.
         let (status, lib) = call(
             &app,
             post(
@@ -11183,29 +11219,45 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let lib_id = lib["id"].as_i64().expect("lib id").to_string();
 
-        // Poll until the background scan finishes (missing path → instant).
+        // Eligibility does not consume an attempt or claim successful completion.
         let mut last = Value::Null;
         for _ in 0..100 {
             let (status, body) = call(&app, get("/api/v1/scan/status", Some(&admin))).await;
             assert_eq!(status, StatusCode::OK);
             last = body[&lib_id].clone();
-            if !last["running"].as_bool().unwrap_or(true) && !last.is_null() {
+            if last["error"].as_str().is_some() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        assert_eq!(last["running"], false, "scan never finished: {last}");
-        let problems = last["last_scan"]["problems"]
-            .as_array()
-            .expect("problems array")
-            .clone();
+        assert_eq!(last["running"], true, "accepted work stays pending: {last}");
+        assert_eq!(last["phase"], "queued");
+        assert!(last["last_scan"].is_null(), "no scan has executed: {last}");
         assert!(
-            problems
-                .iter()
-                .any(|p| p.as_str().unwrap_or("").contains("does not exist")),
-            "expected a missing-path problem, got: {problems:?}"
+            last["error"].as_str().is_some_and(|error| error
+                .contains("could not read library root /definitely/not/here")
+                && error.contains("Waiting for a compatible worker")),
+            "{last}"
         );
-        assert_eq!(last["last_scan"]["errors"], 1);
+        let page = state
+            .store
+            .list_jobs(plurx_core::store::background_jobs::JobQuery {
+                state: None,
+                kind: Some(plurx_core::store::background_jobs::JobKind::LibraryScan),
+                after_id: None,
+                limit: 10,
+            })
+            .await
+            .expect("durable job");
+        assert_eq!(page.jobs.len(), 1);
+        assert_eq!(
+            page.jobs[0].failed_attempts, 0,
+            "missing local mounts are not failed executions"
+        );
+        assert!(
+            page.jobs[0].token.is_none(),
+            "an unreadable node must not claim"
+        );
     }
 
     #[tokio::test]

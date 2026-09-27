@@ -1653,40 +1653,6 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         ))
     }
 
-    async fn claim_analysis_request_foreground(
-        &self,
-        request_id: &str,
-        node_id: &str,
-        now_ms: i64,
-        lease_expires_ms: i64,
-    ) -> Result<Option<AnalysisRequest>, StoreError> {
-        if request_id.is_empty()
-            || node_id.is_empty()
-            || node_id.len() > 128
-            || lease_expires_ms <= now_ms
-        {
-            return Err(StoreError::Task("invalid foreground claim".to_owned()));
-        }
-        let max_attempts = configured_max_attempts(self).await?;
-        let changes = self.client().txn(vec![
-            ("UPDATE analysis_requests SET state = 'running', owner_node_id = $1, fence = fence + 1, lease_expires_ms = $2, attempts = attempts + 1, last_error_code = NULL, updated_at_ms = $3 WHERE request_id = $4 AND component = 'subtitle_source' AND priority = 'foreground' AND state = 'queued' AND not_before_ms <= $3 AND attempts < $5 AND EXISTS (SELECT 1 FROM files WHERE files.id = analysis_requests.file_id AND files.size = analysis_requests.source_size AND files.mtime = analysis_requests.source_mtime)".to_owned(), params!(node_id, lease_expires_ms, now_ms, request_id, max_attempts)),
-            ("INSERT OR IGNORE INTO analysis_attempts(request_id,attempt,claim_node_id,claim_epoch,claim_expires_at_ms,phase,started_at_ms,phase_updated_at_ms) SELECT request_id,attempts,$1,fence,$2,'claimed',$3,$3 FROM analysis_requests WHERE request_id = $4 AND component = 'subtitle_source' AND state = 'running' AND owner_node_id = $1 AND updated_at_ms = $3".to_owned(), params!(node_id, lease_expires_ms, now_ms, request_id)),
-        ]).await?.into_iter().collect::<Result<Vec<_>, _>>().map_err(database_error)?;
-        if changes.first() != Some(&1) || changes.get(1) != Some(&1) {
-            return Ok(None);
-        }
-        Ok(self
-            .client()
-            .query_consistent_map::<RequestRow, _>(
-                format!("SELECT {REQUEST_COLS} FROM analysis_requests WHERE request_id = $1"),
-                params!(request_id),
-            )
-            .await?
-            .into_iter()
-            .next()
-            .map(|row| row.0))
-    }
-
     async fn retire_subtitle_source_ready(
         &self,
         stamp: &SubtitleSourceStamp,
@@ -2058,7 +2024,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             terminal_code = 'lease_expired'
                       WHERE (request_id, claim_epoch) IN (
                         SELECT request_id, fence FROM analysis_requests
-                         WHERE state = 'running'
+                         WHERE component <> 'subtitle_source' AND state = 'running'
                            AND COALESCE(lease_expires_ms, 0) <= $1)"
                         .to_owned(),
                     params!(now_ms),
@@ -2074,7 +2040,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                                  + attempts * 7) % 51))) / 100), $3),
                             last_error_code = 'lease_expired',
                             updated_at_ms = $1
-                      WHERE state = 'running' AND COALESCE(lease_expires_ms, 0) <= $1"
+                      WHERE component <> 'subtitle_source' AND state = 'running' AND COALESCE(lease_expires_ms, 0) <= $1"
                         .to_owned(),
                     params!(now_ms, backoff_base_ms, backoff_max_ms),
                 ),
@@ -2084,7 +2050,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             terminal_code = 'attempt_limit'
                       WHERE (request_id, claim_epoch) IN (
                         SELECT request_id, fence FROM analysis_requests
-                         WHERE attempts >= $2 AND state = 'queued' AND not_before_ms <= $1)"
+                         WHERE component <> 'subtitle_source' AND attempts >= $2 AND state = 'queued' AND not_before_ms <= $1)"
                         .to_owned(),
                     params!(now_ms, max_attempts),
                 ),
@@ -2092,7 +2058,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     "UPDATE analysis_requests
                         SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                             last_error_code = 'attempt_limit', updated_at_ms = $1
-                      WHERE attempts >= $2 AND state = 'queued' AND not_before_ms <= $1"
+                      WHERE component <> 'subtitle_source' AND attempts >= $2 AND state = 'queued' AND not_before_ms <= $1"
                         .to_owned(),
                     params!(now_ms, max_attempts),
                 ),
@@ -2109,7 +2075,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         "SELECT {REQUEST_COLS} FROM analysis_requests
                           WHERE (target_node_id = $1
                               OR (component IN ('skip_markers','subtitle_source') AND target_node_id = ''))
-                            AND attempts < $2
+                            AND component <> 'subtitle_source' AND attempts < $2
                             AND state = 'queued' AND not_before_ms <= $3
                           ORDER BY CASE WHEN priority = 'foreground' THEN 0 ELSE 1 END,
                                    created_at_ms - CASE WHEN priority = 'forced'
@@ -2207,7 +2173,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             .txn(vec![
                 (
                     "UPDATE analysis_requests SET lease_expires_ms = $1, updated_at_ms = $2
-                  WHERE request_id = $3 AND state = 'running' AND owner_node_id = $4
+                  WHERE component <> 'subtitle_source' AND request_id = $3 AND state = 'running' AND owner_node_id = $4
                     AND fence = $5 AND lease_expires_ms > $2 AND $1 > $2"
                         .to_owned(),
                     params!(lease_expires_ms, now_ms, request_id, node_id, fence),
@@ -2342,7 +2308,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         attempts = CASE WHEN $1 = 0 AND attempts > 0
                           THEN attempts - 1 ELSE attempts END,
                         not_before_ms = $2, last_error_code = $3, updated_at_ms = $4
-                  WHERE request_id = $5 AND state = 'running' AND owner_node_id = $6
+                  WHERE component <> 'subtitle_source' AND request_id = $5 AND state = 'running' AND owner_node_id = $6
                     AND fence = $7 AND lease_expires_ms > $4"
                         .to_owned(),
                     params!(
@@ -2392,7 +2358,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     "UPDATE analysis_requests
                     SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                         last_error_code = $1, updated_at_ms = $2
-                  WHERE request_id = $3 AND state = 'running' AND owner_node_id = $4
+                  WHERE component <> 'subtitle_source' AND request_id = $3 AND state = 'running' AND owner_node_id = $4
                     AND fence = $5 AND lease_expires_ms > $2"
                         .to_owned(),
                     params!(error_code, now_ms, request_id, node_id, fence),
@@ -3010,7 +2976,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     "UPDATE analysis_requests
                     SET state = 'ready', owner_node_id = NULL, lease_expires_ms = NULL,
                         result_cache_key = $1, last_error_code = NULL, updated_at_ms = $2
-                  WHERE request_id = $3 AND state = 'running' AND owner_node_id = $4
+                  WHERE component <> 'subtitle_source' AND request_id = $3 AND state = 'running' AND owner_node_id = $4
                     AND fence = $5 AND lease_expires_ms > $2
                     AND file_id = $6 AND source_size = $7 AND source_mtime = $8
                     AND EXISTS (SELECT 1 FROM files

@@ -1,8 +1,8 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 fast lane: final preflight repair · **Updated:** 2026-09-26 ·
-**Branch:** `codex/durable-cluster-work` ·
-**Base:** `116559cb8` · **PR:** [#532 — ready](http://192.168.4.7:3000/noirr/plurx/pulls/532)
+**Status:** M1–M3 merged; E0 fast lane: isolated lockfile correction · **Updated:** 2026-09-26 ·
+**Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` ·
+**Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — validating](http://192.168.4.7:3000/noirr/plurx/pulls/564)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -17,13 +17,13 @@ implementation is claimed; “compiled” does not mean tests passed.
 | M1 durable queue and pre-transcode | Implemented; focused validation passed | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; local exact-recipe offline joining and scheduling implemented; lost-reply and process-expiry regressions written; cross-node transcode convergence belongs to E1 |
 | M2 fragment analysis and hydration | Implemented; focused validation passed | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
 | M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
-| E0 subtitle and library workers | Foundation compiled on follow-on branch | Durable library intents, per-request results and joint queue/domain publication ownership committed on `codex/cluster-work-adapters`; production dispatch, budgets, subtitles and learner permissions remain open |
+| E0 subtitle and library workers | Adapters implemented; construction checks passed | Library work, storage/provider budgets, learner authority and all-track subtitle extraction are connected. Integrated current main; PR #564 received five findings; fixes and regressions are implemented. 17 queue contracts and nine cancellation regressions passed; CI pending |
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
 | Final adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
-| Fast lane | Preflight repair | Run 3293 found a duplicate Python assertion of the old transaction count. Rust owns the checked count; Python now checks that this explicit census exists. Required remote lane remains blocking |
-| Merge / cleanup | Not started | Green required lane before merge |
+| Core fast lane | Passed: run 3296 on `3784d5ec5` | Preflight, Rust, Windows, web and main promotion gate all passed |
+| Core merge | Complete | PR #532 merged as `b4b488556`; E0–E3 continue in the agent clone |
 
 ## Decisions and unresolved policy
 
@@ -428,6 +428,26 @@ The failing replicated test is being rerun before the main fast lane starts.
   no Rust or queue ownership source changed. The final normal hook rechecks
   the integrated tree before push.
 
+- E0 construction: added the durable binding between a queue attempt and the
+  existing per-library publication lease. Both SQLite and Hiqlite recheck the
+  queue owner inside every existing fenced catalogue transaction. Cancellation,
+  expiry, takeover and compaction cannot restore a stale domain owner. Schema
+  migration, fresh bootstrap and backup import include the binding. The core
+  all-target compile passed; the dual-owner contract is written but will run
+  only after this follow-on PR's adversarial review. No scan entry point has
+  been redirected yet. Core PR run 3289 passed preflight and web syntax; Rust
+  and Windows validation are running.
+
+- E0 storage: durable library admission now commits input hints with its waiter,
+  and typed per-request completion checks both owners. Requests arriving during
+  execution remain pending until processed; completion cannot settle them by
+  accident. Results survive independently of process memory and retire with
+  their seven-day receipts. Bounds are 256 pending interests per library,
+  16 KiB input and 64 KiB result per request; the handler must report oversized
+  results explicitly rather than silently truncate item IDs. The all-target
+  core compile passed. These APIs are not yet connected to scan entry points;
+  regression execution is deferred to the follow-on review.
+
 - 2026-09-26: fast-lane run 3289 passed preflight, Windows compilation and web
   checks. Rust compilation and Clippy passed, then unit execution found stale
   adapter ownership inventories, downgrade fixtures retaining common-queue
@@ -441,8 +461,185 @@ The failing replicated test is being rerun before the main fast lane starts.
   after correcting its deliberate corruption fixture). Docs index passes. Main remains
   `116559cb8`; no production deployment has occurred.
 
+- E0 library dispatch: full, startup, scheduled and targeted entry points now
+  persist their accepted intent. A source-readable voter claims the common
+  job and existing library lease, binds both owners, and keeps physical
+  admission through cooperative cancellation and process/walker joins. Busy
+  library leases yield without charging retries. Per-request results survive
+  manager restart and a late arrival cannot be completed by an earlier pass.
+  Recent status comes from durable receipts; live local counters overlay it.
+  New targeted requests normally return the existing 202 response. Oversized
+  results produce an explicit failed receipt rather than truncated item IDs.
+  Old process-local pending queues, retry tasks and result rings are removed.
+  All-target compilation passed before the final thumbnail/fixture changes;
+  the final Rust 1.97.1 workspace Clippy with all targets and denied warnings
+  passed. New ownership sites are recorded in the static inventory. No
+  follow-on test has been executed.
 - Run 3293 stopped in preflight on one stale Python copy of the transaction
   census count; no Rust lane was allocated. The Rust census still checks the
   exact count and transaction ownership. The Python recovery contract now
   checks the explicit assertion's shape, as it already does for migration
   counts, rather than maintaining another unrelated numeric baseline.
+
+- Core PR #532 merged after all required fast-lane gates passed on the reviewed
+  candidate. Merge `b4b488556` preserves the regression declarations. The
+  follow-on branch now includes current main; no production deployment occurred.
+
+- E0 storage/provider concurrency: appended SQLite 74 / Hiqlite 52. Root
+  aliases map to replicated storage domains; unmapped work uses the existing
+  global fallback. Claims reserve every library domain and both provider
+  concurrency slots atomically, and normal renewal/settlement owns their
+  lifetime. Administrator API and Developer settings expose the mapping.
+  Changing identities while live reservations exist returns conflict; feature
+  enable switches remain independent. Contracts for aliases, independent
+  domains and all-or-none provider contention are written, not executed.
+  Rust 1.97.1 workspace/all-target compilation and Clippy with Hiqlite passed.
+  Provider rate pacing, subtitles and learner authority remain unfinished.
+
+- E0 provider pacing: appended SQLite 75 / Hiqlite 53. A bounded two-provider
+  ledger charges each maintenance dispatch, shares cooldowns and reported
+  limits, and retains spent allowance after a lost response. Queue-bound
+  library owners and existing artwork/genre publication leases use the same
+  budget; no per-node multiplication. HTTP bodies and retry waits cooperate
+  with queue cancellation. Wrote cross-owner pacing, cooldown, stale-owner
+  transport and populated-backup parity regressions; none executed yet.
+  The replicated state digest now includes all four E0 domain tables.
+
+- Construction follow-up: library path edits can change the required storage
+  domain without using the mapping editor. Renewal, library binding, catalogue
+  publication, per-request completion and provider charging now require the
+  claim to hold every current resource. A changed root invalidates those
+  operations; the worker stops and a later attempt reacquires current slots.
+  Lost-acknowledgement reconciliation checks the same resource snapshot, so
+  recovery cannot accidentally restore the invalid claim.
+  The ownership contract includes this race. Source eligibility now opens the
+  directory rather than treating a directory metadata record as readability.
+
+- E0 learner execution: added per-kind execution authority independently of
+  voter-only singleton coordination. A ready, committed, non-removed learner
+  may consume immutable work, and renewal/publication recheck that permission.
+  Both backends share the artifact-only claim allowlist; catalogue/provider
+  kinds and wrong-kind claim replays are refused. Discovery, outbox admission,
+  library binding and catalogue completion remain voter operations. Developer
+  observations report both authorities without affecting saved preferences.
+  Role-loss and claim-scope regressions are written, not run. Rust 1.97.1
+  workspace Clippy with all targets, Hiqlite and denied warnings passed after
+  correcting the fixture import. Subtitle migration remains the E0 remainder.
+
+- E0 subtitle construction: reuse the existing all-track extractor as one
+  computation, including foreground fallback. Analysis records retain durable
+  demand/history; common claims project ownership and fenced artifact writes.
+  SQLite 76 / Hiqlite 54 add the adapter triggers and invalidate legacy owners
+  at maintenance cutover. Store changes compiled; daemon construction checks
+  and regression adaptation are in progress. No E0 tests have run.
+
+- Subtitle adapter now compiles with Rust 1.97.1 workspace/all-target Clippy,
+  Hiqlite and denied warnings. Foreground and background execution share the
+  common job; foreground CPU admission uses the attached TranscodeManager pool.
+  Removed the old independent foreground claim API and adapted its coverage/
+  repair fixtures. Added exact-owner publication, takeover, forged-source,
+  cancellation and lost-completion-acknowledgement regressions. Construction
+  caught fixture-only missing imports and lint violations, all corrected.
+  No E0 regression has been executed; final review precedes the fast lane.
+
+- Subtitle batch committed as `d2d41217b` through the normal hook, after
+  catalog registration and the migration fixture length were corrected.
+  Main `0386c78ec` merged cleanly into the candidate. The cutover also preserves
+  spent subtitle retry allowance and the configured analysis attempt limit.
+  Rechecking the integrated source before opening the final review.
+
+- E0 candidate `1f378c4a1` passed the normal hook against main `0386c78ec`.
+  Draft PR #564 is open. Its single independent adversarial review is now
+  examining that frozen source; only this status record changes during review.
+  Draft status keeps the fast lane idle. The desktop cannot attach Forgejo PR
+  artifacts, so the ordinary PR link above is the review entry point.
+
+
+## E0 adversarial review and corrections
+
+The single review of `1f378c4a1` against `0386c78ec` requested five changes.
+All are corrected in the candidate. Post-review queue validation passed on
+SQLite and three-voter Hiqlite; the required CI fast lane remains pending.
+
+1. Library success now uses the permitted `succeeded` waiter state; the
+   existing durable-result projection and regression use the same state.
+2. Subtitle completion atomically settles its receipts and result reference,
+   allowing bounded retention to retire completed jobs.
+3. Activity Retry successors can enter the common queue. Retrying reuses valid
+   immutable representations and retries missing work. Unsupported legacy
+   demand is cancelled; individual admission errors do not stop an outbox page.
+   Only shared queue capacity stops the page early.
+4. Imports from SQLite schemas before 76 revoke legacy running/submitted
+   subtitle owners after parity verification, preserving spent attempts. The
+   old-backup import regression now includes a running subtitle owner.
+5. Audiobook cover extraction uses the cancellable process-group collector,
+   joins killed children, and checks cancellation between audiobook parts.
+   A stalled-child regression enforces the five-second release budget.
+
+No second review is planned. Run the focused regressions with replicated-store
+coverage and the required fast lane, address failures, then merge #564 and
+continue E1–E3.
+
+- 2026-09-26: committed the five review corrections as `078bac0cc`; normal
+  catalog, formatting, all-target Clippy and JavaScript checks passed. Ran
+  `cargo test -p plurx-core --features hiqlite-contract-tests --test
+  store_contract background_ -- --test-threads=1`: 14 passed, three failed.
+  Fixed a missing SQL parameter in storage-domain listing and two fixture
+  setup/cleanup defects, then reran each failing contract: all three passed.
+  The old-backup test also proves that normal admissions resume after the
+  existing finite legacy import. Documentation and process-ownership inventory
+  checks passed (11 tests). This is focused evidence, not a green CI claim.
+
+- 2026-09-26: `cargo test -p plurx-core --features hiqlite-store --lib
+  cancellation -- --nocapture` passed all nine selected regressions, including
+  audiobook child kill/reap and the sparse scanner join (0.39 s execution).
+  The subtitle outbox now also retires permanently fenced/source-invalid
+  entries, so stale pages cannot block later work. Required PR fast lane next.
+
+- 2026-09-26: fast lane [3314](http://192.168.4.7:3000/noirr/plurx/actions/runs/3314)
+  on `bf6b1365e` stopped in static preflight: the publication-guard inventory
+  mistook `self.local_serving_role().await` for direct field access. Registered
+  that exact read-only accessor call; direct stores/swaps remain prohibited.
+  Rust/Windows did not execute in that failed run. E1 has its own temporary
+  branch, `codex/cluster-cache-preparation`, with no implementation changes yet.
+
+- 2026-09-26: lane [3315](http://192.168.4.7:3000/noirr/plurx/actions/runs/3315)
+  passed the corrected guard inventory, then found the API overview's stale
+  route count (236 versus 237 after storage-domain routes). Corrected the count.
+  A local TypeScript check also found three new storage-input element type
+  errors; annotated those inputs without raising the baseline. Batch these
+  corrections before the next lane run.
+
+- 2026-09-26: lane [3317](http://192.168.4.7:3000/noirr/plurx/actions/runs/3317)
+  passed preflight and web checks, then stopped before Rust compilation because
+  the isolated Hiqlite spike lockfile lacked core's new cancellation dependency.
+  Refreshed only that workspace dependency list; both isolated lockfiles pass
+  `make spike-lock-check` with Rust 1.97.1. No dependency version changed.
+
+- 2026-09-26: main advanced to `2b09d7a32` with the frozen Fontconfig
+  environment implementation. Integrated that source into E0 before promotion;
+  the normal pinned hook validates the combined tree before its next lane run.
+  The prior lane's result cannot qualify this new tree. Preserved both parents'
+  process and timer inventory entries in the only merge conflict.
+
+- 2026-09-26: E0 fast lane 3320 passed preflight, Windows and web; Rust
+  reported stale schema/import/census assertions, an old subtitle claim fixture,
+  missing scan consumers in HTTP/scheduler fixtures, an unclassified storage-domain
+  route and two discarded subtitle cancellation results. Fixes are being checked
+  against the pinned compiler before the next candidate. No merge is claimed.
+  E1 remains in [draft PR #566](http://192.168.4.7:3000/noirr/plurx/pulls/566);
+  portable transcode copies, prediction and E2–E3 remain outstanding.
+
+- 2026-09-26: the missing-root regression exposed a visibility gap. An unreadable
+  node correctly leaves accepted scan work for another member, but the status
+  did not explain why. Added a bounded node-local readiness observation to the
+  existing scan status; it names the last local read failure without settling
+  the durable job or spending an attempt. The regression now asserts pending
+  work, a visible explanation and zero claims/failures on an unreadable node.
+
+- 2026-09-26: E0 correction evidence: 376 store tests passed on the first
+  focused run; its two census failures passed after tightening the ratchet
+  (five census/import cases rerun). The subtitle transient-repair contract
+  passed SQLite and real three-voter Hiqlite. All 16 selected daemon
+  regressions pass with the missing-root visibility fix. Ownership inventory:
+  seven passed. Full fast-lane confirmation remains required before merge.

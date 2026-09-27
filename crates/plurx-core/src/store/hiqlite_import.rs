@@ -1576,6 +1576,58 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "background_job_domain_leases",
+        columns: &[
+            "resource",
+            "domain_fence",
+            "job_id",
+            "job_fence",
+            "node_id",
+            "boot_id",
+            "claim_id",
+        ],
+        order_by: "resource",
+        minimum_schema: super::background_jobs_domain::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_provider_budgets",
+        columns: &["provider", "next_dispatch_ms", "interval_ms"],
+        order_by: "provider",
+        minimum_schema: super::background_jobs_provider::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_storage_domains",
+        columns: &["library_id", "root_path", "domain_id"],
+        order_by: "library_id, root_path",
+        minimum_schema: super::background_jobs_resources::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_library_requests",
+        columns: &[
+            "request_id",
+            "library_id",
+            "job_id",
+            "input_json",
+            "result_json",
+            "completed_claim_id",
+            "completed_at_ms",
+        ],
+        order_by: "request_id",
+        minimum_schema: super::background_jobs_library::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "job_leases",
         columns: &[
             "resource",
@@ -1855,6 +1907,14 @@ impl HiqliteAuthStore {
             // Triggers were installed at bootstrap; now capture the imported
             // legacy rows in the same finite schema-defined snapshot.
             super::hiqlite_background_jobs::seal_legacy(self.client()).await?;
+        }
+
+        if schema_version < 76 {
+            // Parity describes the imported snapshot. Only after proving it do
+            // we revoke pre-common-queue owners; their spent attempts survive.
+            self.client()
+                .execute(super::background_jobs_subtitle::RESET_LEGACY, params!())
+                .await?;
         }
 
         Ok(SqliteImportReport {
@@ -3241,8 +3301,16 @@ mod tests {
         assert!(names.contains(&"dvr_reminders"));
         assert!(names.contains(&"media_classifications"));
         assert!(names.contains(&"file_grants"));
+        for name in [
+            "background_library_requests",
+            "background_job_domain_leases",
+            "background_provider_budgets",
+            "background_storage_domains",
+        ] {
+            assert!(names.contains(&name));
+        }
         assert!(!names.contains(&"classification_fts"));
-        assert_eq!(names.len(), 60, "review every imported durable table");
+        assert_eq!(names.len(), 64, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its
@@ -3690,7 +3758,14 @@ mod tests {
                 .copied()
                 .filter(|table| table.name.starts_with("background_"))
             {
-                assert_eq!(table.minimum_schema, 71);
+                let introduced = match table.name {
+                    "background_job_domain_leases" => 72,
+                    "background_library_requests" => 73,
+                    "background_storage_domains" => 74,
+                    "background_provider_budgets" => 75,
+                    _ => 71,
+                };
+                assert_eq!(table.minimum_schema, introduced, "{}", table.name);
                 let rows = if version >= table.minimum_schema {
                     reader
                         .import_chunk(table, version, SourceChunk::Offset(0))

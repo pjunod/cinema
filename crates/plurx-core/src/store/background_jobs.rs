@@ -11,9 +11,13 @@ pub use super::background_jobs_delivery::{
     DeliveryIntent, JobWaiter, WaiterCursor, WaiterPage, WaiterQuery,
 };
 use super::background_jobs_delivery::{DELIVERIES_SQL, WAITERS_SQL};
+pub use super::background_jobs_domain::BindLibraryJob;
 use super::background_jobs_fragment::PUBLISH_FRAGMENT_SQL;
 pub use super::background_jobs_fragment::{FragmentJobFailure, PublishFragmentJob};
 pub use super::background_jobs_fragment_admission::EnqueueFragmentJob;
+pub use super::background_jobs_library::{
+    CompleteLibraryWork, LibraryWorkQuery, LibraryWorkRecord, NewLibraryWork,
+};
 use super::background_jobs_maintenance::{CANCEL_WAITER_SQL, MAINTENANCE_NEEDED, MAINTENANCE_SQL};
 pub use super::background_jobs_migration::JobMigrationStatus;
 pub use super::background_jobs_observation::{
@@ -105,8 +109,25 @@ WITH request AS (SELECT json($1) AS body), snapshot AS (
       AND expires_at_ms > json_extract(body, '$.now_ms')
       AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || owner_node_id)
     ) THEN 'producer_fenced'
+    WHEN json_extract(body, '$.payload.kind') = 'subtitle_extract' AND (
+      json_type(body, '$.subtitle_request') IS NULL OR NOT EXISTS (
+        SELECT 1 FROM analysis_requests request JOIN files file ON file.id = request.file_id
+          AND file.size = request.source_size AND file.mtime = request.source_mtime
+        WHERE request.request_id = json_extract(body, '$.subtitle_request.request_id')
+          AND request.request_id = json_extract(body, '$.payload.source_generation')
+          AND request.file_id = json_extract(body, '$.payload.file_id')
+          AND request.pipeline_version = json_extract(body, '$.subtitle_request.pipeline_version')
+          AND request.component = 'subtitle_source' AND request.cancel_requested = 0
+          AND request.state IN ('queued','running')
+          AND request.video_identity = '' AND request.target_node_id = ''
+      )) THEN 'request_fenced'
     WHEN prior_job IS NOT NULL AND prior_digest != json_extract(body, '$.request.request_digest') THEN 'conflict'
     WHEN prior_job IS NOT NULL THEN 'existing'
+    WHEN json_type(body, '$.library_request') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM libraries WHERE id = json_extract(body, '$.payload.library_id')) THEN 'source_changed'
+    WHEN json_type(body, '$.library_request') IS NOT NULL AND (SELECT COUNT(*) FROM background_library_requests request
+      JOIN background_job_waiters waiter ON waiter.request_scope = 'library' AND waiter.request_id = request.request_id
+      WHERE request.library_id = json_extract(body, '$.payload.library_id') AND waiter.state = 'pending') >= 256 THEN 'queue_full'
     WHEN json_type(body, '$.offline_join') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM offline_packages package JOIN background_jobs original
         ON original.id = json_extract(body, '$.offline_join.job_id')
@@ -278,9 +299,10 @@ WHERE id = json_extract($1, '$.job_id')
   AND fence < 9223372036854775807 AND revision < 9223372036854775807
   AND NOT EXISTS (SELECT 1 FROM background_job_attempts WHERE claim_id = json_extract($1, '$.claim_id'))
   AND (SELECT COUNT(*) FROM background_job_attempts) < 40000
-  AND (SELECT COUNT(*) FROM background_job_reservations
-    WHERE resource_key = 'source_io' AND expires_at_ms > json_extract($1, '$.now_ms')
-      AND job_id != json_extract($1, '$.job_id')) < 2
+  AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
+    WHERE required.job_id = background_jobs.id AND (SELECT COUNT(*) FROM background_job_reservations held
+      WHERE held.resource_key = required.resource_key AND held.expires_at_ms > json_extract($1, '$.now_ms')
+        AND held.job_id != json_extract($1, '$.job_id')) >= 2)
 "#;
 
 const RENEW_SQL: &str = r#"
@@ -300,6 +322,12 @@ WITH inputs AS (
     AND job.revision = json_extract(token, '$.revision')
     AND job.lease_expires_ms = json_extract(token, '$.lease_expires_ms')
     AND job.lease_expires_ms > now_ms AND job.state = 'running'
+            AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
+                WHERE required.job_id = job.id AND NOT EXISTS (
+                    SELECT 1 FROM background_job_reservations held
+                    WHERE held.job_id = job.id AND held.fence = job.fence
+                        AND held.resource_key = required.resource_key
+                        AND held.expires_at_ms >= job.lease_expires_ms))
     AND (job.retry_deadline_ms = 0 OR job.retry_deadline_ms > now_ms)
     AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || job.owner_node_id)
     AND job.revision < 9223372036854775807
@@ -366,10 +394,27 @@ pub enum JobKind {
     MediaProbe,
 }
 
-/// Closed payload variants carry domain identifiers, never executable text,
-/// credentials, external URLs or caller-selected filesystem paths.
+impl JobKind {
+    /// Learners may compute immutable results, but never own catalogue scans
+    /// or provider passes. Every publication still uses its typed transaction.
+    pub const fn permits_artifact_execution(self) -> bool {
+        match self {
+            Self::TranscodePrepare
+            | Self::FragmentIndexBuild
+            | Self::ArtifactHydrate
+            | Self::SubtitleExtract
+            | Self::ArtifactVerify
+            | Self::ArtworkDerivative
+            | Self::SemanticEmbedding
+            | Self::MediaProbe => true,
+            Self::LibraryScan | Self::MetadataRefresh => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+/// Closed payloads contain identifiers, never executable text or caller-selected paths.
 pub enum JobPayload {
     TranscodePrepare {
         file_id: i64,
@@ -398,7 +443,8 @@ pub enum JobPayload {
     SubtitleExtract {
         file_id: i64,
         source_generation: String,
-        track: u32,
+        /// None prepares every eligible track in the existing one-pass extractor.
+        track: Option<u32>,
         pipeline_digest: String,
     },
     LibraryScan {
@@ -909,6 +955,42 @@ pub struct CancelWaiterOutcome {
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    /// Pending compatibility records are an outbox; only the common queue executes them.
+    async fn subtitle_job_intents(&self, limit: usize) -> Result<Vec<String>, StoreError>;
+    async fn enqueue_subtitle_job(
+        &self,
+        request: super::AnalysisRequest,
+        now_ms: i64,
+    ) -> Result<EnqueueOutcome, StoreError>;
+    async fn write_subtitle_job(
+        &self,
+        request: super::background_jobs_subtitle::WriteSubtitleJob,
+    ) -> Result<bool, StoreError>;
+
+    async fn update_provider_budget(
+        &self,
+        request: super::background_jobs_provider::ProviderBudgetRequest,
+    ) -> Result<super::background_jobs_provider::ProviderBudgetOutcome, StoreError>;
+    async fn storage_domains(
+        &self,
+    ) -> Result<Vec<super::background_jobs_resources::StorageDomainMapping>, StoreError>;
+    async fn replace_storage_domains(
+        &self,
+        mappings: Vec<super::background_jobs_resources::StorageDomainMapping>,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+    async fn enqueue_library_work(
+        &self,
+        request: NewLibraryWork,
+    ) -> Result<EnqueueOutcome, StoreError>;
+    async fn library_work_requests(
+        &self,
+        query: LibraryWorkQuery,
+    ) -> Result<Vec<LibraryWorkRecord>, StoreError>;
+    async fn complete_library_work(&self, request: CompleteLibraryWork)
+        -> Result<bool, StoreError>;
+
+    async fn bind_library_job(&self, request: BindLibraryJob) -> Result<bool, StoreError>;
     async fn bind_transcode_job_recipe(
         &self,
         token: JobToken,
@@ -953,6 +1035,8 @@ pub trait BackgroundJobStore: Send + Sync {
         replacement: crate::cluster::coordination::Lease,
     ) -> Result<EnqueueOutcome, StoreError>;
     async fn claim_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError>;
+    /// Narrow entry point shared by voter and learner artifact workers.
+    async fn claim_artifact_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError>;
     async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError>;
     async fn job_labels(&self, ids: &[String]) -> Result<Vec<JobLabel>, StoreError>;
     async fn job_counts(&self, now_ms: i64) -> Result<Vec<JobCount>, StoreError>;
@@ -995,6 +1079,23 @@ pub(super) trait QueueSql: Send + Sync {
     ) -> Result<Vec<String>, StoreError>;
 }
 
+// Claim acknowledgement and renewal reconciliation must not revive a token
+// whose library now requires different storage. Return the row and resource
+// verdict from one authoritative snapshot, not two independently timed reads.
+const CLAIM_RESOURCE_SNAPSHOT: &str = r#"NOT EXISTS (
+    SELECT 1 FROM background_job_required_resources required
+    WHERE required.job_id = background_jobs.id AND NOT EXISTS (
+        SELECT 1 FROM background_job_reservations held
+        WHERE held.job_id = background_jobs.id AND held.fence = background_jobs.fence
+            AND held.resource_key = required.resource_key
+            AND held.expires_at_ms >= background_jobs.lease_expires_ms))"#;
+
+#[derive(Deserialize)]
+struct ClaimSnapshot {
+    job: BackgroundJob,
+    resources_current: i64,
+}
+
 pub(super) fn decode<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, StoreError> {
     serde_json::from_str(value)
         .map_err(|error| StoreError::Database(format!("invalid background job row: {error}")))
@@ -1004,8 +1105,10 @@ pub(super) async fn enqueue_body<T: QueueSql>(
     store: &T,
     request: &EnqueueJob,
 ) -> Result<serde_json::Value, StoreError> {
-    let fragment_policy = matches!(request.payload, JobPayload::FragmentIndexBuild { .. })
-        || matches!(&request.payload, JobPayload::ArtifactHydrate { artifact_key, .. } if artifact_key.starts_with("fragment:"));
+    let fragment_policy = matches!(
+        request.payload,
+        JobPayload::FragmentIndexBuild { .. } | JobPayload::SubtitleExtract { .. }
+    ) || matches!(&request.payload, JobPayload::ArtifactHydrate { artifact_key, .. } if artifact_key.starts_with("fragment:"));
     let limit = if fragment_policy {
         let rows = store.queue_sql("SELECT json_quote(value) AS result_json FROM settings WHERE key = json_extract($1, '$.key')".into(),
             encode(&serde_json::json!({"key": super::keys::ANALYSIS_MAX_ATTEMPTS}))?, false, true).await?;
@@ -1021,6 +1124,63 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn subtitle_job_intents(&self, limit: usize) -> Result<Vec<String>, StoreError> {
+        super::background_jobs_subtitle::intents(self, limit).await
+    }
+    async fn enqueue_subtitle_job(
+        &self,
+        request: super::AnalysisRequest,
+        now_ms: i64,
+    ) -> Result<EnqueueOutcome, StoreError> {
+        super::background_jobs_subtitle::enqueue(self, request, now_ms).await
+    }
+    async fn write_subtitle_job(
+        &self,
+        request: super::background_jobs_subtitle::WriteSubtitleJob,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_subtitle::write(self, request).await
+    }
+
+    async fn update_provider_budget(
+        &self,
+        request: super::background_jobs_provider::ProviderBudgetRequest,
+    ) -> Result<super::background_jobs_provider::ProviderBudgetOutcome, StoreError> {
+        super::background_jobs_provider::update(self, request).await
+    }
+    async fn storage_domains(
+        &self,
+    ) -> Result<Vec<super::background_jobs_resources::StorageDomainMapping>, StoreError> {
+        super::background_jobs_resources::list(self).await
+    }
+    async fn replace_storage_domains(
+        &self,
+        mappings: Vec<super::background_jobs_resources::StorageDomainMapping>,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_resources::replace(self, mappings, now_ms).await
+    }
+    async fn enqueue_library_work(
+        &self,
+        request: NewLibraryWork,
+    ) -> Result<EnqueueOutcome, StoreError> {
+        super::background_jobs_library::enqueue(self, request).await
+    }
+    async fn library_work_requests(
+        &self,
+        query: LibraryWorkQuery,
+    ) -> Result<Vec<LibraryWorkRecord>, StoreError> {
+        super::background_jobs_library::list(self, query).await
+    }
+    async fn complete_library_work(
+        &self,
+        request: CompleteLibraryWork,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_library::complete(self, request).await
+    }
+
+    async fn bind_library_job(&self, request: BindLibraryJob) -> Result<bool, StoreError> {
+        super::background_jobs_domain::bind(self, request).await
+    }
     async fn bind_transcode_job_recipe(
         &self,
         token: JobToken,
@@ -1783,21 +1943,41 @@ impl<T: QueueSql> BackgroundJobStore for T {
         Ok(outcome)
     }
 
+    async fn claim_artifact_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError> {
+        if !request.kind.permits_artifact_execution() {
+            return Err(invalid(
+                "artifact workers cannot claim catalogue or provider work",
+            ));
+        }
+        self.claim_job(request).await
+    }
+
     async fn claim_job(&self, request: ClaimJob) -> Result<ClaimOutcome, StoreError> {
         request.validate()?;
         // Replaying an acknowledged or ambiguous claim must return its current
         // identity, not compete for a fresh fence. Never adopt another boot.
         let previous = self.queue_sql(
-            format!("SELECT {JOB_JSON} AS result_json FROM background_jobs WHERE id = json_extract($1, '$.job_id') AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))"),
+            format!("SELECT json_object('job', json({JOB_JSON}), 'resources_current', {CLAIM_RESOURCE_SNAPSHOT}) AS result_json FROM background_jobs WHERE id = json_extract($1, '$.job_id') AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))"),
             encode(&request)?, false, true,
         ).await?;
         let Some(previous) = previous.first() else {
             return Ok(ClaimOutcome::ExpiredOrPruned);
         };
-        let previous: BackgroundJob = decode(previous)?;
+        let snapshot: ClaimSnapshot = decode(previous)?;
+        let previous = snapshot.job;
+        if previous.payload_version != request.payload_version
+            || previous
+                .supported_payload()
+                .map(|payload| payload.kind())
+                .ok()
+                != Some(request.kind)
+        {
+            return Ok(ClaimOutcome::Unsupported);
+        }
         if let Some(token) = &previous.token {
             if token.claim_id == request.claim_id {
-                return if previous.state == JobState::Running
+                return if snapshot.resources_current == 1
+                    && previous.state == JobState::Running
                     && token.node_id == request.node_id
                     && token.boot_id == request.boot_id
                     && token.lease_expires_ms > request.now_ms
@@ -1814,15 +1994,6 @@ impl<T: QueueSql> BackgroundJobStore for T {
         }
         if matches!(previous.state, JobState::Cancelling | JobState::Cancelled) {
             return Ok(ClaimOutcome::Cancelled);
-        }
-        if previous.payload_version != request.payload_version
-            || previous
-                .supported_payload()
-                .map(|payload| payload.kind())
-                .ok()
-                != Some(request.kind)
-        {
-            return Ok(ClaimOutcome::Unsupported);
         }
         let rows = self
             .queue_sql(
@@ -1857,7 +2028,7 @@ impl<T: QueueSql> BackgroundJobStore for T {
             return Ok(ClaimResolution::ExpiredOrPruned);
         }
         let rows = self.queue_sql(format!(
-            "SELECT {JOB_JSON} AS result_json FROM background_jobs WHERE id = json_extract($1, '$.job_id') AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))
+            "SELECT json_object('job', json({JOB_JSON}), 'resources_current', {CLAIM_RESOURCE_SNAPSHOT}) AS result_json FROM background_jobs WHERE id = json_extract($1, '$.job_id') AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || json_extract($1, '$.node_id'))
              AND EXISTS (SELECT 1 FROM background_job_attempts a WHERE a.job_id = background_jobs.id
                AND a.claim_id = json_extract($1, '$.claim_id')
                AND a.owner_node_id = json_extract($1, '$.node_id')
@@ -1867,7 +2038,11 @@ impl<T: QueueSql> BackgroundJobStore for T {
         let Some(row) = rows.first() else {
             return Ok(ClaimResolution::ExpiredOrPruned);
         };
-        let job: BackgroundJob = decode(row)?;
+        let snapshot: ClaimSnapshot = decode(row)?;
+        let job = snapshot.job;
+        if job.state == JobState::Running && snapshot.resources_current != 1 {
+            return Ok(ClaimResolution::LostOwnership);
+        }
         if let Some(token) = job.token {
             if token.claim_id != request.claim_id
                 || token.node_id != request.node_id

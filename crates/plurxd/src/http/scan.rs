@@ -133,11 +133,8 @@ pub async fn scan(
     }
 
     let request_id = format!("sr-{}", uuid::Uuid::new_v4().simple());
-    // The ids ride ON the request so the job applies them, whether it runs
-    // now or is drained from the pending queue later. An endpoint that
-    // applied them itself would drop them for every request that arrived
-    // while a scan was running — which is most of them, since creating or
-    // scanning a library makes it busy.
+    // Persist hints with the request before acknowledging it. An eligible
+    // cluster worker applies them when it scans, including after a restart.
     let episodeish = matches!(body.hint.as_deref(), Some("episode") | Some("season"))
         || body.series.as_ref().is_some_and(|s| s.tmdb.is_some());
     // A series import deliberately carries the SHOW id in `series`, with no
