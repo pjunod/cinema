@@ -132,7 +132,9 @@ const TRANSCODE_COPIES_SCHEMA_VERSION: i64 = 56;
 const TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE: i64 = ARTWORK_JOBS_SCHEMA_VERSION;
 const PREDICTIONS_SCHEMA_VERSION: i64 = 57;
 const PREDICTIONS_SCHEMA_MIGRATION_SOURCE: i64 = TRANSCODE_COPIES_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = PREDICTIONS_SCHEMA_VERSION;
+const EMBEDDINGS_SCHEMA_VERSION: i64 = 58;
+const EMBEDDINGS_SCHEMA_MIGRATION_SOURCE: i64 = PREDICTIONS_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = EMBEDDINGS_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -2927,6 +2929,19 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(PREDICTIONS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(EMBEDDINGS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_embeddings::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(EMBEDDINGS_SCHEMA_VERSION, now, EMBEDDINGS_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(EMBEDDINGS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -3115,6 +3130,7 @@ impl HiqliteAuthStore {
         let statements = vec![
             ("DELETE FROM background_job_commands".to_owned(), params!()),
             ("DELETE FROM background_predictions".to_owned(), params!()),
+            ("DELETE FROM background_embeddings".to_owned(), params!()),
             (
                 "DELETE FROM background_transcode_artifacts".to_owned(),
                 params!(),
@@ -4956,7 +4972,8 @@ fn schema_migration_action(
         | SUBTITLE_JOBS_SCHEMA_MIGRATION_SOURCE
         | ARTWORK_JOBS_SCHEMA_MIGRATION_SOURCE
         | TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE
-        | PREDICTIONS_SCHEMA_MIGRATION_SOURCE => {
+        | PREDICTIONS_SCHEMA_MIGRATION_SOURCE
+        | EMBEDDINGS_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -6983,9 +7000,9 @@ mod tests {
             "v47 must advance exactly one step to the read-index schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 52,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 53,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v57 step"
+            "this implementation contains every additive v5→v58 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

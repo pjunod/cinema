@@ -3248,3 +3248,234 @@ async fn background_next_episode_uses_the_active_session_before_watch_completion
     })
     .await;
 }
+
+#[tokio::test]
+async fn background_embeddings_share_verified_vectors_and_fence_source_changes() {
+    use plurx_core::store::background_jobs_embeddings::{
+        entry_digest, EmbeddingModel, PublishEmbeddingJob, SharedEmbedding,
+    };
+    for_each_backend(|store, backend| async move {
+        for scenario in ["published", "source_changed", "cancelled", "expired"] {
+            let (_, file_id) = seed_file(&store, &format!("embedding-{scenario}")).await;
+            let item_id = store
+                .get_file(file_id)
+                .await
+                .expect("file")
+                .expect("file")
+                .item_id;
+            let entry = store
+                .classification_page(item_id - 1, 1)
+                .await
+                .expect("entry")
+                .remove(0);
+            let model = EmbeddingModel {
+                weights_sha256: "a".repeat(64),
+                config_sha256: "b".repeat(64),
+                tokenizer_sha256: "c".repeat(64),
+                tokenizer_version: "v1".into(),
+                dimensions: 3,
+                normalization_version: "l2-v1".into(),
+            };
+            let content = entry_digest(&entry);
+            let id = uuid::Uuid::new_v4().to_string();
+            let request = EnqueueJob {
+                id: id.clone(),
+                payload: JobPayload::SemanticEmbedding {
+                    item_id,
+                    content_digest: content.clone(),
+                    model_digest: model.digest(),
+                },
+                dedupe_key: format!("embed:{item_id}:{}", model.digest()),
+                priority: 3,
+                not_before_ms: 1000,
+                now_ms: 1000,
+                request: JobRequest {
+                    scope: "semantic".into(),
+                    request_id: format!("{item_id}:a"),
+                    request_digest: content.clone(),
+                    consumer_kind: "semantic".into(),
+                    consumer_ref: item_id.to_string(),
+                    target_node_id: None,
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            };
+            assert!(
+                matches!(
+                    store.enqueue_job(request.clone()).await.expect("enqueue"),
+                    EnqueueOutcome::Accepted { .. }
+                ),
+                "{backend}"
+            );
+            let mut other = request.clone();
+            other.id = uuid::Uuid::new_v4().to_string();
+            other.request.request_id = format!("{item_id}:b");
+            assert!(matches!(
+                store.enqueue_job(other.clone()).await.expect("join"),
+                EnqueueOutcome::Existing { .. } | EnqueueOutcome::Accepted { .. }
+            ));
+            store
+                .cancel_waiter(CancelWaiter {
+                    scope: "semantic".into(),
+                    request_id: request.request.request_id.clone(),
+                    now_ms: 1001,
+                })
+                .await
+                .expect("independent cancellation");
+            let candidate = store.background_job(&id).await.expect("read").expect("job");
+            let ClaimOutcome::Claimed { job } = store
+                .claim_artifact_job(ClaimJob {
+                    job_id: id.clone(),
+                    expected_revision: candidate.revision,
+                    node_id: "node-a".into(),
+                    boot_id: uuid::Uuid::new_v4().to_string(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::SemanticEmbedding,
+                    payload_version: 1,
+                    now_ms: 1010,
+                    dispatched_at_ms: 1010,
+                })
+                .await
+                .expect("claim")
+            else {
+                panic!("{backend}: claim");
+            };
+            let vector = vec![1., 0., 0.];
+            let mut publication = PublishEmbeddingJob {
+                token: job.token.expect("token"),
+                artifact: SharedEmbedding {
+                    item_id,
+                    content_digest: content.clone(),
+                    model: model.clone(),
+                    vector_sha256: SharedEmbedding::vector_digest(&vector),
+                    vector,
+                },
+                source_json: entry.source_json.clone(),
+                classification_revision: 0,
+                now_ms: 1100,
+            };
+            for invalid in ["model", "dimension", "hash", "norm"] {
+                let mut bad = publication.clone();
+                match invalid {
+                    "model" => bad.artifact.model.tokenizer_version = "v2".into(),
+                    "dimension" => bad.artifact.vector.push(0.),
+                    "hash" => bad.artifact.vector_sha256 = "0".repeat(64),
+                    _ => {
+                        bad.artifact.vector = vec![2., 0., 0.];
+                        bad.artifact.vector_sha256 =
+                            SharedEmbedding::vector_digest(&bad.artifact.vector);
+                    }
+                }
+                assert!(
+                    !matches!(
+                        store.publish_embedding_job(bad).await,
+                        Ok(JobPublishOutcome::Published { .. })
+                    ),
+                    "{backend}: {invalid}"
+                );
+            }
+            if scenario == "source_changed" {
+                let record = plurx_core::store::classification::Record {
+                    source_json: entry.source_json.clone(),
+                    revision: 0,
+                    overrides: Default::default(),
+                    classification: plurx_core::metadata::classification::classify(
+                        &entry.input().expect("input").metadata(),
+                        vec!["new classification".into()],
+                    ),
+                };
+                assert!(store
+                    .write_classification(item_id, &record)
+                    .await
+                    .expect("change"));
+            } else if scenario == "cancelled" {
+                store
+                    .cancel_job(CancelJob {
+                        job_id: id.clone(),
+                        now_ms: 1050,
+                    })
+                    .await
+                    .expect("cancel");
+            } else if scenario == "expired" {
+                publication.now_ms = publication.token.lease_expires_ms;
+            }
+            let verdict = store
+                .publish_embedding_job(publication.clone())
+                .await
+                .expect("publish");
+            if scenario == "published" {
+                assert!(
+                    matches!(verdict, JobPublishOutcome::Published { .. }),
+                    "{backend}"
+                );
+                publication.now_ms += 1;
+                assert!(matches!(
+                    store
+                        .publish_embedding_job(publication)
+                        .await
+                        .expect("lost reply"),
+                    JobPublishOutcome::AlreadyPublished { .. }
+                ));
+                let reused = store
+                    .embedding_for(item_id, &content, &model.digest())
+                    .await
+                    .expect("new node lookup");
+                assert_eq!(
+                    reused.artifact.expect("portable vector").vector,
+                    vec![1., 0., 0.]
+                );
+                assert_eq!(reused.last_completed_job.as_deref(), Some(id.as_str()));
+                let mut late = other;
+                late.id = uuid::Uuid::new_v4().to_string();
+                late.request.request_id = format!("{item_id}:late-node");
+                assert!(matches!(
+                    store.enqueue_job(late).await.expect("late discovery"),
+                    EnqueueOutcome::NoDemand
+                ));
+                let waiters = store
+                    .job_waiters(WaiterQuery {
+                        job_id: id,
+                        after: None,
+                        limit: 10,
+                    })
+                    .await
+                    .expect("waiters")
+                    .waiters;
+                assert_eq!(
+                    waiters
+                        .iter()
+                        .filter(|waiter| waiter.state == "succeeded")
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    waiters
+                        .iter()
+                        .filter(|waiter| waiter.state == "cancelled")
+                        .count(),
+                    1
+                );
+                let mut wrong_model = model;
+                wrong_model.dimensions = 4;
+                assert!(store
+                    .embedding_for(item_id, &content, &wrong_model.digest())
+                    .await
+                    .expect("different model")
+                    .artifact
+                    .is_none());
+            } else {
+                assert!(
+                    matches!(verdict, JobPublishOutcome::LostOwnership),
+                    "{backend}: {scenario}"
+                );
+                assert!(store
+                    .embedding_for(item_id, &content, &model.digest())
+                    .await
+                    .expect("absent")
+                    .artifact
+                    .is_none());
+            }
+        }
+    })
+    .await;
+}

@@ -101,6 +101,7 @@ pub use background_jobs::BackgroundJobStore;
 pub mod background_jobs_artwork;
 mod background_jobs_delivery;
 pub mod background_jobs_domain;
+pub mod background_jobs_embeddings;
 mod background_jobs_fragment;
 pub mod background_jobs_fragment_admission;
 pub mod background_jobs_library;

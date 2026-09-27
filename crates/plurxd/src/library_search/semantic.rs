@@ -1,10 +1,24 @@
-//! Optional CPU sentence embeddings. Model files and vectors stay on this node.
+//! Optional CPU sentence embeddings. Durable portable vectors feed a local serving index.
 use crate::state::AppState;
 use anyhow::{bail, Result};
 use candle_core::{Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config, DTYPE};
-use plurx_core::store::classification::Entry;
+use plurx_core::store::background_jobs_embeddings::{
+    embedding_text, entry_digest as source_key, EmbeddingModel,
+};
+#[path = "semantic_work.rs"]
+mod work;
+fn model_identity() -> EmbeddingModel {
+    EmbeddingModel {
+        weights_sha256: FILES[2].1.into(),
+        config_sha256: FILES[0].1.into(),
+        tokenizer_sha256: FILES[1].1.into(),
+        tokenizer_version: "tokenizers-0.22-truncate256-v1".into(),
+        dimensions: DIM,
+        normalization_version: "mean-pool-l2-text-v1".into(),
+    }
+}
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -174,38 +188,9 @@ async fn download(dir: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn embedding_text(entry: &Entry) -> Result<String> {
-    let input = entry.input()?;
-    let labels = entry
-        .record
-        .as_ref()
-        .filter(|r| r.source_json == entry.source_json)
-        .map(|r| r.classification.terms(&r.overrides).join(", "))
-        .unwrap_or_default();
-    Ok(format!(
-        "{}. {}. {}. {}. {}",
-        input.title,
-        input.genres.join(", "),
-        input.tags.join(", "),
-        labels,
-        input.overview
-    )
-    .chars()
-    .take(8000)
-    .collect())
-}
-fn source_key(entry: &Entry) -> String {
-    // Corrections and newly imported provider keywords also invalidate embeddings.
-    hex::encode(Sha256::digest(
-        format!(
-            "{}:{}",
-            entry.source_json,
-            entry.record.as_ref().map(|r| r.revision).unwrap_or(0)
-        )
-        .as_bytes(),
-    ))
-}
 pub async fn worker(state: AppState, shutdown: CancellationToken) {
+    let boot = uuid::Uuid::new_v4().to_string();
+    let mut jobs = None;
     let mut cursor = 0;
     let mut seen = BTreeSet::new();
     loop {
@@ -223,7 +208,17 @@ pub async fn worker(state: AppState, shutdown: CancellationToken) {
             seen.clear();
         } else {
             ENABLED.store(true, Ordering::Release);
-            let result = tokio::select! {_=shutdown.cancelled()=>{disable();return;},result=step(&state,&mut cursor,&mut seen)=>result};
+            // Keep joined model work inside this future through cancellation.
+            let result = async {
+                step(&state, &mut cursor, &mut seen, &shutdown).await?;
+                for _ in 0..16 {
+                    if !work::run(&state, &boot, &mut jobs, &shutdown).await? {
+                        break;
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
             if let Err(error) = result {
                 tracing::warn!(%error,"Embedded semantic search paused; local text search remains available");
                 phase("unavailable");
@@ -232,7 +227,12 @@ pub async fn worker(state: AppState, shutdown: CancellationToken) {
         tokio::select! {_=shutdown.cancelled()=>{disable();return;},_=tokio::time::sleep(Duration::from_secs(if enabled&&cursor>0{1}else{30}))=>{}}
     }
 }
-async fn step(state: &AppState, cursor: &mut i64, seen: &mut BTreeSet<i64>) -> Result<()> {
+async fn step(
+    state: &AppState,
+    cursor: &mut i64,
+    seen: &mut BTreeSet<i64>,
+    shutdown: &CancellationToken,
+) -> Result<()> {
     if !ENABLED.load(Ordering::Acquire) {
         return Ok(());
     }
@@ -244,7 +244,7 @@ async fn step(state: &AppState, cursor: &mut i64, seen: &mut BTreeSet<i64>) -> R
     };
     if !loaded {
         phase("downloading");
-        download(&dir).await?;
+        tokio::select! { () = shutdown.cancelled() => return Ok(()), result = download(&dir) => result? };
         phase("loading");
         let r = runtime();
         let model_dir = dir.clone();
@@ -254,7 +254,7 @@ async fn step(state: &AppState, cursor: &mut i64, seen: &mut BTreeSet<i64>) -> R
             let path = model_dir.join("vectors.json");
             if std::fs::metadata(&path).is_ok_and(|m| m.len() < 300_000_000) {
                 if let Ok(cached) = serde_json::from_slice::<Index>(&std::fs::read(path)?) {
-                    if cached.revision == REVISION
+                    if cached.revision == model_identity().digest()
                         && cached.rows.len() <= MAX_ITEMS
                         && cached.rows.values().all(|v| {
                             v.embedding.len() == DIM && v.embedding.iter().all(|x| x.is_finite())
@@ -282,7 +282,7 @@ async fn step(state: &AppState, cursor: &mut i64, seen: &mut BTreeSet<i64>) -> R
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut r = r.lock().map_err(|_| anyhow::anyhow!("model lock"))?;
             r.index.rows.retain(|id, _| keep.contains(id));
-            r.index.revision = REVISION.into();
+            r.index.revision = model_identity().digest();
             r.phase = if capped {
                 "ready_capacity_limit"
             } else {
@@ -303,25 +303,38 @@ async fn step(state: &AppState, cursor: &mut i64, seen: &mut BTreeSet<i64>) -> R
         let id = entry.input()?.id;
         *cursor = id;
         seen.insert(id);
+        if shutdown.is_cancelled() || !ENABLED.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let source = source_key(&entry);
-        let text = embedding_text(&entry)?;
-        let r = runtime();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let mut r = r.lock().map_err(|_| anyhow::anyhow!("model lock"))?;
-            if !ENABLED.load(Ordering::Acquire) {
-                *r = Runtime::default();
-                return Ok(());
+        let present = runtime()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("model lock"))?
+            .index
+            .rows
+            .get(&id)
+            .is_some_and(|row| row.source == source);
+        if present {
+            continue;
+        }
+        let lookup = state
+            .store
+            .embedding_for(id, &source, &model_identity().digest())
+            .await?;
+        if let Some(artifact) = lookup.artifact {
+            let mut r = rt.lock().map_err(|_| anyhow::anyhow!("model lock"))?;
+            if ENABLED.load(Ordering::Acquire) && r.encoder.is_some() {
+                r.index.rows.insert(
+                    id,
+                    Vector {
+                        source,
+                        embedding: artifact.vector,
+                    },
+                );
             }
-            if r.index.rows.get(&id).is_some_and(|v| v.source == source) {
-                return Ok(());
-            }
-            if let Some(encoder) = &r.encoder {
-                let embedding = encoder.embed(&text)?;
-                r.index.rows.insert(id, Vector { source, embedding });
-            }
-            Ok(())
-        })
-        .await??;
+        } else {
+            work::enqueue(state, id, &source, lookup.last_completed_job.as_deref()).await?;
+        }
     }
     Ok(())
 }

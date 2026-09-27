@@ -700,6 +700,60 @@ impl JobFence {
         Ok(published)
     }
 
+    pub(crate) async fn publish_embedding(
+        &self,
+        artifact: plurx_core::store::background_jobs_embeddings::SharedEmbedding,
+        source_json: String,
+        classification_revision: i64,
+    ) -> Result<bool, StoreError> {
+        let mut state = self.0.state.lock().await;
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+            metrics::event(self.0.kind, Event::FencedPublication);
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            metrics::event(self.0.kind, Event::FencedPublication);
+            return Ok(false);
+        };
+        let now_ms = unix_ms()?;
+        let mut request = plurx_core::store::background_jobs_embeddings::PublishEmbeddingJob {
+            token,
+            artifact,
+            source_json,
+            classification_revision,
+            now_ms,
+        };
+        let reply = self.0.store.publish_embedding_job(request.clone()).await;
+        #[cfg(test)]
+        let reply = faults::after_commit(faults::PUBLISH, reply);
+        let result = match reply {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                self.0.store.publish_embedding_job(request).await?
+            }
+        };
+        let published = matches!(
+            result,
+            JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
+        );
+        metrics::event(
+            self.0.kind,
+            if published {
+                Event::Published
+            } else {
+                Event::FencedPublication
+            },
+        );
+        if published {
+            state.token = None;
+        }
+        Ok(published)
+    }
+
     pub(crate) async fn fail_fragment(
         &self,
         code: plurx_core::content_analysis::IndexFailureCode,

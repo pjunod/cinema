@@ -137,6 +137,15 @@ WITH provided AS (SELECT json($1) AS body), input AS (
       )) THEN 'request_fenced'
     WHEN prior_job IS NOT NULL AND prior_digest != json_extract(body, '$.request.request_digest') THEN 'conflict'
     WHEN prior_job IS NOT NULL THEN 'existing'
+    WHEN json_extract(body,'$.payload.kind') = 'semantic_embedding' AND NOT EXISTS (
+      SELECT 1 FROM items WHERE id = json_extract(body,'$.payload.item_id')) THEN 'source_changed'
+    WHEN json_extract(body,'$.payload.kind') = 'semantic_embedding' AND EXISTS (
+      SELECT 1 FROM background_embeddings WHERE item_id = json_extract(body,'$.payload.item_id')
+        AND content_digest = json_extract(body,'$.payload.content_digest')
+        AND model_digest = json_extract(body,'$.payload.model_digest')) THEN 'no_demand'
+    WHEN json_extract(body,'$.payload.kind') = 'semantic_embedding' AND active_job IS NULL
+      AND (SELECT COUNT(*) FROM background_jobs WHERE kind = 'semantic_embedding'
+        AND state IN ('queued','running','cancelling')) >= 64 THEN 'queue_full'
     WHEN json_type(body, '$.library_request') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM libraries WHERE id = json_extract(body, '$.payload.library_id')) THEN 'source_changed'
     WHEN json_type(body, '$.library_request') IS NOT NULL AND (SELECT COUNT(*) FROM background_library_requests request
@@ -974,6 +983,16 @@ pub struct CancelWaiterOutcome {
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    async fn embedding_for(
+        &self,
+        item_id: i64,
+        content_digest: &str,
+        model_digest: &str,
+    ) -> Result<super::background_jobs_embeddings::EmbeddingLookup, StoreError>;
+    async fn publish_embedding_job(
+        &self,
+        request: super::background_jobs_embeddings::PublishEmbeddingJob,
+    ) -> Result<JobPublishOutcome, StoreError>;
     async fn sync_predictions(
         &self,
         request: super::background_jobs_predictions::SyncPredictions,
@@ -1184,6 +1203,20 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn embedding_for(
+        &self,
+        item_id: i64,
+        content_digest: &str,
+        model_digest: &str,
+    ) -> Result<super::background_jobs_embeddings::EmbeddingLookup, StoreError> {
+        super::background_jobs_embeddings::lookup(self, item_id, content_digest, model_digest).await
+    }
+    async fn publish_embedding_job(
+        &self,
+        request: super::background_jobs_embeddings::PublishEmbeddingJob,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        super::background_jobs_embeddings::publish(self, request).await
+    }
     async fn sync_predictions(
         &self,
         request: super::background_jobs_predictions::SyncPredictions,
