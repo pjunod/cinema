@@ -190,6 +190,7 @@
  * Prepared replacement (a staged successor for a quality or track change)
  * @property {any} [prepared]              the successor being prepared, until it settles
  * @property {any} [preparedCommitting]    the prepared successor being committed
+ * @property {any} [preparedRetiring]      a proven switch's hidden predecessor awaiting idle teardown
  * @property {any} [preparedControlPending] the committed successor awaiting its control acknowledgement
  * @property {any[]} [preparedSettled]     action ids already settled, so a late commit is refused
  * @property {any} [switchCommit]          the last prepared switch's commit timing
@@ -628,6 +629,16 @@ function resumeHlsStartup(video,player){
   armHlsStartupRetry(video,player,episode);
   return true;
 }
+function noteCompletedAutoTransfer(p,bytes,loading,now){
+  if(!p||!p.abr) return;
+  const elapsed=Number(loading&&loading.end)-Number(loading&&loading.start);
+  if(!(Number(bytes)>0)||!(elapsed>0)) return;
+  const age=PlaybackPolicy.AUTO_DEFAULTS.recentSampleMaxAgeMs;
+  const recent=(p.abr.completedTransfers||[]).filter(row=>
+    row.atMs<=now&&now-row.atMs<=age).slice(-31);
+  recent.push({bytes:Number(bytes),startedAtMs:now-elapsed,endedAtMs:now,atMs:now});
+  p.abr.completedTransfers=recent;
+}
 function createHlsStartupLoader(StockLoader,episode){
   return class PlurxStartupLoader extends StockLoader{
     constructor(config){ super(config); episode.loaders.add(this); this.plurxRequestOrdinal=0; }
@@ -671,6 +682,7 @@ function createHlsStartupLoader(StockLoader,episode){
             player.abr.recentEstimateAtMs=now;
             player.abr.recentEstimateSource='progress';
             player.abr.recentEstimateUrl=String(context.url||'');
+            scheduleUrgentAutoControllerTick(player,kbps,now);
           }
         });
       }
@@ -991,6 +1003,7 @@ function wireHlsObservers(hls,startup,video,observesCurrent){
       : null;
     if(sampleKbps&&p.abr){
       const now=performance.now();
+      if(d.frag.type==='main') noteCompletedAutoTransfer(p,stats.loaded||b,loading,now);
       // The completed fragment's full-load average can include fast bytes
       // from before a cliff. Preserve a fresher within-fragment byte delta
       // until the next request supplies its own measurement.
@@ -1002,6 +1015,7 @@ function wireHlsObservers(hls,startup,video,observesCurrent){
         p.abr.recentEstimateAtMs=now;
         p.abr.recentEstimateSource='complete';
         p.abr.recentEstimateUrl=String(d.frag&&d.frag.url||'');
+        if(d.frag.type==='main') scheduleUrgentAutoControllerTick(p,sampleKbps,now);
       }
     }
     if(b<=(p.segBytes|0)) return;

@@ -1198,6 +1198,25 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "background_transcode_artifacts",
+        columns: &[
+            "recipe_hash",
+            "manifest_digest",
+            "file_id",
+            "source_size",
+            "source_mtime",
+            "recipe_version",
+            "built_by_node_id",
+            "built_at_ms",
+            "producer_payload",
+        ],
+        order_by: "recipe_hash, manifest_digest",
+        minimum_schema: super::background_jobs_transcode::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "cache_storage_members",
         columns: &[
             "storage_id",
@@ -1606,6 +1625,78 @@ const TABLES: &[TablePlan] = &[
         columns: &["library_id", "root_path", "domain_id"],
         order_by: "library_id, root_path",
         minimum_schema: super::background_jobs_resources::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_artifact_repairs",
+        columns: &[
+            "id",
+            "original_key",
+            "target_node_id",
+            "location_generation",
+            "artifact_key",
+            "producer_payload",
+            "phase",
+            "job_id",
+            "created_at_ms",
+            "updated_at_ms",
+            "expires_ms",
+        ],
+        order_by: "id",
+        minimum_schema: super::background_jobs_integrity::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_embeddings",
+        columns: &[
+            "item_id",
+            "model_digest",
+            "content_digest",
+            "artifact_json",
+            "built_by_node_id",
+            "built_at_ms",
+        ],
+        order_by: "item_id, model_digest",
+        minimum_schema: super::background_jobs_embeddings::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_predictions",
+        columns: &[
+            "request_id",
+            "file_id",
+            "request_json",
+            "expires_ms",
+            "state",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "request_id",
+        minimum_schema: super::background_jobs_predictions::SQLITE_INTRODUCED_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "background_artwork_locations",
+        columns: &[
+            "artifact_key",
+            "node_id",
+            "spec_json",
+            "blob_sha256",
+            "bytes",
+            "built_by_node_id",
+            "built_at_ms",
+            "verified_at_ms",
+        ],
+        order_by: "artifact_key, node_id",
+        minimum_schema: super::background_jobs_artwork::SQLITE_INTRODUCED_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -2766,6 +2857,8 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 // stored probe JSON crosses with the row and the destination's
                 // bounded backfill recovers a valid tag afterward.
                 "NULL".to_owned()
+            } else if table.name == "background_transcode_artifacts" && *column == "producer_payload" && schema_version < 82 {
+                "NULL".to_owned()
             } else if table.name == "files" && *column == "downloaded_subtitles" && schema_version < 67 {
                 "'[]'".to_owned()
             } else if table.name == "files" && *column == "field_order" && schema_version < 64 {
@@ -3310,7 +3403,7 @@ mod tests {
             assert!(names.contains(&name));
         }
         assert!(!names.contains(&"classification_fts"));
-        assert_eq!(names.len(), 64, "review every imported durable table");
+        assert_eq!(names.len(), 69, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its
@@ -3763,6 +3856,11 @@ mod tests {
                     "background_library_requests" => 73,
                     "background_storage_domains" => 74,
                     "background_provider_budgets" => 75,
+                    "background_artwork_locations" => 77,
+                    "background_transcode_artifacts" => 78,
+                    "background_predictions" => 79,
+                    "background_embeddings" => 80,
+                    "background_artifact_repairs" => 82,
                     _ => 71,
                 };
                 assert_eq!(table.minimum_schema, introduced, "{}", table.name);

@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use rusqlite::{params, OptionalExtension};
 
 use super::SqliteStore;
-use crate::domain::{CacheManifestCheck, CachedTranscode};
+use crate::domain::CachedTranscode;
 use crate::error::StoreError;
 use crate::store::TranscodeCacheStore;
 
@@ -191,79 +191,6 @@ impl TranscodeCacheStore for SqliteStore {
                 .query_map(params![node, limit], cache_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows)
-        })
-        .await
-    }
-
-    async fn cache_manifest_candidates(
-        &self,
-        node_id: &str,
-        limit: i64,
-    ) -> Result<Vec<CachedTranscode>, StoreError> {
-        let node = node_id.to_owned();
-        self.with_conn(move |conn| {
-            let mut stmt = conn.prepare(&format!(
-                "SELECT {CACHE_COLS}
-                 FROM transcode_cache_locations l
-                 JOIN transcode_cache_recipes r ON r.recipe_hash = l.recipe_hash
-                 WHERE l.node_id = ?1 AND l.storage_class = 'local'
-                   AND l.complete = 1 AND l.manifest_digest IS NOT NULL
-                 ORDER BY l.last_seen_at ASC, l.rowid ASC
-                 LIMIT ?2"
-            ))?;
-            let rows = stmt
-                .query_map(params![node, limit], cache_from_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
-        })
-        .await
-    }
-
-    async fn mark_cache_manifests_checked(
-        &self,
-        checks: &[CacheManifestCheck],
-    ) -> Result<usize, StoreError> {
-        if checks.len() > 128
-            || checks.iter().any(|check| {
-                check.recipe_hash.is_empty()
-                    || check.node_id.is_empty()
-                    || check.storage_class.is_empty()
-                    || check.relative_dir.is_empty()
-                    || check.manifest_digest.len() != 64
-                    || check.next_object_index < 0
-                    || check.observed_at < 0
-            })
-        {
-            return Err(StoreError::Task(
-                "invalid cache manifest cursor batch".to_owned(),
-            ));
-        }
-        if checks.is_empty() {
-            return Ok(0);
-        }
-        let checks = checks.to_vec();
-        self.with_conn(move |conn| {
-            let tx = conn.unchecked_transaction()?;
-            let mut changed = 0usize;
-            for check in checks {
-                changed += tx.execute(
-                    "UPDATE transcode_cache_locations
-                        SET last_seen_at = ?7, scrub_object_index = ?6
-                       WHERE recipe_hash = ?1 AND node_id = ?2 AND storage_class = ?3
-                         AND relative_dir = ?4 AND manifest_digest = ?5 AND complete = 1",
-                    params![
-                        check.recipe_hash,
-                        check.node_id,
-                        check.storage_class,
-                        check.relative_dir,
-                        check.manifest_digest,
-                        check.next_object_index,
-                        check.observed_at,
-                    ],
-                )?;
-            }
-            tx.commit()?;
-            Ok(changed)
         })
         .await
     }

@@ -35,9 +35,25 @@ const PREPARED_ALIGN_SEEK_MS=1500;
 // Corrective seeks per commit. The incumbent keeps moving while each one runs,
 // so a second measurement is worth taking and a third is a loop.
 const PREPARED_ALIGN_ATTEMPTS=2;
+// A seek can leave one decoded frame from the old position in the callback
+// queue. Prove the successor advances monotonically before it takes the
+// picture; the incumbent remains visible while these frames are checked.
+const PREPARED_MONOTONIC_FRAME_STEPS=3;
+// A proven successor frame must still be recent when the incumbent advances.
+// At 24/30 fps this spans one frame, leaving room under the 100 ms visible gap.
+const PREPARED_HANDOFF_FRAME_AGE_MS=50;
+// Four increasing frames need roughly one eighth of a second at 30 fps;
+// leave a bounded margin for callback jitter without holding two audio clocks.
+const PREPARED_FRAME_PROOF_MS=800;
 // A switch that never renders is a failed preparation, and the server is owed
 // that answer rather than a 330-second silence.
 const PREPARED_FIRST_FRAME_MS=8000;
+// Retiring the old MSE decoder in the successor's first-frame callback can
+// consume the next three Firefox display ticks. Let the new picture advance
+// before scheduling that work in an idle turn, with a finite cleanup bound.
+const PREPARED_RETIRE_ADVANCING_FRAMES=3;
+const PREPARED_RETIRE_MAX_MS=2000;
+const PREPARED_RETIRE_IDLE_TIMEOUT_MS=1000;
 const PREPARED_TERMINAL_STATES=["committed","failed","aborted"];
 // Unsent settlements, bounded. Two stagings can be unsettled at once — a
 // supersede queues the old one's `aborted` while the new one is already
@@ -186,6 +202,10 @@ function preparedVideoElement(){
 // decoder host the page has no use for. Once a switch has happened the retired
 // element IS this element, so nothing is created twice.
 function ensurePreparedVideoElement(){
+  // Until its idle retirement runs, the hidden predecessor still has the old
+  // element's listeners and decoder. Never reuse it for a new preparation.
+  if(PLAYER&&PLAYER.preparedRetiring)
+    retirePreparedPredecessor(PLAYER,PLAYER.preparedRetiring);
   const existing=preparedVideoElement();
   if(existing) return existing;
   const v=document.getElementById("video");
@@ -270,29 +290,39 @@ function beginPreparedReplacement(p,action){
   // actual incumbent position before exposure, so this cannot skip content.
   const startLeadMs=Math.min(PREPARED_BUFFER_LEAD_MS+1000,
     Math.max(0,Math.round((bufferRunway(v)-3)*1000)));
+  const stageAtMs=performance.now();
   const state={actionId:action.action_id,sessionId:action.session_id,
     playlistUrl:action.playlist_url,controlBootstrap:action.control||null,
     mediaOriginMs:originMs,offeredOriginMs,
     selection:action.effective_selection,
     startAtSec:preparedLocalPositionMs(filmMs+startLeadMs,originMs)/1000,
+    stageAtMs,bufferReadyAtMs:null,overlapProofReadyAtMs:null,
     state:"building",hls:null,metadata:false,buffered:false,
     warmFrameReady:false,warmFrameCallbackId:null,
-    exposeFrameTimer:null,exposeFrameCallbackId:null,
+    exposeFrameTimer:null,exposeFrameCallbackId:null,handoffFrameCallbackId:null,
+    overlapPhase:null,
+    overlapListeners:null,incumbentElement:v,
+    incumbentStyle:{position:v.style.position,inset:v.style.inset,
+      zIndex:v.style.zIndex,pointerEvents:v.style.pointerEvents},
     incumbentHls:null,incumbentLoadPaused:false,incumbentResumeTimer:null,
     frameTimer:null,framePollTimer:null,frameListener:null,startedAt:Date.now()};
   p.prepared=state;
   clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"staged",
     message:`preparing ${action.session_id} at film ${Math.round(filmMs/1000)}s `+
-      `(origin ${Math.round(offeredOriginMs/1000)}s, ${preparedSelectionText(action.effective_selection)})`},
+      `(origin ${Math.round(offeredOriginMs/1000)}s, ${preparedSelectionText(action.effective_selection)}) `+
+      `stage_at_ms=${Math.round(stageAtMs)} start_lead_ms=${startLeadMs}`},
     playbackContext()));
   try{
     spare.muted=true;
-    // Keep the prepared decoder in the compositor under a nearly transparent
-    // overlay. display:none can suspend its video frames in Chrome, so the
-    // first visible frame may cost several more frame intervals.
+    // Both pictures keep their final geometry while the successor decodes.
+    // The incumbent remains the visible and authoritative layer until the
+    // successor has advanced under it after the audio handoff.
+    v.style.position="absolute";
+    v.style.inset="0";
+    v.style.zIndex="2";
     spare.style.position="absolute";
     spare.style.inset="0";
-    spare.style.opacity="0.001";
+    spare.style.opacity="";
     spare.style.pointerEvents="none";
     spare.style.zIndex="1";
     spare.style.display="";
@@ -413,6 +443,7 @@ function createPreparedHlsLoader(StockLoader,p,state){
             p.abr.recentEstimateAtMs=now;
             p.abr.recentEstimateSource='progress';
             p.abr.recentEstimateUrl=String(context.url||'');
+            scheduleUrgentAutoControllerTick(p,kbps,now);
           }
         });
       }
@@ -430,6 +461,7 @@ function notePreparedHlsFragmentLoaded(p,state,d){
       loadingStartMs:loading.start,loadingEndMs:loading.end}):null;
   if(!kbps) return;
   const now=performance.now(),url=String(d.frag.url||'');
+  if(d.frag.type==='main') noteCompletedAutoTransfer(p,loaded,loading,now);
   // A completed request can average bytes from both sides of a cliff. Keep
   // the fresher within-request progress delta until a new request measures it.
   if(p.abr.recentEstimateSource==='progress'&&p.abr.recentEstimateUrl===url
@@ -438,6 +470,7 @@ function notePreparedHlsFragmentLoaded(p,state,d){
   p.abr.recentEstimateAtMs=now;
   p.abr.recentEstimateSource='complete';
   p.abr.recentEstimateUrl=url;
+  if(d.frag.type==='main') scheduleUrgentAutoControllerTick(p,kbps,now);
 }
 function resumePreparedIncumbentLoad(p,state){
   if(!state) return;
@@ -514,6 +547,11 @@ function notePreparedBuffer(p,state){
   if(!state.buffered){
     state.buffered=true;
     state.state="buffer_ready";
+    state.bufferReadyAtMs=performance.now();
+    clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"buffer_ready",
+      message:`prepared ${state.sessionId} buffer ready at_ms=${Math.round(state.bufferReadyAtMs)} `+
+        `stage_elapsed_ms=${Math.round(state.bufferReadyAtMs-state.stageAtMs)} `+
+        `through_ms=${through} film_ms=${Math.round(filmMs)}`},playbackContext()));
     queuePlaybackControlAcknowledgement(p,state.actionId,"buffer_ready",
       {buffered_through_ms:through});
   }
@@ -538,7 +576,7 @@ function commitPreparedReplacement(p,state){
   const drift=Math.abs((spare.currentTime||0)-wanted)*1000;
   // Already on the incumbent's second: nothing to wait for, and the exposure
   // is the same synchronous block it has always been.
-  if(drift<=PREPARED_ALIGN_SLACK_MS) return exposePreparedReplacementAtFrame(p,state,v,spare,filmMs);
+  if(drift<=PREPARED_ALIGN_SLACK_MS) return exposePreparedReplacementAtFrame(p,state,v,spare);
   // Otherwise finish aligning BEFORE the successor is seen or heard. The
   // corrective seek used to be the line above, with nothing between it and the
   // element swap; a seek is asynchronous, so the successor had nothing decoded
@@ -573,7 +611,7 @@ async function alignPreparedReplacement(p,state,v,spare){
       const filmMs=playbackFilmPositionMs(v,p);
       const target=preparedLocalPositionMs(filmMs,state.mediaOriginMs)/1000;
       if(Math.abs((spare.currentTime||0)-target)*1000<=PREPARED_ALIGN_SLACK_MS)
-        return exposePreparedReplacementAtFrame(p,state,v,spare,filmMs);
+        return exposePreparedReplacementAtFrame(p,state,v,spare);
     }
   }
   if(!live()) return false;
@@ -614,28 +652,143 @@ function preparedAlignedBuffered(spare){
   }catch(e){}
   return false;
 }
-// A decoded successor frame while it is nearly transparent proves that Chrome
-// is presenting the prepared layer. Expose on its next frame instead of at an
-// arbitrary point between two 30-fps pictures. A browser that does not render
-// the warm layer keeps the immediate path; a missed next frame is bounded.
-function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
-  if(!state.warmFrameReady||typeof spare.requestVideoFrameCallback!=="function")
-    return exposePreparedReplacement(p,state,v,spare,filmMs);
-  let settled=false;
-  const finish=()=>{
+// A decoded successor frame under the incumbent proves the prepared layer is
+// presenting. Require increasing media-time steps after any alignment seek:
+// a queued pre-seek frame can otherwise step the visible picture backward.
+// Keep the incumbent's audio with its visible picture through this proof.
+function exposePreparedReplacementAtFrame(p,state,v,spare){
+  if(!streamHasVideo(p,spare)||typeof spare.requestVideoFrameCallback!=="function")
+    return exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
+  // Buffer readiness can precede the first warm callback. The aligned,
+  // advancing frame proof below is the actual presentation evidence; rejecting
+  // the handoff here would reopen an otherwise ready successor at the cliff.
+  let settled=false,priorMediaTime=null,advancingSteps=0;
+  let videoCallbacks=0,badFrames=0,lastFrameAt=null,lastAdvancingFrameAt=null;
+  state.overlapPhase="video";
+  const live=()=>PLAYER===p&&preparedState(p)===state
+    &&document.getElementById("video")===v&&preparedVideoElement()===spare
+    &&playbackOwnsAttachedMedia(p);
+  const finish=(ready,reason="frame-proof")=>{
     if(settled) return;
     settled=true;
     if(state.exposeFrameTimer!=null){ clearTimeout(state.exposeFrameTimer); state.exposeFrameTimer=null; }
     if(state.exposeFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
       try{ spare.cancelVideoFrameCallback(state.exposeFrameCallbackId); }catch(e){}
     state.exposeFrameCallbackId=null;
-    if(PLAYER!==p||preparedState(p)!==state||document.getElementById("video")!==v
-      ||preparedVideoElement()!==spare||!playbackOwnsAttachedMedia(p)) return;
-    exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
+    if(state.warmFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
+      try{ spare.cancelVideoFrameCallback(state.warmFrameCallbackId); }catch(e){}
+    state.warmFrameCallbackId=null;
+    if(state.handoffFrameCallbackId!=null&&typeof v.cancelVideoFrameCallback==="function")
+      try{ v.cancelVideoFrameCallback(state.handoffFrameCallbackId); }catch(e){}
+    state.handoffFrameCallbackId=null;
+    if(!live()) return;
+    if(ready){
+      state.overlapProofReadyAtMs=performance.now();
+      clientLog(Object.assign({level:"info",event:"prepared_replacement",
+        detail:"proof_ready",
+        message:`prepared ${state.sessionId} overlap proof ready at_ms=${Math.round(state.overlapProofReadyAtMs)} `+
+          `buffer_elapsed_ms=${Math.round(state.overlapProofReadyAtMs-state.bufferReadyAtMs)} `+
+          `video_callbacks=${videoCallbacks}`},playbackContext()));
+      exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
+      return;
+    }
+    const phase=state.overlapPhase;
+    const target=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
+    const driftMs=Math.round(Math.abs((spare.currentTime||0)-target)*1000);
+    const buffered=preparedAlignedBuffered(spare);
+    const callbackAgeMs=lastFrameAt==null?null:Math.round(performance.now()-lastFrameAt);
+    const diagnostic=`phase=${phase} video_callbacks=${videoCallbacks} `+
+      `bad_frames=${badFrames} `+
+      `last_frame_age_ms=${callbackAgeMs==null?"none":callbackAgeMs} `+
+      `drift_ms=${driftMs} ready_state=${spare.readyState} buffered=${buffered}`;
+    // A timed-out or misaligned successor has not earned exposure. The
+    // incumbent is still visible and audible, so failure can restore it.
+    failPreparedReplacement(p,state,`${reason}: ${diagnostic}`);
   };
-  state.exposeFrameTimer=setTimeout(finish,100);
-  try{ state.exposeFrameCallbackId=spare.requestVideoFrameCallback(finish); }
-  catch(e){ finish(); }
+  const requestFrame=()=>{
+    if(settled) return;
+    try{ state.exposeFrameCallbackId=spare.requestVideoFrameCallback(observe); }
+    catch(e){ finish(false,"frame-callback-error"); }
+  };
+  const exposeAfterIncumbentFrame=()=>{
+    // Keep both frame callbacks alive until a recent advancing successor frame
+    // and the incumbent's next frame meet. The successor can pause or step
+    // backward after its third proof frame while we wait for the incumbent.
+    state.overlapPhase="incumbent-frame";
+    requestFrame();
+    if(settled) return;
+    requestIncumbentFrame();
+  };
+  const requestIncumbentFrame=()=>{
+    if(settled) return;
+    try{
+      state.handoffFrameCallbackId=v.requestVideoFrameCallback(()=>{
+        state.handoffFrameCallbackId=null;
+        if(settled) return;
+        if(!live()){ finish(false,"stale-owner"); return; }
+        if(v.paused||v.seeking||spare.paused||spare.seeking||p.wantsPlayback===false){
+          finish(false,"viewer-intent"); return;
+        }
+        const wanted=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
+        if(!preparedAlignedBuffered(spare)
+          ||Math.abs((spare.currentTime||0)-wanted)*1000>PREPARED_ALIGN_SLACK_MS){
+          finish(false,"lost-alignment"); return;
+        }
+        if(lastAdvancingFrameAt==null
+          ||performance.now()-lastAdvancingFrameAt>PREPARED_HANDOFF_FRAME_AGE_MS){
+          requestIncumbentFrame();
+          return;
+        }
+        finish(true);
+      });
+    }catch(e){ finish(false,"incumbent-frame-callback-error"); }
+  };
+  const observe=(now,meta)=>{
+    state.exposeFrameCallbackId=null;
+    if(settled) return;
+    if(!live()){ finish(false,"stale-owner"); return; }
+    lastFrameAt=performance.now();
+    videoCallbacks++;
+    const mediaTime=Number(meta&&meta.mediaTime);
+    // A seek may leave old-position frames queued after `seeked`. Increasing
+    // timestamps alone can then prove the wrong position. Keep the incumbent
+    // visible until each proof frame is also on its current film second.
+    const target=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
+    if(Number.isFinite(mediaTime)
+       &&Math.abs(mediaTime-target)*1000<=PREPARED_ALIGN_SLACK_MS){
+      if(priorMediaTime!=null&&mediaTime<=priorMediaTime) badFrames++;
+      advancingSteps=priorMediaTime!=null&&mediaTime>priorMediaTime
+        ?advancingSteps+1:0;
+      priorMediaTime=mediaTime;
+      lastAdvancingFrameAt=advancingSteps>=PREPARED_MONOTONIC_FRAME_STEPS
+        ?performance.now():null;
+      if(advancingSteps>=PREPARED_MONOTONIC_FRAME_STEPS){
+        if(v.paused||v.seeking||spare.paused||spare.seeking){
+          finish(false,"viewer-intent");
+          return;
+        }
+        if(state.overlapPhase==="incumbent-frame") requestFrame();
+        else if(typeof v.requestVideoFrameCallback==="function") exposeAfterIncumbentFrame();
+        else finish(true);
+        return;
+      }
+    }else{
+      badFrames++;
+      priorMediaTime=null;
+      advancingSteps=0;
+      lastAdvancingFrameAt=null;
+    }
+    requestFrame();
+  };
+  const intentChanged=()=>{
+    if(!live()||v.paused||v.seeking){ finish(false,"viewer-intent"); return; }
+  };
+  state.overlapListeners=[["pause",intentChanged],["seeking",intentChanged],
+    ["volumechange",intentChanged],["ratechange",intentChanged]];
+  for(const [name,listener] of state.overlapListeners)
+    v.addEventListener(name,listener);
+  state.exposeFrameTimer=setTimeout(()=>finish(false,"deadline"),PREPARED_FRAME_PROOF_MS);
+  requestFrame();
   return true;
 }
 // Phase two: the exposure, unchanged. Intent is sampled at the last reversible
@@ -652,8 +805,7 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     state.incumbentResumeTimer=null;
   }
   // Intent is sampled at the last reversible boundary. Preparation can take
-  // seconds, during which the viewer may pause, mute, or change rate; copying
-  // the earlier snapshot would overwrite that newer choice.
+  // seconds, during which the viewer may pause, mute, or change rate.
   const intent={
     wantsPlayback:p.wantsPlayback!==false,
     muted:!!retired.muted,
@@ -661,12 +813,14 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     playbackRate:retired.playbackRate,
     defaultPlaybackRate:retired.defaultPlaybackRate
   };
+  detachPreparedOverlapListeners(state);
+  state.overlapPhase="exposed";
   state.predecessor={hls:predecessor,element:retired,sessionId:p.sessionId,
     probeUrl:p.probeUrl,offset:p.offset,wantsPlayback:p.wantsPlayback,
     health:p.health,healthObservedAt:p.healthObservedAt,
     presentationAdvancedAt:p.presentationAdvancedAt,
-    muted:retired.muted,volume:retired.volume,playbackRate:retired.playbackRate,
-    defaultPlaybackRate:retired.defaultPlaybackRate};
+    muted:intent.muted,volume:intent.volume,playbackRate:intent.playbackRate,
+    defaultPlaybackRate:intent.defaultPlaybackRate};
   // Authoritative before visible, so anything that reads PLAYER.hls during the
   // swap reads the instance that owns the picture.
   p.hls=state.hls;
@@ -692,13 +846,15 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     spare.playbackRate=intent.playbackRate;
   }catch(e){}
   spare.style.display="";
-  spare.style.position="";
-  spare.style.inset="";
-  spare.style.opacity="";
+  // The prepared video already fills the player in its own compositor layer.
+  // Put it above the incumbent without removing the old media layer from
+  // layout: Gecko can defer the first visible successor frame when display:none
+  // tears down that layer in the same turn as the reveal. Idle retirement will
+  // remove the muted old element after the successor is advancing visibly.
   spare.style.pointerEvents="";
-  spare.style.zIndex="";
+  spare.style.zIndex="3";
   spare.removeAttribute("aria-hidden");
-  retired.style.display="none";
+  retired.style.pointerEvents="none";
   retired.muted=true;
   retired.setAttribute("aria-hidden","true");
   // The element the rest of the page addresses is `#video`. Swapping the ids
@@ -717,10 +873,12 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
   resetPlaybackTransportEvents(spare);
   p.wantsPlayback=intent.wantsPlayback;
   if(intent.wantsPlayback){
-    // Un-muting without a user gesture pauses the element on WebKit, and the
-    // last gesture was minutes ago. Ask again: a switch whose picture never
-    // advances is reported as a failure eight seconds later and rolled back.
-    try{ const resumed=spare.play(); if(resumed&&resumed.catch) resumed.catch(()=>{}); }catch(e){}
+    // Native WebKit can pause on unmute without a new gesture. Its resume is
+    // needed; the already-playing hls.js successor needs no second play call
+    // at the compositor boundary, where reactivating its audio can delay the
+    // first visible frame. The first-frame watchdog still owns rollback.
+    if(preferNativeHls(spare)||spare.paused)
+      try{ const resumed=spare.play(); if(resumed&&resumed.catch) resumed.catch(()=>{}); }catch(e){}
   }else{
     try{ spare.pause(); }catch(e){}
   }
@@ -732,7 +890,9 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
   // of it. Two assignments, no await, nothing read back by anything that
   // decides anything.
   notePreparedSwitchCommit(p,retired,spare);
-  renderPlayerInfo();
+  // Rebuilding the title/badge DOM is presentation work. The successor is
+  // already authoritative for telemetry; paint the changed badges with the
+  // bounded idle retirement instead of blocking its first visible frame.
   preparedFirstFrame(p,state,spare,unixMs=>{
     notePreparedSwitchFirstFrame(p);
     state.state="committed";
@@ -745,11 +905,15 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
       bootstrap:state.controlBootstrap};
     settleDirectedChange(p,p.directedChange,"committed",
       Math.round(performance.now()-((p.directedChange&&p.directedChange.tappedAt)||performance.now())));
-    retirePreparedPredecessor(p,state);
+    deferPreparedPredecessorRetirement(p,state,spare);
     queuePlaybackControlAcknowledgement(p,state.actionId,"committed",
       {first_frame_unix_ms:unixMs,committed_media_origin_ms:state.offeredOriginMs});
+    const committedAtMs=performance.now();
     clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:"committed",
-      message:`switched to ${state.sessionId} at film ${Math.round(filmMs/1000)}s`},
+      message:`switched to ${state.sessionId} at film ${Math.round(filmMs/1000)}s `+
+        `commit_at_ms=${Math.round(committedAtMs)} `+
+        `stage_elapsed_ms=${Math.round(committedAtMs-state.stageAtMs)} `+
+        `proof_elapsed_ms=${state.overlapProofReadyAtMs==null?"none":Math.round(committedAtMs-state.overlapProofReadyAtMs)}`},
       playbackContext()));
   },()=>{
     // Switched, and nothing rendered. The honest answer is `failed`: the

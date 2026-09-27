@@ -124,7 +124,11 @@ books, and home media.
   show advisory requirements. Library scan/refresh requests and results are
   durable; ready learners can execute immutable preparation. One heavy worker
   per node, two readers per named storage domain, and shared provider pacing
-  protect playback and shared resources. The
+  protect playback and shared resources. Nodes reuse content/model-verified
+  semantic vectors and distribute pure leaf probes while each scan retains
+  one catalogue coordinator. Admitted cache verification repairs a corrupt
+  holder by verified copy or one typed rebuild; failed plans stop and remain
+  visible in Activity. The
   [operations guide](OPERATIONS.md#distributed-speculative-production) explains
   migration, capacity and observations.
 - **Scheduled jobs**, off by default except the artwork retry. Per library: a

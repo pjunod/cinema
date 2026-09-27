@@ -79,14 +79,112 @@ function preparedSwitchAudioEnable(){
   ];
 }
 
-// First-frame proof makes the switch irreversible. Until this function runs,
-// both the old hls.js instance and its media element are deliberately alive.
+// First-frame proof makes the switch irreversible, but destroying the old MSE
+// decoder in that callback can delay the successor's very next frame. Keep the
+// hidden, muted predecessor until the successor has advanced several frames,
+// then retire it in browser idle time. The bound also covers paused playback
+// and engines that stop delivering frame callbacks.
+function deferPreparedPredecessorRetirement(p,state,successor){
+  if(!p||!state||!state.predecessor) return;
+  if(p.preparedRetiring) retirePreparedPredecessor(p,p.preparedRetiring);
+  p.preparedRetiring=state;
+  state.retireElement=successor;
+  state.retireFrameCallbackId=null;
+  state.retireIdleCallbackId=null;
+  state.retireIdleTimer=null;
+  const current=()=>p.preparedRetiring===state&&state.predecessor;
+  const finish=()=>{
+    if(!current()) return;
+    retirePreparedPredecessor(p,state);
+  };
+  state.retireDeadlineTimer=setTimeout(finish,PREPARED_RETIRE_MAX_MS);
+  const idle=()=>{
+    if(!current()||state.retireIdleCallbackId!=null||state.retireIdleTimer!=null) return;
+    if(typeof window.requestIdleCallback==="function"){
+      state.retireIdleCallbackId=window.requestIdleCallback(
+        finish,
+        {timeout:PREPARED_RETIRE_IDLE_TIMEOUT_MS});
+    }else{
+      // Do not do decoder teardown inside a frame callback on older engines.
+      state.retireIdleTimer=setTimeout(finish,120);
+    }
+  };
+  if(typeof successor.requestVideoFrameCallback!=="function"){
+    idle();
+    return;
+  }
+  let prior=null,advances=0;
+  const next=()=>{
+    if(!current()) return;
+    try{ state.retireFrameCallbackId=successor.requestVideoFrameCallback((_,meta)=>{
+      state.retireFrameCallbackId=null;
+      if(!current()) return;
+      const at=Number(meta&&meta.mediaTime);
+      if(Number.isFinite(at)){
+        advances=prior!=null&&at>prior?advances+1:0;
+        prior=at;
+      }
+      if(advances>=PREPARED_RETIRE_ADVANCING_FRAMES) idle();
+      else next();
+    }); }catch(e){ idle(); }
+  };
+  next();
+}
 function retirePreparedPredecessor(p,state){
+  if(!state) return;
+  const successor=state.retireElement;
+  if(state.retireFrameCallbackId!=null&&state.retireElement
+    &&typeof state.retireElement.cancelVideoFrameCallback==="function")
+    try{ state.retireElement.cancelVideoFrameCallback(state.retireFrameCallbackId); }catch(e){}
+  state.retireFrameCallbackId=null;
+  if(state.retireIdleCallbackId!=null&&typeof window.cancelIdleCallback==="function")
+    try{ window.cancelIdleCallback(state.retireIdleCallbackId); }catch(e){}
+  state.retireIdleCallbackId=null;
+  if(state.retireIdleTimer!=null) clearTimeout(state.retireIdleTimer);
+  state.retireIdleTimer=null;
+  if(state.retireDeadlineTimer!=null) clearTimeout(state.retireDeadlineTimer);
+  state.retireDeadlineTimer=null;
+  state.retireElement=null;
+  if(p&&p.preparedRetiring===state) p.preparedRetiring=null;
   const predecessor=state&&state.predecessor;
   if(!predecessor) return;
   state.predecessor=null;
   destroyHlsInstance(p,predecessor.hls,predecessor.element);
   disposeRetiredMediaElement(predecessor.element);
+  // Retirement can happen at browser idle, or be drained by a seek, close,
+  // or new preparation before that idle turn. Repaint the delivery badges on
+  // every path, but only for the same attached successor and in a later idle
+  // turn so no first visible frame waits for title DOM work.
+  if(!state.retireInfoScheduled){
+    state.retireInfoScheduled=true;
+    const refresh=()=>{
+      if(PLAYER===p&&p.sessionId===state.sessionId
+        &&document.getElementById("video")===successor) renderPlayerInfo();
+    };
+    if(typeof window.requestIdleCallback==="function")
+      window.requestIdleCallback(refresh,{timeout:PREPARED_RETIRE_IDLE_TIMEOUT_MS});
+    else setTimeout(refresh,120);
+  }
+}
+function detachPreparedOverlapListeners(state){
+  const v=state&&state.incumbentElement;
+  if(v&&state.overlapListeners){
+    for(const [name,listener] of state.overlapListeners)
+      v.removeEventListener(name,listener);
+  }
+  if(state) state.overlapListeners=null;
+}
+function restorePreparedOverlap(state){
+  if(!state) return;
+  detachPreparedOverlapListeners(state);
+  const v=state.incumbentElement;
+  if(v&&state.incumbentStyle){
+    v.style.position=state.incumbentStyle.position;
+    v.style.inset=state.incumbentStyle.inset;
+    v.style.zIndex=state.incumbentStyle.zIndex;
+    v.style.pointerEvents=state.incumbentStyle.pointerEvents;
+  }
+  state.overlapPhase=null;
 }
 
 // Restore the last proven picture after the visible successor renders no
@@ -120,6 +218,7 @@ function rollbackPreparedReplacement(p,state,successor){
   successor.style.display="none";
   successor.muted=true;
   successor.setAttribute("aria-hidden","true");
+  restorePreparedOverlap(state);
   adoptPlaybackMediaElement(p,retired);
   resetPlaybackTransportEvents(retired);
   if(predecessor.wantsPlayback===false){
@@ -281,11 +380,17 @@ function freePreparedReplacement(p,state){
   p.prepared=null;
   markPreparedSettlement(p,state.actionId);
   const spare=preparedVideoElement();
+  restorePreparedOverlap(state);
   if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
   if(state.exposeFrameTimer!=null){ clearTimeout(state.exposeFrameTimer); state.exposeFrameTimer=null; }
   if(spare&&state.exposeFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
     try{ spare.cancelVideoFrameCallback(state.exposeFrameCallbackId); }catch(e){}
   state.exposeFrameCallbackId=null;
+  const incumbent=state.incumbentElement;
+  if(incumbent&&state.handoffFrameCallbackId!=null
+    &&typeof incumbent.cancelVideoFrameCallback==="function")
+    try{ incumbent.cancelVideoFrameCallback(state.handoffFrameCallbackId); }catch(e){}
+  state.handoffFrameCallbackId=null;
   if(spare&&state.warmFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
     try{ spare.cancelVideoFrameCallback(state.warmFrameCallbackId); }catch(e){}
   state.warmFrameCallbackId=null;

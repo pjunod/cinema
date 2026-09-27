@@ -171,8 +171,8 @@ final class TVPhysicalInputTests: XCTestCase {
     private func focus(_ target: XCUIElement, in app: XCUIApplication) -> Bool {
         for _ in 0..<80 {
             if target.hasFocus { return true }
-            // Include tvOS Menu/PopUpButton focus nodes, not only Buttons.
-            let current = app.descendants(matching: .any).matching(
+            // Use the previous physical paging path's focused Button query.
+            let current = app.buttons.matching(
                 NSPredicate(format: "hasFocus == true")
             ).firstMatch
             guard current.exists else { remote.press(.up); continue }

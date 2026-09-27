@@ -44,6 +44,12 @@ pub(crate) trait QueueFixture: Store {
         replacement: &Lease,
     ) -> Result<bool, StoreError> {
         let mut request = plurx_core::store::background_jobs_pretranscode::enqueue_request(job)?;
+        // Capability pagination deliberately seeds more than one candidate
+        // page. Use manual fixture demand rather than the 64 automatic-intent
+        // budget; the production budget is covered by its own queue contract.
+        if job.dedupe_key.starts_with("claim-pagination-") {
+            request.request.scope = "fixture:pagination".into();
+        }
         // These domain fixtures often use synthetic claim clocks. Producer
         // publication itself uses wall time, so its demand must remain live.
         let now = std::time::SystemTime::now()

@@ -206,7 +206,9 @@ computation identity; cancelling an interest leaves other consumers intact.
 Fragment delivery is a separate node-targeted hydration job, so a builder can
 finish before every consumer is online. Existing offline work can join an
 already-running preparation on the same node when its resolved source and
-recipe match. Cross-node transcode delivery remains a follow-on extension.
+recipe match. Completed transcodes and artwork have portable, verified holder
+metadata and node-targeted copies. Hot demand can request a second holder;
+ordinary cache policy retains cold output without copying it everywhere.
 
 Workers reserve physical capacity before claiming and retain it until child
 processes are reaped. The shared claim carries node, boot, claim, fence,
@@ -232,6 +234,19 @@ storage domains share two reader slots across aliases; unmapped work shares
 the global fallback. Provider requests use a replicated pacing/cooldown ledger
 across library, artwork and genre maintenance. These records participate in
 backup import and the replicated-state digest.
+
+Semantic embedding jobs publish vectors keyed by content and the full model,
+tokenizer, dimensions and normalization identity. Nodes reuse these artifacts
+in their existing local search index; corrupt shared or cached vectors are
+rejected. Pure media probes carry the source snapshot and coordinator fence.
+Workers return facts; only the still-current coordinator applies them.
+
+Transcode and artwork verification use admitted, node-targeted jobs. A bounded
+object page resumes from its durable cursor and yields to playback. Verification
+retires only its observed holder generation. A finite repair plan first tries
+verified copy, then at most one original typed rebuild and delivery. Original
+transcode producer intent survives job-history retirement. Plans, producer
+metadata and cursors use the same replicated Store and backup mapping.
 
 Cutover seals old accepted requests in a finite backlog, drains bounded pages
 without losing capacity-refused work, and removes the old execution APIs.

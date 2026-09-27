@@ -50,6 +50,15 @@ private struct LayoutFramePreferenceKey: PreferenceKey {
     }
 }
 
+private struct HeroContentFramePreferenceKey: PreferenceKey {
+    static var defaultValue: CGRect = .null
+
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        value = value.isNull ? next : value.union(next)
+    }
+}
+
 private struct NativeAPIContractFixture: Decodable {
     let server: ServerInfo
     let itemDetail: ItemDetail
@@ -6041,8 +6050,12 @@ final class AppleClientTests: XCTestCase {
         defaults.set(true, forKey: "plurx.acceptance.probe")
 
         XCTAssertEqual(
-            PlaybackAcceptanceLaunch.current(defaults: defaults),
+            PlaybackAcceptanceLaunch.current(
+                defaults: defaults,
+                arguments: ["plurx", "-plurx.origin", "http://192.168.4.143:52773"]
+            ),
             PlaybackAcceptanceLaunch(
+                requestedOrigin: "http://192.168.4.143:52773",
                 itemId: 17,
                 fileId: 42,
                 startMs: 91_000,
@@ -6052,6 +6065,26 @@ final class AppleClientTests: XCTestCase {
                 probesEnabled: true
             )
         )
+
+        let missingProxy = try XCTUnwrap(
+            PlaybackAcceptanceLaunch.current(defaults: defaults, arguments: ["plurx"])
+        )
+        XCTAssertFalse(missingProxy.matchesActiveOrigins(
+            model: "http://192.168.4.7:32400",
+            session: "http://192.168.4.7:32400"
+        ))
+        let launch = try XCTUnwrap(PlaybackAcceptanceLaunch.current(
+            defaults: defaults,
+            arguments: ["plurx", "-plurx.origin", "http://192.168.4.143:52773"]
+        ))
+        XCTAssertTrue(launch.matchesActiveOrigins(
+            model: "http://192.168.4.143:52773",
+            session: "http://192.168.4.143:52773"
+        ))
+        XCTAssertFalse(launch.matchesActiveOrigins(
+            model: "http://192.168.4.143:52773",
+            session: "http://192.168.4.7:32400"
+        ))
     }
 
     func testApplePlaybackProbeCarriesRunwayAndNoCredentialSurface() throws {
@@ -10038,20 +10071,34 @@ final class AppleClientTests: XCTestCase {
             context.fill(CGRect(x: 0, y: 0, width: 160, height: 90))
         }
 
-        for viewportWidth: CGFloat in [375, 430] {
+        for viewportWidth: CGFloat in [320, 375, 402, 430] {
             var heroFrame: CGRect = .null
+            var contentFrame: CGRect = .null
             let controller = UIHostingController(rootView:
                 NavigationStack {
                     ScrollView {
                         LazyVStack(alignment: .leading) {
                             NavigationLink(value: 1) {
-                                ZStack {
+                                ZStack(alignment: .bottomLeading) {
                                     Image(uiImage: backdrop)
                                         .resizable()
                                         .aspectRatio(contentMode: .fill)
-                                        .frame(maxWidth: .infinity)
-                                        .frame(height: HomeHeroMetrics.compactHeight)
-                                        .clipped()
+                                        .modifier(IOSHomeHeroArtworkLayout())
+                                    VStack(alignment: .leading) {
+                                        Text("CONTINUE")
+                                        Text("Featured movie")
+                                        Color.clear.frame(height: 3)
+                                        Label("Resume", systemImage: "play.fill")
+                                    }
+                                    .background {
+                                        GeometryReader { geometry in
+                                            Color.clear.preference(
+                                                key: HeroContentFramePreferenceKey.self,
+                                                value: geometry.frame(in: .global)
+                                            )
+                                        }
+                                    }
+                                    .padding(16)
                                 }
                                 .modifier(IOSHomeHeroCardLayout())
                                 .reportLayoutFrame()
@@ -10064,6 +10111,9 @@ final class AppleClientTests: XCTestCase {
                 }
                 .onPreferenceChange(LayoutFramePreferenceKey.self) {
                     heroFrame = $0
+                }
+                .onPreferenceChange(HeroContentFramePreferenceKey.self) {
+                    contentFrame = $0
                 }
             )
 
@@ -10085,6 +10135,9 @@ final class AppleClientTests: XCTestCase {
                 viewportWidth - HomeHeroMetrics.horizontalInset,
                 accuracy: 0.5
             )
+            XCTAssertFalse(contentFrame.isNull)
+            XCTAssertEqual(contentFrame.minX, heroFrame.minX + 16, accuracy: 0.5)
+            XCTAssertEqual(contentFrame.maxX, heroFrame.maxX - 16, accuracy: 0.5)
             window.isHidden = true
         }
     }

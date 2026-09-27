@@ -236,6 +236,8 @@ pub struct DiscoveryCandidate {
 pub const REASON_IN_PROGRESS: &str = "in progress";
 pub const REASON_NEXT_UP: &str = "next up";
 pub const REASON_RECENT: &str = "recently added";
+pub const REASON_HOT: &str = "recently demanded";
+pub const REASON_CHANNEL: &str = "next channel programme";
 
 /// Stable persisted queue identifier for a user-facing discovery label.
 pub fn queue_reason(reason: &str) -> Option<&'static str> {
@@ -243,6 +245,8 @@ pub fn queue_reason(reason: &str) -> Option<&'static str> {
         REASON_IN_PROGRESS => Some("in_progress"),
         REASON_NEXT_UP => Some("next_up"),
         REASON_RECENT => Some("recent"),
+        REASON_HOT => Some("recent_demand"),
+        REASON_CHANNEL => Some("channel_next"),
         _ => None,
     }
 }

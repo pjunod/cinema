@@ -5,6 +5,9 @@ import SwiftUI
 /// can supply these defaults when it launches a signed debug build, so the
 /// test rig does not need a person to navigate the app or time remote presses.
 struct PlaybackAcceptanceLaunch: Equatable {
+    /// Read the launch argument itself. A saved `plurx.origin` must never make
+    /// an acceptance run appear to have used the shaping proxy.
+    let requestedOrigin: String
     let itemId: Int
     let fileId: Int
     let startMs: Int
@@ -13,11 +16,15 @@ struct PlaybackAcceptanceLaunch: Equatable {
     let height: Int?
     let probesEnabled: Bool
 
-    static func current(defaults: UserDefaults = .standard) -> Self? {
+    static func current(
+        defaults: UserDefaults = .standard,
+        arguments: [String] = ProcessInfo.processInfo.arguments
+    ) -> Self? {
         let fileId = defaults.integer(forKey: "plurx.acceptance.fileId")
         guard fileId > 0 else { return nil }
         let height = defaults.integer(forKey: "plurx.acceptance.height")
         return Self(
+            requestedOrigin: originArgument(arguments) ?? "",
             itemId: max(0, defaults.integer(forKey: "plurx.acceptance.itemId")),
             fileId: fileId,
             startMs: max(0, defaults.integer(forKey: "plurx.acceptance.startMs")),
@@ -26,6 +33,19 @@ struct PlaybackAcceptanceLaunch: Equatable {
             height: height > 0 ? height : nil,
             probesEnabled: defaults.bool(forKey: "plurx.acceptance.probe")
         )
+    }
+
+    private static func originArgument(_ arguments: [String]) -> String? {
+        guard let flag = arguments.firstIndex(of: "-plurx.origin"),
+              arguments.indices.contains(flag + 1)
+        else { return nil }
+        return Session.canonicalOrigin(arguments[flag + 1])
+    }
+
+    func matchesActiveOrigins(model: String, session: String) -> Bool {
+        !requestedOrigin.isEmpty
+            && Session.canonicalOrigin(model) == requestedOrigin
+            && Session.canonicalOrigin(session) == requestedOrigin
     }
 }
 #endif
@@ -100,15 +120,30 @@ struct RootView: View {
             case .ready:
                 #if DEBUG
                 if let launch = playbackAcceptance {
-                    PlayerView(
-                        itemId: launch.itemId,
-                        fileId: launch.fileId,
-                        startMs: launch.startMs,
-                        durationMs: launch.durationMs,
-                        title: launch.title,
-                        initialHeight: launch.height,
-                        diagnosticProbesEnabled: launch.probesEnabled
-                    )
+                    if launch.matchesActiveOrigins(
+                        model: model.origin,
+                        session: Session.shared.credentials.origin
+                    ) {
+                        PlayerView(
+                            itemId: launch.itemId,
+                            fileId: launch.fileId,
+                            startMs: launch.startMs,
+                            durationMs: launch.durationMs,
+                            title: launch.title,
+                            initialHeight: launch.height,
+                            diagnosticProbesEnabled: launch.probesEnabled
+                        )
+                    } else {
+                        VStack(spacing: 12) {
+                            Text("Acceptance playback stopped")
+                                .font(.headline)
+                            Text("Active server does not match the requested shaping proxy.")
+                            Text("Requested: \(launch.requestedOrigin.isEmpty ? "missing or invalid" : launch.requestedOrigin)")
+                            Text("Active: \(model.origin)")
+                        }
+                        .padding()
+                        .accessibilityIdentifier("acceptance-origin-mismatch")
+                    }
                 } else {
                     HomeView()
                 }

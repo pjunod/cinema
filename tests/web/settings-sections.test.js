@@ -426,6 +426,8 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // portable backup and fenced restore and reached `developerPanel`
       // without being composed here, so this whole gate died on its name.
       shippedSource("clusterBackupCard"), shippedSource("durableQueueCard"),
+      shippedSource("clusterPlacementCard"), shippedSource("boundedCatalogueCard"),
+      shippedSource("storageDomainsCard"),
       shippedSource("autoQualityCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       shippedSource("libraryChannelsSettingsCard"),
       shippedSource("playbackProtocolCard"), shippedSource("liveHlsRecoveryCard"),

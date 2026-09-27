@@ -35,6 +35,7 @@ mod keys;
 mod libraries;
 pub(crate) mod library_channels;
 pub(crate) mod live_tv;
+mod live_tv_cluster;
 mod network;
 mod offline;
 pub(crate) mod peer_transport;
@@ -49,6 +50,7 @@ pub(crate) mod stream;
 pub(crate) mod subtitle_downloads;
 pub(crate) mod system;
 mod trakt;
+pub(crate) mod transcode_copies;
 
 /// Unmodified User-Agent strings as the shipping clients actually send them.
 /// Shared with the HTTP wire tests so the write-then-read proof and the
@@ -454,6 +456,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/cluster/join/finalize"
         | "/api/v1/cluster/learner/join/redeem"
         | "/api/v1/cluster/learner/join/finalize"
+        | "/internal/media/cache-copy/{recipe}/{digest}/{object}"
         | "/internal/media/fragment-index/{cache_key}"
         | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
         internal_activity::PATH
@@ -467,6 +470,9 @@ fn http_route_group(path: &str) -> usize {
         | crate::live_tv::START_PATH
         | crate::live_tv::START_V2_PATH
         | crate::live_tv::ACTIVATE_PATH
+        | crate::live_tv::cluster::PLACEMENT_PATH
+        | crate::live_tv::cluster::PROCESS_PATH
+        | crate::live_tv::cluster::INGEST_PATH
         | crate::live_tv::RESOURCE_PATH
         | crate::live_tv::STOP_PATH
         | crate::live_tv::RETIRE_PATH
@@ -1837,6 +1843,24 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            crate::live_tv::cluster::PLACEMENT_PATH,
+            post(internal_live_tv::placement).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::cluster::PROCESS_PATH,
+            post(internal_live_tv::process).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::cluster::INGEST_PATH,
+            post(internal_live_tv::ingest).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
             crate::live_tv::RESOURCE_PATH,
             post(internal_live_tv::resource).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
@@ -1871,6 +1895,10 @@ pub fn router(state: AppState) -> Router {
             post(internal_live_tv::guide).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
             )),
+        )
+        .route(
+            "/internal/media/cache-copy/{recipe}/{digest}/{object}",
+            get(transcode_copies::serve),
         )
         .route(
             "/internal/media/fragment-index/{cache_key}",
@@ -2033,7 +2061,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
             crate::media_sessions::ABORT_PATH
                 | crate::media_sessions::RELAY_PATH
                 | crate::media_sessions::CONTROL_PATH
-                | crate::live_tv::RESOURCE_PATH
+        | crate::live_tv::RESOURCE_PATH
                 | crate::live_tv::STOP_PATH
                 // A retire is a stop plus a fence. Refusing it during
                 // maintenance refuses it precisely when a client needs it.
@@ -2138,7 +2166,8 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                     if file_id.parse::<i64>().is_ok_and(|value| value > 0)
                     && ordinal.parse::<i64>().is_ok_and(|value| value >= 0))
             });
-    if fragment_index_read
+    if (method == Method::GET && transcode_copies::route_eligible(path))
+        || fragment_index_read
         || subtitle_source_read
         || (method == Method::GET && path == crate::media_pool::SNAPSHOT_PATH)
         || (method == Method::POST
@@ -3986,6 +4015,9 @@ mod tests {
             (Method::GET, "/api/v1/developer/readiness"),
             (Method::POST, "/api/v1/live-tv/guide/refresh"),
             (Method::POST, crate::live_tv::SNAPSHOT_PATH),
+            (Method::POST, crate::live_tv::cluster::PLACEMENT_PATH),
+            (Method::POST, crate::live_tv::cluster::PROCESS_PATH),
+            (Method::POST, crate::live_tv::cluster::INGEST_PATH),
             (Method::POST, crate::live_tv::START_PATH),
             (Method::POST, crate::live_tv::ACTIVATE_PATH),
             (Method::POST, crate::live_tv::DRAIN_PATH),
@@ -4448,6 +4480,10 @@ mod tests {
                 // derivatives, so a stale answer costs disk until the next
                 // pass and can never delete a live grid cache.
                 "sweep_derived_orphans:store.items_with_artwork",
+                // Retention authority for durable artwork: keep advertised
+                // holders and in-flight attempt directories during cache GC.
+                "sweep_derived_orphans:store.artwork_locations",
+                "sweep_derived_orphans:store.background_job",
                 "materialize_once:store.items_with_artwork_page",
             ],
         );
@@ -7981,6 +8017,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_tv_placement_and_ingest_refuse_household_bearers_before_admission() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let request = json!({"expected_owner_node_id":state.node_id,"source_node_id":state.node_id,
+            "user_id":1,"user_name":"viewer","request_id":"0123456789abcdef0123456789abcdef",
+            "channel_id":"7.1","config_generation":1,"source_serving_generation":0});
+        let placed = json!({"request":request,"playback":null});
+        let process = json!({"start":placed,"worker":state.node_id,"nonce":"test"});
+        for (path, body) in [
+            (crate::live_tv::cluster::PLACEMENT_PATH, placed),
+            (crate::live_tv::cluster::PROCESS_PATH, process.clone()),
+            (crate::live_tv::cluster::INGEST_PATH, process),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(post(path, Some(&admin), body))
+                .await
+                .expect("peer response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+        assert!(state.live_tv.activities().is_empty());
+    }
+
+    #[tokio::test]
     async fn live_tv_quorum_loss_fences_channels_and_stops_readiness_before_device_work() {
         let (app, state) = test_app_with_state();
         let admin = setup_admin(&app).await;
@@ -9333,6 +9393,7 @@ mod tests {
             ids,
             vec![
                 "durable_cluster_work",
+                "bounded_catalogue_reads",
                 "cluster_backup",
                 "windows_server",
                 // D-01 adds the Android TV display-mode card. Its one row is
@@ -9469,7 +9530,8 @@ mod tests {
                 "source_fencing",
                 "sources_match_their_scan_whole",
                 "stored_source_producer",
-                "tuner_reserve"
+                "tuner_reserve",
+                "watch_floor"
             ]
         );
         // Order-independent because no row reachable here has a `met` branch a
@@ -10155,12 +10217,11 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert!(
-            body["error"]
-                .as_str()
-                .is_some_and(|message| message.contains("every committed voter")),
-            "legacy settings errors retain their {{error}} response contract: {body}"
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cluster_media_pool_enabled"], true);
+        assert_eq!(
+            body["cluster_media_pool_ready"], false,
+            "standalone observation stays advisory"
         );
         let (status, body) = call(
             &app,
@@ -10195,13 +10256,8 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert!(
-            body["error"]
-                .as_str()
-                .is_some_and(|message| message.contains("remote placement")),
-            "one endpoint answers refusals one way: settings keep {{error}}: {body}"
-        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cluster_session_takeover_enabled"], true);
         let (status, body) = call(
             &app,
             put(
@@ -10856,6 +10912,210 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         assert!(read() > before, "the ttff never reached client=\"firefox\"");
+    }
+
+    /// C-08 M5 row 4 end to end: a real direct-play GET opens the start
+    /// attempt, and the viewer's `ttff` beacon through `/client-log` settles
+    /// it `ok`; a failure report for a pending attempt settles it `failed`.
+    #[tokio::test]
+    async fn a_first_frame_beacon_settles_the_start_its_direct_play_opened() {
+        use crate::playstart::StartPhase;
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let user = state
+            .store
+            .get_user_by_username("paul")
+            .await
+            .expect("user")
+            .expect("paul")
+            .id;
+        let s = seed_content(&state).await;
+        let ledger = std::sync::Arc::clone(&state.start_attempts);
+        let response = app
+            .clone()
+            .oneshot(ranged(
+                &format!("/api/v1/files/{}/direct?token={admin}", s.file),
+                0,
+                9,
+            ))
+            .await
+            .expect("r");
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        // Opened on `note_playback_started`'s detached task.
+        for _ in 0..200 {
+            if ledger.phase(user, s.file).is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            matches!(ledger.phase(user, s.file), Some(StartPhase::Pending { .. })),
+            "the direct-play GET opened no attempt: {:?}",
+            ledger.phase(user, s.file)
+        );
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/client-log",
+                Some(&admin),
+                json!({ "event": "ttff", "method": "direct_play", "ms": 900, "file_id": s.file }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(ledger.count("direct_play", "ok"), 1);
+        assert_eq!(ledger.phase(user, s.file), Some(StartPhase::Playing));
+
+        let other_file = s.file + 1_000;
+        ledger.opened(
+            user,
+            other_file,
+            None,
+            "transcode",
+            std::time::Instant::now(),
+        );
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/client-log",
+                Some(&admin),
+                json!({ "level": "error", "event": "playback_error", "file_id": other_file }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(ledger.count("transcode", "failed"), 1);
+    }
+
+    /// C-08 M5 row 4: a start request the server answers with an error is a
+    /// refused start, on each of the three routes that begin one; a HEAD is
+    /// not a start.
+    #[tokio::test]
+    async fn a_start_request_the_server_refuses_is_a_refused_start() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let s = seed_content(&state).await;
+        let ledger = std::sync::Arc::clone(&state.start_attempts);
+
+        let (status, _) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/hls/sessions", s.file),
+                Some(&admin),
+                json!({ "playback_id": "   " }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(ledger.count("unknown", "refused"), 1, "HLS create");
+
+        let missing = s.file + 1_000;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/files/{missing}/stream.mp4?token={admin}"))
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("r");
+        assert!(response.status().is_client_error(), "{}", response.status());
+        assert_eq!(ledger.count("remux", "refused"), 1, "stream.mp4");
+
+        for method in ["HEAD", "GET"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(format!("/api/v1/files/{missing}/direct?token={admin}"))
+                        .body(Body::empty())
+                        .expect("req"),
+                )
+                .await
+                .expect("r");
+            assert!(response.status().is_client_error(), "{}", response.status());
+        }
+        assert_eq!(ledger.count("direct_play", "refused"), 1, "direct GET only");
+
+        // A catalogued file whose bytes are gone: the open fails.
+        let path = state
+            .store
+            .get_file(s.file)
+            .await
+            .expect("file")
+            .expect("seeded")
+            .path;
+        std::fs::remove_file(&path).expect("remove seeded media");
+        let response = app
+            .clone()
+            .oneshot(ranged(
+                &format!("/api/v1/files/{}/direct?token={admin}", s.file),
+                0,
+                9,
+            ))
+            .await
+            .expect("r");
+        assert!(!response.status().is_success(), "{}", response.status());
+        assert_eq!(
+            ledger.count("direct_play", "refused"),
+            2,
+            "direct open failure"
+        );
+    }
+
+    /// C-08 M5 row 4: a scrape settles an attempt past its deadline, so an
+    /// idle node still reports the last start that was abandoned.
+    #[tokio::test]
+    async fn a_scrape_settles_a_start_past_its_deadline_as_cancelled() {
+        let (app, state) = test_state();
+        let ledger = std::sync::Arc::clone(&state.start_attempts);
+        let long_ago = std::time::Instant::now()
+            .checked_sub(crate::playstart::START_DEADLINE + std::time::Duration::from_secs(1))
+            .expect("the monotonic clock is older than the start deadline");
+        ledger.opened(7, 70, None, "remux", long_ago);
+        assert_eq!(ledger.count("remux", "cancelled"), 0);
+        let (status, _) = call_text(&app, get("/metrics", None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ledger.count("remux", "cancelled"), 1);
+        assert_eq!(ledger.phase(7, 70), None);
+    }
+
+    /// C-08 M5 row 4: a live progress beat keeps the viewer's play alive, so
+    /// a request after a long pause joins it instead of opening a start.
+    #[tokio::test]
+    async fn a_progress_beat_keeps_a_started_play_alive() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let user = state
+            .store
+            .get_user_by_username("paul")
+            .await
+            .expect("user")
+            .expect("paul")
+            .id;
+        let s = seed_content(&state).await;
+        let ledger = std::sync::Arc::clone(&state.start_attempts);
+        let opened = std::time::Instant::now();
+        ledger.opened(user, s.file, Some(s.movie), "direct_play", opened);
+        ledger.client_event(user, s.file, "ttff", None, None, opened);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let (status, body) = call(
+            &app,
+            post(
+                &format!("/api/v1/items/{}/progress", s.movie),
+                Some(&admin),
+                json!({ "position_ms": 60_000, "duration_ms": 600_000 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let seen = ledger.last_seen(user, s.file).expect("play tracked");
+        assert!(
+            seen >= opened + std::time::Duration::from_millis(20),
+            "the progress beat did not refresh the play"
+        );
     }
 
     /// C-08 M5 row 3's denominator end to end: two live progress beats a

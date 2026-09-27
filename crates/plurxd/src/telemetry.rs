@@ -939,6 +939,7 @@ pub(crate) fn admission_waits_on_this_thread(pool: AdmissionPool) -> u64 {
 /// `method` is one of the playback vocabulary's values; anything else is
 /// `unknown`.
 pub(crate) fn record_delivered_bytes(method: &str, bytes: u64) {
+    crate::media_pool::observe_media_io(bytes, 0, None);
     METRICS.delivered_bytes[label_index(Some(method), &METHODS)]
         .fetch_add(bytes, Ordering::Relaxed);
     #[cfg(test)]
@@ -1219,6 +1220,83 @@ fn render_counters<const N: usize>(
 }
 
 static METRICS: LazyLock<PlaybackMetrics> = LazyLock::new(PlaybackMetrics::new);
+
+/// C-08 M5 row 4: how each finite-playback start ended. The attempt itself is
+/// kept by [`crate::playstart::StartAttempts`], which resolves every attempt it
+/// opens exactly once; these cells are only where the resolutions land.
+pub(crate) const START_OUTCOMES: [&str; 4] = ["ok", "refused", "failed", "cancelled"];
+/// The terminal client events that arrived with no attempt on this node to
+/// resolve (see [`crate::playstart::StartAttempts`]): a first frame, or a
+/// failure report, the ledger could not pair.
+pub(crate) const START_UNPAIRED: [&str; 2] = ["ok", "failed"];
+
+struct StartOutcomeCounters {
+    outcomes: [[AtomicU64; START_OUTCOMES.len()]; METHODS.len()],
+    unpaired: [AtomicU64; START_UNPAIRED.len()],
+}
+
+impl StartOutcomeCounters {
+    const fn new() -> Self {
+        Self {
+            outcomes: [const { [const { AtomicU64::new(0) }; START_OUTCOMES.len()] };
+                METHODS.len()],
+            unpaired: [const { AtomicU64::new(0) }; START_UNPAIRED.len()],
+        }
+    }
+
+    fn render(&self) -> String {
+        let mut out = String::from(
+            "# HELP plurx_start_outcomes_total Finite-playback start attempts by how they ended: a first frame (ok), a server refusal of the start request (refused), a client failure report before any frame (failed), or neither within the start deadline (cancelled).\n\
+             # TYPE plurx_start_outcomes_total counter\n",
+        );
+        for (method_index, method) in METHODS.iter().enumerate() {
+            for (outcome_index, outcome) in START_OUTCOMES.iter().enumerate() {
+                out.push_str(&format!(
+                    "plurx_start_outcomes_total{{method=\"{method}\",outcome=\"{outcome}\"}} {}\n",
+                    self.outcomes[method_index][outcome_index].load(Ordering::Relaxed)
+                ));
+            }
+        }
+        out.push_str(
+            "# HELP plurx_start_outcomes_unpaired_total First-frame and start-failure reports this node could not pair with a start attempt it opened.\n\
+             # TYPE plurx_start_outcomes_unpaired_total counter\n",
+        );
+        for (index, outcome) in START_UNPAIRED.iter().enumerate() {
+            out.push_str(&format!(
+                "plurx_start_outcomes_unpaired_total{{outcome=\"{outcome}\"}} {}\n",
+                self.unpaired[index].load(Ordering::Relaxed)
+            ));
+        }
+        out
+    }
+}
+
+static START_OUTCOME_COUNTERS: StartOutcomeCounters = StartOutcomeCounters::new();
+
+/// Count one resolved start attempt. `method` outside the playback vocabulary
+/// is `unknown`; `outcome` outside [`START_OUTCOMES`] is a programming error
+/// and is dropped rather than folded into a real outcome.
+pub(crate) fn record_start_outcome(method: &str, outcome: &str) {
+    let Some(outcome) = START_OUTCOMES.iter().position(|label| *label == outcome) else {
+        return;
+    };
+    START_OUTCOME_COUNTERS.outcomes[label_index(Some(method), &METHODS)][outcome]
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+/// Count one terminal client event the start ledger could not pair.
+pub(crate) fn record_start_unpaired(outcome: &str) {
+    if let Some(index) = START_UNPAIRED.iter().position(|label| *label == outcome) {
+        START_OUTCOME_COUNTERS.unpaired[index].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+fn render_start_outcomes_for_test(record: impl FnOnce(&StartOutcomeCounters)) -> String {
+    let counters = StartOutcomeCounters::new();
+    record(&counters);
+    counters.render()
+}
 
 pub(crate) fn record_tone_map_peak(source: plurx_core::transcode::ToneMapPeakSource) {
     let index = match source {
@@ -1932,12 +2010,52 @@ pub fn prometheus() -> String {
     let mut metrics = METRICS.render();
     metrics.push_str(&QUEUE_METRICS.render());
     metrics.push_str(&SUBTITLE_SOURCE_METRICS.render());
+    metrics.push_str(&START_OUTCOME_COUNTERS.render());
     metrics
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// C-08 M5 row 4: the start-outcome families render every enumerated
+    /// label pair and nothing else, and the production exposition carries
+    /// them.
+    #[test]
+    fn start_outcome_families_render_exactly_their_enumerated_labels() {
+        let rendered = render_start_outcomes_for_test(|counters| {
+            counters.outcomes[label_index(Some("remux"), &METHODS)][2]
+                .fetch_add(3, Ordering::Relaxed);
+            counters.unpaired[0].fetch_add(1, Ordering::Relaxed);
+        });
+        let series = rendered
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            series.len(),
+            METHODS.len() * START_OUTCOMES.len() + START_UNPAIRED.len()
+        );
+        for method in METHODS {
+            for outcome in START_OUTCOMES {
+                let prefix = format!(
+                    "plurx_start_outcomes_total{{method=\"{method}\",outcome=\"{outcome}\"}} "
+                );
+                assert!(
+                    series.iter().any(|line| line.starts_with(&prefix)),
+                    "missing {prefix}"
+                );
+            }
+        }
+        assert!(
+            series.contains(&"plurx_start_outcomes_total{method=\"remux\",outcome=\"failed\"} 3")
+        );
+        assert!(series.contains(&"plurx_start_outcomes_unpaired_total{outcome=\"ok\"} 1"));
+        assert!(series.contains(&"plurx_start_outcomes_unpaired_total{outcome=\"failed\"} 0"));
+        let exposition = prometheus();
+        assert!(exposition.contains("# TYPE plurx_start_outcomes_total counter"));
+        assert!(exposition.contains("# TYPE plurx_start_outcomes_unpaired_total counter"));
+    }
 
     #[test]
     fn subtitle_source_metrics_render_bounded_labels_and_bytes() {

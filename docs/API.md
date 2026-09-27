@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 237
+One binary serves everything on one port (`:32400` by default). plurx has 241
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -876,7 +876,14 @@ immutable means the URL itself must change when the bytes do, so every artwork
 URL is built as `…?v={item.updated_at}`: the replicated item revision advances
 on every artwork patch and makes an otherwise mutable filename a new cache
 identity. The `?v=` value is a cache key only; the handler ignores it. There
-are **no sizing parameters** — the stored bytes are what you get.
+supports `?size=original|w300|w500|w780`. Original requests preserve the stored
+hero/backdrop bytes. A cold smaller variant returns the original with
+`Cache-Control: private, max-age=0, must-revalidate` and
+`X-Plurx-Artwork: original-fallback`, while recording one durable preparation
+interest for this node. Published variants use strong digest ETags. Their
+identity includes the source digest, width, format and renderer pipeline;
+preparation uses spare capacity, and another node can hydrate verified bytes
+instead of encoding them again.
 
 On a local miss the node fetches from a reachable peer voter and atomically
 materializes the file: 8 concurrent materializations process-wide, 3 peers
@@ -2575,7 +2582,7 @@ Every route is admin unless the row says otherwise. `/cluster/status` and
 | POST | `/api/v1/cluster/learner-join-tokens` | admin | The same, wire-distinct, for a **learner** |
 | GET | `/api/v1/cluster/work/storage-domains` | admin | Library roots and persisted domain mappings; two shared readers per domain and two concurrent library workers per provider |
 | PUT | `/api/v1/cluster/work/storage-domains` | admin | Array of `{library_id, root_path, domain_id}` replaces the mapping, at most 256 roots / 64 KiB. Empty IDs are omitted for the global fallback. Returns 409 while live work owns reservations or a root no longer exists; feature enable settings are independent |
-| GET | `/api/v1/cluster/jobs` | admin | Optional `state`, `kind`, and `cursor` query parameters; at most 100 durable job summaries, bounded counts and next cursor; payloads, paths and ownership tokens omitted |
+| GET | `/api/v1/cluster/jobs` | admin | Optional `state`, `kind`, and `cursor` query parameters; at most 100 durable job summaries, bounded counts, next cursor and up to 64 recent repair plans; payloads, paths and ownership tokens omitted |
 | GET | `/api/v1/cluster/jobs/{id}` | admin | Durable summary, latest 16 attempts and first 100 interests; `more_waiters` identifies truncation |
 | POST | `/api/v1/cluster/jobs/{id}/cancel` | admin | Idempotent cooperative cancellation; running children retain reservations until joined or expired |
 | POST | `/api/v1/cluster/jobs/{id}/retry` | admin | JSON `request_id` UUID identifies one deliberate retry; failed/cancelled core work creates a fresh admin interest or fragment analysis generation. Preserve the UUID across transport retries; active work returns conflict |
@@ -2804,7 +2811,13 @@ bearer because this is a peer-to-peer capability, not a household one — the
 same rule the join routes state from the other direction. And it **never
 proxies a second hop**: the handler reads local bytes only, so a filename
 absent everywhere is a bounded 404 instead of a fan-out cycle around the
-cluster. The user-facing image route (§6.6) is the one that races peers.
+cluster. The user-facing image route (§6.7) is the one that races peers.
+
+The reserved `variant-{64 lowercase hex artifact key}` name serves a published
+artwork derivative under the same exact-name proof. The response must match
+the committed blob digest and byte count on the serving node. It never reads
+an unpublished staging file, never resizes for a peer, and still rejects a
+`size` query. Older peers return a bounded miss for this name.
 
 ### 19.7 `GET /cluster/support-bundle`
 
@@ -2944,12 +2957,16 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | GET | `/internal/v1/media/snapshot` | — | This node's media-pool snapshot |
 | POST | `/internal/v1/media/offers` | 64 KiB | One placement bid; starts no work |
 | POST | `/api/v1/internal/media/shared-cache-canary` | 1 KiB | Proves shared-cache identity and generation |
+| GET | `/internal/media/cache-copy/{recipe}/{digest}/{object}` | — | A signed committed member may fetch the authenticated manifest (`object=manifest`) or one zero-based manifest object from a published local transcode. Full digest checks, bounded response permits and cache reader pins apply; this never starts an encoder. |
 | GET | `/internal/media/fragment-index/{cache_key}` | — | Streams the verified local fragment index |
 | GET | `/internal/media/subtitle-source/{file_id}/{ordinal}/{format}` | — | Streams a verified local subtitle-source representation (`sup`, `webvtt`, or `matroska`) named by this node's manifest. Requires a signed cluster read request and the subtitle-cluster-sources switch; returns 404 for a missing or corrupt object so the caller can try another published holder. The source video is never opened. |
 | POST | `/internal/media/subtitle-range` | Range identity (file ID, stamp, ordinal, anchor, span and sampled source attestation) | Produces one indexed Matroska text playback window. Exact signed request and response; 4 KiB request body, 8 MiB VTT bound, two workers per node and one per requesting peer, 25 s worker deadline. Source is resolved from the catalog and checked before and after extraction. Partial ranges never become whole-track publications. |
 | POST | `/_internal/v1/live-tv/snapshot` | 16 KiB | Tuner readiness and lineup for the current generation |
 | POST | `/_internal/v1/live-tv/guide` | 16 KiB | The owner's cached programme guide, relayed verbatim. Deliberately not gated on the Live TV protocol capability: an owner that predates the guide answers 404 and the ingress renders "no guide yet" rather than taking Live TV down across a mixed fleet |
 | POST | `/_internal/v1/live-tv/start`, `/_internal/v2/live-tv/start`, `/_internal/v1/live-tv/activate` | 16 KiB | Starts and activates a tuner session on the owner; v2 carries the exact signed live playback envelope |
+| POST | `/_internal/v1/live-tv/placement` | 16 KiB | Protocol 4 placed start on the configured tuner owner. Retains the selected compatible processor and nonce across retries; accepts the signed start and playback envelope |
+| POST | `/_internal/v1/live-tv/process` | 16 KiB | The configured tuner owner asks its assigned voter to process a viewer from shared peer ingest. Returns an ordinary provisional capability owned by that processor; existing admission and activation apply |
+| POST | `/_internal/v1/live-tv/ingest` | 16 KiB | Assigned processor requests a nonce-bound raw feed from the configured owner. Returns a bounded consumer of the shared tuner transport; slow consumers are evicted independently and dropping the body detaches that consumer |
 | POST | `/_internal/v1/live-tv/resource` | 16 KiB | Fetches a playlist, segment or status for an owned capability |
 | POST | `/_internal/v1/live-tv/stop`, `/_internal/v1/live-tv/drain` | 16 KiB | Releases a capability; drains below a generation |
 | POST | `/_internal/v1/live-tv/retire`, `/_internal/v1/live-tv/resume`, `/_internal/v1/live-tv/start-state` | 1 KiB | Retires a viewer's public start id on the owner, hands back the session it still owns, or reports what became of it. Three paths rather than one with a mode flag: `resume` selects a session, cancels the others and fences an id it has never seen, and a status read may do none of that. New paths rather than new fields on the signed start bodies: an owner that predates them answers 404, which an ingress renders as a typed answer that proves nothing about the tuner |

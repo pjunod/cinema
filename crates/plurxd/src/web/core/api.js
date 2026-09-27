@@ -1,15 +1,56 @@
 "use strict";
 // ---- api helpers ----------------------------------------------------------
+// Session-scoped watch-write floor. Keep the decimal string intact: Raft
+// indexes may exceed JavaScript's exact Number range. Expiry is monotonic.
+let READ_AFTER={generation:-1,epoch:0,index:"",expires:0};
+function readAfterRequest(){
+  if(READ_AFTER.generation!==AUTH_GENERATION){
+    READ_AFTER={generation:AUTH_GENERATION,epoch:READ_AFTER.epoch+1,index:"",expires:0};
+  }
+  if(performance.now()>=READ_AFTER.expires) READ_AFTER.index="";
+  return {generation:AUTH_GENERATION,epoch:READ_AFTER.epoch,index:READ_AFTER.index};
+}
+function forgetReadAfter(request){
+  if(request.generation!==AUTH_GENERATION) return;
+  READ_AFTER={generation:AUTH_GENERATION,epoch:READ_AFTER.epoch+1,index:"",expires:0};
+}
+function observeReadAfter(value,request){
+  if(request.generation!==AUTH_GENERATION||value==null) return;
+  if(!/^[1-9][0-9]{0,19}$/.test(value)||
+      (value.length===20&&value>"18446744073709551615")){
+    forgetReadAfter(request);
+    return;
+  }
+  // An unknown write invalidates already-in-flight indexed replies too.
+  if(request.epoch!==READ_AFTER.epoch) return;
+  const previous=READ_AFTER.index;
+  if(!previous||value.length>previous.length||(value.length===previous.length&&value>=previous)){
+    READ_AFTER.index=value;
+    READ_AFTER.expires=performance.now()+60000;
+  }
+}
 async function api(path, {method="GET", body=null, raw=false, signal=null, keepSessionOn401=false}={}){
   const authGeneration=AUTH_GENERATION;
+  const readAfter=readAfterRequest();
   const headers={};
+  if(readAfter.index) headers["x-plurx-read-after"]=readAfter.index;
   if(TOKEN) headers["authorization"]="Bearer "+TOKEN;
   if(body){ headers["content-type"]="application/json"; }
-  const res=await fetch(API+path,{method,headers,body:body?JSON.stringify(body):null,signal});
+  let res;
+  try{
+    res=await fetch(API+path,{method,headers,body:body?JSON.stringify(body):null,signal});
+  }catch(error){
+    if(method!=="GET"&&method!=="HEAD") forgetReadAfter(readAfter);
+    throw error;
+  }
   if(authGeneration!==AUTH_GENERATION){
     const error=new Error("stale authorization"); error.status=401; error.staleAuth=true;
     throw error;
   }
+  const commitIndex=res.headers?.get("x-plurx-commit-index")??null;
+  // Older peers may acknowledge a write without an indexed receipt.
+  if(commitIndex==null&&method!=="GET"&&method!=="HEAD") forgetReadAfter(readAfter);
+  else observeReadAfter(commitIndex,readAfter);
   // `keepSessionOn401` belongs to the two cluster recovery reads, whose guard
   // answers from a process-local proof cache. A closed cache there is a
   // statement about the cluster, not about this credential, and ending the
