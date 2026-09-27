@@ -81,6 +81,12 @@ impl Encoder {
 /// a transcode was using. A pool owned here and entered with `install` bounds
 /// inference to these threads and never builds, sizes or reconfigures the
 /// global pool that any other rayon user would get.
+///
+/// Two is a chosen bound on the cores one forward pass can take, not the
+/// fastest size. With the inference crates optimized, two threads keep about
+/// three quarters of the best throughput, around 23 ms per text against 18 ms
+/// at eight threads; `embed_thread_scaling` measures it and plan §3.7(d)
+/// records the runs.
 const EMBED_THREADS: usize = 2;
 static EMBED_POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
 fn on_embed_pool<R: Send>(work: impl FnOnce() -> R + Send) -> Result<R> {
@@ -610,8 +616,20 @@ mod tests {
     /// §3.7(d)'s measurement: embedding latency by inference thread count.
     /// Prints one line per pool size; asserts only that every size produces
     /// the same vectors, since the thread count must not change a result.
+    ///
+    /// The timings only mean something with the inference crates optimized,
+    /// as a release build has them. The dev and test profiles leave candle
+    /// and gemm at opt-level 0, which is over ten times slower per text and
+    /// makes more threads look better than they are. Plan §3.7(d)'s numbers
+    /// come from:
+    ///
+    /// ```text
+    /// PLURX_TEST_MINILM_DIR=<verified model dir> cargo test --locked -p plurxd \
+    ///   --bin plurxd --config 'profile.dev.package."*".opt-level=3' \
+    ///   embed_thread_scaling -- --ignored --nocapture
+    /// ```
     #[test]
-    #[ignore = "needs the pinned model; set PLURX_TEST_MINILM_DIR to verified model files"]
+    #[ignore = "needs the pinned model (PLURX_TEST_MINILM_DIR) and optimized dependencies; the doc comment has the command"]
     fn embed_thread_scaling() {
         let dir = std::env::var("PLURX_TEST_MINILM_DIR").expect("model directory");
         let encoder = Encoder::load(Path::new(&dir)).expect("load");
