@@ -227,8 +227,9 @@ pub fn observe(pid: u32) -> Observed {
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     {
-        let Ok(pid) = libc::id_t::try_from(pid) else {
-            return Observed::default();
+        let pid = match libc::id_t::try_from(pid) {
+            Ok(pid) => pid,
+            Err(_) => return Observed::default(),
         };
         // SAFETY: plain syscall; errno distinguishes -1 as a value from -1
         // as an error, and a pid that no longer exists reads as unknown.
@@ -654,13 +655,16 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use crate::process::spawn_job_owned;
+    #[cfg(target_os = "linux")]
     use std::process::Stdio;
     use std::time::Duration;
 
     const CHILD_MODE: &str = "PLURX_PRIORITY_CHILD";
 
     /// Re-exec this test binary as a child that sleeps until killed.
+    #[cfg(target_os = "linux")]
     fn sleeper() -> tokio::process::Command {
         let mut command =
             tokio::process::Command::new(std::env::current_exe().expect("test executable"));
@@ -674,6 +678,7 @@ mod tests {
         command
     }
 
+    #[cfg(target_os = "linux")]
     const CHILD_ARGS: [&str; 3] = [
         "--exact",
         "process::priority::tests::child_main",

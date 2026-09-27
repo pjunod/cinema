@@ -435,16 +435,11 @@
             above,
             "an above-ladder height passes through as what it is",
         );
-        // A below-ladder ask lands on the ladder's lowest rung, not on
-        // `MIN_HEIGHT`: the snap runs first and the clamp only bounds what
-        // comes out of it, so for a menu rung the clamp never binds downward
-        // at all.
+        // A below-ladder ask lands on the ladder's lowest rung. The new 144p
+        // rung meets `MIN_HEIGHT`, so snapping and clamping agree at the floor.
         let floor = resolved_height(&state, &odd_source, Some(1)).await;
         assert_eq!(floor, crate::transcode::snap_height(1));
-        assert!(
-            floor > crate::transcode::MIN_HEIGHT,
-            "the clamp is a bound, not the policy: {floor}",
-        );
+        assert_eq!(floor, crate::transcode::MIN_HEIGHT);
         // Upward it does bind, and it is the only thing that does: an
         // above-ladder height passes the snap through untouched, so without
         // the clamp a body asking for 100000 builds a transcode at 100000.

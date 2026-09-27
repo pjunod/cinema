@@ -968,7 +968,7 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(detail.reading?.locator.locations?.totalProgression, 0.55)
     }
 
-    func testBookReaderPolicyAcceptsOnlyAvailablePhoneAndTabletEpubs() {
+    func testBookReaderPolicyKeepsSupportedBooksInTheApp() {
         let epub = MediaFile(id: 90, filename: "Contract.EPUB", available: true)
         let pdf = MediaFile(id: 91, filename: "Contract.pdf", available: true)
         let missing = MediaFile(id: 92, filename: "Missing.epub", available: false)
@@ -1005,6 +1005,13 @@ final class AppleClientTests: XCTestCase {
             available: true,
             reader: pdfRead
         )
+        let localOnlyPDF = MediaFile(
+            id: 96,
+            filename: "Legacy.pdf",
+            size: 4_096,
+            available: true,
+            reader: serverHandoff
+        )
 
         XCTAssertTrue(BookReaderPolicy.canRead(epub, onTelevision: false))
         XCTAssertTrue(BookReaderPolicy.canDownload(epub, onTelevision: false))
@@ -1017,6 +1024,7 @@ final class AppleClientTests: XCTestCase {
         XCTAssertFalse(BookReaderPolicy.canDownload(nativePDF, onTelevision: false))
         XCTAssertFalse(BookReaderPolicy.canRead(nativePDF, onTelevision: true))
         XCTAssertFalse(BookReaderPolicy.canRead(unverifiablePDF, onTelevision: false))
+        XCTAssertTrue(BookReaderPolicy.canRead(localOnlyPDF, onTelevision: false))
     }
 
     #if os(iOS)
@@ -7158,15 +7166,15 @@ final class AppleClientTests: XCTestCase {
     func testPlaybackQualityChoicesMatchTheAndroidClientAndSpellTheDecisionOverride() {
         XCTAssertEqual(
             PlaybackQuality.allCases.map(\.rawValue),
-            ["auto", "original", "2160", "1440", "1080", "720", "480", "360"]
+            ["auto", "original", "2160", "1440", "1080", "720", "480", "360", "240", "144"]
         )
         XCTAssertEqual(
             PlaybackQuality.allCases.map(\.label),
-            ["Auto", "Original", "4K · 2160p", "1440p", "1080p", "720p", "480p", "360p"]
+            ["Auto", "Original", "4K · 2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p"]
         )
         XCTAssertEqual(
             PlaybackQuality.allCases.map(\.rungHeight),
-            [nil, nil, 2_160, 1_440, 1_080, 720, 480, 360]
+            [nil, nil, 2_160, 1_440, 1_080, 720, 480, 360, 240, 144]
         )
 
         XCTAssertNil(PlaybackQuality.auto.decisionForce)

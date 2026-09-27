@@ -116,6 +116,15 @@ books, and home media.
   film TMDB genuinely has no art for costs one request a day. TMDB calls
   themselves retry a 429 or a 5xx (honouring `Retry-After`); a 404 stays a fast
   permanent no.
+- **Durable cluster work.** Pre-transcode and fragment-index preparation share
+  fenced ownership, retries, cancellation and verified publication. Matching
+  fragment demands share one build with separate deliveries. Exact local
+  offline recipes can join running preparation without another encoder.
+  Activity exposes job history and explicit retry; Developer enable controls
+  show advisory requirements. One heavy worker per node and two shared I/O
+  slots protect playback and shared storage. The
+  [operations guide](OPERATIONS.md#distributed-speculative-production) explains
+  migration, capacity and observations.
 - **Scheduled jobs**, off by default except the artwork retry. Per library: a
   **scan** interval and a **refresh art** interval (Settings → Libraries →
   the library's **Configure** drawer).

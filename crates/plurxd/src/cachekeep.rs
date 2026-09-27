@@ -24,6 +24,8 @@
 //! is a *hit* — a viewer gets a playlist for a directory that no longer exists.
 //! This way the failure is an orphan directory, which step 3 collects.
 
+#[cfg(test)]
+use crate::queue_fixture::QueueFixture;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -589,14 +591,30 @@ fn orphan_inventory_authorized(snapshot: &OwnershipSnapshot) -> bool {
     snapshot.complete || snapshot.has_owners
 }
 
+async fn queue_staging_jobs(
+    store: &Arc<dyn Store>,
+    node_id: &str,
+) -> Result<Vec<String>, plurx_core::error::StoreError> {
+    store.pretranscode_staging_jobs(node_id).await
+}
+
+async fn queue_job(
+    store: &Arc<dyn Store>,
+    id: &str,
+) -> Result<Option<plurx_core::domain::PretranscodeJob>, plurx_core::error::StoreError> {
+    match store.background_job(id).await? {
+        Some(job) => plurx_core::store::background_jobs_pretranscode::projection(&job).map(Some),
+        None => store.pretranscode_job(id).await,
+    }
+}
+
 async fn ownership_snapshot(
     store: &Arc<dyn Store>,
     root: &Path,
     node_id: &str,
 ) -> Result<OwnershipSnapshot, plurx_core::error::StoreError> {
     let inventory = store.cache_ownership_inventory(node_id).await?;
-    let queue_jobs = store
-        .pretranscode_staging_jobs(node_id)
+    let queue_jobs = queue_staging_jobs(store, node_id)
         .await?
         .into_iter()
         .collect::<HashSet<_>>();
@@ -678,7 +696,7 @@ async fn delete_final_batch(
             owned_paths.insert(path);
         }
     }
-    let queue_jobs = match store.pretranscode_staging_jobs(node_id).await {
+    let queue_jobs = match queue_staging_jobs(store, node_id).await {
         Ok(jobs) => jobs.into_iter().collect::<HashSet<_>>(),
         Err(error) => {
             tracing::warn!(%error, "cache: could not recheck queue ownership; keeping bytes");
@@ -696,9 +714,11 @@ async fn delete_final_batch(
             if !queue_jobs.contains(job_id) {
                 false
             } else {
-                match store.pretranscode_job(job_id).await {
+                match queue_job(store, job_id).await {
                     Ok(Some(job)) => {
-                        job.state == "running" && job.owner_node_id == node_id && job.fence == fence
+                        matches!(job.state.as_str(), "running" | "cancelling")
+                            && job.owner_node_id == node_id
+                            && job.fence == fence
                     }
                     Ok(None) => false,
                     Err(error) => {
@@ -752,7 +772,7 @@ async fn delete_staging_batch(
         .filter(|entry| !entry.complete)
         .map(|entry| entry.recipe_hash)
         .collect::<HashSet<_>>();
-    let queue_jobs = match store.pretranscode_staging_jobs(node_id).await {
+    let queue_jobs = match queue_staging_jobs(store, node_id).await {
         Ok(jobs) => jobs.into_iter().collect::<HashSet<_>>(),
         Err(error) => {
             tracing::warn!(%error, "cache: could not recheck queue ownership; keeping bytes");
@@ -1750,7 +1770,10 @@ mod tests {
     const NODE: &str = "node-a";
 
     async fn store() -> (Arc<dyn Store>, i64) {
-        let store = SqliteStore::open_in_memory().expect("store");
+        seed_store(SqliteStore::open_in_memory().expect("store")).await
+    }
+
+    async fn seed_store(store: SqliteStore) -> (Arc<dyn Store>, i64) {
         let lib = store
             .create_library(&NewLibrary {
                 name: "M".into(),
@@ -1844,7 +1867,7 @@ mod tests {
         })
         .expect("requirements");
         assert!(store
-            .enqueue_pretranscode_job(
+            .fixture_enqueue_pretranscode_job(
                 &NewPretranscodeJob {
                     id: job_id.to_owned(),
                     dedupe_key: format!("cachekeep-scrub-{job_id}"),
@@ -1877,7 +1900,7 @@ mod tests {
             scratch_bytes: 2,
         };
         let claimed = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 NODE,
                 &capabilities,
                 &[],
@@ -1889,7 +1912,7 @@ mod tests {
             .expect("scrub fixture job");
         assert_eq!(claimed.id, job_id);
         assert!(store
-            .complete_pretranscode_job(
+            .fixture_complete_pretranscode_job(
                 &claimed,
                 recipe,
                 1,
@@ -2384,7 +2407,7 @@ mod tests {
         .expect("requirements");
         let job_id = "00000000-0000-4000-8000-000000000201";
         assert!(store
-            .enqueue_pretranscode_job(
+            .fixture_enqueue_pretranscode_job(
                 &NewPretranscodeJob {
                     id: job_id.to_owned(),
                     dedupe_key: "cachekeep-queue-job".to_owned(),
@@ -2417,7 +2440,7 @@ mod tests {
             scratch_bytes: i64::MAX,
         };
         let first = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 NODE,
                 &capabilities,
                 &[],
@@ -2440,14 +2463,14 @@ mod tests {
             .expect("checkpoint");
         let first_resume_at = lease_now_ms().saturating_add(1_000);
         assert!(store
-            .yield_pretranscode_job(&first, first_resume_at, first_resume_at)
+            .fixture_yield_pretranscode_job(&first, first_resume_at, first_resume_at)
             .await
             .expect("yield"));
         sweep(&store, root.path(), NODE, unix_now()).await;
         assert!(staging.exists(), "a yielded local checkpoint was swept");
 
         let resumed = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 NODE,
                 &capabilities,
                 &[],
@@ -2479,11 +2502,11 @@ mod tests {
 
         let second_resume_at = lease_now_ms().saturating_add(1_000);
         assert!(store
-            .yield_pretranscode_job(&resumed, second_resume_at, second_resume_at)
+            .fixture_yield_pretranscode_job(&resumed, second_resume_at, second_resume_at)
             .await
             .expect("second yield"));
         let resumed_again = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 NODE,
                 &capabilities,
                 &[],
@@ -2508,7 +2531,7 @@ mod tests {
 
         let takeover_at = resumed_again.lease_expires_ms.saturating_add(1);
         let successor = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 "node-b",
                 &capabilities,
                 &[],
@@ -2626,8 +2649,9 @@ mod tests {
 
     #[tokio::test]
     async fn manifest_scrub_invalidates_unsafe_rows_without_leaving_the_cache_root() {
-        let (store, file) = store().await;
         let sandbox = root();
+        let database = sandbox.path().join("plurx.db");
+        let (store, file) = seed_store(SqliteStore::open(&database).expect("store")).await;
         let cache_root = sandbox.path().join("cache");
         let outside = sandbox.path().join("outside");
         tokio::fs::create_dir_all(&cache_root)
@@ -2646,7 +2670,7 @@ mod tests {
             file,
             "00000000-0000-4000-8000-000000000402",
             recipes[0],
-            "../outside",
+            "valid/first",
             1,
             &"b".repeat(64),
         )
@@ -2656,11 +2680,44 @@ mod tests {
             file,
             "00000000-0000-4000-8000-000000000403",
             recipes[1],
-            &outside.to_string_lossy(),
+            "valid/second",
             1,
             &"c".repeat(64),
         )
         .await;
+
+        // Publication now rejects unsafe paths. Model an existing corrupt row
+        // after a valid fenced publication, without weakening that boundary.
+        let connection = rusqlite::Connection::open(&database).expect("corrupt fixture");
+        let guard: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'cache_publication_generation_guard'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("publication guard");
+        connection
+            .execute_batch("DROP TRIGGER cache_publication_generation_guard")
+            .expect("permit fixture corruption");
+        for (recipe, unsafe_path) in [
+            (recipes[0], "../outside".to_owned()),
+            (recipes[1], outside.to_string_lossy().into_owned()),
+        ] {
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE transcode_cache_locations SET relative_dir = ?1,
+                 publication_generation = publication_generation + 1 WHERE recipe_hash = ?2",
+                        rusqlite::params![unsafe_path, recipe],
+                    )
+                    .expect("inject unsafe path"),
+                1
+            );
+        }
+        connection
+            .execute_batch(&guard)
+            .expect("restore publication guard");
+        drop(connection);
 
         let swept = sweep_with_readers(
             &store,

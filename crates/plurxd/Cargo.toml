@@ -87,6 +87,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+rusqlite = { workspace = true }
 # `fixtures` builds plurx-core's shared media-fixture helper for the copyseg
 # tests. A dev-dependency, so a release build never compiles it.
 plurx-core = { path = "../plurx-core", features = [

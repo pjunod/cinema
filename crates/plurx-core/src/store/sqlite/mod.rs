@@ -9,6 +9,7 @@
 //! `watch` — this file owns open/migrate, shared row mappers, and settings.
 
 mod apikeys;
+mod background_jobs;
 mod cache;
 mod classification;
 mod coordination;
@@ -1151,6 +1152,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // items in title order). Indexes only: no row changes, and every
     // statement is `IF NOT EXISTS`.
     super::sql_source::ITEM_READ_INDEXES,
+    // v71: common durable background work identities and ownership.
+    super::background_jobs::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1907,11 +1910,21 @@ impl MetricsStore for SqliteStore {
                       WHERE state = 'running'
                         AND COALESCE(lease_expires_ms, 0) < ?2 * 1000),
                     (SELECT COALESCE(MAX(updated_at_ms), 0)
-                       FROM cluster_fragment_index_jobs WHERE state = 'ready')
+                       FROM cluster_fragment_index_jobs WHERE state = 'ready'),
+                    (SELECT json_object('jobs', json((SELECT COALESCE(json_group_array(json_object(
+                        'kind', grouped.kind, 'state', grouped.state, 'count', grouped.count,
+                        'oldest_age_ms', MAX(0, ?2 * 1000 - grouped.created))), '[]')
+                        FROM (SELECT kind, state, COUNT(*) AS count, MIN(created_at_ms) AS created
+                            FROM background_jobs GROUP BY kind, state LIMIT 128) grouped)),
+                        'source_io_reservations', (SELECT COUNT(*) FROM background_job_reservations
+                            WHERE resource_key = 'source_io' AND expires_at_ms > ?2 * 1000),
+                        'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import')))
                  FROM offline_packages WHERE node_id = ?1",
                 params![node_id, now],
                 |row| {
                     Ok(PrometheusStoreSnapshot {
+                        background_jobs: super::background_jobs_observation::background_job_metrics(&row.get::<_, String>(24)?)
+                            .map_err(|error| rusqlite::Error::FromSqlConversionFailure(24, rusqlite::types::Type::Text, Box::new(error)))?,
                         libraries: row.get(0)?,
                         users: row.get(1)?,
                         offline: OfflinePackageStats {
@@ -2831,9 +2844,9 @@ mod tests {
         // earlier entry moved; the list stays append-only. v67 adds durable
         // downloaded captions to files. v68 adds external-reader file grants;
         // v69 adds the cluster subtitle-source queue and publication metadata;
-        // v70 adds K-05 M5's catalogue read indexes.
+        // v70 adds K-05 M5's catalogue read indexes; v71 adds the common queue.
         assert_eq!(
-            version, 70,
+            version, 71,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

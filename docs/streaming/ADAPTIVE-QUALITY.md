@@ -30,7 +30,7 @@ not a rebuild.
 | Piece | Where | State |
 |---|---|---|
 | Rung parameter | `POST /files/:id/hls/sessions` body `height` (clamped 144–2160); omitted = Auto, resolved server-side | done |
-| Height → bitrate ladder | `bitrate_for_height()` in `plurxd/src/transcode.rs` (2160→20 Mb/s, 1080→8, 720→4, 480→2, else 1.2) | done |
+| Height → bitrate ladder | `bitrate_for_height()` in `plurxd/src/transcode.rs` (2160→20 Mb/s, 1080→8, 720→4, 480→2, 360→1.2, 240→0.5, 144→0.1) | done |
 | Segment-aligned keyframes | `-force_key_frames expr:gte(t,n_forced*SEGMENT_SECONDS)` + `hls_time SEGMENT_SECONDS` in `hls_args` (2 s since PERF-PLAN §4.4) | done |
 | Mid-stream session restart | the seek and audio-switch paths already call `hls/start?start=…` and re-attach via `attachHls()` | done |
 | Never upscale | `video_filters()` refuses to scale above source height | done |
@@ -59,6 +59,8 @@ rungs, and the player builds both its menu and Auto policy from those rows.
 | 720p | 720 | 4 Mb/s | AAC 160 kb/s | 4.2 Mb/s |
 | 480p | 480 | 2 Mb/s | AAC 160 kb/s | 2.2 Mb/s |
 | 360p | 360 | 1.2 Mb/s | AAC 160 kb/s | 1.4 Mb/s |
+| 240p | 240 | 500 kb/s | AAC 160 kb/s | 660 kb/s |
+| 144p | 144 | 100 kb/s | AAC 160 kb/s | 260 kb/s |
 
 Rungs above the source height are dropped (a 720p file offers 720p and below).
 Direct play or remux remains the first choice at 4K, but codec incompatibility
@@ -95,7 +97,7 @@ ladder with nominal and advertised-peak kb/s. The advertised per-rung
 bandwidth covers the *measured* peak, not the nominal target.
 
 *Client*: complete. The player consumes the server ladder instead of a
-hardcoded quality list, so 360p and any later server rung appear without a
+hardcoded quality list, so 360p, 240p, 144p and any later server rung appear without a
 second client edit. The menu, persistence, restart machinery, active rung, and
 switch reason all use that one response.
 
@@ -154,8 +156,9 @@ The web controller is gated by the node-wide admin setting
 off preserves the server-selected Auto stream and every manual ladder rung,
 but performs no client-side rung switch or supply-stall rescue.
 
-**Implementation status (2026-08-14):** the web controller is implemented in
-the pure playback-policy module and sampled by the embedded player every 5 s.
+**Implementation status (2026-09-25):** the web controller is implemented in
+the pure playback-policy module and decides every 1 s. Its server-health read
+remains at most once per 5 s.
 The constants below are the live defaults. The browser shaping run remains the
 acceptance evidence for a host on which Chrome can start; unit tests do not
 stand in for that run.
@@ -163,20 +166,33 @@ stand in for that run.
 A client-side controller, roughly 120 lines, extracted as a pure function so
 it unit-tests without a video element:
 
-- **Sample** every 5 s: `hls.bandwidthEstimate` (hls.js's EWMA over real
+- **Sample** every 1 s: `hls.bandwidthEstimate` (hls.js's EWMA over real
   segment downloads), stalls (a `waiting` event after playback started, or
   hls.js `bufferStalledError`), buffer runway
   (`buffered.end − currentTime`), and — new — the server's `recent_speed`
-  from the session status endpoint: on a JIT server the download estimate
+  from the session status endpoint (read at most every 5 s): on a JIT server the download estimate
   measures `min(link, encode)`, and a producer below 1× with shrinking
-  runway is actionable *before* the client ever stalls.
-- **Severe pressure** (an active supply stall, ≤1.5 s of runway, three
-  supply stalls in 60 s, or an estimate below 0.7× the current rung) selects
-  the highest rung whose `total_kbps` is ≤0.95× the estimate **in one move**.
-  During severe pressure, the stable hls.js EWMA is bounded by the most recent
-  completed-fragment throughput when that sample is at most 15 s old. The EWMA
-  deliberately remembers the pre-cliff link; the fresh bound prevents that
-  memory from admitting an intermediate rung and forcing a second restart.
+  runway is actionable *before* the client ever stalls. A prepared successor
+  begins publishing its own fragment progress and completion estimates only
+  after it becomes the attached player; its staging traffic cannot change the
+  incumbent's bandwidth history.
+- **Severe pressure** requires a fresh transfer estimate below 0.7× the
+  current rung. A stall or ≤1.5 s of runway supplies urgency, but never
+  invents a bandwidth cause. The controller selects the highest rung whose
+  advertised `peak_kbps` fits within 0.84× the lower of the fresh transfer
+  and hls.js EWMA estimates **in one move**. The reserve covers a partial
+  fragment progress window that straddles a cliff; using nominal bitrate
+  admitted 480p on a measured 1.1 Mb/s link and forced a second restart.
+  On the bottom three rungs, a fresh transfer below the current rung's
+  nominal rate is also severe even with a deep client buffer: that rate
+  cannot sustain playback, and the buffer can hide the second 350 kb/s
+  cliff for many seconds. Higher rungs wait for the 0.7× signal because
+  the first partial fragment can straddle the old and new links; a mixed
+  3.17 Mb/s sample at 720p selected an unsustainable 360p successor on a
+  1.1 Mb/s link before the next 1.095 Mb/s sample arrived.
+  The fresh transfer sample expires after 15 s. The stable EWMA deliberately
+  remembers the pre-cliff link, so the fresh bound prevents that memory from
+  admitting an intermediate rung.
   If no rung fits, the lowest rung is the only actionable choice. It never
   walks one rung at a time through a
   bandwidth cliff, which leaves the player above the sustainable rate for
@@ -197,7 +213,7 @@ it unit-tests without a video element:
 - **One automatic move in flight.** The decode rescue, the supply rescue and a
   rung switch all open a replacement session, and all three yield at that
   request before anything on the player records the attempt. They therefore
-  share a single claim, taken before the request rather than after it: one 5 s
+  share a single claim, taken before the request rather than after it: one 1 s
   sample opens at most one replacement session, a refused path consumes none of
   its own one-shot latches and re-evaluates on the next sample, and a failed
   open releases the claim rather than wedging every later rescue. The viewer's
@@ -213,18 +229,21 @@ it unit-tests without a video element:
 Asymmetric *selection* (down in one move, up one rung slowly) is the whole
 trick of ABR; the constants are starting points to tune on real use.
 
-The switch itself is the honest cost of the JIT model: a restart, not a
-seamless splice — and the restart machinery **destroys the old stream
-before the new one is ready** (`teardownHls` runs first), so the claim
-that "the buffer covers it" is not true as built and this plan no longer
-makes it. The interruption is a measured product property with an SLO
+The web player offers a prepared successor for an Auto rung move when its
+incumbent can still present. It starts the successor at most three seconds
+ahead, waits until the successor overlaps the incumbent's film position and
+has two seconds buffered beyond it, aligns the two elements, then exposes the
+successor on its next decoded frame if the warm layer is rendering. That wait
+is bounded to 100 ms. The incumbent remains available until the successor presents a
+frame. A stalled incumbent or a failed preparation falls back to a bounded
+reopen, which can interrupt playback. The interruption has an SLO
 ([PERF-PLAN.md](../performance/PERF-PLAN.md) §8.6, decision 4: p95 ≤ 2.5 s on LAN,
 operator-confirmed): the loading overlay says "Adjusting quality…", the
 toast names the move (`Quality → 480p — bandwidth`), and every switch is
 logged to the Stats overlay with its reason, so "why did it get blurry"
-always has an answer. A prepared-handoff variant (start the replacement,
-switch at a boundary) is Option B in the review record — build it only if
-the measured p95 misses the SLO.
+always has an answer. The prepared path keeps the old session alive until
+the new picture proves the handoff; the fallback's restart cost remains a
+measured product property.
 
 Voluntary moves make that restart cost explicit. Over the 60 s dwell horizon,
 a mild downgrade's estimated saved pressure is
@@ -276,10 +295,10 @@ track change resets the budget; a 400 (bad request) fires an unbound retry
 with a fresh request id; and `quality_auto: true` is sent for an Auto viewer
 with a burned subtitle so the server does not make that session sticky).
 
-The floor is the predecessor's own rung, not 360. Auto is not
-ladder-constrained below 360 — a sub-360 source resolves there, and a starved
-network prior deliberately settles at `MIN_HEIGHT` — so a way *down* must never
-answer such a session with a higher rung.
+The adaptive ladder now reaches the enforced `MIN_HEIGHT` of 144p. At that
+floor, a stall reopen repeats 144p; at 240p, it can step to 144p. An unprobed
+height of `0` normalizes to `MIN_HEIGHT`. The client-owned retry budget still
+decides when repeated floor attempts end.
 
 **Stepping follows the viewer's quality choice, not the presence of `height`.**
 The two are different questions: a subtitle burn and Quality = Original both

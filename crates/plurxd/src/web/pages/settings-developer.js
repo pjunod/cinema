@@ -40,7 +40,7 @@ function clusterBackupCard(settings,readiness){
 // A readiness status is evidence, not authority. The daemon can report facts
 // it can observe on this node; the controls remain available regardless of
 // the answer, including when the reading itself is unavailable.
-const DEV_READINESS_LABEL={met:"met",unmet:"not met",unobservable:"not observable"};
+const DEV_READINESS_LABEL={met:"met",unmet:"not met",unobservable:"not observable",unknown:"unknown",unavailable:"unavailable"};
 function devReadinessRow(readiness,itemId,reqId){
   if(!readiness||!Array.isArray(readiness.items)) return null;
   const item=readiness.items.find(row=>row&&row.id===itemId);
@@ -57,7 +57,7 @@ function devReadinessPill(found,readiness){
 }
 function devReadinessEvidence(found,readiness){
   if(readiness&&readiness.unavailable) return `The prerequisite reading failed: ${readiness.unavailable}`;
-  if(found) return found.evidence;
+  if(found) return found.evidence+(readiness?.observed_at_ms?` Observed ${new Date(readiness.observed_at_ms).toLocaleString()}.`:"");
   return readiness?"This server did not report on this prerequisite.":"";
 }
 function devReq(readiness,itemId,reqId,title,detail){
@@ -135,10 +135,12 @@ function autoQualityCard(settings){
       ${togRow("pabr",`Adjust Auto quality while playing <span class="pill warn">experimental</span>`,`Off keeps the server's first Auto choice and the full manual quality menu. On lets supported clients adjust rungs and recover supply stalls.`,enabled)}
       <div class="hint"><b>This switch is the enable path.</b> It is saved on the server and is never disabled or overridden by the readiness rows below. It affects eligible Auto sessions; a manual rung remains the viewer's choice.</div>
       <details class="setdetails" open><summary>Requirements and current evidence</summary><div class="setdetails-body">
-      ${devStaticReq("Web controller in this browser",webController?"met":"not met","This page can see the shipped browser controller. A missing controller means this browser cannot adjust Auto while playing.",webController?"ok":"warn")}
+      ${devStaticReq("Web controller implementation",webController?"present":"absent","This page can see the browser controller function. Presence confirms the implementation loaded; the dated recovery traces below describe runtime qualification.",webController?"ok":"warn")}
       ${devStaticReq("Native controllers","not met in this build","Apple and Android native adapters have not shipped. The server setting remains selectable and applies to a native client only when that client's controller exists.","warn")}
-      ${devStaticReq("Chrome shaped-network recovery","not met · 2026-09-24","The 8 to 1.5 Mb/s trace restarted and downshifted after 21.113 s, with a 4.2665 s maximum frame gap. Repeat the D3 cliff matrix after improving recovery.","warn")}
-      ${devStaticReq("Safari, Firefox and physical devices","not measured · 2026-09-24","Safari WebDriver session creation timed out; Firefox was unavailable. Native two-cliff, HDR and device traces remain owed. Record each platform's first-frame, gap, rung and restart results.","warn")}
+      ${devStaticReq("Chrome shaped-network recovery","not met · 2026-09-26","The final-code two-cliff repeat downshifted in 7.215 s and 7.672 s with no restart or stall, but its 133.30 ms and 166.70 ms frame gaps exceeded the unchanged 100 ms limit. An earlier candidate pass did not repeat; loaded-host qualification remains open.","warn")}
+      ${devStaticReq("Firefox shaped-network recovery","failed · 2026-09-26","Candidate and final-code traces missed the 100 ms gap limit. The integrated repeat restarted at cliff two with a 1.73 s gap; a further source-exact experiment reached 216.66 ms and 1,766.68 ms gaps. A stable final-branch pass remains owed.","warn")}
+      ${devStaticReq("HDR playback","incomplete · 2026-09-26","Chrome could not present the synthetic HDR fixture's first frame in the 30 s smoke window. This display reported no HDR support and the server selected CPU tone-mapping to SDR. A real HDR display trace remains owed.","warn")}
+      ${devStaticReq("Safari and physical devices","not measured · 2026-09-26","Safari WebDriver session creation failed before playback. Apple and Android device traces remain owed. Record first frame, gap, rung, restarts and unexpected SDR transitions per platform.","warn")}
       <p class="devcheck-note">Evidence is dated because this server cannot inspect another device's trace. Recheck the architecture-review fleet evidence before enabling broadly. These observations never gate this checkbox.</p>
       </div></details><div class="err" id="aqerr" role="alert"></div>
       ${setCardFoot("saveAutoQuality")}`);
@@ -314,6 +316,37 @@ function seekScratchReservationsCard(){
       <p class="devcheck-note">Advisory only. Capacity, authorization and retention rules are unchanged by anything on this card; the global scratch ceiling is still the one on <a href="#/settings/playback">Playback</a>.</p>
       </div></details>`);
 }
+function durableQueueCard(settings,readiness){
+  const cadence=Number(settings.cache_produce_mins)||0;
+  return setCard(`${cardHead("Durable cluster work","Share preparation across eligible idle workers and keep accepted work through restarts.",'<span class="pill">Shared queue</span>')}
+    ${togRow("durable-analysis","Enable fragment indexing and analysis workers","Use the existing analysis preference. Pausing keeps accepted requests and their history.",!!settings.vod_index_cluster_cache)}
+    ${togRow("durable-pretranscode","Enable pre-transcoding workers","Use the existing scheduled preparation preference. Enabling keeps the current cadence, or uses every six hours when it was off.",cadence>0)}
+    <input type="hidden" id="durable-cadence" value="${cadence>0?cadence:360}">
+    <p class="hint">Pre-transcoding still uses the configured <a href="#/settings/maintenance">cache disk budget</a>. A zero budget leaves no room for production. Queue cleanup and cancellation remain active while workers are paused.</p>
+    <details class="setdetails" open><summary>Requirements and current observations</summary><div class="setdetails-body">
+      ${devReq(readiness,"durable_cluster_work","durable_store","Durable storage responds","Accepted work needs the replicated Store, or the local Store on a standalone server.")}
+      ${devReq(readiness,"durable_cluster_work","durable_tools","Compatible tools","A worker needs decoders and the exact output recipe required by its job.")}
+      ${devReq(readiness,"durable_cluster_work","durable_capacity","Spare capacity","Live playback takes precedence. Heavy jobs share one local lane and bounded source I/O across the cluster.")}
+      ${devReq(readiness,"durable_cluster_work","durable_scratch","Cache headroom","Each output needs writable local storage and enough room for its stage and final artifact.")}
+      ${devReq(readiness,"durable_cluster_work","durable_sources","Readable sources","At least one eligible worker must be able to read and validate the source.")}
+      ${devReq(readiness,"durable_cluster_work","durable_peers","Peer compatibility","Peers are checked individually. One unavailable peer does not disable the saved preference.")}
+      <p class="devcheck-note">Advisory only. Every preference can be saved regardless of these observations.</p>
+    </div></details>
+    <p><a href="#/activity">Inspect queued work, owners, retries and attempts in Activity</a>.</p>
+    <div class="err" id="durable-setting-error" role="alert"></div>${setCardFoot("saveDurableQueueSettings")}`,{id:"durable-queue-settings"});
+}
+async function saveDurableQueueSettings(btn){
+  const err=document.getElementById("durable-setting-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{
+      vod_index_cluster_cache:/** @type {HTMLInputElement} */ (document.getElementById("durable-analysis")).checked,
+      cache_produce_mins:/** @type {HTMLInputElement} */ (document.getElementById("durable-pretranscode")).checked?Number(/** @type {HTMLInputElement} */ (document.getElementById("durable-cadence")).value):0
+    }}));
+    const card=document.getElementById("durable-queue-settings");if(card)card.outerHTML=durableQueueCard(saved,DEVELOPER_READINESS);
+    toast("Cluster work preferences saved");
+  }catch(error){if(err)err.textContent=error.message||String(error);btn.disabled=false;}
+}
+
 function developerPanel(settings,readiness){
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
     <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>Tuner, guide, recording and library channels</span></a>
@@ -326,6 +359,7 @@ function developerPanel(settings,readiness){
       ${directedChangeDeveloperRows()}`,{local:true});
   return `${setHead("Developer","Experimental features still awaiting device qualification.")}
       ${destinations}
+      <div class="setsection"><h2>Cluster work</h2><p>Shared preparation and durable job history.</p></div>${durableQueueCard(settings,readiness)}
       <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
       <div class="setsection"><h2>Live TV video</h2><p>Output choices whose device and node capacity evidence remains advisory.</p></div>${liveTvDeinterlaceCard(settings)}
       <div class="setsection"><h2>Recovery</h2><p>Portable backup scheduling and visible readiness. Saving is never gated by these observations.</p></div>${clusterBackupCard(settings,readiness)}

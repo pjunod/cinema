@@ -307,10 +307,10 @@ broad command's `--list` output. One assertion should produce one set of
 runner-minutes.
 
 For Apple changes, T1 begins on the private-repository lab runner selected by
-`[self-hosted, macOS, ARM64, lab, apple, xcode-26]`. It verifies Xcode 26.6
-build 17F113, iOS 26.5 runtime build 23F77, tvOS 26.5 runtime build 23L470,
-the matching SDK versions, and XcodeGen 2.46.0 before restoring DerivedData or
-booting a simulator. That makes
+`[self-hosted, macOS, ARM64, lab, apple, xcode-27]` on the MacBook Pro.
+It verifies Xcode 27.0 build 27A266a, the iOS and tvOS 27.0 SDKs, iOS 26.5
+runtime build 23F77, tvOS 26.5 runtime build 23L470, and XcodeGen 2.46.0
+before restoring DerivedData or booting a simulator. That makes
 toolchain drift fail in seconds instead of paying for a partial build. The
 runner creates uniquely named iPhone, iPad, and Apple TV devices for each run
 and deletes them in an `always()` cleanup step; persistent runner state is not
@@ -469,7 +469,7 @@ A successful job publishes a small JSON manifest as a workflow artifact:
   "workflow_sha": "...",
   "head_sha": "...",
   "base_sha": "...",
-  "runner": "gha-maca-apple-01/xcode-26.6",
+  "runner": "gha-macb-apple-01/xcode-27.0",
   "image_version": "...",
   "tests": 196,
   "result": "passed"
