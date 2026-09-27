@@ -1,6 +1,14 @@
 version = 1
 enforce_after = "e8a910f"
 
+[[fixes]]
+id = "apple.home-hero-foreground-clipping"
+commits = ["50784639d"]
+source = "clients/apple/Sources/HomeView.swift"
+source_anchor = "struct IOSHomeHeroArtworkLayout: ViewModifier"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPhoneHomeHeroKeepsEqualInsetsOnBothEdges"
+
 # D-03's internal reader corrections need a durable source-to-test bridge.
 # The Android PDF checks below are source contracts; simulator/device behavior
 # remains separate acceptance evidence on the D-03 workboard.
