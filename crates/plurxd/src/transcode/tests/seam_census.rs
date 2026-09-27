@@ -841,13 +841,32 @@ fn seam_census_of_the_workspace() {
                     "TerminalCleanup",
                     "HeadChildOwner",
                     "VodServingAdmission",
+                    "RollingControlHandle",
+                    "RollingActorRuntime",
+                    "RollingDecisionTransport",
+                    "RollingActorExitFence",
+                    "RollingProducerIngress",
+                    "RollingProducerIngressState",
                 ]
                 .iter()
                 .any(|owner| site.owner == *owner || site.owner.starts_with(&format!("{owner}::")))
+                || (site.owner.starts_with("RollingControlActor") && site.seam != Seam::Arm)
         })
         .collect();
     assert!(
         migrated.is_empty(),
         "M8-migrated owners keep no test-only seams: {migrated:?}"
+    );
+    // The control actor keeps only the arms that apply the six test-driver
+    // commands (`RollingControlCommand`'s test-only variants), which no
+    // production sender builds.
+    let actor_arms: Vec<&Site> = sites
+        .iter()
+        .filter(|site| site.owner.starts_with("RollingControlActor"))
+        .collect();
+    assert_eq!(
+        actor_arms.len(),
+        6,
+        "the control actor's test-only sites are its six test-command arms: {actor_arms:?}"
     );
 }
