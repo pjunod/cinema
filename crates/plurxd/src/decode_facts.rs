@@ -468,7 +468,35 @@ enum ProbeLaunchMode {
     ProductionFdExport(std::os::fd::RawFd),
 }
 
+/// The version-check and probe deadlines of the test-only `Fixture` launch
+/// mode. Fixture scripts run as the production background class (nice 15), so
+/// a loaded runner can starve them past the 5 s version and 10 s probe
+/// deadlines, and the tests using them then failed on `Deadline` rather than
+/// on what they assert. No test measures a deadline through this mode: the
+/// deadline proofs launch in the `Production*` modes with their own budgets,
+/// and those keep the production constants.
+#[cfg(test)]
+const FIXTURE_HANG_GUARD: Duration = Duration::from_secs(60);
+
 impl ProbeLaunchMode {
+    /// How long discovery's `-version` check may take.
+    fn version_deadline(self) -> Duration {
+        #[cfg(test)]
+        if self == Self::Fixture {
+            return FIXTURE_HANG_GUARD;
+        }
+        VERSION_DEADLINE
+    }
+
+    /// The ceiling on any caller's probe budget.
+    fn probe_deadline(self) -> Duration {
+        #[cfg(test)]
+        if self == Self::Fixture {
+            return FIXTURE_HANG_GUARD;
+        }
+        PROBE_DEADLINE
+    }
+
     fn is_production(self) -> bool {
         match self {
             Self::Production => true,
@@ -3145,7 +3173,13 @@ async fn probe_version(
 ) -> Result<Vec<u8>, DecodeFactError> {
     #[cfg(not(test))]
     let _ = configured_path;
-    probe_version_with_deadline(executable, configured_path, launch_mode, VERSION_DEADLINE).await
+    probe_version_with_deadline(
+        executable,
+        configured_path,
+        launch_mode,
+        launch_mode.version_deadline(),
+    )
+    .await
 }
 
 #[cfg(unix)]
@@ -3423,7 +3457,9 @@ impl DecodeFactCache {
         cancelled: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<(DecodeFacts, DecodeFactLookupResult), DecodeFactError> {
         let started = std::time::Instant::now();
-        let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
+        let remaining = budget
+            .min(probe.launch_mode.probe_deadline())
+            .saturating_sub(started.elapsed());
         if remaining.is_zero() {
             return Err(DecodeFactError::Deadline);
         }
@@ -3446,7 +3482,9 @@ impl DecodeFactCache {
             gate_elapsed,
         );
         let gate = gate_result?;
-        let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
+        let remaining = budget
+            .min(probe.launch_mode.probe_deadline())
+            .saturating_sub(started.elapsed());
         let phase_started = std::time::Instant::now();
         let validation = probe.validate_current(remaining, cancelled).await;
         let identity_elapsed = phase_started.elapsed();
@@ -3456,7 +3494,9 @@ impl DecodeFactCache {
             identity_elapsed,
         );
         validation?;
-        let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
+        let remaining = budget
+            .min(probe.launch_mode.probe_deadline())
+            .saturating_sub(started.elapsed());
         let phase_started = std::time::Instant::now();
         let observation = source_observation_with_probe_gate(
             Arc::clone(&source.handle),
@@ -3490,7 +3530,9 @@ impl DecodeFactCache {
                 .record_hit_phase(DecodeFactPhase::SourceObservation, observation_elapsed);
             return Ok((facts, DecodeFactLookupResult::Hit));
         }
-        let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
+        let remaining = budget
+            .min(probe.launch_mode.probe_deadline())
+            .saturating_sub(started.elapsed());
         if remaining.is_zero() {
             return Err(DecodeFactError::Deadline);
         }
@@ -3506,7 +3548,9 @@ impl DecodeFactCache {
                     .map_err(|_| DecodeFactError::CacheInvariant)?
             }
         };
-        let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
+        let remaining = budget
+            .min(probe.launch_mode.probe_deadline())
+            .saturating_sub(started.elapsed());
         if remaining.is_zero() {
             return Err(DecodeFactError::Deadline);
         }
@@ -3543,7 +3587,9 @@ impl DecodeFactCache {
         let collection_result = await_owned_collection(collection, remaining, cancelled).await;
         let (facts, gate, source) = collection_result?;
         let facts = facts?;
-        let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
+        let remaining = budget
+            .min(probe.launch_mode.probe_deadline())
+            .saturating_sub(started.elapsed());
         let phase_started = std::time::Instant::now();
         let validation = probe.validate_current(remaining, cancelled).await;
         self.metrics.record_phase(
@@ -3552,7 +3598,9 @@ impl DecodeFactCache {
             phase_started.elapsed(),
         );
         validation?;
-        let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
+        let remaining = budget
+            .min(probe.launch_mode.probe_deadline())
+            .saturating_sub(started.elapsed());
         let phase_started = std::time::Instant::now();
         let observation = source_observation_with_probe_gate(
             Arc::clone(&source.handle),
@@ -4081,7 +4129,7 @@ async fn collect(
         work,
     } = source;
     let started = std::time::Instant::now();
-    let launch_deadline = started + budget.min(PROBE_DEADLINE);
+    let launch_deadline = started + budget.min(probe.launch_mode.probe_deadline());
     let source_fd = handle.as_raw_fd();
     if probe.launch_mode.is_production() && observation.executable {
         return Err(DecodeFactError::SourceMetadata(
@@ -4396,14 +4444,14 @@ async fn collect(
     budget: Duration,
     cancelled: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<DecodeFacts, DecodeFactError> {
-    let _ = probe.launch_mode;
     let DecodeFactCollectionSource {
         handle,
         observation,
         offset_permit,
         work,
     } = source;
-    let launch_deadline = std::time::Instant::now() + budget.min(PROBE_DEADLINE);
+    let launch_deadline =
+        std::time::Instant::now() + budget.min(probe.launch_mode.probe_deadline());
     let source_path = plurx_core::fs_secure::std_file_path(&handle)
         .map_err(|error| DecodeFactError::SourceMetadata(error.to_string()))?;
     if source_observation_windows(&handle)?.identity != observation.identity {
@@ -5696,8 +5744,9 @@ void probe_main(unsigned long *stack) {
     /// constructor (no-op hooks) runs the blocked-identity test's scenario —
     /// same fixture probe and source, with no observation delayed. It checks
     /// that the probe runs and the single probe lane is free when the call
-    /// returns. Its five-second budget tolerates process scheduling in debug
-    /// builds; the neighboring blocked-source test checks the 100 ms deadline.
+    /// returns. Its budget is the fixture hang guard, so process scheduling
+    /// on a loaded runner cannot turn it into a deadline test; the
+    /// neighboring blocked-source test checks the 100 ms deadline.
     /// Acceptance runs it in the release profile
     /// (`cargo test --release -p plurxd decode_fact_source_shipped_shape`).
     #[cfg(unix)]
@@ -5722,16 +5771,17 @@ void probe_main(unsigned long *stack) {
         let cache = DecodeFactCache::new();
         let ownership = Arc::clone(&cache.probe_gate);
         // This checks the shipped FD/source shape and probe-lane release,
-        // not a wall-clock latency promise. A loaded runner can spend more
-        // than 100 ms scheduling the shell before it prints its fixed output.
-        // Dedicated deadline regressions below retain their short budgets.
+        // not a wall-clock latency promise. A loaded runner can spend seconds
+        // scheduling the background-class shell before it prints its fixed
+        // output, so the budget is only a hang guard. Dedicated deadline
+        // regressions below retain their short budgets.
         let result = cache
             .get_or_probe(
                 &identity,
                 source,
                 None,
                 ProbeStreamSelection::FirstPlayable,
-                Duration::from_secs(5),
+                FIXTURE_HANG_GUARD,
                 None,
             )
             .await;
