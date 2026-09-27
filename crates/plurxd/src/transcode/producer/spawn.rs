@@ -369,6 +369,36 @@ impl ObservedFfmpeg {
     }
 }
 
+/// The binary a transcode producer runs: the configured FFmpeg, except where a
+/// test on this thread has put a stand-in in its place (see
+/// [`with_producer_ffmpeg_for_test`]).
+fn producer_ffmpeg_bin() -> String {
+    #[cfg(test)]
+    if let Some(bin) = PRODUCER_FFMPEG_FOR_TEST.with(|bin| bin.borrow().clone()) {
+        return bin;
+    }
+    ffmpeg_bin()
+}
+
+#[cfg(test)]
+thread_local! {
+    static PRODUCER_FFMPEG_FOR_TEST: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test seam: run `bin` instead of FFmpeg for every transcode producer this
+/// thread spawns — which, under `#[tokio::test]`'s current-thread runtime, is
+/// every producer the test starts. It exists for the hardware-admission tests:
+/// a host without the GPU they claim makes the real FFmpeg exit within tens of
+/// milliseconds, and whether that exit reaches the session's control actor
+/// before or after the manager registers the start decided whether the start
+/// failed with `DecisionMismatch` or a slot was handed back mid-test. Every
+/// thread libtest runs a test on is its own, so the stand-in ends with it.
+#[cfg(test)]
+pub(crate) fn with_producer_ffmpeg_for_test(bin: impl Into<String>) {
+    PRODUCER_FFMPEG_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(bin.into()));
+}
+
 #[allow(clippy::too_many_arguments)] // the priority class joined seven existing inputs
 pub(super) fn spawn_ffmpeg(
     args: &[String],
@@ -386,7 +416,7 @@ pub(super) fn spawn_ffmpeg(
         stdout,
         stderr,
     } = crate::producer_spawn::spawn(
-        std::path::Path::new(&ffmpeg_bin()),
+        std::path::Path::new(&producer_ffmpeg_bin()),
         args,
         crate::producer_spawn::SpawnOptions {
             runtime_cache,

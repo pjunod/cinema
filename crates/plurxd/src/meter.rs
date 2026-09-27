@@ -79,9 +79,15 @@ impl Meter {
 
     /// Record bytes on their way out. Cheap enough to call per chunk.
     pub fn note(&self, bytes: u64) {
+        self.note_at(bytes, self.started.elapsed().as_millis() as i64);
+    }
+
+    /// [`Meter::note`] at `now`, in milliseconds since this meter began. The
+    /// clock is read once, by [`Meter::note`], so a test can hand it an exact
+    /// instant instead of racing the wall clock between its setup and the note.
+    fn note_at(&self, bytes: u64, now: i64) {
         crate::telemetry::record_delivered_bytes(self.method, bytes);
         let total = self.total.fetch_add(bytes as i64, Relaxed) + bytes as i64;
-        let now = self.started.elapsed().as_millis() as i64;
         let opened = self.window_at_ms.load(Relaxed);
         if now - opened < WINDOW_MIN_MS {
             return;
@@ -134,19 +140,15 @@ impl Meter {
 mod tests {
     use super::*;
 
-    /// A meter with a synthetic clock: `started` is pushed into the past so
-    /// `elapsed()` reports whatever the test wants, without sleeping.
-    fn at(ms: u64) -> Meter {
-        Meter {
-            started: Instant::now() - std::time::Duration::from_millis(ms),
-            ..Meter::new()
-        }
-    }
+    // The window arithmetic is tested at exact instants through `note_at`:
+    // backdating `started` and then calling `note` let a loaded runner add
+    // whatever it spent between the two to the window, so 8 MB "over two
+    // seconds" was sometimes 8 MB over 2.009 s.
 
     #[test]
     fn a_rate_needs_a_window_to_measure_over() {
-        let m = at(0);
-        m.note(1_000_000);
+        let m = Meter::new();
+        m.note_at(1_000_000, 0);
         assert_eq!(m.total_bytes(), 1_000_000);
         // One fetch is not a rate. Reporting 1 MB "per" the instant it landed
         // is how you get a bandwidth readout of several gigabits.
@@ -158,36 +160,48 @@ mod tests {
         // 8 MB handed over across a two-second window → 4 MB/s. The point is
         // that the idle time between segment fetches is *in* the denominator:
         // this is delivery to a viewer, not the speed of one download.
-        let m = at(2_000);
-        m.note(8_000_000);
+        let m = Meter::new();
+        m.note_at(8_000_000, 2_000);
         assert_eq!(m.recent_bps(), Some(4_000_000));
     }
 
     #[test]
     fn an_idle_stretch_re_baselines_instead_of_reporting_a_dead_link() {
-        let m = at(2_000);
-        m.note(8_000_000);
+        let m = Meter::new();
+        m.note_at(8_000_000, 2_000);
         assert_eq!(m.recent_bps(), Some(4_000_000));
 
         // The viewer's buffer fills and fetching stops for half a minute. That
         // is a healthy session, and the last real rate is the honest thing to
         // keep showing — recomputing over the idle stretch would print a link
         // speed of nearly nothing for a stream that is doing fine.
-        let idle = Meter {
-            started: m.started - std::time::Duration::from_millis(30_000),
-            total: AtomicI64::new(m.total_bytes()),
-            window_at_ms: AtomicI64::new(m.window_at_ms.load(Relaxed)),
-            window_bytes: AtomicI64::new(m.window_bytes.load(Relaxed)),
-            recent_bps: AtomicI64::new(m.recent_bps.load(Relaxed)),
-            method: "unknown",
-        };
-        idle.note(4_000);
+        m.note_at(4_000, 32_000);
+        assert_eq!(m.recent_bps(), Some(4_000_000), "kept the last real rate");
         assert_eq!(
-            idle.recent_bps(),
-            Some(4_000_000),
-            "kept the last real rate"
+            m.window_at_ms.load(Relaxed),
+            32_000,
+            "but the window restarted here"
         );
-        assert_eq!(idle.idle_for_ms(), 0, "but the window restarted here");
+    }
+
+    /// The production entry point reads the meter's own clock: a note made
+    /// once the minimum window has passed closes it against the real elapsed
+    /// time, however long that turned out to be.
+    #[test]
+    fn a_note_reads_the_meters_own_clock() {
+        let m = Meter {
+            started: Instant::now() - std::time::Duration::from_millis(2_000),
+            ..Meter::new()
+        };
+        m.note(8_000_000);
+        let rate = m
+            .recent_bps()
+            .expect("a window of at least two seconds closed");
+        assert!(
+            rate > 0 && rate <= 4_000_000,
+            "8 MB over at least two seconds is at most 4 MB/s: {rate}"
+        );
+        assert!(m.window_at_ms.load(Relaxed) >= 2_000);
     }
 
     /// `plurx_delivered_bytes_total{method}` is fed by the same call that

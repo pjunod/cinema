@@ -114,6 +114,8 @@
     /// potentially a whole film. And the admission record must flip to the
     /// software class, or every speed measured from the replacement encoder
     /// is filed as evidence about hardware.
+    // The encoder stand-in is a /bin/sh script.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_fallback_to_software_frees_the_hardware_slot_at_once() {
         super::require_ffmpeg();
@@ -121,6 +123,8 @@
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
         let work = crate::test_tempdir().expect("work");
+        let encoder = crate::test_tempdir().expect("encoder stand-in");
+        let producer_started = hardware_encoder_stand_in(encoder.path());
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -139,6 +143,7 @@
             .start(file_id, 1080, 0.0, None, None, "paul", "pb-fallback")
             .await
             .expect("hardware start");
+        wait_for_stand_in(&producer_started).await;
         assert_eq!(mgr.admissions.in_use(), 1, "the start holds the only slot");
 
         let session = mgr

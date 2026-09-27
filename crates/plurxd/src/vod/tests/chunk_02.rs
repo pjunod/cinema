@@ -1833,7 +1833,11 @@
             "`keep` must survive the sweep"
         );
 
-        let events = tokio::time::timeout(Duration::from_secs(2), async {
+        // Lifecycle telemetry is written off the request path, so wait for
+        // the five rows to land. The bound only turns a lost write into a
+        // failure instead of a hang; a loaded runner took longer than the two
+        // seconds this used to allow to get the writer scheduled.
+        let events = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let events = serve
                     .shared

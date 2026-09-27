@@ -4890,16 +4890,13 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn the_self_test_fails_on_an_ffmpeg_that_does_not_behave() {
-        use std::os::unix::fs::PermissionsExt;
-
         let cache = fresh_cache();
         let root = store::store_root(cache.path());
         let real = plurx_core::testfixtures::ffmpeg();
         let prober = plurx_core::testfixtures::ffprobe();
         let script = |name: &str, body: String| {
             let path = cache.path().join(name);
-            std::fs::write(&path, body).expect("fake");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            crate::write_test_executable(&path, body, 0o755);
             path.to_string_lossy().into_owned()
         };
         // Answers `-version` as the real build does, then exits 0 and does

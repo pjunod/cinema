@@ -695,22 +695,16 @@ async fn a_capture_whose_frozen_faces_diverge_is_refused() {
 /// shell fragment) runs, then the host's real encoder with the same arguments.
 fn stand_in(fixture: &Fixture, name: &str, prelude: &str) {
     let program = fixture.base.path().join(name);
-    std::fs::write(
-        &program,
-        format!(
-            "#!/bin/sh\n{prelude}\nexec '{}' \"$@\"\n",
-            crate::ffmpeg::encoder_executable_path()
-                .expect("an encoder on this host")
-                .display()
-        ),
-    )
-    .expect("stand-in encoder");
+    let script = format!(
+        "#!/bin/sh\n{prelude}\nexec '{}' \"$@\"\n",
+        crate::ffmpeg::encoder_executable_path()
+            .expect("an encoder on this host")
+            .display()
+    );
     #[cfg(unix)]
-    std::fs::set_permissions(
-        &program,
-        std::os::unix::fs::PermissionsExt::from_mode(0o755),
-    )
-    .expect("executable stand-in");
+    crate::write_test_executable(&program, script, 0o755);
+    #[cfg(not(unix))]
+    std::fs::write(&program, script).expect("stand-in encoder");
     hooks::install(
         &fixture.runtime,
         hooks::Hooks {
