@@ -847,6 +847,8 @@ fn seam_census_of_the_workspace() {
                     "RollingActorExitFence",
                     "RollingProducerIngress",
                     "RollingProducerIngressState",
+                    "StartedSessionCleanup",
+                    "StartedSessionGuard",
                 ]
                 .iter()
                 .any(|owner| site.owner == *owner || site.owner.starts_with(&format!("{owner}::")))
