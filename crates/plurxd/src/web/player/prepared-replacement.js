@@ -645,10 +645,9 @@ function preparedAlignedBuffered(spare){
 function exposePreparedReplacementAtFrame(p,state,v,spare){
   if(typeof spare.requestVideoFrameCallback!=="function")
     return exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
-  if(!state.warmFrameReady){
-    failPreparedReplacement(p,state,"occluded successor produced no frame callback");
-    return false;
-  }
+  // Buffer readiness can precede the first warm callback. The aligned,
+  // advancing frame proof below is the actual presentation evidence; rejecting
+  // the handoff here would reopen an otherwise ready successor at the cliff.
   let settled=false,priorMediaTime=null,advancingSteps=0;
   let videoCallbacks=0,badFrames=0,lastFrameAt=null;
   state.overlapPhase="video";
@@ -662,6 +661,9 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
     if(state.exposeFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
       try{ spare.cancelVideoFrameCallback(state.exposeFrameCallbackId); }catch(e){}
     state.exposeFrameCallbackId=null;
+    if(state.warmFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
+      try{ spare.cancelVideoFrameCallback(state.warmFrameCallbackId); }catch(e){}
+    state.warmFrameCallbackId=null;
     if(state.handoffFrameCallbackId!=null&&typeof v.cancelVideoFrameCallback==="function")
       try{ v.cancelVideoFrameCallback(state.handoffFrameCallbackId); }catch(e){}
     state.handoffFrameCallbackId=null;
