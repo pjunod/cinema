@@ -454,7 +454,7 @@ pub(super) fn spawn_rolling_scratch_cleanup_owner(session_id: String, session: &
     });
 }
 
-fn spawn_retired_presentation_cleanup_owner(
+pub(super) fn spawn_retired_presentation_cleanup_owner(
     retired_presentations: RetiredPresentations,
     session_id: String,
     retired: RetiredPresentation,

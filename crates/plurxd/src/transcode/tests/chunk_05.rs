@@ -763,7 +763,12 @@
             .expect("slow garbage deletion cannot hold the path transition")
             .expect("replacement task");
         pause_held.release();
-        drop(pause_batch.reached().await);
+        let batch_held = pause_batch.reached().await;
+        assert!(
+            !session.retention_cleanup_active.load(Acquire),
+            "the batch point follows the worker clearing its active flag"
+        );
+        batch_held.release();
         assert_eq!(session.control.current_producer_attempt(), successor);
         assert!(dir.path().join("seg00000.ts").exists());
         assert!(dir.path().join("seg00001.ts").exists());
@@ -817,7 +822,12 @@
             .await
             .expect("force remove_file failure");
         pause_held.release();
-        drop(pause_batch.reached().await);
+        let batch_held = pause_batch.reached().await;
+        assert!(
+            !session.retention_cleanup_active.load(Acquire),
+            "the batch point follows the worker clearing its active flag"
+        );
+        batch_held.release();
 
         assert!(!dir.path().join("seg00000.ts").exists());
         assert!(session
@@ -1209,8 +1219,11 @@
             EncoderCaps::default(),
             Pipeline::Cpu,
         ));
-        let info = mgr
-            .start_copy(
+        // Unpaced, so the first playlist does not wait on real time.
+        store.put_setting(keys::HLS_READRATE, "0").await.expect("s");
+        let info = tokio::time::timeout(
+            Duration::from_secs(30),
+            mgr.start_copy(
                 file_id,
                 0.0,
                 None,
@@ -1221,9 +1234,11 @@
                 },
                 "paul",
                 "pb-shipped-shape",
-            )
-            .await
-            .expect("copy session");
+            ),
+        )
+        .await
+        .expect("the production start answers")
+        .expect("copy session");
         let session = mgr
             .sessions
             .lock()
@@ -1270,7 +1285,7 @@
             );
         }
 
-        let playlist = tokio::time::timeout(Duration::from_secs(30), async {
+        let playlist = tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 if let Ok((bytes, _)) = mgr.playlist_with_owner(&info.session_id).await {
                     break bytes;

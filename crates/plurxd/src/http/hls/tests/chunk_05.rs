@@ -1522,6 +1522,11 @@
         });
         let held = pause.reached().await;
         assert_eq!(
+            fixture.actor_delivery().await.fetched_segment,
+            Some(3),
+            "the actor commits the fetch before the point"
+        );
+        assert_eq!(
             fixture.begin_producer_attempt().await,
             Ok(1),
             "successor admission resets the compatibility projection"

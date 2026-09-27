@@ -1606,6 +1606,10 @@
         assert_eq!(admissions.in_use(), 1);
         assert_eq!(admissions.software_in_use(), 2);
         assert!(manager.sessions.lock().await.contains_key("post-media"));
+        assert!(
+            session.child_transition.try_lock().is_err(),
+            "the handoff point comes before retirement releases the child transition"
+        );
         let follower = tokio::spawn({
             let manager = Arc::clone(&manager);
             let session = Arc::clone(&session);

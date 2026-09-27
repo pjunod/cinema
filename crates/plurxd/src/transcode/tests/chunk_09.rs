@@ -1273,3 +1273,470 @@
             "and so is one publication would reject for length"
         );
     }
+
+    // S-14 M8: the position of every awaited Session hook point. Each test
+    // holds a point and checks that the step before it has happened and the
+    // step after it has not, or that a path refused by the step before it
+    // never reaches the point; the plan's execution log records the mutation
+    // that moves each point to either side of its step and the test it fails.
+
+    /// The path-owner point sits between the replacement-marker check and the
+    /// attempt sample: a reader that sees the marker answers without reaching
+    /// it, and a reader held there samples the attempts a successor installs
+    /// while it waits.
+    #[tokio::test]
+    async fn path_owner_sample_point_follows_the_marker_check_and_precedes_the_sample() {
+        let dir = crate::test_tempdir().expect("tempdir");
+        seeded_session_dir(dir.path(), 2, 2.0).await;
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+
+        let point = session
+            .test_hooks()
+            .path_owner_sample
+            .arm("path_owner_sample");
+        session.replacing_child.store(true, Release);
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                session.coherent_path_producer_attempt()
+            )
+            .await
+            .expect("a reader that sees the marker answers without waiting"),
+            None
+        );
+        assert!(!point.was_reached(), "the marker check comes before the point");
+        session.replacing_child.store(false, Release);
+
+        let point = session
+            .test_hooks()
+            .path_owner_sample
+            .arm("path_owner_sample");
+        let reader = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move { session.coherent_path_producer_attempt().await }
+        });
+        let held = point.reached().await;
+        let successor = session
+            .control
+            .begin_producer_attempt()
+            .await
+            .expect("successor attempt");
+        session.reset_compatibility_delivery(successor).await;
+        held.release();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), reader)
+                .await
+                .expect("the reader answers")
+                .expect("reader task"),
+            Some(successor),
+            "the attempts are sampled after the point"
+        );
+    }
+
+    /// Compatibility publication's point sits between its first deadline
+    /// check and the store: an expired publication answers without reaching
+    /// it, and one held there has not published yet.
+    #[tokio::test]
+    async fn playlist_publication_point_follows_the_deadline_check_and_precedes_the_store() {
+        let dir = crate::test_tempdir().expect("tempdir");
+        seeded_session_dir(dir.path(), 2, 2.0).await;
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        let attempt = session.compatibility_producer_attempt();
+
+        let point = session
+            .test_hooks()
+            .playlist_publication
+            .arm("playlist_publication");
+        assert!(
+            !tokio::time::timeout(
+                Duration::from_secs(2),
+                session.publish_compatibility_playlist(attempt, std::time::Instant::now()),
+            )
+            .await
+            .expect("an expired publication answers without waiting"),
+            "an expired publication does not publish"
+        );
+        assert!(!point.was_reached(), "the deadline check comes before the point");
+
+        let point = session
+            .test_hooks()
+            .playlist_publication
+            .arm("playlist_publication");
+        let publish = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move {
+                session
+                    .publish_compatibility_playlist(
+                        attempt,
+                        std::time::Instant::now() + Duration::from_secs(30),
+                    )
+                    .await
+            }
+        });
+        let held = point.reached().await;
+        assert_eq!(
+            session.compatibility_playlist_published(attempt),
+            Some(false),
+            "the store comes after the point"
+        );
+        held.release();
+        assert!(tokio::time::timeout(Duration::from_secs(5), publish)
+            .await
+            .expect("the publication answers")
+            .expect("publication task"));
+        assert_eq!(session.compatibility_playlist_published(attempt), Some(true));
+    }
+
+    /// A playlist response's point sits between the first-playlist gate and
+    /// the actor observation: a playlist below the start cushion waits without
+    /// reaching it, and a response held there has not reported the playlist
+    /// to the actor.
+    #[tokio::test]
+    async fn playlist_response_point_follows_the_first_playlist_gate_and_precedes_the_observation(
+    ) {
+        use plurx_core::store::SqliteStore;
+
+        let dir = crate::test_tempdir().expect("tempdir");
+        let manager_dir = crate::test_tempdir().expect("manager tempdir");
+        // One segment is below the first-playlist gate.
+        seeded_session_dir(dir.path(), 1, 4.0).await;
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        session.publication_worker_started.store(true, Release);
+        install_seeded_served_playlist_snapshot(&session, 0).await;
+        let point = session
+            .test_hooks()
+            .playlist_publication
+            .arm("playlist_publication");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let mgr = Arc::new(TranscodeManager::new(
+            store,
+            manager_dir.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        mgr.playlist_wait_override_ms.store(5_000, Relaxed);
+        mgr.sessions
+            .lock()
+            .await
+            .insert("gate-order".into(), Arc::clone(&session));
+
+        let playlist = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move { mgr.playlist("gate-order").await }
+        });
+        tokio::time::sleep(PLAYLIST_WAIT_POLL * 2).await;
+        assert!(!playlist.is_finished(), "a playlist below the cushion waits");
+        assert!(
+            !point.was_reached(),
+            "the first-playlist gate comes before the point"
+        );
+
+        seeded_session_dir(dir.path(), 12, 4.0).await;
+        install_seeded_served_playlist_snapshot(&session, 0).await;
+        let held = point.reached().await;
+        assert!(
+            !session
+                .control
+                .snapshot()
+                .await
+                .expect("rolling actor")
+                .delivery
+                .playlist_ready,
+            "the actor observes the playlist after the point"
+        );
+        held.release();
+        let bytes = tokio::time::timeout(Duration::from_secs(5), playlist)
+            .await
+            .expect("the playlist answers")
+            .expect("playlist task")
+            .expect("playlist");
+        assert!(String::from_utf8(bytes)
+            .expect("playlist text")
+            .contains("seg00011.ts"));
+        assert!(
+            session
+                .control
+                .snapshot()
+                .await
+                .expect("rolling actor")
+                .delivery
+                .playlist_ready
+        );
+    }
+
+    /// Install a stand-in producer through the prepublication install path,
+    /// the pipe variant when `pipe` is set.
+    async fn install_stand_in_producer(
+        session: &Session,
+        producer_attempt: u64,
+        pipe: bool,
+    ) -> Result<(), String> {
+        if pipe {
+            session
+                .spawn_and_install_prepublication_pipe_child(producer_attempt, || {
+                    let mut child = tokio::process::Command::new("sleep")
+                        .arg("60")
+                        .stdout(std::process::Stdio::piped())
+                        .kill_on_drop(true)
+                        .spawn()
+                        .map_err(|error| error.to_string())?;
+                    let stdout = child.stdout.take().expect("piped stdout");
+                    Ok((ObservedFfmpeg::for_test(child), stdout))
+                })
+                .await
+                .map(drop)
+        } else {
+            session
+                .spawn_and_install_prepublication_child(producer_attempt, || {
+                    Ok(ObservedFfmpeg::for_test(long_running_child()))
+                })
+                .await
+        }
+    }
+
+    /// Every producer install path's point sits between the actor's install
+    /// authorization and the final install fence: a retired session's install
+    /// is refused without reaching it, and retirement while an install is
+    /// held there is refused by the fence.
+    #[tokio::test]
+    async fn producer_install_points_follow_authorization_and_precede_the_final_fence() {
+        let dir = crate::test_tempdir().expect("dir");
+        for pipe in [false, true] {
+            let session = watchdog_session(dir.path(), None, false);
+            let (mut replacement, attempt) = session
+                .kill_child_for_replacement()
+                .await
+                .expect("admit a producer attempt");
+            session.control.end().await.expect("end verdict");
+            let point = session
+                .test_hooks()
+                .producer_install
+                .arm("producer_install");
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    install_stand_in_producer(&session, attempt, pipe),
+                )
+                .await
+                .expect("a refused authorization answers without waiting")
+                .is_err(),
+                "a retired session's install is refused (pipe: {pipe})"
+            );
+            assert!(
+                !point.was_reached(),
+                "authorization comes before the point (pipe: {pipe})"
+            );
+            replacement.settle_terminal_rejection();
+
+            let session = watchdog_session(dir.path(), None, false);
+            let (mut replacement, attempt) = session
+                .kill_child_for_replacement()
+                .await
+                .expect("admit a producer attempt");
+            let point = session
+                .test_hooks()
+                .producer_install
+                .arm("producer_install");
+            let install = install_stand_in_producer(&session, attempt, pipe);
+            let retire = async {
+                let held = point.reached().await;
+                session.control.end().await.expect("end verdict");
+                held.release();
+            };
+            let (result, ()) = tokio::join!(install, retire);
+            assert!(
+                result.is_err(),
+                "the final fence comes after the point (pipe: {pipe})"
+            );
+            replacement.settle_terminal_rejection();
+        }
+
+        let session = watchdog_session(dir.path(), Some(long_running_child()), false);
+        let (mut replacement, attempt) = session
+            .kill_child_for_replacement()
+            .await
+            .expect("admit a replacement");
+        session.control.end().await.expect("end verdict");
+        let point = session
+            .test_hooks()
+            .producer_install
+            .arm("producer_install");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                session.install_replacement_child(attempt, long_running_child()),
+            )
+            .await
+            .expect("a refused authorization answers without waiting")
+            .is_err(),
+            "a retired session's replacement install is refused"
+        );
+        assert!(
+            !point.was_reached(),
+            "authorization comes before the replacement install's point"
+        );
+        replacement.settle_terminal_rejection();
+    }
+
+    /// A refresh's point follows its playlist read: a playlist rewritten while
+    /// the refresh is held there is not what it merges.
+    #[tokio::test]
+    async fn refresh_point_follows_the_playlist_read() {
+        let dir = crate::test_tempdir().expect("tempdir");
+        seeded_session_dir(dir.path(), 2, 2.0).await;
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        let point = session
+            .test_hooks()
+            .refresh_after_read
+            .arm("refresh_after_read");
+        let refresh = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move { session.refresh_segments().await }
+        });
+        let held = point.reached().await;
+        seeded_session_dir(dir.path(), 3, 2.0).await;
+        held.release();
+        tokio::time::timeout(Duration::from_secs(5), refresh)
+            .await
+            .expect("the refresh answers")
+            .expect("refresh task");
+        assert_eq!(
+            session.segments.lock().await.segs.len(),
+            2,
+            "the refresh merges the bytes it read before the point"
+        );
+    }
+
+    /// An activity read's point sits after the actor snapshot and before the
+    /// segment index is read: an index refreshed while the read is held there
+    /// is the one it reports.
+    #[tokio::test]
+    async fn activity_point_precedes_the_index_read() {
+        let dir = crate::test_tempdir().expect("tempdir");
+        seeded_session_dir(dir.path(), 2, 2.0).await;
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        let point = session.test_hooks().activity_detail.arm("activity_detail");
+        let reader = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move {
+                session_info(
+                    "activity-order",
+                    &session,
+                    AheadLimits {
+                        max_secs: 0,
+                        max_bytes: 0,
+                        global_max_bytes: 0,
+                    },
+                    0,
+                    0,
+                )
+                .await
+            }
+        });
+        let held = point.reached().await;
+        session.refresh_segments().await;
+        held.release();
+        let info = tokio::time::timeout(Duration::from_secs(5), reader)
+            .await
+            .expect("the activity read answers")
+            .expect("activity task");
+        assert_eq!(
+            info.produced_end_ms,
+            Some(4_000),
+            "the index is read after the point"
+        );
+    }
+
+    /// The first-media owner point follows an accepted settlement: a refused
+    /// settlement never reaches it.
+    #[tokio::test]
+    async fn first_media_owner_point_follows_an_accepted_settlement() {
+        let root = crate::test_tempdir().expect("first-media root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create scratch");
+        let session =
+            watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
+        let point = session
+            .test_hooks()
+            .first_media_owner_claim
+            .arm("first_media_owner_claim");
+        let (handoff, applied) =
+            begin_first_media_publication_handoff(&session, "first-media-refused")
+                .await
+                .expect("first-media settlement capacity");
+        handoff.settle_for_test(false);
+        assert!(
+            !tokio::time::timeout(Duration::from_secs(2), applied)
+                .await
+                .expect("a refused settlement answers without waiting")
+                .expect("first-media handoff application"),
+            "a refused settlement is not applied"
+        );
+        assert!(
+            !point.was_reached(),
+            "only an accepted settlement reaches the point"
+        );
+        assert!(!session.first_media_handoff_applied.load(Acquire));
+        session.fail(PlaylistError::SessionFailed("test complete".into()));
+    }
+
+    /// Both scratch owners' point sits after the scratch release began and
+    /// before the directory is removed.
+    #[tokio::test]
+    async fn scratch_cleanup_points_follow_the_release_and_precede_the_removal() {
+        let root = crate::test_tempdir().expect("scratch root");
+        let ledger = crate::scratch_ledger::ScratchLedger::new();
+        let scratch_session = |name: &'static str| {
+            let dir = root.path().join(name);
+            std::fs::create_dir_all(&dir).expect("create scratch");
+            std::fs::write(dir.join("seg00000.ts"), b"scratch").expect("seed scratch");
+            let mut session = watchdog_session(&dir, None, false);
+            Arc::get_mut(&mut session)
+                .expect("unshared scratch fixture")
+                .scratch = Some(
+                ledger
+                    .reserve(0, HLS_SCRATCH_MAX_BYTES_DEFAULT)
+                    .expect("fixture admission")
+                    .bound_to(name, 0),
+            );
+            (session, dir)
+        };
+
+        let (session, dir) = scratch_session("rolling-owner");
+        let key = session.scratch.as_ref().expect("scratch permit").key();
+        let point = session.test_hooks().scratch_cleanup.arm("scratch_cleanup");
+        spawn_rolling_scratch_cleanup_owner("rolling-owner".to_owned(), &session);
+        let held = point.reached().await;
+        assert_eq!(
+            ledger.lifecycle_of(key),
+            Some(crate::scratch_ledger::ScratchLifecycle::Releasing),
+            "the release begins before the point"
+        );
+        assert!(dir.exists(), "the directory is removed after the point");
+        held.release();
+        await_scratch_removed(&dir).await;
+
+        let (session, dir) = scratch_session("retired-owner");
+        let key = session.scratch.as_ref().expect("scratch permit").key();
+        let point = session.test_hooks().scratch_cleanup.arm("scratch_cleanup");
+        spawn_retired_presentation_cleanup_owner(
+            Arc::new(Mutex::new(HashMap::new())),
+            "retired-owner".to_owned(),
+            RetiredPresentation {
+                session: Arc::clone(&session),
+                producer_attempt: 0,
+                serve_until: Instant::now(),
+            },
+        );
+        let held = point.reached().await;
+        assert_eq!(
+            ledger.lifecycle_of(key),
+            Some(crate::scratch_ledger::ScratchLifecycle::Releasing),
+            "the retired owner begins the release before the point"
+        );
+        assert!(dir.exists(), "the retired owner removes the directory after the point");
+        held.release();
+        await_scratch_removed(&dir).await;
+    }

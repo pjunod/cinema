@@ -1629,6 +1629,82 @@
         assert_eq!(status.hold_reason, Some(AheadHoldReason::Demand));
     }
 
+    /// S-14 M8 point positions. The flow worker's point comes after producer
+    /// policy ran (the accepted hold has suspended the producer), and the
+    /// control response's point comes before the response waits for its flow
+    /// ticket: the response reaches its point while the flow worker is held.
+    #[tokio::test]
+    async fn control_and_flow_points_bracket_producer_policy() {
+        let dir = crate::test_tempdir().expect("session dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        fixture.mark_started().await;
+        activate_control_route(
+            fixture.store.as_ref(),
+            &session_id,
+            &generation,
+            "test-node",
+        )
+        .await;
+        let flow = fixture
+            .session
+            .test_hooks()
+            .flow_completion
+            .arm("flow_completion");
+        let applied = fixture
+            .session
+            .test_hooks()
+            .control_applied
+            .arm("control_applied");
+        let request = {
+            let manager = Arc::clone(&fixture.state.transcode);
+            let session_id = session_id.clone();
+            let generation = generation.clone();
+            tokio::spawn(async move {
+                let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+                    crate::playback_control::ClientPlatform::Web,
+                );
+                snapshot.demand = crate::playback_control::PlaybackDemand::Hold;
+                snapshot.playback_rate = 0.0;
+                snapshot.render_state = crate::playback_control::RenderState::Waiting;
+                let client = uuid::Uuid::new_v4().to_string();
+                manager
+                    .hls_session_control(crate::playback_control::LocalControlRequest {
+                        session_id: &session_id,
+                        generation: &generation,
+                        owner_node_id: "test-node",
+                        owner_epoch: 1,
+                        client_instance_id: &client,
+                        sequence: 1,
+                        snapshot,
+                        prepared_successor:
+                            crate::playback_control::PreparedSuccessorObservation::NotRequested,
+                    })
+                    .await
+            })
+        };
+
+        let flow_held = flow.reached().await;
+        assert!(
+            fixture.session.suspended.load(Acquire),
+            "producer policy has applied the accepted hold before the flow point"
+        );
+        let applied_held = applied.reached().await;
+        applied_held.release();
+        flow_held.release();
+        assert!(
+            matches!(
+                tokio::time::timeout(Duration::from_secs(10), request)
+                    .await
+                    .expect("the control answers")
+                    .expect("control task"),
+                Some(Ok(_))
+            ),
+            "the accepted hold answers once its ticket completes"
+        );
+    }
+
     #[tokio::test]
     async fn retirement_before_flow_completion_cannot_escape_as_active_control() {
         let dir = crate::test_tempdir().expect("session dir");
