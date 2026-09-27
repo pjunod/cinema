@@ -32,6 +32,8 @@ Native Home restoration: [Original Apple Home screens](apple-builds/334-original
 
 Library-page revision: [Quiet Home and open media details](clients/CALM-LIBRARY-PAGES.md) — **built**; web Home and item page since restored to their originals.
 
+Apple Home clipping: [Featured movie content bounds](apple-builds/570-home-hero-clipping.md).
+
 ## Find it fast
 
 | You want to know… | Read |
