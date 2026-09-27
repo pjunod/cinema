@@ -6858,6 +6858,13 @@ mod tests {
         assert!(error.contains("cancelled after conversion lease loss"));
     }
 
+    /// The deadline the output-bound proofs run under. It only has to outlast
+    /// a runner that is not scheduling the reader: at 5 s a loaded runner
+    /// sometimes reached it first, and the proof failed on the deadline's
+    /// error instead of the cap's. A cap that never fires still fails, here.
+    #[cfg(unix)]
+    const OUTPUT_BOUND_TEST_DEADLINE: Duration = Duration::from_secs(60);
+
     #[cfg(unix)]
     #[tokio::test]
     async fn descriptor_probe_output_is_bounded_while_the_process_runs() {
@@ -6878,11 +6885,13 @@ mod tests {
             &source,
             "noisy probe",
             &CancellationToken::new(),
-            Duration::from_secs(5),
+            // Only a hang guard: `yes` reaches the output cap in
+            // milliseconds, and the cap, not this deadline, must stop it.
+            OUTPUT_BOUND_TEST_DEADLINE,
         )
         .await
         .expect_err("probe output bound");
-        assert!(error.contains("ffprobe stdout exceeded"));
+        assert!(error.contains("ffprobe stdout exceeded"), "{error}");
     }
 
     #[tokio::test]
@@ -7476,11 +7485,11 @@ mod tests {
             tool.to_str().expect("UTF-8 tool"),
             &[],
             &CancellationToken::new(),
-            Duration::from_secs(5),
+            OUTPUT_BOUND_TEST_DEADLINE,
         )
         .await
         .expect_err("noisy tool must be stopped at the stream cap");
-        assert!(error.contains("conversion tool stdout exceeded"));
+        assert!(error.contains("conversion tool stdout exceeded"), "{error}");
     }
 
     #[cfg(unix)]
@@ -7499,7 +7508,11 @@ mod tests {
         .await
         .expect_err("hung tool must exceed its deadline");
         assert!(error.contains("execution deadline"));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        // The tool would run for 60 s; returning well inside that is what
+        // shows the deadline ended it. The bound is half the tool's life, not
+        // a latency promise: a loaded runner took more than the 2 s this
+        // used to allow to schedule the kill and the reap.
+        assert!(started.elapsed() < Duration::from_secs(30));
     }
 
     #[cfg(unix)]
