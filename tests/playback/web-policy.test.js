@@ -4332,7 +4332,7 @@ asyncTest("a burn session-open refusal reaches the surface as a refused change",
     [
       'const API="/api/v1"; let TOKEN="token", AUTH_GENERATION=0;',
       'const PLAYBACK_ID="playback-1"; let STREAM_FAILURE=null;',
-      shippedSource("api"),
+      (require("../web/shell-source.js").apiPrelude()+shippedSource("api")),
       // `openSession` attaches this browser's capabilities document; the burn
       // refusal under test does not care what is in it, only that building one
       // does not throw.

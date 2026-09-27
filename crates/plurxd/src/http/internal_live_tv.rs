@@ -264,10 +264,9 @@ pub(crate) async fn retire(
     if request.expected_owner_node_id != state.node_id {
         return Err(StatusCode::CONFLICT);
     }
-    let outcome = state
-        .live_tv
-        .retire_local(request.user_id, &request.request_id)
-        .await;
+    let outcome = super::live_tv_cluster::retire(&state, request.user_id, &request.request_id)
+        .await
+        .map_err(error_status)?;
     signed_json_response(&state, &headers, RETIRE_PATH, StatusCode::OK, &outcome)
 }
 
@@ -283,10 +282,9 @@ pub(crate) async fn resume(
     if request.expected_owner_node_id != state.node_id {
         return Err(StatusCode::CONFLICT);
     }
-    let answer = state
-        .live_tv
-        .resume_local(request.user_id, &request.request_id)
-        .await;
+    let answer = super::live_tv_cluster::resume(&state, request.user_id, &request.request_id)
+        .await
+        .map_err(error_status)?;
     signed_json_response(&state, &headers, RESUME_PATH, StatusCode::OK, &answer)
 }
 
@@ -304,9 +302,9 @@ pub(crate) async fn start_state(
     if request.expected_owner_node_id != state.node_id {
         return Err(StatusCode::CONFLICT);
     }
-    let answer = state
-        .live_tv
-        .start_state_local(request.user_id, &request.request_id);
+    let answer = super::live_tv_cluster::start_state(&state, request.user_id, &request.request_id)
+        .await
+        .map_err(error_status)?;
     signed_json_response(&state, &headers, START_STATE_PATH, StatusCode::OK, &answer)
 }
 
@@ -397,6 +395,7 @@ fn signed_wire_error(
         &serde_json::json!({
             "code": error.code(),
             "message": error.to_string(),
+            "owner_decided": !(path == crate::live_tv::cluster::PLACEMENT_PATH && matches!(error, crate::live_tv::LiveTvError::OwnerUnavailable(_))),
         }),
     )
     .unwrap_or_else(IntoResponse::into_response)
@@ -475,5 +474,118 @@ async fn authorize_voter(
         Ok(auth.node_id)
     } else {
         Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+/// Exact-signed raw consumer; it shares the configured owner's existing tuner.
+pub(crate) async fn ingest(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    use crate::live_tv::cluster::INGEST_PATH;
+    if !state.serving.is_ready() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    let signer = match authorize_voter(&state, &headers, &body, INGEST_PATH, None).await {
+        Ok(signer) => signer,
+        Err(status) => return status.into_response(),
+    };
+    let wire = match serde_json::from_slice::<crate::live_tv::cluster::ProcessingStart>(&body) {
+        Ok(request) => request,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let Some(_admission) = state.serving.try_restart_admission().await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let request = wire.start.into_request();
+    if wire.worker != signer
+        || !state
+            .live_tv
+            .placements()
+            .authorizes(&request, &signer, &wire.nonce)
+    {
+        return StatusCode::CONFLICT.into_response();
+    }
+    match state.live_tv.shared_ingest(&request).await {
+        Ok(body) => (
+            [
+                (header::CONTENT_TYPE, "video/mp2t"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            body,
+        )
+            .into_response(),
+        Err(error) => signed_wire_error(&state, &headers, INGEST_PATH, error),
+    }
+}
+
+pub(crate) async fn placement(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    use crate::live_tv::cluster::{PlacedStart, PLACEMENT_PATH};
+    if let Err(status) = require_start_authority(&state).await {
+        return status.into_response();
+    }
+    let wire = match serde_json::from_slice::<PlacedStart>(&body) {
+        Ok(wire) => wire,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let request = wire.into_request();
+    if let Err(status) = authorize_voter(
+        &state,
+        &headers,
+        &body,
+        PLACEMENT_PATH,
+        Some(&request.source_node_id),
+    )
+    .await
+    {
+        return status.into_response();
+    }
+    let Some(_admission) = state.serving.try_restart_admission().await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match super::live_tv_cluster::start(&state, request).await {
+        Ok(answer) => {
+            signed_json_response(&state, &headers, PLACEMENT_PATH, StatusCode::OK, &answer)
+                .unwrap_or_else(IntoResponse::into_response)
+        }
+        Err(error) => signed_wire_error(&state, &headers, PLACEMENT_PATH, error),
+    }
+}
+pub(crate) async fn process(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    use crate::live_tv::cluster::{ProcessingStart, PROCESS_PATH};
+    if let Err(status) = require_start_authority(&state).await {
+        return status.into_response();
+    }
+    let wire = match serde_json::from_slice::<ProcessingStart>(&body) {
+        Ok(wire) => wire,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    if let Err(status) = authorize_voter(
+        &state,
+        &headers,
+        &body,
+        PROCESS_PATH,
+        Some(&wire.start.request.expected_owner_node_id),
+    )
+    .await
+    {
+        return status.into_response();
+    }
+    let Some(_admission) = state.serving.try_restart_admission().await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match super::live_tv_cluster::process(&state, wire).await {
+        Ok(answer) => signed_json_response(&state, &headers, PROCESS_PATH, StatusCode::OK, &answer)
+            .unwrap_or_else(IntoResponse::into_response),
+        Err(error) => signed_wire_error(&state, &headers, PROCESS_PATH, error),
     }
 }

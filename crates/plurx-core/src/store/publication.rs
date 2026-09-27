@@ -658,6 +658,76 @@ impl<'a> PublicationStore<'a> {
             .await
     }
 
+    /// Pure probe demand is tied to the current coordinator generation.
+    pub async fn enqueue_probe(
+        &self,
+        file: &crate::domain::MediaFile,
+        pipeline: &str,
+    ) -> Result<Option<String>, StoreError> {
+        use super::background_jobs::{EnqueueJob, EnqueueOutcome, JobPayload, JobRequest};
+        use super::background_jobs_probe::{generation, ProbeCoordinator};
+        if self.fence.is_none() {
+            return Ok(None);
+        }
+        let guard = self.token().await?;
+        let lease = guard.as_ref().ok_or_else(|| self.invalidated())?;
+        let coordinator = ProbeCoordinator::from_lease(lease);
+        if !coordinator.validate() {
+            return Ok(None);
+        }
+        let generation = generation(file.id, file.size, file.mtime, &coordinator, pipeline);
+        let now = unix_ms()?;
+        let result = self
+            .store
+            .enqueue_job(EnqueueJob {
+                id: uuid::Uuid::new_v4().to_string(),
+                dedupe_key: format!("probe:{generation}"),
+                priority: 1,
+                not_before_ms: now,
+                now_ms: now,
+                payload: JobPayload::MediaProbe {
+                    file_id: file.id,
+                    source_size: file.size,
+                    source_mtime: file.mtime,
+                    source_generation: generation.clone(),
+                    probe_digest: pipeline.into(),
+                    coordinator,
+                },
+                request: JobRequest {
+                    scope: "probe".into(),
+                    request_id: generation.clone(),
+                    request_digest: generation,
+                    consumer_kind: "probe".into(),
+                    consumer_ref: file.id.to_string(),
+                    target_node_id: None,
+                    deadline_ms: Some(now.saturating_add(300_000)),
+                    retain_identity: false,
+                },
+            })
+            .await?;
+        Ok(match result {
+            EnqueueOutcome::Accepted { job_id, .. }
+            | EnqueueOutcome::Existing {
+                job_id,
+                cancelled: false,
+                ..
+            } => Some(job_id),
+            _ => None,
+        })
+    }
+
+    pub async fn apply_probe(&self, job_id: &str) -> Result<bool, StoreError> {
+        let guard = self.token().await?;
+        let lease = guard.as_ref().ok_or_else(|| self.invalidated())?.clone();
+        self.store
+            .apply_probe_job(super::background_jobs_probe::ApplyProbeJob {
+                job_id: job_id.into(),
+                lease,
+                now_ms: unix_ms()?,
+            })
+            .await
+    }
+
     pub async fn upsert_file(
         &self,
         item_id: i64,
@@ -1064,6 +1134,51 @@ impl<'a> PublicationStore<'a> {
                         &lease,
                         &replacement,
                     )
+                    .await
+            })
+        })
+        .await
+    }
+
+    pub async fn sync_predictions(
+        &self,
+        requests: Vec<super::NewAnalysisRequest>,
+        desired_files: Vec<i64>,
+    ) -> Result<(), StoreError> {
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .sync_predictions(super::background_jobs_predictions::SyncPredictions {
+                        requests,
+                        desired_files,
+                        lease,
+                        replacement,
+                        now_ms: unix_ms()?,
+                    })
+                    .await
+            })
+        })
+        .await
+    }
+
+    /// Admit one hot-copy interest under the discovery lease. Worker execution
+    /// remains owned by the common queue, never by this planner lease.
+    pub async fn enqueue_hot_copy(
+        &self,
+        request: super::background_jobs::EnqueueJob,
+    ) -> Result<super::background_jobs::EnqueueOutcome, StoreError> {
+        if request.request.scope != "automatic:hot-copy"
+            || !matches!(
+                request.payload,
+                super::background_jobs::JobPayload::ArtifactHydrate { .. }
+            )
+        {
+            return Err(StoreError::Task("invalid hot copy request".into()));
+        }
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .enqueue_job_fenced(request, lease, replacement)
                     .await
             })
         })

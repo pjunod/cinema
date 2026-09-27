@@ -18,9 +18,9 @@ use super::{
     TranscodeCacheStore, WatchedOutboxStore,
 };
 use crate::domain::{
-    CacheManifestCheck, CachedTranscode, NewOfflinePackage, OfflineActivityPackage,
-    OfflineCreateOutcome, OfflineLease, OfflineLeaseOutcome, OfflinePackage, OfflinePackageStats,
-    OfflineRemovalPlanEntry, OfflineRemovalReport, TraktAuth, OFFLINE_NODE_REMOVED_CODE,
+    CachedTranscode, NewOfflinePackage, OfflineActivityPackage, OfflineCreateOutcome, OfflineLease,
+    OfflineLeaseOutcome, OfflinePackage, OfflinePackageStats, OfflineRemovalPlanEntry,
+    OfflineRemovalReport, TraktAuth, OFFLINE_NODE_REMOVED_CODE,
 };
 use crate::error::StoreError;
 use crate::secrets::SealedSecret;
@@ -384,6 +384,11 @@ struct DurableDump {
     background_jobs: Vec<String>,
     background_job_domain_leases: Vec<String>,
     background_library_requests: Vec<String>,
+    background_artwork_locations: Vec<String>,
+    background_transcode_artifacts: Vec<String>,
+    background_predictions: Vec<String>,
+    background_embeddings: Vec<String>,
+    background_artifact_repairs: Vec<String>,
     background_storage_domains: Vec<String>,
     background_provider_budgets: Vec<String>,
     background_fragment_targets: Vec<String>,
@@ -434,6 +439,11 @@ pub(super) async fn local_durable_digest(client: &TimedClient) -> Result<String,
         background_fragment_targets: rows(client, "SELECT json_array(cache_key, target_node_id, job_id) AS value
             FROM background_fragment_targets ORDER BY cache_key, target_node_id").await?,
         background_job_domain_leases: rows(client, "SELECT json_array(resource, domain_fence, job_id, job_fence, node_id, boot_id, claim_id) AS value FROM background_job_domain_leases ORDER BY resource").await?,
+        background_artifact_repairs: rows(client, "SELECT json_array(id,original_key,target_node_id,location_generation,artifact_key,producer_payload,phase,job_id,created_at_ms,updated_at_ms,expires_ms) AS value FROM background_artifact_repairs ORDER BY id").await?,
+        background_embeddings: rows(client, "SELECT json_array(item_id,model_digest,content_digest,artifact_json,built_by_node_id,built_at_ms) AS value FROM background_embeddings ORDER BY item_id,model_digest").await?,
+        background_predictions: rows(client, "SELECT json_array(request_id,file_id,request_json,expires_ms,state,created_at_ms,updated_at_ms) AS value FROM background_predictions ORDER BY request_id").await?,
+        background_transcode_artifacts: rows(client, "SELECT json_array(recipe_hash,manifest_digest,file_id,source_size,source_mtime,recipe_version,built_by_node_id,built_at_ms,producer_payload) AS value FROM background_transcode_artifacts ORDER BY recipe_hash,manifest_digest").await?,
+        background_artwork_locations: rows(client, "SELECT json_array(artifact_key,node_id,spec_json,blob_sha256,bytes,built_by_node_id,built_at_ms,verified_at_ms) AS value FROM background_artwork_locations ORDER BY artifact_key,node_id").await?,
         background_library_requests: rows(client, "SELECT json_array(request_id, library_id, job_id, input_json, result_json, completed_claim_id, completed_at_ms) AS value FROM background_library_requests ORDER BY request_id").await?,
         background_storage_domains: rows(client, "SELECT json_array(library_id, root_path, domain_id) AS value FROM background_storage_domains ORDER BY library_id, root_path").await?,
         background_provider_budgets: rows(client, "SELECT json_array(provider, next_dispatch_ms, interval_ms) AS value FROM background_provider_budgets ORDER BY provider").await?,
@@ -1168,82 +1178,6 @@ impl TranscodeCacheStore for HiqliteAuthStore {
                 .await
                 .map_err(database_error)?,
         ))
-    }
-
-    async fn cache_manifest_candidates(
-        &self,
-        node_id: &str,
-        limit: i64,
-    ) -> Result<Vec<CachedTranscode>, StoreError> {
-        Ok(cached(
-            self.client()
-                .query_consistent_map::<CacheRow, _>(
-                    format!(
-                        "SELECT {CACHE_COLS} FROM transcode_cache_locations l \
-                         JOIN transcode_cache_recipes r ON r.recipe_hash = l.recipe_hash \
-                         WHERE l.node_id = $1 AND l.storage_class = 'local' \
-                           AND l.complete = 1 AND l.manifest_digest IS NOT NULL \
-                         ORDER BY l.last_seen_at ASC, l.rowid ASC LIMIT $2"
-                    ),
-                    params!(node_id, limit),
-                )
-                .await
-                .map_err(database_error)?,
-        ))
-    }
-
-    async fn mark_cache_manifests_checked(
-        &self,
-        checks: &[CacheManifestCheck],
-    ) -> Result<usize, StoreError> {
-        if checks.len() > 128
-            || checks.iter().any(|check| {
-                check.recipe_hash.is_empty()
-                    || check.node_id.is_empty()
-                    || check.storage_class.is_empty()
-                    || check.relative_dir.is_empty()
-                    || check.manifest_digest.len() != 64
-                    || check.next_object_index < 0
-                    || check.observed_at < 0
-            })
-        {
-            return Err(StoreError::Task(
-                "invalid cache manifest cursor batch".to_owned(),
-            ));
-        }
-        if checks.is_empty() {
-            return Ok(0);
-        }
-        let sql = "UPDATE transcode_cache_locations
-                    SET last_seen_at = MAX(last_seen_at, $1), scrub_object_index = $2
-                   WHERE recipe_hash = $3 AND node_id = $4 AND storage_class = $5
-                     AND relative_dir = $6 AND manifest_digest = $7 AND complete = 1";
-        validate_sql(sql)?;
-        let statements = checks
-            .iter()
-            .map(|check| {
-                (
-                    sql.to_owned(),
-                    params!(
-                        check.observed_at,
-                        check.next_object_index,
-                        &check.recipe_hash,
-                        &check.node_id,
-                        &check.storage_class,
-                        &check.relative_dir,
-                        &check.manifest_digest
-                    ),
-                )
-            })
-            .collect::<Vec<_>>();
-        let results = self
-            .client()
-            .txn(statements)
-            .await?
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(database_error)?;
-        Ok(results.into_iter().sum())
     }
 
     async fn stale_cache_claims(

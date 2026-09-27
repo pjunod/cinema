@@ -2453,7 +2453,7 @@ where
 }
 
 pub(crate) struct BoundedOutput {
-    stdout: Vec<u8>,
+    pub(crate) stdout: Vec<u8>,
     stderr: Vec<u8>,
 }
 

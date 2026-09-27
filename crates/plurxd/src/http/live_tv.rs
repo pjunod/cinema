@@ -523,27 +523,35 @@ pub(crate) async fn start_session(
     // Fencing the id here turned that replay into a 409 — it removed the
     // recovery it was meant to provide. The client retires the hint itself on
     // its next press, and the owner reaps an unheld session at 45 s.
-    let provisional = owner_start_within(&state, &config, &request, deadline).await?;
+    let provisional = owner_start_within(
+        &state,
+        &config,
+        &request,
+        deadline,
+        owner_protocols.contains(&4),
+    )
+    .await?;
+    let processor = capability_owner(&provisional.capability).map_err(api_error)?;
     let activation = LiveTvActivateRequest {
-        expected_owner_node_id: config.owner_node_id.clone(),
+        expected_owner_node_id: processor.clone(),
         capability: provisional.capability.clone(),
         activation_token: provisional.activation_token.clone(),
         config_generation: config.generation,
         source_serving_generation: ingress_generation,
     };
-    let activated = match owner_activate_within(&state, &config, &activation, deadline).await {
+    let activated = match owner_activate_within(&state, &activation, deadline).await {
         Ok(activated) => activated,
         Err(error) => {
             // The capability is stopped, which tombstones the request on the
             // owner; a replay of the same id gets that tombstone, which is an
             // owner-decided answer. Nothing else to fence.
-            let _ = owner_stop(&state, &config.owner_node_id, &provisional.capability).await;
+            let _ = owner_stop(&state, &processor, &provisional.capability).await;
             return Err(error);
         }
     };
     let current = state.live_tv.config().await.map_err(api_error)?;
     if current != config || !state.serving.authority().is_current(ingress_generation) {
-        let _ = owner_stop(&state, &config.owner_node_id, &provisional.capability).await;
+        let _ = owner_stop(&state, &processor, &provisional.capability).await;
         return Err(ApiError::typed_detail(
             StatusCode::SERVICE_UNAVAILABLE,
             "owner_unavailable",
@@ -591,7 +599,10 @@ pub(crate) async fn start_state(
     let request_id = parse_public_request_id(&request_id)?.to_owned();
     let config = live_tv_enabled_config(&state).await?;
     if config.owner_node_id == state.node_id {
-        return Ok(Json(state.live_tv.start_state_local(user.id, &request_id)));
+        return super::live_tv_cluster::start_state(&state, user.id, &request_id)
+            .await
+            .map(Json)
+            .map_err(api_error);
     }
     // Its own owner path, not a resume: a resume selects one session, cancels
     // the others, touches what it keeps and retires an id it has never seen.
@@ -954,16 +965,18 @@ async fn owner_start_within(
     config: &LiveTvConfig,
     request: &LiveTvStartRequest,
     budget: tokio::time::Instant,
+    placed: bool,
 ) -> Result<crate::live_tv::LiveTvProvisional, ApiError> {
     if config.owner_node_id == state.node_id {
-        return state
-            .live_tv
-            .start_local(request.clone())
+        return super::live_tv_cluster::start(state, request.clone())
             .await
             // Only the owner knows what is holding its tuners, so only the
             // owner can name them. A relayed refusal keeps the code and loses
             // the detail, which is the honest thing for an ingress to say.
             .map_err(|error| {
+                if matches!(error, LiveTvError::OwnerUnavailable(_)) {
+                    return api_error_from(error, Decided::Ingress);
+                }
                 capacity_error(
                     error,
                     state.live_tv.transport_holders(),
@@ -972,7 +985,13 @@ async fn owner_start_within(
             });
     }
     let (node_id, base) = owner_peer(state, &config.owner_node_id).await?;
-    let (path, body) = if request.playback.is_some() {
+    let (path, body) = if placed {
+        (
+            crate::live_tv::cluster::PLACEMENT_PATH,
+            serde_json::to_vec(&crate::live_tv::cluster::PlacedStart::from_request(request))
+                .map_err(|e| ApiError::Internal(e.to_string()))?,
+        )
+    } else if request.playback.is_some() {
         (
             START_V2_PATH,
             serde_json::to_vec(&LiveTvStartRequestV2::from(request))
@@ -1014,8 +1033,10 @@ async fn owner_start_within(
                                 "The tuner owner returned an invalid start response",
                             )
                         })?;
-                if capability_owner(&provisional.capability).ok().as_deref()
-                    != Some(config.owner_node_id.as_str())
+                if (!placed
+                    && capability_owner(&provisional.capability).ok().as_deref()
+                        != Some(config.owner_node_id.as_str()))
+                    || capability_owner(&provisional.capability).is_err()
                     || provisional.config_generation != config.generation
                     || provisional.channel.id != request.channel_id
                 {
@@ -1042,18 +1063,17 @@ async fn owner_start_within(
 
 async fn owner_activate_within(
     state: &AppState,
-    config: &LiveTvConfig,
     request: &LiveTvActivateRequest,
     budget: tokio::time::Instant,
 ) -> Result<LiveTvActivated, ApiError> {
-    if config.owner_node_id == state.node_id {
+    if request.expected_owner_node_id == state.node_id {
         return state
             .live_tv
             .activate_local(request, &state.node_id)
             .await
             .map_err(api_error);
     }
-    let (node_id, base) = owner_peer(state, &config.owner_node_id).await?;
+    let (node_id, base) = owner_peer(state, &request.expected_owner_node_id).await?;
     let body =
         serde_json::to_vec(request).map_err(|error| ApiError::Internal(error.to_string()))?;
     let transport = &state.live_tv_peers;
@@ -1261,7 +1281,9 @@ async fn owner_retire(
     request_id: &str,
 ) -> Result<crate::live_tv::LiveTvRetireOutcome, ApiError> {
     if config.owner_node_id == state.node_id {
-        return Ok(state.live_tv.retire_local(user_id, request_id).await);
+        return super::live_tv_cluster::retire(state, user_id, request_id)
+            .await
+            .map_err(api_error);
     }
     let body = serde_json::to_vec(&crate::live_tv::LiveTvRetireRequest {
         expected_owner_node_id: config.owner_node_id.clone(),
@@ -1279,7 +1301,9 @@ async fn owner_resume(
     request_id: &str,
 ) -> Result<crate::live_tv::LiveTvResumeAnswer, ApiError> {
     if config.owner_node_id == state.node_id {
-        return Ok(state.live_tv.resume_local(user_id, request_id).await);
+        return super::live_tv_cluster::resume(state, user_id, request_id)
+            .await
+            .map_err(api_error);
     }
     let body = serde_json::to_vec(&crate::live_tv::LiveTvResumeRequest {
         expected_owner_node_id: config.owner_node_id.clone(),
@@ -1627,7 +1651,10 @@ impl LiveTvPeers {
 /// throws away the hint that is its only handle on a session the owner may
 /// still be feeding. A fleet deploy fences peers for a fraction of a second
 /// several times a night; that window lands here.
-async fn owner_peer(state: &AppState, expected: &str) -> Result<(String, String), ApiError> {
+pub(super) async fn owner_peer(
+    state: &AppState,
+    expected: &str,
+) -> Result<(String, String), ApiError> {
     if !state.membership.is_replicated() {
         return Err(api_error_from(
             LiveTvError::OwnerUnavailable(
@@ -1674,10 +1701,10 @@ async fn resolve_owner_peer(
 /// An error the owner signed, turned into the same envelope a locally minted
 /// one gets. The two extra fields are functions of *where the body came from*
 /// and *what the code is*, so they are produced here rather than added to the
-/// internal wire: a body that arrived as a signed owner response is
-/// owner-decided, whatever its code — including one this function folds into
-/// `owner_unavailable`, because the owner still answered.
-fn wire_api_error(status: reqwest::StatusCode, body: &[u8]) -> ApiError {
+/// internal wire. Legacy owner responses are decided. A placement coordinator
+/// can explicitly report an ambiguous processor exchange; preserve that false
+/// verdict so the client retains its recovery id after a lost worker reply.
+pub(super) fn wire_api_error(status: reqwest::StatusCode, body: &[u8]) -> ApiError {
     let wire = serde_json::from_slice::<WireError>(body).ok();
     let code = wire
         .as_ref()
@@ -1698,7 +1725,11 @@ fn wire_api_error(status: reqwest::StatusCode, body: &[u8]) -> ApiError {
         .ok()
         .map(|detail| detail.holders)
         .filter(|holders| !holders.is_empty());
-    let decided_by_owner = wire.is_some();
+    let decided_by_owner = wire.is_some()
+        && serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v.get("owner_decided").and_then(serde_json::Value::as_bool))
+            .unwrap_or(true);
     let stable = match code.as_str() {
         "live_tv_disabled" => "live_tv_disabled",
         "tuner_capacity" => "tuner_capacity",
@@ -1755,7 +1786,7 @@ async fn owner_snapshot(
     .await
 }
 
-async fn owner_snapshot_within(
+pub(super) async fn owner_snapshot_within(
     state: &AppState,
     config: &LiveTvConfig,
     force: bool,
@@ -2124,6 +2155,14 @@ mod tests {
             body_of(api_error(LiveTvError::Capacity("full".into()))).await["retry"],
             "later"
         );
+    }
+
+    #[tokio::test]
+    async fn a_signed_placement_timeout_preserves_the_clients_recovery_identity() {
+        let answer = body_of(wire_api_error(reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            br#"{"code":"owner_unavailable","message":"processor reply lost","owner_decided":false}"#)).await;
+        assert_eq!(answer["owner_decided"], false);
+        assert_eq!(answer["retry"], "now");
     }
 
     #[tokio::test]

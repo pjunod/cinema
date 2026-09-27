@@ -1,8 +1,8 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 merged; E0 fast lane: isolated lockfile correction · **Updated:** 2026-09-26 ·
-**Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` ·
-**Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — validating](http://192.168.4.7:3000/noirr/plurx/pulls/564)
+**Status:** M1–M3 and E0 merged; E1–E3 reviewed; combined promotion qualifying · **Updated:** 2026-09-27 ·
+**Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` · **E1:** `codex/cluster-cache-preparation` ·
+**E2:** `codex/cluster-batch-analysis` · **E3:** `codex/cluster-media-placement` · **Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) · **E1:** [#566 — superseded by combined promotion](http://192.168.4.7:3000/noirr/plurx/pulls/566) · **E2:** [#567 — superseded by final promotion](http://192.168.4.7:3000/noirr/plurx/pulls/567) · **Final:** [#572 — E1–E3 promotion](http://192.168.4.7:3000/noirr/plurx/pulls/572)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -14,13 +14,13 @@ implementation is claimed; “compiled” does not mean tests passed.
 |---|---|---|
 | Isolated clone | Complete | Agent-owned `/private/tmp/plurx-durable-work-agent`; original checkout untouched |
 | Compiler | Ready | Rust 1.97.1; core + Hiqlite all-target compile and baseline daemon compile passed |
-| M1 durable queue and pre-transcode | Implemented; focused validation passed | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; local exact-recipe offline joining and scheduling implemented; lost-reply and process-expiry regressions written; cross-node transcode convergence belongs to E1 |
-| M2 fragment analysis and hydration | Implemented; focused validation passed | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
-| M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
-| E0 subtitle and library workers | Adapters implemented; construction checks passed | Library work, storage/provider budgets, learner authority and all-track subtitle extraction are connected. Integrated current main; PR #564 received five findings; fixes and regressions are implemented. 17 queue contracts and nine cancellation regressions passed; CI pending |
-| E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
-| E2 embeddings, probes and repair | Planned | Reuse queue contracts |
-| E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
+| M1 durable queue and pre-transcode | Merged in #532 | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; local exact-recipe offline joining and scheduling implemented; lost-reply and process-expiry regressions written; cross-node transcode convergence belongs to E1 |
+| M2 fragment analysis and hydration | Merged in #532 | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; fast lane 3296 passed |
+| M3 UI, recovery and migration | Merged in #532 | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; fast lane 3296 passed |
+| E0 subtitle and library workers | Merged | PR #564 merged as `1d70a1fed`; one final review addressed and run 3322 passed all required fast-lane jobs |
+| E1 reads, caches, prediction, artwork | Reviewed; promoting in #572 | Read path, artwork, portable transcodes, bounded hot copies and durable predictive analysis implemented. Single final review addressed; focused store, image, copy and cleanup checks passed. Required fast lane remains. Scheduled verification/repair belongs to E2 |
+| E2 embeddings, probes and repair | Reviewed; promoting in #572 | Three final findings addressed; focused regressions passed. Candidate `b01b58416` includes current main and the daemon fixture deadline correction |
+| E3 placement and shared Live TV ingest | Reviewed; three findings fixed | Advisory enable controls, observed-resource ranking, stable remote Live TV placement and bounded shared ingest implemented. All 12 targeted E3/fixture regressions plus advisory settings passed; 11 docs/ownership checks passed; combined fast lane remains |
 | Final adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
 | Core fast lane | Passed: run 3296 on `3784d5ec5` | Preflight, Rust, Windows, web and main promotion gate all passed |
 | Core merge | Complete | PR #532 merged as `b4b488556`; E0–E3 continue in the agent clone |
@@ -603,6 +603,15 @@ continue E1–E3.
   Rust/Windows did not execute in that failed run. E1 has its own temporary
   branch, `codex/cluster-cache-preparation`, with no implementation changes yet.
 
+- 2026-09-26: E1 construction began on `codex/cluster-cache-preparation` while
+  #564 runs its required fast lane. Added browser write-position echo with
+  monotonic expiry, full-width decimal indexes, auth-generation isolation and
+  out-of-order/unknown-reply handling. Bounded reads become the initial default;
+  a replicated Developer preference overrides the seed without restarts. Its
+  local preference lookup runs inside the existing per-read proof. Auth stays
+  authoritative, and clients without a valid watch floor retain authority reads.
+  New regressions are written, not executed; E1 review and tests remain deferred.
+
 - 2026-09-26: lane [3315](http://192.168.4.7:3000/noirr/plurx/actions/runs/3315)
   passed the corrected guard inventory, then found the API overview's stale
   route count (236 versus 237 after storage-domain routes). Corrected the count.
@@ -610,11 +619,26 @@ continue E1–E3.
   errors; annotated those inputs without raising the baseline. Batch these
   corrections before the next lane run.
 
+- 2026-09-26: E1 read path committed as `5ba02212f`; inherited E0 contract
+  fixes through `27e1c0f47`. Pinned workspace/all-target Clippy, served-script
+  syntax and TypeScript checks passed without a baseline increase. Added one
+  bounded named-settings snapshot on both backends; playback language defaults
+  now use one Authority read instead of three. Its backend contract is written
+  and compiled, not run. Shared artifact work remains in construction.
+
 - 2026-09-26: lane [3317](http://192.168.4.7:3000/noirr/plurx/actions/runs/3317)
   passed preflight and web checks, then stopped before Rust compilation because
   the isolated Hiqlite spike lockfile lacked core's new cancellation dependency.
   Refreshed only that workspace dependency list; both isolated lockfiles pass
   `make spike-lock-check` with Rust 1.97.1. No dependency version changed.
+
+- 2026-09-26: E1 adds typed immutable artwork identities, bounded verified-holder
+  records, exact-attempt publication and target-specific delivery receipts on
+  SQLite 77 / Hiqlite 55. Import, replicated-state digest and retention include
+  the new records. Source aliases share a content identity; pipeline changes
+  create a different one. The cross-backend contract is written, not executed.
+  HTTP admission, byte transfer and the worker are still under construction;
+  this storage commit alone does not move image generation off requests.
 
 - 2026-09-26: main advanced to `2b09d7a32` with the frozen Fontconfig
   environment implementation. Integrated that source into E0 before promotion;
@@ -622,6 +646,23 @@ continue E1–E3.
   The prior lane's result cannot qualify this new tree. Preserved both parents'
   process and timer inventory entries in the only merge conflict.
 
+- 2026-09-26: E0 candidate `715074e19` includes main `2b09d7a32`.
+  Lane [3320](http://192.168.4.7:3000/noirr/plurx/actions/runs/3320) passed
+  preflight and web checks; Rust and Windows are running. The merged process
+  ownership inventory passed seven focused checks before push. No second review.
+
+- 2026-09-26: E1 now connects durable artwork admission, a physical-capacity
+  worker, exact-attempt publication and verified peer hydration. Cold requests
+  return originals; repeated misses share demand. Pipeline identity includes
+  the actual renderer/dependencies, and final filenames include the blob digest.
+  Unpublished files cannot become hits, and obsolete owners cannot overwrite
+  a published generation. Child cancellation is joined; staging cleanup checks
+  current queue ownership. Added coalescing, unpublished/corrupt output and
+  real-child cancellation regressions, with execution still deferred. Cache
+  prediction, hot second copies, portable transcodes and E2/E3 remain unfinished.
+
+- Agent-only cleanup removed 164 obsolete incremental compiler directories
+  (about 35 GiB), preserving the dependency cache, source and all commits.
 - 2026-09-26: E0 fast lane 3320 passed preflight, Windows and web; Rust
   reported stale schema/import/census assertions, an old subtitle claim fixture,
   missing scan consumers in HTTP/scheduler fixtures, an unclassified storage-domain
@@ -643,3 +684,305 @@ continue E1–E3.
   passed SQLite and real three-voter Hiqlite. All 16 selected daemon
   regressions pass with the missing-root visibility fix. Ownership inventory:
   seven passed. Full fast-lane confirmation remains required before merge.
+
+- 2026-09-26: E0 correction `fd0317594` passed its pinned normal commit hook
+  and is pushed to PR #564. E1 inherits the fixes, adjusts schema expectations
+  for its additional artwork migration, and retains both parents' ownership sites.
+
+- 2026-09-26: E1 portable-transcode storage is in construction. SQLite 78 /
+  Hiqlite 56 retain producer source/manifest provenance independently of queue
+  receipt cleanup; hydration uses the existing fenced cache publication and
+  settles only its receiving target. Bounded upkeep recovers provenance from
+  retained completed jobs, never from a cache path or timestamp alone. Added
+  copy, stale-owner, changed-source, acknowledgement-replay and target-settlement
+  regression coverage; it is written and awaiting final E1 review, not executed.
+  The transfer worker and serving endpoint are the next part of this batch.
+
+- 2026-09-26: E1 adds signed manifest-addressed transcode transfers and one
+  durable target worker per node. Objects are bounded, hashed before writing,
+  and staged under exact job/fence ownership. Cache publication is fenced;
+  ambiguous replies leave final bytes for ownership-aware GC. Transfer bodies
+  retain capacity and cache pins until dropped. Up to three holders can supply
+  each verified object; playback pressure cancels and joins the transfer before
+  capacity is released. Authentication, bounded paths, manifest tampering and
+  response lifetime regressions are written; execution remains deferred until
+  E1's single final review. Hot placement, prediction and E2/E3 remain open.
+
+- 2026-09-26: E0 PR #564 merged as `1d70a1fed50da407b05ab2f2ad523d8e2a970195`
+  after the single final adversarial review, fixes, and all required fast-lane
+  jobs passed on `fd0317594` (run 3322). Its merge preserves all 18 regression
+  declarations. E1 remains in construction; no E1 tests have been executed.
+
+- 2026-09-26: E1 demand selection now uses a bounded replicated snapshot:
+  the last day's top 128 watched items, at most 64 active leased viewers, and
+  the next item of at most 64 enabled library channels. Each viewer contributes
+  at most one next-up episode. Full encoding retains its existing preference
+  and budget. A singleton planner requests one secondary hot copy, excludes
+  unreachable holders, uses available configured cache budget for transcodes,
+  and leaves byte verification to the destination. Automatic transcode and
+  hot-copy interests share an atomic 64-interest cap; each pass admits at most
+  16 copies. Dormant-user, demand-expiry, target stability, and foreground
+  capacity contracts are written/compiled, not run. Predictive index/subtitle
+  lifecycle and repair are still outstanding; this is not an E1 completion claim.
+
+- 2026-09-26: Predictive index/subtitle preparation now persists at most 64
+  shared admission intents before creating existing typed analysis requests.
+  SQLite 79 / Hiqlite 57 carry their bounded lifecycle and import/digest support.
+  Demand changes and a 24-hour deadline cancel only prediction-owned interests;
+  a real subtitle request can atomically adopt an in-flight extraction. Finished
+  analyses release intent capacity. A stale planner or delayed outbox insert
+  cannot revive retired work. Source/recipe changes remain fenced by the normal
+  workers. Prediction uses the existing bounded all-track subtitle extractor
+  instead of adding a second extraction path; this preserves its one-read and
+  cancellation behavior. Contracts for ownership, adoption, lease loss and the
+  active viewer's following episode are written and compile-only so far.
+
+- 2026-09-26: E1 cleanup now recognizes durable transcode hydration attempts,
+  including after process restart. Both staging and renamed directories retain
+  exact node/fence ownership; an old generation cannot borrow a newer attempt.
+  Artwork final names bind the full variant and output digests within a fixed
+  filename bound. A bounded sweep excludes active publication, retains current
+  local holder records and reclaims aged unpublished outputs. Added restart,
+  stale-fence, orphan, transfer tampering/overflow and stalled-body cancellation
+  regression cases; these remain unexecuted until final review.
+- 2026-09-26 execution decision: scheduled artifact verification and repair ship
+  together in E2, as one recovery path. E1 retains verified serving/transfers and
+  the existing integrity sweep. This changes batch ownership, not programme
+  scope. No fleet performance gain or production rollout is claimed.
+
+- 2026-09-26: E1's single final adversarial review of `d4064bb21` returned
+  two actionable findings. P1: local transcode reuse hashed a whole object
+  before observing playback cancellation. Verification now checks between
+  bounded reads, awaits the current read before releasing ownership, and uses
+  the copy-wide deadline from before local reuse. Copy writes likewise check
+  between bounded chunks and join temporary cleanup. P2: hot-copy and ordinary
+  delivery used different identities, duplicating work and rejecting long node
+  IDs. Both now use the same fixed-length payload hash. The backend contract
+  covers both admission orders, independent cancellation and a 256-byte node.
+  Regression execution follows these fixes; no second review is scheduled.
+
+- 2026-09-26: Post-review focused evidence: 23 durable SQLite contracts, four
+  cooperative cancellation/cleanup tests, six browser read-after tests, seven
+  ownership inventory tests and all 50 selected daemon cases passed (44 image,
+  four copy, one restart-GC and one placement case). The first image pass had
+  one macOS temporary-path fixture failure; the fixture now uses the existing
+  canonical temp helper and that case passed on rerun. Read-after coverage is
+  wired into the existing web check and fast preflight. The local CI-contract
+  subset passed 66/67; the Linux janitor timeout case failed on this macOS host
+  without `timeout`. Its Linux fast-lane result remains required; no unrelated
+  janitor behavior was changed. Replicated contracts and the fast lane remain
+  in progress.
+
+- 2026-09-26: All seven new replicated cases passed against SQLite and real
+  three-voter Hiqlite (artwork, prediction, transcode copies, demand expiry,
+  and active-viewer next-up). Fast-lane run 3330 stopped in a playback-control
+  fixture that extracted `api()` without its new session helpers. Both fixture
+  sites now load the shared prelude; the full playback-control, player-DOM and
+  Live TV web checks pass. This is a harness correction, with no product change
+  and no second adversarial review. The corrected candidate must rerun the lane.
+
+- 2026-09-26: E2 started on `codex/cluster-batch-analysis` from E1 candidate
+  `1c885264b`. E1 run 3337 is queued; no merge is claimed. Shared embeddings
+  carry exact model/config/tokenizer/normalization identity, verified normalized
+  vectors and catalogue source fences. Both storage schemas, import/reset/digest
+  mappings and the existing semantic worker are connected. Execution reserves
+  physical capacity before claiming and joins inference before releasing it.
+  New contracts cover cross-node reuse, cancellation, wrong identity and stale
+  publication. E2 tests have not run; compiler/lint evidence is in progress.
+
+- 2026-09-27: committed shared embeddings as `535969244`; the normal hook
+  passed. Leaf probes now carry the coordinator lease generation, parser/reporter
+  identity and exact file snapshot. The existing re-probe pass admits at most
+  128 leaves, uses completed remote facts, and keeps local fallback for work
+  not yet started. Filesystem discovery and identity placement stay unchanged.
+  Worker publication and coordinator application are separate atomic fences;
+  a changed source or coordinator rejects either transition. Contracts are
+  written and workspace Clippy passed; E2 tests remain deferred. Semantic jobs
+  use background priority and no longer reserve source-media I/O slots.
+  Scheduled artifact verification/repair remains to be built. E1 run 3337 has
+  green preflight, Windows and web checks; the Rust gate is still running.
+
+- 2026-09-27: main advanced to `24a268339` with K-08's bounded semantic
+  inference pool while E1 run 3337 was executing. Integrated that current main
+  into E1 without conflicts. The prior candidate has green preflight, Windows
+  and web jobs; Rust was still running. The merged candidate requires a fresh
+  fast lane. E2's embeddings and leaf probes are committed separately on
+  `codex/cluster-batch-analysis` in draft PR #567; scheduled repair remains open.
+
+- 2026-09-27: current-main integration committed as `8e8b9de09`; E2 retains
+  K-08's bounded inference pool. Tightened leaf handoff: accepted queued leaves
+  now remain with their durable attempts, use one five-minute budget per page,
+  and never become duplicate local subprocesses. Admitted work completes before
+  legacy local work in the page; failed leaves are reported. Workspace Clippy
+  and all test-target compilation passed. No E2 tests have run. E1's new run
+  3340 is qualifying `20d2a6bcb`; the obsolete run was cancelled automatically.
+
+- 2026-09-27: scheduled transcode scrubbing moved out of cleanup into admitted,
+  node-targeted verification jobs. Exact location generation and worker fencing
+  guard corruption retirement; playback/cancellation yields never report bad
+  bytes. Artwork uses the same queue and existing bounded cache reader. Repair
+  tries a peer copy, then one retained typed producer and delivery; cancellation,
+  source changes and exhausted work stop the plan. Original transcode intent
+  survives job-history retirement. Activity shows bounded, redacted repair
+  observations. SQLite schema 82 / Hiqlite 60 and import mapping are integrated.
+  Shared/local embedding digests now reject corrupt vectors, and fragment reads
+  stop at declared size plus one byte. New contracts cover generation fencing,
+  acknowledgement replay, history retirement and finite repair transitions.
+  Construction checks compile test targets only; no E2 tests have executed.
+  E1 run 3340 passed preflight, Windows and web; its Rust gate remains running.
+- 2026-09-27: E1 run 3340 reached its 30-minute Rust deadline with the
+  migration-overflow case unfinished. The full log also identified a SQLite
+  placeholder-census failure: the named-settings query added one unchecked
+  binding shape. Kept its SQL and binding in one statement; the unchanged
+  census now passes. Diagnosed queue admission with `EXPLAIN QUERY PLAN`:
+  flattened stages expanded to 21,663 planner steps; materializing the four
+  single-row stages reduces this to 120. Added a bounded-plan regression.
+  The overflow test still seeds 4,100 accepted jobs and proves the 3,840
+  background ceiling; it now frees exactly the 260 needed slots, retaining
+  the other jobs instead of spending time cancelling the whole inventory.
+  All six migration regressions pass in 47.35 seconds; the placeholder census
+  passes separately. Main advanced to `c61bb6409`; integrate and qualify that
+  candidate before resubmission. No green merge is claimed.
+
+- 2026-09-27: integrated current main `c61bb6409` (S-14 M8 playback
+  ownership seams). Ownership-census conflicts retain both parents' comments
+  and count their combined source. Current candidate compilation and the
+  affected queue contracts precede the next required fast-lane run.
+
+- 2026-09-27: E1 candidate `02b265bdf` incorporates current main
+  `c61bb6409` and the admission-planner fix. Its normal hook, 23 durable
+  queue contracts and seven ownership checks passed before push. E2
+  integrates the same source; E2 tests remain deferred until its final review.
+
+- 2026-09-27: E1 fast lane 3353 is running on `02b265bdf`. E2 integrates
+  that candidate as `3c62043aa`. Completed the no-holder repair transition: it
+  advances to the retained producer without charging an impossible copy. A
+  source change retires the plan and cancels only its own child interest.
+  Repair-ledger capacity cannot keep a known corrupt locator advertised; the
+  verification job records `repair_capacity` if no plan slot is available.
+  Updated architecture, operations, API, feature and execution-ledger docs.
+
+- 2026-09-27: removed the obsolete unfenced manifest-scrub Store methods and
+  their payload type. Existing cursor and consensus-cost coverage now uses
+  claimed durable verification; each publication is one transaction. Store,
+  transaction, placeholder and consistent-read censuses shrink with the removed
+  paths. E2 implementation is complete; final review and fast lane remain.
+
+- 2026-09-27: E2's single adversarial review covered `02b265bdf..a43205ab6`
+  and found three P2 issues. Published embedding completions now enter the
+  local serving index immediately; queued repair copies whose final holder
+  disappears advance to one rebuild while cancelling only their own interest;
+  an overdue leaf is reported without discarding later completed probes.
+  Added regressions for all three. Post-review qualification is starting.
+
+- 2026-09-27: post-review probe coverage exposed and corrected canonical JSON
+  ordering at publication (the source identity now serializes the same way as
+  enqueue). The overdue-first-leaf regression passes, as does immediate local
+  embedding installation. Three-voter contracts are running; their first probe
+  run used the prior snapshot and will be rerun with the serialization fix.
+  E1's full fast lane identified stale artwork/readiness inventories and a
+  pagination fixture exceeding the new automatic-demand cap. The fixture now
+  uses explicit manual demand for its 129-row capability scan; the automatic
+  limit itself remains covered and unchanged.
+
+- 2026-09-27: E2 post-review focused qualification passed: 28 shared queue
+  contracts on SQLite and a real local three-voter cluster, followed by the
+  corrected probe contract on the same backends; the migrated distributed
+  pre-transcode and one-consensus-entry verification contracts also pass.
+  Immediate embedding installation and overdue-leaf preservation pass, as do
+  four Store source censuses, four documentation-index checks and seven
+  ownership-inventory checks. E1 run 3353 finished with exactly three failures:
+  the two stale inventories and the pagination demand fixture, all corrected
+  in `7cfafe6cc` with focused regressions passing. No merge is claimed yet.
+
+- 2026-09-27: promote E1 and E2 together through #567. Neither is merged yet;
+  requalifying E1 separately would repeat the same full workspace fast lane.
+  #566 returns to draft as superseded and will close after #567 merges. The
+  E1 review and its fixes remain recorded; E2's one review covered its exact
+  additional implementation. This batches the completed commits without a
+  repeat adversarial review. Both inventories, capability pagination, three
+  cache-verification tests and the 445-method Store inventory pass. Candidate
+  `465f16594` passed the normal pinned hook; only promotion bookkeeping follows.
+
+- 2026-09-27: combined E1–E2 candidate `05192c812` is running required fast
+  lane 3358. #566 is verified draft and superseded. E3 continues separately on
+  `codex/cluster-media-placement`, based on the integrated candidate. Placement
+  and takeover no longer require a uniformly fresh fleet; saved preferences
+  always persist. Developer controls show requirements as advisory. Recent
+  storage-read latency, client delivery and peer throughput are bounded node
+  observations; missing samples never refuse work. Shared remote Live TV
+  processing remains unfinished. No E3 tests have run.
+
+- 2026-09-27: E3 draft [#572](http://192.168.4.7:3000/noirr/plurx/pulls/572)
+  contains advisory placement controls and recent I/O ranking. Added an
+  exact-authenticated raw Live TV consumer using the existing shared tuner
+  transport and bounded per-consumer queue. Viewer execution can consume a
+  peer response through its existing process/admission lifecycle. Placement,
+  recovery routing and remote start authorization remain under construction;
+  this is not yet a completed remote playback path. Pinned workspace
+  all-target Clippy passes; no E3 tests have run.
+
+- 2026-09-27: connected the new placed-start protocol to the tuner owner's
+  bounded assignment history, worker selection, signed processing/ingest
+  requests, and existing activation/resource/recovery routes. An ambiguous
+  start keeps its worker; retirement fences new ingest before cleanup, and
+  unreachable assignments are retained rather than reassigned. Workers reuse
+  the existing FFmpeg admission, fan-out, source probing and cleanup paths;
+  remote sessions do not fetch tuner signal directly. Mixed-version ingress
+  retains the older local-owner start protocol. All-target compilation passed;
+  adversarial review and tests still await the completed E3 batch.
+
+- 2026-09-27: combined fast lane 3358 passed 1,360 core unit tests and
+  all 179 storage contracts, including the real replicated backend. The daemon
+  suite reported `decode_fact_source_shipped_shape`: its non-deadline fixture
+  allowed only 100 ms for process scheduling. Expanded that fixture budget to
+  five seconds while retaining its exact invalid-JSON and permit-release
+  assertions. Integrated current main's Apple Live TV URL repair (`1cbdc8d51`)
+  for the next promotion candidate. E3 remains isolated on its draft branch.
+
+
+- 2026-09-27: E3 implementation and regression-writing complete. New coverage
+  exercises one owner ingest with three viewers across two processing nodes,
+  independent slow-peer eviction, retry/retirement ownership, bounded assignment
+  pressure, household-bearer refusal, maintenance admission, missing metrics
+  and incompatible peers. Static ownership counters record the additional
+  bounded peer/recovery deadlines and the retained test HTTP server. No E3
+  tests have run. Next: the one final adversarial review, findings, then the
+  fast lane. E1–E2 candidate `b01b58416` runs separately in fast lane 3360.
+
+
+- 2026-09-27: the single E3 adversarial review of `d48607ee2` found three
+  issues. All are addressed: (1) peer-backed viewer transports now survive
+  non-owner DVR reconciliation, and the two-node regression runs the actual
+  DVR loop; (2) unknown retirement fences have a separate eight-entry per-user
+  budget and cannot exhaust other viewers' assignment capacity; (3) assignment
+  generations advance monotonically, rejecting delayed older starts before
+  they can remove newer ownership. Added targeted regressions for all three.
+  Pinned all-target Clippy passed; test execution follows this fix commit.
+
+- Promotion decision: main advanced to Apple build 190 while E1–E2 qualified.
+  With E3's one final review also complete, the remaining E1–E3 changes will
+  promote together through #572 after integrating current main. This replaces
+  separate overlapping E1–E2 and E3 qualifications. Prior reviews remain the
+  final reviews of their respective implementation batches. #566 and #567
+  will close as superseded after the combined candidate merges; no production
+  deployment is authorized or claimed by these merges.
+
+- 2026-09-27: final E1–E3 candidate integrates main `9660f698a` (Apple build
+  190). E3 review fixes committed as `fd4d45ae2`. All 12 targeted daemon
+  regressions passed, plus the existing settings authorization/advisory-enable
+  regression. Two socket fixtures initially hit the local sandbox restriction;
+  rerunning those exact tests with loopback permission passed (3 tests, 4.31s,
+  including settings). The corrected E2 source-shape fixture passed as well.
+  Documentation index and transport ownership suites passed all 11 checks.
+  Commands: `cargo test -p plurxd --bin plurxd -- --exact` with the PR's E3
+  regression names and `decode_facts::tests::decode_fact_source_shipped_shape`;
+  `python3 -m unittest tests.validation.test_rolling_producer_ownership_inventory
+  tests.operations.test_docs_index`. PR #572 now targets main; #567 is draft
+  pending supersession. The final required fast lane is next.
+
+- Fast lane 3361 stopped at API documentation parity: the three new internal
+  Live TV routes were absent from the maintained API table and its route count.
+  Added the signed placement, processing and bounded ingest entries and updated
+  the count to 241. No runtime failure was reported; downstream compile/unit
+  jobs correctly did not start after preflight failed.

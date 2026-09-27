@@ -22,7 +22,7 @@ async function viewActivity(generation=++PAGE_RENDER_GENERATION){
 
 // Durable status is separate from node-local progress and has its own bounded
 // refresh. A slow queue read never holds up the live Activity overview.
-const DURABLE_ACTIVITY={state:"queued",cursor:null,next:null,rows:[],counts:[],observed:0,error:null,busy:false,epoch:0,detail:null,retries:new Map()};
+const DURABLE_ACTIVITY={state:"queued",cursor:null,next:null,rows:[],counts:[],repairs:[],observed:0,error:null,busy:false,epoch:0,detail:null,retries:new Map()};
 function durableQueueHtml(){
   if(!ME||!ME.is_admin)return "";
   const q=DURABLE_ACTIVITY;
@@ -41,6 +41,7 @@ function durableQueueHtml(){
     ${q.error?`<p class="err" role="status">${esc(q.error)}${q.observed?" Showing the last observation.":""}</p>`:""}
     ${rows?`<div class="tbl"><table><thead><tr><th>Work</th><th>State</th><th>Owner</th><th>Priority</th><th>Age</th><th>Reason</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`:q.observed?'<p class="muted">No jobs on this page.</p>':""}
     <div class="row">${q.cursor?'<button class="ghost sm" onclick="pageDurableJobs(null)">First page</button>':""}${q.next?`<button class="ghost sm" onclick="pageDurableJobs(${esc(JSON.stringify(q.next))})">Next 100</button>`:""}</div>
+    ${(q.repairs||[]).length?`<details><summary>Artifact repairs · ${(q.repairs||[]).length} recent plans</summary><p class="hint">Copy first, then one rebuild and delivery if needed. Failed plans stop automatically; inspect the work for its reason and retry controls.</p><div class="tbl"><table><thead><tr><th>Artifact</th><th>Destination</th><th>Phase</th><th>Age</th><th></th></tr></thead><tbody>${q.repairs.map(repair=>`<tr><td>${esc(repair.kind)}</td><td>${esc(repair.target_node_id)}</td><td>${esc(repair.phase)}</td><td>${esc(Math.floor(repair.age_ms/60000))} min</td><td>${repair.job_id?`<button class="ghost sm" onclick="showDurableJob(${esc(JSON.stringify(repair.job_id))})">Inspect work</button>`:""}</td></tr>`).join("")}</tbody></table></div></details>`:""}
     ${q.detail?`<div class="hint"><b>${esc(q.detail.job.kind.replace(/_/g," "))} · ${esc(q.detail.job.state)}</b><p>${esc(q.detail.job.failed_attempts)} charged failures · ${esc(q.detail.job.yield_count)} yields · ${esc(q.detail.waiters.length)} interests shown${q.detail.more_waiters?" (more retained)":""}</p>
       ${q.detail.attempts.map(attempt=>`<div>${esc(attempt.node_id)} · ${esc(attempt.outcome||"running")} · ${esc(attempt.error_code||"")} · started ${esc(new Date(attempt.started_at_ms).toLocaleString())}</div>`).join("")}
       <button class="ghost sm" onclick="DURABLE_ACTIVITY.detail=null;paintDurableActivity()">Close details</button></div>`:""}</div>`;
@@ -61,7 +62,7 @@ async function refreshDurableActivity(force=false){
     const query=new URLSearchParams({state:q.state});if(q.cursor)query.set("cursor",q.cursor);
     const page=await api(`/cluster/jobs?${query}`);
     if(epoch!==q.epoch||generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity")return;
-    q.rows=page.jobs;q.counts=page.counts;q.migration=page.migration;q.next=page.next_cursor;q.observed=page.observed_at_ms;q.error=null;
+    q.rows=page.jobs;q.repairs=page.repairs||[];q.counts=page.counts;q.migration=page.migration;q.next=page.next_cursor;q.observed=page.observed_at_ms;q.error=null;
   }catch(error){if(epoch===q.epoch&&generation===PAGE_RENDER_GENERATION)q.error=error.message||String(error);}
   finally{q.busy=false;paintDurableActivity();if(epoch!==q.epoch)refreshDurableActivity(true);}
 }

@@ -8,6 +8,7 @@ use plurx_core::process::bounded as bounded_process;
 #[path = "../../plurx-core/tests/support/queue_fixture.rs"]
 mod queue_fixture;
 
+mod artifact_integrity;
 mod background_jobs;
 mod backup;
 mod cachekeep;
@@ -57,6 +58,7 @@ mod scratch_put;
 mod seam_hooks;
 mod serving_fence;
 mod shared_cache;
+mod source_probe;
 mod state;
 mod store_result;
 mod storeprobe;
@@ -2655,6 +2657,14 @@ fn spawn_background_loops(
     tokio::spawn(crate::media_sessions::lease_loop(state.clone()));
     tokio::spawn(crate::media_sessions::takeover_loop(state.clone()));
     tokio::spawn(crate::media_sessions::maintenance_loop(state.clone()));
+    tokio::spawn(crate::artifact_integrity::run(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
+    tokio::spawn(crate::source_probe::run(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(crate::library_search::semantic::worker(
         state.clone(),
         background_shutdown.clone(),
@@ -2746,6 +2756,9 @@ fn spawn_background_loops(
         std::sync::Arc::clone(&state.jobs)
             .background_work_loop(std::sync::Arc::clone(&state.transcode)),
     );
+
+    tokio::spawn(crate::http::images::durable_artwork_loop(state.clone()));
+    tokio::spawn(crate::http::transcode_copies::run(state.clone()));
 
     // Trakt: hourly (and on-demand) two-way sync + the scrobble-pause sweep.
     tokio::spawn(

@@ -1618,6 +1618,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 "background"
             };
             let results = self.client().txn(vec![
+                ("UPDATE background_predictions SET state = 'adopted', updated_at_ms = $1 WHERE state = 'pending' AND request_id IN (SELECT request_id FROM analysis_requests WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND component = 'subtitle_source' AND pipeline_version = $5 AND state IN ('queued','running','submitted'))".to_owned(),
+                 params!(now_ms, stamp.file_id, stamp.source_size, stamp.source_mtime, &stamp.pipeline_version)),
                 ("UPDATE analysis_requests SET priority = 'foreground', trigger = 'playback', updated_at_ms = $1 WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND component = 'subtitle_source' AND pipeline_version = $5 AND state = 'queued' AND priority = 'normal' AND $6 = 'foreground'".to_owned(),
                  params!(now_ms, stamp.file_id, stamp.source_size, stamp.source_mtime, &stamp.pipeline_version, priority)),
                 ("INSERT OR IGNORE INTO analysis_requests (request_id,file_id,source_size,source_mtime,component,pipeline_version,video_identity,requested_generation,expected_predecessor_generation,priority,trigger,force_rebuild,target_node_id,state,owner_node_id,fence,lease_expires_ms,attempts,not_before_ms,result_cache_key,last_error_code,cancel_requested,created_at_ms,updated_at_ms) SELECT $1,$2,$3,$4,'subtitle_source',$5,'',$1,'',$6,$7,0,'','queued',NULL,0,NULL,0,$8,NULL,NULL,0,$8,$8 WHERE $9 < $10 AND COALESCE((SELECT next_epoch FROM subtitle_source_repair_epochs WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND pipeline_version = $5), 0) = $11 AND COALESCE((SELECT COALESCE(last_1_ms >= $12, 0) + COALESCE(last_2_ms >= $12, 0) + COALESCE(last_3_ms >= $12, 0) FROM subtitle_source_repair_epochs WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND pipeline_version = $5), 0) = $9 AND EXISTS (SELECT 1 FROM files WHERE id = $2 AND size = $3 AND mtime = $4) AND NOT EXISTS (SELECT 1 FROM analysis_requests WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4 AND component = 'subtitle_source' AND pipeline_version = $5 AND state IN ('queued','running','submitted')) AND (SELECT COUNT(*) FROM analysis_requests WHERE state IN ('queued','running','submitted')) < $13".to_owned(),
@@ -1822,7 +1824,16 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     ) ELSE NULL END,
                     NULL, 0, $15, $15
               WHERE EXISTS (SELECT 1 FROM files WHERE id = $2 AND size = $3 AND mtime = $4)
-                AND (SELECT COUNT(*) FROM analysis_requests
+                AND ($8 NOT LIKE 'predict:%' OR EXISTS (
+                    SELECT 1 FROM background_predictions prediction WHERE prediction.request_id = $1
+                      AND prediction.state = 'pending' AND prediction.expires_ms > $15
+                      AND prediction.file_id = $2
+                      AND json_extract(prediction.request_json,'$.source_size') = $3
+                      AND json_extract(prediction.request_json,'$.source_mtime') = $4
+                      AND json_extract(prediction.request_json,'$.component') = $5
+                      AND json_extract(prediction.request_json,'$.pipeline_version') = $6
+                      AND json_extract(prediction.request_json,'$.target_node_id') = $12))
+                    AND (SELECT COUNT(*) FROM analysis_requests
                       WHERE state IN ('queued', 'running', 'submitted')) < $16
                 AND ($11 = 0 OR $5 <> 'fragment_index' OR NOT EXISTS (
                   SELECT 1 FROM analysis_requests legacy

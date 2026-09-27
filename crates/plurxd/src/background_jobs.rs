@@ -648,6 +648,267 @@ impl JobFence {
         Ok(published)
     }
 
+    pub(crate) async fn publish_artwork(
+        &self,
+        mut location: plurx_core::store::background_jobs_artwork::ArtworkLocation,
+    ) -> Result<bool, StoreError> {
+        let mut state = self.0.state.lock().await;
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+            metrics::event(self.0.kind, Event::FencedPublication);
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            metrics::event(self.0.kind, Event::FencedPublication);
+            return Ok(false);
+        };
+        let now_ms = unix_ms()?;
+        location.verified_at_ms = now_ms;
+        let mut request = plurx_core::store::background_jobs_artwork::PublishArtworkJob {
+            token,
+            location,
+            now_ms,
+        };
+        let reply = self.0.store.publish_artwork_job(request.clone()).await;
+        #[cfg(test)]
+        let reply = faults::after_commit(faults::PUBLISH, reply);
+        let result = match reply {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                request.location.verified_at_ms = request.now_ms;
+                self.0.store.publish_artwork_job(request).await?
+            }
+        };
+        let published = matches!(
+            result,
+            JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
+        );
+        metrics::event(
+            self.0.kind,
+            if published {
+                Event::Published
+            } else {
+                Event::FencedPublication
+            },
+        );
+        if published {
+            state.token = None;
+        }
+        Ok(published)
+    }
+
+    pub(crate) async fn publish_embedding(
+        &self,
+        artifact: plurx_core::store::background_jobs_embeddings::SharedEmbedding,
+        source_json: String,
+        classification_revision: i64,
+    ) -> Result<bool, StoreError> {
+        let mut state = self.0.state.lock().await;
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+            metrics::event(self.0.kind, Event::FencedPublication);
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            metrics::event(self.0.kind, Event::FencedPublication);
+            return Ok(false);
+        };
+        let now_ms = unix_ms()?;
+        let mut request = plurx_core::store::background_jobs_embeddings::PublishEmbeddingJob {
+            token,
+            artifact,
+            source_json,
+            classification_revision,
+            now_ms,
+        };
+        let reply = self.0.store.publish_embedding_job(request.clone()).await;
+        #[cfg(test)]
+        let reply = faults::after_commit(faults::PUBLISH, reply);
+        let result = match reply {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                self.0.store.publish_embedding_job(request).await?
+            }
+        };
+        let published = matches!(
+            result,
+            JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
+        );
+        metrics::event(
+            self.0.kind,
+            if published {
+                Event::Published
+            } else {
+                Event::FencedPublication
+            },
+        );
+        if published {
+            state.token = None;
+        }
+        Ok(published)
+    }
+
+    pub(crate) async fn publish_probe(
+        &self,
+        output: plurx_core::store::background_jobs_probe::ProbeOutput,
+    ) -> Result<bool, StoreError> {
+        let mut state = self.0.state.lock().await;
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+            metrics::event(self.0.kind, Event::FencedPublication);
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            metrics::event(self.0.kind, Event::FencedPublication);
+            return Ok(false);
+        };
+        let now_ms = unix_ms()?;
+        let mut request = plurx_core::store::background_jobs_probe::PublishProbeJob {
+            token,
+            output,
+            now_ms,
+        };
+        let reply = self.0.store.publish_probe_job(request.clone()).await;
+        #[cfg(test)]
+        let reply = faults::after_commit(faults::PUBLISH, reply);
+        let result = match reply {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                self.0.store.publish_probe_job(request).await?
+            }
+        };
+        let published = matches!(
+            result,
+            JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
+        );
+        metrics::event(
+            self.0.kind,
+            if published {
+                Event::Published
+            } else {
+                Event::FencedPublication
+            },
+        );
+        if published {
+            state.token = None;
+        }
+        Ok(published)
+    }
+
+    pub(crate) async fn verify_transcode(
+        &self,
+        candidate: plurx_core::store::background_jobs_integrity::TranscodeVerificationCandidate,
+        valid: bool,
+        next_object_index: i64,
+    ) -> Result<bool, StoreError> {
+        let mut state = self.0.state.lock().await;
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+            metrics::event(self.0.kind, Event::FencedPublication);
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        let mut request = plurx_core::store::background_jobs_integrity::VerifyTranscode {
+            token,
+            recipe_hash: candidate.recipe_hash,
+            manifest_digest: candidate.manifest_digest,
+            relative_dir: candidate.relative_dir,
+            publication_generation: candidate.publication_generation,
+            valid,
+            next_object_index,
+            now_ms: unix_ms()?,
+        };
+        let reply = self.0.store.verify_transcode_job(request.clone()).await;
+        #[cfg(test)]
+        let reply = faults::after_commit(faults::PUBLISH, reply);
+        let result = match reply {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                self.0.store.verify_transcode_job(request).await?
+            }
+        };
+        let published = matches!(
+            result,
+            JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
+        );
+        metrics::event(
+            self.0.kind,
+            if published {
+                Event::Published
+            } else {
+                Event::FencedPublication
+            },
+        );
+        if published {
+            state.token = None;
+        }
+        Ok(published)
+    }
+
+    pub(crate) async fn verify_artwork(
+        &self,
+        location: plurx_core::store::background_jobs_artwork::ArtworkLocation,
+        valid: bool,
+    ) -> Result<bool, StoreError> {
+        let mut state = self.0.state.lock().await;
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+            metrics::event(self.0.kind, Event::FencedPublication);
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        let mut request = plurx_core::store::background_jobs_integrity::VerifyArtwork {
+            token,
+            location,
+            valid,
+            now_ms: unix_ms()?,
+        };
+        let reply = self.0.store.verify_artwork_job(request.clone()).await;
+        #[cfg(test)]
+        let reply = faults::after_commit(faults::PUBLISH, reply);
+        let result = match reply {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                self.0.store.verify_artwork_job(request).await?
+            }
+        };
+        let published = matches!(
+            result,
+            JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
+        );
+        metrics::event(
+            self.0.kind,
+            if published {
+                Event::Published
+            } else {
+                Event::FencedPublication
+            },
+        );
+        if published {
+            state.token = None;
+        }
+        Ok(published)
+    }
+
     pub(crate) async fn fail_fragment(
         &self,
         code: plurx_core::content_analysis::IndexFailureCode,

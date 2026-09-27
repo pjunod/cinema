@@ -8,7 +8,7 @@ const TEST_CAPTURE_OWNER=Object.freeze({lifecycleId:"test-player",attachmentGene
 const captureSnapshot=(value,intentGeneration=0,owner=TEST_CAPTURE_OWNER)=>
   control.capture(value,intentGeneration,owner);
 
-const {shellSource} = require("../web/shell-source.js");
+const {shellSource,apiPrelude} = require("../web/shell-source.js");
 // The app's body rows, joined in served order.
 const SHIPPED_UI = shellSource().bodyScript;
 const DECLARATIONS = ["\nfunction ", "\nasync function "];
@@ -1512,7 +1512,7 @@ async function main() {
       "let now=0,timer,bodyResolve;const performance={now:()=>now},requests=[],released=[];let TOKEN=null,AUTH_GENERATION=0,PLAYER=null;const API='/api',PLAYBACK_ID='playback';const PlaybackPolicy={};",
       "function setTimeout(fn){timer=fn;return 1;}function clearTimeout(){}function fetch(url,options){return new Promise(resolve=>requests.push({url,options,resolve}));}function logout(){}",
       "function currentCapsDocument(){return {};}function capsDocumentIsUsable(){return false;}function prePlaySelectionQuery(){return '';}function decisionUrl(){return '/decision';}function vodClientContract(){return {session:{}};}function newRequestId(){return 'request';}",
-      shippedSource('api'),shippedSource('askDecision'),shippedSource('openSession'),shippedSource('beginPlaybackPreparation'),
+      apiPrelude()+shippedSource('api'),shippedSource('askDecision'),shippedSource('openSession'),shippedSource('beginPlaybackPreparation'),
       "return {requests,released,start(endpoint){const owner=beginPlaybackPreparation(()=>true);return owner.run(signal=>endpoint==='decision'?askDecision('f','auto',null,signal):openSession('f',{start:0},signal),value=>{if(value.session_id)released.push(value.session_id);});},headers(bodyHeld){requests[0].resolve({status:200,ok:true,json:()=>bodyHeld?new Promise(resolve=>bodyResolve=resolve):Promise.resolve({session_id:'late'})});},body(){bodyResolve({session_id:'late'});},expire(){now=20000;timer();}};",
     ].join('\n'))();
     const opening=h.start(endpoint);const outcome=opening.catch(error=>error);
@@ -1587,7 +1587,7 @@ async function main() {
       surfaceSeam(),
       "const performance={now:()=>now};const API='/api',TOKEN=null,AUTH_GENERATION=0;function logout(){}function fetch(url,options){return new Promise(resolve=>pending.push({url,options,resolve}));}",
       "function setTimeout(fn,ms){const id=++timerId;timers.set(id,{fn,at:now+ms});return id;}function clearTimeout(id){timers.delete(id);}function exactWireId(x){return x.id;}function toast(text){notices.push(text);}function autoNextOn(){return true;}function setLoading(value){loading.push(value);}function closePlayer(){closed++;}",
-      shippedSource('api'),shippedSource('beginPlaybackPreparation'),
+      apiPrelude()+shippedSource('api'),shippedSource('beginPlaybackPreparation'),
       shippedSource('playbackContinuation'),shippedSource('playNextEpisode'),shippedSource('finishPlayback'),
       "return {pending,loading,notices,surface:surfacePainted,events:()=>surfaceEvents,location,start:()=>finishPlayback(true),result:()=>({AUTOPLAY,closed}),advance(ms){now+=ms;for(const[id,t]of [...timers])if(t.at<=now){timers.delete(id);t.fn();}}};",
     ].join('\n'))();
