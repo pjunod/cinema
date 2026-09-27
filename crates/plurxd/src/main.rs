@@ -2746,6 +2746,8 @@ fn spawn_background_loops(
             .background_work_loop(std::sync::Arc::clone(&state.transcode)),
     );
 
+    tokio::spawn(crate::http::images::durable_artwork_loop(state.clone()));
+
     // Trakt: hourly (and on-demand) two-way sync + the scrobble-pause sweep.
     tokio::spawn(
         std::sync::Arc::clone(&state.trakt)

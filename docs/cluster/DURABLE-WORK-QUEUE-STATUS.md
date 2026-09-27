@@ -1,7 +1,7 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 merged; E0 fast lane: isolated lockfile correction · **Updated:** 2026-09-26 ·
-**Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` ·
+**Status:** M1–M3 merged; E0 validating current main; E1 artwork worker in construction · **Updated:** 2026-09-26 ·
+**Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` · **E1:** `codex/cluster-cache-preparation` ·
 **Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — validating](http://192.168.4.7:3000/noirr/plurx/pulls/564)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
@@ -645,3 +645,21 @@ continue E1–E3.
   the normal pinned hook validates the combined tree before its next lane run.
   The prior lane's result cannot qualify this new tree. Preserved both parents'
   process and timer inventory entries in the only merge conflict.
+
+- 2026-09-26: E0 candidate `715074e19` includes main `2b09d7a32`.
+  Lane [3320](http://192.168.4.7:3000/noirr/plurx/actions/runs/3320) passed
+  preflight and web checks; Rust and Windows are running. The merged process
+  ownership inventory passed seven focused checks before push. No second review.
+
+- 2026-09-26: E1 now connects durable artwork admission, a physical-capacity
+  worker, exact-attempt publication and verified peer hydration. Cold requests
+  return originals; repeated misses share demand. Pipeline identity includes
+  the actual renderer/dependencies, and final filenames include the blob digest.
+  Unpublished files cannot become hits, and obsolete owners cannot overwrite
+  a published generation. Child cancellation is joined; staging cleanup checks
+  current queue ownership. Added coalescing, unpublished/corrupt output and
+  real-child cancellation regressions, with execution still deferred. Cache
+  prediction, hot second copies, portable transcodes and E2/E3 remain unfinished.
+
+- Agent-only cleanup removed 164 obsolete incremental compiler directories
+  (about 35 GiB), preserving the dependency cache, source and all commits.

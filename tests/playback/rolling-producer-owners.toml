@@ -2179,7 +2179,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # main @ d95503c25 has 647; with S-04 M2's three -> 650 (measured by zeroing this row)
 # on the merge of main into #553 after #532 and #563; the merge adds no new site.
 # Combined E0 and S-04 M2 ownership sites; neither parent is discarded.
-expected_occurrences = 648
+# E1 artwork adds one daemon-owned durable consumer; no request spawns an encoder.
+expected_occurrences = 649
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -3121,7 +3122,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # main @ d95503c25 has 1025; with S-04 M2's four -> 1029 (measured by zeroing this row)
 # on the merge of main into #553 after #532 and #563; the merge adds no new site.
 # Combined E0 and S-04 M2 ownership sites; neither parent is discarded.
-expected_occurrences = 1036
+# E1 replaces the request resize timeout with the joined collector; adds worker idle/preemption observations and a bounded cancellation regression.
+expected_occurrences = 1039
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -4057,7 +4059,8 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # probe's exec-from-`pre_exec` to show that a priority registered after it
 # never runs. The child is owned by `spawn_job_owned` and killed on drop.
 # E0 adds one test-only kill(pid, 0) observation proving cooperative cancellation reaped its bounded child before returning.
-expected_occurrences = 53
+# E1 cancellation regression probes the fixture PID after the encoder has been joined; it owns no surviving child.
+expected_occurrences = 54
 
 [[module_structures]]
 id = "kill-on-drop-construction"

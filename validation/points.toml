@@ -700,7 +700,7 @@ paths = [
   "crates/plurx-core/src/scan/**",
   "crates/plurx-core/src/store/sqlite/library.rs",
   "crates/plurx-core/src/store/sqlite/media.rs",
-  "crates/plurxd/src/http/{browse,comingsoon,images,items,libraries,photos,scan}.rs",
+  "crates/plurxd/src/http/{browse,comingsoon,images,images_worker,items,libraries,photos,scan}.rs",
   "docs/FEATURES.md",
   "docs/REQUIREMENTS.md",
 ]

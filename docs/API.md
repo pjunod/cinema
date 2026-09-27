@@ -876,7 +876,14 @@ immutable means the URL itself must change when the bytes do, so every artwork
 URL is built as `…?v={item.updated_at}`: the replicated item revision advances
 on every artwork patch and makes an otherwise mutable filename a new cache
 identity. The `?v=` value is a cache key only; the handler ignores it. There
-are **no sizing parameters** — the stored bytes are what you get.
+supports `?size=original|w300|w500|w780`. Original requests preserve the stored
+hero/backdrop bytes. A cold smaller variant returns the original with
+`Cache-Control: private, max-age=0, must-revalidate` and
+`X-Plurx-Artwork: original-fallback`, while recording one durable preparation
+interest for this node. Published variants use strong digest ETags. Their
+identity includes the source digest, width, format and renderer pipeline;
+preparation uses spare capacity, and another node can hydrate verified bytes
+instead of encoding them again.
 
 On a local miss the node fetches from a reachable peer voter and atomically
 materializes the file: 8 concurrent materializations process-wide, 3 peers
@@ -2804,7 +2811,13 @@ bearer because this is a peer-to-peer capability, not a household one — the
 same rule the join routes state from the other direction. And it **never
 proxies a second hop**: the handler reads local bytes only, so a filename
 absent everywhere is a bounded 404 instead of a fan-out cycle around the
-cluster. The user-facing image route (§6.6) is the one that races peers.
+cluster. The user-facing image route (§6.7) is the one that races peers.
+
+The reserved `variant-{64 lowercase hex artifact key}` name serves a published
+artwork derivative under the same exact-name proof. The response must match
+the committed blob digest and byte count on the serving node. It never reads
+an unpublished staging file, never resizes for a peer, and still rejects a
+`size` query. Older peers return a bounded miss for this name.
 
 ### 19.7 `GET /cluster/support-bundle`
 

@@ -26,7 +26,21 @@ pub struct ArtworkVariantSpec {
 }
 impl ArtworkVariantSpec {
     pub fn validate(&self) -> Result<(), StoreError> {
+        let expected_format = match self
+            .source_name
+            .rsplit_once('.')
+            .map(|(_, ext)| ext.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("jpg" | "jpeg") => "jpeg",
+            Some("gif" | "png") => "png",
+            Some("webp") => "webp",
+            _ => "",
+        };
         if !identifier(&self.source_name)
+            || self.source_name.len() > 160
+            || self.source_name.contains(':')
+            || self.format != expected_format
             || self.source_name == "."
             || self.source_name == ".."
             || !digest(&self.source_sha256)
@@ -152,7 +166,11 @@ WITH input AS (SELECT json($1) AS body), observation AS (
      AND ((job.kind = 'artwork_derivative'
        AND json_extract(job.payload_json, '$.artifact_key') = json_extract(body, '$.location.artifact_key')
        AND json_remove(json_extract(job.payload_json, '$.spec'), '$.source_name') = json_remove(json_extract(body, '$.location.spec'), '$.source_name')
-       AND json_extract(body, '$.location.built_by_node_id') = job.owner_node_id)
+       AND (json_extract(body, '$.location.built_by_node_id') = job.owner_node_id
+         OR EXISTS (SELECT 1 FROM background_artwork_locations original
+           WHERE original.artifact_key = json_extract(body, '$.location.artifact_key')
+             AND original.built_by_node_id = json_extract(body, '$.location.built_by_node_id')
+             AND original.built_at_ms = json_extract(body, '$.location.built_at_ms'))))
      OR (job.kind = 'artifact_hydrate' AND job.target_node_id = job.owner_node_id
        AND json_extract(job.payload_json, '$.artifact_key') = 'artwork:' || json_extract(body, '$.location.artifact_key')
        AND EXISTS (SELECT 1 FROM background_artwork_locations original
@@ -183,3 +201,82 @@ SELECT json_extract(body, '$.token.claim_id'), 'publish_artwork', body,
  CASE WHEN outcome IN ('published','already_published') THEN json_object('outcome',outcome,'job_id',id,'result_ref',output || '')
  ELSE json_object('outcome',outcome) END FROM verdict RETURNING result_json
 "#;
+
+/// One active demand per receiving node and content identity. Repeated grid
+/// requests neither append waiters nor reset a failed intent's retry budget;
+/// a fresh real request may retry after an hour. Every intent expires in 24h.
+pub(super) async fn enqueue<T: QueueSql>(
+    store: &T,
+    spec: ArtworkVariantSpec,
+    node_id: &str,
+    now_ms: i64,
+) -> Result<super::background_jobs::EnqueueOutcome, StoreError> {
+    use super::background_jobs::{enqueue_body, EnqueueJob, JobPayload, JobRequest, ENQUEUE_SQL};
+    spec.validate()?;
+    if !identifier(node_id) || node_id.len() > 200 {
+        return Err(StoreError::Task("invalid artwork demand node".into()));
+    }
+    let key = spec.artifact_key();
+    let request = EnqueueJob {
+        id: uuid::Uuid::new_v4().to_string(),
+        payload: JobPayload::ArtworkDerivative {
+            artifact_key: key.clone(),
+            spec,
+        },
+        dedupe_key: format!("artwork:{key}"),
+        priority: 1,
+        not_before_ms: now_ms,
+        now_ms,
+        request: JobRequest {
+            scope: format!("artwork:{node_id}"),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            request_digest: key.clone(),
+            consumer_kind: "artwork".into(),
+            consumer_ref: key,
+            target_node_id: Some(node_id.into()),
+            deadline_ms: Some(
+                now_ms
+                    .checked_add(86_400_000)
+                    .ok_or_else(|| StoreError::Task("artwork deadline overflow".into()))?,
+            ),
+            retain_identity: false,
+        },
+    };
+    request.validate()?;
+    let mut body = enqueue_body(store, &request).await?;
+    body["artwork_demand"] = true.into();
+    let rows = store
+        .queue_sql(ENQUEUE_SQL.into(), encode(&body)?, true, true)
+        .await?;
+    decode(
+        rows.first()
+            .ok_or_else(|| StoreError::Task("missing artwork admission verdict".into()))?,
+    )
+}
+
+/// Historical content/provenance is not a live-holder or transfer proof.
+pub(super) async fn canonical<T: QueueSql>(
+    store: &T,
+    key: &str,
+) -> Result<Option<ArtworkLocation>, StoreError> {
+    if !digest(key) {
+        return Err(StoreError::Task("invalid artwork identity".into()));
+    }
+    let rows = store
+        .queue_sql(
+            r#"
+SELECT json_object('artifact_key', artifact_key, 'node_id', node_id,
+  'spec', json(spec_json), 'blob_sha256', blob_sha256, 'bytes', bytes,
+  'built_by_node_id', built_by_node_id, 'built_at_ms', built_at_ms,
+  'verified_at_ms', verified_at_ms) AS result_json
+FROM background_artwork_locations WHERE artifact_key = json_extract($1, '$.key')
+ORDER BY verified_at_ms DESC, node_id LIMIT 1
+"#
+            .into(),
+            encode(&serde_json::json!({"key": key}))?,
+            false,
+            true,
+        )
+        .await?;
+    rows.first().map(|row| decode(row)).transpose()
+}

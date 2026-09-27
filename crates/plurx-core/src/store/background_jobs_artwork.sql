@@ -21,7 +21,7 @@ BEGIN
         json_extract(NEW.request_json,'$.location.bytes'),json_extract(NEW.request_json,'$.location.built_by_node_id'),
         json_extract(NEW.request_json,'$.location.built_at_ms'),json_extract(NEW.request_json,'$.now_ms')
     WHERE json_extract(NEW.result_json,'$.outcome') = 'published'
-    ON CONFLICT(artifact_key,node_id) DO UPDATE SET verified_at_ms = excluded.verified_at_ms;
+    ON CONFLICT(artifact_key,node_id) DO UPDATE SET verified_at_ms = excluded.verified_at_ms, spec_json = excluded.spec_json;
 
     UPDATE background_jobs SET state = 'succeeded', result_ref = json_extract(NEW.result_json,'$.result_ref'),
         owner_node_id = NULL, owner_boot_id = NULL, claim_id = NULL, lease_expires_ms = NULL,

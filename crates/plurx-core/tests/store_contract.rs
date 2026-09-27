@@ -519,6 +519,8 @@ const BACKGROUND_JOB_METHODS: &[&str] = &[
     "enqueue_subtitle_job",
     "write_subtitle_job",
     "artwork_locations",
+    "artwork_variant",
+    "enqueue_artwork_demand",
     "publish_artwork_job",
     "storage_domains",
     "replace_storage_domains",
@@ -17568,7 +17570,7 @@ fn contract_inventory_matches_every_store_method() {
     // Three library admission/query/completion operations preserve each caller.
     // +2: replicated root-domain observation and atomic replacement.
     // E1 adds a bounded named-settings snapshot for playback preferences.
-    assert_eq!(declared.len(), 430, "review the Store method count");
+    assert_eq!(declared.len(), 432, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

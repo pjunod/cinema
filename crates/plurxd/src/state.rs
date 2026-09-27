@@ -5578,7 +5578,7 @@ impl JobManager {
                     // Outbox admission is still voter-owned; learners only
                     // consume already-authorized immutable work for a target.
                     if self.may_run_cluster_jobs().await {
-                        self.enqueue_fragment_deliveries().await;
+                        self.enqueue_artifact_deliveries().await;
                     }
                     self.drain_cluster_fragment_index_slot(Arc::clone(&transcode))
                         .await;
@@ -7677,23 +7677,27 @@ impl JobManager {
             return;
         }
 
-        self.enqueue_fragment_deliveries().await;
+        self.enqueue_artifact_deliveries().await;
         let built = self.drain_cluster_fragment_index_slot(transcode).await;
         if built > 0 {
             tracing::info!(built, "cluster fragment-index queue pass finished");
         }
     }
 
-    async fn enqueue_fragment_deliveries(&self) {
+    pub(crate) fn execution_authority(&self) -> Arc<dyn ClusterJobAuthority> {
+        Arc::clone(&self.job_authority)
+    }
+
+    pub(crate) async fn enqueue_artifact_deliveries(&self) {
         match self.store.delivery_intents(clock_ms()).await {
             Ok(intents) => {
                 for intent in intents {
                     if let Err(error) = self.store.enqueue_delivery(intent, clock_ms()).await {
-                        tracing::warn!(%error, "admitting fragment delivery");
+                        tracing::warn!(%error, "admitting artifact delivery");
                     }
                 }
             }
-            Err(error) => tracing::warn!(%error, "reading fragment delivery obligations"),
+            Err(error) => tracing::warn!(%error, "reading artifact delivery obligations"),
         }
     }
 

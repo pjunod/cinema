@@ -2614,3 +2614,19 @@ async fn background_artwork_publication_fences_builds_and_completes_verified_del
     })
     .await;
 }
+
+#[tokio::test]
+async fn background_artwork_grid_demand_coalesces_and_does_not_erase_failure_budget() {
+    use plurx_core::store::background_jobs_artwork::{ArtworkVariantSpec, ARTWORK_PIPELINE};
+    for_each_backend(|store, backend| async move {
+        let spec = ArtworkVariantSpec { source_name: "grid.png".into(), source_sha256: "c".repeat(64), width: 500, format: "png".into(), pipeline: ARTWORK_PIPELINE.into() };
+        let EnqueueOutcome::Accepted { job_id, .. } = store.enqueue_artwork_demand(spec.clone(), "node-a", 1000).await.expect("demand") else { panic!("{backend}: demand") };
+        for _ in 0..20 {
+            assert!(matches!(store.enqueue_artwork_demand(spec.clone(), "node-a", 1001).await.expect("repeat"), EnqueueOutcome::Existing { job_id: existing, .. } if existing == job_id));
+        }
+        assert_eq!(store.job_waiters(WaiterQuery { job_id: job_id.clone(), after: None, limit: 128 }).await.expect("receipts").waiters.len(), 1);
+        store.cancel_job(CancelJob { job_id: job_id.clone(), now_ms: 2000 }).await.expect("cancel");
+        assert!(matches!(store.enqueue_artwork_demand(spec.clone(), "node-a", 3000).await.expect("cooldown"), EnqueueOutcome::Existing { cancelled: true, .. }));
+        assert!(matches!(store.enqueue_artwork_demand(spec, "node-a", 3_603_000).await.expect("new later demand"), EnqueueOutcome::Accepted { job_id: next, .. } if next != job_id));
+    }).await;
+}

@@ -57,7 +57,15 @@ pub(crate) const SCHEMA: &str = include_str!("background_jobs_schema.sql");
 // The returned snapshot is the verdict that authorized the mutation, not a
 // follow-up read which might observe a different concurrent request.
 pub(super) const ENQUEUE_SQL: &str = r#"
-WITH request AS (SELECT json($1) AS body), snapshot AS (
+WITH input AS (SELECT json($1) AS body), request AS (
+ SELECT CASE WHEN json_extract(body, '$.artwork_demand') = 1 THEN json_set(body, '$.request.request_id',
+   COALESCE((SELECT request_id FROM background_job_waiters
+     WHERE request_scope = json_extract(body, '$.request.scope')
+       AND consumer_ref = json_extract(body, '$.request.consumer_ref')
+       AND (state IN ('pending','awaiting_hydration') OR updated_at_ms > json_extract(body, '$.now_ms') - 3600000)
+     ORDER BY updated_at_ms DESC, request_id DESC LIMIT 1), json_extract(body, '$.request.request_id')))
+ ELSE body END AS body FROM input
+), snapshot AS (
   SELECT body,
     (SELECT job_id FROM background_job_waiters
       WHERE request_scope = json_extract(body, '$.request.scope')
@@ -948,6 +956,17 @@ pub struct CancelWaiterOutcome {
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    /// Immutable producer provenance, including when all advertised holders expired.
+    async fn artwork_variant(
+        &self,
+        artifact_key: &str,
+    ) -> Result<Option<super::background_jobs_artwork::ArtworkLocation>, StoreError>;
+    async fn enqueue_artwork_demand(
+        &self,
+        spec: super::background_jobs_artwork::ArtworkVariantSpec,
+        node_id: &str,
+        now_ms: i64,
+    ) -> Result<EnqueueOutcome, StoreError>;
     async fn artwork_locations(
         &self,
         artifact_key: &str,
@@ -1127,6 +1146,20 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn artwork_variant(
+        &self,
+        artifact_key: &str,
+    ) -> Result<Option<super::background_jobs_artwork::ArtworkLocation>, StoreError> {
+        super::background_jobs_artwork::canonical(self, artifact_key).await
+    }
+    async fn enqueue_artwork_demand(
+        &self,
+        spec: super::background_jobs_artwork::ArtworkVariantSpec,
+        node_id: &str,
+        now_ms: i64,
+    ) -> Result<EnqueueOutcome, StoreError> {
+        super::background_jobs_artwork::enqueue(self, spec, node_id, now_ms).await
+    }
     async fn artwork_locations(
         &self,
         artifact_key: &str,
