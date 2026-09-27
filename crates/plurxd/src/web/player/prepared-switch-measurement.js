@@ -96,8 +96,6 @@ function deferPreparedPredecessorRetirement(p,state,successor){
   const finish=()=>{
     if(!current()) return;
     retirePreparedPredecessor(p,state);
-    if(PLAYER===p&&p.sessionId===state.sessionId
-      &&document.getElementById("video")===successor) renderPlayerInfo();
   };
   state.retireDeadlineTimer=setTimeout(finish,PREPARED_RETIRE_MAX_MS);
   const idle=()=>{
@@ -134,6 +132,7 @@ function deferPreparedPredecessorRetirement(p,state,successor){
 }
 function retirePreparedPredecessor(p,state){
   if(!state) return;
+  const successor=state.retireElement;
   if(state.retireFrameCallbackId!=null&&state.retireElement
     &&typeof state.retireElement.cancelVideoFrameCallback==="function")
     try{ state.retireElement.cancelVideoFrameCallback(state.retireFrameCallbackId); }catch(e){}
@@ -152,6 +151,20 @@ function retirePreparedPredecessor(p,state){
   state.predecessor=null;
   destroyHlsInstance(p,predecessor.hls,predecessor.element);
   disposeRetiredMediaElement(predecessor.element);
+  // Retirement can happen at browser idle, or be drained by a seek, close,
+  // or new preparation before that idle turn. Repaint the delivery badges on
+  // every path, but only for the same attached successor and in a later idle
+  // turn so no first visible frame waits for title DOM work.
+  if(!state.retireInfoScheduled){
+    state.retireInfoScheduled=true;
+    const refresh=()=>{
+      if(PLAYER===p&&p.sessionId===state.sessionId
+        &&document.getElementById("video")===successor) renderPlayerInfo();
+    };
+    if(typeof window.requestIdleCallback==="function")
+      window.requestIdleCallback(refresh,{timeout:PREPARED_RETIRE_IDLE_TIMEOUT_MS});
+    else setTimeout(refresh,120);
+  }
 }
 function detachPreparedOverlapListeners(state){
   const v=state&&state.incumbentElement;

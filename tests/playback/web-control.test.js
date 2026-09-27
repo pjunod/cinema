@@ -4331,10 +4331,16 @@ async function main() {
     assert.equal(incumbent.destroyed, false,
       "first-frame proof acknowledges the switch without blocking its next frame on decoder teardown");
     assert.ok(p.preparedRetiring, "the hidden predecessor has a bounded retirement owner");
+    const paintsBeforeDrain = h.adopted.filter(([kind]) => kind === "render").length;
     h.teardown();
     assert.equal(incumbent.destroyed, true,
       "a new attachment drains pending predecessor retirement");
     assert.equal(p.preparedRetiring, null);
+    assert.equal(h.adopted.filter(([kind]) => kind === "render").length, paintsBeforeDrain,
+      "direct retirement does not repaint in the media teardown turn");
+    h.fireAll();
+    assert.equal(h.adopted.filter(([kind]) => kind === "render").length, paintsBeforeDrain + 1,
+      "direct retirement still refreshes attached delivery badges later");
   }
 
   // The commit is sent only after a frame renders. It is a claim that the
