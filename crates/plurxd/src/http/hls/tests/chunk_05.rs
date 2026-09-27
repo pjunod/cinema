@@ -1,8 +1,46 @@
 
+    /// The cleanup holds the player's replacement gate until it settles,
+    /// and it settles only after it has aborted the worker and settled the
+    /// request claim (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8; #573 review
+    /// finding 2). While the test holds the cleanup at
+    /// `after_cleanup_settled`, the worker is already gone and the claim is
+    /// already retryable, and a takeover for the player still waits on the
+    /// gate. The worker is published as the guard's own incarnation at owner
+    /// epoch 1, so the cleanup's owner-fenced abort reaches it.
     #[tokio::test(start_paused = true)]
     async fn started_session_guard_holds_replacement_gate_until_cleanup_settles() {
         let dir = crate::test_tempdir().expect("state dir");
-        let fixture = HlsDeliveryFixture::publish(dir.path(), "guard-lifetime").await;
+        let incarnation_id = uuid::Uuid::new_v4().to_string();
+        let fixture =
+            HlsDeliveryFixture::publish_takeover(dir.path(), "guard-lifetime", &incarnation_id, 1)
+                .await;
+        assert!(fixture.worker_is_registered("guard-lifetime").await);
+        let user = fixture
+            .state
+            .store
+            .create_user("guard-lifetime", "hash", false)
+            .await
+            .expect("create guard user");
+        let request_id = "guard-lifetime-request";
+        let fingerprint = "c".repeat(64);
+        let now_ms = unix_ms();
+        assert!(matches!(
+            fixture
+                .state
+                .store
+                .claim_media_session_request(
+                    user.id,
+                    request_id,
+                    &fingerprint,
+                    "guard-lifetime-player",
+                    &incarnation_id,
+                    now_ms,
+                    now_ms.saturating_add(60_000),
+                )
+                .await
+                .expect("claim guarded request"),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
         let request = crate::transcode::SessionRequest {
             control_sequence: None,
             file_id: 1,
@@ -36,15 +74,49 @@
         let mut guard = StartedSessionGuard::new(
             fixture.state.clone(),
             fixture.state.node_id.clone(),
-            uuid::Uuid::new_v4().to_string(),
+            incarnation_id.clone(),
             "guard-lifetime".to_owned(),
-            7,
-            "guard-lifetime-request".to_owned(),
+            user.id,
+            request_id.to_owned(),
             Some(replacement),
         );
         guard.hold_cleanup_for_test(std::sync::Arc::clone(&settled), released_tx);
         drop(guard);
         let held = settled.reached().await;
+
+        assert!(
+            !fixture.worker_is_registered("guard-lifetime").await,
+            "the cleanup aborts the worker before it settles"
+        );
+        let retry_incarnation = uuid::Uuid::new_v4().to_string();
+        let retry_now_ms = unix_ms();
+        let retried = fixture
+            .state
+            .store
+            .claim_media_session_request(
+                user.id,
+                request_id,
+                &fingerprint,
+                "guard-lifetime-player",
+                &retry_incarnation,
+                retry_now_ms,
+                retry_now_ms.saturating_add(60_000),
+            )
+            .await
+            .expect("retry guarded request");
+        assert!(
+            matches!(
+                &retried,
+                MediaSessionRequestClaim::Acquired { incarnation_id } if *incarnation_id == retry_incarnation
+            ),
+            "the cleanup settles the request claim before it settles: {retried:?}"
+        );
+        assert!(fixture
+            .state
+            .store
+            .fail_media_session_request(user.id, request_id, &retry_incarnation, unix_ms())
+            .await
+            .expect("settle retry claim"));
 
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let blocked = tokio::spawn({
