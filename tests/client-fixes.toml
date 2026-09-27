@@ -21,6 +21,14 @@ source_anchor = "CURRENT_PROJECT_VERSION:"
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_apple_counter_the_target_already_ships_fails_against_the_target"
 
+[[fixes]]
+id = "apple.home-hero-foreground-clipping"
+commits = ["50784639d"]
+source = "clients/apple/Sources/HomeView.swift"
+source_anchor = "struct IOSHomeHeroArtworkLayout: ViewModifier"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPhoneHomeHeroKeepsEqualInsetsOnBothEdges"
+
 # D-03's internal reader corrections need a durable source-to-test bridge.
 # The Android PDF checks below are source contracts; simulator/device behavior
 # remains separate acceptance evidence on the D-03 workboard.
