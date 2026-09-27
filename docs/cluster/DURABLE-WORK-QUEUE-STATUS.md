@@ -618,3 +618,10 @@ continue E1–E3.
   A local TypeScript check also found three new storage-input element type
   errors; annotated those inputs without raising the baseline. Batch these
   corrections before the next lane run.
+
+- 2026-09-26: E1 read path committed as `5ba02212f`; inherited E0 contract
+  fixes through `27e1c0f47`. Pinned workspace/all-target Clippy, served-script
+  syntax and TypeScript checks passed without a baseline increase. Added one
+  bounded named-settings snapshot on both backends; playback language defaults
+  now use one Authority read instead of three. Its backend contract is written
+  and compiled, not run. Shared artifact work remains in construction.

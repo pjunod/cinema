@@ -3927,6 +3927,18 @@ impl SettingsStore for HiqliteAuthStore {
         Ok(pair)
     }
 
+    async fn get_settings(
+        &self,
+        keys: &[&str],
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        let keys = super::selected_settings_json(keys)?;
+        let rows = self.client().query_consistent_map::<SettingEntryRow, _>(
+            "SELECT key, value FROM settings WHERE key IN (SELECT value FROM json_each($1)) ORDER BY key",
+            params!(keys),
+        ).await?;
+        Ok(rows.into_iter().map(|row| (row.key, row.value)).collect())
+    }
+
     async fn settings_snapshot(
         &self,
     ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {

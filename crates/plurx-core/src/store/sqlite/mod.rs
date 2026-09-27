@@ -2057,6 +2057,18 @@ impl SettingsStore for SqliteStore {
         .await
     }
 
+    async fn get_settings(
+        &self,
+        keys: &[&str],
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        let keys = super::selected_settings_json(keys)?;
+        self.with_read(move |conn| {
+            let mut statement = conn.prepare("SELECT key, value FROM settings WHERE key IN (SELECT value FROM json_each(?1)) ORDER BY key")?;
+            let rows = statement.query_map(params![keys], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+            rows.collect::<Result<_, _>>().map_err(StoreError::from)
+        }).await
+    }
+
     async fn settings_snapshot(
         &self,
     ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {

@@ -2093,6 +2093,8 @@ pub trait SettingsStore: Send + Sync + 'static {
         first: &str,
         second: &str,
     ) -> Result<(Option<String>, Option<String>), StoreError>;
+    /// Read at most 32 named settings from one snapshot. Missing keys are absent.
+    async fn get_settings(&self, keys: &[&str]) -> Result<BTreeMap<String, String>, StoreError>;
     /// Read the complete settings table from one database snapshot.
     ///
     /// Administrative views render many independent settings at once. A
@@ -2137,6 +2139,15 @@ pub trait SettingsStore: Send + Sync + 'static {
     ) -> Result<bool, StoreError>;
     /// The stable unique id of this logical server.
     async fn instance_id(&self) -> Result<String, StoreError>;
+}
+
+pub(crate) fn selected_settings_json(keys: &[&str]) -> Result<String, StoreError> {
+    if keys.len() > 32 || keys.iter().any(|key| key.is_empty() || key.len() > 256) {
+        return Err(StoreError::Task(
+            "settings read requires at most 32 nonempty bounded keys".into(),
+        ));
+    }
+    serde_json::to_string(keys).map_err(|error| StoreError::Task(error.to_string()))
 }
 
 pub(crate) fn validate_generated_settings(

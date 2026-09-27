@@ -221,6 +221,7 @@ const SETTINGS_METHODS: &[&str] = &[
     "get_setting",
     "get_or_init_setting",
     "get_setting_pair",
+    "get_settings",
     "settings_snapshot",
     "put_setting",
     "put_setting_if_absent",
@@ -17564,7 +17565,8 @@ fn contract_inventory_matches_every_store_method() {
     // E0 adds the catalogue/queue dual-owner binding.
     // Three library admission/query/completion operations preserve each caller.
     // +2: replicated root-domain observation and atomic replacement.
-    assert_eq!(declared.len(), 427, "review the Store method count");
+    // E1 adds a bounded named-settings snapshot for playback preferences.
+    assert_eq!(declared.len(), 428, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -23187,6 +23189,31 @@ async fn settings_contract_runs_through_dyn_store() {
             (Some("L".to_owned()), Some("R".to_owned())),
             "backend {backend}"
         );
+        let selected = store
+            .get_settings(&[
+                "contract.right",
+                "contract.left",
+                "missing",
+                "contract.left",
+            ])
+            .await
+            .expect("selected settings snapshot");
+        assert_eq!(
+            selected.len(),
+            2,
+            "{backend}: return only selected present keys, once"
+        );
+        assert_eq!(selected.get("contract.left").map(String::as_str), Some("L"));
+        assert_eq!(
+            selected.get("contract.right").map(String::as_str),
+            Some("R")
+        );
+        assert!(store
+            .get_settings(&[])
+            .await
+            .expect("empty selection")
+            .is_empty());
+        assert!(store.get_settings(&["contract.left"; 33]).await.is_err());
         let settings = store.settings_snapshot().await.expect("settings snapshot");
         assert_eq!(
             settings.get("contract.key").map(String::as_str),
