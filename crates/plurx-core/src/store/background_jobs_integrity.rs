@@ -133,9 +133,7 @@ WITH input AS (SELECT json($1) AS body), observation AS (
   AND EXISTS (SELECT 1 FROM background_job_waiters interest WHERE interest.job_id = job.id
     AND interest.state = 'pending' AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract(body,'$.now_ms')))
   /* location predicate */
-  AND (json_extract(body,'$.valid') = 1 OR (SELECT COUNT(*) FROM background_artifact_repairs) < 4096
-    OR EXISTS (SELECT 1 FROM background_artifact_repairs WHERE original_key = json_extract(body,'$.artifact_key')
-      AND target_node_id = json_extract(body,'$.token.node_id') AND location_generation = json_extract(body,'$.location_generation')))
+
  AS owns
  FROM input LEFT JOIN background_jobs job ON job.id = json_extract(body,'$.token.job_id')
 ), verdict AS (
@@ -177,6 +175,25 @@ pub(super) async fn enqueue_repair<T: QueueSql>(
         || now_ms >= repair.expires_ms
     {
         return Ok(EnqueueOutcome::NoDemand);
+    }
+    if repair.phase == "copy" {
+        let body = encode(&serde_json::json!({"id":repair.id,"now":now_ms}))?;
+        // No advertised holder is lack of opportunity, not a failed transfer.
+        // The atomic recheck lets a newly published holder win the race.
+        let absent = store
+            .queue_sql(
+                format!("SELECT 'true' AS result_json {NO_COPY_HOLDERS_SQL}"),
+                body.clone(),
+                false,
+                true,
+            )
+            .await?;
+        if !absent.is_empty() {
+            let changed = store.queue_sql(format!("UPDATE background_artifact_repairs SET phase = CASE WHEN producer_payload IS NULL THEN 'failed' ELSE 'build' END, updated_at_ms = json_extract($1,'$.now') WHERE id IN (SELECT repair.id {NO_COPY_HOLDERS_SQL}) RETURNING 'true' AS result_json"),body,true,true).await?;
+            if !changed.is_empty() {
+                return Ok(EnqueueOutcome::NoDemand);
+            }
+        }
     }
     let payload = if repair.phase == "build" {
         repair
@@ -231,6 +248,17 @@ pub(super) async fn enqueue_repair<T: QueueSql>(
     )
 }
 
+const NO_COPY_HOLDERS_SQL: &str = r#"
+FROM background_artifact_repairs repair WHERE repair.id = json_extract($1,'$.id') AND repair.phase = 'copy'
+ AND repair.expires_ms > json_extract($1,'$.now')
+ AND NOT EXISTS (SELECT 1 FROM transcode_cache_locations location WHERE location.complete = 1
+   AND 'transcode:' || location.recipe_hash || ':' || location.manifest_digest = repair.artifact_key
+   AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || location.node_id))
+ AND NOT EXISTS (SELECT 1 FROM background_artwork_locations location WHERE 'artwork:' || location.artifact_key = repair.artifact_key
+   AND location.verified_at_ms > json_extract($1,'$.now') - 604800000
+   AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || location.node_id))
+"#;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifyArtwork {
     pub token: JobToken,
@@ -273,7 +301,10 @@ pub(super) async fn verify_artwork<T: QueueSql>(
         ));
     }
     let key = format!("artwork:{}", location.artifact_key);
-    let generation = format!("{}:{}", location.blob_sha256, location.built_at_ms);
+    let generation = format!(
+        "{}:{}:{}",
+        location.blob_sha256, location.built_at_ms, location.verified_at_ms
+    );
     let mut body =
         serde_json::to_value(&input).map_err(|error| StoreError::Task(error.to_string()))?;
     body["artifact_key"] = key.clone().into();
@@ -284,7 +315,7 @@ pub(super) async fn verify_artwork<T: QueueSql>(
     })
     .map_err(|error| StoreError::Task(error.to_string()))?;
     body["output"] = serde_json::json!({"artifact_kind":"verification","artifact_key":key,"node_id":input.token.node_id,"location_generation":generation,"valid":input.valid});
-    // Lease, attempt, reservations, waiter, replay and repair-capacity checks
+    // Lease, attempt, reservations, waiter and replay checks
     // are identical for both artifact types; only the physical locator differs.
     let sql = VERIFY_SQL.replace("/* location predicate */", r#"  AND EXISTS (SELECT 1 FROM background_artwork_locations location WHERE
     location.artifact_key = json_extract(body,'$.location.artifact_key') AND location.node_id = json_extract(body,'$.token.node_id')

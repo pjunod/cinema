@@ -17,7 +17,7 @@ SELECT json_object('needed', 1) AS result_json
 WHERE EXISTS (SELECT 1 FROM background_predictions WHERE (state = 'pending' AND expires_ms <= json_extract($1,'$.now_ms'))
     OR (state <> 'pending' AND updated_at_ms <= json_extract($1,'$.now_ms') - 604800000))
  OR EXISTS (SELECT 1 FROM background_artifact_repairs repair WHERE
-    (phase = 'build' AND json_extract(producer_payload,'$.kind') = 'transcode_prepare' AND NOT EXISTS (SELECT 1 FROM files WHERE id = json_extract(producer_payload,'$.file_id') AND size = json_extract(producer_payload,'$.source_size') AND mtime = json_extract(producer_payload,'$.source_mtime'))) OR
+    (phase NOT IN ('ready','failed') AND json_extract(producer_payload,'$.kind') = 'transcode_prepare' AND NOT EXISTS (SELECT 1 FROM files WHERE id = json_extract(producer_payload,'$.file_id') AND size = json_extract(producer_payload,'$.source_size') AND mtime = json_extract(producer_payload,'$.source_mtime'))) OR
     (phase NOT IN ('ready','failed') AND (expires_ms <= json_extract($1,'$.now_ms')
       OR EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || repair.target_node_id)))
     OR (phase IN ('ready','failed') AND updated_at_ms < json_extract($1,'$.now_ms') - 604800000)

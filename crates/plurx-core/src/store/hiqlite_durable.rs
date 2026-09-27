@@ -18,9 +18,9 @@ use super::{
     TranscodeCacheStore, WatchedOutboxStore,
 };
 use crate::domain::{
-    CacheManifestCheck, CachedTranscode, NewOfflinePackage, OfflineActivityPackage,
-    OfflineCreateOutcome, OfflineLease, OfflineLeaseOutcome, OfflinePackage, OfflinePackageStats,
-    OfflineRemovalPlanEntry, OfflineRemovalReport, TraktAuth, OFFLINE_NODE_REMOVED_CODE,
+    CachedTranscode, NewOfflinePackage, OfflineActivityPackage, OfflineCreateOutcome, OfflineLease,
+    OfflineLeaseOutcome, OfflinePackage, OfflinePackageStats, OfflineRemovalPlanEntry,
+    OfflineRemovalReport, TraktAuth, OFFLINE_NODE_REMOVED_CODE,
 };
 use crate::error::StoreError;
 use crate::secrets::SealedSecret;
@@ -1178,82 +1178,6 @@ impl TranscodeCacheStore for HiqliteAuthStore {
                 .await
                 .map_err(database_error)?,
         ))
-    }
-
-    async fn cache_manifest_candidates(
-        &self,
-        node_id: &str,
-        limit: i64,
-    ) -> Result<Vec<CachedTranscode>, StoreError> {
-        Ok(cached(
-            self.client()
-                .query_consistent_map::<CacheRow, _>(
-                    format!(
-                        "SELECT {CACHE_COLS} FROM transcode_cache_locations l \
-                         JOIN transcode_cache_recipes r ON r.recipe_hash = l.recipe_hash \
-                         WHERE l.node_id = $1 AND l.storage_class = 'local' \
-                           AND l.complete = 1 AND l.manifest_digest IS NOT NULL \
-                         ORDER BY l.last_seen_at ASC, l.rowid ASC LIMIT $2"
-                    ),
-                    params!(node_id, limit),
-                )
-                .await
-                .map_err(database_error)?,
-        ))
-    }
-
-    async fn mark_cache_manifests_checked(
-        &self,
-        checks: &[CacheManifestCheck],
-    ) -> Result<usize, StoreError> {
-        if checks.len() > 128
-            || checks.iter().any(|check| {
-                check.recipe_hash.is_empty()
-                    || check.node_id.is_empty()
-                    || check.storage_class.is_empty()
-                    || check.relative_dir.is_empty()
-                    || check.manifest_digest.len() != 64
-                    || check.next_object_index < 0
-                    || check.observed_at < 0
-            })
-        {
-            return Err(StoreError::Task(
-                "invalid cache manifest cursor batch".to_owned(),
-            ));
-        }
-        if checks.is_empty() {
-            return Ok(0);
-        }
-        let sql = "UPDATE transcode_cache_locations
-                    SET last_seen_at = MAX(last_seen_at, $1), scrub_object_index = $2
-                   WHERE recipe_hash = $3 AND node_id = $4 AND storage_class = $5
-                     AND relative_dir = $6 AND manifest_digest = $7 AND complete = 1";
-        validate_sql(sql)?;
-        let statements = checks
-            .iter()
-            .map(|check| {
-                (
-                    sql.to_owned(),
-                    params!(
-                        check.observed_at,
-                        check.next_object_index,
-                        &check.recipe_hash,
-                        &check.node_id,
-                        &check.storage_class,
-                        &check.relative_dir,
-                        &check.manifest_digest
-                    ),
-                )
-            })
-            .collect::<Vec<_>>();
-        let results = self
-            .client()
-            .txn(statements)
-            .await?
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(database_error)?;
-        Ok(results.into_iter().sum())
     }
 
     async fn stale_cache_claims(

@@ -49,15 +49,15 @@ use plurx_core::cluster::migration::{
 use plurx_core::config::Config;
 use plurx_core::domain::{
     scopes, ArtworkAttempt, BookMetadataPatch, BookMetadataSource, CacheConsumerKind,
-    CacheConsumerPin, CacheManifestCheck, CacheStorageMember, CredentialGeneration,
-    DolbyVisionFacts, ItemEdit, ItemKind, ItemSort, LibraryKind, MediaSessionActivation,
-    MediaSessionActivationSettlement, MediaSessionEnd, MediaSessionProjectionCompletion,
-    MediaSessionRenewal, MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover,
-    MediaSessionTakeoverCursor, MediaSessionTerminalAck, MetadataPatch, NetworkPriorObservation,
-    NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome,
-    OfflineLeaseOutcome, PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements,
-    PretranscodeWorkerCapabilities, ProbeResult, ReadingStateWrite, TraktAuth,
-    MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS, MEDIA_SESSION_PUBLICATION_BLOCKED,
+    CacheConsumerPin, CacheStorageMember, CredentialGeneration, DolbyVisionFacts, ItemEdit,
+    ItemKind, ItemSort, LibraryKind, MediaSessionActivation, MediaSessionActivationSettlement,
+    MediaSessionEnd, MediaSessionProjectionCompletion, MediaSessionRenewal,
+    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaSessionTakeoverCursor,
+    MediaSessionTerminalAck, MetadataPatch, NetworkPriorObservation, NewItem, NewLibrary,
+    NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome, OfflineLeaseOutcome,
+    PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements, PretranscodeWorkerCapabilities,
+    ProbeResult, ReadingStateWrite, TraktAuth, MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
+    MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
 use plurx_core::dvr::{
     DvrInsertOutcome, DvrOrigin, DvrRecording, DvrReminder, DvrReminderState, DvrState,
@@ -483,8 +483,6 @@ const CACHE_METHODS: &[&str] = &[
     "complete_cache_entry",
     "touch_cache_entry",
     "cache_by_age",
-    "cache_manifest_candidates",
-    "mark_cache_manifests_checked",
     "stale_cache_claims",
     "all_cache_rows",
     "cache_ownership_inventory",
@@ -8778,33 +8776,51 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
 
         let wrong_digest = "f".repeat(64);
-        let wrong_check = CacheManifestCheck {
+        let verification_now = queue_time(963);
+        let location = store
+            .transcode_verification_candidates("node-legacy", None)
+            .await
+            .expect("verification candidates")
+            .into_iter()
+            .find(|location| location.recipe_hash == legacy_recipe)
+            .expect("legacy candidate");
+        let token = background_jobs::integrity_verify_claim_on(
+            &store,
+            &format!("transcode:{legacy_recipe}:{adopted_digest}"),
+            verification_now,
+            "node-legacy",
+        )
+        .await;
+        let exact_check = plurx_core::store::background_jobs_integrity::VerifyTranscode {
+            token,
             recipe_hash: legacy_recipe.to_owned(),
-            node_id: "node-legacy".to_owned(),
-            storage_class: "local".to_owned(),
-            relative_dir: "contract/pretranscode/legacy".to_owned(),
-            manifest_digest: wrong_digest.clone(),
-            next_object_index: 8,
-            observed_at: 123,
-        };
-        assert_eq!(
-            store
-                .mark_cache_manifests_checked(std::slice::from_ref(&wrong_check))
-                .await
-                .unwrap_or_else(|error| panic!("{backend}: stale scrub cursor: {error}")),
-            0,
-            "{backend}: stale manifest identity advanced a replacement cursor"
-        );
-        let exact_check = CacheManifestCheck {
+            relative_dir: location.relative_dir,
             manifest_digest: adopted_digest.clone(),
-            ..wrong_check
+            publication_generation: location.publication_generation,
+            valid: true,
+            next_object_index: 8,
+            now_ms: verification_now + 1,
         };
-        assert_eq!(
-            store
-                .mark_cache_manifests_checked(std::slice::from_ref(&exact_check))
-                .await
-                .unwrap_or_else(|error| panic!("{backend}: exact scrub cursor: {error}")),
-            1,
+        let mut wrong_check = exact_check.clone();
+        wrong_check.manifest_digest = wrong_digest.clone();
+        assert!(
+            matches!(
+                store
+                    .verify_transcode_job(wrong_check)
+                    .await
+                    .expect("stale scrub cursor"),
+                plurx_core::store::background_jobs::JobPublishOutcome::LostOwnership
+            ),
+            "{backend}: stale manifest advanced a replacement cursor"
+        );
+        assert!(
+            matches!(
+                store
+                    .verify_transcode_job(exact_check)
+                    .await
+                    .expect("exact scrub cursor"),
+                plurx_core::store::background_jobs::JobPublishOutcome::Published { .. }
+            ),
             "{backend}: exact manifest cursor did not advance"
         );
         assert_eq!(
@@ -9369,7 +9385,7 @@ async fn contract_cache_touch_times(
 
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
+async fn manifest_verification_publication_costs_one_consensus_entry() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let store = open_contract_hiqlite_store(&cluster).await;
@@ -9490,18 +9506,6 @@ async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
             .await
             .expect("complete manifest cursor job"));
     }
-    let checks = fixtures
-        .iter()
-        .map(|(_, recipe, relative, digest)| CacheManifestCheck {
-            recipe_hash: (*recipe).to_owned(),
-            node_id: "manifest-node".to_owned(),
-            storage_class: "local".to_owned(),
-            relative_dir: (*relative).to_owned(),
-            manifest_digest: digest.clone(),
-            next_object_index: 8,
-            observed_at: 123,
-        })
-        .collect::<Vec<_>>();
     let observer = Client::remote(
         cluster.addresses.clone(),
         true,
@@ -9512,19 +9516,48 @@ async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
     )
     .await
     .expect("connect manifest cursor observer");
-    let before = contract_leader_point(&observer).await;
-    assert_eq!(
-        store
-            .mark_cache_manifests_checked(&checks)
+    let store: Arc<dyn Store> = Arc::new(store);
+    for (_, recipe, _, digest) in &fixtures {
+        let location = store
+            .transcode_verification_candidates("manifest-node", None)
             .await
-            .expect("advance manifest cursors"),
-        2
-    );
-    assert_eq!(
-        contract_stable_leader_delta(before, contract_leader_point(&observer).await),
-        1,
-        "one scrub page must be one consensus transaction"
-    );
+            .expect("candidates")
+            .into_iter()
+            .find(|location| location.recipe_hash == *recipe)
+            .expect("candidate");
+        let token = background_jobs::integrity_verify_claim_on(
+            &store,
+            &format!("transcode:{recipe}:{digest}"),
+            queue_clock,
+            "manifest-node",
+        )
+        .await;
+        let before = contract_leader_point(&observer).await;
+        let result = store
+            .verify_transcode_job(
+                plurx_core::store::background_jobs_integrity::VerifyTranscode {
+                    token,
+                    recipe_hash: (*recipe).to_owned(),
+                    manifest_digest: digest.clone(),
+                    relative_dir: location.relative_dir,
+                    publication_generation: location.publication_generation,
+                    valid: true,
+                    next_object_index: 8,
+                    now_ms: queue_clock + 1,
+                },
+            )
+            .await
+            .expect("publish verification");
+        assert!(matches!(
+            result,
+            plurx_core::store::background_jobs::JobPublishOutcome::Published { .. }
+        ));
+        assert_eq!(
+            contract_stable_leader_delta(before, contract_leader_point(&observer).await),
+            1,
+            "one verification publication must be one consensus transaction"
+        );
+    }
     for (_, recipe, _, _) in fixtures {
         assert_eq!(
             store
@@ -17585,7 +17618,8 @@ fn contract_inventory_matches_every_store_method() {
     // Three library admission/query/completion operations preserve each caller.
     // +2: replicated root-domain observation and atomic replacement.
     // E1 adds a bounded named-settings snapshot for playback preferences.
-    assert_eq!(declared.len(), 447, "review the Store method count");
+    // E2 removes two unfenced legacy scrub methods.
+    assert_eq!(declared.len(), 445, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

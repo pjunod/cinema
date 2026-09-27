@@ -4208,6 +4208,32 @@ and lease loss prevent later publication; incomplete work restarts under a new
 claim. SQLite 76 / replicated 54 invalidate old subtitle owners during the
 maintenance cutover; queued requests are drained through the bounded outbox.
 
+Semantic search keeps its existing enable preference. Enabled nodes reuse
+verified embedding artifacts instead of recomputing unchanged item text. The
+identity includes model weights, tokenizer, dimensions and normalization;
+source changes cannot publish into an older item generation. Maintenance
+re-probes submit bounded pages of leaf work to the queue. The scan coordinator
+retains matching, catalogue identity, deletion decisions and completion.
+
+Scheduled transcode and artwork verification runs through the same physical
+admission and ownership rules as preparation. It yields to playback, checks
+bounded byte/object pages, and retires only the observed cache generation.
+Repair attempts verified copies first, then one original typed rebuild and
+one delivery. With no advertised holder, it advances to the original producer
+without charging an impossible copy attempt. Exhaustion, explicit cancellation
+or source replacement stops the plan. Activity lists up to 64 recent plans,
+with destination, phase and a link to the current work; source paths and raw
+producer payloads are omitted. The underlying job's existing Retry action is
+a deliberate new interest, not an automatic restart of the whole repair plan.
+
+SQLite 82 / replicated 60 add repair records and retained producer intent.
+Completed job history may expire without losing the original rebuild identity.
+Verification affects derived artifacts only; it does not rewrite media files.
+Corrupt generation bytes remain subject to existing reader-safe orphan cleanup.
+The repair ledger holds at most 4,096 plans. If it is full, verification still
+retires bad locators and records `repair_capacity` on the verification job;
+ordinary demand can rebuild a later cache miss.
+
 Workers advertise the capabilities the local daemon actually proved at boot.
 A row that needs an unsupported decoder, encoder family, HLS output contract,
 tone-map path, output grade, or scratch budget stays queued instead of failing

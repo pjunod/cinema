@@ -3684,6 +3684,15 @@ async fn integrity_claim(
     kind: JobKind,
     now: i64,
 ) -> JobToken {
+    integrity_claim_on(store, id, kind, now, "node-a").await
+}
+async fn integrity_claim_on(
+    store: &std::sync::Arc<dyn plurx_core::store::Store>,
+    id: &str,
+    kind: JobKind,
+    now: i64,
+    node: &str,
+) -> JobToken {
     let job = store
         .background_job(id)
         .await
@@ -3693,7 +3702,7 @@ async fn integrity_claim(
         .claim_job(ClaimJob {
             job_id: id.into(),
             expected_revision: job.revision,
-            node_id: "node-a".into(),
+            node_id: node.into(),
             boot_id: uuid::Uuid::new_v4().to_string(),
             claim_id: uuid::Uuid::new_v4().to_string(),
             kind,
@@ -3713,13 +3722,22 @@ async fn integrity_verify_claim(
     key: &str,
     now: i64,
 ) -> JobToken {
+    integrity_verify_claim_on(store, key, now, "node-a").await
+}
+
+pub(super) async fn integrity_verify_claim_on(
+    store: &std::sync::Arc<dyn plurx_core::store::Store>,
+    key: &str,
+    now: i64,
+    node: &str,
+) -> JobToken {
     let id = uuid::Uuid::new_v4().to_string();
     store
         .enqueue_job(EnqueueJob {
             id: id.clone(),
             payload: JobPayload::ArtifactVerify {
                 artifact_key: key.into(),
-                target_node_id: "node-a".into(),
+                target_node_id: node.into(),
             },
             dedupe_key: id.clone(),
             priority: 0,
@@ -3738,7 +3756,7 @@ async fn integrity_verify_claim(
         })
         .await
         .expect("admission");
-    integrity_claim(store, &id, JobKind::ArtifactVerify, now).await
+    integrity_claim_on(store, &id, JobKind::ArtifactVerify, now, node).await
 }
 
 #[tokio::test]
@@ -3848,32 +3866,20 @@ async fn background_integrity_repairs_retain_producers_and_stop_after_one_rebuil
             "{backend}: producer survives history"
         );
         assert_eq!(plan.phase, "copy");
-        let EnqueueOutcome::Accepted { job_id: copy, .. } = store
-            .enqueue_artifact_repair(plan.clone(), now + 2)
-            .await
-            .expect("copy")
-        else {
-            panic!("{backend}: copy admission")
-        };
         assert!(matches!(
             store
                 .enqueue_artifact_repair(plan.clone(), now + 2)
                 .await
-                .expect("replay"),
-            EnqueueOutcome::NoDemand | EnqueueOutcome::Existing { .. }
+                .expect("no copy opportunity"),
+            EnqueueOutcome::NoDemand
         ));
-        let token = integrity_claim(&store, &copy, JobKind::ArtifactHydrate, now + 2).await;
-        store
-            .settle_job(SettleJob {
-                token,
-                settlement: JobSettlement::Fail {
-                    error_code: "no_valid_peer".into(),
-                },
-                now_ms: now + 3,
-            })
-            .await
-            .expect("copy exhausted");
-        store.maintain_jobs(now + 4).await.expect("advance");
+        assert!(matches!(
+            store
+                .enqueue_artifact_repair(plan.clone(), now + 2)
+                .await
+                .expect("stale replay"),
+            EnqueueOutcome::NoDemand
+        ));
         plan = store.artifact_repairs(true).await.expect("build").remove(0);
         assert_eq!(plan.phase, "build");
         let EnqueueOutcome::Accepted { job_id: build, .. } = store
@@ -3963,6 +3969,48 @@ async fn background_artwork_verification_repairs_copy_then_rebuild_then_deliver(
             })
             .await
             .expect("original");
+        // Retain one advertised peer. The copy phase below models that peer
+        // failing actual byte verification, so exactly one rebuild may follow.
+        let peer_id = uuid::Uuid::new_v4().to_string();
+        store
+            .enqueue_job(EnqueueJob {
+                id: peer_id.clone(),
+                payload: JobPayload::ArtifactHydrate {
+                    artifact_key: format!("artwork:{key}"),
+                    target_node_id: "node-b".into(),
+                },
+                dedupe_key: peer_id.clone(),
+                priority: 0,
+                not_before_ms: 1001,
+                now_ms: 1001,
+                request: JobRequest {
+                    scope: "integrity-peer".into(),
+                    request_id: peer_id.clone(),
+                    request_digest: "a".repeat(64),
+                    consumer_kind: "artifact_copy".into(),
+                    consumer_ref: peer_id.clone(),
+                    target_node_id: None,
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .expect("peer copy");
+        let token =
+            integrity_claim_on(&store, &peer_id, JobKind::ArtifactHydrate, 1001, "node-b").await;
+        let mut peer_location = location.clone();
+        peer_location.node_id = "node-b".into();
+        assert!(matches!(
+            store
+                .publish_artwork_job(PublishArtworkJob {
+                    token,
+                    location: peer_location,
+                    now_ms: 1001
+                })
+                .await
+                .expect("peer holder"),
+            JobPublishOutcome::Published { .. }
+        ));
         let token = integrity_verify_claim(&store, &format!("artwork:{key}"), 1002).await;
         let observation = VerifyArtwork {
             token,
@@ -3994,7 +4042,8 @@ async fn background_artwork_verification_repairs_copy_then_rebuild_then_deliver(
             .artwork_locations(&key, 1004)
             .await
             .expect("retired bad holder")
-            .is_empty());
+            .iter()
+            .all(|holder| holder.node_id != "node-a"));
         for (now, phase, kind) in [
             (1004, "copy", JobKind::ArtifactHydrate),
             (1008, "build", JobKind::ArtworkDerivative),
@@ -4022,9 +4071,6 @@ async fn background_artwork_verification_repairs_copy_then_rebuild_then_deliver(
                     .await
                     .expect("copy failed");
             } else {
-                if phase == "build" {
-                    location.built_at_ms = now + 1;
-                }
                 location.verified_at_ms = now + 1;
                 assert!(matches!(
                     store
@@ -4055,7 +4101,7 @@ async fn background_artwork_verification_repairs_copy_then_rebuild_then_deliver(
                 .await
                 .expect("restored")
                 .len(),
-            1
+            2
         );
     })
     .await;

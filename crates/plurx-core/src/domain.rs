@@ -895,23 +895,6 @@ pub struct CacheOwnershipInventory {
     pub complete: bool,
 }
 
-/// One exact generation cursor advance after a bounded integrity-scrub page.
-/// Backends apply a page of these in one transaction so routine maintenance
-/// costs one consensus write rather than one write per cache location.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CacheManifestCheck {
-    pub recipe_hash: String,
-    pub node_id: String,
-    pub storage_class: String,
-    pub relative_dir: String,
-    pub manifest_digest: String,
-    pub next_object_index: i64,
-    /// Descriptor-bound presence observation. A location that performed deep
-    /// verification is placed one second later than presence-only peers so
-    /// oldest-first pages durably rotate the deep-I/O starting point.
-    pub observed_at: i64,
-}
-
 /// One immutable candidate inserted by the cluster-wide speculative scheduler.
 ///
 /// The source snapshot is part of the row rather than looked up when a worker

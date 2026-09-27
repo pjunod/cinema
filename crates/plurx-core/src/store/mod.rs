@@ -938,9 +938,9 @@ use async_trait::async_trait;
 
 use crate::cluster::coordination::{Lease, LeaseClaim};
 use crate::domain::{
-    BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheManifestCheck, CacheStorageMember,
-    CachedTranscode, DolbyVisionFacts, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind,
-    ItemPage, ItemSort, Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome,
+    BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheStorageMember, CachedTranscode,
+    DolbyVisionFacts, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind, ItemPage,
+    ItemSort, Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome,
     MediaSessionActivationSettlement, MediaSessionProjectionCompletion, MediaSessionRenewal,
     MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch,
     NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
@@ -3650,24 +3650,6 @@ pub trait TranscodeCacheStore: Send + Sync + 'static {
         node_id: &str,
         limit: i64,
     ) -> Result<Vec<CachedTranscode>, StoreError>;
-
-    /// Bounded set of manifest-fenced local generations for background
-    /// integrity scrubbing. Unlike the eviction view this includes pinned
-    /// offline locations: pinning protects valid bytes from LRU, not corrupt
-    /// bytes from invalidation.
-    async fn cache_manifest_candidates(
-        &self,
-        node_id: &str,
-        limit: i64,
-    ) -> Result<Vec<CachedTranscode>, StoreError>;
-
-    /// Advance the scrub cursor only if the checked immutable publication is
-    /// still current. Reusing `last_seen_at` rotates a bounded oldest-first
-    /// scan without changing the playback LRU clock.
-    async fn mark_cache_manifests_checked(
-        &self,
-        checks: &[CacheManifestCheck],
-    ) -> Result<usize, StoreError>;
 
     /// Claims older than `older_than_unix` that never completed — a producer
     /// that died. Their directories are garbage and their rows are lies.

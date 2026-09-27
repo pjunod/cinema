@@ -64,6 +64,7 @@ BEGIN
           AND manifest_digest = json_extract(NEW.request_json,'$.manifest_digest')),
         'copy',json_extract(NEW.request_json,'$.now_ms'),json_extract(NEW.request_json,'$.now_ms'),json_extract(NEW.request_json,'$.now_ms') + 604800000
     WHERE json_extract(NEW.result_json,'$.outcome') = 'published' AND json_extract(NEW.request_json,'$.valid') = 0
+      AND (SELECT COUNT(*) FROM background_artifact_repairs) < 4096
     ON CONFLICT(original_key,target_node_id,location_generation) DO NOTHING;
     UPDATE offline_packages SET state = 'failed',phase = 'integrity',error_code = 'cache_integrity',
         error_message = 'Prepared media failed its generation integrity check.',updated_at = json_extract(NEW.request_json,'$.now_ms') / 1000
@@ -91,6 +92,10 @@ BEGIN
       AND publication_generation = json_extract(NEW.request_json,'$.publication_generation')
       AND json_extract(NEW.result_json,'$.outcome') = 'published' AND json_extract(NEW.request_json,'$.valid') = 1;
     UPDATE background_jobs SET state = 'succeeded',result_ref = json_extract(NEW.result_json,'$.result_ref'),
+        last_error_code = CASE WHEN json_extract(NEW.request_json,'$.valid') = 0 AND NOT EXISTS (
+            SELECT 1 FROM background_artifact_repairs WHERE original_key = json_extract(NEW.request_json,'$.artifact_key')
+              AND target_node_id = json_extract(NEW.request_json,'$.token.node_id')
+              AND location_generation = json_extract(NEW.request_json,'$.location_generation')) THEN 'repair_capacity' ELSE NULL END,
         owner_node_id = NULL,owner_boot_id = NULL,claim_id = NULL,lease_expires_ms = NULL,
         revision = revision + 1,updated_at_ms = json_extract(NEW.request_json,'$.now_ms')
     WHERE id = json_extract(NEW.result_json,'$.job_id') AND json_extract(NEW.result_json,'$.outcome') = 'published';
@@ -125,7 +130,7 @@ BEGIN
             FROM background_job_waiters waiter WHERE waiter.request_scope = 'artifact-repair' AND waiter.request_id = background_artifact_repairs.id || ':build')
           ELSE artifact_key END,
         phase = CASE
-          WHEN expires_ms <= json_extract(NEW.request_json,'$.now_ms') OR EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || target_node_id) OR (phase = 'build' AND json_extract(producer_payload,'$.kind') = 'transcode_prepare' AND NOT EXISTS (SELECT 1 FROM files WHERE id = json_extract(producer_payload,'$.file_id') AND size = json_extract(producer_payload,'$.source_size') AND mtime = json_extract(producer_payload,'$.source_mtime'))) THEN 'failed'
+          WHEN expires_ms <= json_extract(NEW.request_json,'$.now_ms') OR EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || target_node_id) OR (phase NOT IN ('ready','failed') AND json_extract(producer_payload,'$.kind') = 'transcode_prepare' AND NOT EXISTS (SELECT 1 FROM files WHERE id = json_extract(producer_payload,'$.file_id') AND size = json_extract(producer_payload,'$.source_size') AND mtime = json_extract(producer_payload,'$.source_mtime'))) THEN 'failed'
           WHEN (SELECT state FROM background_job_waiters waiter WHERE waiter.request_scope = 'artifact-repair'
             AND waiter.request_id = background_artifact_repairs.id || ':' || CASE background_artifact_repairs.phase WHEN 'copying' THEN 'copy' WHEN 'building' THEN 'build' ELSE 'deliver' END) = 'succeeded'
             THEN CASE phase WHEN 'building' THEN 'deliver' ELSE 'ready' END
@@ -133,7 +138,7 @@ BEGIN
         updated_at_ms = json_extract(NEW.request_json,'$.now_ms')
     WHERE id IN (SELECT id FROM background_artifact_repairs WHERE phase NOT IN ('ready','failed') AND (expires_ms <= json_extract(NEW.request_json,'$.now_ms')
       OR EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || target_node_id)
-      OR (phase = 'build' AND json_extract(producer_payload,'$.kind') = 'transcode_prepare' AND NOT EXISTS (SELECT 1 FROM files WHERE id = json_extract(producer_payload,'$.file_id') AND size = json_extract(producer_payload,'$.source_size') AND mtime = json_extract(producer_payload,'$.source_mtime')))
+      OR (phase NOT IN ('ready','failed') AND json_extract(producer_payload,'$.kind') = 'transcode_prepare' AND NOT EXISTS (SELECT 1 FROM files WHERE id = json_extract(producer_payload,'$.file_id') AND size = json_extract(producer_payload,'$.source_size') AND mtime = json_extract(producer_payload,'$.source_mtime')))
       OR (phase IN ('copying','building','delivering') AND EXISTS (SELECT 1 FROM background_job_waiters waiter
         WHERE waiter.request_scope = 'artifact-repair' AND waiter.request_id = background_artifact_repairs.id || ':' ||
             CASE background_artifact_repairs.phase WHEN 'copying' THEN 'copy' WHEN 'building' THEN 'build' ELSE 'deliver' END
@@ -152,6 +157,7 @@ BEGIN
         json_extract(NEW.request_json,'$.artifact_key'),json_extract(NEW.request_json,'$.producer_payload'),
         'copy',json_extract(NEW.request_json,'$.now_ms'),json_extract(NEW.request_json,'$.now_ms'),json_extract(NEW.request_json,'$.now_ms') + 604800000
     WHERE json_extract(NEW.result_json,'$.outcome') = 'published' AND json_extract(NEW.request_json,'$.valid') = 0
+      AND (SELECT COUNT(*) FROM background_artifact_repairs) < 4096
     ON CONFLICT(original_key,target_node_id,location_generation) DO NOTHING;
     DELETE FROM background_artwork_locations WHERE artifact_key = json_extract(NEW.request_json,'$.location.artifact_key')
       AND node_id = json_extract(NEW.request_json,'$.token.node_id') AND json_extract(NEW.result_json,'$.outcome') = 'published'
@@ -160,6 +166,10 @@ BEGIN
     WHERE artifact_key = json_extract(NEW.request_json,'$.location.artifact_key') AND node_id = json_extract(NEW.request_json,'$.token.node_id')
       AND json_extract(NEW.result_json,'$.outcome') = 'published' AND json_extract(NEW.request_json,'$.valid') = 1;
     UPDATE background_jobs SET state = 'succeeded',result_ref = json_extract(NEW.result_json,'$.result_ref'),
+        last_error_code = CASE WHEN json_extract(NEW.request_json,'$.valid') = 0 AND NOT EXISTS (
+            SELECT 1 FROM background_artifact_repairs WHERE original_key = json_extract(NEW.request_json,'$.artifact_key')
+              AND target_node_id = json_extract(NEW.request_json,'$.token.node_id')
+              AND location_generation = json_extract(NEW.request_json,'$.location_generation')) THEN 'repair_capacity' ELSE NULL END,
         owner_node_id = NULL,owner_boot_id = NULL,claim_id = NULL,lease_expires_ms = NULL,
         revision = revision + 1,updated_at_ms = json_extract(NEW.request_json,'$.now_ms')
     WHERE id = json_extract(NEW.result_json,'$.job_id') AND json_extract(NEW.result_json,'$.outcome') = 'published';
@@ -170,3 +180,14 @@ BEGIN
 END;
 -- next statement
 CREATE INDEX IF NOT EXISTS background_verification_locator ON background_jobs(kind,target_node_id,json_extract(payload_json,'$.artifact_key'),updated_at_ms);
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_artifact_repair_stopped
+AFTER UPDATE OF phase ON background_artifact_repairs WHEN NEW.phase = 'failed' AND OLD.phase IN ('copying','building','delivering')
+BEGIN
+    INSERT INTO background_job_commands(id,operation,request_json,result_json)
+    SELECT 'repair-stop:' || NEW.id,'cancel_waiter',json_object('scope',waiter.request_scope,'request_id',waiter.request_id,'now_ms',NEW.updated_at_ms),
+      json_object('job_id',waiter.job_id,'cancelled',json('true'))
+    FROM background_job_waiters waiter WHERE waiter.request_scope = 'artifact-repair'
+      AND waiter.request_id = NEW.id || ':' || CASE OLD.phase WHEN 'copying' THEN 'copy' WHEN 'building' THEN 'build' ELSE 'deliver' END
+      AND waiter.state IN ('pending','awaiting_hydration');
+END;
