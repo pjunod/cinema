@@ -4455,6 +4455,10 @@ mod tests {
                 // derivatives, so a stale answer costs disk until the next
                 // pass and can never delete a live grid cache.
                 "sweep_derived_orphans:store.items_with_artwork",
+                // Retention authority for durable artwork: keep advertised
+                // holders and in-flight attempt directories during cache GC.
+                "sweep_derived_orphans:store.artwork_locations",
+                "sweep_derived_orphans:store.background_job",
                 "materialize_once:store.items_with_artwork_page",
             ],
         );
@@ -9340,6 +9344,7 @@ mod tests {
             ids,
             vec![
                 "durable_cluster_work",
+                "bounded_catalogue_reads",
                 "cluster_backup",
                 "windows_server",
                 // D-01 adds the Android TV display-mode card. Its one row is
@@ -9476,7 +9481,8 @@ mod tests {
                 "source_fencing",
                 "sources_match_their_scan_whole",
                 "stored_source_producer",
-                "tuner_reserve"
+                "tuner_reserve",
+                "watch_floor"
             ]
         );
         // Order-independent because no row reachable here has a `met` branch a
