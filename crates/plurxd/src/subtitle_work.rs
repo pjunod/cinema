@@ -52,6 +52,20 @@ impl JobManager {
                             }
                             match self.store.enqueue_subtitle_job(request, clock_ms()).await {
                                 Ok(EnqueueOutcome::QueueFull) => break,
+                                Ok(
+                                    EnqueueOutcome::RequestFenced
+                                    | EnqueueOutcome::SourceChanged
+                                    | EnqueueOutcome::NoDemand
+                                    | EnqueueOutcome::DomainTerminal
+                                    | EnqueueOutcome::Conflict,
+                                ) => {
+                                    // Immutable intent no longer matches a claimable source.
+                                    // Retire it so a full page of stale rows cannot starve demand.
+                                    let _ = self
+                                        .store
+                                        .cancel_analysis_request_admin(&id, clock_ms())
+                                        .await;
+                                }
                                 Ok(_) => {}
                                 Err(error) => {
                                     tracing::debug!(%error, request_id = %id, "subtitle outbox entry deferred")

@@ -33,7 +33,7 @@ pub fn validate(mappings: &[StorageDomainMapping]) -> Result<(), StoreError> {
 }
 
 pub(super) async fn list<T: QueueSql>(store: &T) -> Result<Vec<StorageDomainMapping>, StoreError> {
-    store.queue_sql("SELECT json_object('library_id', library_id, 'root_path', root_path, 'domain_id', domain_id) AS result_json FROM background_storage_domains ORDER BY library_id, root_path".into(), "{}".into(), false, true).await?
+    store.queue_sql("SELECT json_object('library_id', library_id, 'root_path', root_path, 'domain_id', domain_id) AS result_json FROM background_storage_domains ORDER BY library_id, root_path LIMIT json_extract($1, '$.limit')".into(), "{\"limit\":256}".into(), false, true).await?
         .iter().map(|row| decode(row)).collect()
 }
 

@@ -1124,9 +1124,9 @@ async fn background_jobs_v70_backup_import_seals_legacy_work() {
                 "acceptable_encoder_families":["software"],"output_contract":"hls-v1","tone_map":false,
                 "output_grade":"sdr","scratch_bytes":1024}).to_string()]).expect("accepted legacy work");
         connection.execute("INSERT INTO analysis_requests
-            (request_id, file_id, source_size, source_mtime, component, pipeline_version,
+            (request_id, file_id, source_size, source_mtime, component, pipeline_version, force_rebuild, target_node_id,
              state, owner_node_id, lease_expires_ms, fence, attempts, not_before_ms, created_at_ms, updated_at_ms)
-            SELECT 'legacy-running-subtitle', id, size, mtime, 'subtitle_source', 'subtitle-source-v1',
+            SELECT 'legacy-running-subtitle', id, size, mtime, 'subtitle_source', 'subtitle-source-v1', 0, '',
              'running', 'dead-owner', 999999, 7, 2, 0, 1, 1 FROM files ORDER BY id LIMIT 1", [])
             .expect("legacy running subtitle");
         connection
@@ -1152,22 +1152,6 @@ async fn background_jobs_v70_backup_import_seals_legacy_work() {
     assert!(recovered.owner_node_id.is_empty());
     assert_eq!(recovered.fence, 8);
     assert_eq!(recovered.attempts, 2);
-    let EnqueueOutcome::Accepted { job_id, .. } = store
-        .enqueue_subtitle_job(recovered, 1000)
-        .await
-        .expect("recovered admission")
-    else {
-        panic!("legacy subtitle must be admitted");
-    };
-    assert_eq!(
-        store
-            .background_job(&job_id)
-            .await
-            .expect("common job")
-            .expect("job")
-            .failed_attempts,
-        2
-    );
 
     assert!(report
         .tables
@@ -1191,6 +1175,22 @@ async fn background_jobs_v70_backup_import_seals_legacy_work() {
             .expect("progress")
             .materialized
             > 0
+    );
+    let admitted = store
+        .enqueue_subtitle_job(recovered, 1000)
+        .await
+        .expect("recovered admission");
+    let EnqueueOutcome::Accepted { job_id, .. } = admitted else {
+        panic!("legacy subtitle must be admitted: {admitted:?}");
+    };
+    assert_eq!(
+        store
+            .background_job(&job_id)
+            .await
+            .expect("common job")
+            .expect("job")
+            .failed_attempts,
+        2
     );
 }
 
@@ -1376,7 +1376,7 @@ async fn background_library_publication_requires_both_live_owners() {
                     .expect("domain revision advanced");
                 store
                     .cancel_job(CancelJob {
-                        job_id: id,
+                        job_id: id.clone(),
                         now_ms: now + 1,
                     })
                     .await
@@ -1400,6 +1400,7 @@ async fn background_library_publication_requires_both_live_owners() {
             }
             // Release expired reservations between scenarios without rewriting
             // or removing the binding: retirement must not restore authority.
+            store.cancel_job(CancelJob { job_id: id, now_ms: now + 120_000 }).await.expect("retire scenario owner");
             store.maintain_jobs(now + 120_000).await.expect("upkeep");
         }
     })

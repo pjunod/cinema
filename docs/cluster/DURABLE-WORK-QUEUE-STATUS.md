@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 merged; E0 review fixes implemented; validation pending · **Updated:** 2026-09-26 ·
+**Status:** M1–M3 merged; E0 review fixes implemented; focused queue validation passed · **Updated:** 2026-09-26 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` ·
 **Base:** `0386c78ec` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/564)
 
@@ -17,7 +17,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | M1 durable queue and pre-transcode | Implemented; focused validation passed | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; local exact-recipe offline joining and scheduling implemented; lost-reply and process-expiry regressions written; cross-node transcode convergence belongs to E1 |
 | M2 fragment analysis and hydration | Implemented; focused validation passed | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
 | M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
-| E0 subtitle and library workers | Adapters implemented; construction checks passed | Library work, storage/provider budgets, learner authority and all-track subtitle extraction are connected. Integrated current main; PR #564 received five findings; fixes and regressions are implemented. Compiler and fast lane evidence pending |
+| E0 subtitle and library workers | Adapters implemented; construction checks passed | Library work, storage/provider budgets, learner authority and all-track subtitle extraction are connected. Integrated current main; PR #564 received five findings; fixes and regressions are implemented. 17 queue contracts and nine cancellation regressions passed; CI pending |
 | E1 reads, caches, prediction, artwork | Planned | Reconcile newly landed K-04 replica reads |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
@@ -558,7 +558,8 @@ The failing replicated test is being rerun before the main fast lane starts.
 ## E0 adversarial review and corrections
 
 The single review of `1f378c4a1` against `0386c78ec` requested five changes.
-All are corrected in the candidate; validation is pending.
+All are corrected in the candidate. Post-review queue validation passed on
+SQLite and three-voter Hiqlite; the required CI fast lane remains pending.
 
 1. Library success now uses the permitted `succeeded` waiter state; the
    existing durable-result projection and regression use the same state.
@@ -578,3 +579,19 @@ All are corrected in the candidate; validation is pending.
 No second review is planned. Run the focused regressions with replicated-store
 coverage and the required fast lane, address failures, then merge #564 and
 continue E1–E3.
+
+- 2026-09-26: committed the five review corrections as `078bac0cc`; normal
+  catalog, formatting, all-target Clippy and JavaScript checks passed. Ran
+  `cargo test -p plurx-core --features hiqlite-contract-tests --test
+  store_contract background_ -- --test-threads=1`: 14 passed, three failed.
+  Fixed a missing SQL parameter in storage-domain listing and two fixture
+  setup/cleanup defects, then reran each failing contract: all three passed.
+  The old-backup test also proves that normal admissions resume after the
+  existing finite legacy import. Documentation and process-ownership inventory
+  checks passed (11 tests). This is focused evidence, not a green CI claim.
+
+- 2026-09-26: `cargo test -p plurx-core --features hiqlite-store --lib
+  cancellation -- --nocapture` passed all nine selected regressions, including
+  audiobook child kill/reap and the sparse scanner join (0.39 s execution).
+  The subtitle outbox now also retires permanently fenced/source-invalid
+  entries, so stale pages cannot block later work. Required PR fast lane next.

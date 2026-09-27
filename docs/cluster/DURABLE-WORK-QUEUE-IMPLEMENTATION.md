@@ -1161,7 +1161,7 @@ not authorize a production restart or rolling mixed-queue cutover.
 | M2 fragment build + hydration | merged | PR #532 | Shared build, hydration, retry ledgers and cutover validated |
 | M3 operations + recovery | merged | PR #532 | Activity, Developer controls, recovery and migration validated |
 | Core promotion/deployment | main merged; production unchanged | `b4b488556` | Required gates passed on reviewed candidate; no deployment authorized |
-| E0 preparation + maintenance adapters | in progress | `codex/cluster-work-adapters` | Library dispatch, storage/provider budgets and learner execution committed; common subtitle adapter in construction |
+| E0 preparation + maintenance adapters | implemented; final validation | PR #564 | One adversarial review, five fixes; 17 queue contracts passed across SQLite/Hiqlite; fast lane pending |
 | E1 reads + cache preparation | not started | — | — |
 | E2 embeddings + batch analysis | not started | — | — |
 | E3 placement + shared ingest | not started | — | — |
