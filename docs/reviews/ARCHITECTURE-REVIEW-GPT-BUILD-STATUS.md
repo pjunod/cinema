@@ -1,6 +1,8 @@
 # Architecture review GPT build — execution status
 
-**Status:** open — current `main` is `d4fa763c79aedaa5982ef7a22c063c123a6d18d9`; the four-node/device rollout and first-hour collector below are pinned to earlier `0386c78ecd16` and are now historical. A-04 correction is unmerged; its D3 qualification and a new exact-main rollout remain owed. · **Updated:** 2026-09-27 02:00 UTC · **Main:** `d4fa763c79aedaa5982ef7a22c063c123a6d18d9`
+**Status:** open — Forgejo `main` is `24a268339b6fd89c203a719034308363cec5b287`; serial four-node rollout is in progress. The clean `1d70a1fed` first hour is historical. Signed Apple Release188 and Android Release131 client sources are unchanged; A-04 candidate `eede4a6ab` is unmerged and needs fresh two-browser qualification. · **Updated:** 2026-09-27 04:10 UTC · **Main:** `24a268339b6fd89c203a719034308363cec5b287`
+
+**Current checkpoint.** The exact `1d70a1fed` collector produced a 121-sample/node passive hour with no source/HTTP/quorum/health/WAL/EMFILE/gap alerts and one transient three-entry apply lag on nynuc (receipt SHA-256 `33b4b984bbddc433023ff75519acb0ef09cf221770bf60a66cf3792745873936`). It stopped before the first `24a268339` voter transition (closure receipt SHA-256 `3cb6b127c66f6530f38424db7cd4df514a1dfcc46f5a46093ee29b066d2576ae`). The new 24-hour/seven-day windows require a new uniform rollout. The unmerged A-04 Chrome candidate passed two strict cliffs on its prior base, but Firefox profile startup prevented playback and the branch must be requalified on current main. L-03 caption-positive rendering/M2 offer, W-02 official/TV input, and locked-device client acceptance remain open. Live evidence and current deployment progress are in the external status note `/private/tmp/codex-fleet-final-status-20260927.md`.
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
 canonical plan ledger. This page shows the assigned build as one operating
