@@ -86,6 +86,16 @@ impl ApiError {
         }
     }
 
+    /// The machine-readable `code` a typed error carries, if it is one.
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            ApiError::Typed { code, .. }
+            | ApiError::TypedRetry { code, .. }
+            | ApiError::TypedDetail { code, .. } => Some(code),
+            _ => None,
+        }
+    }
+
     fn parts(&self) -> (StatusCode, String) {
         match self {
             ApiError::NotFound(what) => (StatusCode::NOT_FOUND, format!("{what} not found")),

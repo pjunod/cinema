@@ -1206,7 +1206,16 @@ pub async fn create(
     super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
     Json(req): Json<CreateSession>,
 ) -> Result<Json<StartResponse>, ApiError> {
-    create_with_purpose(user, state, id, headers, remote, req, None).await
+    let (user_id, start_attempts) = (user.id, Arc::clone(&state.start_attempts));
+    let created = create_with_purpose(user, state, id, headers, remote, req, None).await;
+    // A start request the server refused (C-08 M5 row 4). The method is not
+    // known until the create has decided it, so a refusal with no attempt in
+    // flight is `unknown`. A "not yet" code keeps the attempt open for the
+    // client's retry of this same create to join.
+    if let Err(error) = &created {
+        start_attempts.refused(user_id, id, None, error.code(), std::time::Instant::now());
+    }
+    created
 }
 
 /// The finite-session application service used by Library channels after it

@@ -792,6 +792,8 @@ pub struct AppState {
     /// is real rather than once a decision has been made.
     pub availability: Arc<crate::playstart::AvailabilityCache>,
     pub starts: Arc<crate::playstart::StartNotifier>,
+    /// Finite-playback start attempts and how each ended (C-08 M5 row 4).
+    pub start_attempts: Arc<crate::playstart::StartAttempts>,
     /// Live telemetry for progressive `/stream.mp4` remuxes, which are not
     /// transcode sessions and so have nowhere else to report from.
     pub streams: Arc<crate::progressive::Streams>,
@@ -1138,6 +1140,7 @@ impl AppState {
             storage: Arc::new(tokio::sync::RwLock::new(Default::default())),
             availability: Arc::new(crate::playstart::AvailabilityCache::new()),
             starts: Arc::new(crate::playstart::StartNotifier::new()),
+            start_attempts: Arc::new(crate::playstart::StartAttempts::new()),
             streams: crate::progressive::Streams::new(),
             direct_plays: crate::delivery::DirectPlays::new(),
             watch_ledger: Arc::new(crate::telemetry::WatchLedger::default()),
