@@ -173,6 +173,11 @@ async function withOrigin(bytes, run, { firstResponseDelayMs = 0 } = {}) {
   let requests = 0;
   const origin = http.createServer((request, response) => {
     const reply = () => {
+      if (request.url === "/api/v1/server") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ instance_id: "test-server", build: "test" }));
+        return;
+      }
       response.writeHead(200, { "content-type": "application/octet-stream" });
       response.end(Buffer.alloc(request.url === "/healthz" ? 1 : bytes, 0x61));
     };
@@ -404,6 +409,26 @@ test("device-run passes an explicitly requested manual quality height", async ()
       assert.ok(heightFlag > 0);
       assert.equal(launches[0][heightFlag + 1], "480");
     });
+  });
+});
+
+test("device-run refuses a dead proxy API before launching the physical app", async () => {
+  await withTempDir(async (directory) => {
+    const launches = [];
+    await assert.rejects(lab.deviceRunCommand({
+      device: "physical-device-17",
+      target: "http://127.0.0.1:1",
+      public_host: "127.0.0.1",
+      file_id: "42",
+      network_profile: "8mbps-to-1mbps",
+      json: path.join(directory, "unreachable.json"),
+    }, {
+      createShaper: (profile, target, options) => new lab.ShapingProxy(profile, target, {
+        ...options, listenHost: "127.0.0.1",
+      }),
+      launchDevice: (args) => launches.push(args),
+    }), /device proxy API preflight/);
+    assert.deepEqual(launches, []);
   });
 });
 

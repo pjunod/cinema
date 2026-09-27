@@ -276,6 +276,7 @@ test("Activity detail request guard executes one current request and releases", 
      const ACTIVITY_DVR={rows:[],next:null,loaded:false,error:null};
      const DVR_PAGE={pendingId:null,selectedId:null,closedByUser:false};
      function dvrSetOverview(){} function loadDvrRecent(){} function selectDvrDetail(){}
+     function refreshDurableActivity(){}
      const matchMedia=()=>({matches:false});
      ${shippedSource("renderActivityBody")};
      return {renderActivityBody,busy:()=>ACTIVITY_DETAIL_BUSY,
