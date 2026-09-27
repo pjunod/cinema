@@ -88,21 +88,8 @@ impl Shared {
     }
 
     pub(super) async fn terminal_route_durably_non_live(&self, session_id: &str) -> bool {
-        #[cfg(test)]
-        if let Some(outcome) = self
-            .terminal_route_test_outcomes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(session_id)
-            .copied()
-        {
-            // Timeout and Store error are both fail-closed retention outcomes;
-            // the distinct variants exist so the regression inventory proves
-            // both paths without depending on SQLite scheduler timing.
-            return match outcome {
-                TerminalRouteTestOutcome::Success => true,
-                TerminalRouteTestOutcome::Timeout | TerminalRouteTestOutcome::Error => false,
-            };
+        if let Some(durably_non_live) = self.hooks.get().terminal_route_outcome(session_id) {
+            return durably_non_live;
         }
         tokio::time::timeout(
             TERMINAL_ROUTE_CONFIRM_TIMEOUT,
@@ -429,18 +416,7 @@ impl Shared {
                 self.working_set.fetch_add(adopted_bytes, Relaxed);
             }
             let _driver = spawn_driver(Arc::clone(self), Arc::clone(&rendition));
-        }
-        #[cfg(test)]
-        if installed {
-            let pause = self
-                .rendition_install_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let Some(pause) = pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
+            self.hooks.get().after_rendition_installed().await;
         }
         // From this point cancellation leaves a registered, correctly
         // accounted dormant rendition. Admission may be retried by its driver
@@ -891,17 +867,7 @@ impl Shared {
         let shared = Arc::clone(self);
         let settlement = tokio::spawn(async move {
             let _build_guard = build_guard;
-            #[cfg(test)]
-            let pause = shared
-                .dormant_purge_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            #[cfg(test)]
-            if let Some(pause) = pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
+            shared.hooks.get().after_dormant_purge_removed().await;
             let _ = perform_driver_step(
                 &shared,
                 &rendition,

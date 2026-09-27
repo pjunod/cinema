@@ -851,6 +851,10 @@ fn seam_census_of_the_workspace() {
                     "StartedSessionGuard",
                     "Rendition",
                     "spawn_driver",
+                    "Shared",
+                    "VodServe::control_with_terminal",
+                    "VodServe::spawn_terminal_cleanup",
+                    "VodServe::blocked_wait",
                 ]
                 .iter()
                 .any(|owner| site.owner == *owner || site.owner.starts_with(&format!("{owner}::")))

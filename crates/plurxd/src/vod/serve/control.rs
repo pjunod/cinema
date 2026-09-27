@@ -110,18 +110,7 @@ impl VodServe {
             }
         };
         if let Some((result, cleanup)) = terminal_replay {
-            #[cfg(test)]
-            let terminal_replay_pause = self
-                .shared
-                .terminal_replay_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            #[cfg(test)]
-            if let Some(pause) = terminal_replay_pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
+            self.shared.hooks.get().before_terminal_replay_join().await;
             cleanup.wait().await;
             if let Some(commit) = &result.terminal_commit {
                 // Reader detach is the visibility fence for VOD End. Every
@@ -380,18 +369,7 @@ impl VodServe {
             Ok(outcome) => outcome,
             Err(error) => return Some(Err(error)),
         };
-        #[cfg(test)]
-        let control_applied_pause = self
-            .shared
-            .control_applied_pause
-            .lock()
-            .expect("control pause lock")
-            .clone();
-        #[cfg(test)]
-        if let Some(pause) = control_applied_pause {
-            pause.wait().await;
-            pause.wait().await;
-        }
+        self.shared.hooks.get().after_control_applied().await;
         let (
             disposition,
             accepted_sequence,

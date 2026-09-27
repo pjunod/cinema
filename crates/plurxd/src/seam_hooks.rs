@@ -25,6 +25,77 @@ impl std::future::Future for HookReady {
     }
 }
 
+/// The hooks of an owner that tests arm after it is built, through the `Arc`
+/// it shares with its tasks (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8, Decision
+/// D-M8-I).
+///
+/// The slot is in the owner in every build. Production never fills it, so
+/// every point reads the owner's no-op hooks; a test fills it once, with the
+/// owner's test hooks, when it first arms a point. Reading it is one atomic
+/// load. The owners that use it are built by production constructors that
+/// tests call too, and are armed through the registry that holds them, so a
+/// construction-time choice would have to be threaded through every caller.
+pub(crate) struct HookSlot<T: ?Sized + 'static> {
+    installed: std::sync::OnceLock<Box<T>>,
+    noop: &'static T,
+}
+
+impl<T: ?Sized + 'static> HookSlot<T> {
+    /// An empty slot that reads `noop` until a test fills it.
+    pub(crate) const fn new(noop: &'static T) -> Self {
+        Self {
+            installed: std::sync::OnceLock::new(),
+            noop,
+        }
+    }
+
+    /// The installed hooks, or the no-op.
+    pub(crate) fn get(&self) -> &T {
+        self.installed.get().map_or(self.noop, |hooks| &**hooks)
+    }
+
+    /// The installed hooks, installing `hooks()` first if the slot is empty.
+    #[cfg(test)]
+    pub(crate) fn get_or_install(&self, hooks: impl FnOnce() -> Box<T>) -> &T {
+        self.installed.get_or_init(hooks)
+    }
+}
+
+/// One armable pause point of a test hook set: [`PauseSlot::arm`] installs
+/// an [`AsyncPause`], and the next owner to reach the point takes it and
+/// holds there. Later arrivals pass until the point is armed again.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct PauseSlot(std::sync::Mutex<Option<std::sync::Arc<AsyncPause>>>);
+
+#[cfg(test)]
+impl PauseSlot {
+    /// Arm the point with a new pause named `point`, and return it.
+    pub(crate) fn arm(&self, point: &'static str) -> std::sync::Arc<AsyncPause> {
+        let pause = AsyncPause::new(point);
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(std::sync::Arc::clone(&pause));
+        pause
+    }
+
+    /// The owner's side: hold at the armed pause, if any.
+    pub(crate) fn hold(&self) -> HookFuture<'static> {
+        let pause = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        Box::pin(async move {
+            if let Some(pause) = pause {
+                pause.hold().await;
+            }
+        })
+    }
+}
+
 /// How long either side of an [`AsyncPause`] waits for the other before
 /// giving up. Every race test meets its pause within milliseconds; the bound
 /// only decides how long a broken one takes to report.

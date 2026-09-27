@@ -191,12 +191,11 @@
         .await
         .expect("plant adopted identity");
 
-        let install_pause = Arc::new(tokio::sync::Barrier::new(2));
-        *serve
+        let install_pause = serve
             .shared
-            .rendition_install_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&install_pause));
+            .test_hooks()
+            .rendition_installed
+            .arm("vod rendition installed");
         let pending = {
             let shared = Arc::clone(&serve.shared);
             let key = key.clone();
@@ -210,7 +209,7 @@
                     .await
             })
         };
-        install_pause.wait().await;
+        let install_held = install_pause.reached().await;
 
         let installed = serve
             .shared
@@ -235,12 +234,7 @@
             ),
             "attach is cancelled after publication"
         );
-        install_pause.wait().await;
-        *serve
-            .shared
-            .rendition_install_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        install_held.release();
 
         let reused = serve
             .shared
@@ -301,18 +295,17 @@
             .await
             .insert(key.clone(), Arc::clone(&rendition));
 
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *serve
+        let pause = serve
             .shared
-            .dormant_purge_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+            .test_hooks()
+            .dormant_purge
+            .arm("vod dormant purge removed");
         let caller = tokio::spawn({
             let shared = Arc::clone(&serve.shared);
             let key = key.clone();
             async move { shared.purge_if_dormant(&key, Duration::ZERO).await }
         });
-        pause.wait().await;
+        let held = pause.reached().await;
         assert!(!serve.shared.renditions.lock().await.contains_key(&key));
         assert_eq!(
             serve.shared.working_set.load(Relaxed),
@@ -332,7 +325,7 @@
                 .is_err(),
             "same-key rebuild cannot overlap removed rendition settlement"
         );
-        pause.wait().await;
+        held.release();
         wait_until(
             "detached dormant settlement",
             Duration::from_secs(2),
@@ -351,11 +344,6 @@
             .await
             .expect("same-key rebuild authority releases after exact settlement");
         drop(retry);
-        *serve
-            .shared
-            .dormant_purge_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     #[cfg(unix)]
@@ -650,7 +638,8 @@
         {
             let mut outcomes = serve
                 .shared
-                .terminal_route_test_outcomes
+                .test_hooks()
+                .terminal_route_outcomes
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             for session_id in &ended_ids {

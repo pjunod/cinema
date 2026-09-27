@@ -614,13 +614,7 @@
         // Pause the session-owned task at the exact pre-detach point. Status
         // preparation is therefore free to inspect the reader registry before
         // End publishes its cleanup marker.
-        let terminal_detach_pause = Arc::new(tokio::sync::Barrier::new(2));
-        *serve
-            .shared
-            .terminal_detach_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(Arc::clone(&terminal_detach_pause));
+        let terminal_detach_pause = serve.arm_terminal_detach_pause_for_test();
         let pending = {
             let serve = Arc::clone(&serve);
             let session_id = session_id.clone();
@@ -668,7 +662,7 @@
         })
         .await
         .expect("terminal commit publishes session-owned cleanup");
-        terminal_detach_pause.wait().await;
+        let detach_held = terminal_detach_pause.reached().await;
         assert!(!cleanup.is_finished());
         pending.abort();
         let cancellation = match pending.await {
@@ -677,13 +671,11 @@
         };
         assert!(cancellation.is_cancelled());
 
-        let terminal_replay_pause = Arc::new(tokio::sync::Barrier::new(2));
-        *serve
+        let terminal_replay_pause = serve
             .shared
-            .terminal_replay_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(Arc::clone(&terminal_replay_pause));
+            .test_hooks()
+            .terminal_replay
+            .arm("vod terminal replay before the detach fence");
         let replay = {
             let serve = Arc::clone(&serve);
             let session_id = session_id.clone();
@@ -711,14 +703,14 @@
                     .await
             })
         };
-        terminal_replay_pause.wait().await;
+        let replay_held = terminal_replay_pause.reached().await;
         assert!(
             !committer.started.load(Acquire),
             "a replacement waiter at the cleanup fence cannot expose terminal settlement while detach is pinned"
         );
-        terminal_replay_pause.wait().await;
+        replay_held.release();
         assert!(rendition.readers.lock().await.contains_key(&session_id));
-        terminal_detach_pause.wait().await;
+        detach_held.release();
         tokio::time::timeout(Duration::from_secs(1), cleanup.wait())
             .await
             .expect("detached cleanup survives request cancellation");
@@ -898,12 +890,11 @@
         let target = entry_containing(&rendition.plan, 300.0);
         let ledger = Arc::clone(&rendition.readers.lock().await[VIEWER].marker_prewarm);
         ledger.lock().expect("ledger").enabled = true;
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *serve
+        let pause = serve
             .shared
-            .control_applied_pause
-            .lock()
-            .expect("pause lock") = Some(Arc::clone(&pause));
+            .test_hooks()
+            .control_applied
+            .arm("vod control applied");
         let accepted = {
             let serve = Arc::clone(&serve);
             let snapshot = snapshot.clone();
@@ -923,7 +914,7 @@
                     .await
             })
         };
-        pause.wait().await;
+        let held = pause.reached().await;
         assert_eq!(
             rendition.readers.lock().await[VIEWER].frontier,
             target,
@@ -932,11 +923,7 @@
         assert!(!ledger.lock().expect("ledger").enabled, "accepted intent invalidates old speculation even when the later marker update is cancelled");
         accepted.abort();
         let _ = accepted.await;
-        *serve
-            .shared
-            .control_applied_pause
-            .lock()
-            .expect("pause lock") = None;
+        held.release();
         let replay = serve
             .control(crate::playback_control::LocalControlRequest {
                 session_id: VIEWER,
@@ -965,8 +952,16 @@
         let serve = bare_serve(base.path());
         let rendition = synthetic_rendition(base.path()).await;
         rendition.attach_reader("viewer", 3).await;
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *serve.shared.segment_ready_pause.lock().expect("pause lock") = Some(Arc::clone(&pause));
+        let registered = serve
+            .shared
+            .test_hooks()
+            .segment_wait_registered
+            .arm("vod segment wait registered");
+        let ready = serve
+            .shared
+            .test_hooks()
+            .segment_ready
+            .arm("vod segment ready before open");
         let get = {
             let serve = Arc::clone(&serve);
             let rendition = Arc::clone(&rendition);
@@ -982,7 +977,14 @@
                     .await
             })
         };
-        pause.wait().await;
+        registered.reached().await.release();
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !ready.was_reached(),
+            "the ready point follows the wait's answer, not its registration"
+        );
         // Publication follows the production GET's post-registration check;
         // the oneshot remembers Ready even if it precedes the next poll.
         rendition
@@ -996,7 +998,7 @@
             .await
             .expect("publish");
         serve.shared.pool.satisfy(&rendition.key, 45);
-        pause.wait().await;
+        let ready_held = ready.reached().await;
         let windows = eviction_windows(&serve.shared, &rendition).await;
         let mut manifest = rendition.manifest.lock().await;
         rendition
@@ -1006,7 +1008,7 @@
             .expect("pressure sweep");
         assert!(manifest.state(45).expect("target").is_materialized());
         drop(manifest);
-        pause.wait().await;
+        ready_held.release();
         assert_eq!(get.await.expect("GET task").expect("response file").len, 12);
         assert!(serve.shared.pool.retained(&rendition.key).is_empty());
         let windows = eviction_windows(&serve.shared, &rendition).await;
@@ -1020,6 +1022,90 @@
             !manifest.state(45).expect("target").is_materialized(),
             "opening releases the narrow pin; old destinations do not become permanent retention"
         );
+    }
+
+    /// The VOD registry built by the production constructor reads the no-op
+    /// hooks: every pause point is ready at its first poll, the route is read
+    /// from the Store, and a blocked GET crosses both of its points to a
+    /// response.
+    #[tokio::test]
+    async fn vod_shared_shipped_shape() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let hooks = serve.shared.hooks.get();
+        let installed: &dyn std::any::Any = hooks;
+        assert!(
+            installed.is::<NoopVodSharedHooks>(),
+            "the production constructor leaves the registry on the no-op hooks"
+        );
+        let waker = futures_util::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        for (point, mut hook) in [
+            ("before_terminal_replay_join", hooks.before_terminal_replay_join()),
+            ("after_control_applied", hooks.after_control_applied()),
+            ("after_segment_wait_registered", hooks.after_segment_wait_registered()),
+            ("before_segment_ready_open", hooks.before_segment_ready_open()),
+            ("before_terminal_detach", hooks.before_terminal_detach()),
+            ("after_rendition_installed", hooks.after_rendition_installed()),
+            ("after_dormant_purge_removed", hooks.after_dormant_purge_removed()),
+        ] {
+            assert!(
+                hook.as_mut().poll(&mut context).is_ready(),
+                "the production {point} point is ready at its first poll"
+            );
+        }
+        assert_eq!(hooks.terminal_route_outcome("no-route"), None);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                serve.shared.terminal_route_durably_non_live("no-route"),
+            )
+            .await
+            .expect("the route is read from the Store"),
+            "a session with no durable route is not live"
+        );
+
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.attach_reader("viewer", 3).await;
+        let get = {
+            let serve = Arc::clone(&serve);
+            let rendition = Arc::clone(&rendition);
+            tokio::spawn(async move {
+                serve
+                    .serve_segment(
+                        &rendition,
+                        "viewer",
+                        45,
+                        Duration::from_secs(5),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while serve.shared.pool.blocked_on(&rendition.key) != Some(45) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the GET registers its wait");
+        rendition
+            .dir
+            .materialize(
+                &mut *rendition.manifest.lock().await,
+                45,
+                b"target bytes",
+                now_ms(),
+            )
+            .await
+            .expect("publish");
+        serve.shared.pool.satisfy(&rendition.key, 45);
+        let ready = tokio::time::timeout(Duration::from_secs(5), get)
+            .await
+            .expect("the production segment points do not hold the GET")
+            .expect("GET task")
+            .expect("response file");
+        assert_eq!(ready.len, 12);
     }
 
     #[tokio::test]
