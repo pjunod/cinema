@@ -96,21 +96,15 @@ function detachPreparedOverlapListeners(state){
   }
   if(state) state.overlapListeners=null;
 }
-function restorePreparedOverlap(state,successor){
+function restorePreparedOverlap(state){
   if(!state) return;
   detachPreparedOverlapListeners(state);
-  const v=state.incumbentElement, intent=state.overlapIntent;
-  if(state.overlapAudioTransferred){
-    if(successor) successor.muted=true;
-    // A newer mute command on the incumbent belongs to the viewer.
-    if(v&&v.muted&&intent) v.muted=intent.muted;
-  }
+  const v=state.incumbentElement;
   if(v&&state.incumbentStyle){
     v.style.position=state.incumbentStyle.position;
     v.style.inset=state.incumbentStyle.inset;
     v.style.zIndex=state.incumbentStyle.zIndex;
   }
-  state.overlapAudioTransferred=false;
   state.overlapPhase=null;
 }
 
@@ -145,7 +139,7 @@ function rollbackPreparedReplacement(p,state,successor){
   successor.style.display="none";
   successor.muted=true;
   successor.setAttribute("aria-hidden","true");
-  restorePreparedOverlap(state,successor);
+  restorePreparedOverlap(state);
   adoptPlaybackMediaElement(p,retired);
   resetPlaybackTransportEvents(retired);
   if(predecessor.wantsPlayback===false){
@@ -307,7 +301,7 @@ function freePreparedReplacement(p,state){
   p.prepared=null;
   markPreparedSettlement(p,state.actionId);
   const spare=preparedVideoElement();
-  restorePreparedOverlap(state,spare);
+  restorePreparedOverlap(state);
   if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
   if(state.exposeFrameTimer!=null){ clearTimeout(state.exposeFrameTimer); state.exposeFrameTimer=null; }
   if(spare&&state.exposeFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")

@@ -39,8 +39,8 @@ const PREPARED_ALIGN_ATTEMPTS=2;
 // queue. Prove the successor advances monotonically before it takes the
 // picture; the incumbent remains visible while these frames are checked.
 const PREPARED_MONOTONIC_FRAME_STEPS=3;
-// Two four-frame observations (before and after audio transfer) need roughly
-// one third of a second at 24 fps; leave a bounded margin for callback jitter.
+// Four increasing frames need roughly one eighth of a second at 30 fps;
+// leave a bounded margin for callback jitter without holding two audio clocks.
 const PREPARED_FRAME_PROOF_MS=800;
 // A switch that never renders is a failed preparation, and the server is owed
 // that answer rather than a 330-second silence.
@@ -287,7 +287,7 @@ function beginPreparedReplacement(p,action){
     state:"building",hls:null,metadata:false,buffered:false,
     warmFrameReady:false,warmFrameCallbackId:null,
     exposeFrameTimer:null,exposeFrameCallbackId:null,
-    overlapPhase:null,overlapIntent:null,overlapAudioTransferred:false,
+    overlapPhase:null,
     overlapListeners:null,incumbentElement:v,
     incumbentStyle:{position:v.style.position,inset:v.style.inset,zIndex:v.style.zIndex},
     incumbentHls:null,incumbentLoadPaused:false,incumbentResumeTimer:null,
@@ -562,7 +562,7 @@ function commitPreparedReplacement(p,state){
   const drift=Math.abs((spare.currentTime||0)-wanted)*1000;
   // Already on the incumbent's second: nothing to wait for, and the exposure
   // is the same synchronous block it has always been.
-  if(drift<=PREPARED_ALIGN_SLACK_MS) return exposePreparedReplacementAtFrame(p,state,v,spare,filmMs);
+  if(drift<=PREPARED_ALIGN_SLACK_MS) return exposePreparedReplacementAtFrame(p,state,v,spare);
   // Otherwise finish aligning BEFORE the successor is seen or heard. The
   // corrective seek used to be the line above, with nothing between it and the
   // element swap; a seek is asynchronous, so the successor had nothing decoded
@@ -597,7 +597,7 @@ async function alignPreparedReplacement(p,state,v,spare){
       const filmMs=playbackFilmPositionMs(v,p);
       const target=preparedLocalPositionMs(filmMs,state.mediaOriginMs)/1000;
       if(Math.abs((spare.currentTime||0)-target)*1000<=PREPARED_ALIGN_SLACK_MS)
-        return exposePreparedReplacementAtFrame(p,state,v,spare,filmMs);
+        return exposePreparedReplacementAtFrame(p,state,v,spare);
     }
   }
   if(!live()) return false;
@@ -638,20 +638,19 @@ function preparedAlignedBuffered(spare){
   }catch(e){}
   return false;
 }
-// A decoded successor frame while it is nearly transparent proves that Chrome
-// is presenting the prepared layer. Require a few increasing media-time steps
-// after any alignment seek before exposing it: a queued pre-seek frame can
-// otherwise step the visible picture backward just after the switch. A browser
-// that does not render the warm layer keeps the immediate path.
-function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
+// A decoded successor frame under the incumbent proves the prepared layer is
+// presenting. Require increasing media-time steps after any alignment seek:
+// a queued pre-seek frame can otherwise step the visible picture backward.
+// Keep the incumbent's audio with its visible picture through this proof.
+function exposePreparedReplacementAtFrame(p,state,v,spare){
   if(typeof spare.requestVideoFrameCallback!=="function")
-    return exposePreparedReplacement(p,state,v,spare,filmMs);
+    return exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
   if(!state.warmFrameReady){
     failPreparedReplacement(p,state,"occluded successor produced no frame callback");
     return false;
   }
   let settled=false,priorMediaTime=null,advancingSteps=0;
-  let videoCallbacks=0,audioCallbacks=0,badFrames=0,lastFrameAt=null;
+  let videoCallbacks=0,badFrames=0,lastFrameAt=null;
   state.overlapPhase="video";
   const live=()=>PLAYER===p&&preparedState(p)===state
     &&document.getElementById("video")===v&&preparedVideoElement()===spare
@@ -670,7 +669,7 @@ function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
         detail:"proof_ready",
         message:`prepared ${state.sessionId} overlap proof ready at_ms=${Math.round(state.overlapProofReadyAtMs)} `+
           `buffer_elapsed_ms=${Math.round(state.overlapProofReadyAtMs-state.bufferReadyAtMs)} `+
-          `video_callbacks=${videoCallbacks} audio_callbacks=${audioCallbacks}`},playbackContext()));
+          `video_callbacks=${videoCallbacks}`},playbackContext()));
       exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
       return;
     }
@@ -680,63 +679,22 @@ function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
     const buffered=preparedAlignedBuffered(spare);
     const callbackAgeMs=lastFrameAt==null?null:Math.round(performance.now()-lastFrameAt);
     const diagnostic=`phase=${phase} video_callbacks=${videoCallbacks} `+
-      `audio_callbacks=${audioCallbacks} bad_frames=${badFrames} `+
+      `bad_frames=${badFrames} `+
       `last_frame_age_ms=${callbackAgeMs==null?"none":callbackAgeMs} `+
       `drift_ms=${driftMs} ready_state=${spare.readyState} buffered=${buffered}`;
-    // An occluded layer can stop issuing callbacks while its media clock and
-    // buffered decoder remain healthy. The old direct prepared exposure is
-    // safer than destroying that valid successor and restarting the film.
-    // A bad frame, changed viewer intent, or failed play is never excused.
-    const intent=state.overlapIntent;
-    const unchangedIntent=!intent||(v.muted&&v.volume===intent.volume
-      &&v.playbackRate===intent.playbackRate
-      &&(p.wantsPlayback!==false)===intent.wantsPlayback);
-    const direct=reason==="deadline"&&badFrames===0
-      &&(phase==="video"||phase==="audio")&&unchangedIntent
-      &&state.buffered&&state.warmFrameReady&&buffered
-      &&spare.readyState>=3&&!spare.error&&!spare.paused&&!spare.seeking
-      &&!v.paused&&!v.seeking&&driftMs<=PREPARED_ALIGN_SLACK_MS;
-    if(direct){
-      clientLog(Object.assign({level:"info",event:"prepared_replacement",
-        detail:"overlap_timeout_direct",
-        message:`prepared overlap used direct exposure: ${diagnostic}`},playbackContext()));
-      exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
-    }else failPreparedReplacement(p,state,`${reason}: ${diagnostic}`);
+    // A timed-out or misaligned successor has not earned exposure. The
+    // incumbent is still visible and audible, so failure can restore it.
+    failPreparedReplacement(p,state,`${reason}: ${diagnostic}`);
   };
   const requestFrame=()=>{
     try{ state.exposeFrameCallbackId=spare.requestVideoFrameCallback(observe); }
     catch(e){ finish(false,"frame-callback-error"); }
   };
-  const transferAudio=()=>{
-    if(!live()||v.paused||v.seeking){ finish(false,"viewer-intent"); return; }
-    state.overlapIntent={wantsPlayback:p.wantsPlayback!==false,muted:!!v.muted,
-      volume:v.volume,playbackRate:v.playbackRate,
-      defaultPlaybackRate:v.defaultPlaybackRate};
-    state.overlapPhase="audio-starting";
-    // The old picture stays on top while the successor's audible clock starts.
-    // This absorbs a decoder resync before any successor frame is exposed.
-    v.muted=true;
-    state.overlapAudioTransferred=true;
-    spare.muted=state.overlapIntent.muted;
-    try{
-      spare.volume=state.overlapIntent.volume;
-      spare.defaultPlaybackRate=state.overlapIntent.defaultPlaybackRate;
-      spare.playbackRate=state.overlapIntent.playbackRate;
-      const started=spare.play();
-      Promise.resolve(started).then(()=>{
-        if(settled||!live()) return;
-        state.overlapPhase="audio";
-        priorMediaTime=null;advancingSteps=0;
-        requestFrame();
-      },()=>finish(false,"successor-play-rejected"));
-    }catch(e){ finish(false,"successor-play-error"); }
-  };
   const observe=(now,meta)=>{
     state.exposeFrameCallbackId=null;
     if(!live()){ finish(false,"stale-owner"); return; }
     lastFrameAt=performance.now();
-    if(state.overlapPhase==="video") videoCallbacks++;
-    else if(state.overlapPhase==="audio") audioCallbacks++;
+    videoCallbacks++;
     const mediaTime=Number(meta&&meta.mediaTime);
     // A seek may leave old-position frames queued after `seeked`. Increasing
     // timestamps alone can then prove the wrong position. Keep the incumbent
@@ -749,8 +707,11 @@ function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
         ?advancingSteps+1:0;
       priorMediaTime=mediaTime;
       if(advancingSteps>=PREPARED_MONOTONIC_FRAME_STEPS){
-        if(state.overlapPhase==="video") transferAudio();
-        else finish(true);
+        if(v.paused||v.seeking||spare.paused||spare.seeking){
+          finish(false,"viewer-intent");
+          return;
+        }
+        finish(true);
         return;
       }
     }else{
@@ -762,11 +723,6 @@ function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
   };
   const intentChanged=()=>{
     if(!live()||v.paused||v.seeking){ finish(false,"viewer-intent"); return; }
-    const intent=state.overlapIntent;
-    if(intent&&state.overlapAudioTransferred
-       &&(!v.muted||v.volume!==intent.volume
-          ||v.playbackRate!==intent.playbackRate
-          ||p.wantsPlayback===false)) finish(false,"viewer-intent");
   };
   state.overlapListeners=[["pause",intentChanged],["seeking",intentChanged],
     ["volumechange",intentChanged],["ratechange",intentChanged]];
@@ -790,9 +746,8 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     state.incumbentResumeTimer=null;
   }
   // Intent is sampled at the last reversible boundary. Preparation can take
-  // seconds, during which the viewer may pause, mute, or change rate; copying
-  // the earlier snapshot would overwrite that newer choice.
-  const intent=state.overlapIntent||{
+  // seconds, during which the viewer may pause, mute, or change rate.
+  const intent={
     wantsPlayback:p.wantsPlayback!==false,
     muted:!!retired.muted,
     volume:retired.volume,
@@ -800,7 +755,6 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     defaultPlaybackRate:retired.defaultPlaybackRate
   };
   detachPreparedOverlapListeners(state);
-  state.overlapAudioTransferred=false;
   state.overlapPhase="exposed";
   state.predecessor={hls:predecessor,element:retired,sessionId:p.sessionId,
     probeUrl:p.probeUrl,offset:p.offset,wantsPlayback:p.wantsPlayback,
