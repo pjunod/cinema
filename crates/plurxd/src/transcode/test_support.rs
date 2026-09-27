@@ -532,28 +532,25 @@ impl HlsDeliveryFixture {
         self.session.child_transition.lock().await
     }
 
-    pub(crate) fn pause_response_projection(&self, pause: Arc<tokio::sync::Barrier>) {
-        *self
-            .session
-            .response_projection_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    pub(crate) fn pause_response_projection(&self) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.session
+            .test_hooks()
+            .media_committed
+            .arm("media_committed")
     }
 
-    pub(crate) fn pause_playlist_publication(&self, pause: Arc<tokio::sync::Barrier>) {
-        *self
-            .session
-            .playlist_publication_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    pub(crate) fn pause_playlist_publication(&self) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.session
+            .test_hooks()
+            .playlist_publication
+            .arm("playlist_publication")
     }
 
-    pub(crate) fn pause_control_after_acceptance(&self, pause: Arc<tokio::sync::Barrier>) {
-        *self
-            .session
-            .control_applied_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    pub(crate) fn pause_control_after_acceptance(&self) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.session
+            .test_hooks()
+            .control_applied
+            .arm("control_applied")
     }
 
     pub(crate) async fn worker_is_registered(&self, session_id: &str) -> bool {
@@ -676,25 +673,9 @@ fn test_session_with_control(
         child: Mutex::new(Some(AttemptChild::new(0, child, control.clone(), None))),
         child_transition: Mutex::new(()),
         replacing_child: AtomicBool::new(false),
-        replacement_pause: std::sync::Mutex::new(None),
-        activity_detail_pause: std::sync::Mutex::new(None),
-        control_applied_pause: std::sync::Mutex::new(None),
         terminal_response_pending: Arc::new(AtomicBool::new(false)),
         terminal_control: std::sync::Mutex::new(None),
-        flow_completion_pause: std::sync::Mutex::new(None),
-        playlist_publication_pause: std::sync::Mutex::new(None),
-        producer_install_pause: std::sync::Mutex::new(None),
-        refresh_after_read_pause: std::sync::Mutex::new(None),
-        path_owner_sample_pause: std::sync::Mutex::new(None),
-        retention_delete_pause: std::sync::Mutex::new(None),
-        response_projection_pause: std::sync::Mutex::new(None),
-        #[cfg(test)]
-        first_media_owner_claim_pause: std::sync::Mutex::new(None),
-        retirement_started: AtomicBool::new(false),
-        #[cfg(test)]
-        retirement_cleanup_handoff_pause: std::sync::Mutex::new(None),
-        #[cfg(test)]
-        scratch_cleanup_pause: std::sync::Mutex::new(None),
+        hooks: crate::seam_hooks::HookSlot::new(&NoopSessionHooks),
         cached: false,
         _cache_reader: None,
         subtitle_handle: None,

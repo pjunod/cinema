@@ -1991,8 +1991,7 @@
             .state
             .transcode
             .set_subtitle_playlist_commit_pause(Arc::clone(&pause));
-        let owner_pause = Arc::new(tokio::sync::Barrier::new(2));
-        fixture.pause_playlist_publication(Arc::clone(&owner_pause));
+        let owner_pause = fixture.pause_playlist_publication();
         let mut predecessor = String::from("#EXTM3U\n#EXT-X-TARGETDURATION:4\n");
         for index in 0..12 {
             let name = format!("seg{index:05}.ts");
@@ -2007,18 +2006,14 @@
         let state = fixture.state.clone();
         let waiting =
             tokio::spawn(async move { subtitle_playlist_local(&state, "subtitle-handoff", 0).await });
-        tokio::time::timeout(Duration::from_secs(5), owner_pause.wait())
-            .await
-            .expect("subtitle request read predecessor playlist");
+        let owner_held = owner_pause.reached().await;
 
         assert_eq!(
             fixture.begin_producer_attempt().await,
             Err(crate::playback_control::ProducerAttemptRejection::PlaylistPublished),
             "published media permanently closes in-place producer replacement"
         );
-        tokio::time::timeout(Duration::from_secs(5), owner_pause.wait())
-            .await
-            .expect("release predecessor playlist publication");
+        owner_held.release();
         tokio::time::timeout(Duration::from_secs(5), pause.wait())
             .await
             .expect("subtitle response reached the exact-owner commit seam");

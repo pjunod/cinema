@@ -75,17 +75,6 @@ pub(super) struct Session {
     /// live producer with another inside this same session. The predecessor's
     /// non-zero kill status belongs to the failed attempt, never its successor.
     pub(super) replacing_child: AtomicBool,
-    #[cfg(test)]
-    pub(super) replacement_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Test-only rendezvous after the actor snapshot for a per-session
-    /// activity read. It proves the manager registry lock was released before
-    /// telemetry can wait and makes attempt replacement interleavings exact.
-    #[cfg(test)]
-    pub(super) activity_detail_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Test-only seam after the control actor has accepted and ticketed a
-    /// command while the HTTP-owned transition guard is still held.
-    #[cfg(test)]
-    pub(super) control_applied_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
     /// Set synchronously by the actor's accepted-End callback and cleared only
     /// after the replicated terminal commit settles. The reaper observes it
     /// under `child_transition`, so no actor-to-continuation reply gap exists.
@@ -94,49 +83,10 @@ pub(super) struct Session {
     /// and every exact retry. It owns physical convergence, response
     /// projection and the durable acknowledgement receipt.
     pub(super) terminal_control: std::sync::Mutex<Option<RollingTerminalOperation>>,
-    /// Test-only seam after producer policy is applied but before the flow
-    /// ticket is completed back to a waiting control response.
-    #[cfg(test)]
-    pub(super) flow_completion_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Test-only rendezvous immediately before first-playlist publication.
-    #[cfg(test)]
-    pub(super) playlist_publication_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Test-only rendezvous after actor authorization and before the exact
-    /// producer fence is reacquired for child assignment.
-    #[cfg(test)]
-    pub(super) producer_install_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Test-only rendezvous after a refresh reads its playlist and before it
-    /// merges the prepared observation.
-    #[cfg(test)]
-    pub(super) refresh_after_read_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Test-only rendezvous after a path reader's first replacement-marker
-    /// check and before it samples compatibility/actor attempt ownership.
-    #[cfg(test)]
-    pub(super) path_owner_sample_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Test-only rendezvous after retention resolves its doomed names while
-    /// holding the path-ownership transition.
-    #[cfg(test)]
-    pub(super) retention_delete_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    #[cfg(test)]
-    pub(super) response_projection_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Test-only seam after actor settlement cleared prepublication and before
-    /// the detached waiter publishes that actor lifetime ownership is active.
-    #[cfg(test)]
-    pub(super) first_media_owner_claim_pause: std::sync::Mutex<Option<Arc<LifecycleTestPause>>>,
-    /// Test-only proof that teardown reached the shared transition before a
-    /// paused replacement is released.
-    #[cfg(test)]
-    pub(super) retirement_started: AtomicBool,
-    /// Test-only seam after actor Terminal has handed exact cleanup to the
-    /// universal detached owner but before registry removal. It proves caller
-    /// cancellation cannot revoke either pre- or post-publication ownership.
-    #[cfg(test)]
-    pub(super) retirement_cleanup_handoff_pause: std::sync::Mutex<Option<Arc<LifecycleTestPause>>>,
-    /// Test-only seam owned by the detached scratch lifecycle. Physical
-    /// process settlement and replacement admission must finish before this
-    /// independently retrying filesystem work is allowed to proceed.
-    #[cfg(test)]
-    pub(super) scratch_cleanup_pause: std::sync::Mutex<Option<Arc<LifecycleTestPause>>>,
+    /// The session's test points (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8), in
+    /// every build. Production never fills the slot, so every point reads
+    /// [`NoopSessionHooks`] (Decision D-M8-I).
+    pub(super) hooks: crate::seam_hooks::HookSlot<dyn SessionHooks>,
     /// Served from the pre-transcode cache.
     ///
     /// A cached session has no process, and its directory is a finished asset
@@ -370,6 +320,214 @@ pub(super) struct Session {
     /// playlist reload may observe that state hundreds of times; only the
     /// transition records retention starting to advance the visible window.
     pub(super) first_slide_logged: AtomicBool,
+}
+
+/// The points of a rolling [`Session`] that a race test can pause at, and the
+/// one it records (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
+///
+/// The session holds these in every build, so its layout and the await points
+/// of the paths below are the same in the test and release binaries. A paused
+/// hook's timing is still a test artefact: what this makes identical is the
+/// struct and the set of await points, not scheduling. Every point hands back
+/// a `'static` future, so a detached owner can take its point where it is
+/// spawned and await it inside the task without holding the session. `Any` is
+/// a supertrait only so a test can reach the test hooks behind the session.
+pub(crate) trait SessionHooks: std::any::Any + Send + Sync {
+    /// A path reader passed its first replacement-marker check and is about to
+    /// sample the compatibility and actor attempts.
+    fn before_path_owner_sample(&self) -> crate::seam_hooks::HookFuture<'static>;
+    /// A playlist is about to be published for its exact attempt: a playlist
+    /// response parsed the bytes it owns and is about to report them to the
+    /// actor, or first-playlist publication passed its first deadline check and
+    /// is about to check the deadline again and read the projected attempt.
+    fn before_playlist_publication(&self) -> crate::seam_hooks::HookFuture<'static>;
+    /// The actor authorized an exact producer install, before the child slot
+    /// is re-checked under the final install fence.
+    fn after_producer_install_authorized(&self) -> crate::seam_hooks::HookFuture<'static>;
+    /// A refresh read its playlist, before it parses and merges the
+    /// observation.
+    fn after_refresh_playlist_read(&self) -> crate::seam_hooks::HookFuture<'static>;
+    /// An activity read took the actor snapshot, before it reads the delivery
+    /// frontier.
+    fn after_activity_snapshot(&self) -> crate::seam_hooks::HookFuture<'static>;
+    /// The actor accepted and ticketed a control command, before the response
+    /// waits for its flow ticket.
+    fn after_control_applied(&self) -> crate::seam_hooks::HookFuture<'static>;
+    /// The flow worker applied producer policy, before it completes the flow
+    /// ticket back to a waiting response.
+    fn before_flow_completion(&self) -> crate::seam_hooks::HookFuture<'static>;
+    /// The actor committed a response's media fetch, before the response
+    /// reports the commit.
+    fn after_media_committed(&self) -> crate::seam_hooks::HookFuture<'static>;
+    /// The first-media waiter was accepted, before it publishes that the actor
+    /// owns the transcode lifetime.
+    fn before_first_media_owner_claim(&self) -> crate::seam_hooks::HookFuture<'static>;
+    /// Rolling retirement began, before it takes the child transition.
+    fn retirement_started(&self);
+    /// Terminal handed exact cleanup to the detached owner, before the
+    /// transition is released.
+    fn after_retirement_cleanup_handoff(&self) -> crate::seam_hooks::HookFuture<'static>;
+    /// The scratch cleanup owner is detached, before it touches the directory.
+    fn before_scratch_cleanup(&self) -> crate::seam_hooks::HookFuture<'static>;
+    /// The detached retention worker took its batch, before any unlink.
+    fn before_retention_unlink(&self) -> crate::seam_hooks::HookFuture<'static>;
+    /// The detached retention worker finished its batch and cleared its
+    /// active flag.
+    fn after_retention_batch(&self) -> crate::seam_hooks::HookFuture<'static>;
+}
+
+/// What production installs: every point is already ready and nothing is
+/// recorded.
+pub(crate) struct NoopSessionHooks;
+
+impl SessionHooks for NoopSessionHooks {
+    fn before_path_owner_sample(&self) -> crate::seam_hooks::HookFuture<'static> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn before_playlist_publication(&self) -> crate::seam_hooks::HookFuture<'static> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn after_producer_install_authorized(&self) -> crate::seam_hooks::HookFuture<'static> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn after_refresh_playlist_read(&self) -> crate::seam_hooks::HookFuture<'static> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn after_activity_snapshot(&self) -> crate::seam_hooks::HookFuture<'static> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn after_control_applied(&self) -> crate::seam_hooks::HookFuture<'static> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn before_flow_completion(&self) -> crate::seam_hooks::HookFuture<'static> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn after_media_committed(&self) -> crate::seam_hooks::HookFuture<'static> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn before_first_media_owner_claim(&self) -> crate::seam_hooks::HookFuture<'static> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn retirement_started(&self) {}
+
+    fn after_retirement_cleanup_handoff(&self) -> crate::seam_hooks::HookFuture<'static> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn before_scratch_cleanup(&self) -> crate::seam_hooks::HookFuture<'static> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn before_retention_unlink(&self) -> crate::seam_hooks::HookFuture<'static> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn after_retention_batch(&self) -> crate::seam_hooks::HookFuture<'static> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+}
+
+/// The session's test hooks: one armable pause per point, the record of
+/// retirement starting, and the pause of the test-only replacement driver.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct SessionTestHooks {
+    pub(crate) path_owner_sample: crate::seam_hooks::PauseSlot,
+    pub(crate) playlist_publication: crate::seam_hooks::PauseSlot,
+    pub(crate) replacement: crate::seam_hooks::PauseSlot,
+    pub(crate) producer_install: crate::seam_hooks::PauseSlot,
+    pub(crate) refresh_after_read: crate::seam_hooks::PauseSlot,
+    pub(crate) activity_detail: crate::seam_hooks::PauseSlot,
+    pub(crate) control_applied: crate::seam_hooks::PauseSlot,
+    pub(crate) flow_completion: crate::seam_hooks::PauseSlot,
+    pub(crate) media_committed: crate::seam_hooks::PauseSlot,
+    pub(crate) first_media_owner_claim: crate::seam_hooks::PauseSlot,
+    pub(crate) retirement_cleanup_handoff: crate::seam_hooks::PauseSlot,
+    pub(crate) scratch_cleanup: crate::seam_hooks::PauseSlot,
+    pub(crate) retention_unlink: crate::seam_hooks::PauseSlot,
+    pub(crate) retention_batch: crate::seam_hooks::PauseSlot,
+    pub(crate) retirement_started: AtomicBool,
+}
+
+#[cfg(test)]
+impl SessionHooks for SessionTestHooks {
+    fn before_path_owner_sample(&self) -> crate::seam_hooks::HookFuture<'static> {
+        self.path_owner_sample.hold()
+    }
+
+    fn before_playlist_publication(&self) -> crate::seam_hooks::HookFuture<'static> {
+        self.playlist_publication.hold()
+    }
+
+    fn after_producer_install_authorized(&self) -> crate::seam_hooks::HookFuture<'static> {
+        self.producer_install.hold()
+    }
+
+    fn after_refresh_playlist_read(&self) -> crate::seam_hooks::HookFuture<'static> {
+        self.refresh_after_read.hold()
+    }
+
+    fn after_activity_snapshot(&self) -> crate::seam_hooks::HookFuture<'static> {
+        self.activity_detail.hold()
+    }
+
+    fn after_control_applied(&self) -> crate::seam_hooks::HookFuture<'static> {
+        self.control_applied.hold()
+    }
+
+    fn before_flow_completion(&self) -> crate::seam_hooks::HookFuture<'static> {
+        self.flow_completion.hold()
+    }
+
+    fn after_media_committed(&self) -> crate::seam_hooks::HookFuture<'static> {
+        self.media_committed.hold()
+    }
+
+    fn before_first_media_owner_claim(&self) -> crate::seam_hooks::HookFuture<'static> {
+        self.first_media_owner_claim.hold()
+    }
+
+    fn retirement_started(&self) {
+        self.retirement_started.store(true, Release);
+    }
+
+    fn after_retirement_cleanup_handoff(&self) -> crate::seam_hooks::HookFuture<'static> {
+        self.retirement_cleanup_handoff.hold()
+    }
+
+    fn before_scratch_cleanup(&self) -> crate::seam_hooks::HookFuture<'static> {
+        self.scratch_cleanup.hold()
+    }
+
+    fn before_retention_unlink(&self) -> crate::seam_hooks::HookFuture<'static> {
+        self.retention_unlink.hold()
+    }
+
+    fn after_retention_batch(&self) -> crate::seam_hooks::HookFuture<'static> {
+        self.retention_batch.hold()
+    }
+}
+
+#[cfg(test)]
+impl Session {
+    /// The session's test hooks, installed on first use.
+    pub(crate) fn test_hooks(&self) -> &SessionTestHooks {
+        let hooks: &dyn std::any::Any = self
+            .hooks
+            .get_or_install(|| Box::new(SessionTestHooks::default()));
+        hooks
+            .downcast_ref()
+            .expect("the session's hook slot holds SessionTestHooks")
+    }
 }
 
 pub(super) enum SessionReapVerdict {
@@ -1226,18 +1384,7 @@ impl Session {
         if self.replacing_child.load(Acquire) {
             return None;
         }
-        #[cfg(test)]
-        {
-            let pause = self
-                .path_owner_sample_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            if let Some(pause) = pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
-        }
+        self.hooks.get().before_path_owner_sample().await;
         let compatibility_attempt = self.compatibility_producer_attempt();
         let producer_attempt = self.control.current_producer_attempt();
         (!self.replacing_child.load(Acquire) && compatibility_attempt == producer_attempt)
@@ -1252,19 +1399,6 @@ impl Session {
         (*projected_attempt == producer_attempt).then(|| self.playlist_published.load(Relaxed))
     }
 
-    #[cfg(test)]
-    pub(super) async fn pause_playlist_publication_for_test(&self) {
-        let pause = self
-            .playlist_publication_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(pause) = pause {
-            pause.wait().await;
-            pause.wait().await;
-        }
-    }
-
     pub(super) async fn publish_compatibility_playlist(
         &self,
         producer_attempt: u64,
@@ -1273,8 +1407,7 @@ impl Session {
         if tokio::time::Instant::now().into_std() >= deadline {
             return false;
         }
-        #[cfg(test)]
-        self.pause_playlist_publication_for_test().await;
+        self.hooks.get().before_playlist_publication().await;
         if tokio::time::Instant::now().into_std() >= deadline {
             return false;
         }
@@ -1659,18 +1792,9 @@ impl Session {
         };
         self.reset_compatibility_delivery(producer_attempt).await;
         self.kill_child().await;
-        #[cfg(test)]
-        {
-            let pause = self
-                .replacement_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let Some(pause) = pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
-        }
+        // This replacement driver is test-only, so its pause is not a point
+        // of the shipped session.
+        self.test_hooks().replacement.hold().await;
         Ok((replacement, producer_attempt))
     }
 
@@ -1725,18 +1849,7 @@ impl Session {
                 });
             }
         };
-        #[cfg(test)]
-        {
-            let pause = self
-                .producer_install_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            if let Some(pause) = pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
-        }
+        self.hooks.get().after_producer_install_authorized().await;
         let final_rejection = {
             let slot = self.child.lock().await;
             if !slot
@@ -1810,18 +1923,7 @@ impl Session {
                 });
             }
         };
-        #[cfg(test)]
-        {
-            let pause = self
-                .producer_install_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            if let Some(pause) = pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
-        }
+        self.hooks.get().after_producer_install_authorized().await;
         let final_rejection = {
             let slot = self.child.lock().await;
             if !slot
@@ -1918,18 +2020,7 @@ impl Session {
                 return Err(reason);
             }
         };
-        #[cfg(test)]
-        {
-            let pause = self
-                .producer_install_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            if let Some(pause) = pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
-        }
+        self.hooks.get().after_producer_install_authorized().await;
         let rejected = {
             match self
                 .control
@@ -2077,18 +2168,7 @@ impl Session {
         let Ok(raw) = tokio::fs::read(self.dir.join("index.m3u8")).await else {
             return;
         };
-        #[cfg(test)]
-        {
-            let pause = self
-                .refresh_after_read_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            if let Some(pause) = pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
-        }
+        self.hooks.get().after_refresh_playlist_read().await;
         let mut observed = SegmentIndex {
             segs: parse_playlist(&String::from_utf8_lossy(&raw)),
             revision: 0,
@@ -2310,18 +2390,7 @@ pub(super) async fn session_info(
     let media_origin_ms = (s.media_origin_seconds * 1_000.0).round() as i64;
     let ready_anchor_ms =
         demand.map(crate::playback_control::PlaybackDemandSnapshot::buffer_anchor_ms);
-    #[cfg(test)]
-    {
-        let pause = s
-            .activity_detail_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Some(pause) = pause {
-            pause.wait().await;
-            pause.wait().await;
-        }
-    }
+    s.hooks.get().after_activity_snapshot().await;
     let (fetched_end_ms, published_end_ms) = delivery_frontier(s, lease.as_ref()).await;
     let (
         ahead,

@@ -855,6 +855,19 @@ fn seam_census_of_the_workspace() {
                     "VodServe::control_with_terminal",
                     "VodServe::spawn_terminal_cleanup",
                     "VodServe::blocked_wait",
+                    "Session",
+                    "session_info",
+                    "ensure_retention_cleanup",
+                    "own_rolling_retirement",
+                    "spawn_retired_presentation_cleanup_owner",
+                    "spawn_rolling_scratch_cleanup_owner",
+                    "begin_first_media_publication_handoff_before",
+                    "RollingTerminalAdmission",
+                    "TranscodeManager::finish_hls_session_control",
+                    "TranscodeManager::hls_session_control_with_terminal",
+                    "TranscodeManager::ensure_flow_worker",
+                    "TranscodeManager::commit_resolved_media_before",
+                    "TranscodeManager::playlist_with_owner_for_session_before",
                 ]
                 .iter()
                 .any(|owner| site.owner == *owner || site.owner.starts_with(&format!("{owner}::")))

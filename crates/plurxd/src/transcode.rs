@@ -1713,8 +1713,6 @@ struct RollingTerminalAdmission {
     session: Arc<Session>,
     identity: RollingTerminalIdentity,
     terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
-    #[cfg(test)]
-    control_pause: Option<Arc<tokio::sync::Barrier>>,
 }
 
 impl crate::playback_control::RollingTerminalAdmission for RollingTerminalAdmission {
@@ -1755,8 +1753,6 @@ impl crate::playback_control::RollingTerminalAdmission for RollingTerminalAdmiss
         let session_id = self.session_id.clone();
         let session = Arc::clone(&self.session);
         let terminal_committer = self.terminal_committer.clone();
-        #[cfg(test)]
-        let control_pause = self.control_pause.clone();
         tokio::spawn(async move {
             let result = manager
                 .finish_hls_session_control(
@@ -1779,8 +1775,6 @@ impl crate::playback_control::RollingTerminalAdmission for RollingTerminalAdmiss
                     true,
                     Some(handoff),
                     terminal_committer,
-                    #[cfg(test)]
-                    control_pause,
                 )
                 .await;
             let prepared_commit = result

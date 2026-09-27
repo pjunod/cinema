@@ -383,11 +383,7 @@ impl RollingRetirementTicket {
 /// attempts and reports every failure. A persistent orphan is then left for
 /// the existing startup/scheduled maintenance sweep; cached directories are
 /// never submitted here.
-pub(super) fn spawn_rolling_scratch_cleanup_owner(
-    session_id: String,
-    session: &Arc<Session>,
-    #[cfg(test)] pause: Option<Arc<LifecycleTestPause>>,
-) {
+pub(super) fn spawn_rolling_scratch_cleanup_owner(session_id: String, session: &Arc<Session>) {
     if session.cached
         || session
             .scratch_cleanup_started
@@ -399,12 +395,9 @@ pub(super) fn spawn_rolling_scratch_cleanup_owner(
     let dir = session.dir.clone();
     begin_rolling_scratch_release(session);
     let owned = Arc::clone(session);
+    let before_cleanup = session.hooks.get().before_scratch_cleanup();
     tokio::spawn(async move {
-        #[cfg(test)]
-        if let Some(pause) = pause {
-            pause.reached.notify_one();
-            pause.release.notified().await;
-        }
+        before_cleanup.await;
         for attempt in 1..=ROLLING_SCRATCH_CLEANUP_ATTEMPTS {
             let cleanup = tokio::time::timeout(ROLLING_SCRATCH_CLEANUP_ATTEMPT, async {
                 clear_session_dir(&dir).await?;
@@ -498,18 +491,7 @@ fn spawn_retired_presentation_cleanup_owner(
             return;
         }
         begin_rolling_scratch_release(&retired.session);
-        #[cfg(test)]
-        let cleanup_pause = retired
-            .session
-            .scratch_cleanup_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        #[cfg(test)]
-        if let Some(pause) = cleanup_pause {
-            pause.reached.notify_one();
-            pause.release.notified().await;
-        }
+        retired.session.hooks.get().before_scratch_cleanup().await;
         let mut attempt = 0_u64;
         loop {
             attempt = attempt.saturating_add(1);
@@ -717,16 +699,7 @@ async fn finish_rolling_retirement_after_reap(session: &Session) {
 async fn finish_prepublication_cleanup_after_reap(session: &Arc<Session>) {
     finish_rolling_retirement_after_reap(session).await;
     if !session.cached {
-        spawn_rolling_scratch_cleanup_owner(
-            "unregistered-prepublication".to_owned(),
-            session,
-            #[cfg(test)]
-            session
-                .scratch_cleanup_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take(),
-        );
+        spawn_rolling_scratch_cleanup_owner("unregistered-prepublication".to_owned(), session);
     }
     if session.control.end().await.is_err() {
         session.control.fence_unavailable();
@@ -828,8 +801,7 @@ async fn own_rolling_retirement(
     settlement: Arc<RollingRetirementSettlement>,
     committed: tokio::sync::oneshot::Sender<()>,
 ) -> Result<bool, String> {
-    #[cfg(test)]
-    session.retirement_started.store(true, Release);
+    session.hooks.get().retirement_started();
 
     let transition = match deadline {
         Some(deadline) => tokio::time::timeout_at(deadline, session.child_transition.lock())
@@ -901,17 +873,7 @@ async fn own_rolling_retirement(
     session.retirement_cleanup_started.store(true, Release);
     let _ = committed.send(());
 
-    #[cfg(test)]
-    let pause = session
-        .retirement_cleanup_handoff_pause
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    #[cfg(test)]
-    if let Some(pause) = pause {
-        pause.reached.notify_one();
-        pause.release.notified().await;
-    }
+    session.hooks.get().after_retirement_cleanup_handoff().await;
 
     drop(transition);
 
@@ -994,16 +956,7 @@ async fn own_rolling_retirement(
                         retired,
                     );
                 } else if !session.cached {
-                    spawn_rolling_scratch_cleanup_owner(
-                        settled_session_id.to_owned(),
-                        &session,
-                        #[cfg(test)]
-                        session
-                            .scratch_cleanup_pause
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .take(),
-                    );
+                    spawn_rolling_scratch_cleanup_owner(settled_session_id.to_owned(), &session);
                 }
                 if registered_key.is_some() || removed {
                     emit_session_event_to_store(

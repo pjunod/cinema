@@ -1547,12 +1547,7 @@
         )
         .await;
 
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *fixture
-            .session
-            .control_applied_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let pause = fixture.session.test_hooks().control_applied.arm("control_applied");
         let client = uuid::Uuid::new_v4().to_string();
         let request = {
             let manager = Arc::clone(&fixture.state.transcode);
@@ -1584,7 +1579,7 @@
 
         // The actor has accepted, renewed, retained demand, and issued its
         // flow ticket, but the request still owns the child transition gate.
-        pause.wait().await;
+        let _held = pause.reached().await;
         request.abort();
         let request_error = match request.await {
             Ok(_) => panic!("request unexpectedly completed"),
@@ -1647,12 +1642,7 @@
             "test-node",
         )
         .await;
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *fixture
-            .session
-            .flow_completion_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let pause = fixture.session.test_hooks().flow_completion.arm("flow_completion");
         let client = uuid::Uuid::new_v4().to_string();
         let control = {
             let manager = Arc::clone(&fixture.state.transcode);
@@ -1679,7 +1669,7 @@
 
         // The actor accepted and producer policy ran, but the ticket has not
         // yet released the HTTP response. Retirement wins in that interval.
-        pause.wait().await;
+        let pause_held = pause.reached().await;
         assert!(
             fixture
                 .state
@@ -1687,7 +1677,7 @@
                 .stop_session(&session_id, "test-retirement")
                 .await
         );
-        pause.wait().await;
+        pause_held.release();
         assert!(matches!(
             control.await.expect("control task"),
             Some(Err(
@@ -1995,18 +1985,14 @@
             .lock()
             .await
             .insert("selected".to_owned(), Arc::clone(&session));
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .activity_detail_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let pause = session.test_hooks().activity_detail.arm("activity_detail");
         let reader = Arc::clone(&manager);
         let detail = tokio::spawn(async move {
             reader
                 .delivery_details_bounded(&["selected".to_owned()], 1)
                 .await
         });
-        pause.wait().await;
+        let pause_held = pause.reached().await;
 
         assert_eq!(
             tokio::time::timeout(Duration::from_millis(100), manager.active_sessions())
@@ -2014,7 +2000,7 @@
                 .expect("another map operation must not wait on selected-session telemetry"),
             1
         );
-        pause.wait().await;
+        pause_held.release();
         assert_eq!(detail.await.expect("activity reader").len(), 1);
     }
 

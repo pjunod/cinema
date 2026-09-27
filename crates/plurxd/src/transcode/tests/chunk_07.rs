@@ -26,11 +26,7 @@ use crate::queue_fixture::QueueFixture;
             .expect("unshared copy fixture")
             .method = crate::delivery::Method::HlsCopy;
         reserve_test_admissions(&session, &admissions);
-        let handoff_pause = Arc::new(LifecycleTestPause::new());
-        *session
-            .retirement_cleanup_handoff_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&handoff_pause));
+        let handoff_pause = session.test_hooks().retirement_cleanup_handoff.arm("retirement_cleanup_handoff");
         session
             .control
             .end()
@@ -46,7 +42,7 @@ use crate::queue_fixture::QueueFixture;
                     .await
             }
         });
-        await_lifecycle_pause(&handoff_pause).await;
+        let handoff_pause_held = handoff_pause.reached().await;
         assert!(manager.sessions.lock().await.is_empty());
         assert_eq!(admissions.in_use(), 1);
         assert_eq!(admissions.software_in_use(), 2);
@@ -57,7 +53,7 @@ use crate::queue_fixture::QueueFixture;
             .await
             .expect_err("registration waiter must cancel")
             .is_cancelled());
-        handoff_pause.release.notify_one();
+        handoff_pause_held.release();
 
         tokio::time::timeout(Duration::from_secs(2), async {
             while !session.retirement_cleanup_finished.load(Acquire) {
@@ -96,11 +92,7 @@ use crate::queue_fixture::QueueFixture;
 
         let dir = crate::test_tempdir().expect("dir");
         let session = watchdog_session(dir.path(), Some(long_running_child()), false);
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .replacement_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let pause = session.test_hooks().replacement.arm("replacement");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let manager = Arc::new(TranscodeManager::new(
             store,
@@ -130,7 +122,7 @@ use crate::queue_fixture::QueueFixture;
                 replacement.complete();
             }
         });
-        pause.wait().await;
+        let pause_held = pause.reached().await;
 
         let stop = tokio::spawn({
             let manager = Arc::clone(&manager);
@@ -139,13 +131,13 @@ use crate::queue_fixture::QueueFixture;
             }
         });
         tokio::time::timeout(Duration::from_secs(1), async {
-            while !session.retirement_started.load(Acquire) {
+            while !session.test_hooks().retirement_started.load(Acquire) {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .expect("stop must reach the shared transition");
-        pause.wait().await;
+        pause_held.release();
 
         replacement.await.expect("copy fallback task");
         stop.await.expect("stop task");

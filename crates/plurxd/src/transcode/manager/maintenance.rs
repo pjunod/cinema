@@ -566,17 +566,7 @@ impl TranscodeManager {
                     break;
                 }
                 manager.flow_control(&session, &session_id).await;
-                #[cfg(test)]
-                let flow_pause = session
-                    .flow_completion_pause
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take();
-                #[cfg(test)]
-                if let Some(pause) = flow_pause {
-                    pause.wait().await;
-                    pause.wait().await;
-                }
+                session.hooks.get().before_flow_completion().await;
                 handled = ticket;
                 session.control.complete_flow(ticket);
             }
