@@ -1,3 +1,4 @@
+use crate::queue_fixture::QueueFixture;
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering::AcqRel};
 
@@ -306,7 +307,7 @@
             .await
             .expect("enqueue"));
         let claimed = sqlite
-            .claim_cluster_fragment_index("node-a", &[], now, now + 60_000)
+            .fixture_claim_cluster_fragment_index("node-a", &[], now, now + 60_000)
             .await
             .expect("claim")
             .expect("claimed job");
@@ -341,7 +342,7 @@
             last_seen_at_ms: now + 1,
         };
         assert!(sqlite
-            .complete_cluster_fragment_index(&claimed, &artifact, &location, now + 1)
+            .fixture_complete_cluster_fragment_index(&claimed, &artifact, &location, now + 1)
             .await
             .expect("publish artifact"));
         let cache = crate::test_tempdir().expect("cluster index cache");
@@ -392,8 +393,10 @@
             .expect("read repair job")
             .expect("the no-holder arm retains a repair job");
         assert_eq!(repair.state, "queued");
-        assert_eq!(repair.priority, "foreground");
-        assert_eq!(repair.trigger, "foreground");
+        // The failed viewer request is no longer a live waiter. Its bounded
+        // automatic repair must leave foreground capacity for active viewers.
+        assert_eq!(repair.priority, "normal");
+        assert_eq!(repair.trigger, "background");
     }
 
     fn fixture_file() -> MediaFile {

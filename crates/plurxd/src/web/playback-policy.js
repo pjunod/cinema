@@ -13,8 +13,20 @@
 
   const AUTO_DEFAULTS = Object.freeze({
     sampleMs: 5_000,
+    // A 5s decision clock plus a prepared successor's first fragments missed
+    // the 10s cliff budget even when the handoff itself was seamless.
+    decisionMs: 1_000,
     safeEstimateFactor: 0.95,
     severeEstimateRatio: 0.7,
+    // The bottom three rungs have little recovery room. A fresh transfer
+    // below their nominal rate is already unsustainable even if a deep
+    // buffer briefly masks the cliff. Higher rungs wait for the stronger
+    // ratio below: their first partial fragment can straddle two links.
+    lowRungEmergencyCount: 3,
+    // An in-flight fragment's first progress window can span a link change.
+    // Leave room for that mixed sample and the encoded segment's peak, not
+    // merely its nominal bitrate, when choosing a cliff replacement.
+    severePeakSafetyFactor: 0.84,
     mildHeadroom: 1.3,
     mildSamples: 2,
     cooldownMs: 20_000,
@@ -360,7 +372,9 @@
       Number.isFinite(runway) && runway <= defaults.nearEmptyRunwaySeconds;
     const freshBandwidthCliff =
       freshRecentEstimate > 0 &&
-      freshRecentEstimate < current.total_kbps * defaults.severeEstimateRatio;
+      (freshRecentEstimate < current.total_kbps * defaults.severeEstimateRatio ||
+       (currentIndex < defaults.lowRungEmergencyCount &&
+        freshRecentEstimate < current.total_kbps));
     const supplyBurst = supplyStalls >= 3;
     const starvation = activeSupplyStall || nearEmpty || supplyBurst;
     const causeKind = causeEvidence && typeof causeEvidence.kind === "string"
@@ -404,7 +418,7 @@
     if (severe && currentIndex > 0) {
       // hls.js's EWMA intentionally carries history. At a sharp cliff that
       // history can briefly make the next rung look safe, even though the
-      // fragment that just completed already measured the lower link. During
+      // fragment transfer measured the lower link. During
       // severe pressure only, bound the stable EWMA by that fresh transfer so
       // one restart lands below the cliff instead of teaching a replacement
       // instance the same lesson and walking the ladder.
@@ -413,12 +427,14 @@
           ? Math.min(estimate, freshRecentEstimate)
           : freshRecentEstimate)
         : estimate;
-      const safe = highestSafeRung(available, severeEstimate, defaults);
+      const peakCeiling = severeEstimate * defaults.severePeakSafetyFactor;
+      const safe = available.slice().reverse().find(rung =>
+        (rung.peak_kbps || rung.total_kbps) <= peakCeiling) || available[0];
       const safeIndex = safe
         ? closestRungIndex(available, safe.height)
         : currentIndex - 1;
       // Empty runway establishes urgency, not cause. The target comes from a
-      // fresh completed transfer, so a server refusal or stopped loader can
+      // fresh measured transfer, so a server refusal or stopped loader can
       // never be translated into the ladder floor.
       const target = available[Math.min(currentIndex - 1, safeIndex)];
       return {

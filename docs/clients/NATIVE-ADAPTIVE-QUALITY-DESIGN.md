@@ -699,8 +699,30 @@ and `b5de25e4962d9f2d928b29f21f6538b3a0bf57c19c665a2a1ac45918ee1fabf1`.
 The two-cliff raw report has SHA-256
 `24489f4d442d37302b4a2ab404f2b2a18e010e28c49d88194bb577b5e6c6e8ad`.
 
-This is the measurement §3.8 requires, and it runs **before** any
-controller exists, so the "after" has a "before".
+#### Candidate browser measurements, 2026-09-26
+
+The pinned Rust 1.97.1 server binary built from draft PR #527 head
+`c9bbdb134` has SHA-256
+`d28f8b12478a1708f696442008439ba1687be501e9735c4c8e5d512477c7f504`.
+These runs describe that candidate, not a deployed or final-main build.
+
+| Browser and case | Result | Receipt |
+|---|---|---|
+| Chrome, 8→1.1→0.35 Mb/s SDR | Both 75 s cliffs passed. Measured media delivery was 1,085.6 and 349.1 kb/s. The first presented frames at 240p and 144p arrived 5.177 and 5.101 s after their cliffs. Maximum frame gap was 100 ms on each; zero restarts, stalls or hitches. Evidence scope is browser video only. | Raw `c87467aeb88a3a8e8e257e363578e08454c7d1c8bd0d85d82a6bb243ba505104`; normalized `78ef88f3e4ca2629936e6fc967b0eb01342e650eac5202580903e6362ba6746a`; JUnit `75967de32ca2d37a4862bfc6f29c40ef2af032d9f4d6dac7085358fe48699088`. |
+| Chrome, final-code source `4d1c1c5ce` SDR repeat | Both 75 s stages were applied and both downshifts were timely: 720p→240p at 7.215 s with the first target frame at 5.502 s; 240p→144p at 7.672 s with the first target frame at 6.026 s. Media delivery was 1,099.3 and 349.1 kb/s. Both stages had zero restarts, upgrades, waits, stalls or hitches. The unchanged 100 ms gap criterion failed at 133.30 and 166.70 ms, so the earlier Chrome pass was not repeatable and D3 remains open. | Binary SHA-256 `ac360a345ef62de86a1288e2e50cb740829703122ff41d72b4062990ca007100`; raw `82aa71ea978a4ad777dacab7ed5d4d29386afee6566a3e1aa3cdd5594536c68b`; normalized `78f88a803ba5d53a6a454c8cf8db28d43bd3c0de6b4feb0d439fa8130f0f3985`; JUnit `b868b3f2ceac7c8d3a691529b27893ff59c3966e61002ab3a82b5139e5633fb0`. |
+| Firefox, same SDR profile | WebDriver initially missed page-level `let` bindings from its isolated realm. The harness now evaluates in the page realm and reached playback. Both 75 s cliffs shaped correctly, downshifts reached 240p and 144p after 3.235 and 5.212 s, and neither restarted or stalled. The first transition's 134.26 ms video gap exceeds the 100 ms limit; the second gap was 99.94 ms. Result: failed, requiring a final-branch repeat. | Raw `18d4b340e135d58e8c6021256e3f7b73ba2e5a64416a1adfa0c2755696f5ccc5`; normalized `aecb54039f4ecfae856774707459fe5a8456edf059a2099c04defcfe42547961`; JUnit `26117eea138ee43955d91806f67391073333b015923a5b1a9b7033c41a683814`. |
+| Firefox, integrated-candidate repeat | The first cliff reached 144p after 3.248 s, then incorrectly upgraded to 240p at 68.235 s while the 1.1 Mb/s cap still applied. The second reached 144p after 10.874 s, with one restart, a 1.73324 s maximum video gap, one wait and two hitches. Measured first-stage media delivery was 613.2 kb/s. Result: failed and unstable across repeats; this does not qualify D3. | Raw `82f79e6a333dc4503a8748c7d2f5608a7e8e8e0a1d5d31b542a8eb6c6e061a4f`; normalized `ca1c065a003c954c808d56170828a30f1eed054a55d12dcfac0c6a764fb97597`; JUnit `21930def3ccd4f5f69ba593028634a732e8cca1d7f0df273dc600a7303f905f4`. |
+| Firefox, policy-fix source-exact `9ee9817d4` | The proposed fresh-transfer target and 10 s pre-upgrade runway did not fix the behavior. At the first 1.1 Mb/s stage, media delivery was 605.2 kb/s, 720p→144p took 5.978 s, a 216.66 ms gap exceeded the limit, and 144p→240p upgraded at 69.915 s under the cap. At 350 kb/s, delivery was 349.2 kb/s, 240p→144p took 11.811 s, with one restart, a 1,766.68 ms gap, three waits and four hitches. Result: failed. | Binary SHA-256 `973c4852c960fbb9a2304d9fd4ece028d48f1ccb9e02b2b67db509adeaadb4e9`; raw `90365609622681e73bb7e03d9e9539275b27a40396953b7cccd1731250875435`; normalized `71eea0dc10c31fa72ad7c605f841fb92ea344f42c6ff57befda3fae0ac771b7d`; JUnit `514a536fa72e2feb29d6fc15fee43d3793ba0952e717d8b91e72548c6f383850`. |
+| Chrome, synthetic 4K HDR Auto smoke | This host reported no HDR display, and the server selected CPU tone mapping to SDR. The player showed no first presented frame within 30 s, so the run cannot measure an HDR→SDR transition or qualify HDR playback. | Raw `d184d30221d038d805ddd47f537f0df31e75657fedc416d3787e483a4586440d`; normalized `7c99021469af549cca8448207b4d5b8d9a5b4f0dad2bc12a652c1f6314641ae2`; JUnit `5711c77e477df96a4bdf8a83fea69918660fb5083b831e12f2dc3a333d14d28e`. |
+
+One source-exact Safari WebDriver attempt returned ready on `GET /status`, then
+failed `POST /session` after 30.011 s with an automation-session timeout before
+playback. Safari and native device traces remain open. The earlier
+loaded-host Chrome failure also remains open. None of these measurements
+completes D3's per-platform, per-profile six-metric matrix.
+
+The original baseline above is the "before" measurement §3.8 requires for
+native controllers. Candidate browser runs do not replace that baseline.
 
 The instrument exists. `scripts/playback-lab` carries a loopback token-
 bucket shaper with a mandatory descent (`playback-lab:42-98`; a profile

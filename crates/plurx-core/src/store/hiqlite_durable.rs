@@ -381,6 +381,13 @@ struct DurableDump {
     trakt_auth: Vec<String>,
     watched_outbox: Vec<String>,
     pretranscode_jobs: Vec<String>,
+    background_jobs: Vec<String>,
+    background_fragment_targets: Vec<String>,
+    background_job_migration: Vec<String>,
+    background_job_legacy: Vec<String>,
+    background_job_waiters: Vec<String>,
+    background_job_attempts: Vec<String>,
+    background_job_reservations: Vec<String>,
     transcode_cache_recipes: Vec<String>,
     transcode_cache_locations: Vec<String>,
     cache_storage_members: Vec<String>,
@@ -418,6 +425,24 @@ pub(super) async fn local_durable_digest(client: &TimedClient) -> Result<String,
              FROM watched_outbox ORDER BY id",
         )
         .await?,
+        background_job_migration: rows(client, "SELECT json_array(singleton, format_version, source_count) AS value FROM background_job_migration ORDER BY singleton").await?,
+        background_job_legacy: rows(client, "SELECT json_array(legacy_key, kind, snapshot_json, state, job_id, outcome, updated_at_ms) AS value FROM background_job_legacy ORDER BY legacy_key").await?,
+        background_fragment_targets: rows(client, "SELECT json_array(cache_key, target_node_id, job_id) AS value
+            FROM background_fragment_targets ORDER BY cache_key, target_node_id").await?,
+        background_jobs: rows(client, "SELECT json_array(id, kind, payload_version, payload_json, dedupe_key,
+            priority, state, target_node_id, owner_node_id, owner_boot_id, claim_id, fence, revision,
+            lease_expires_ms, failure_policy, failed_attempts, attempt_limit, retry_deadline_ms, attempt_errors, index_diagnostic_json, yield_count, abandoned_count, not_before_ms, checkpoint_json,
+            result_ref, last_error_code, created_at_ms, updated_at_ms) AS value FROM background_jobs ORDER BY id").await?,
+        background_job_waiters: rows(client, "SELECT json_array(request_scope, request_id, request_digest, job_id,
+            consumer_kind, consumer_ref, priority, state, target_node_id, deadline_ms, receipt_expires_ms,
+            retain_identity, result_ref, failed_attempts, attempt_limit, not_before_ms, retry_deadline_ms,
+            participation_fence, attempt_errors, last_error_code, index_diagnostic_json, created_at_ms, updated_at_ms) AS value FROM background_job_waiters
+            ORDER BY request_scope, request_id").await?,
+        background_job_attempts: rows(client, "SELECT json_array(job_id, fence, claim_id, owner_node_id, owner_boot_id,
+            started_at_ms, resolve_until_ms, finished_at_ms, outcome, error_code) AS value
+            FROM background_job_attempts ORDER BY job_id, fence").await?,
+        background_job_reservations: rows(client, "SELECT json_array(resource_key, slot, job_id, fence, expires_at_ms)
+            AS value FROM background_job_reservations ORDER BY resource_key, slot").await?,
         pretranscode_jobs: rows(
             client,
             "SELECT json_array(id, dedupe_key, file_id, source_size, source_mtime,

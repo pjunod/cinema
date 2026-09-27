@@ -9,6 +9,11 @@
 
 // Production children go through `process::spawn_job_owned`; see clippy.toml.
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
+#[cfg(test)]
+extern crate self as plurx_core;
+#[cfg(test)]
+#[path = "../tests/support/queue_fixture.rs"]
+mod queue_fixture;
 
 pub mod auth;
 pub mod cluster;

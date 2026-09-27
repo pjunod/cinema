@@ -4,6 +4,11 @@
 
 mod admission;
 use plurx_core::process::bounded as bounded_process;
+#[cfg(test)]
+#[path = "../../plurx-core/tests/support/queue_fixture.rs"]
+mod queue_fixture;
+
+mod background_jobs;
 mod backup;
 mod cachekeep;
 mod channel_subjects;
@@ -14,6 +19,7 @@ mod delivery;
 mod dv_disk;
 mod dvpipe;
 mod ffmpeg;
+mod fontenv;
 mod fragindex;
 mod fragment_index_cluster;
 mod hevc_census;
@@ -2734,6 +2740,11 @@ fn spawn_background_loops(
     // does nothing until someone sets one in Settings.
     tokio::spawn(
         std::sync::Arc::clone(&state.jobs).schedule_loop(std::sync::Arc::clone(&state.transcode)),
+    );
+
+    tokio::spawn(
+        std::sync::Arc::clone(&state.jobs)
+            .background_work_loop(std::sync::Arc::clone(&state.transcode)),
     );
 
     // Trakt: hourly (and on-demand) two-way sync + the scrobble-pause sweep.

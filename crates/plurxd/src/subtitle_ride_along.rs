@@ -4239,6 +4239,7 @@ mod tests {
             Duration::from_secs(60),
             |_: &crate::fragindex::PassProgress| {},
             gate,
+            &tokio_util::sync::CancellationToken::new(),
         )
         .await;
         let mut by_arithmetic = Vec::new();

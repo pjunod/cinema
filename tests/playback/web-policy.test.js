@@ -342,7 +342,7 @@ test("the sampling tick resamples the wait sentence before the presenter paints"
     (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
     () => {},
     (v, p) => order.push(["sampled", v, p]),
-    { AUTO_DEFAULTS: { sampleMs: 1000 } },
+    { AUTO_DEFAULTS: { sampleMs: 5000, decisionMs: 1000 } },
     () => { installedMediaSession += 1; },
   );
   const v = { id: "v" }, p = { id: "p" };
@@ -352,6 +352,8 @@ test("the sampling tick resamples the wait sentence before the presenter paints"
   assert.equal(installedMediaSession, 2, "a re-arm left the OS transport pointing at the old stream");
   const half = intervals.find((entry) => entry.ms === 500);
   assert.ok(half, "armPlaybackSampling no longer arms a 500 ms tick");
+  assert.ok(intervals.find((entry) => entry.ms === 1000),
+    "Auto decides every second while its health reads remain on the slower cadence");
   half.fn();
   assert.deepEqual(order.at(-1), ["sampled", v, p]);
   assert.match(shippedSource("adoptPlaybackMediaElement"), /setInterval\(\(\)=>playbackSamplingTick\(v,p\),500\)/);
@@ -1668,6 +1670,76 @@ test("a bandwidth cliff drops from 1080p to the sustainable rung in one move", (
   assert.equal(decision.action, "switch");
   assert.equal(decision.evidence.kind, "bandwidth-limited");
   assert.equal(decision.emergency, true);
+});
+
+test("the two measured A-04 cliffs select encoded low rungs with peak headroom", () => {
+  const ladder = [
+    ...serverLadder,
+    { height: 240, total_kbps: 660, peak_kbps: 910 },
+    { height: 144, total_kbps: 260, peak_kbps: 310 },
+  ];
+  const first = policy.decideRung({
+    ladder,
+    currentHeight: 720,
+    estimateKbps: 8_000,
+    recentEstimateKbps: 1_100,
+    recentEstimateAtMs: 9_000,
+    runwaySeconds: 5,
+    nowMs: 10_000,
+  });
+  assert.equal(first.height, 240);
+  assert.equal(first.reason, "bandwidth cliff");
+  const second = policy.decideRung({
+    ladder,
+    currentHeight: 240,
+    estimateKbps: 1_100,
+    recentEstimateKbps: 350,
+    recentEstimateAtMs: 19_000,
+    runwaySeconds: 5,
+    nowMs: 20_000,
+  });
+  assert.equal(second.height, 144);
+  assert.equal(second.reason, "bandwidth cliff");
+});
+
+test("a mixed progress sample cannot select a rung whose peak exceeds the cliff budget", () => {
+  const ladder = [...serverLadder,
+    { height: 240, total_kbps: 660, peak_kbps: 910 },
+    { height: 144, total_kbps: 260, peak_kbps: 310 }];
+  const decision = policy.decideRung({ladder,currentHeight:720,
+    estimateKbps:8061,recentEstimateKbps:2202,
+    recentEstimateAtMs:9000,runwaySeconds:11,nowMs:10000});
+  assert.equal(decision.height,240);
+  assert.equal(decision.reason,"bandwidth cliff");
+});
+
+test("a low-rung transfer below nominal is urgent despite a deep buffer", () => {
+  const ladder = [...serverLadder,
+    { height: 240, total_kbps: 660, peak_kbps: 910 },
+    { height: 144, total_kbps: 260, peak_kbps: 310 }];
+  const decision = policy.decideRung({ladder,currentHeight:240,
+    estimateKbps:1100,recentEstimateKbps:626,
+    recentEstimateAtMs:9000,runwaySeconds:43,
+    previousRunwaySeconds:42,nowMs:10000});
+  assert.equal(decision.height,144);
+  assert.equal(decision.reason,"bandwidth cliff");
+});
+
+test("a high-rung mixed fragment waits for a clean cliff sample", () => {
+  const ladder = [...serverLadder,
+    { height: 240, total_kbps: 660, peak_kbps: 910 },
+    { height: 144, total_kbps: 260, peak_kbps: 310 }];
+  const mixed = policy.decideRung({ladder,currentHeight:720,
+    estimateKbps:8075,recentEstimateKbps:3170,
+    recentEstimateAtMs:9000,runwaySeconds:12,
+    previousRunwaySeconds:13,nowMs:10000});
+  assert.equal(mixed.height,720);
+  const clean = policy.decideRung({ladder,currentHeight:720,
+    estimateKbps:8075,recentEstimateKbps:1095,
+    recentEstimateAtMs:10500,runwaySeconds:10,
+    previousRunwaySeconds:12,nowMs:11000});
+  assert.equal(clean.height,240);
+  assert.equal(clean.reason,"bandwidth cliff");
 });
 
 test("an active supply stall without a completed slow transfer retains quality", () => {
