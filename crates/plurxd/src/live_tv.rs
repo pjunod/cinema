@@ -9567,6 +9567,12 @@ mod tests {
     use super::guide::LiveTvProgramme;
     use super::*;
 
+    /// How long a test waits on an event before calling it a hang. It is not
+    /// a latency promise: a loaded runner can take seconds to schedule the
+    /// fixture processes these tests drive, and the tests assert on what
+    /// happens, not on how quickly.
+    const LIVE_TV_TEST_HANG_GUARD: Duration = Duration::from_secs(60);
+
     async fn serve_once(response: Vec<u8>) -> (reqwest::Url, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -10966,44 +10972,67 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
             }
         });
 
+        // The session's per-second fence validates against the node's 1 Hz
+        // settings observation; run that loop as production does (and as
+        // `start_path_fixture` does), because this test now drives the start
+        // for as long as it waits and the session's timers run with it.
+        let observed = Arc::downgrade(&manager);
+        let observer = tokio::spawn(async move {
+            while let Some(manager) = observed.upgrade() {
+                manager.observe_fence().await;
+                drop(manager);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
         let request = test_session(root.path().join("unused"), 1).request.clone();
         let mut start = Box::pin(manager.start_local(request.clone()));
+        // Drive the start while watching its session: it must still be
+        // unanswered when the producer has listed exactly one segment. The
+        // start used to be polled for a fixed 700 ms and then left alone while
+        // the registry was read, so a runner too loaded to register the
+        // session inside that window found no session at all. The wait is
+        // bounded only against a hang.
+        let first_publication = async {
+            loop {
+                let observed = {
+                    let registry = manager.registry.lock().expect("registry");
+                    registry.sessions.values().next().map(|session| {
+                        let state = session.state.lock().expect("session state");
+                        assert!(state.startup.is_none());
+                        state
+                            .publication
+                            .as_ref()
+                            .map(|publication| publication.listed)
+                    })
+                };
+                if observed == Some(Some(1)) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::select! {
+            biased;
+            answered = &mut start => panic!(
+                "one listed segment must not answer the start (answered ok: {})",
+                answered.is_ok()
+            ),
+            () = first_publication => {}
+            () = tokio::time::sleep(LIVE_TV_TEST_HANG_GUARD) => {
+                panic!("producer never published its first listed segment")
+            }
+        }
+        // And one listed segment keeps it unanswered while it is driven on.
         assert!(
             tokio::time::timeout(Duration::from_millis(700), &mut start)
                 .await
                 .is_err(),
             "one listed segment must not answer the start"
         );
-        // The fixture drip-feeds fewer than SOURCE_PREFIX_BYTES, so the real
-        // source-observation stage spends SOURCE_PREFIX_TIME before FFmpeg is
-        // launched. Bound the publication wait from that production contract,
-        // not from a scheduler-sensitive subsecond guess.
-        let first_publication_deadline =
-            tokio::time::Instant::now() + SOURCE_PREFIX_TIME + Duration::from_secs(3);
-        loop {
-            let observed = {
-                let registry = manager.registry.lock().expect("registry");
-                let session = registry.sessions.values().next().expect("starting session");
-                let state = session.state.lock().expect("session state");
-                assert!(state.startup.is_none());
-                state
-                    .publication
-                    .as_ref()
-                    .map(|publication| publication.listed)
-            };
-            if observed == Some(1) {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < first_publication_deadline,
-                "producer never published its first listed segment; last count {observed:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
         tokio::fs::write(manager.scratch_root.join("release-second"), b"release")
             .await
             .expect("release second segment");
-        let provisional = tokio::time::timeout(Duration::from_secs(2), &mut start)
+        let provisional = tokio::time::timeout(LIVE_TV_TEST_HANG_GUARD, &mut start)
             .await
             .expect("second segment publication deadline")
             .expect("first HLS publication");
@@ -11066,7 +11095,7 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
             ),
             "a delayed replay must not open another tuner after cleanup"
         );
-        tokio::time::timeout(Duration::from_secs(2), closed_rx)
+        tokio::time::timeout(LIVE_TV_TEST_HANG_GUARD, closed_rx)
             .await
             .expect("tuner socket close deadline")
             .expect("tuner socket close signal");
@@ -11074,6 +11103,7 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
         assert!(manager.activities().is_empty());
         assert!(!session.directory.exists());
         tuner.await.expect("fake tuner");
+        observer.abort();
     }
 
     /// A loopback HDHomeRun for start-path tests. It answers discovery and
