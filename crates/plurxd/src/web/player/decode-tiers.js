@@ -1723,8 +1723,10 @@ function armHitchDetector(v){
   };
   const step=(now, meta, epoch)=>{
     // Bail the moment this playback is replaced, or the callback outlives its
-    // PLAYER and starts recording another stream's frames as this one's.
-    if(PLAYER!==p) return;
+    // PLAYER and starts recording another stream's frames as this one's. A
+    // prepared switch keeps the same PLAYER while changing the video element;
+    // only the element that now owns the picture may report a hitch.
+    if(PLAYER!==p||document.getElementById("video")!==v) return;
     if(!playbackOwnsAttachedMedia(p)){
       prev=null;rateWin.length=0;
       queuePlaybackFrame(v,p,step);return;

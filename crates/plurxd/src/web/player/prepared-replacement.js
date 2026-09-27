@@ -647,7 +647,12 @@ function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
     state.exposeFrameCallbackId=null;
     if(!live()){ finish(false); return; }
     const mediaTime=Number(meta&&meta.mediaTime);
-    if(Number.isFinite(mediaTime)){
+    // A seek may leave old-position frames queued after `seeked`. Increasing
+    // timestamps alone can then prove the wrong position. Keep the incumbent
+    // visible until each proof frame is also on its current film second.
+    const target=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
+    if(Number.isFinite(mediaTime)
+       &&Math.abs(mediaTime-target)*1000<=PREPARED_ALIGN_SLACK_MS){
       advancingSteps=priorMediaTime!=null&&mediaTime>priorMediaTime
         ?advancingSteps+1:0;
       priorMediaTime=mediaTime;
