@@ -81,6 +81,7 @@ REGRESSION_FIELD_RE = re.compile(
 # carries a plan PR — `Merge plan/C-08 (#461) at <sha>` — before the
 # integration PR itself lands; its trailers count for the commits it brings.
 MERGE_SUBJECT_RE = re.compile(r"^Merge pull request '(?P<title>.*)' \(#(?P<pull>\d+)\)")
+MANUAL_MERGE_SUBJECT_RE = re.compile(r"^Merge PR #(?P<pull>\d+): (?P<title>.+)$")
 SQUASH_SUBJECT_RE = re.compile(r"^(?P<title>.*) \(#(?P<pull>\d+)\)$")
 INTEGRATION_SUBJECT_RE = re.compile(
     r"^Merge (?P<title>[^\s']+) \(#(?P<pull>\d+)\)(?: at [0-9a-f]{7,64})?$"
@@ -430,12 +431,18 @@ def landing_commit_title(subject: str) -> tuple[str, str] | None:
     """The PR title and number a landing commit's subject carries, if any.
 
     Every shape `main` carries: Forgejo's merge commit
-    (`Merge pull request '<title>' (#N) from <branch> into main`), an
+    (`Merge pull request '<title>' (#N) from <branch> into main`), the
+    manually formed `Merge PR #N: <title>` used by #569, an
     integration branch's plan merge (`Merge plan/C-08 (#461) at <sha>`, whose
     "title" is the branch), and a squashed PR (`<title> (#N)`).
     """
 
-    for shape in (MERGE_SUBJECT_RE, INTEGRATION_SUBJECT_RE, SQUASH_SUBJECT_RE):
+    for shape in (
+        MERGE_SUBJECT_RE,
+        MANUAL_MERGE_SUBJECT_RE,
+        INTEGRATION_SUBJECT_RE,
+        SQUASH_SUBJECT_RE,
+    ):
         landed = shape.match(subject)
         if landed:
             return landed.group("title"), landed.group("pull")
