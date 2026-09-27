@@ -1,0 +1,54 @@
+name: k08 build measure
+
+# K-08 M0/M5 build-cost measurement on the fast-lane runner class
+# (docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md §5.1, §5.6). Dispatch
+# only: it has no pull_request, push or schedule trigger, so it never runs on
+# its own, is not a required check, and costs nothing until someone asks for
+# a number. The numbers are printed at the end of each job's log.
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  measure:
+    name: k08 build measure (${{ matrix.mode }})
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [parallel, serial]
+    # The fast Rust gate's runner class and container, so the numbers are the
+    # gate's own. The persistent Cargo cache is deliberately not restored:
+    # every number here is taken against a scratch target directory.
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    container: ubuntu:24.04
+    timeout-minutes: 180
+    steps:
+      - name: Install Rust gate prerequisites
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get -o Acquire::Retries=3 update
+          apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+            build-essential ca-certificates clang cmake curl git lld llvm \
+            make nasm ninja-build nodejs pkg-config python3
+      - name: Check out the candidate
+        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+      - name: Measure
+        env:
+          K08_MEASURE_OUT: ${{ runner.temp }}/k08-measure
+          K08_MEASURE_SCRATCH: ${{ runner.temp }}/k08-measure-target
+        run: scripts/k08-build-measure "${{ matrix.mode }}"
+      - name: Print the table
+        if: always()
+        run: cat "${{ runner.temp }}/k08-measure/table.md" || true
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
