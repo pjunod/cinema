@@ -2780,3 +2780,13 @@ source = "clients/android/app/src/main/java/tv/plurx/app/BackNavigation.kt"
 source_anchor = "internal fun NavController.popBackStackFrom(entry: NavBackStackEntry): Boolean {"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/BackNavigationTest.kt"
 test_anchor = "fun secondBackDuringExitAnimationKeepsHomeVisible()"
+
+# Server-issued Live TV capabilities contain dots and UUID hyphens. The
+# client must preserve that spelling when validating start and resume URLs.
+[[fixes]]
+id = "apple.live-tv-server-capability-url"
+commits = ["de991b9b4"]
+source = "clients/apple/Sources/LiveTv.swift"
+source_anchor = "return value.addingPercentEncoding(withAllowedCharacters: unreserved)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testRealCapabilityMasterIsAcceptedAfterStartAndResume() throws"

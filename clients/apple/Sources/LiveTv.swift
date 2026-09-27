@@ -783,7 +783,12 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
     }
 
     static func pathComponent(_ value: String) -> String {
-        value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        // RFC 3986 unreserved characters keep the server's capability spelling:
+        // real session ids contain dots and UUID hyphens. Escaping those made
+        // playlistURL reject the server-issued master before AVPlayer attached.
+        let unreserved = CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? ""
     }
 
     func playlistURL(_ playlistUrl: String, sessionId: String) throws -> URL {

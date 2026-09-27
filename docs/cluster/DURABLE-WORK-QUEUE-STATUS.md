@@ -903,3 +903,12 @@ continue E1–E3.
   repeat adversarial review. Both inventories, capability pagination, three
   cache-verification tests and the 445-method Store inventory pass. Candidate
   `465f16594` passed the normal pinned hook; only promotion bookkeeping follows.
+
+
+- 2026-09-27: combined fast lane 3358 passed 1,360 core unit tests and
+  all 179 storage contracts, including the real replicated backend. The daemon
+  suite reported `decode_fact_source_shipped_shape`: its non-deadline fixture
+  allowed only 100 ms for process scheduling. Expanded that fixture budget to
+  five seconds while retaining its exact invalid-JSON and permit-release
+  assertions. Integrated current main's Apple Live TV URL repair (`1cbdc8d51`)
+  for the next promotion candidate. E3 remains isolated on its draft branch.
