@@ -772,3 +772,11 @@ continue E1–E3.
   without `timeout`. Its Linux fast-lane result remains required; no unrelated
   janitor behavior was changed. Replicated contracts and the fast lane remain
   in progress.
+
+- 2026-09-26: All seven new replicated cases passed against SQLite and real
+  three-voter Hiqlite (artwork, prediction, transcode copies, demand expiry,
+  and active-viewer next-up). Fast-lane run 3330 stopped in a playback-control
+  fixture that extracted `api()` without its new session helpers. Both fixture
+  sites now load the shared prelude; the full playback-control, player-DOM and
+  Live TV web checks pass. This is a harness correction, with no product change
+  and no second adversarial review. The corrected candidate must rerun the lane.
