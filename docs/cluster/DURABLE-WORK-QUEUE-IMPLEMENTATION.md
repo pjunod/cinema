@@ -1191,15 +1191,15 @@ not authorize a production restart or rolling mixed-queue cutover.
 
 | Unit | Status | Branch/PR | Evidence |
 |---|---|---|---|
-| Implementation plan | review findings addressed 2026-09-25; external review pending | Working-tree documentation only | One independent adversarial review; dispositions in §13; four docs-index tests and explicit new-file link/whitespace checks |
+| Implementation plan | implemented through E3 | PRs #532, #564 and #572 | Design dispositions in §13; implementation reviews addressed and required gates passed |
 | M1 queue + pre-transcode | merged | PR #532 | Adversarial findings addressed; fast lane 3296 green |
 | M2 fragment build + hydration | merged | PR #532 | Shared build, hydration, retry ledgers and cutover validated |
 | M3 operations + recovery | merged | PR #532 | Activity, Developer controls, recovery and migration validated |
 | Core promotion/deployment | main merged; production unchanged | `b4b488556` | Required gates passed on reviewed candidate; no deployment authorized |
 | E0 preparation + maintenance adapters | merged | PR #564 | Final review addressed; fast lane 3322 green |
-| E1 reads + cache preparation | reviewed; combined qualification | PR #572 | Copy, artwork, prediction and read-after contracts pass; review findings addressed |
-| E2 embeddings + batch analysis | reviewed; combined qualification | PR #572 | Review findings addressed; shared queue, embedding, probe and repair regressions passed |
-| E3 placement + shared ingest | reviewed; three findings addressed | PR #572 | Remote transport lifetime, per-user retirement capacity and monotonic placement generations corrected; 13 focused daemon regressions and 11 docs/ownership checks passed; final lane remains |
+| E1 reads + cache preparation | merged | PR #572 | Copy, artwork, prediction and read-after contracts pass; review findings addressed; fast lane 3363 green |
+| E2 embeddings + batch analysis | merged | PR #572 | Review findings addressed; shared queue, embedding, probe and repair regressions passed; fast lane 3363 green |
+| E3 placement + shared ingest | merged | PR #572 | Three review findings addressed; shared-ingest and recovery regressions passed locally and in CI; fast lane 3363 green |
 
 **First-release done:** accepted jobs survive restart; both backends enforce
 exclusive publication; compatible nodes share real work; cancellation and
