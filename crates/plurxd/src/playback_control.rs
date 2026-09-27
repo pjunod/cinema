@@ -6784,24 +6784,50 @@ pub(crate) trait RollingTerminalAdmission: Send + Sync {
     fn accepted(&self, outcome: RollingControlOutcome);
 }
 
+/// The points of [`RollingFlowSync`] that a test can pause at
+/// (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
+///
+/// The flow sync holds one of these in every build, so its layout and the
+/// await points of [`RollingFlowSync::wait_for`] are the same in the test and
+/// release binaries. Production installs [`NoopRollingFlowSyncHooks`]; the
+/// race test installs a pausing implementation. A paused hook's timing is
+/// still a test artefact: what this makes identical is the struct and the set
+/// of await points, not scheduling.
+trait RollingFlowSyncHooks: Send + Sync {
+    /// A waiter has registered its `Notify` interest and found its ticket not
+    /// yet applied, before it awaits the notification.
+    fn after_wait_check(&self) -> crate::seam_hooks::HookFuture<'_>;
+}
+
+/// What production installs: the point is already ready.
+struct NoopRollingFlowSyncHooks;
+
+impl RollingFlowSyncHooks for NoopRollingFlowSyncHooks {
+    fn after_wait_check(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+}
+
 struct RollingFlowSync {
     requested: AtomicU64,
     applied: AtomicU64,
     request_notify: tokio::sync::Notify,
     applied_notify: tokio::sync::Notify,
-    #[cfg(test)]
-    wait_after_check: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    hooks: Box<dyn RollingFlowSyncHooks>,
 }
 
 impl RollingFlowSync {
     fn new() -> Self {
+        Self::with_hooks(Box::new(NoopRollingFlowSyncHooks))
+    }
+
+    fn with_hooks(hooks: Box<dyn RollingFlowSyncHooks>) -> Self {
         Self {
             requested: AtomicU64::new(0),
             applied: AtomicU64::new(0),
             request_notify: tokio::sync::Notify::new(),
             applied_notify: tokio::sync::Notify::new(),
-            #[cfg(test)]
-            wait_after_check: std::sync::Mutex::new(None),
+            hooks,
         }
     }
 
@@ -6837,17 +6863,7 @@ impl RollingFlowSync {
             if self.applied.load(Ordering::Acquire) >= ticket {
                 return;
             }
-            #[cfg(test)]
-            let pause = self
-                .wait_after_check
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            #[cfg(test)]
-            if let Some(pause) = pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
+            self.hooks.after_wait_check().await;
             notified.as_mut().await;
         }
     }
@@ -22970,15 +22986,25 @@ mod tests {
         assert!(handle.snapshot().await.is_some_and(|lease| lease.retired));
     }
 
+    /// The race test's hooks: the first waiter to pass its check holds the
+    /// pause; later ones pass through once it is released.
+    struct FlowWaitPause(Arc<crate::seam_hooks::AsyncPause>);
+
+    impl RollingFlowSyncHooks for FlowWaitPause {
+        fn after_wait_check(&self) -> crate::seam_hooks::HookFuture<'_> {
+            Box::pin(async move {
+                self.0.hold().await;
+            })
+        }
+    }
+
     #[tokio::test]
     async fn flow_completion_between_check_and_await_cannot_be_lost() {
-        let sync = Arc::new(RollingFlowSync::new());
+        let pause = crate::seam_hooks::AsyncPause::new("flow wait after check");
+        let sync = Arc::new(RollingFlowSync::with_hooks(Box::new(FlowWaitPause(
+            Arc::clone(&pause),
+        ))));
         let ticket = sync.request();
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *sync
-            .wait_after_check
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
         let waiter = {
             let sync = Arc::clone(&sync);
             tokio::spawn(async move { sync.wait_for(ticket).await })
@@ -22986,13 +23012,35 @@ mod tests {
 
         // The waiter has registered but has not awaited the notification.
         // `notify_waiters` in this exact interval must still release it.
-        pause.wait().await;
+        let held = pause.reached().await;
         sync.complete(ticket);
-        pause.wait().await;
+        held.release();
         tokio::time::timeout(Duration::from_secs(1), waiter)
             .await
             .expect("registered completion wake was retained")
             .expect("waiter task");
+    }
+
+    /// The race test's scenario through the production constructor: the
+    /// no-op hook is ready at once, so the first poll leaves the waiter parked
+    /// on its registered notification, and the completion in that gap wakes
+    /// it. Polled by hand, no task and no timer.
+    #[test]
+    fn rolling_flow_sync_shipped_shape() {
+        use std::future::Future;
+        let sync = RollingFlowSync::new();
+        let ticket = sync.request();
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut waiter = std::pin::pin!(sync.wait_for(ticket));
+        assert!(
+            waiter.as_mut().poll(&mut context).is_pending(),
+            "an unapplied ticket parks its waiter"
+        );
+        sync.complete(ticket);
+        assert!(
+            waiter.as_mut().poll(&mut context).is_ready(),
+            "the production hook let the waiter reach its registered notification"
+        );
     }
 
     #[tokio::test]
