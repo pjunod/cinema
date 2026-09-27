@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 merged; E0 fast lane: preflight correction · **Updated:** 2026-09-26 ·
+**Status:** M1–M3 merged; E0 fast lane: isolated lockfile correction · **Updated:** 2026-09-26 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` ·
 **Base:** `0386c78ec` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — validating](http://192.168.4.7:3000/noirr/plurx/pulls/564)
 
@@ -609,3 +609,9 @@ continue E1–E3.
   A local TypeScript check also found three new storage-input element type
   errors; annotated those inputs without raising the baseline. Batch these
   corrections before the next lane run.
+
+- 2026-09-26: lane [3317](http://192.168.4.7:3000/noirr/plurx/actions/runs/3317)
+  passed preflight and web checks, then stopped before Rust compilation because
+  the isolated Hiqlite spike lockfile lacked core's new cancellation dependency.
+  Refreshed only that workspace dependency list; both isolated lockfiles pass
+  `make spike-lock-check` with Rust 1.97.1. No dependency version changed.
