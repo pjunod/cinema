@@ -369,7 +369,7 @@
         assert!(!joined.contains("remove_types=32-34"), "{joined}");
 
         let (control, mut registration) =
-            crate::playback_control::RollingControlHandle::spawn_prepublication_producer(
+            crate::playback_control::RollingControlHandle::spawn_prepublication_producer_for_test(
                 "channel-repair-test",
             );
         registration

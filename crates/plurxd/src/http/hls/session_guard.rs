@@ -203,6 +203,60 @@ impl Drop for MediaSessionRequestGuard {
     }
 }
 
+/// The points of a started session's cleanup that a test holds or observes
+/// (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
+///
+/// The cleanup holds one of these in every build, so its layout and the await
+/// points of the spawned teardown are the same in the test and release
+/// binaries. Production installs [`NoopStartedSessionCleanupHooks`]; a test
+/// replaces them on the armed guard before it drops.
+trait StartedSessionCleanupHooks: Send + Sync {
+    /// The worker abort and the request-claim settlement have finished, and
+    /// the replacement gate is still held.
+    fn after_cleanup_settled(&self) -> crate::seam_hooks::HookFuture<'_>;
+    /// The replacement gate was released.
+    fn after_replacement_released(&self);
+}
+
+/// What production installs: nothing is held or recorded.
+struct NoopStartedSessionCleanupHooks;
+
+impl StartedSessionCleanupHooks for NoopStartedSessionCleanupHooks {
+    fn after_cleanup_settled(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn after_replacement_released(&self) {}
+}
+
+/// The test's hooks: hold the settled cleanup at `pause`, then report the
+/// release of the replacement gate on `released`.
+#[cfg(test)]
+struct HeldStartedSessionCleanup {
+    pause: std::sync::Arc<crate::seam_hooks::AsyncPause>,
+    released: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+#[cfg(test)]
+impl StartedSessionCleanupHooks for HeldStartedSessionCleanup {
+    fn after_cleanup_settled(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(async move {
+            self.pause.hold().await;
+        })
+    }
+
+    fn after_replacement_released(&self) {
+        if let Some(released) = self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = released.send(());
+        }
+    }
+}
+
 struct StartedSessionCleanup {
     state: AppState,
     owner_node_id: String,
@@ -213,12 +267,7 @@ struct StartedSessionCleanup {
     owns_worker: bool,
     owns_request_claim: bool,
     _replacement: Option<ClusterReplacementGuard>,
-    #[cfg(test)]
-    test_settlement: Option<(
-        tokio::sync::oneshot::Sender<()>,
-        tokio::sync::oneshot::Receiver<()>,
-        tokio::sync::oneshot::Sender<()>,
-    )>,
+    hooks: Box<dyn StartedSessionCleanupHooks>,
 }
 
 impl StartedSessionGuard {
@@ -358,8 +407,7 @@ impl StartedSessionGuard {
                 owns_worker,
                 owns_request_claim,
                 _replacement: replacement,
-                #[cfg(test)]
-                test_settlement: None,
+                hooks: Box::new(NoopStartedSessionCleanupHooks),
             }),
         }
     }
@@ -368,17 +416,19 @@ impl StartedSessionGuard {
         self.cleanup = None;
     }
 
+    /// Hold this guard's cleanup at `pause` once it has settled, with the
+    /// replacement gate still held; `released` reports the gate's release.
     #[cfg(test)]
     pub(super) fn hold_cleanup_for_test(
         &mut self,
-        settled: tokio::sync::oneshot::Sender<()>,
-        release: tokio::sync::oneshot::Receiver<()>,
+        pause: std::sync::Arc<crate::seam_hooks::AsyncPause>,
         released: tokio::sync::oneshot::Sender<()>,
     ) {
-        self.cleanup
-            .as_mut()
-            .expect("armed guard cleanup")
-            .test_settlement = Some((settled, release, released));
+        self.cleanup.as_mut().expect("armed guard cleanup").hooks =
+            Box::new(HeldStartedSessionCleanup {
+                pause,
+                released: std::sync::Mutex::new(Some(released)),
+            });
     }
 }
 
@@ -408,8 +458,7 @@ impl Drop for StartedSessionGuard {
             owns_worker,
             owns_request_claim,
             _replacement,
-            #[cfg(test)]
-            test_settlement,
+            hooks,
         } = cleanup;
         // Declared before the spawn, not inside it: from here the guard is
         // held by cleanup, its request has already answered the viewer, and a
@@ -427,15 +476,9 @@ impl Drop for StartedSessionGuard {
                 settle_media_session_request_claim(&state, user_id, &request_id, &incarnation_id)
                     .await;
             }
-            #[cfg(test)]
-            if let Some((settled, release, released)) = test_settlement {
-                let _ = settled.send(());
-                let _ = release.await;
-                drop(_replacement);
-                let _ = released.send(());
-                return;
-            }
+            hooks.after_cleanup_settled().await;
             drop(_replacement);
+            hooks.after_replacement_released();
         }));
     }
 }
