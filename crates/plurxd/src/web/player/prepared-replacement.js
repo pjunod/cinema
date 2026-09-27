@@ -35,6 +35,11 @@ const PREPARED_ALIGN_SEEK_MS=1500;
 // Corrective seeks per commit. The incumbent keeps moving while each one runs,
 // so a second measurement is worth taking and a third is a loop.
 const PREPARED_ALIGN_ATTEMPTS=2;
+// A seek can leave one decoded frame from the old position in the callback
+// queue. Prove the successor advances monotonically before it takes the
+// picture; the incumbent remains visible while these frames are checked.
+const PREPARED_MONOTONIC_FRAME_STEPS=3;
+const PREPARED_FRAME_PROOF_MS=500;
 // A switch that never renders is a failed preparation, and the server is owed
 // that answer rather than a 330-second silence.
 const PREPARED_FIRST_FRAME_MS=8000;
@@ -616,27 +621,47 @@ function preparedAlignedBuffered(spare){
   return false;
 }
 // A decoded successor frame while it is nearly transparent proves that Chrome
-// is presenting the prepared layer. Expose on its next frame instead of at an
-// arbitrary point between two 30-fps pictures. A browser that does not render
-// the warm layer keeps the immediate path; a missed next frame is bounded.
+// is presenting the prepared layer. Require a few increasing media-time steps
+// after any alignment seek before exposing it: a queued pre-seek frame can
+// otherwise step the visible picture backward just after the switch. A browser
+// that does not render the warm layer keeps the immediate path.
 function exposePreparedReplacementAtFrame(p,state,v,spare,filmMs){
   if(!state.warmFrameReady||typeof spare.requestVideoFrameCallback!=="function")
     return exposePreparedReplacement(p,state,v,spare,filmMs);
-  let settled=false;
-  const finish=()=>{
+  let settled=false,priorMediaTime=null,advancingSteps=0;
+  const live=()=>PLAYER===p&&preparedState(p)===state
+    &&document.getElementById("video")===v&&preparedVideoElement()===spare
+    &&playbackOwnsAttachedMedia(p);
+  const finish=(ready)=>{
     if(settled) return;
     settled=true;
     if(state.exposeFrameTimer!=null){ clearTimeout(state.exposeFrameTimer); state.exposeFrameTimer=null; }
     if(state.exposeFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
       try{ spare.cancelVideoFrameCallback(state.exposeFrameCallbackId); }catch(e){}
     state.exposeFrameCallbackId=null;
-    if(PLAYER!==p||preparedState(p)!==state||document.getElementById("video")!==v
-      ||preparedVideoElement()!==spare||!playbackOwnsAttachedMedia(p)) return;
-    exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
+    if(!live()) return;
+    if(ready) exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
+    else failPreparedReplacement(p,state,"successor frames did not advance before exposure");
   };
-  state.exposeFrameTimer=setTimeout(finish,100);
-  try{ state.exposeFrameCallbackId=spare.requestVideoFrameCallback(finish); }
-  catch(e){ finish(); }
+  const observe=(now,meta)=>{
+    state.exposeFrameCallbackId=null;
+    if(!live()){ finish(false); return; }
+    const mediaTime=Number(meta&&meta.mediaTime);
+    if(Number.isFinite(mediaTime)){
+      advancingSteps=priorMediaTime!=null&&mediaTime>priorMediaTime
+        ?advancingSteps+1:0;
+      priorMediaTime=mediaTime;
+      if(advancingSteps>=PREPARED_MONOTONIC_FRAME_STEPS){ finish(true); return; }
+    }else{
+      priorMediaTime=null;
+      advancingSteps=0;
+    }
+    try{ state.exposeFrameCallbackId=spare.requestVideoFrameCallback(observe); }
+    catch(e){ finish(false); }
+  };
+  state.exposeFrameTimer=setTimeout(()=>finish(false),PREPARED_FRAME_PROOF_MS);
+  try{ state.exposeFrameCallbackId=spare.requestVideoFrameCallback(observe); }
+  catch(e){ finish(false); }
   return true;
 }
 // Phase two: the exposure, unchanged. Intent is sampled at the last reversible
