@@ -2,7 +2,7 @@
 
 **Status:** M1–M3 and E0 merged; E1 awaiting fast lane; E2 in construction · **Updated:** 2026-09-27 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` · **E1:** `codex/cluster-cache-preparation` ·
-**Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) · **E1:** [#566 — awaiting fast lane](http://192.168.4.7:3000/noirr/plurx/pulls/566)
+**E2:** `codex/cluster-batch-analysis` · **Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) · **E1:** [#566 — awaiting fast lane](http://192.168.4.7:3000/noirr/plurx/pulls/566) · **E2:** [#567 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/567)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -19,7 +19,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
 | E0 subtitle and library workers | Merged | PR #564 merged as `1d70a1fed`; one final review addressed and run 3322 passed all required fast-lane jobs |
 | E1 reads, caches, prediction, artwork | Reviewed; fast lane queued | Read path, artwork, portable transcodes, bounded hot copies and durable predictive analysis implemented. Single final review addressed; focused store, image, copy and cleanup checks passed. Required fast lane remains. Scheduled verification/repair belongs to E2 |
-| E2 embeddings, probes and repair | In construction | Shared embedding storage and semantic worker wired; compiling regression contracts. Probes and verification/repair remain |
+| E2 embeddings, probes and repair | In construction | Embeddings and bounded leaf probes committed and compiled. Scheduled verification/repair remains |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
 | Final adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
 | Core fast lane | Passed: run 3296 on `3784d5ec5` | Preflight, Rust, Windows, web and main promotion gate all passed |
@@ -801,3 +801,10 @@ continue E1–E3.
   use background priority and no longer reserve source-media I/O slots.
   Scheduled artifact verification/repair remains to be built. E1 run 3337 has
   green preflight, Windows and web checks; the Rust gate is still running.
+
+- 2026-09-27: main advanced to `24a268339` with K-08's bounded semantic
+  inference pool while E1 run 3337 was executing. Integrated that current main
+  into E1 without conflicts. The prior candidate has green preflight, Windows
+  and web jobs; Rust was still running. The merged candidate requires a fresh
+  fast lane. E2's embeddings and leaf probes are committed separately on
+  `codex/cluster-batch-analysis` in draft PR #567; scheduled repair remains open.
