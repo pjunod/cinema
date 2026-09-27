@@ -298,7 +298,7 @@ function queueAutoControllerTick(p,urgent){
 function scheduleUrgentAutoControllerTick(p,kbps,now){
   if(!p||PLAYER!==p||!p.abr||p.abr.switching||p.method!=="transcode"
     ||qualityForce()!=="auto"||!(SERVER&&SERVER.playback_auto_abr)) return;
-  const v=document.getElementById("video");
+  const v=/** @type {HTMLVideoElement|null} */ (document.getElementById("video"));
   const height=Number(p.health&&p.health.target_height||p.autoHeight||v&&v.videoHeight);
   const ladder=PlaybackPolicy.normalizedLadder(p.ladder);
   const index=ladder.findIndex(rung=>rung.height===height);
