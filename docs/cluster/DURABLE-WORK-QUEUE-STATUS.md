@@ -611,3 +611,10 @@ continue E1–E3.
   local preference lookup runs inside the existing per-read proof. Auth stays
   authoritative, and clients without a valid watch floor retain authority reads.
   New regressions are written, not executed; E1 review and tests remain deferred.
+
+- 2026-09-26: lane [3315](http://192.168.4.7:3000/noirr/plurx/actions/runs/3315)
+  passed the corrected guard inventory, then found the API overview's stale
+  route count (236 versus 237 after storage-domain routes). Corrected the count.
+  A local TypeScript check also found three new storage-input element type
+  errors; annotated those inputs without raising the baseline. Batch these
+  corrections before the next lane run.
