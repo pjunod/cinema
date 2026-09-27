@@ -728,7 +728,7 @@ mod tests {
     #[tokio::test]
     async fn artwork_cancellation_reaps_the_encoder_before_returning() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("directory");
+        let dir = crate::test_tempdir().expect("directory");
         let program = dir.path().join("encoder");
         let announced = dir.path().join("pid");
         std::fs::write(

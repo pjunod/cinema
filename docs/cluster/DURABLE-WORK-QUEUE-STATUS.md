@@ -18,7 +18,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | M2 fragment analysis and hydration | Implemented; focused validation passed | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
 | M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
 | E0 subtitle and library workers | Merged | PR #564 merged as `1d70a1fed`; one final review addressed and run 3322 passed all required fast-lane jobs |
-| E1 reads, caches, prediction, artwork | In construction | Read path, artwork, portable transcodes, bounded hot copies and durable predictive analysis implemented. Cleanup and transfer regression targets compile; final review and validation remain. Scheduled verification/repair belongs to E2 |
+| E1 reads, caches, prediction, artwork | In construction | Read path, artwork, portable transcodes, bounded hot copies and durable predictive analysis implemented. Single final review addressed; focused store, image, copy and cleanup checks passed. Required fast lane remains. Scheduled verification/repair belongs to E2 |
 | E2 embeddings, probes and repair | Planned | Reuse queue contracts |
 | E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
 | Final adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
@@ -760,3 +760,15 @@ continue E1–E3.
   IDs. Both now use the same fixed-length payload hash. The backend contract
   covers both admission orders, independent cancellation and a 256-byte node.
   Regression execution follows these fixes; no second review is scheduled.
+
+- 2026-09-26: Post-review focused evidence: 23 durable SQLite contracts, four
+  cooperative cancellation/cleanup tests, six browser read-after tests, seven
+  ownership inventory tests and all 50 selected daemon cases passed (44 image,
+  four copy, one restart-GC and one placement case). The first image pass had
+  one macOS temporary-path fixture failure; the fixture now uses the existing
+  canonical temp helper and that case passed on rerun. Read-after coverage is
+  wired into the existing web check and fast preflight. The local CI-contract
+  subset passed 66/67; the Linux janitor timeout case failed on this macOS host
+  without `timeout`. Its Linux fast-lane result remains required; no unrelated
+  janitor behavior was changed. Replicated contracts and the fast lane remain
+  in progress.
