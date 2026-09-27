@@ -22,14 +22,14 @@ pub(super) async fn enqueue(
     }
     Ok(jobs)
 }
-/// Pending work can fall back to the coordinator without delaying an otherwise
-/// local pass. Already running work gets a bounded opportunity to finish.
+/// Accepted work stays with its durable attempt. One shared batch deadline
+/// bounds waiting; it never becomes a duplicate unadmitted local subprocess.
 pub(super) async fn consume(
     store: &PublicationStore<'_>,
     file: &MediaFile,
     id: &str,
+    deadline: tokio::time::Instant,
 ) -> Result<Option<bool>, StoreError> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
     loop {
         check_scan_cancellation()?;
         let Some(job) = store.background_job(id).await? else {
@@ -55,7 +55,7 @@ pub(super) async fn consume(
                 }
                 return store.apply_probe(id).await.map(Some);
             }
-            JobState::Running if tokio::time::Instant::now() < deadline => {
+            JobState::Queued | JobState::Running if tokio::time::Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             _ => {
@@ -66,6 +66,12 @@ pub(super) async fn consume(
                         now_ms: crate::cluster::coordination::unix_ms()?,
                     })
                     .await?;
+                if matches!(
+                    job.state,
+                    JobState::Queued | JobState::Running | JobState::Cancelling
+                ) {
+                    return Err(StoreError::Task("leaf probe batch exhausted its five-minute wait budget; accepted work was cancelled".into()));
+                }
                 return Ok(None);
             }
         }

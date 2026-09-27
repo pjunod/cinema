@@ -808,3 +808,11 @@ continue E1–E3.
   and web jobs; Rust was still running. The merged candidate requires a fresh
   fast lane. E2's embeddings and leaf probes are committed separately on
   `codex/cluster-batch-analysis` in draft PR #567; scheduled repair remains open.
+
+- 2026-09-27: current-main integration committed as `8e8b9de09`; E2 retains
+  K-08's bounded inference pool. Tightened leaf handoff: accepted queued leaves
+  now remain with their durable attempts, use one five-minute budget per page,
+  and never become duplicate local subprocesses. Admitted work completes before
+  legacy local work in the page; failed leaves are reported. Workspace Clippy
+  and all test-target compilation passed. No E2 tests have run. E1's new run
+  3340 is qualifying `20d2a6bcb`; the obsolete run was cancelled automatically.

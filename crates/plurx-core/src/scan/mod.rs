@@ -490,8 +490,14 @@ pub async fn reprobe_files_with_publication(
     let mut report = ReprobeReport::default();
     let pipeline = probe::pipeline_digest().await;
     for batch in files.chunks(128) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
         let pending = probe_batch::enqueue(store, batch, pipeline.as_deref()).await?;
-        for file in batch {
+        // Complete admitted leaves before any legacy local work in this page.
+        let ordered = batch
+            .iter()
+            .filter(|file| pending.contains_key(&file.id))
+            .chain(batch.iter().filter(|file| !pending.contains_key(&file.id)));
+        for file in ordered {
             check_scan_cancellation()?;
             report.attempted += 1;
             let path_str = file.path.to_string_lossy().into_owned();
@@ -510,7 +516,7 @@ pub async fn reprobe_files_with_publication(
                 }
             };
             if let Some(job_id) = pending.get(&file.id) {
-                match probe_batch::consume(store, file, job_id).await? {
+                match probe_batch::consume(store, file, job_id, deadline).await? {
                     Some(true) => {
                         report.repaired += 1;
                         continue;
@@ -519,7 +525,11 @@ pub async fn reprobe_files_with_publication(
                         report.gone += 1;
                         continue;
                     }
-                    None => {}
+                    None => {
+                        report.still_failing += 1;
+                        report.problems.push(format!("`{path_str}`: durable leaf probe failed; inspect background job {job_id}"));
+                        continue;
+                    }
                 }
             }
             match probe_with_outcome(&file.path).await {
