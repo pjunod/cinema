@@ -277,6 +277,41 @@ function recordAutoDecision(p,currentHeight,result,runway,throughputKbps){
     message:`Auto quality retained ${currentHeight}p — ${result.reason}`},
     playbackContext()));
 }
+// A media-fragment progress delta can establish a severe link cliff just after
+// the periodic Auto tick. Queue the same decision immediately for that fresh
+// observation, without running two health polls or two selection asks at once.
+function queueAutoControllerTick(p,urgent){
+  if(!p||PLAYER!==p||!p.abr||!playbackOwnsAttachedMedia(p)) return;
+  if(p.abr.controllerTickRunning){
+    if(urgent) p.abr.controllerUrgentPending=true;
+    return;
+  }
+  p.abr.controllerTickRunning=true;
+  Promise.resolve().then(()=>autoControllerTick()).catch(()=>{}).finally(()=>{
+    p.abr.controllerTickRunning=false;
+    if(p.abr.controllerUrgentPending){
+      p.abr.controllerUrgentPending=false;
+      queueAutoControllerTick(p,false);
+    }
+  });
+}
+function scheduleUrgentAutoControllerTick(p,kbps,now){
+  if(!p||PLAYER!==p||!p.abr||p.abr.switching||p.method!=="transcode"
+    ||qualityForce()!=="auto"||!(SERVER&&SERVER.playback_auto_abr)) return;
+  const v=document.getElementById("video");
+  const height=Number(p.health&&p.health.target_height||p.autoHeight||v&&v.videoHeight);
+  const ladder=PlaybackPolicy.normalizedLadder(p.ladder);
+  const index=ladder.findIndex(rung=>rung.height===height);
+  if(index<=0) return;
+  const current=ladder[index];
+  const ratio=index<PlaybackPolicy.AUTO_DEFAULTS.lowRungEmergencyCount
+    ?1:PlaybackPolicy.AUTO_DEFAULTS.severeEstimateRatio;
+  if(!(kbps>0&&kbps<current.total_kbps*ratio)) return;
+  const prior=p.abr.lastUrgentAutoTickAtMs;
+  if(prior!=null&&now-prior<PlaybackPolicy.AUTO_DEFAULTS.decisionMs) return;
+  p.abr.lastUrgentAutoTickAtMs=now;
+  queueAutoControllerTick(p,true);
+}
 async function switchAutoRung(currentHeight,decision){
   const p=PLAYER, v=document.getElementById("video");
   if(!p||!v||!p.abr||p.abr.switching||!(decision&&decision.height>0)) return;

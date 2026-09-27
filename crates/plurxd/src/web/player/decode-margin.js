@@ -516,7 +516,7 @@ function armPlaybackSampling(v,p){
   p.progressTimer=setInterval(()=>playbackSamplingTick(v,p),500);
   clearInterval(p.autoTimer);
   p.autoTimer=setInterval(()=>{
-    if(playbackOwnsAttachedMedia(p)) autoControllerTick().catch(()=>{});
+    if(playbackOwnsAttachedMedia(p)) queueAutoControllerTick(p,false);
   },PlaybackPolicy.AUTO_DEFAULTS.decisionMs);
   clearInterval(p.timer);
   p.timer=setInterval(()=>{

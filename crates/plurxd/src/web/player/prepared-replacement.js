@@ -275,18 +275,8 @@ function beginPreparedReplacement(p,action){
   // seconds ahead when the incumbent already has enough runway to play
   // until that second. The buffer gate below still requires overlap with the
   // actual incumbent position before exposure, so this cannot skip content.
-  const autoMove=p.directedChange&&p.directedChange.autoMove;
-  const emergencyDownshift=autoMove&&autoMove.switchReason==="bandwidth cliff"
-    &&Number(autoMove.to)<Number(autoMove.from);
-  const ordinaryStartLeadMs=Math.min(PREPARED_BUFFER_LEAD_MS+1000,
+  const startLeadMs=Math.min(PREPARED_BUFFER_LEAD_MS+1000,
     Math.max(0,Math.round((bufferRunway(v)-3)*1000)));
-  // At an emergency downshift the link has already been measured below this
-  // rung's safe rate. A three-second head start makes the buffer-overlap gate
-  // wait for the incumbent to catch the successor while that link is draining.
-  // One second still avoids starting behind the moving playhead; the ordinary
-  // overlap, two-second runway and decoded-frame proofs decide exposure.
-  const startLeadMs=emergencyDownshift
-    ?Math.min(1000,ordinaryStartLeadMs):ordinaryStartLeadMs;
   const stageAtMs=performance.now();
   const state={actionId:action.action_id,sessionId:action.session_id,
     playlistUrl:action.playlist_url,controlBootstrap:action.control||null,

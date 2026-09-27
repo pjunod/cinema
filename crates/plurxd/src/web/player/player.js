@@ -681,6 +681,7 @@ function createHlsStartupLoader(StockLoader,episode){
             player.abr.recentEstimateAtMs=now;
             player.abr.recentEstimateSource='progress';
             player.abr.recentEstimateUrl=String(context.url||'');
+            scheduleUrgentAutoControllerTick(player,kbps,now);
           }
         });
       }
