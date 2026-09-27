@@ -1,8 +1,11 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 and E0 merged; E1–E3 reviewed; combined promotion qualifying · **Updated:** 2026-09-27 ·
-**Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` · **E1:** `codex/cluster-cache-preparation` ·
-**E2:** `codex/cluster-batch-analysis` · **E3:** `codex/cluster-media-placement` · **Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) · **E1:** [#566 — superseded by combined promotion](http://192.168.4.7:3000/noirr/plurx/pulls/566) · **E2:** [#567 — superseded by final promotion](http://192.168.4.7:3000/noirr/plurx/pulls/567) · **Final:** [#572 — E1–E3 promotion](http://192.168.4.7:3000/noirr/plurx/pulls/572)
+**Status:** M1–M3 and E0–E3 merged into main · **Updated:** 2026-09-27 ·
+**Final implementation:** `82df7f59e` · **Production:** unchanged ·
+**Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) ·
+**E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) ·
+**E1–E3:** [#572 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/572) ·
+**Qualification:** [fast lane 3363 — passed](http://192.168.4.7:3000/noirr/plurx/actions/runs/3363)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -18,10 +21,11 @@ implementation is claimed; “compiled” does not mean tests passed.
 | M2 fragment analysis and hydration | Merged in #532 | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; fast lane 3296 passed |
 | M3 UI, recovery and migration | Merged in #532 | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; fast lane 3296 passed |
 | E0 subtitle and library workers | Merged | PR #564 merged as `1d70a1fed`; one final review addressed and run 3322 passed all required fast-lane jobs |
-| E1 reads, caches, prediction, artwork | Reviewed; promoting in #572 | Read path, artwork, portable transcodes, bounded hot copies and durable predictive analysis implemented. Single final review addressed; focused store, image, copy and cleanup checks passed. Required fast lane remains. Scheduled verification/repair belongs to E2 |
-| E2 embeddings, probes and repair | Reviewed; promoting in #572 | Three final findings addressed; focused regressions passed. Candidate `b01b58416` includes current main and the daemon fixture deadline correction |
-| E3 placement and shared Live TV ingest | Reviewed; three findings fixed | Advisory enable controls, observed-resource ranking, stable remote Live TV placement and bounded shared ingest implemented. All 12 targeted E3/fixture regressions plus advisory settings passed; 11 docs/ownership checks passed; combined fast lane remains |
-| Final adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
+| E1 reads, caches, prediction, artwork | Merged in #572 | Replica reads, artwork, portable transcodes, bounded hot copies and prediction; both final review findings addressed |
+| E2 embeddings, probes and repair | Merged in #572 | Verified embeddings, coordinator-owned probes and finite integrity repair; all three final review findings addressed |
+| E3 placement and shared Live TV ingest | Merged in #572 | Advisory enable controls, resource ranking, stable placement and bounded shared ingest; all three final review findings addressed |
+| Final E1–E3 qualification | Passed on `f0f020ff5` | Fast lane 3363: policy, Rust, Windows, web and Main promotion gate green; 1,360 core tests, 179 storage contracts, 3,023 daemon tests and both serial media fixtures passed |
+| Core adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
 | Core fast lane | Passed: run 3296 on `3784d5ec5` | Preflight, Rust, Windows, web and main promotion gate all passed |
 | Core merge | Complete | PR #532 merged as `b4b488556`; E0–E3 continue in the agent clone |
 
@@ -986,3 +990,27 @@ continue E1–E3.
   Added the signed placement, processing and bounded ingest entries and updated
   the count to 241. No runtime failure was reported; downstream compile/unit
   jobs correctly did not start after preflight failed.
+
+- 2026-09-27: complete E1–E3 programme merged in #572 as `82df7f59e`.
+  Fast lane 3363 passed on exact candidate `f0f020ff5` against main
+  `9660f698a`: policy/contract preflight, Rust, Windows, web and Main promotion
+  gate all green. Rust evidence includes 1,360 core tests, all 179 storage
+  contracts, 3,023 daemon tests, and both serial media fixtures. All eight E1–E3
+  adversarial findings are addressed; no additional review loop was requested.
+  Superseded drafts #566 and #567 are closed. Production nodes were not changed.
+
+## Final decisions and release boundary
+
+- Developer enable preferences remain independently writable. Requirements are
+  advisory; authentication, ownership fences and actual resource admission still
+  protect execution. Enabling a preference does not certify old peer protocols.
+- New work can use another compatible processor. Existing sessions retain their
+  owner under the existing recovery contract. Live TV shares tuner ingest with
+  bounded independent consumers; ingress still carries client media traffic.
+- Direct client redirects and shared Live TV encodes remain outside this
+  implementation's agreed E3 boundary. No production deployment, node restart or
+  operator preference change is included in the merge.
+- SQLite 82 / Hiqlite 60 and the migration/import contracts are included. Queue
+  retries are bounded, and typed publication remains fenced by source and current
+  attempt ownership. Corrupt rebuildable artifacts get a finite copy/rebuild/
+  delivery repair sequence rather than an unbounded retry loop.
