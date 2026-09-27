@@ -4058,10 +4058,11 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # on the merge of main into #553 after #532 and #563; the merge adds no new site.
 # 397 -> 373 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
-# zeroing this row: -24, the `Barrier::wait` calls the five
-# seams and their race tests made (two per seam in production code, the rest
-# in the tests); the pauses are now `AsyncPause::hold`/`reached`. No process
-# lifecycle call was added or removed.
+# zeroing this row: net -24. 25 `Barrier::wait` calls the five seams and their
+# race tests made are gone (the pauses are now `AsyncPause::hold`/`reached`),
+# and one `cleanup.wait()` (`TerminalCleanup::wait`, not a process call) is
+# added by `terminal_cleanup_shipped_shape`. No process lifecycle call was
+# added or removed.
 # main @ `d4fa763c7` has 400; with S-14 M8's -24 (above) -> 376, measured by zeroing this row
 # on the merge of main into #562. Main's additions and this branch's coexist unchanged; the merge adds no new site.
 expected_occurrences = 376
