@@ -207,7 +207,9 @@ pub(crate) struct Placement {
 #[derive(Default)]
 pub(crate) struct Placements {
     entries: BTreeMap<(i64, String), Placement>,
-    retired: BTreeMap<(i64, String), tokio::time::Instant>,
+    retired: BTreeMap<(i64, String), (tokio::time::Instant, u64)>,
+    retire_sequence: u64,
+    generation: i64,
 }
 impl Placements {
     pub fn get(&self, user: i64, request: &str) -> Option<Placement> {
@@ -218,9 +220,15 @@ impl Placements {
         request: &LiveTvStartRequest,
         worker: String,
     ) -> Result<Placement, LiveTvError> {
+        if request.config_generation < self.generation {
+            return Err(LiveTvError::Conflict(
+                "the Live TV placement generation is stale".into(),
+            ));
+        }
+        self.generation = request.config_generation;
         let now = tokio::time::Instant::now();
         self.retired
-            .retain(|_, at| now.duration_since(*at) < Duration::from_secs(60));
+            .retain(|_, (at, _)| now.duration_since(*at) < RETIRED_TTL);
         if self
             .retired
             .contains_key(&(request.user_id, request.request_id.clone()))
@@ -243,7 +251,7 @@ impl Placements {
             }
             return Ok(held);
         }
-        if self.entries.len() + self.retired.len() >= 1024 {
+        if self.entries.len() >= 1024 {
             return Err(LiveTvError::Capacity(
                 "Live TV placement recovery history is full".into(),
             ));
@@ -273,13 +281,27 @@ impl Placements {
         }
         let now = tokio::time::Instant::now();
         self.retired
-            .retain(|_, at| now.duration_since(*at) < Duration::from_secs(60));
-        if !self.retired.contains_key(&key) && self.entries.len() + self.retired.len() >= 1024 {
-            return Err(LiveTvError::Capacity(
-                "Live TV retirement history is full".into(),
-            ));
+            .retain(|_, (at, _)| now.duration_since(*at) < RETIRED_TTL);
+        let sequence = self.retire_sequence;
+        self.retire_sequence = self.retire_sequence.saturating_add(1);
+        self.retired.insert(key, (now, sequence));
+        while self
+            .retired
+            .keys()
+            .filter(|(owner, _)| *owner == user)
+            .count()
+            > MAX_RETIRED_PER_USER
+        {
+            let oldest = self
+                .retired
+                .iter()
+                .filter(|((owner, _), _)| *owner == user)
+                .min_by_key(|(_, (at, sequence))| (*at, *sequence))
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                self.retired.remove(&oldest);
+            }
         }
-        self.retired.insert(key, now);
         Ok(None)
     }
     pub fn finish(&mut self, user: i64, request: &str) {
@@ -422,5 +444,44 @@ mod tests {
             .expect("full history still retires existing")
             .expect("owned");
         assert!(!placements.authorizes(&request(0), &held.worker, &held.nonce));
+    }
+    #[test]
+    fn one_users_unknown_retirements_do_not_consume_another_users_placement_capacity() {
+        let mut placements = Placements::default();
+        for id in 0..2048 {
+            placements
+                .begin_retire(7, &request(id).request_id)
+                .expect("per-user retirement");
+        }
+        assert_eq!(placements.retired.len(), MAX_RETIRED_PER_USER);
+        let mut other = request(3000);
+        other.user_id = 8;
+        placements
+            .assign(&other, "worker".into())
+            .expect("another viewer can start");
+        assert!(
+            placements.assign(&request(2047), "worker".into()).is_err(),
+            "the latest retirement still fences its viewer"
+        );
+    }
+    #[test]
+    fn delayed_old_generation_cannot_erase_a_newer_worker_assignment() {
+        let mut placements = Placements::default();
+        let old = request(1);
+        placements
+            .assign(&old, "old-worker".into())
+            .expect("initial generation");
+        let mut current = request(2);
+        current.config_generation = 2;
+        let held = placements
+            .assign(&current, "current-worker".into())
+            .expect("new generation");
+        assert!(placements.assign(&old, "different-worker".into()).is_err());
+        let replay = placements
+            .assign(&current, "different-worker".into())
+            .expect("current recovery");
+        assert_eq!(replay.worker, held.worker);
+        assert_eq!(replay.nonce, held.nonce);
+        assert!(placements.authorizes(&current, &held.worker, &held.nonce));
     }
 }

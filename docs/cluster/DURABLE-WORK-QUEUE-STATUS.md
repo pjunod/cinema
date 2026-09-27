@@ -949,3 +949,21 @@ continue E1–E3.
   bounded peer/recovery deadlines and the retained test HTTP server. No E3
   tests have run. Next: the one final adversarial review, findings, then the
   fast lane. E1–E2 candidate `b01b58416` runs separately in fast lane 3360.
+
+
+- 2026-09-27: the single E3 adversarial review of `d48607ee2` found three
+  issues. All are addressed: (1) peer-backed viewer transports now survive
+  non-owner DVR reconciliation, and the two-node regression runs the actual
+  DVR loop; (2) unknown retirement fences have a separate eight-entry per-user
+  budget and cannot exhaust other viewers' assignment capacity; (3) assignment
+  generations advance monotonically, rejecting delayed older starts before
+  they can remove newer ownership. Added targeted regressions for all three.
+  Pinned all-target Clippy passed; test execution follows this fix commit.
+
+- Promotion decision: main advanced to Apple build 190 while E1–E2 qualified.
+  With E3's one final review also complete, the remaining E1–E3 changes will
+  promote together through #572 after integrating current main. This replaces
+  separate overlapping E1–E2 and E3 qualifications. Prior reviews remain the
+  final reviews of their respective implementation batches. #566 and #567
+  will close as superseded after the combined candidate merges; no production
+  deployment is authorized or claimed by these merges.

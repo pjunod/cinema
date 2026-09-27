@@ -1016,7 +1016,9 @@ Unknown observations are ranking inputs, never a certification requirement.
 Live TV protocol 4 adds placed starts without changing v1/v2 signed bodies. The
 configured tuner owner selects a compatible voter from fresh media snapshots
 and retains the request's worker and nonce before contacting it. At most 1,024
-placement/recovery records are retained; new work is refused when ambiguous
+assigned placement/recovery records are retained; unknown retirements use a
+separate eight-entry per-user allowance. Configuration generations advance
+monotonically, so a delayed older start cannot remove newer ownership. new work is refused when ambiguous
 owners fill that bound. Retries do not choose another worker. Explicit retirement
 fences later ingest before the worker exchange; confirmed terminal records live
 for another minute. Admission sweeps at most eight old records inside 200 ms;
@@ -1026,7 +1028,8 @@ reports the lost session and starts with a new request identity.
 
 The selected worker opens an exact-signed, nonce-bound raw feed from the tuner
 owner and runs the existing viewer session lifecycle. The tuner owner joins its
-ordinary bounded transport queue; the worker shares one such feed for viewers
+ordinary bounded transport queue; peer-backed viewer transports are distinct
+from physical-device transports during DVR reconciliation. The worker shares one such feed for viewers
 of the same channel. Dropping a response detaches only that consumer, and a
 slow consumer is evicted independently. Existing source observations, serving
 fences, configuration/drain checks, physical encoder admission, process reaping,

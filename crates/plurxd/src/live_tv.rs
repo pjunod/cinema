@@ -2175,8 +2175,9 @@ impl LiveTvMetrics {
              plurx_live_tv_transport_consumers{{kind=\"recording\"}} {recordings}\n\
              # HELP plurx_live_tv_consumer_evictions_total Consumers a shared tuner connection stopped feeding: backlog (its bounded queue filled) or fenced (the owner lost serving authority).\n\
              # TYPE plurx_live_tv_consumer_evictions_total counter\n",
-            registry.transports.len(),
+            registry.transports.values().filter(|transport| transport.origin != dvr::TransportOrigin::PeerViewer).count(),
         );
+        out.push_str(&format!("# HELP plurx_live_tv_peer_feeds Shared tuner feeds this processor consumes.\n# TYPE plurx_live_tv_peer_feeds gauge\nplurx_live_tv_peer_feeds {}\n", registry.transports.values().filter(|transport| transport.origin == dvr::TransportOrigin::PeerViewer).count()));
         for (kind_index, kind) in ["viewer", "recording"].into_iter().enumerate() {
             for (reason_index, reason) in ["backlog", "fenced"].into_iter().enumerate() {
                 out.push_str(&format!(
@@ -4238,6 +4239,13 @@ impl LiveTvManager {
                 // viewer refused because a capture has the last tuner is owed
                 // the real reason. The reservation happens in this same lock
                 // hold (plan L-03 §2.4 D2).
+                if let Some(transport) = registry.transports.get(&request.channel_id) {
+                    if (transport.origin == dvr::TransportOrigin::PeerViewer) != is_remote {
+                        return Err(LiveTvError::Capacity(
+                            "the previous tuner-owner transport is still draining".into(),
+                        ));
+                    }
+                }
                 match registry.viewer_admission(&seat, request.user_id, now, config.max_sessions) {
                     ViewerAdmission::Join(transport) => {
                         if transport.reserve_seat() {
@@ -4258,7 +4266,11 @@ impl LiveTvManager {
                             owner_serving_generation: serving_generation,
                             device_id: device_id.clone(),
                             address,
-                            origin: dvr::TransportOrigin::Viewer,
+                            origin: if is_remote {
+                                dvr::TransportOrigin::PeerViewer
+                            } else {
+                                dvr::TransportOrigin::Viewer
+                            },
                             scratch: self.transport_scratch(),
                             metrics: Arc::clone(&self.metrics),
                             seats: 1,
@@ -12035,6 +12047,28 @@ exec /bin/cat > {sink}"#,
                 .expect("ingress activates assigned worker");
             remotes.push(remote);
         }
+        worker.dvr_storage_free_bytes.store(0, Ordering::Release);
+        let dvr_shutdown = CancellationToken::new();
+        let (events, _queue) = webhook::channel();
+        let dvr_worker = Arc::clone(&worker);
+        let stop_dvr = dvr_shutdown.clone();
+        let dvr_task = tokio::spawn(async move {
+            dvr_worker.dvr_loop(events, stop_dvr).await;
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while worker.dvr_storage_free_bytes.load(Ordering::Acquire) != u64::MAX {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("production DVR reconciliation completed");
+        assert!(worker
+            .registry
+            .lock()
+            .expect("registry")
+            .transports
+            .values()
+            .all(|transport| !transport.is_closing()));
         assert_eq!(
             tuner.gets.load(Ordering::Acquire),
             1,
@@ -12073,6 +12107,8 @@ exec /bin/cat > {sink}"#,
             .stop_local(&remotes[1].capability)
             .await
             .expect("stop final remote");
+        dvr_shutdown.cancel();
+        dvr_task.await.expect("DVR loop joined");
         worker
             .shutdown()
             .await
