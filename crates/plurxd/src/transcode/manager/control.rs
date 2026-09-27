@@ -1264,6 +1264,13 @@ impl TranscodeManager {
             .is_some_and(|gate| gate.released.load(Acquire))
     }
 
+    /// Whether `session_id`'s publication fence is closed, for a test that
+    /// holds a release between its fence and its durable End.
+    #[cfg(test)]
+    pub(crate) fn session_publication_fenced_for_test(&self, session_id: &str) -> bool {
+        self.session_release_is_active(session_id)
+    }
+
     /// Phase one of a durable terminal decision: close response publication
     /// and late adoption without choosing a local tombstone cause. The Store
     /// CAS then persists the first winning cause, and `begin_session_terminal`

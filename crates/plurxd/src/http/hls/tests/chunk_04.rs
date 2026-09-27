@@ -1055,6 +1055,11 @@
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !has_active_preparation_for_ask(&playback_id, "the-first-ask"),
+            "the staging task is parked at its registration point, so nothing is \
+             registered yet: the second ask lands in the window before registration",
+        );
         // The viewer taps a different quality. Nothing is cancelled anywhere:
         // the new exchange's guard simply takes the slot.
         let second = PendingCandidateGuard::begin(&playback_id, "the-second-ask");

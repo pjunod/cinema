@@ -2550,3 +2550,250 @@
         );
         drop(planted);
     }
+
+    /// `before_preparation_settlement` sits below the settlement's retry
+    /// deadline: a settlement delayed there past its whole retry budget
+    /// expires without committing, as one behind a Store that slow would.
+    #[tokio::test]
+    async fn a_settlement_delayed_past_its_retry_budget_expires_uncommitted() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        fixture
+            .state
+            .transcode
+            .vod_for_test()
+            .install_http_test_session(&session_id, staged_source_file(), dir.path())
+            .await;
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &staged_candidate_request(),
+            Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
+        )
+        .await;
+        let mut request = control_request(route.incarnation_id.clone());
+        request.supported_actions = Some(vec![
+            crate::playback_control::PREPARE_REPLACEMENT_ACTION.to_owned()
+        ]);
+        let (status, prepare_body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let action_id = prepare_body["action"]["action_id"]
+            .as_str()
+            .expect("Prepare action id")
+            .to_owned();
+        tokio::time::sleep(Duration::from_millis(260)).await;
+        request.sequence = 2;
+        request.capabilities = None;
+        request.acknowledgement = Some(crate::playback_control::ActionAcknowledgement {
+            action_id,
+            state: crate::playback_control::AcknowledgementState::Committed,
+            buffered_through_ms: None,
+            committed_media_origin_ms: prepare_body["action"]["media_origin_ms"].as_i64(),
+            first_frame_unix_ms: Some(unix_ms()),
+        });
+        delay_next_preparation_settlement(
+            &fixture.state,
+            &route.incarnation_id,
+            PREPARATION_SETTLEMENT_RETRY_BUDGET + Duration::from_millis(200),
+        );
+        let (failed_status, _) = control_body(
+            control_local_inner(&fixture.state, &route, request, unix_ms().saturating_add(500))
+                .await,
+        )
+        .await;
+        assert_eq!(failed_status, StatusCode::SERVICE_UNAVAILABLE);
+        tokio::time::sleep(PREPARATION_SETTLEMENT_RETRY_BUDGET + Duration::from_secs(1)).await;
+        assert_eq!(
+            fixture
+                .state
+                .store
+                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .await
+                .expect("pointer after the expired settlement")
+                .expect("the predecessor stays current")
+                .incarnation_id,
+            route.incarnation_id,
+            "the delay spent the retry budget, so the settlement expired uncommitted"
+        );
+    }
+
+    /// `after_release_fence_closed` sits between the publication fence and the
+    /// durable End: a release held there has closed the session's publication
+    /// fence, and its durable route is still live.
+    #[tokio::test]
+    async fn release_fence_point_sits_between_the_fence_and_the_durable_end() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "release-fence-unrelated").await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let _owner = install_vod_http_session(&fixture, dir.path(), &session_id).await;
+        let user = fixture
+            .store
+            .create_user("release-fence", "hash", false)
+            .await
+            .expect("release fence user");
+        activate_ready(
+            &fixture.store,
+            MediaSessionActivation {
+                recovery_epoch: String::new(),
+                expected_desired_revision: None,
+                incarnation_id: uuid::Uuid::new_v4().to_string(),
+                session_id: session_id.clone(),
+                user_id: user.id,
+                playback_id: "release-fence".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: fixture.state.node_id.clone(),
+                lease_expires_at_ms: unix_ms() + 60_000,
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms: unix_ms(),
+            },
+        )
+        .await;
+        assert!(
+            !fixture
+                .state
+                .transcode
+                .session_publication_fenced_for_test(&session_id),
+            "no release has fenced the session yet"
+        );
+
+        let pause = pause_release_after_fence(&fixture.state, &session_id);
+        let deletion = tokio::spawn({
+            let state = fixture.state.clone();
+            let session_id = session_id.clone();
+            async move { delete(State(state), AxPath(session_id)).await }
+        });
+        let held = pause.reached().await;
+        assert!(
+            fixture
+                .state
+                .transcode
+                .session_publication_fenced_for_test(&session_id),
+            "the publication fence is closed before the point"
+        );
+        assert_eq!(
+            fixture
+                .store
+                .media_session_route(&session_id)
+                .await
+                .expect("route read")
+                .expect("the durable route")
+                .state,
+            "active",
+            "the durable End runs after the point"
+        );
+        held.release();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), deletion)
+                .await
+                .expect("the release finishes once released")
+                .expect("delete task"),
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    /// `after_release_tombstoned` sits between the durable End's proof and the
+    /// exact remote owner's terminal projection: a release held there has armed
+    /// the ended row's projection and has not yet tried the owner, which is
+    /// unreachable here, so the release is deferred only after the point.
+    #[tokio::test]
+    async fn release_tombstone_point_sits_between_the_durable_proof_and_the_remote_owner() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture =
+            HlsDeliveryFixture::publish(dir.path(), "release-tombstone-unrelated").await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let user = fixture
+            .store
+            .create_user("release-tombstone", "hash", false)
+            .await
+            .expect("release tombstone user");
+        activate_ready(
+            &fixture.store,
+            MediaSessionActivation {
+                recovery_epoch: String::new(),
+                expected_desired_revision: None,
+                incarnation_id: uuid::Uuid::new_v4().to_string(),
+                session_id: session_id.clone(),
+                user_id: user.id,
+                playback_id: "release-tombstone".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: "remote-owner-node".to_owned(),
+                lease_expires_at_ms: unix_ms() + 60_000,
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms: unix_ms(),
+            },
+        )
+        .await;
+        let pause = pause_release_after_tombstone(&fixture.state, &session_id);
+        let settlement = match fixture
+            .state
+            .media_sessions
+            .begin_release_reconciliation(&session_id)
+            .await
+        {
+            ReleaseAdmission::Won(settlement) => settlement,
+            ReleaseAdmission::Joined(_) | ReleaseAdmission::Full => panic!("first release wins"),
+        };
+        let release = tokio::spawn({
+            let state = fixture.state.clone();
+            let session_id = session_id.clone();
+            async move {
+                release_session(
+                    state,
+                    session_id,
+                    settlement,
+                    crate::vodserve::Terminal::Deleted,
+                    "released by client",
+                )
+                .await
+            }
+        });
+        let held = pause.reached().await;
+        let ended = fixture
+            .store
+            .media_session_route(&session_id)
+            .await
+            .expect("route read")
+            .expect("the ended row");
+        assert_eq!(ended.state, "ended");
+        assert_ne!(
+            ended.publication_ready_at_ms, MEDIA_SESSION_PUBLICATION_BLOCKED,
+            "the durable End's terminal projection is armed before the point"
+        );
+        assert!(!release.is_finished(), "the release is held at the point");
+        held.release();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(60), release)
+                .await
+                .expect("the release finishes once released")
+                .expect("release task"),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the unreachable remote owner is tried after the point, and the release deferred"
+        );
+    }
