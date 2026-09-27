@@ -1472,7 +1472,9 @@ impl<T: QueueSql> BackgroundJobStore for T {
         let rows = self
             .queue_sql(
                 "SELECT json_quote(id) AS result_json FROM background_jobs job
-            WHERE kind = 'transcode_prepare' AND state IN ('queued','running','cancelling')
+            WHERE (kind = 'transcode_prepare' OR (kind = 'artifact_hydrate'
+                AND json_extract(payload_json, '$.artifact_key') LIKE 'transcode:%'))
+            AND state IN ('queued','running','cancelling')
             AND ((job.fence = 0 AND json_extract(job.checkpoint_json, '$.staging_node_id') = json_extract($1, '$.node_id'))
                 OR EXISTS (SELECT 1 FROM background_job_attempts attempt WHERE attempt.job_id = job.id
                 AND attempt.fence = job.fence AND attempt.owner_node_id = json_extract($1, '$.node_id')))

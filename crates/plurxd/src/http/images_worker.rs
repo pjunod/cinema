@@ -68,14 +68,29 @@ fn filename(spec: &ArtworkVariantSpec) -> Option<String> {
     let pipeline = hex::encode(Sha256::digest(spec.pipeline.as_bytes()));
     Some(format!("{stem}-{}.{extension}", &pipeline[..16]))
 }
-fn location_filename(location: &ArtworkLocation) -> Option<String> {
-    let base = filename(&location.spec)?;
-    let (stem, extension) = base.rsplit_once('.')?;
-    Some(format!(
-        "{stem}-b{}.{}",
-        location.blob_sha256.get(..32)?,
-        extension
-    ))
+pub(super) fn location_filename(location: &ArtworkLocation) -> Option<String> {
+    location.spec.validate().ok()?;
+    let key = location.spec.artifact_key();
+    let blob = &location.blob_sha256;
+    if blob.len() != 64 || !blob.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("variant-{key}-b{blob}.{}", location.spec.format))
+}
+
+pub(super) fn published_key(filename: &str) -> Option<&str> {
+    let (stem, extension) = filename.rsplit_once('.')?;
+    if !matches!(extension, "jpeg" | "png" | "webp") {
+        return None;
+    }
+    let (key, blob) = stem.strip_prefix("variant-")?.split_once("-b")?;
+    (key.len() == 64
+        && blob.len() == 64
+        && key
+            .bytes()
+            .chain(blob.bytes())
+            .all(|b| b.is_ascii_hexdigit()))
+    .then_some(key)
 }
 
 pub(super) fn staging_owner(filename: &str) -> Option<(String, i64)> {
@@ -669,6 +684,36 @@ mod tests {
             .expect("location")
             .remove(0);
         let ready_name = location_filename(&location).expect("ready name");
+        assert_eq!(
+            published_key(&ready_name),
+            Some(spec.artifact_key().as_str())
+        );
+        super::super::tests::age_past_the_orphan_grace(&root.join(&ready_name)).await;
+        let mut orphan = location.clone();
+        orphan.blob_sha256 = "a".repeat(64);
+        let orphan_name = location_filename(&orphan).expect("orphan name");
+        tokio::fs::write(root.join(&orphan_name), b"abandoned generation")
+            .await
+            .expect("orphan");
+        super::super::tests::age_past_the_orphan_grace(&root.join(&orphan_name)).await;
+        let publishing = state
+            .artwork_fetch
+            .derive_permit()
+            .await
+            .expect("publishing");
+        assert_eq!(
+            sweep_derived_orphans(&state).await,
+            0,
+            "GC must exclude publication"
+        );
+        assert!(root.join(&orphan_name).exists());
+        drop(publishing);
+        assert_eq!(sweep_derived_orphans(&state).await, 1);
+        assert!(root.join(&ready_name).exists(), "published bytes retained");
+        assert!(
+            !root.join(&orphan_name).exists(),
+            "unpublished digest reclaimed"
+        );
         plurx_core::fs_secure::atomic_write_child(&root, &ready_name, b"corrupt replacement")
             .await
             .expect("replace");

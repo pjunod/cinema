@@ -2184,7 +2184,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # E1 cache copies: one daemon consumer owns joined transfer/cancellation;
 # request/body deadlines and pressure polling are bounded by that consumer.
 # The response status inspection launches no process.
-expected_occurrences = 651
+# E1 copy-body regression owns one local HTTP server and aborts/joins it.
+expected_occurrences = 652
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -3130,7 +3131,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # E1 cache copies: one daemon consumer owns joined transfer/cancellation;
 # request/body deadlines and pressure polling are bounded by that consumer.
 # The response status inspection launches no process.
-expected_occurrences = 1042
+# E1 copy-body regression bounds cancellation completion with one timeout.
+expected_occurrences = 1043
 
 [[module_structures]]
 id = "bare-time-constructor"

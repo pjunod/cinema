@@ -2138,6 +2138,13 @@ fn superseded_derivative_name(filename: &str) -> bool {
 }
 
 async fn sweep_derived_orphans(state: &AppState) -> usize {
+    // Exclude the rename-to-publication interval. Never wait behind active work:
+    // a later bounded sweep can reclaim the same orphan.
+    let Ok(_publication) = Arc::clone(&state.artwork_fetch.derive_permits)
+        .try_acquire_many_owned(DERIVATIVE_CONCURRENCY as u32)
+    else {
+        return 0;
+    };
     let Ok(items) = state.store.items_with_artwork().await else {
         return 0;
     };
@@ -2185,7 +2192,11 @@ async fn sweep_derived_orphans(state: &AppState) -> usize {
             continue;
         };
         let staging = worker::staging_owner(&filename);
-        if staging.is_none() && !derived_entry_is_reclaimable(&filename, &referenced) {
+        let published_key = worker::published_key(&filename);
+        if staging.is_none()
+            && published_key.is_none()
+            && !derived_entry_is_reclaimable(&filename, &referenced)
+        {
             continue;
         }
         let Ok(metadata) = tokio::fs::symlink_metadata(entry.path()).await else {
@@ -2200,6 +2211,20 @@ async fn sweep_derived_orphans(state: &AppState) -> usize {
                 .is_none_or(|age| age < CONTENT_ORPHAN_GRACE)
         {
             continue;
+        }
+        if let Some(key) = published_key {
+            match state.store.artwork_locations(key, worker::now_ms()).await {
+                Ok(locations)
+                    if locations.iter().any(|location| {
+                        location.node_id == state.node_id
+                            && worker::location_filename(location).as_deref() == Some(&filename)
+                    }) =>
+                {
+                    continue
+                }
+                Err(_) => continue,
+                _ => {}
+            }
         }
         if let Some((job_id, fence)) = staging {
             match state.store.background_job(&job_id).await {
@@ -4063,7 +4088,7 @@ mod tests {
         );
     }
 
-    async fn age_past_the_orphan_grace(path: &FsPath) {
+    pub(super) async fn age_past_the_orphan_grace(path: &FsPath) {
         let old = std::time::SystemTime::now()
             .checked_sub(CONTENT_ORPHAN_GRACE + Duration::from_secs(60))
             .expect("aged timestamp");

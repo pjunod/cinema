@@ -916,7 +916,11 @@ normal catalogue path once implemented. Preserve strong auth and user
 read-after-write behavior. Move any remaining opt-out to Developer; no receipt
 is consulted by request handling.
 
-Add `artifact_hydrate`, `artifact_verify` and `artwork_variant` jobs. Reuse
+Add `artifact_hydrate` and `artwork_variant` jobs. The 2026-09-26 execution
+decision keeps scheduled `artifact_verify` pages with their repair consumer in
+E2 (§9.3), so verification failure has its recovery path in the same batch.
+E1 verifies bytes at transfer and serving boundaries and preserves the existing
+cache integrity sweep. Reuse
 existing manifests and holder APIs; share a transfer helper rather than
 rewriting every artifact store. Select one producer, then copy to a second
 healthy holder for currently demanded/hot artifacts when space permits. Keep

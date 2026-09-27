@@ -265,6 +265,14 @@ async fn background_transcode_copies_preserve_source_proof_and_settle_only_the_r
             else {
                 panic!("{backend}: copy not claimed")
             };
+            assert!(
+                store
+                    .background_staging_jobs(&target)
+                    .await
+                    .expect("copy staging inventory")
+                    .contains(&job.id),
+                "{backend}: hydration owns cache bytes"
+            );
             let mut publication = PublishTranscodeJob {
                 token: job.token.expect("copy token"),
                 output: output.clone(),

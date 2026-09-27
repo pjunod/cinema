@@ -535,7 +535,8 @@ share the computation. Original hero/backdrop bytes remain unchanged.
 A worker reserves the existing background CPU/heavy-work admission before
 claiming. It retains that admission through cancellation and encoder reap;
 the encoder keeps its five-second deadline and 15 MiB output bound. Completed
-bytes have a digest-bearing filename. An expired owner's staging rename
+bytes use `variant-{full_key}-b{full_output_digest}.{format}`, independent of
+the source alias and within a fixed filename bound. An expired owner's staging rename
 cannot overwrite a published generation. The Store atomically publishes the
 holder, settles the attempt and leaves remote interests awaiting hydration.
 Only verified bytes on the receiving node settle those interests.
@@ -553,8 +554,10 @@ seven-day observation retention, backup import and replicated-state digest.
 Expired/removed holder observations are not availability proof; historical
 producer metadata separately permits a canonical rebuild without changing
 provenance. Staging cleanup observes the current job fence before reclaiming
-an aged file. General hot-copy selection and repair/audit scheduling remain
-part of the programme's unfinished E1/E2 work.
+an aged file. Final-byte cleanup checks current local publication by full key
+and digest, with a 24-hour grace. It skips a pass when a worker owns any derive
+permit, excluding the rename/publication interval. General hot-copy selection
+is implemented in E1; scheduled repair/audit remains E2 work.
 
 Construction compilation and new regression targets are recorded on the
 [status page](../cluster/DURABLE-WORK-QUEUE-STATUS.md). They are not production

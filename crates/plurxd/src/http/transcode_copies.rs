@@ -201,18 +201,29 @@ async fn fetch(
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>, String> {
     let deadline = deadline.min(Instant::now() + Duration::from_secs(60));
-    let mut response = tokio::select! {
+    let response = tokio::select! {
         () = cancel.cancelled() => return Err("copy cancelled".into()),
         response = transport.request_stream(peer, base, reqwest::Method::GET, path, Vec::new(), deadline, PeerAuthMode::ExactRequest) => response.map_err(|error| format!("peer request: {error:?}"))?,
     };
-    if !response.status().is_success()
+    receive_body(response, maximum, expected, deadline, cancel).await
+}
+
+async fn receive_body(
+    mut response: reqwest::Response,
+    maximum: u64,
+    expected: Option<&str>,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> Result<Vec<u8>, String> {
+    if maximum > manifest::MAX_OBJECT_BYTES
+        || !response.status().is_success()
         || response
             .content_length()
             .is_some_and(|length| length > maximum)
     {
         return Err("peer refused copy or advertised an oversized object".into());
     }
-    let mut bytes = Vec::with_capacity(maximum as usize);
+    let mut bytes = Vec::with_capacity(maximum.min(64 * 1024) as usize);
     let mut hash = Sha256::new();
     loop {
         let chunk = tokio::select! {
@@ -692,6 +703,82 @@ mod tests {
             result.expect_err("unsigned cache copy"),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    #[tokio::test]
+    async fn peer_copy_bodies_reject_tampering_overflow_and_stalled_cancellation() {
+        use axum::{routing::get, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/good", get(|| async { "hello" }))
+                    .route("/wrong", get(|| async { "jello" }))
+                    .route(
+                        "/long",
+                        get(|| async {
+                            Body::from_stream(futures_util::stream::iter([
+                                Ok::<_, std::io::Error>(Bytes::from_static(b"hello")),
+                                Ok(Bytes::from_static(b"!")),
+                            ]))
+                        }),
+                    )
+                    .route(
+                        "/stalled",
+                        get(|| async {
+                            Body::from_stream(futures_util::stream::pending::<
+                                Result<Bytes, std::io::Error>,
+                            >())
+                        }),
+                    ),
+            )
+            .await
+            .expect("server");
+        });
+        let client = reqwest::Client::new();
+        let digest = hex::encode(Sha256::digest(b"hello"));
+        let cancel = CancellationToken::new();
+        for (route, valid) in [("good", true), ("wrong", false), ("long", false)] {
+            let response = client
+                .get(format!("http://{address}/{route}"))
+                .send()
+                .await
+                .expect("response");
+            let result = receive_body(
+                response,
+                5,
+                Some(&digest),
+                Instant::now() + Duration::from_secs(2),
+                &cancel,
+            )
+            .await;
+            assert_eq!(result.is_ok(), valid, "{route}: {result:?}");
+        }
+        let response = client
+            .get(format!("http://{address}/stalled"))
+            .send()
+            .await
+            .expect("stalled headers");
+        let receiving = receive_body(
+            response,
+            5,
+            Some(&digest),
+            Instant::now() + Duration::from_secs(60),
+            &cancel,
+        );
+        tokio::pin!(receiving);
+        assert!(futures_util::poll!(&mut receiving).is_pending());
+        cancel.cancel();
+        assert!(tokio::time::timeout(Duration::from_secs(1), receiving)
+            .await
+            .expect("joined cancellation")
+            .is_err());
+        server.abort();
+        let _ = server.await;
     }
 
     #[test]

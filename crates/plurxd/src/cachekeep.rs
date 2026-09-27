@@ -399,7 +399,7 @@ fn staging_recipe(name: &str) -> &str {
 /// cache location. The recipe prefix still ensures one encoder identity per
 /// directory; the job suffix is the durable housekeeping authority.
 fn staging_queue_job(name: &str) -> Option<&str> {
-    let (recipe, job_id) = name.rsplit_once("-j")?;
+    let (recipe, job_id) = staging_recipe(name).rsplit_once("-j")?;
     if recipe.len() != 64 || !recipe.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
@@ -407,7 +407,7 @@ fn staging_queue_job(name: &str) -> Option<&str> {
 }
 
 fn staging_queue_recipe(name: &str) -> Option<&str> {
-    let (recipe, job_id) = name.rsplit_once("-j")?;
+    let (recipe, job_id) = staging_recipe(name).rsplit_once("-j")?;
     (recipe.len() == 64
         && recipe.bytes().all(|byte| byte.is_ascii_hexdigit())
         && uuid::Uuid::parse_str(job_id).is_ok())
@@ -598,13 +598,27 @@ async fn queue_staging_jobs(
     store.pretranscode_staging_jobs(node_id).await
 }
 
-async fn queue_job(
+async fn queue_generation_owned(
     store: &Arc<dyn Store>,
     id: &str,
-) -> Result<Option<plurx_core::domain::PretranscodeJob>, plurx_core::error::StoreError> {
+    node_id: &str,
+    fence: i64,
+) -> Result<bool, plurx_core::error::StoreError> {
+    use plurx_core::store::background_jobs::JobState;
     match store.background_job(id).await? {
-        Some(job) => plurx_core::store::background_jobs_pretranscode::projection(&job).map(Some),
-        None => store.pretranscode_job(id).await,
+        Some(job) => Ok(
+            matches!(job.state, JobState::Running | JobState::Cancelling)
+                && job.fence == fence
+                && job
+                    .token
+                    .as_ref()
+                    .is_some_and(|token| token.node_id == node_id),
+        ),
+        None => Ok(store.pretranscode_job(id).await?.is_some_and(|job| {
+            matches!(job.state.as_str(), "running" | "cancelling")
+                && job.owner_node_id == node_id
+                && job.fence == fence
+        })),
     }
 }
 
@@ -714,13 +728,8 @@ async fn delete_final_batch(
             if !queue_jobs.contains(job_id) {
                 false
             } else {
-                match queue_job(store, job_id).await {
-                    Ok(Some(job)) => {
-                        matches!(job.state.as_str(), "running" | "cancelling")
-                            && job.owner_node_id == node_id
-                            && job.fence == fence
-                    }
-                    Ok(None) => false,
+                match queue_generation_owned(store, job_id, node_id, fence).await {
+                    Ok(owned) => owned,
                     Err(error) => {
                         tracing::warn!(job = job_id, %error, "cache: could not recheck exact queue generation; keeping bytes");
                         true
@@ -786,8 +795,19 @@ async fn delete_staging_batch(
     // Same-recipe fenced staging directories share one canonical guard; keep
     // it until the whole batch is complete.
     for candidate in batch.iter() {
-        let owned = staging_queue_job(&candidate.name).is_some_and(|job| queue_jobs.contains(job))
-            || claimed_recipes.contains(staging_recipe(&candidate.name));
+        let queue_owned = if let Some((job, fence)) = final_queue_generation(&candidate.name) {
+            if queue_jobs.contains(job) {
+                // An expired generation cannot borrow a later attempt's ownership.
+                queue_generation_owned(store, job, node_id, fence)
+                    .await
+                    .unwrap_or(true)
+            } else {
+                false
+            }
+        } else {
+            staging_queue_job(&candidate.name).is_some_and(|job| queue_jobs.contains(job))
+        };
+        let owned = queue_owned || claimed_recipes.contains(staging_recipe(&candidate.name));
         if owned {
             kept += 1;
             continue;
@@ -1548,7 +1568,8 @@ async fn sweep_orphan_dirs(
         };
         staging_scanned += 1;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if staging_queue_job(&name).is_some_and(|job| queue_staging.contains(job))
+        if (final_queue_generation(&name).is_none()
+            && staging_queue_job(&name).is_some_and(|job| queue_staging.contains(job)))
             || claimed_recipes.contains(staging_recipe(&name))
         {
             continue;
@@ -1762,6 +1783,15 @@ mod tests {
         let recipe = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
         assert_eq!(staging_queue_job(&format!("{recipe}-j{job}")), Some(job));
         assert_eq!(final_queue_job(&format!("{recipe}-j{job}-f42")), Some(job));
+        assert_eq!(
+            staging_queue_job(&format!("{recipe}-j{job}-f42")),
+            Some(job)
+        );
+        assert_eq!(
+            staging_queue_recipe(&format!("{recipe}-j{job}-f42")),
+            Some(recipe)
+        );
+        assert_eq!(staging_queue_job(&format!("{recipe}-j{job}-fno")), None);
         assert_eq!(staging_queue_job(&format!("abcdef-j{job}")), None);
         assert_eq!(staging_queue_job("abcdef-jnot-a-uuid"), None);
         assert_eq!(staging_queue_job("abcdef"), None);
@@ -2792,6 +2822,100 @@ mod tests {
             !final_dir.exists(),
             "unreferenced generation should become reclaimable after publication ownership ends"
         );
+    }
+
+    #[tokio::test]
+    async fn copied_transcode_gc_uses_durable_attempt_ownership_after_restart() {
+        use plurx_core::store::background_jobs::*;
+        let (store, _) = store().await;
+        let root = root();
+        let recipe = "a".repeat(64);
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = unix_now() * 1000;
+        store
+            .enqueue_job(EnqueueJob {
+                id: id.clone(),
+                payload: JobPayload::ArtifactHydrate {
+                    artifact_key: format!("transcode:{recipe}:{}", "b".repeat(64)),
+                    target_node_id: NODE.into(),
+                },
+                dedupe_key: format!("hydrate:{id}"),
+                priority: 1,
+                not_before_ms: now,
+                now_ms: now,
+                request: JobRequest {
+                    scope: "internal:copy".into(),
+                    request_id: id.clone(),
+                    request_digest: recipe.clone(),
+                    consumer_kind: "copy".into(),
+                    consumer_ref: id.clone(),
+                    target_node_id: Some(NODE.into()),
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .expect("enqueue copy");
+        let job = store
+            .background_job(&id)
+            .await
+            .expect("lookup")
+            .expect("job");
+        let ClaimOutcome::Claimed { job } = store
+            .claim_job(ClaimJob {
+                job_id: id.clone(),
+                expected_revision: job.revision,
+                node_id: NODE.into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::ArtifactHydrate,
+                payload_version: 1,
+                now_ms: now,
+                dispatched_at_ms: now,
+            })
+            .await
+            .expect("claim")
+        else {
+            panic!("copy not claimed")
+        };
+        assert!(queue_generation_owned(&store, &id, NODE, job.fence)
+            .await
+            .expect("owner"));
+        assert!(
+            !queue_generation_owned(&store, &id, "another-node", job.fence)
+                .await
+                .expect("wrong node")
+        );
+        assert!(!queue_generation_owned(&store, &id, NODE, job.fence + 1)
+            .await
+            .expect("wrong fence"));
+        let current = format!("{recipe}-j{id}-f{}", job.fence);
+        let stale = format!("{recipe}-j{id}-f{}", job.fence + 1);
+        for parent in ["aa", "tmp"] {
+            for name in [&current, &stale] {
+                let dir = root.path().join(parent).join(name);
+                tokio::fs::create_dir_all(&dir).await.expect("directory");
+                tokio::fs::write(dir.join("object"), b"bytes")
+                    .await
+                    .expect("bytes");
+            }
+        }
+        // Fresh reader registry models a restarted process. The replicated
+        // attempt, not a surviving process pin or a producer-only projection,
+        // must authorize both the staged and renamed copy.
+        let swept = sweep_with_readers(
+            &store,
+            root.path(),
+            NODE,
+            &ActiveCacheReaders::default(),
+            unix_now(),
+        )
+        .await;
+        assert_eq!(swept.orphans, 2);
+        for parent in ["aa", "tmp"] {
+            assert!(root.path().join(parent).join(&current).exists());
+            assert!(!root.path().join(parent).join(&stale).exists());
+        }
     }
 
     /// Budget eviction deletes bytes before forgetting its observed row. A
