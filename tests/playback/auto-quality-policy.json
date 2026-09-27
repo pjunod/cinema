@@ -30,6 +30,7 @@
     "cooldownMs": 20000,
     "upgradeHeadroom": 1.8,
     "upgradeHoldMs": 45000,
+    "upgradeRunwaySeconds": 10,
     "upgradeSpeedFloor": 1.15,
     "stallWindowMs": 60000,
     "dwellMs": 60000,
@@ -223,6 +224,8 @@
       "note": "The server returns `hold` on every control exchange while the rolling producer's ahead window is full (`resolve_action` and `HoldReason` in crates/plurxd/src/playback_control.rs; only a client that reports `stalled` has it withheld), and `producer_state` reads `held` whenever the producer is suspended. With a healthy buffer, a fast link and encode headroom, that is a producer paced ahead of its viewer, and it is the state upward recovery is meant to happen in. The web emits no cause kind for it; a native classifier that names it must name it `producer-paced`, outside `namedSuppression`. This case fails if `producer-paced` ever joins `namedSuppression`, which is how M0.1 would freeze Auto if it keyed on any hold.",
       "sample": {
         "estimateKbps": 20000,
+        "recentEstimateKbps": 20000,
+        "recentEstimateAtMs": 599000,
         "recentSpeed": 3.0,
         "runwaySeconds": 30,
         "upgradeSinceMs": 540000,
@@ -358,6 +361,8 @@
       "section": "3.4 upward recovery is gated on encode headroom",
       "sample": {
         "estimateKbps": 20000,
+        "recentEstimateKbps": 20000,
+        "recentEstimateAtMs": 599000,
         "recentSpeed": 3.0,
         "runwaySeconds": 30,
         "upgradeSinceMs": 540000
@@ -380,6 +385,8 @@
       "section": "3.4, playback-policy.js predictedSpeed",
       "sample": {
         "estimateKbps": 20000,
+        "recentEstimateKbps": 20000,
+        "recentEstimateAtMs": 599000,
         "recentSpeed": null,
         "runwaySeconds": 30,
         "upgradeSinceMs": 540000
@@ -439,6 +446,8 @@
       "sample": {
         "currentHeight": 360,
         "estimateKbps": 60000,
+        "recentEstimateKbps": 60000,
+        "recentEstimateAtMs": 599000,
         "recentSpeed": 6.0,
         "runwaySeconds": 30,
         "upgradeSinceMs": 540000

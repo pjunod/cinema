@@ -32,6 +32,9 @@
     cooldownMs: 20_000,
     upgradeHeadroom: 1.8,
     upgradeHoldMs: 45_000,
+    // A higher prepared stream has to refill its own buffer before an
+    // incumbent with little runway can be retired.
+    upgradeRunwaySeconds: 10,
     // The estimate alone is not evidence that a higher rung is sustainable.
     // On a JIT server hls.js measures min(link, encode) of the CURRENT rung,
     // so a fast 720p encode reads as ~200 Mb/s and clears any bandwidth bar
@@ -416,17 +419,11 @@
     const severe = freshBandwidthCliff;
 
     if (severe && currentIndex > 0) {
-      // hls.js's EWMA intentionally carries history. At a sharp cliff that
-      // history can briefly make the next rung look safe, even though the
-      // fragment transfer measured the lower link. During
-      // severe pressure only, bound the stable EWMA by that fresh transfer so
-      // one restart lands below the cliff instead of teaching a replacement
-      // instance the same lesson and walking the ladder.
-      const severeEstimate = freshRecentEstimate > 0
-        ? (estimate > 0
-          ? Math.min(estimate, freshRecentEstimate)
-          : freshRecentEstimate)
-        : estimate;
+      // The completed or in-flight transfer is the current link observation.
+      // hls.js's EWMA can still contain the old link in either direction:
+      // capping by a stale LOW estimate needlessly skips a sustainable rung,
+      // while a stale HIGH estimate would risk another stall.
+      const severeEstimate = freshRecentEstimate;
       const peakCeiling = severeEstimate * defaults.severePeakSafetyFactor;
       const safe = available.slice().reverse().find(rung =>
         (rung.peak_kbps || rung.total_kbps) <= peakCeiling) || available[0];
@@ -525,6 +522,9 @@
     const upgradeReady =
       next &&
       estimate > next.total_kbps * defaults.upgradeHeadroom &&
+      freshRecentEstimate > (next.peak_kbps || next.total_kbps)
+        * defaults.upgradeHeadroom &&
+      Number.isFinite(runway) && runway >= defaults.upgradeRunwaySeconds &&
       encodeHeadroom &&
       stallFree &&
       !estimatePressure &&

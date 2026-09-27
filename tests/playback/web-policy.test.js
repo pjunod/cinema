@@ -2605,6 +2605,8 @@ test("recovery holds for 45 seconds, moves up once, and respects pixel height", 
     ladder: serverLadder,
     currentHeight: 720,
     estimateKbps: 16_000,
+    recentEstimateKbps: 16_000,
+    recentEstimateAtMs: 59_000,
     runwaySeconds: 20,
     nowMs: 60_000,
     lastSwitchAtMs: 0,
@@ -2616,6 +2618,8 @@ test("recovery holds for 45 seconds, moves up once, and respects pixel height", 
     ladder: serverLadder,
     currentHeight: 720,
     estimateKbps: 16_000,
+    recentEstimateKbps: 16_000,
+    recentEstimateAtMs: 104_000,
     runwaySeconds: 20,
     nowMs: 105_000,
     lastSwitchAtMs: 0,
@@ -2628,6 +2632,8 @@ test("recovery holds for 45 seconds, moves up once, and respects pixel height", 
     ladder: serverLadder,
     currentHeight: 720,
     estimateKbps: 16_000,
+    recentEstimateKbps: 16_000,
+    recentEstimateAtMs: 114_000,
     runwaySeconds: 20,
     nowMs: 115_000,
     lastSwitchAtMs: 105_000,
@@ -2639,6 +2645,8 @@ test("recovery holds for 45 seconds, moves up once, and respects pixel height", 
     ladder: serverLadder,
     currentHeight: 480,
     estimateKbps: 16_000,
+    recentEstimateKbps: 16_000,
+    recentEstimateAtMs: 119_000,
     runwaySeconds: 20,
     playerHeight: 700,
     nowMs: 120_000,
@@ -2646,6 +2654,26 @@ test("recovery holds for 45 seconds, moves up once, and respects pixel height", 
     upgradeSinceMs: 70_000,
   });
   assert.equal(capped.height, 480, "the 720p rung exceeds the player");
+});
+
+test("Auto upgrade needs fresh peak headroom and successor runway", () => {
+  const ladder = [...serverLadder,
+    { height: 240, total_kbps: 660, peak_kbps: 910 },
+    { height: 144, total_kbps: 260, peak_kbps: 310 }];
+  const base = { ladder, currentHeight: 144, estimateKbps: 8_000,
+    runwaySeconds: 60, recentSpeed: 6, nowMs: 120_000,
+    lastSwitchAtMs: 0, upgradeSinceMs: 70_000 };
+  assert.equal(policy.decideRung({ ...base, recentEstimateKbps: 1_100,
+    recentEstimateAtMs: 119_000 }).height, 144,
+  "a short fragment must not promote beyond the measured link");
+  assert.equal(policy.decideRung({ ...base, recentEstimateKbps: 8_000,
+    recentEstimateAtMs: 100_000 }).height, 144,
+  "a stale transfer must not authorize recovery");
+  assert.equal(policy.decideRung({ ...base, recentEstimateKbps: 8_000,
+    recentEstimateAtMs: 119_000, runwaySeconds: 3 }).height, 144,
+  "the prepared successor cannot consume the incumbent's last runway");
+  assert.equal(policy.decideRung({ ...base, recentEstimateKbps: 8_000,
+    recentEstimateAtMs: 119_000 }).height, 240);
 });
 
 test("native element transfer errors never spend a compatibility transcode", () => {
