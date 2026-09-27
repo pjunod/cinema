@@ -1,8 +1,8 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 merged; E0 review fixes implemented; focused queue validation passed · **Updated:** 2026-09-26 ·
+**Status:** M1–M3 merged; E0 fast lane: preflight correction · **Updated:** 2026-09-26 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` ·
-**Base:** `0386c78ec` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — draft](http://192.168.4.7:3000/noirr/plurx/pulls/564)
+**Base:** `0386c78ec` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — validating](http://192.168.4.7:3000/noirr/plurx/pulls/564)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -595,3 +595,10 @@ continue E1–E3.
   audiobook child kill/reap and the sparse scanner join (0.39 s execution).
   The subtitle outbox now also retires permanently fenced/source-invalid
   entries, so stale pages cannot block later work. Required PR fast lane next.
+
+- 2026-09-26: fast lane [3314](http://192.168.4.7:3000/noirr/plurx/actions/runs/3314)
+  on `bf6b1365e` stopped in static preflight: the publication-guard inventory
+  mistook `self.local_serving_role().await` for direct field access. Registered
+  that exact read-only accessor call; direct stores/swaps remain prohibited.
+  Rust/Windows did not execute in that failed run. E1 has its own temporary
+  branch, `codex/cluster-cache-preparation`, with no implementation changes yet.
