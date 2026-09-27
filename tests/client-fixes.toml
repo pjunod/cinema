@@ -1,6 +1,26 @@
 version = 1
 enforce_after = "e8a910f"
 
+# A-04 physical shaping acceptance refuses a saved-server fallback when the
+# explicit Debug launch proxy is absent or does not match the server identity.
+[[fixes]]
+id = "apple.physical-acceptance-proxy-origin"
+commits = ["31a5a4697"]
+source = "clients/apple/Sources/AppModel.swift"
+source_anchor = "let acceptance = PlaybackAcceptanceLaunch.current()"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPhysicalDeviceAcceptanceLaunchReadsOnlyExplicitDebugDefaults"
+
+# The release-input correction is a separate client commit, so its counter
+# claim needs a direct policy-test bridge as well as the original proxy fix.
+[[fixes]]
+id = "apple.a04-release-counter-after-proxy-fix"
+commits = ["ac51adb13"]
+source = "clients/apple/project.yml"
+source_anchor = "CURRENT_PROJECT_VERSION:"
+test = "tests/validation/test_mobile_versions.py"
+test_anchor = "test_apple_counter_the_target_already_ships_fails_against_the_target"
+
 [[fixes]]
 id = "apple.home-hero-foreground-clipping"
 commits = ["50784639d"]

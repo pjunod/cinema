@@ -352,6 +352,10 @@ function destroyHlsInstance(p,hls,element){
   resetPlaybackTransportEvents(element);
 }
 function teardownHls(){
+  // A committed switch may still own a hidden predecessor while its idle
+  // retirement waits. A seek or close must drain it before replacing media.
+  if(PLAYER&&PLAYER.preparedRetiring)
+    retirePreparedPredecessor(PLAYER,PLAYER.preparedRetiring);
   if(PLAYER) cancelHlsStartup(PLAYER,'teardown');
   if(PLAYER) PLAYER.mediaAttachment=null;
   // A staged successor belongs to the stream it was prepared against. Any new
@@ -490,6 +494,8 @@ function handlePlaybackTransportEvent(v,p,event){
 // with it and the callbacks run forever.
 function stopPlayerTimers(){
   if(!PLAYER) return;
+  if(PLAYER.preparedRetiring)
+    retirePreparedPredecessor(PLAYER,PLAYER.preparedRetiring);
   stopPlaybackControl(PLAYER);
   clearPendingSeekTimer();
   clearInterval(PLAYER.timer); PLAYER.timer=null;
@@ -516,7 +522,7 @@ function armPlaybackSampling(v,p){
   p.progressTimer=setInterval(()=>playbackSamplingTick(v,p),500);
   clearInterval(p.autoTimer);
   p.autoTimer=setInterval(()=>{
-    if(playbackOwnsAttachedMedia(p)) autoControllerTick().catch(()=>{});
+    if(playbackOwnsAttachedMedia(p)) queueAutoControllerTick(p,false);
   },PlaybackPolicy.AUTO_DEFAULTS.decisionMs);
   clearInterval(p.timer);
   p.timer=setInterval(()=>{

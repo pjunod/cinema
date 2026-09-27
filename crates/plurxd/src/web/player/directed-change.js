@@ -11,7 +11,7 @@
 // the incumbent playing, wait for the successor the server builds -- with
 // exactly ONE reopen as the answer to every way it can go wrong.
 const PREPARED_OFFER_BOUND_MS=12000;
-const PREPARED_OFFER_CADENCE_MS=1000;
+const PREPARED_OFFER_CADENCE_MS=500;
 // `askPlaybackControl` cannot serve this and cannot be made to. Its waiter
 // settles on the FIRST exchange at or after its floor, and a `Prepare` arrives
 // on a later exchange than the one that carried the ask -- the server has to
@@ -46,6 +46,7 @@ async function awaitPreparedOffer(p,tappedAt){
     const waiter={kind:"offer",minSequence,generation,controlEpoch,
       intentGeneration,tappedAt,player:p,preparedActionId:null,settled:false,
       timer:null,cadence:null,confirm:null,
+      firstStagingAtMs:null,offerReceivedAtMs:null,
       settle:(outcome)=>{
         if(waiter.settled) return;
         waiter.settled=true;
@@ -119,6 +120,15 @@ function settlePreparedOfferWaiter(p,waiter,mine,response,error){
   const action=response.action||null;
   if(action&&window.PlurxPlaybackControl
      &&action.type===PlurxPlaybackControl.PREPARE_ACTION_TAG){
+    if(waiter.offerReceivedAtMs==null){
+      waiter.offerReceivedAtMs=performance.now();
+      clientLog(Object.assign({level:"info",event:"prepared_offer_timing",
+        detail:"offer_received",
+        message:`prepared offer received at_ms=${Math.round(waiter.offerReceivedAtMs)} `+
+          `ask_elapsed_ms=${Math.round(waiter.offerReceivedAtMs-waiter.tappedAt)} `+
+          `staging_elapsed_ms=${waiter.firstStagingAtMs==null?"none":Math.round(waiter.offerReceivedAtMs-waiter.firstStagingAtMs)}`},
+        playbackContext()));
+    }
     waiter.preparedActionId=action.action_id||null;
     // The server replays a `Prepare` byte-identically until it processes the
     // acknowledgement, so a replay of one this client already built settles at
@@ -135,6 +145,14 @@ function settlePreparedOfferWaiter(p,waiter,mine,response,error){
   // to remove. Only the explicit value declines; absent stays armed and lets
   // the bound decide.
   if(preparation==="none"){ waiter.settle("declined"); return; }
+  if(preparation==="staging"&&waiter.firstStagingAtMs==null){
+    waiter.firstStagingAtMs=performance.now();
+    clientLog(Object.assign({level:"info",event:"prepared_offer_timing",
+      detail:"staging_seen",
+      message:`prepared staging seen at_ms=${Math.round(waiter.firstStagingAtMs)} `+
+        `ask_elapsed_ms=${Math.round(waiter.firstStagingAtMs-waiter.tappedAt)}`},
+      playbackContext()));
+  }
   if(preparation==="staging"&&waiter.cadence==null){
     // Staging is progress, not an answer. Come back sooner than ordinary
     // cadence so the offer is collected as soon as it exists rather than up to
