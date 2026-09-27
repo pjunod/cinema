@@ -7710,6 +7710,7 @@ pub(crate) struct RollingControlTestHooks {
     executor_observation: std::sync::Mutex<Option<Arc<crate::seam_hooks::AsyncPause>>>,
     producer_attempt_reply: std::sync::Mutex<Option<Arc<crate::seam_hooks::AsyncPause>>>,
     deferred_attempt_reply: std::sync::Mutex<Option<DeferredProducerAttemptReply>>,
+    command_settled: std::sync::Mutex<Option<Arc<crate::seam_hooks::AsyncPause>>>,
 }
 
 #[cfg(test)]
@@ -7726,6 +7727,7 @@ impl RollingControlTestHooks {
             executor_observation: std::sync::Mutex::new(None),
             producer_attempt_reply: std::sync::Mutex::new(None),
             deferred_attempt_reply: std::sync::Mutex::new(None),
+            command_settled: std::sync::Mutex::new(None),
         })
     }
 
@@ -7812,6 +7814,7 @@ impl RollingControlHooks for RollingControlTestHooks {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
+        let settled = Self::take(&self.command_settled);
         Box::pin(async move {
             if let Some(DeferredProducerAttemptReply {
                 reply,
@@ -7823,6 +7826,9 @@ impl RollingControlHooks for RollingControlTestHooks {
                     reply_pause.hold().await;
                 }
                 let _ = reply.send(outcome);
+            }
+            if let Some(settled) = settled {
+                settled.hold().await;
             }
         })
     }
@@ -13207,6 +13213,16 @@ impl RollingControlHandle {
     #[cfg(test)]
     pub(crate) fn pause_producer_attempt_reply(&self, pause: Arc<crate::seam_hooks::AsyncPause>) {
         RollingControlTestHooks::arm(&self.test_hooks().producer_attempt_reply, pause);
+    }
+
+    /// Hold the actor at `after_command_settled` once the next command it
+    /// applies has settled, whichever command that is.
+    #[cfg(test)]
+    pub(crate) fn pause_after_command_settled_for_test(
+        &self,
+        pause: Arc<crate::seam_hooks::AsyncPause>,
+    ) {
+        RollingControlTestHooks::arm(&self.test_hooks().command_settled, pause);
     }
 
     pub(crate) async fn authorize_producer_install(
@@ -29412,6 +29428,50 @@ mod tests {
         );
         assert!(actor.pending_decision.is_none());
         assert!(actor.decision_committed_at.is_none());
+    }
+
+    /// `after_command_settled` comes after the executor wake
+    /// (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8; #573 review finding 1). The
+    /// actor is held at that point after a decision install, a command that
+    /// changes what the executor sees. The executor must already have been
+    /// woken and begun observing, and it must stay at its poll, because the
+    /// held actor cannot answer, until the actor goes on. With the point
+    /// above the wake, the held actor has not woken the executor, which
+    /// stays idle.
+    #[tokio::test]
+    async fn actor_wakes_the_executor_before_its_command_settles() {
+        let handle = RollingControlHandle::spawn_for_test("session-start");
+        let settled = crate::seam_hooks::AsyncPause::new("rolling control command settled");
+        handle.pause_after_command_settled_for_test(Arc::clone(&settled));
+        let decision = ProducerDecision::Fail {
+            decision_sequence: 9,
+            failed_attempt: 1,
+            reason: ProducerDecisionReason::ReaderFailed,
+            proposal: None,
+            cleanup: ProducerFailureCleanup {
+                kind: ProducerFailureCleanupKind::ProducerFailureCleanup,
+                cleanup_policy: CleanupPolicy::DiscardPrepublication,
+            },
+        };
+        let install = {
+            let handle = handle.clone();
+            tokio::spawn(async move { handle.install_producer_decision_for_test(decision).await })
+        };
+        let held = settled.reached().await;
+        assert!(install.await.expect("install task"));
+
+        wait_for_executor_observation(&handle, "executing", None).await;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            handle.executor_observation_for_test(),
+            ("executing".to_owned(), 0),
+            "the executor's poll waits on the held actor"
+        );
+
+        held.release();
+        wait_for_executor_observation(&handle, "idle", Some(9)).await;
     }
 
     #[tokio::test]
