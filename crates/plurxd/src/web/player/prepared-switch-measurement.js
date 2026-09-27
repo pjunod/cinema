@@ -79,9 +79,69 @@ function preparedSwitchAudioEnable(){
   ];
 }
 
-// First-frame proof makes the switch irreversible. Until this function runs,
-// both the old hls.js instance and its media element are deliberately alive.
+// First-frame proof makes the switch irreversible, but destroying the old MSE
+// decoder in that callback can delay the successor's very next frame. Keep the
+// hidden, muted predecessor until the successor has advanced several frames,
+// then retire it in browser idle time. The bound also covers paused playback
+// and engines that stop delivering frame callbacks.
+function deferPreparedPredecessorRetirement(p,state,successor){
+  if(!p||!state||!state.predecessor) return;
+  if(p.preparedRetiring) retirePreparedPredecessor(p,p.preparedRetiring);
+  p.preparedRetiring=state;
+  state.retireElement=successor;
+  state.retireFrameCallbackId=null;
+  state.retireIdleCallbackId=null;
+  state.retireIdleTimer=null;
+  state.retireDeadlineTimer=setTimeout(
+    ()=>retirePreparedPredecessor(p,state),PREPARED_RETIRE_MAX_MS);
+  const current=()=>p.preparedRetiring===state&&state.predecessor;
+  const idle=()=>{
+    if(!current()||state.retireIdleCallbackId!=null||state.retireIdleTimer!=null) return;
+    if(typeof window.requestIdleCallback==="function"){
+      state.retireIdleCallbackId=window.requestIdleCallback(
+        ()=>retirePreparedPredecessor(p,state),
+        {timeout:PREPARED_RETIRE_IDLE_TIMEOUT_MS});
+    }else{
+      // Do not do decoder teardown inside a frame callback on older engines.
+      state.retireIdleTimer=setTimeout(()=>retirePreparedPredecessor(p,state),120);
+    }
+  };
+  if(typeof successor.requestVideoFrameCallback!=="function"){
+    idle();
+    return;
+  }
+  let prior=null,advances=0;
+  const next=()=>{
+    if(!current()) return;
+    try{ state.retireFrameCallbackId=successor.requestVideoFrameCallback((_,meta)=>{
+      state.retireFrameCallbackId=null;
+      if(!current()) return;
+      const at=Number(meta&&meta.mediaTime);
+      if(Number.isFinite(at)){
+        advances=prior!=null&&at>prior?advances+1:0;
+        prior=at;
+      }
+      if(advances>=PREPARED_RETIRE_ADVANCING_FRAMES) idle();
+      else next();
+    }); }catch(e){ idle(); }
+  };
+  next();
+}
 function retirePreparedPredecessor(p,state){
+  if(!state) return;
+  if(state.retireFrameCallbackId!=null&&state.retireElement
+    &&typeof state.retireElement.cancelVideoFrameCallback==="function")
+    try{ state.retireElement.cancelVideoFrameCallback(state.retireFrameCallbackId); }catch(e){}
+  state.retireFrameCallbackId=null;
+  if(state.retireIdleCallbackId!=null&&typeof window.cancelIdleCallback==="function")
+    try{ window.cancelIdleCallback(state.retireIdleCallbackId); }catch(e){}
+  state.retireIdleCallbackId=null;
+  if(state.retireIdleTimer!=null) clearTimeout(state.retireIdleTimer);
+  state.retireIdleTimer=null;
+  if(state.retireDeadlineTimer!=null) clearTimeout(state.retireDeadlineTimer);
+  state.retireDeadlineTimer=null;
+  state.retireElement=null;
+  if(p&&p.preparedRetiring===state) p.preparedRetiring=null;
   const predecessor=state&&state.predecessor;
   if(!predecessor) return;
   state.predecessor=null;

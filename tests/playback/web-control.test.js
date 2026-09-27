@@ -3972,6 +3972,9 @@ async function main() {
         shippedConst("PREPARED_BUFFER_LEAD_MS"),
         shippedConst("PREPARED_ALIGN_SLACK_MS"),
         shippedConst("PREPARED_FIRST_FRAME_MS"),
+        shippedConst("PREPARED_RETIRE_ADVANCING_FRAMES"),
+        shippedConst("PREPARED_RETIRE_MAX_MS"),
+        shippedConst("PREPARED_RETIRE_IDLE_TIMEOUT_MS"),
         shippedConst("PREPARED_TERMINAL_STATES"),
         shippedConst("PREPARED_ACK_QUEUE_MAX"),
         shippedConst("PREPARED_SETTLED_MEMORY"),
@@ -4010,6 +4013,7 @@ async function main() {
         // The directed change the commit and its failure now settle.
         shippedSource("settleDirectedChange"), shippedSource("supersedeDirectedChange"),
         shippedSource("fallBackDirectedChange"),
+        shippedSource("deferPreparedPredecessorRetirement"),
         shippedSource("retirePreparedPredecessor"), shippedSource("rollbackPreparedReplacement"),
         shippedSource("adoptPlaybackMediaElement"), shippedSource("disposeRetiredMediaElement"),
         shippedSource("preparedFirstFrame"), shippedSource("cancelPreparedFirstFrame"),
@@ -4322,8 +4326,13 @@ async function main() {
     h.spare.frameCallback();
     assert.equal(latest(h).state, "committed");
     assert.ok(latest(h).first_frame_unix_ms > 0);
+    assert.equal(incumbent.destroyed, false,
+      "first-frame proof acknowledges the switch without blocking its next frame on decoder teardown");
+    assert.ok(p.preparedRetiring, "the hidden predecessor has a bounded retirement owner");
+    h.teardown();
     assert.equal(incumbent.destroyed, true,
-      "first-frame proof retires the predecessor through the normal teardown");
+      "a new attachment drains pending predecessor retirement");
+    assert.equal(p.preparedRetiring, null);
   }
 
   // The commit is sent only after a frame renders. It is a claim that the

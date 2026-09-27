@@ -190,6 +190,7 @@
  * Prepared replacement (a staged successor for a quality or track change)
  * @property {any} [prepared]              the successor being prepared, until it settles
  * @property {any} [preparedCommitting]    the prepared successor being committed
+ * @property {any} [preparedRetiring]      a proven switch's hidden predecessor awaiting idle teardown
  * @property {any} [preparedControlPending] the committed successor awaiting its control acknowledgement
  * @property {any[]} [preparedSettled]     action ids already settled, so a late commit is refused
  * @property {any} [switchCommit]          the last prepared switch's commit timing

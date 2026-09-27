@@ -48,6 +48,12 @@ const PREPARED_FRAME_PROOF_MS=800;
 // A switch that never renders is a failed preparation, and the server is owed
 // that answer rather than a 330-second silence.
 const PREPARED_FIRST_FRAME_MS=8000;
+// Retiring the old MSE decoder in the successor's first-frame callback can
+// consume the next three Firefox display ticks. Let the new picture advance
+// before scheduling that work in an idle turn, with a finite cleanup bound.
+const PREPARED_RETIRE_ADVANCING_FRAMES=3;
+const PREPARED_RETIRE_MAX_MS=2000;
+const PREPARED_RETIRE_IDLE_TIMEOUT_MS=1000;
 const PREPARED_TERMINAL_STATES=["committed","failed","aborted"];
 // Unsent settlements, bounded. Two stagings can be unsettled at once — a
 // supersede queues the old one's `aborted` while the new one is already
@@ -196,6 +202,10 @@ function preparedVideoElement(){
 // decoder host the page has no use for. Once a switch has happened the retired
 // element IS this element, so nothing is created twice.
 function ensurePreparedVideoElement(){
+  // Until its idle retirement runs, the hidden predecessor still has the old
+  // element's listeners and decoder. Never reuse it for a new preparation.
+  if(PLAYER&&PLAYER.preparedRetiring)
+    retirePreparedPredecessor(PLAYER,PLAYER.preparedRetiring);
   const existing=preparedVideoElement();
   if(existing) return existing;
   const v=document.getElementById("video");
@@ -889,7 +899,7 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
       bootstrap:state.controlBootstrap};
     settleDirectedChange(p,p.directedChange,"committed",
       Math.round(performance.now()-((p.directedChange&&p.directedChange.tappedAt)||performance.now())));
-    retirePreparedPredecessor(p,state);
+    deferPreparedPredecessorRetirement(p,state,spare);
     queuePlaybackControlAcknowledgement(p,state.actionId,"committed",
       {first_frame_unix_ms:unixMs,committed_media_origin_ms:state.offeredOriginMs});
     const committedAtMs=performance.now();
