@@ -2186,12 +2186,12 @@ use crate::queue_fixture::QueueFixture;
         panic!("{what} never happened within {deadline:?}");
     }
 
-    /// The race test's hooks: the first waiter to enable its interest holds
-    /// the pause; later ones pass through once it is released.
-    struct WaitEnabledPause(Arc<crate::seam_hooks::AsyncPause>);
+    /// The race test's hooks: the first waiter past its re-check holds the
+    /// pause; later ones pass through once it is released.
+    struct WaitCheckPause(Arc<crate::seam_hooks::AsyncPause>);
 
-    impl crate::vodserve::session::CleanupWaitHooks for WaitEnabledPause {
-        fn after_wait_enabled(&self) -> crate::seam_hooks::HookFuture<'_> {
+    impl crate::vodserve::session::CleanupWaitHooks for WaitCheckPause {
+        fn after_wait_check(&self) -> crate::seam_hooks::HookFuture<'_> {
             Box::pin(async move {
                 self.0.hold().await;
             })
@@ -2200,8 +2200,8 @@ use crate::queue_fixture::QueueFixture;
 
     #[tokio::test]
     async fn terminal_cleanup_completion_after_wait_registration_is_not_lost() {
-        let pause = crate::seam_hooks::AsyncPause::new("terminal cleanup wait enabled");
-        let cleanup = Arc::new(TerminalCleanup::with_hooks(Box::new(WaitEnabledPause(
+        let pause = crate::seam_hooks::AsyncPause::new("terminal cleanup wait check");
+        let cleanup = Arc::new(TerminalCleanup::with_hooks(Box::new(WaitCheckPause(
             Arc::clone(&pause),
         ))));
         let waiter = tokio::spawn({
@@ -2209,8 +2209,10 @@ use crate::queue_fixture::QueueFixture;
             async move { cleanup.wait().await }
         });
 
-        // `wait` has enabled its Notified future but has not performed the
-        // state re-check. `notify_waiters` in this exact gap used to vanish.
+        // `wait` has re-read the finished flag (still false) and has not yet
+        // awaited its Notified future. A completion in this gap is seen by no
+        // later state read, so only a waiter registered before the re-check
+        // observes it; one registered after the re-check never wakes.
         let held = pause.reached().await;
         cleanup.complete();
         held.release();

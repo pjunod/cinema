@@ -252,16 +252,17 @@ impl Rendition {
 /// artefact: what this makes identical is the struct and the set of await
 /// points, not scheduling.
 pub(super) trait CleanupWaitHooks: Send + Sync {
-    /// A waiter has enabled its `Notify` interest, before it re-reads the
-    /// finished flag.
-    fn after_wait_enabled(&self) -> HookFuture<'_>;
+    /// A waiter has registered its `Notify` interest and re-read the finished
+    /// flag, and has not yet awaited the notification. A completion that lands
+    /// here must still wake it.
+    fn after_wait_check(&self) -> HookFuture<'_>;
 }
 
 /// What production installs: the point is already ready.
 pub(super) struct NoopCleanupWaitHooks;
 
 impl CleanupWaitHooks for NoopCleanupWaitHooks {
-    fn after_wait_enabled(&self) -> HookFuture<'_> {
+    fn after_wait_check(&self) -> HookFuture<'_> {
         Box::pin(HookReady)
     }
 }
@@ -309,17 +310,19 @@ impl TerminalCleanup {
 
     pub(super) async fn wait(&self) {
         while !self.is_finished() {
+            // `notify_waiters` stores no permit: it wakes only the waiters
+            // registered when it runs. Register this one (Tokio counts a
+            // `Notified` as registered once `notified()` returns; `enable` makes
+            // that explicit) before the second state read, so a completion on
+            // either side of that read, or between it and the await, is not
+            // lost.
             let notified = self.notify.notified();
             tokio::pin!(notified);
-            // `notify_waiters` stores no permit for a future that has only
-            // been constructed. Register it before the second state read so
-            // completion can occur on either side of that read without being
-            // lost.
             notified.as_mut().enable();
-            self.hooks.after_wait_enabled().await;
             if self.is_finished() {
                 return;
             }
+            self.hooks.after_wait_check().await;
             notified.await;
         }
     }
