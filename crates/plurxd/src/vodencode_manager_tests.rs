@@ -739,3 +739,76 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
         "the offline package's pixel proof did not run at the background class"
     );
 }
+
+/// `Encoding`'s admission through its production constructor
+/// (`TranscodeManager::prepare_vod_encoding`, TRANSCODE-DECOMPOSITION-PLAN
+/// §5.9): the no-op hook is ready at once, so asking for a permit reads the
+/// pool policy and admits. The race tests that pause this point
+/// (`encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_after_reap`
+/// and the `vod::tests` handoff tests) build their own encodings.
+#[tokio::test]
+async fn encoding_shipped_shape() {
+    use plurx_core::store::SqliteStore;
+    let base = crate::test_tempdir().expect("manager fixture");
+    let source = plurx_core::testfixtures::source("h264");
+    let probe = plurx_core::scan::probe::probe(&source)
+        .await
+        .expect("real source probe");
+    let metadata = std::fs::metadata(&source).expect("source metadata");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let file_id =
+        seed_file_with_probe_at(&store, source.to_str().expect("path"), probe.clone()).await;
+    let seeded = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("seeded");
+    store
+        .upsert_file(
+            seeded.item_id,
+            source.to_str().expect("path"),
+            metadata.len() as i64,
+            metadata
+                .modified()
+                .expect("mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix mtime")
+                .as_secs() as i64,
+            &probe,
+        )
+        .await
+        .expect("attested source metadata");
+    let file = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("attested");
+    let manager = TranscodeManager::new(
+        store,
+        base.path().join("manager"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    );
+    let req = SessionRequest {
+        request_id: Some("encoding-shipped-shape".into()),
+        previous_session_id: None,
+        reopen_reason: None,
+        presentation: Presentation::Vod,
+        automatic: false,
+        start_seconds: 0.0,
+        kind: SessionKind::Transcode { height: 240 },
+        ..reopen_request(file_id, "encoding-shipped-shape", "unused", "unused")
+    };
+    let encoding = manager
+        .prepare_vod_encoding(&req, &file)
+        .await
+        .expect("the production recipe freezes")
+        .expect("a transcode freezes an encoding");
+    let permit = tokio::time::timeout(Duration::from_secs(5), encoding.try_permit())
+        .await
+        .expect("the production hook does not hold admission")
+        .expect("an idle pool admits the encoding");
+    assert!(encoding.admissions.software_in_use() > 0, "the permit holds software capacity");
+    drop(permit);
+    assert_eq!(encoding.admissions.software_in_use(), 0);
+}
