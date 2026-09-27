@@ -526,7 +526,7 @@ impl<T: Store + ?Sized> QueueFixture for T {}
 /// This touches only the common queue namespace, never production migration.
 #[allow(dead_code)]
 pub(crate) fn remove_common_queue_schema(connection: &rusqlite::Connection) {
-    for kind in ["trigger", "table"] {
+    for kind in ["trigger", "view", "table"] {
         let names: Vec<String> = connection.prepare(
             "SELECT name FROM sqlite_master WHERE type = ?1 AND name GLOB 'background_*' ORDER BY name"
         ).expect("queue schema objects").query_map([kind], |row| row.get(0))

@@ -2188,11 +2188,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # 641 + K-10 M4 -> 643 (measured by zeroing this row) on the merge of main
 # into #556: S-14 M8's two test-only sites and K-10 M4's two test-only
 # offline worker spawns coexist unchanged; the merge adds no new site.
+# E0 removes the direct full-scan spawn and process-local retry spawn; the bounded-process cancellation fixture adds one retained test task.
+# E0 subtitles remove the independent foreground analysis heartbeat task;
+# the retained common job heartbeat owns that lifetime.
 # 644 + S-14 M8 -> 646 (measured by zeroing this row) on the merge of main
 # into #553 after #556: S-04 M2's three, S-14 M8's two test-only and K-10
 # M4's two test-only sites coexist unchanged; the merge adds no new site.
 # main @ d95503c25 has 647; with S-04 M2's three -> 650 (measured by zeroing this row)
 # on the merge of main into #553 after #532 and #563; the merge adds no new site.
+# Combined E0 and S-04 M2 ownership sites; neither parent is discarded.
+# E0 HTTP scan fixtures retain a consumer handle and abort it on teardown.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
 # zeroing this row: +7 in `seam_hooks.rs` (the two
@@ -2204,7 +2209,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # a process or a recipe decision.
 # main @ `d4fa763c7` has 650; with S-14 M8's +4 (above) -> 654, measured by zeroing this row
 # on the merge of main into #562. Main's additions and this branch's coexist unchanged; the merge adds no new site.
-expected_occurrences = 654
+# main @ 1d70a1fed has 649; with S-14 M8's +4 reviewed above -> 653, measured by zeroing this row
+# on the merge of main into #562. Main's E0 fixtures and this branch's coexist unchanged; the merge adds no new site.
+expected_occurrences = 653
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -3141,11 +3148,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # virtual-clock test waits coexist unchanged; the merge adds no new site.
 # 1010 + K-10 M4 -> 1013 (measured by zeroing this row) on the merge of
 # main into #556: S-14 M8's one test-only timeout and K-10 M4's three
+# virtual-clock test waits coexist unchanged; the merge adds no new site.
+# E0 adds one library playback-pressure timer and three bounded cancellation-fixture observations. Replacing old scan scheduling timers leaves the state.rs total unchanged.
+# E0 adds one bounded Developer worker-authority observation; it owns no work or lease.
+# E0 subtitles add one common-worker idle poll and one physical-pressure
+# observation. Both remain inside the worker that joins its child on loss.
 # 1016 + S-14 M8 -> 1017 (measured by zeroing this row) on the merge of
 # main into #553 after #556: S-14 M8's one test-only timeout joins S-04
 # M2's four and K-10 M4's three test waits; the merge adds no new site.
 # main @ d95503c25 has 1025; with S-04 M2's four -> 1029 (measured by zeroing this row)
 # on the merge of main into #553 after #532 and #563; the merge adds no new site.
+# Combined E0 and S-04 M2 ownership sites; neither parent is discarded.
 # virtual-clock test waits coexist unchanged; the merge adds no new site.
 # 1013 -> 1021 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3157,7 +3170,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # clock sleep in its own tests). Test-only; no production timer.
 # main @ `d4fa763c7` has 1029; with S-14 M8's +8 (above) -> 1037, measured by zeroing this row
 # on the merge of main into #562. Main's additions and this branch's coexist unchanged; the merge adds no new site.
-expected_occurrences = 1037
+# main @ 1d70a1fed has 1036; with S-14 M8's +8 reviewed above -> 1044, measured by zeroing this row
+# on the merge of main into #562. Main's E0 sites and this branch's coexist unchanged; the merge adds no new site.
+expected_occurrences = 1044
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -4112,6 +4127,7 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # `libc::execv` from inside a `pre_exec`, which reproduces the decode-fact
 # probe's exec-from-`pre_exec` to show that a priority registered after it
 # never runs. The child is owned by `spawn_job_owned` and killed on drop.
+# E0 adds one test-only kill(pid, 0) observation proving cooperative cancellation reaped its bounded child before returning.
 # 50 -> 51 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
 # zeroing this row: the `libc::kill(pid, 0)` in
@@ -4119,7 +4135,9 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # its child (signal 0 sends nothing).
 # main @ `d4fa763c7` has 52; with S-14 M8's +1 (above) -> 53, measured by zeroing this row
 # on the merge of main into #562. Main's additions and this branch's coexist unchanged; the merge adds no new site.
-expected_occurrences = 53
+# main @ 1d70a1fed has 53 (E0's kill(pid, 0) above); with S-14 M8's +1 reviewed above -> 54, measured by
+# zeroing this row on the merge of main into #562. Both test-only observations coexist; the merge adds no new site.
+expected_occurrences = 54
 
 [[module_structures]]
 id = "kill-on-drop-construction"

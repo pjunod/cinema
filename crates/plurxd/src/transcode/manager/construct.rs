@@ -323,6 +323,7 @@ impl TranscodeManager {
     }
 
     pub(crate) fn with_subtitle_jobs(mut self, jobs: Arc<crate::state::JobManager>) -> Self {
+        jobs.share_subtitle_admissions(self.admissions.clone());
         self.subtitle_jobs = Some(jobs);
         self
     }

@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 236
+One binary serves everything on one port (`:32400` by default). plurx has 237
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -771,8 +771,8 @@ matching is the one 422 in the API, and its body names every configured root:
 
 | Status | Meaning |
 |---|---|
-| 200 `{"status":"scanned", …, "report", "items"}` | Ran synchronously to completion — a real filesystem walk and ffprobe work happened inline on the request |
-| 202 `{"status":"queued", "request_id", …}` | The library was busy. **Queued, never dropped** — importing a season fires one request per episode within seconds, and dropping N−1 would leave the season half-indexed. Duplicates by path collapse |
+| 200 `{"status":"scanned", …, "report", "items"}` | A durable result was already ready when the request was acknowledged |
+| 202 `{"status":"queued", "request_id", …}` | Durably accepted for an eligible cluster worker. Requests survive process restart; same-path requests share a scan while retaining each caller’s hints and result |
 | 400 | Relative path, nonpositive `series.tmdb`, or invalid `book` fields |
 | 422 | Path under no library root |
 
@@ -786,9 +786,11 @@ notification counter *before* path resolution, so a request rejected for a
 path-mapping mistake still proves the caller reached plurx with a working key.
 
 `GET /api/v1/scan/requests/{id}` returns the record verbatim. `status` is
-`running` · `queued` · `done` · `failed`; `report` and `items` appear only at
-a terminal state, `error` only on failure. Records live in a 256-entry
-in-memory ring and 404 once evicted, so poll promptly.
+`queued` · `done` · `failed` · `cancelled`; `report` and `items` appear only at
+a terminal state, `error` only on failure. Request receipts and results persist
+for seven days. The recent list is bounded to 256 records; an older record can
+still be read by ID until its receipt expires. A library admits at most 256
+pending requests; overload is an explicit rejection before acceptance.
 
 ### 6.4 Root identity, and why a scan refuses to prune
 
@@ -2571,6 +2573,8 @@ Every route is admin unless the row says otherwise. `/cluster/status` and
 |---|---|---|---|
 | POST | `/api/v1/cluster/join-tokens` | admin | Mints one single-use **voter** join token |
 | POST | `/api/v1/cluster/learner-join-tokens` | admin | The same, wire-distinct, for a **learner** |
+| GET | `/api/v1/cluster/work/storage-domains` | admin | Library roots and persisted domain mappings; two shared readers per domain and two concurrent library workers per provider |
+| PUT | `/api/v1/cluster/work/storage-domains` | admin | Array of `{library_id, root_path, domain_id}` replaces the mapping, at most 256 roots / 64 KiB. Empty IDs are omitted for the global fallback. Returns 409 while live work owns reservations or a root no longer exists; feature enable settings are independent |
 | GET | `/api/v1/cluster/jobs` | admin | Optional `state`, `kind`, and `cursor` query parameters; at most 100 durable job summaries, bounded counts and next cursor; payloads, paths and ownership tokens omitted |
 | GET | `/api/v1/cluster/jobs/{id}` | admin | Durable summary, latest 16 attempts and first 100 interests; `more_waiters` identifies truncation |
 | POST | `/api/v1/cluster/jobs/{id}/cancel` | admin | Idempotent cooperative cancellation; running children retain reservations until joined or expired |

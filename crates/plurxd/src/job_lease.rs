@@ -146,6 +146,12 @@ impl ActiveJobLease {
         PublicationStore::fenced(store, self.fence.clone())
     }
 
+    /// Stop catalogue publication synchronously, then let the caller join its
+    /// scan and media children before releasing either durable owner.
+    pub(crate) fn revoke(&self) {
+        self.fence.revoke();
+    }
+
     pub(crate) fn loss_token(&self) -> tokio_util::sync::CancellationToken {
         self.lost.clone()
     }
