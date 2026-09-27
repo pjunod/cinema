@@ -508,10 +508,16 @@ impl ProbeLaunchMode {
     fn inject_slow_reap(self) -> bool {
         matches!(
             self,
-            Self::ProductionPidfdOpenFailure
-                | Self::ProductionPidfdReadFailure
-                | Self::ProductionSteadyResponseInterruptedUntilDeadline
+            Self::ProductionPidfdOpenFailure | Self::ProductionPidfdReadFailure
         )
+    }
+
+    /// The steady-response deadline test holds the detached reap until it
+    /// has looked at what the reap still owns, instead of racing a fixed
+    /// sleep: see `STEADY_RESPONSE_REAP_RELEASE`.
+    #[cfg(all(test, target_os = "linux"))]
+    fn inject_held_reap(self) -> bool {
+        self == Self::ProductionSteadyResponseInterruptedUntilDeadline
     }
 
     #[cfg(all(test, target_os = "linux"))]
@@ -586,6 +592,9 @@ impl ProbeLaunchMode {
                     steady_notification_response: u8::MAX,
                     steady_notification_response_interrupts: Some(
                         &STEADY_RESPONSE_STOP_INTERRUPT_HITS,
+                    ),
+                    steady_notification_response_deadline_exits: Some(
+                        &STEADY_RESPONSE_STOP_DEADLINE_EXITS,
                     ),
                     steady_notification_response_stop_exits: Some(&STEADY_RESPONSE_STOP_EXITS),
                     stop_after_steady_notification_response_interrupt: true,
@@ -2315,6 +2324,19 @@ static STEADY_RESPONSE_STOP_INTERRUPT_HITS: std::sync::atomic::AtomicUsize =
 static STEADY_RESPONSE_DEADLINE_EXITS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Deadline exits of the stop-path proof's response loop, which must stay
+/// zero: the stop signal, not the launch deadline, is what releases it.
+#[cfg(all(test, target_os = "linux"))]
+static STEADY_RESPONSE_STOP_DEADLINE_EXITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// The detached reap of the steady-response deadline proof waits for one
+/// permit here, so the test can observe it still holding version ownership
+/// for as long as it likes — the slow reap it stands for is unbounded — and
+/// then let it finish. A fixed sleep made that observation a race.
+#[cfg(all(test, target_os = "linux"))]
+static STEADY_RESPONSE_REAP_RELEASE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(0);
+
 #[cfg(all(test, target_os = "linux"))]
 static STEADY_RESPONSE_STOP_EXITS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -2628,7 +2650,11 @@ async fn wait_for_probe_reap(
     _launch_mode: ProbeLaunchMode,
 ) -> std::io::Result<std::process::ExitStatus> {
     #[cfg(all(test, target_os = "linux"))]
-    if _launch_mode.inject_slow_reap() {
+    if _launch_mode.inject_held_reap() {
+        if let Ok(permit) = STEADY_RESPONSE_REAP_RELEASE.acquire().await {
+            permit.forget();
+        }
+    } else if _launch_mode.inject_slow_reap() {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     child.wait().await
@@ -5234,13 +5260,20 @@ void probe_main(unsigned long *stack) {
         STEADY_RESPONSE_DEADLINE_INTERRUPT_HITS.store(0, Ordering::Release);
         STEADY_RESPONSE_DEADLINE_EXITS.store(0, Ordering::Release);
         let ownership = Arc::new(tokio::sync::Semaphore::new(1));
+        // The launch deadline is the subject here, so it cannot be replaced by
+        // an event, but it must outlast the launch it bounds: the second exec
+        // notification only arrives once the probe has been forked, handed
+        // its filter and exec'd twice, and a loaded runner took longer than
+        // the 100 ms this used to allow. The injected interruptions then hold
+        // the response loop until this deadline, whatever its length.
+        let deadline = Duration::from_secs(3);
         let started = std::time::Instant::now();
         assert_eq!(
             probe_version_with_deadline_on(
                 &identity.executable_snapshot,
                 identity.executable(),
                 ProbeLaunchMode::ProductionSteadyResponseInterruptedUntilDeadline,
-                Duration::from_millis(100),
+                deadline,
                 Arc::clone(&ownership),
             )
             .await,
@@ -5250,23 +5283,27 @@ void probe_main(unsigned long *stack) {
             STEADY_RESPONSE_DEADLINE_INTERRUPT_HITS.load(Ordering::Acquire) > 1,
             "the production supervisor must receive the second exec notification and consume persistent response interruptions"
         );
-        tokio::time::timeout(Duration::from_millis(250), async {
+        assert!(
+            started.elapsed() >= deadline,
+            "only the shared launch deadline ends persistent response interruptions"
+        );
+        tokio::time::timeout(Duration::from_secs(20), async {
             while STEADY_RESPONSE_DEADLINE_EXITS.load(Ordering::Acquire) == 0 {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .expect("the response loop itself must observe the shared deadline");
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "the caller must detach at the shared launch deadline"
-        );
+        // The caller detached at the deadline: its reap is held (see
+        // `STEADY_RESPONSE_REAP_RELEASE`), and it has returned all the same,
+        // leaving the version owner and the supervisor with the cleanup.
         assert!(
             Arc::clone(&ownership).try_acquire_owned().is_err(),
             "the version owner remains held during deliberately slow reap"
         );
         assert_eq!(STEADY_RESPONSE_SUPERVISOR_OWNERS.load(Ordering::Acquire), 1);
-        let _ownership = tokio::time::timeout(Duration::from_secs(2), ownership.acquire_owned())
+        STEADY_RESPONSE_REAP_RELEASE.add_permits(1);
+        let _ownership = tokio::time::timeout(Duration::from_secs(20), ownership.acquire_owned())
             .await
             .expect("steady-response cleanup cannot wedge supervisor join")
             .expect("version ownership returns after reap and supervisor teardown");
@@ -5288,13 +5325,16 @@ void probe_main(unsigned long *stack) {
         );
         STEADY_RESPONSE_STOP_INTERRUPT_HITS.store(0, Ordering::Release);
         STEADY_RESPONSE_STOP_EXITS.store(0, Ordering::Release);
+        STEADY_RESPONSE_STOP_DEADLINE_EXITS.store(0, Ordering::Release);
         let ownership = Arc::new(tokio::sync::Semaphore::new(1));
-        let started = std::time::Instant::now();
+        // Long enough that a loaded runner's launch cannot reach it: whether
+        // the stop signal or the deadline released the loop is read from the
+        // loop's own exit counters below, not from how long the call took.
         probe_version_with_deadline_on(
             &identity.executable_snapshot,
             identity.executable(),
             ProbeLaunchMode::ProductionSteadyResponseInterruptedUntilStop,
-            Duration::from_secs(3),
+            Duration::from_secs(20),
             Arc::clone(&ownership),
         )
         .await
@@ -5307,8 +5347,9 @@ void probe_main(unsigned long *stack) {
             STEADY_RESPONSE_STOP_EXITS.load(Ordering::Acquire) >= 1,
             "the response loop itself must observe the supervisor stop signal"
         );
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
+        assert_eq!(
+            STEADY_RESPONSE_STOP_DEADLINE_EXITS.load(Ordering::Acquire),
+            0,
             "the stop signal, not the long launch deadline, must release the response loop"
         );
         let _ownership = ownership
