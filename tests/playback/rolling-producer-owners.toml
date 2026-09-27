@@ -3182,7 +3182,6 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # E2 integration retains and counts both E1/S-14 and the admitted analysis/integrity owners.
 # E3: bounded peer-ingest/read/recovery deadlines and retained two-node test server.
 # E3 final-review regression retains and joins the production DVR loop; its bounded wait proves reconciliation completed.
-expected_occurrences = 1063
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # virtual-clock test waits coexist unchanged; the merge adds no new site.
 # 1013 -> 1021 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
@@ -3197,6 +3196,27 @@ expected_occurrences = 1063
 # on the merge of main into #562. Main's additions and this branch's coexist unchanged; the merge adds no new site.
 # main @ 1d70a1fed has 1036; with S-14 M8's +8 reviewed above -> 1044, measured by zeroing this row
 # on the merge of main into #562. Main's E0 sites and this branch's coexist unchanged; the merge adds no new site.
+# 1013 -> 1015 with C-08 M5 row 4 (start outcomes), measured by zeroing this
+# row on the merge of main into #559: both new sites are test-only in
+# `http::tests`: the 5 ms `tokio::time::sleep` that polls for
+# `note_playback_started`'s detached task to open the attempt, and the 20 ms
+# sleep that separates the attempt's open from the progress beat that must
+# refresh it. No production timer: the start ledger's deadline is swept from
+# `Instant` comparisons on ledger operations and on the /metrics scrape,
+# never by a timer.
+# main @ d4fa763c7 has 1029; with C-08 M5 row 4's two test-only sleeps
+# reviewed above -> 1031 (measured by zeroing this row) on the merge of
+# main into #559; the merge adds no new site.
+# main @ 1d70a1fed has 1036; with C-08 M5 row 4's two test-only sleeps reviewed above -> 1038,
+# measured by zeroing this row on the merge of main into #559; main's E0 sites and this
+# branch's coexist unchanged; the merge adds no new site.
+# main @ c61bb6409 (S-14 #562) has 1044; with C-08 M5 row 4's two test-only sleeps reviewed above
+# -> 1046, measured by zeroing this row on the merge of main into #559; S-14's sites and this
+# branch's coexist unchanged; the merge adds no new site.
+# main @ 82df7f59e (#572) has 1063; with C-08 M5 row 4's two test-only sleeps reviewed above
+# -> 1065, measured by zeroing this row on the merge of main into #559; #572's E1-E3 sites and
+# this branch's coexist unchanged; the merge adds no new site.
+expected_occurrences = 1065
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3915,7 +3935,21 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # E1 plus S-14 M8: both reviewed fixture ownership sets retained.
 # E2 integration retains and counts both E1/S-14 and the admitted analysis/integrity owners.
 # E3: bounded peer-ingest/read/recovery deadlines and retained two-node test server.
-expected_occurrences = 395
+# 389 -> 396 with C-08 M5 row 4 (start outcomes), measured from the
+# validation unittests' actual count: seven `Response::status()` reads in
+# the three start-outcome handler tests (`http::tests`), HTTP status codes on
+# in-process `oneshot` responses. No child process, no producer, nothing to
+# own.
+# main @ d4fa763c7 has 390; with C-08 M5 row 4's seven test-only
+# `Response::status()` reads reviewed above -> 397 (measured by zeroing this
+# row) on the merge of main into #559; the merge adds no new site.
+# main @ c61bb6409 (S-14 #562) has 391; with C-08 M5 row 4's seven test-only `Response::status()`
+# reads reviewed above -> 398, measured by zeroing this row on the merge of main into #559;
+# S-14's test child and this branch's reads coexist unchanged; the merge adds no new site.
+# main @ 82df7f59e (#572) has 395; with C-08 M5 row 4's seven test-only `Response::status()`
+# reads reviewed above -> 402, measured by zeroing this row on the merge of main into #559;
+# #572's owners and this branch's reads coexist unchanged; the merge adds no new site.
+expected_occurrences = 402
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

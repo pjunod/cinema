@@ -10914,6 +10914,210 @@ mod tests {
         assert!(read() > before, "the ttff never reached client=\"firefox\"");
     }
 
+    /// C-08 M5 row 4 end to end: a real direct-play GET opens the start
+    /// attempt, and the viewer's `ttff` beacon through `/client-log` settles
+    /// it `ok`; a failure report for a pending attempt settles it `failed`.
+    #[tokio::test]
+    async fn a_first_frame_beacon_settles_the_start_its_direct_play_opened() {
+        use crate::playstart::StartPhase;
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let user = state
+            .store
+            .get_user_by_username("paul")
+            .await
+            .expect("user")
+            .expect("paul")
+            .id;
+        let s = seed_content(&state).await;
+        let ledger = std::sync::Arc::clone(&state.start_attempts);
+        let response = app
+            .clone()
+            .oneshot(ranged(
+                &format!("/api/v1/files/{}/direct?token={admin}", s.file),
+                0,
+                9,
+            ))
+            .await
+            .expect("r");
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        // Opened on `note_playback_started`'s detached task.
+        for _ in 0..200 {
+            if ledger.phase(user, s.file).is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            matches!(ledger.phase(user, s.file), Some(StartPhase::Pending { .. })),
+            "the direct-play GET opened no attempt: {:?}",
+            ledger.phase(user, s.file)
+        );
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/client-log",
+                Some(&admin),
+                json!({ "event": "ttff", "method": "direct_play", "ms": 900, "file_id": s.file }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(ledger.count("direct_play", "ok"), 1);
+        assert_eq!(ledger.phase(user, s.file), Some(StartPhase::Playing));
+
+        let other_file = s.file + 1_000;
+        ledger.opened(
+            user,
+            other_file,
+            None,
+            "transcode",
+            std::time::Instant::now(),
+        );
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/client-log",
+                Some(&admin),
+                json!({ "level": "error", "event": "playback_error", "file_id": other_file }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(ledger.count("transcode", "failed"), 1);
+    }
+
+    /// C-08 M5 row 4: a start request the server answers with an error is a
+    /// refused start, on each of the three routes that begin one; a HEAD is
+    /// not a start.
+    #[tokio::test]
+    async fn a_start_request_the_server_refuses_is_a_refused_start() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let s = seed_content(&state).await;
+        let ledger = std::sync::Arc::clone(&state.start_attempts);
+
+        let (status, _) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/hls/sessions", s.file),
+                Some(&admin),
+                json!({ "playback_id": "   " }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(ledger.count("unknown", "refused"), 1, "HLS create");
+
+        let missing = s.file + 1_000;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/files/{missing}/stream.mp4?token={admin}"))
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("r");
+        assert!(response.status().is_client_error(), "{}", response.status());
+        assert_eq!(ledger.count("remux", "refused"), 1, "stream.mp4");
+
+        for method in ["HEAD", "GET"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(format!("/api/v1/files/{missing}/direct?token={admin}"))
+                        .body(Body::empty())
+                        .expect("req"),
+                )
+                .await
+                .expect("r");
+            assert!(response.status().is_client_error(), "{}", response.status());
+        }
+        assert_eq!(ledger.count("direct_play", "refused"), 1, "direct GET only");
+
+        // A catalogued file whose bytes are gone: the open fails.
+        let path = state
+            .store
+            .get_file(s.file)
+            .await
+            .expect("file")
+            .expect("seeded")
+            .path;
+        std::fs::remove_file(&path).expect("remove seeded media");
+        let response = app
+            .clone()
+            .oneshot(ranged(
+                &format!("/api/v1/files/{}/direct?token={admin}", s.file),
+                0,
+                9,
+            ))
+            .await
+            .expect("r");
+        assert!(!response.status().is_success(), "{}", response.status());
+        assert_eq!(
+            ledger.count("direct_play", "refused"),
+            2,
+            "direct open failure"
+        );
+    }
+
+    /// C-08 M5 row 4: a scrape settles an attempt past its deadline, so an
+    /// idle node still reports the last start that was abandoned.
+    #[tokio::test]
+    async fn a_scrape_settles_a_start_past_its_deadline_as_cancelled() {
+        let (app, state) = test_state();
+        let ledger = std::sync::Arc::clone(&state.start_attempts);
+        let long_ago = std::time::Instant::now()
+            .checked_sub(crate::playstart::START_DEADLINE + std::time::Duration::from_secs(1))
+            .expect("the monotonic clock is older than the start deadline");
+        ledger.opened(7, 70, None, "remux", long_ago);
+        assert_eq!(ledger.count("remux", "cancelled"), 0);
+        let (status, _) = call_text(&app, get("/metrics", None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ledger.count("remux", "cancelled"), 1);
+        assert_eq!(ledger.phase(7, 70), None);
+    }
+
+    /// C-08 M5 row 4: a live progress beat keeps the viewer's play alive, so
+    /// a request after a long pause joins it instead of opening a start.
+    #[tokio::test]
+    async fn a_progress_beat_keeps_a_started_play_alive() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let user = state
+            .store
+            .get_user_by_username("paul")
+            .await
+            .expect("user")
+            .expect("paul")
+            .id;
+        let s = seed_content(&state).await;
+        let ledger = std::sync::Arc::clone(&state.start_attempts);
+        let opened = std::time::Instant::now();
+        ledger.opened(user, s.file, Some(s.movie), "direct_play", opened);
+        ledger.client_event(user, s.file, "ttff", None, None, opened);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let (status, body) = call(
+            &app,
+            post(
+                &format!("/api/v1/items/{}/progress", s.movie),
+                Some(&admin),
+                json!({ "position_ms": 60_000, "duration_ms": 600_000 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let seen = ledger.last_seen(user, s.file).expect("play tracked");
+        assert!(
+            seen >= opened + std::time::Duration::from_millis(20),
+            "the progress beat did not refresh the play"
+        );
+    }
+
     /// C-08 M5 row 3's denominator end to end: two live progress beats a
     /// second apart credit the advance to the method the player names; an
     /// offline replay (`recorded_at`) credits nothing.

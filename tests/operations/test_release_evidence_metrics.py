@@ -4,7 +4,7 @@ C-08 M5 (docs/server/OBSERVABILITY-BASELINE.md, section 3.5) adds the series a
 release comparison reads. A family that renders on /metrics but has no row in
 docs/OPERATIONS.md is a number nobody knows how to read, and a documented
 family the server no longer renders is a query that silently returns nothing.
-Both directions are checked here, plus the two reserved names that must stay
+Both directions are checked here, plus the reserved name that must stay
 documented and must NOT yet be rendered.
 """
 
@@ -26,13 +26,14 @@ RENDERED = [
     "plurx_watched_seconds_total",
     "plurx_delivered_bytes_total",
     "plurx_admission_wait_seconds",
+    "plurx_start_outcomes_total",
+    "plurx_start_outcomes_unpaired_total",
 ]
 
 # Names reserved by the plan so two efforts cannot invent two spellings. Each
 # becomes a RENDERED entry in the PR that builds it.
 RESERVED = [
     "plurx_scratch_bytes",
-    "plurx_start_outcomes_total",
 ]
 
 

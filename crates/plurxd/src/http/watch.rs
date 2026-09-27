@@ -77,6 +77,11 @@ pub async fn progress(
     // player in the house arrives here every few seconds.
     if req.recorded_at.is_none() {
         state.direct_plays.touch_item(user.id, id);
+        // And the play it belongs to stays one start attempt however long
+        // the viewer is paused (C-08 M5 row 4).
+        state
+            .start_attempts
+            .progress_beat(user.id, id, std::time::Instant::now());
         // The denominator for stalled seconds and bytes per watched minute
         // (C-08 M5). Live beats only: an offline replay's position did not
         // advance in front of this node.
