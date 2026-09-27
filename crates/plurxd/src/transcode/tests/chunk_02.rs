@@ -1921,7 +1921,7 @@
 
     #[tokio::test]
     async fn process_supervisor_reports_current_exit_and_fences_predecessor_exit() {
-        let control = crate::playback_control::RollingControlHandle::spawn("supervisor-test");
+        let control = crate::playback_control::RollingControlHandle::spawn_for_test("supervisor-test");
         let current_attempt = control
             .begin_producer_attempt()
             .await
@@ -1999,7 +1999,7 @@
 
     #[tokio::test]
     async fn process_supervisor_owns_signals_termination_and_reaping() {
-        let control = crate::playback_control::RollingControlHandle::spawn("supervisor-signal");
+        let control = crate::playback_control::RollingControlHandle::spawn_for_test("supervisor-signal");
         let attempt = control
             .begin_producer_attempt()
             .await
@@ -2065,7 +2065,7 @@
 
     #[tokio::test]
     async fn deferred_flow_signal_reauthorizes_attempt_before_touching_pid() {
-        let control = crate::playback_control::RollingControlHandle::spawn("signal-capacity");
+        let control = crate::playback_control::RollingControlHandle::spawn_for_test("signal-capacity");
         let attempt = control
             .begin_producer_attempt()
             .await
@@ -2103,7 +2103,7 @@
 
     #[tokio::test]
     async fn deferred_flow_signal_wakes_fail_closed_when_control_is_fenced() {
-        let control = crate::playback_control::RollingControlHandle::spawn("signal-unavailable");
+        let control = crate::playback_control::RollingControlHandle::spawn_for_test("signal-unavailable");
         let attempt = control
             .begin_producer_attempt()
             .await
@@ -2135,7 +2135,7 @@
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn actor_task_exit_fences_a_reserved_signal_and_cleanup_still_progresses() {
-        let control = crate::playback_control::RollingControlHandle::spawn("signal-actor-exit");
+        let control = crate::playback_control::RollingControlHandle::spawn_for_test("signal-actor-exit");
         let attempt = control
             .begin_producer_attempt()
             .await
@@ -2201,7 +2201,7 @@
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn producer_signal_and_retirement_share_one_authorization_linearization() {
-        let control = crate::playback_control::RollingControlHandle::spawn("signal-fence");
+        let control = crate::playback_control::RollingControlHandle::spawn_for_test("signal-fence");
         let attempt = control
             .begin_producer_attempt()
             .await
@@ -2365,7 +2365,7 @@
     /// child has the layout and await points the daemon ships.
     #[tokio::test]
     async fn attempt_child_shipped_shape() {
-        let control = crate::playback_control::RollingControlHandle::spawn("attempt-shipped-shape");
+        let control = crate::playback_control::RollingControlHandle::spawn_for_test("attempt-shipped-shape");
         let attempt = control
             .begin_producer_attempt()
             .await
@@ -2412,7 +2412,7 @@
 
     #[tokio::test]
     async fn dropping_process_owner_terminates_and_reaps_without_a_pid_side_channel() {
-        let control = crate::playback_control::RollingControlHandle::spawn("supervisor-drop");
+        let control = crate::playback_control::RollingControlHandle::spawn_for_test("supervisor-drop");
         let attempt = control
             .begin_producer_attempt()
             .await

@@ -485,7 +485,7 @@
             child,
             cached,
             actor_managed_prepublication,
-            crate::playback_control::RollingControlHandle::spawn("test-start"),
+            crate::playback_control::RollingControlHandle::spawn_for_test("test-start"),
             0,
         )
     }
@@ -662,7 +662,7 @@
             .expect("seed init segment");
 
         let (control, mut registration) =
-            crate::playback_control::RollingControlHandle::spawn_prepublication_transcode(
+            crate::playback_control::RollingControlHandle::spawn_prepublication_transcode_for_test(
                 "published-frontier-test",
             );
         registration.register().await.expect("register executor");
@@ -1206,7 +1206,7 @@
             sessions.insert("a-blocked".to_owned(), Arc::clone(&blocked));
             sessions.insert("b-follower".to_owned(), Arc::clone(&follower));
         }
-        let actor_pause = Arc::new(tokio::sync::Barrier::new(2));
+        let actor_pause = crate::seam_hooks::AsyncPause::new("producer attempt reply");
         blocked
             .control
             .pause_producer_attempt_reply(Arc::clone(&actor_pause));
@@ -1214,7 +1214,7 @@
             let control = blocked.control.clone();
             async move { control.begin_producer_attempt().await }
         });
-        actor_pause.wait().await;
+        let held = actor_pause.reached().await;
 
         let fence = tokio::spawn({
             let manager = Arc::clone(&manager);
@@ -1254,7 +1254,7 @@
             "a later snapshot member cannot publish while an earlier actor is stalled"
         );
 
-        actor_pause.wait().await;
+        held.release();
         let _ = actor_command.await.expect("blocked actor command");
         fence.await.expect("authority fence task");
         assert_eq!(
@@ -1299,7 +1299,7 @@
             .lock()
             .await
             .insert("bounded-stop".to_owned(), Arc::clone(&session));
-        let actor_pause = Arc::new(tokio::sync::Barrier::new(2));
+        let actor_pause = crate::seam_hooks::AsyncPause::new("producer attempt reply");
         session
             .control
             .pause_producer_attempt_reply(Arc::clone(&actor_pause));
@@ -1307,7 +1307,7 @@
             let control = session.control.clone();
             async move { control.begin_producer_attempt().await }
         });
-        actor_pause.wait().await;
+        let held = actor_pause.reached().await;
         let dropped = Arc::new(AtomicBool::new(false));
 
         assert!(
@@ -1331,7 +1331,7 @@
             "actor settlement must not retain the global registry lock"
         );
 
-        actor_pause.wait().await;
+        held.release();
         let _ = actor_command.await.expect("blocked actor command");
         tokio::time::timeout(Duration::from_secs(2), async {
             while !dropped.load(Acquire)

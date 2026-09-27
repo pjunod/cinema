@@ -1950,7 +1950,7 @@ scope = "test"
     /// feature would be dead in production and the suite silent about it.
     #[tokio::test]
     async fn a_latched_fault_travels_from_the_reader_to_the_actor() {
-        let control = crate::playback_control::RollingControlHandle::spawn("session-start");
+        let control = crate::playback_control::RollingControlHandle::spawn_for_test("session-start");
         let attempt = control
             .begin_producer_attempt()
             .await
