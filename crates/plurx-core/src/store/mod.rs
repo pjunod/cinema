@@ -108,6 +108,7 @@ mod background_jobs_maintenance;
 mod background_jobs_migration;
 mod background_jobs_observation;
 mod background_jobs_offline;
+pub mod background_jobs_preparation;
 pub mod background_jobs_pretranscode;
 pub mod background_jobs_provider;
 mod background_jobs_publication;

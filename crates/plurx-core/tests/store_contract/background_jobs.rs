@@ -2840,3 +2840,81 @@ async fn background_artwork_grid_demand_coalesces_and_does_not_erase_failure_bud
         assert!(matches!(store.enqueue_artwork_demand(spec, "node-a", 3_603_000).await.expect("new later demand"), EnqueueOutcome::Accepted { job_id: next, .. } if next != job_id));
     }).await;
 }
+
+#[tokio::test]
+async fn background_prediction_cap_preserves_foreground_admission_and_releases_cancelled_slots() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "prediction-cap").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let mut prototype = preparation_request(&file, &uuid::Uuid::new_v4().to_string(), 1000);
+        let mut first = None;
+        for index in 0..64 {
+            let mut request = prototype.clone();
+            request.id = uuid::Uuid::new_v4().to_string();
+            request.request.request_id = format!("prediction-{index}");
+            if index == 0 {
+                first = Some(request.request.clone());
+            }
+            assert!(
+                matches!(
+                    store.enqueue_job(request).await.expect("prediction"),
+                    EnqueueOutcome::Accepted { .. }
+                ),
+                "{backend}: slot {index}"
+            );
+        }
+        prototype.id = uuid::Uuid::new_v4().to_string();
+        prototype.request.request_id = "overflow".into();
+        assert!(
+            matches!(
+                store.enqueue_job(prototype.clone()).await.expect("bounded"),
+                EnqueueOutcome::QueueFull
+            ),
+            "{backend}"
+        );
+        let mut foreground = prototype.clone();
+        foreground.id = uuid::Uuid::new_v4().to_string();
+        foreground.priority = 3;
+        foreground.request.scope = "user:foreground".into();
+        assert!(
+            matches!(
+                store.enqueue_job(foreground).await.expect("foreground"),
+                EnqueueOutcome::Accepted { .. }
+            ),
+            "{backend}: speculation cannot fill foreground capacity"
+        );
+        let first = first.expect("first interest");
+        store
+            .cancel_waiter(CancelWaiter {
+                scope: first.scope,
+                request_id: first.request_id,
+                now_ms: 1001,
+            })
+            .await
+            .expect("cancel one interest");
+        assert!(
+            matches!(
+                store.enqueue_job(prototype).await.expect("released slot"),
+                EnqueueOutcome::Accepted { .. }
+            ),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn background_preparation_demand_expires_after_one_day_and_dormant_users_are_not_viewers() {
+    use plurx_core::store::background_jobs_preparation::PreparationDemand;
+    for_each_backend(|store, backend| async move {
+        let (user, file_id) = seed_file(&store, "preparation-demand").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let watch = store.put_progress(user, file.item_id, 1000, Some(100_000)).await.expect("demand");
+        let now = watch.updated_at * 1000;
+        let demand = store.preparation_demands(now).await.expect("demand snapshot");
+        assert!(demand.iter().any(|row| matches!(row, PreparationDemand::Item { item_id, .. } if *item_id == file.item_id)), "{backend}");
+        assert!(!demand.iter().any(|row| matches!(row, PreparationDemand::Viewer { .. })), "{backend}: watch history is not an active lease");
+        assert!(store.preparation_demands(now + 86_400_000).await.expect("expired snapshot").is_empty(), "{backend}");
+        assert!(store.hot_artifacts(now).await.expect("empty artifact snapshot").is_empty(), "{backend}: demand alone is not proof of stored bytes");
+    }).await;
+}

@@ -186,6 +186,11 @@ WITH input AS (SELECT json($1) AS body), request AS (
         SELECT 1 FROM cluster_fragment_index_artifacts artifact JOIN files file ON file.id = artifact.file_id
           AND file.size = artifact.source_size AND file.mtime = artifact.source_mtime
         WHERE 'fragment:' || artifact.cache_key = json_extract(body, '$.payload.artifact_key')
+      UNION ALL SELECT 1 FROM background_artwork_locations artifact
+        WHERE 'artwork:' || artifact.artifact_key = json_extract(body, '$.payload.artifact_key')
+      UNION ALL SELECT 1 FROM background_transcode_artifacts artifact JOIN files file ON file.id = artifact.file_id
+          AND file.size = artifact.source_size AND file.mtime = artifact.source_mtime
+        WHERE 'transcode:' || artifact.recipe_hash || ':' || artifact.manifest_digest = json_extract(body, '$.payload.artifact_key')
     ) THEN 'source_changed'
     WHEN json_type(body, '$.delivery_parent') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM background_job_waiters WHERE job_id = json_extract(body, '$.delivery_parent')
@@ -235,6 +240,9 @@ WITH input AS (SELECT json($1) AS body), request AS (
     WHEN json_type(body, '$.legacy_key') IS NULL AND EXISTS (SELECT 1 FROM background_jobs WHERE id = json_extract(body, '$.id')) THEN 'conflict'
     WHEN json_type(body, '$.legacy_key') IS NULL AND json_extract(body, '$.priority') < 2
       AND EXISTS (SELECT 1 FROM background_job_legacy WHERE state = 'awaiting_import') THEN 'queue_full'
+    WHEN json_extract(body, '$.request.scope') IN ('automatic:transcode','automatic:transcode-repair','automatic:hot-copy')
+      AND (SELECT COUNT(*) FROM background_job_waiters WHERE request_scope IN ('automatic:transcode','automatic:transcode-repair','automatic:hot-copy')
+        AND state IN ('pending','awaiting_hydration') AND (deadline_ms IS NULL OR deadline_ms > json_extract(body, '$.now_ms'))) >= 64 THEN 'queue_full'
     WHEN (SELECT COUNT(*) FROM background_job_waiters) >= 16384 THEN 'queue_full'
     WHEN json_extract(body, '$.request.scope') LIKE 'user:%' AND (SELECT COUNT(*) FROM background_job_waiters
       WHERE request_scope = json_extract(body, '$.request.scope')
@@ -534,7 +542,10 @@ impl JobPayload {
                     && (1..=8_640).contains(target_height)
                     && identifier(policy_generation)
                     && requirements.validate()
-                    && matches!(reason.as_str(), "in_progress" | "next_up" | "recent")
+                    && matches!(
+                        reason.as_str(),
+                        "in_progress" | "next_up" | "recent" | "recent_demand" | "channel_next"
+                    )
             }
             Self::FragmentIndexBuild {
                 file_id,
@@ -956,6 +967,14 @@ pub struct CancelWaiterOutcome {
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    async fn preparation_demands(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<super::background_jobs_preparation::PreparationDemand>, StoreError>;
+    async fn hot_artifacts(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<super::background_jobs_preparation::HotArtifact>, StoreError>;
     async fn transcode_copy_sources(
         &self,
         artifact_key: &str,
@@ -1150,6 +1169,18 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn preparation_demands(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<super::background_jobs_preparation::PreparationDemand>, StoreError> {
+        super::background_jobs_preparation::demands(self, now_ms).await
+    }
+    async fn hot_artifacts(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<super::background_jobs_preparation::HotArtifact>, StoreError> {
+        super::background_jobs_preparation::hot_artifacts(self, now_ms).await
+    }
     async fn transcode_copy_sources(
         &self,
         artifact_key: &str,

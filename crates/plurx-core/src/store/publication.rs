@@ -1070,6 +1070,30 @@ impl<'a> PublicationStore<'a> {
         .await
     }
 
+    /// Admit one hot-copy interest under the discovery lease. Worker execution
+    /// remains owned by the common queue, never by this planner lease.
+    pub async fn enqueue_hot_copy(
+        &self,
+        request: super::background_jobs::EnqueueJob,
+    ) -> Result<super::background_jobs::EnqueueOutcome, StoreError> {
+        if request.request.scope != "automatic:hot-copy"
+            || !matches!(
+                request.payload,
+                super::background_jobs::JobPayload::ArtifactHydrate { .. }
+            )
+        {
+            return Err(StoreError::Task("invalid hot copy request".into()));
+        }
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .enqueue_job_fenced(request, lease, replacement)
+                    .await
+            })
+        })
+        .await
+    }
+
     /// Admit a speculative request through the shared durable queue while
     /// preserving the singleton discovery publication fence.
     pub async fn enqueue_durable_pretranscode(
