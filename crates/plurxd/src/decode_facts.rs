@@ -5316,17 +5316,23 @@ void probe_main(unsigned long *stack) {
         // the response loop until this deadline, whatever its length.
         let deadline = Duration::from_secs(3);
         let started = std::time::Instant::now();
-        assert_eq!(
+        // The reap below is held until this test releases it, after the call
+        // returns. A caller that joined its cleanup instead of detaching would
+        // therefore wait forever, so the call gets its own outer bound: that
+        // regression fails here, not as a hung test binary.
+        let returned = tokio::time::timeout(
+            deadline + Duration::from_secs(20),
             probe_version_with_deadline_on(
                 &identity.executable_snapshot,
                 identity.executable(),
                 ProbeLaunchMode::ProductionSteadyResponseInterruptedUntilDeadline,
                 deadline,
                 Arc::clone(&ownership),
-            )
-            .await,
-            Err(DecodeFactError::Deadline)
-        );
+            ),
+        )
+        .await
+        .expect("the caller must detach its held cleanup at the launch deadline");
+        assert_eq!(returned, Err(DecodeFactError::Deadline));
         assert!(
             STEADY_RESPONSE_DEADLINE_INTERRUPT_HITS.load(Ordering::Acquire) > 1,
             "the production supervisor must receive the second exec notification and consume persistent response interruptions"
