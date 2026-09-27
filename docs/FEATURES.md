@@ -121,8 +121,10 @@ books, and home media.
   fragment demands share one build with separate deliveries. Exact local
   offline recipes can join running preparation without another encoder.
   Activity exposes job history and explicit retry; Developer enable controls
-  show advisory requirements. One heavy worker per node and two shared I/O
-  slots protect playback and shared storage. The
+  show advisory requirements. Library scan/refresh requests and results are
+  durable; ready learners can execute immutable preparation. One heavy worker
+  per node, two readers per named storage domain, and shared provider pacing
+  protect playback and shared resources. The
   [operations guide](OPERATIONS.md#distributed-speculative-production) explains
   migration, capacity and observations.
 - **Scheduled jobs**, off by default except the artwork retry. Per library: a

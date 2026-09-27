@@ -6,6 +6,9 @@
 //! subtitle endpoint always uses it, and burned transcodes reuse it for simple
 //! text codecs whose authored styling is not lost by WebVTT conversion.
 
+#[cfg(test)]
+use crate::background_jobs::subtitle_fixture::SubtitleFixture;
+
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -5347,18 +5350,12 @@ mod cluster_consumer_tests {
             .expect("enqueue")
             .expect("request");
         let claimed = store
-            .claim_analysis_request_foreground(&request.request_id, "test-node", now, now + 120_000)
+            .claim_subtitle_fixture(&request.request_id, "test-node", now, now + 120_000)
             .await
             .expect("claim")
             .expect("running request");
         assert!(store
-            .fail_analysis_request(
-                &claimed.request_id,
-                "test-node",
-                claimed.fence,
-                "stored_probe_invalid",
-                now
-            )
+            .fail_subtitle_fixture(&claimed, "stored_probe_invalid", now)
             .await
             .expect("fail request"));
         let tmp = base.path().join("candidate.vtt");
@@ -5546,12 +5543,7 @@ mod cluster_consumer_tests {
             .expect("enqueue")
             .expect("request");
         store
-            .claim_analysis_request_foreground(
-                &request.request_id,
-                "remote-worker",
-                now,
-                now + 1_800_000,
-            )
+            .claim_subtitle_fixture(&request.request_id, "remote-worker", now, now + 1_800_000)
             .await
             .expect("claim")
             .expect("running row");

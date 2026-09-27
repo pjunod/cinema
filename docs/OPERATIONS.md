@@ -4179,11 +4179,38 @@ When `cache_produce_mins` is non-zero, one cluster lease owner ranks Continue
 Watching, Next Up, and Recently Added candidates and enqueues immutable source
 generations. It does not encode them. The generation identity includes the
 requested encoder and rate-control policy plus normalized audio language,
-subtitle language, and subtitle mode. Every voter with a configured local
-cache then competes for a compatible durable job. Whole-title preparation and
+subtitle language, and subtitle mode. Every eligible voter or ready learner with a configured local
+cache then competes for a compatible durable artifact job. Whole-title preparation and
 fragment indexing share one ownership queue, one heavy worker per node and two
-cluster-wide source-I/O reservations. Spare nodes can prepare different titles
+reader slots per shared storage domain. Unmapped roots use one global domain. Spare nodes can prepare different titles
 without duplicating the same computation or multiplying NAS reads by node count.
+
+Settings → Developer → Shared storage budgets assigns the same domain name to
+mount paths on the same NAS. Independent storage may use different names. A
+multi-root library conservatively reserves all of its domains, even for a
+file-specific job. Save mapping changes while background jobs are idle; an
+active reservation cannot change identity. Ordinary library path edits that
+change required domains stop renewal and publication until a later attempt
+acquires the new slots. Enable switches remain independent of these mappings
+and their advisory observations.
+
+Library scans and refreshes are accepted durably and dispatched on an eligible
+source-readable voter. Their request/result history survives the HTTP node's
+restart. Provider maintenance shares request spacing and cooldowns across
+nodes; adding workers does not multiply that allowance. The Developer card
+reports this node's artifact and catalogue authority separately. Learners
+retain immutable-result execution only; they cannot become scan/provider
+coordinators through the artifact claim path.
+
+Whole-source subtitle preparation uses that same queue. Different selected
+tracks join the existing all-track pass, with immutable representations fetched
+through verified peer transfer. The old analysis row remains its durable demand
+and progress record. A foreground fallback claims this same job and reserves a
+CPU thread from the streaming admission pool. A wait timeout does not start a
+second extractor alongside a running owner. Source replacement, cancellation
+and lease loss prevent later publication; incomplete work restarts under a new
+claim. SQLite 76 / replicated 54 invalidate old subtitle owners during the
+maintenance cutover; queued requests are drained through the bounded outbox.
 
 Workers advertise the capabilities the local daemon actually proved at boot.
 A row that needs an unsupported decoder, encoder family, HLS output contract,

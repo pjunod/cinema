@@ -76,6 +76,7 @@ operations! {
     SettleAnalysisAfterQueueAdmission => "settle_analysis_after_queue_admission",
     RecordFragmentIndexSource => "record_fragment_index_source",
     RequeueFragmentIndexNoHolder => "requeue_fragment_index_no_holder",
+    CancelStaleSubtitleIntent => "cancel_stale_subtitle_intent",
     TouchApiKey => "touch_api_key",
     ForgetMissingInternalIndex => "forget_missing_internal_index",
     ForgetCorruptInternalIndex => "forget_corrupt_internal_index",
@@ -415,7 +416,7 @@ mod tests {
 
     #[test]
     fn every_classified_failure_has_a_bounded_metric_row() {
-        assert_eq!(Operation::ALL.len(), 43, "one fixed label per audited site");
+        assert_eq!(Operation::ALL.len(), 44, "one fixed label per audited site");
         let metrics = Metrics::default();
         for operation in Operation::ALL {
             for severity in Discard::ALL {

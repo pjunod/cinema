@@ -11,6 +11,36 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
+use tokio_util::sync::CancellationToken;
+
+tokio::task_local! {
+    static WORK_CANCELLATION: CancellationToken;
+}
+
+/// Give a directly awaited operation cooperative cancellation. The caller must
+/// signal this token and await the operation, not drop it: owned children reap
+/// before returning. Spawned tasks deliberately do not inherit this scope.
+pub async fn cancellable<T>(
+    cancellation: CancellationToken,
+    operation: impl std::future::Future<Output = T>,
+) -> T {
+    WORK_CANCELLATION.scope(cancellation, operation).await
+}
+
+pub(crate) fn cancellation() -> Option<CancellationToken> {
+    WORK_CANCELLATION.try_with(Clone::clone).ok()
+}
+
+pub fn check_cancellation() -> io::Result<()> {
+    if WORK_CANCELLATION
+        .try_with(CancellationToken::is_cancelled)
+        .unwrap_or(false)
+    {
+        Err(io::Error::new(io::ErrorKind::Interrupted, "work cancelled"))
+    } else {
+        Ok(())
+    }
+}
 
 #[derive(Debug)]
 pub struct Output {
@@ -95,6 +125,8 @@ where
     P: AsRef<OsStr>,
     A: AsRef<OsStr>,
 {
+    check_cancellation()?;
+    let cancellation = cancellation().unwrap_or_default();
     let mut command = Command::new(program);
     command
         .args(args)
@@ -135,7 +167,11 @@ where
     let mut stderr = tokio::spawn(drain_capped(stderr, max_output_bytes));
     let mut child = OwnedChild::new(child, job);
 
-    let completed = tokio::time::timeout(wall_time, async {
+    let completed = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Ok(Err(io::Error::new(
+            io::ErrorKind::Interrupted, "work cancelled"))),
+        result = tokio::time::timeout(wall_time, async {
         let status = child.wait().await?;
         // A short-lived probe may not daemonize. Once its leader exits, kill
         // any descendant left in the owned group before waiting for pipe EOF.
@@ -151,20 +187,32 @@ where
             stdout,
             stderr,
         })
-    })
-    .await;
+        }) => result,
+    };
     match completed {
         Ok(Ok(output)) => Ok(output),
         Ok(Err(error)) => {
             child.kill_and_reap().await;
-            stdout.abort();
-            stderr.abort();
+            if !stdout.is_finished() {
+                stdout.abort();
+                let _ = stdout.await;
+            }
+            if !stderr.is_finished() {
+                stderr.abort();
+                let _ = stderr.await;
+            }
             Err(error)
         }
         Err(_) => {
             child.kill_and_reap().await;
-            stdout.abort();
-            stderr.abort();
+            if !stdout.is_finished() {
+                stdout.abort();
+                let _ = stdout.await;
+            }
+            if !stderr.is_finished() {
+                stderr.abort();
+                let _ = stderr.await;
+            }
             Err(io::Error::new(io::ErrorKind::TimedOut, "probe timed out"))
         }
     }
@@ -207,6 +255,60 @@ mod tests {
         .expect("bounded output");
         assert!(output.status.success());
         assert_eq!(output.stdout.len(), 1024);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cooperative_cancellation_reaps_the_child_before_returning() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let pid_file = dir.path().join("child.pid");
+        let cancellation = CancellationToken::new();
+        let child_cancel = cancellation.clone();
+        let path = pid_file.clone();
+        let child = tokio::spawn(async move {
+            cancellable(
+                child_cancel,
+                output(
+                    "/bin/sh",
+                    &[
+                        "-c",
+                        "echo $$ > \"$1\"; exec sleep 300",
+                        "probe",
+                        path.to_str().expect("path"),
+                    ],
+                    Duration::from_secs(300),
+                    1024,
+                    TEST_WORK,
+                ),
+            )
+            .await
+        });
+        let pid: i32 = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(&pid_file).await {
+                    if let Ok(pid) = text.trim().parse() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("child announced itself");
+        cancellation.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(5), child)
+            .await
+            .expect("bounded cancellation")
+            .expect("joined owner")
+            .expect_err("cancelled");
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        // SAFETY: signal zero observes this fixture's child without signalling it.
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "unreaped child outlived its admission"
+        );
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
     }
 
     #[tokio::test]

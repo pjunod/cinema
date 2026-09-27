@@ -591,11 +591,39 @@ The core needs one conservative cluster-wide source-I/O domain, defaulting to
 two heavy background readers. Its reservation rows use the same claim/expiry
 transaction; there is no storage-domain configuration project in M1–M3.
 E0 adds a replicated storage-domain ID to library roots so aliases of one NAS
-share a limit, with the global domain as the unmapped fallback. It also adapts
+share a limit, with the global domain as the unmapped fallback. Developer
+settings accepts up to 256 named root mappings (64 KiB total). A job reserves
+all domains of its library conservatively, including file-specific jobs: this
+avoids interpreting platform-specific path prefixes inside the replicated SQL.
+Changing mappings requires an interval without live queue reservations so an
+active lease never changes resource identity underneath its worker. A library
+path edit that changes its required domains invalidates renewal and joint
+publication until a fresh claim acquires the current slots. Already-running
+I/O has the same bounded cancellation overlap as lease loss. This
+configuration constraint does not gate any feature enable setting. Library
+jobs also reserve two shared slots per metadata provider; unused provider
+slots may therefore reduce concurrency for local-only libraries initially. It also adapts
 the existing provider rate policy into a global allowance rather than multiplying
 it by node count. Concurrency leases are not rate limits: E0 adds a bounded
 token/refill record when the provider needs a time-based quota. Provider/scanner
 machinery remains unchanged until that adapter is implemented.
+
+The E0 request allowance is a two-row replicated pacing ledger. Maintenance
+clients charge before every HTTP dispatch, including retries and images;
+credits never accumulate into a burst or return after a lost response. Start
+at one TMDB dispatch per 100 ms and one AniList dispatch per 2.1 seconds.
+These are conservative application policies: [TMDB documents a changeable
+soft ceiling](https://developer.themoviedb.org/docs/rate-limiting), while
+[AniList currently documents a degraded 30/minute limit and response
+headers](https://docs.anilist.co/guide/rate-limiting). Rate-limit headers may
+slow pacing; Retry-After and exhausted-window reset times extend a shared
+cooldown (bounded to 24 hours). Each caller waits at most its existing
+60-second provider budget and yields promptly on cooperative cancellation.
+Artwork repair and genre backfill share the same ledger through their
+existing renewable publication leases. The two provider concurrency slots
+apply to queue library jobs; those two existing singleton maintenance passes
+retain their current concurrency owners. Interactive provider search and the
+standalone import CLI retain their existing request policy.
 
 Claim all required shared slots in the same transaction or claim none. Resource
 ordering cannot deadlock a worker halfway through acquiring two domains.
@@ -830,11 +858,19 @@ identity or the live subtitle-window lifecycle while adding adapters.
 
 **Subtitle preparation.**
 
-Add typed `subtitle_extract` jobs keyed by source generation, selected track,
-normalization options and extractor version. Publish bounded immutable sidecars
-with existing subtitle size limits. Reuse verified peer fetching and retain
-per-request authorization. Two viewers selecting the same track join one job;
-different tracks are different jobs.
+Add typed `subtitle_extract` jobs keyed by source generation and extractor
+version. Publish bounded immutable track representations with the existing
+subtitle size limits, verified peer fetching and per-request authorization.
+
+**Implementation adjustment, 2026-09-26:** K-09 already extracts all eligible
+tracks in one source pass. Keep that computation unit: requests for different
+tracks join one all-track build, while each consumer selects and verifies its
+own representation. Creating one whole-file pass per selected track would
+multiply storage reads. The optional track field is `null` for this adapter;
+workers do not claim future track-specific payloads. Existing analysis records
+become a durable admission outbox and progress history. They cannot claim a
+second worker. Common queue renewal, settlement and cancellation project into
+that history; artifact publication checks the exact queue owner atomically.
 
 Keep the existing immediate local path available when remote preparation cannot
 meet a playback deadline. Both paths must claim/join the same artifact build
@@ -1121,11 +1157,11 @@ not authorize a production restart or rolling mixed-queue cutover.
 | Unit | Status | Branch/PR | Evidence |
 |---|---|---|---|
 | Implementation plan | review findings addressed 2026-09-25; external review pending | Working-tree documentation only | One independent adversarial review; dispositions in §13; four docs-index tests and explicit new-file link/whitespace checks |
-| M1 queue + pre-transcode | implemented; final evidence pending | PR #532 | Pinned compiler and Clippy; tests deferred |
-| M2 fragment build + hydration | implemented; final evidence pending | PR #532 | Shared build, target hydration, retry ledgers and cutover compiled |
-| M3 operations + recovery | implemented; final evidence pending | PR #532 | Activity, advisory Developer controls, recovery and migration compiled |
-| Core promotion/deployment | not started | — | — |
-| E0 preparation + maintenance adapters | not started | — | — |
+| M1 queue + pre-transcode | merged | PR #532 | Adversarial findings addressed; fast lane 3296 green |
+| M2 fragment build + hydration | merged | PR #532 | Shared build, hydration, retry ledgers and cutover validated |
+| M3 operations + recovery | merged | PR #532 | Activity, Developer controls, recovery and migration validated |
+| Core promotion/deployment | main merged; production unchanged | `b4b488556` | Required gates passed on reviewed candidate; no deployment authorized |
+| E0 preparation + maintenance adapters | implemented; final validation | PR #564 | One adversarial review, five fixes; 17 queue contracts passed across SQLite/Hiqlite; fast lane pending |
 | E1 reads + cache preparation | not started | — | — |
 | E2 embeddings + batch analysis | not started | — | — |
 | E3 placement + shared ingest | not started | — | — |

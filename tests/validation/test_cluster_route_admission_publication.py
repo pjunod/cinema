@@ -188,6 +188,9 @@ class RequestGatePublicationTest(unittest.TestCase):
                 "inner.local_serving_role.load(",
                 # the public accessor the request gate calls, which only reads
                 "pub async fn local_serving_role(",
+                # Artifact eligibility calls the same read-only accessor.
+                # Keep the exact zero-argument awaited call, not a field prefix.
+                "self.local_serving_role().await",
             ),
             "local_maintenance": (
                 "local_maintenance: AtomicBool,",

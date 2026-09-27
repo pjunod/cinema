@@ -149,7 +149,51 @@ pub struct PublicationStore<'a> {
     fence: Option<PublicationFence>,
 }
 
+struct FencedProviderBudget {
+    store: Arc<dyn Store>,
+    fence: PublicationFence,
+}
+
+#[async_trait::async_trait]
+impl crate::metadata::budget::ProviderBudget for FencedProviderBudget {
+    async fn update(
+        &self,
+        provider: crate::metadata::Provider,
+        action: super::background_jobs_provider::ProviderBudgetAction,
+    ) -> Result<super::background_jobs_provider::ProviderBudgetOutcome, StoreError> {
+        let publisher = PublicationStore::fenced(self.store.as_ref(), self.fence.clone());
+        let guard = publisher.token().await?;
+        let lease = guard
+            .as_ref()
+            .ok_or_else(|| publisher.invalidated())?
+            .clone();
+        self.store
+            .update_provider_budget(super::background_jobs_provider::ProviderBudgetRequest {
+                provider,
+                lease,
+                now_ms: unix_ms()?,
+                action,
+            })
+            .await
+    }
+}
+
 impl<'a> PublicationStore<'a> {
+    /// A client keeps the same renewable publication fence as its maintenance
+    /// pass. Each dispatched request is charged before sending; waiting does
+    /// not hold the fence's read guard or prevent lease renewal.
+    pub fn provider_budget(
+        &self,
+        store: Arc<dyn Store>,
+    ) -> crate::metadata::budget::SharedProviderBudget {
+        self.fence.as_ref().map(|fence| {
+            Arc::new(FencedProviderBudget {
+                store,
+                fence: fence.clone(),
+            }) as Arc<dyn crate::metadata::budget::ProviderBudget>
+        })
+    }
+
     pub async fn apply_identity_repair(
         &self,
         snapshot: &IdentityRepairSnapshot,
@@ -176,6 +220,46 @@ impl<'a> PublicationStore<'a> {
             store,
             fence: Some(fence),
         }
+    }
+
+    /// Keep the domain heartbeat behind this read guard while the queue binds
+    /// or completes its exact attempt. Catalogue writes use the same lock.
+    pub async fn bind_library_job(
+        &self,
+        token: super::background_jobs::JobToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let guard = self.token().await?;
+        let lease = guard.as_ref().ok_or_else(|| self.invalidated())?.clone();
+        self.store
+            .bind_library_job(super::background_jobs::BindLibraryJob {
+                token,
+                lease,
+                now_ms,
+            })
+            .await
+    }
+
+    /// False requires reading the request result: a previous acknowledgement
+    /// may have been lost, or either of the two owners may have changed.
+    pub async fn complete_library_work(
+        &self,
+        token: super::background_jobs::JobToken,
+        request_id: String,
+        result: super::background_jobs_library::LibraryWorkResult,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let guard = self.token().await?;
+        let lease = guard.as_ref().ok_or_else(|| self.invalidated())?.clone();
+        self.store
+            .complete_library_work(super::background_jobs::CompleteLibraryWork {
+                token,
+                lease,
+                request_id,
+                result,
+                now_ms,
+            })
+            .await
     }
 
     pub fn raw(&self) -> &'a dyn Store {

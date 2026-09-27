@@ -1154,6 +1154,16 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::sql_source::ITEM_READ_INDEXES,
     // v71: common durable background work identities and ownership.
     super::background_jobs::SCHEMA,
+    // v72: durable library execution binds the existing catalogue lease.
+    super::background_jobs_domain::SCHEMA,
+    // v73: durable library requests and their independent results.
+    super::background_jobs_library::SCHEMA,
+    // v74: named storage domains and atomic provider/storage reservations.
+    super::background_jobs_resources::SCHEMA,
+    // v75: replicated provider request pacing and cooldowns.
+    super::background_jobs_provider::SCHEMA,
+    // v76: subtitle extraction executes under common queue ownership.
+    concat!(include_str!("../background_jobs_subtitle.sql"), "\n", "UPDATE analysis_requests SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL, fence = fence + 1 WHERE component = 'subtitle_source' AND state IN ('running','submitted');"),
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1697,7 +1707,21 @@ impl SqliteStore {
                     SET revision = ?6, expires_at_ms = ?7, updated_at_ms = ?8
                   WHERE resource = ?1 AND owner_node_id = ?2
                     AND fence = ?3 AND revision = ?4
-                    AND expires_at_ms = ?5 AND expires_at_ms > ?8",
+                    AND expires_at_ms = ?5 AND expires_at_ms > ?8
+                    AND NOT EXISTS (SELECT 1 FROM background_job_domain_leases binding
+                        WHERE binding.resource = job_leases.resource AND binding.domain_fence = job_leases.fence
+                        AND NOT EXISTS (SELECT 1 FROM background_jobs job WHERE job.id = binding.job_id
+                            AND job.fence = binding.job_fence AND job.owner_node_id = binding.node_id
+                            AND job.owner_boot_id = binding.boot_id AND job.claim_id = binding.claim_id
+                            AND job.state = 'running' AND job.lease_expires_ms > ?8
+            AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
+                WHERE required.job_id = job.id AND NOT EXISTS (
+                    SELECT 1 FROM background_job_reservations held
+                    WHERE held.job_id = job.id AND held.fence = job.fence
+                        AND held.resource_key = required.resource_key
+                        AND held.expires_at_ms >= job.lease_expires_ms))
+                            AND NOT EXISTS (SELECT 1 FROM settings WHERE key =
+                                'internal.cluster_job_owner_removed.' || job.owner_node_id)))",
                 params![
                     &lease.resource,
                     &lease.owner_node_id,
@@ -1917,7 +1941,7 @@ impl MetricsStore for SqliteStore {
                         FROM (SELECT kind, state, COUNT(*) AS count, MIN(created_at_ms) AS created
                             FROM background_jobs GROUP BY kind, state LIMIT 128) grouped)),
                         'source_io_reservations', (SELECT COUNT(*) FROM background_job_reservations
-                            WHERE resource_key = 'source_io' AND expires_at_ms > ?2 * 1000),
+                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000),
                         'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import')))
                  FROM offline_packages WHERE node_id = ?1",
                 params![node_id, now],
@@ -2845,8 +2869,10 @@ mod tests {
         // downloaded captions to files. v68 adds external-reader file grants;
         // v69 adds the cluster subtitle-source queue and publication metadata;
         // v70 adds K-05 M5's catalogue read indexes; v71 adds the common queue.
+        // v72–v76 add library work, domain leases, source-I/O reservations,
+        // provider dispatch budgets and the subtitle adapter.
         assert_eq!(
-            version, 71,
+            version, 76,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

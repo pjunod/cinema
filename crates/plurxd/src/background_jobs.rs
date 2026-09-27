@@ -18,6 +18,10 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
+#[path = "../../plurx-core/tests/support/subtitle_jobs.rs"]
+pub(crate) mod subtitle_fixture;
+
+#[cfg(test)]
 #[path = "background_job_faults.rs"]
 mod faults;
 #[path = "background_job_metrics.rs"]
@@ -146,7 +150,11 @@ async fn claim_with_resolution_inner(
 ) -> Result<Option<(BackgroundJob, Instant)>, StoreError> {
     let issued = Instant::now();
     let deadline = issued + Duration::from_millis(JOB_LEASE_MS as u64);
-    let claimed = store.claim_job(request.clone()).await;
+    let claimed = if request.kind.permits_artifact_execution() {
+        store.claim_artifact_job(request.clone()).await
+    } else {
+        store.claim_job(request.clone()).await
+    };
     #[cfg(test)]
     let claimed = faults::after_commit(faults::CLAIM, claimed);
     match claimed {
@@ -183,7 +191,11 @@ async fn claim_with_resolution_inner(
                 // scheduling/checkpoint state. Recover the committed row,
                 // never pair a new token with the pre-claim candidate image.
                 if let Ok(Some(job)) = store.background_job(&request.job_id).await {
-                    if job.token.as_ref() == Some(&token) {
+                    if job.token.as_ref() == Some(&token)
+                        && job
+                            .supported_payload()
+                            .is_ok_and(|payload| payload.kind() == request.kind)
+                    {
                         let remaining = token
                             .lease_expires_ms
                             .saturating_sub(request.now_ms)
@@ -344,7 +356,7 @@ impl JobFence {
 
     async fn renew(&self) -> Result<bool, StoreError> {
         let mut state = self.0.state.lock().await;
-        if self.0.lost.is_cancelled() || !self.0.authority.may_run_cluster_jobs().await {
+        if self.0.lost.is_cancelled() || !self.0.authority.may_execute_job(self.0.kind).await {
             return Ok(false);
         }
         let Some(current) = state.token.clone() else {
@@ -436,12 +448,82 @@ impl JobFence {
         Ok(result)
     }
 
+    pub(crate) async fn write_subtitle(
+        &self,
+        request: &plurx_core::store::AnalysisRequest,
+        output: plurx_core::store::background_jobs_subtitle::SubtitleJobWrite,
+    ) -> Result<bool, StoreError> {
+        let mut state = self.0.state.lock().await;
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        let complete = matches!(
+            output,
+            plurx_core::store::background_jobs_subtitle::SubtitleJobWrite::Complete { .. }
+        );
+        let mut write = plurx_core::store::background_jobs_subtitle::WriteSubtitleJob {
+            token,
+            request: request.clone(),
+            output,
+            now_ms: unix_ms()?,
+        };
+        let result = match self.0.store.write_subtitle_job(write.clone()).await {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                    return Err(error);
+                }
+                write.now_ms = unix_ms()?;
+                self.0.store.write_subtitle_job(write).await?
+            }
+        };
+        if result && complete {
+            state.token = None;
+        }
+        Ok(result)
+    }
+
+    pub(crate) async fn bind_library(
+        &self,
+        publisher: &plurx_core::store::PublicationStore<'_>,
+    ) -> Result<bool, StoreError> {
+        let state = self.0.state.lock().await;
+        if !self.0.authority.may_run_cluster_jobs().await || !self.may_publish() {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        publisher.bind_library_job(token, unix_ms()?).await
+    }
+
+    pub(crate) async fn complete_library(
+        &self,
+        publisher: &plurx_core::store::PublicationStore<'_>,
+        request_id: String,
+        result: plurx_core::store::background_jobs_library::LibraryWorkResult,
+    ) -> Result<bool, StoreError> {
+        let state = self.0.state.lock().await;
+        if !self.0.authority.may_run_cluster_jobs().await || !self.may_publish() {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        publisher
+            .complete_library_work(token, request_id, result, unix_ms()?)
+            .await
+    }
+
     pub(crate) async fn bind_transcode_recipe(
         &self,
         recipe_hash: &str,
     ) -> Result<bool, StoreError> {
         let state = self.0.state.lock().await;
-        if !self.0.authority.may_run_cluster_jobs().await || !self.may_publish() {
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
             return Ok(false);
         }
         let Some(token) = state.token.clone() else {
@@ -471,7 +553,7 @@ impl JobFence {
         output: TranscodeJobOutput,
     ) -> Result<bool, StoreError> {
         let mut state = self.0.state.lock().await;
-        if !self.0.authority.may_run_cluster_jobs().await || !self.may_publish() {
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
             metrics::event(self.0.kind, Event::FencedPublication);
             return Ok(false);
         }
@@ -492,7 +574,7 @@ impl JobFence {
             // Retry the exact publication once; the Store recognizes its
             // committed result even when the original token is now terminal.
             Err(error) => {
-                if !self.0.authority.may_run_cluster_jobs().await || !self.may_publish() {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
                     return Err(error);
                 }
                 request.now_ms = unix_ms()?;
@@ -522,7 +604,7 @@ impl JobFence {
         artifact: plurx_core::store::ClusterFragmentIndexArtifact,
     ) -> Result<bool, StoreError> {
         let mut state = self.0.state.lock().await;
-        if !self.0.authority.may_run_cluster_jobs().await || !self.may_publish() {
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
             metrics::event(self.0.kind, Event::FencedPublication);
             return Ok(false);
         }
@@ -541,7 +623,7 @@ impl JobFence {
         let result = match reply {
             Ok(result) => result,
             Err(error) => {
-                if !self.0.authority.may_run_cluster_jobs().await || !self.may_publish() {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
                     return Err(error);
                 }
                 request.now_ms = unix_ms()?;
@@ -701,7 +783,7 @@ pub(crate) async fn claim_pretranscode(
     };
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
-    if !authority.may_run_cluster_jobs().await {
+    if !authority.may_execute_job(JobKind::TranscodePrepare).await {
         return Ok(None);
     }
     let mut cursor = None;
@@ -761,7 +843,7 @@ pub(crate) async fn claim_pretranscode(
                     continue;
                 }
             };
-            if !authority.may_run_cluster_jobs().await {
+            if !authority.may_execute_job(JobKind::TranscodePrepare).await {
                 return Ok(None);
             }
             let now_ms = unix_ms()?;
@@ -868,7 +950,13 @@ pub(crate) async fn claim_fragment(
     };
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
-    if !authority.may_run_cluster_jobs().await {
+    let mut eligible_kinds = Vec::new();
+    for kind in [JobKind::FragmentIndexBuild, JobKind::ArtifactHydrate] {
+        if authority.may_execute_job(kind).await {
+            eligible_kinds.push(kind);
+        }
+    }
+    if eligible_kinds.is_empty() {
         return Ok(None);
     }
     let mut cursor = None;
@@ -876,7 +964,7 @@ pub(crate) async fn claim_fragment(
         let page = store
             .job_candidates(CandidateQuery {
                 node_id: node.into(),
-                kinds: vec![JobKind::FragmentIndexBuild, JobKind::ArtifactHydrate],
+                kinds: eligible_kinds.clone(),
                 after: cursor,
                 now_ms: unix_ms()?,
                 limit: MAX_PAGE_SIZE,
@@ -914,8 +1002,8 @@ pub(crate) async fn claim_fragment(
             let Some(admission) = transcode.admit_fragment().await else {
                 return Ok(None);
             };
-            if !authority.may_run_cluster_jobs().await {
-                return Ok(None);
+            if !authority.may_execute_job(kind).await {
+                continue;
             }
             let now_ms = unix_ms()?;
             let request = ClaimJob {
@@ -973,6 +1061,246 @@ pub(crate) async fn claim_fragment(
     Ok(None)
 }
 
+/// Bounded, node-local eligibility observations. They never settle durable work:
+/// another member may have a readable mount while this one does not.
+#[derive(Default)]
+pub(crate) struct LibraryReadiness(std::sync::Mutex<std::collections::BTreeMap<i64, String>>);
+impl LibraryReadiness {
+    fn record(&self, library_id: i64, problem: Option<String>) {
+        let mut rows = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(problem) = problem {
+            if rows.len() >= 128 && !rows.contains_key(&library_id) {
+                rows.pop_first();
+            }
+            rows.insert(library_id, problem.chars().take(512).collect());
+        } else {
+            rows.remove(&library_id);
+        }
+    }
+
+    pub(crate) fn problem(&self, library_id: i64) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&library_id)
+            .cloned()
+    }
+}
+
+/// Library coordinators share the same physical heavy-work admission as
+/// preparation/indexing. Source checks happen before claiming; domain-lease
+/// contention is resolved by the caller through an uncharged yield.
+pub(crate) async fn claim_library(
+    store: Arc<dyn Store>,
+    authority: Arc<dyn ClusterJobAuthority>,
+    transcode: &crate::transcode::TranscodeManager,
+    node: &str,
+    library_filter: Option<i64>,
+    readiness: &LibraryReadiness,
+) -> Result<
+    Option<(
+        BackgroundJob,
+        ActiveBackgroundJob,
+        crate::transcode::FragmentAdmission,
+    )>,
+    StoreError,
+> {
+    use plurx_core::store::background_jobs::{
+        CandidateQuery, JobKind, JobPayload, MAX_ACTIVE_JOBS, MAX_PAGE_SIZE,
+    };
+    static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
+    if !authority.may_run_cluster_jobs().await {
+        return Ok(None);
+    }
+    let mut cursor = None;
+    for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
+        let page = store
+            .job_candidates(CandidateQuery {
+                node_id: node.into(),
+                kinds: vec![JobKind::LibraryScan, JobKind::MetadataRefresh],
+                after: cursor,
+                now_ms: unix_ms()?,
+                limit: MAX_PAGE_SIZE,
+            })
+            .await?;
+        for candidate in page.jobs {
+            let Ok(payload) = candidate.supported_payload() else {
+                continue;
+            };
+            let kind = payload.kind();
+            let library_id = match payload {
+                JobPayload::LibraryScan {
+                    library_id,
+                    generation,
+                }
+                | JobPayload::MetadataRefresh {
+                    library_id,
+                    generation,
+                } if generation == "library-work-v1" => library_id,
+                _ => continue,
+            };
+            if library_filter.is_some_and(|wanted| wanted != library_id) {
+                continue;
+            }
+            let library = store.get_library(library_id).await?;
+            // A deleted library still needs its accepted requests settled.
+            let mut problem = library
+                .as_ref()
+                .filter(|library| library.paths.is_empty())
+                .map(|_| {
+                    "This node observed no library roots; waiting for a compatible worker."
+                        .to_owned()
+                });
+            for path in library.iter().flat_map(|library| &library.paths) {
+                if let Err(error) = tokio::fs::read_dir(path).await {
+                    problem = Some(format!("This node could not read library root {}: {error}. Waiting for a compatible worker.", path.display()));
+                    break;
+                }
+            }
+            let readable = problem.is_none();
+            readiness.record(library_id, problem);
+            if !readable {
+                continue;
+            }
+            let Some(admission) = transcode.admit_fragment().await else {
+                return Ok(None);
+            };
+            if !authority.may_run_cluster_jobs().await {
+                return Ok(None);
+            }
+            let now_ms = unix_ms()?;
+            let Some((job, deadline)) = claim_with_resolution(
+                store.as_ref(),
+                &candidate,
+                ClaimJob {
+                    job_id: candidate.id.clone(),
+                    expected_revision: candidate.revision,
+                    node_id: node.into(),
+                    boot_id: boot.clone(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind,
+                    payload_version: 1,
+                    now_ms,
+                    dispatched_at_ms: now_ms,
+                },
+            )
+            .await?
+            else {
+                continue;
+            };
+            let active = ActiveBackgroundJob::start(
+                Arc::clone(&store),
+                Arc::clone(&authority),
+                job.token
+                    .clone()
+                    .ok_or_else(|| StoreError::Task("library claim has no owner".into()))?,
+                deadline,
+                kind,
+            )?;
+            return Ok(Some((job, active, admission)));
+        }
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(None)
+}
+
+/// The caller holds physical admission through execution and cleanup.
+pub(crate) async fn claim_subtitle(
+    store: Arc<dyn Store>,
+    authority: Arc<dyn ClusterJobAuthority>,
+    node: &str,
+    request_filter: Option<&str>,
+    pipeline_digest: &str,
+) -> Result<Option<(BackgroundJob, ActiveBackgroundJob)>, StoreError> {
+    use plurx_core::store::background_jobs::{
+        CandidateQuery, JobKind, JobPayload, MAX_ACTIVE_JOBS, MAX_PAGE_SIZE,
+    };
+    static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
+    if !authority.may_execute_job(JobKind::SubtitleExtract).await {
+        return Ok(None);
+    }
+    let mut cursor = None;
+    for _ in 0..MAX_ACTIVE_JOBS.div_ceil(MAX_PAGE_SIZE) {
+        let page = store
+            .job_candidates(CandidateQuery {
+                node_id: node.into(),
+                kinds: vec![JobKind::SubtitleExtract],
+                after: cursor,
+                now_ms: unix_ms()?,
+                limit: MAX_PAGE_SIZE,
+            })
+            .await?;
+        for candidate in page.jobs {
+            let Ok(JobPayload::SubtitleExtract {
+                file_id,
+                source_generation,
+                track: None,
+                pipeline_digest: expected,
+            }) = candidate.supported_payload()
+            else {
+                continue;
+            };
+            if expected != pipeline_digest
+                || request_filter.is_some_and(|wanted| wanted != source_generation)
+            {
+                continue;
+            }
+            let Some(file) = store.get_file(file_id).await? else {
+                continue;
+            };
+            if tokio::fs::File::open(&file.path).await.is_err() {
+                continue;
+            }
+            if !authority.may_execute_job(JobKind::SubtitleExtract).await {
+                return Ok(None);
+            }
+            let now_ms = unix_ms()?;
+            let Some((job, deadline)) = claim_with_resolution(
+                store.as_ref(),
+                &candidate,
+                ClaimJob {
+                    job_id: candidate.id.clone(),
+                    expected_revision: candidate.revision,
+                    node_id: node.into(),
+                    boot_id: boot.clone(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::SubtitleExtract,
+                    payload_version: 1,
+                    now_ms,
+                    dispatched_at_ms: now_ms,
+                },
+            )
+            .await?
+            else {
+                continue;
+            };
+            let active = ActiveBackgroundJob::start(
+                Arc::clone(&store),
+                Arc::clone(&authority),
+                job.token
+                    .clone()
+                    .ok_or_else(|| StoreError::Task("subtitle claim has no owner".into()))?,
+                deadline,
+                JobKind::SubtitleExtract,
+            )?;
+            return Ok(Some((job, active)));
+        }
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -988,6 +1316,13 @@ mod tests {
 
     async fn active_with_deadline(
         local_deadline: Option<Duration>,
+    ) -> (Arc<dyn Store>, String, ActiveBackgroundJob) {
+        active_with_authority(local_deadline, Arc::new(UnclusteredJobAuthority)).await
+    }
+
+    async fn active_with_authority(
+        local_deadline: Option<Duration>,
+        authority: Arc<dyn ClusterJobAuthority>,
     ) -> (Arc<dyn Store>, String, ActiveBackgroundJob) {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let library = store
@@ -1075,13 +1410,48 @@ mod tests {
         .expect("owned");
         let active = ActiveBackgroundJob::start(
             Arc::clone(&store),
-            Arc::new(UnclusteredJobAuthority),
+            authority,
             job.token.expect("token"),
             local_deadline.map_or(deadline, |duration| Instant::now() + duration),
             JobKind::FragmentIndexBuild,
         )
         .expect("start");
         (store, id, active)
+    }
+
+    struct ArtifactAuthority(std::sync::atomic::AtomicBool);
+    #[plurx_core::cluster::coordination::cluster_job_async_trait]
+    impl ClusterJobAuthority for ArtifactAuthority {
+        async fn may_run_cluster_jobs(&self) -> bool {
+            false
+        }
+        async fn may_execute_job(&self, kind: JobKind) -> bool {
+            self.0.load(std::sync::atomic::Ordering::Acquire) && kind.permits_artifact_execution()
+        }
+    }
+
+    #[tokio::test]
+    async fn artifact_owner_renews_without_catalogue_authority_and_stops_on_role_loss() {
+        let authority = Arc::new(ArtifactAuthority(std::sync::atomic::AtomicBool::new(true)));
+        let (_store, _id, active) = active_with_authority(None, authority.clone()).await;
+        assert!(!authority.may_run_cluster_jobs().await);
+        assert!(!authority.may_execute_job(JobKind::LibraryScan).await);
+        assert!(active
+            .fence
+            .renew()
+            .await
+            .expect("artifact ownership renews"));
+        authority
+            .0
+            .store(false, std::sync::atomic::Ordering::Release);
+        assert!(!active
+            .fence
+            .renew()
+            .await
+            .expect("role loss refuses renewal"));
+        // Finish still retires this exact attempt after the physical worker is
+        // gone; losing dispatch authority never forbids ownership cleanup.
+        active.finish().await;
     }
 
     #[test]
