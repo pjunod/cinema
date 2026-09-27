@@ -517,22 +517,6 @@ async fn activate_preparation_before(
         .and_then(Result::ok)
 }
 
-#[cfg(test)]
-fn completed_preparation_candidates() -> &'static std::sync::Mutex<std::collections::HashSet<String>>
-{
-    static COMPLETED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-        std::sync::OnceLock::new();
-    COMPLETED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
-}
-
-#[cfg(test)]
-pub(super) fn take_preparation_candidate_completion(incarnation_id: &str) -> bool {
-    completed_preparation_candidates()
-        .lock()
-        .expect("preparation candidate completions")
-        .remove(incarnation_id)
-}
-
 /// Last delivered selection of each *playback*, so a session that replaces
 /// another can be measured against the one it replaced.
 ///
@@ -1134,19 +1118,10 @@ pub(super) async fn process_preparation_candidate(
         accepted_film_time_ms,
         purpose,
     } = exchange;
-    #[cfg(test)]
-    struct Completion(String);
-    #[cfg(test)]
-    impl Drop for Completion {
-        fn drop(&mut self) {
-            completed_preparation_candidates()
-                .lock()
-                .expect("preparation candidate completions")
-                .insert(self.0.clone());
-        }
-    }
-    #[cfg(test)]
-    let _completion = Completion(route.incarnation_id.clone());
+    let _finished = PreparationCandidateFinished {
+        hooks: state.hls_route_hooks.get(),
+        incarnation_id: &route.incarnation_id,
+    };
     // Released on every exit below, including the early one.
     struct InFlight;
     impl Drop for InFlight {
@@ -1194,15 +1169,20 @@ pub(super) async fn process_preparation_candidate(
         crate::playback_control::record_preparation_staged(false);
         return;
     }
-    // Test-only. The refusal arm takes the same exit as the `Err` arm below,
-    // so a forced refusal is indistinguishable from an unplannable candidate.
-    #[cfg(test)]
-    if let Some((delay, refuse)) = take_preparation_planning_fault(&route.playback_id) {
-        tokio::time::sleep(delay).await;
-        if refuse {
-            crate::playback_control::record_preparation_staged(false);
-            return;
-        }
+    state
+        .hls_route_hooks
+        .get()
+        .before_preparation_planning(&route.playback_id)
+        .await;
+    // A refusal takes the same exit as the `Err` arm below, so a refused
+    // plan is indistinguishable from an unplannable candidate.
+    if state
+        .hls_route_hooks
+        .get()
+        .refuses_preparation_planning(&route.playback_id)
+    {
+        crate::playback_control::record_preparation_staged(false);
+        return;
     }
     let candidate = match plan_preparation_candidate(
         &state,
@@ -1289,10 +1269,18 @@ pub(super) async fn process_preparation_candidate(
         PreparationPurpose::PlannedRelocation(_) => None,
     };
     if let Some(successor_owner) = successor_owner {
-        #[cfg(test)]
-        let _ = &successor_owner;
-        #[cfg(not(test))]
-        stage_and_prime_prepared_successor(
+        // Production always stages and primes. Hooks that decline priming (the
+        // test hooks do, unless a test asks) stage the durable row only, on
+        // this node, as a selection change: those decision-boundary tests use
+        // synthetic media rows and exercise durable preparation semantics
+        // without launching ffmpeg.
+        let primes = state.hls_route_hooks.get().primes_prepared_successor();
+        let (successor_owner, purpose) = if primes {
+            (successor_owner, purpose)
+        } else {
+            (state.node_id.clone(), PreparationPurpose::SelectionChange)
+        };
+        stage_prepared_successor_with_prime(
             &state,
             &session_id,
             &route,
@@ -1305,23 +1293,7 @@ pub(super) async fn process_preparation_candidate(
                 film_time_ms: accepted_film_time_ms,
                 desired_digest: Some(selection.desired().digest()),
             },
-        )
-        .await;
-        // These decision-boundary tests use synthetic media rows and exercise
-        // durable preparation semantics without launching ffmpeg. Production
-        // always takes the reserve-and-prime call above.
-        #[cfg(test)]
-        stage_prepared_successor(
-            &state,
-            &session_id,
-            &route,
-            &recipe,
-            &candidate,
-            Some(source),
-            AcceptedAsk {
-                film_time_ms: accepted_film_time_ms,
-                desired_digest: Some(selection.desired().digest()),
-            },
+            primes,
         )
         .await;
     }
@@ -1415,34 +1387,6 @@ pub(super) async fn stage_prepared_successor(
         PreparationPurpose::SelectionChange,
         accepted,
         false,
-    )
-    .await;
-}
-
-#[cfg(not(test))]
-#[allow(clippy::too_many_arguments)]
-async fn stage_and_prime_prepared_successor(
-    state: &AppState,
-    session_id: &str,
-    route: &MediaSessionRoute,
-    predecessor: &RemoteStartRequest,
-    candidate: &crate::transcode::SessionRequest,
-    source: Option<&plurx_core::domain::MediaFile>,
-    successor_owner: &str,
-    purpose: PreparationPurpose,
-    accepted: AcceptedAsk,
-) {
-    stage_prepared_successor_with_prime(
-        state,
-        session_id,
-        route,
-        predecessor,
-        candidate,
-        source,
-        successor_owner,
-        purpose,
-        accepted,
-        true,
     )
     .await;
 }
@@ -1712,13 +1656,14 @@ pub(super) async fn stage_prepared_successor_with_prime(
             purpose,
             cancelled: tokio_util::sync::CancellationToken::new(),
         };
-        // Test-only: see `preparation_registration_delays`. This is the only
-        // way to put a supersession into the window the comment below names,
-        // because in production that window contains no await at all.
-        #[cfg(test)]
-        if let Some(delay) = take_preparation_registration_delay(&preparation.playback_id) {
-            tokio::time::sleep(delay).await;
-        }
+        // A test's only way to put a supersession into the window the comment
+        // below names (`delay_preparation_registration`). Production's point
+        // is ready at its first poll, so the window has no suspension point.
+        state
+            .hls_route_hooks
+            .get()
+            .before_preparation_registered(&preparation.playback_id)
+            .await;
         // Publish cancellation ownership before the Store future is polled.
         // A wait or settings disable may then cancel an in-flight reservation;
         // the detached reservation owner reconciles a late commit exactly.

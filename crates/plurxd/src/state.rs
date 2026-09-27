@@ -816,6 +816,12 @@ pub struct AppState {
     /// Production has no hook or alternate path.
     #[cfg(test)]
     pub(crate) cache_revocation_test_barrier: Option<Arc<tokio::sync::Barrier>>,
+    /// The HLS route group's test points (TRANSCODE-DECOMPOSITION-PLAN §3.9,
+    /// M8, Decision D-M8-J), in every build and shared by every clone.
+    /// Production never fills the slot, so every point reads
+    /// [`crate::http::hls::NoopHlsRouteHooks`].
+    pub(crate) hls_route_hooks:
+        Arc<crate::seam_hooks::HookSlot<dyn crate::http::hls::HlsRouteHooks>>,
     pub started_at: Instant,
 }
 
@@ -908,8 +914,37 @@ impl AppState {
 
     /// `node_id` is this server's stable id — the `node_id` a cache location
     /// is recorded against, so a cluster can tell whose copy is whose.
+    ///
+    /// The state holds the HLS route test hooks, so its admitted preparation
+    /// candidates stage without priming (Decision D-M8-J);
+    /// [`AppState::new_unhooked`] leaves the production no-op in place.
     #[cfg(test)]
     pub fn new(
+        server_name: String,
+        store: Arc<dyn Store>,
+        dirs: Dirs,
+        node_id: String,
+        encoder_caps: EncoderCaps,
+        system: SystemInfo,
+        logs: Arc<LogBuffer>,
+    ) -> Self {
+        let state = Self::new_unhooked(
+            server_name,
+            store,
+            dirs,
+            node_id,
+            encoder_caps,
+            system,
+            logs,
+        );
+        crate::http::hls::hls_route_test_hooks(&state);
+        state
+    }
+
+    /// [`AppState::new`] without the HLS route test hooks: every route point
+    /// reads the no-op production installs.
+    #[cfg(test)]
+    pub fn new_unhooked(
         server_name: String,
         store: Arc<dyn Store>,
         dirs: Dirs,
@@ -1148,6 +1183,7 @@ impl AppState {
             shutdown: tokio_util::sync::CancellationToken::new(),
             #[cfg(test)]
             cache_revocation_test_barrier: None,
+            hls_route_hooks: crate::http::hls::unfilled_hls_route_hooks(),
             started_at: Instant::now(),
         }
     }

@@ -47,14 +47,7 @@
             control.err()
         );
 
-        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        {
-            let mut slot = super::CREATE_ASK_RECORDED_PAUSE
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *slot = Some((reached_tx, release_rx));
-        }
+        let pause = super::pause_create_after_ask_recorded(&state);
 
         let creating = {
             let state = state.clone();
@@ -78,10 +71,7 @@
             })
         };
 
-        tokio::time::timeout(Duration::from_secs(60), reached_rx)
-            .await
-            .expect("the create must reach the seam")
-            .expect("seam signal");
+        let held = pause.reached().await;
 
         // The viewer changes their mind while it is frozen.
         let moved = state
@@ -100,7 +90,7 @@
             "the ask moved while the create was frozen"
         );
 
-        let _ = release_tx.send(());
+        held.release();
         let completed = tokio::time::timeout(Duration::from_secs(120), creating)
             .await
             .expect("the create must finish once released")
@@ -2399,4 +2389,164 @@
             !by_request.contains("00:00:04.000 -->"),
             "shifting by the request leads the picture by the seek's distance from its keyframe"
         );
+    }
+
+    /// The route group's shipped shape (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8,
+    /// Decision D-M8-J): a state built by the production constructor holds
+    /// the unfilled slot, so every point reads the no-op, and a release runs
+    /// through its three points to a durable End.
+    #[tokio::test]
+    async fn hls_route_shipped_shape() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        let root = crate::test_tempdir().expect("shipped state root");
+        let state = crate::state::AppState::new_unhooked(
+            "test".into(),
+            Arc::clone(&fixture.store),
+            crate::state::Dirs {
+                artwork: root.path().join("artwork"),
+                transcode: root.path().join("transcode"),
+                cache: root.path().join("cache"),
+                subs: root.path().join("subs"),
+                runtime_cache: root.path().join("runtime"),
+                renditions: root.path().join("renditions"),
+            },
+            "shipped-node".into(),
+            plurx_core::transcode::EncoderCaps::default(),
+            Default::default(),
+            Arc::new(crate::logbuf::LogBuffer::new(64)),
+        );
+        let hooks = state.hls_route_hooks.get();
+        let installed: &dyn std::any::Any = hooks;
+        assert!(
+            installed.is::<NoopHlsRouteHooks>(),
+            "the production constructor leaves the route group on the no-op hooks"
+        );
+        let waker = futures_util::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        for (point, mut hook) in [
+            ("after_create_ask_recorded", hooks.after_create_ask_recorded()),
+            ("before_dispatch_answer", hooks.before_dispatch_answer("p")),
+            ("before_preparation_settlement", hooks.before_preparation_settlement("i")),
+            ("before_preparation_planning", hooks.before_preparation_planning("p")),
+            ("before_preparation_registered", hooks.before_preparation_registered("p")),
+            ("after_release_fence_closed", hooks.after_release_fence_closed(&session_id)),
+            ("after_release_tombstoned", hooks.after_release_tombstoned(&session_id)),
+        ] {
+            assert!(
+                hook.as_mut().poll(&mut context).is_ready(),
+                "the production {point} point is ready at its first poll"
+            );
+        }
+        assert!(!hooks.staged_read_fault("i"));
+        assert!(!hooks.preparation_settlement_fault("i"));
+        assert!(!hooks.refuses_preparation_planning("p"));
+        assert!(!hooks.release_commit_unknown(&session_id));
+        assert!(
+            hooks.primes_prepared_successor(),
+            "production stages and primes every admitted successor"
+        );
+
+        let user = fixture
+            .store
+            .create_user("shipped-release", "hash", false)
+            .await
+            .expect("release user");
+        let route = activate_ready(
+            &fixture.store,
+            MediaSessionActivation {
+                recovery_epoch: String::new(),
+                expected_desired_revision: None,
+                incarnation_id: uuid::Uuid::new_v4().to_string(),
+                session_id: session_id.clone(),
+                user_id: user.id,
+                playback_id: "shipped-release".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: state.node_id.clone(),
+                lease_expires_at_ms: unix_ms() + 60_000,
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms: unix_ms(),
+            },
+        )
+        .await;
+        let settlement = match state
+            .media_sessions
+            .begin_release_reconciliation(&session_id)
+            .await
+        {
+            ReleaseAdmission::Won(settlement) => settlement,
+            ReleaseAdmission::Joined(_) | ReleaseAdmission::Full => panic!("first release wins"),
+        };
+        let released = tokio::time::timeout(
+            Duration::from_secs(10),
+            release_session(
+                state.clone(),
+                session_id.clone(),
+                settlement,
+                crate::vodserve::Terminal::Deleted,
+                "released by client",
+            ),
+        )
+        .await
+        .expect("the production release points do not hold the release");
+        assert_eq!(released, StatusCode::NO_CONTENT);
+        assert!(
+            fixture
+                .store
+                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .await
+                .expect("pointer after release")
+                .is_none(),
+            "the release reached its durable End"
+        );
+    }
+
+    /// `before_dispatch_answer` sits after the dispatch and before the
+    /// exchange reads the pending map: an exchange that dispatches nothing,
+    /// held at the point while a candidate for its own ask appears, answers
+    /// `staging` from the map it reads after the point.
+    #[tokio::test]
+    async fn dispatch_answer_point_precedes_the_pending_map_read() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("preparation-answer-point");
+        let (fixture, _session_id, route) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+        let request = preparing_control_request(&route);
+        let pause = pause_before_dispatch_answer(&fixture.state, &playback_id);
+        let exchange = tokio::spawn({
+            let fixture_state = fixture.state.clone();
+            let route = route.clone();
+            let request = request.clone();
+            async move {
+                control_local_inner(&fixture_state, &route, request, unix_ms() + 4_000).await
+            }
+        });
+        let held = pause.reached().await;
+        assert!(
+            pending_candidate_for_playback(&playback_id).is_none(),
+            "the opening ask dispatches nothing"
+        );
+        let planted = PendingCandidateGuard::begin(&playback_id, &request.selection.desired().digest());
+        held.release();
+        let (status, body) = control_body(
+            tokio::time::timeout(Duration::from_secs(10), exchange)
+                .await
+                .expect("the exchange finishes once released")
+                .expect("exchange task"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            preparation_state(&body),
+            "staging",
+            "the answer reads the pending map after the point"
+        );
+        drop(planted);
     }

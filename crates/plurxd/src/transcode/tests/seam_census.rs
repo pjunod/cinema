@@ -859,6 +859,10 @@ fn seam_census_of_the_workspace() {
                 .iter()
                 .any(|owner| site.owner == *owner || site.owner.starts_with(&format!("{owner}::")))
                 || (site.owner.starts_with("RollingControlActor") && site.seam != Seam::Arm)
+                // The HLS route group (D-M8-J). `subtitle_playlist.rs` holds a
+                // `TranscodeManager` pause, which that owner's migration takes.
+                || (site.file.contains("/http/hls/")
+                    && !site.file.ends_with("/http/hls/subtitle_playlist.rs"))
         })
         .collect();
     assert!(

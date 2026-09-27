@@ -100,6 +100,10 @@ where
         })
 }
 
+#[path = "hls/hooks.rs"]
+mod hooks;
+pub(crate) use hooks::*;
+
 // split: begin hls-session-guard
 #[path = "hls/session_guard.rs"]
 mod session_guard;

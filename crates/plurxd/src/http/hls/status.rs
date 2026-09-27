@@ -35,8 +35,7 @@ pub(super) async fn status_local_before_with_relay(
         }
         DurableRouteResolution::ActiveRemote(route) => route,
         DurableRouteResolution::ActiveLocal(admitted_route) => {
-            #[cfg(test)]
-            record_status_telemetry_lookup(session);
+            state.hls_route_hooks.get().status_local_lookup(session);
             let local_publication = tokio::time::timeout_at(
                 tokio::time::Instant::from_std(request_deadline),
                 state.transcode.hls_session_status_publication(session),
@@ -150,26 +149,4 @@ fn same_route_authority(left: &MediaSessionRoute, right: &MediaSessionRoute) -> 
     left.incarnation_id == right.incarnation_id
         && left.owner_node_id == right.owner_node_id
         && left.owner_epoch == right.owner_epoch
-}
-
-#[cfg(test)]
-pub(super) fn status_telemetry_observers(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicUsize>>>
-{
-    static OBSERVERS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicUsize>>>,
-    > = std::sync::OnceLock::new();
-    OBSERVERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-#[cfg(test)]
-fn record_status_telemetry_lookup(session: &str) {
-    if let Some(observer) = status_telemetry_observers()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(session)
-        .cloned()
-    {
-        observer.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
 }

@@ -110,7 +110,7 @@
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        await_preparation_candidate(&route).await;
+        await_preparation_candidate(&fixture.state, &route).await;
 
         let (origin_ms, start_seconds, bootstrap_start_seconds, bootstrap_origin_ms) =
             staged_resume_ms(&fixture, &route).await;
@@ -175,7 +175,7 @@
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        await_preparation_candidate(&route).await;
+        await_preparation_candidate(&fixture.state, &route).await;
 
         let (origin_ms, start_seconds, bootstrap_start_seconds, bootstrap_origin_ms) =
             staged_resume_ms(&fixture, &route).await;
@@ -241,7 +241,7 @@
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        await_preparation_candidate(&route).await;
+        await_preparation_candidate(&fixture.state, &route).await;
 
         let (origin_ms, start_seconds, bootstrap_start_seconds, bootstrap_origin_ms) =
             staged_resume_ms(&fixture, &route).await;
@@ -591,7 +591,7 @@
             "and the same response has to say so, or the client reopens",
         );
 
-        await_preparation_candidate(&route).await;
+        await_preparation_candidate(&fixture.state, &route).await;
     }
 
     /// The window `PendingCandidateGuard` exists for.
@@ -618,7 +618,7 @@
         // Longer than the two 260 ms polls below, and it refuses at the end:
         // this half of the test is about the window, not about what a
         // successful plan produces.
-        fault_preparation_planning(&playback_id, std::time::Duration::from_millis(1_500), true);
+        fault_preparation_planning(&fixture.state, &playback_id, std::time::Duration::from_millis(1_500), true);
 
         let mut request = preparing_control_request(&route);
         let _ = accepted_exchange(&fixture, &route, &request).await;
@@ -648,7 +648,7 @@
             );
         }
 
-        await_preparation_candidate(&route).await;
+        await_preparation_candidate(&fixture.state, &route).await;
         assert!(
             pending_candidate_for_playback(&playback_id).is_none(),
             "the guard drops with the task, so the marker cannot outlive it",
@@ -665,7 +665,7 @@
 
         // Same window, superseded instead of failed. A different height, so the
         // ask is undispatched again and a second candidate is spawned.
-        fault_preparation_planning(&playback_id, std::time::Duration::from_millis(1_500), false);
+        fault_preparation_planning(&fixture.state, &playback_id, std::time::Duration::from_millis(1_500), false);
         pace_control_exchanges().await;
         request.sequence = 6;
         request.selection.quality =
@@ -676,7 +676,7 @@
         let refused_before = crate::playback_control::preparation_staged_snapshot().refused;
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         cancel_preparations_for_superseded_predecessor(&playback_id, None);
-        await_preparation_candidate(&route).await;
+        await_preparation_candidate(&fixture.state, &route).await;
 
         assert!(
             pending_candidate_for_playback(&playback_id).is_none(),
@@ -883,7 +883,7 @@
         request.capabilities = None;
         request.selection.quality =
             crate::playback_control::QualitySelection::Manual { height: 1080 };
-        wait_for_the_dispatched_candidate(&playback_id);
+        wait_for_the_dispatched_candidate(&fixture.state, &playback_id);
         let dispatched = accepted_exchange(&fixture, &route, &request).await;
 
         assert!(
@@ -897,7 +897,7 @@
             "this exchange started a successor, and that is a fact about this exchange \
              — not about a map another thread may already have emptied",
         );
-        await_preparation_candidate(&route).await;
+        await_preparation_candidate(&fixture.state, &route).await;
     }
 
     /// The third of the three `staging` sources, on its own: a successor that is
@@ -1023,7 +1023,7 @@
             .await;
 
         let first = PendingCandidateGuard::begin(&playback_id, "the-first-ask");
-        delay_preparation_registration(&playback_id, std::time::Duration::from_millis(800));
+        delay_preparation_registration(&fixture.state, &playback_id, std::time::Duration::from_millis(800));
 
         let superseded_before = cancelled_total("predecessor_superseded");
         let ownership_before = cancelled_total("ownership_cancelled");
@@ -1367,7 +1367,7 @@
 
         // The marker a real candidate would be holding at this point.
         let pending = PendingCandidateGuard::begin(&playback_id, "register-window-digest");
-        delay_preparation_registration(&playback_id, std::time::Duration::from_millis(800));
+        delay_preparation_registration(&fixture.state, &playback_id, std::time::Duration::from_millis(800));
 
         let superseded_before = cancelled_total("predecessor_superseded");
         let ownership_before = cancelled_total("ownership_cancelled");
@@ -1653,10 +1653,10 @@
     /// Keyed rather than counted: the process-global in-flight count may still
     /// be zero before the spawned future receives its first poll, so polling it
     /// would let an assertion run against a ledger nothing had written yet.
-    async fn await_preparation_candidate(route: &MediaSessionRoute) {
+    async fn await_preparation_candidate(state: &AppState, route: &MediaSessionRoute) {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                if take_preparation_candidate_completion(&route.incarnation_id) {
+                if take_preparation_candidate_completion(state, &route.incarnation_id) {
                     break;
                 }
                 tokio::task::yield_now().await;
