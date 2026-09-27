@@ -2217,7 +2217,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # `::spawn_for_test(` sites stay counted through the alias) -> 661, measured by zeroing
 # this row on the merge of main into #573. Main's additions and this branch's coexist
 # unchanged; the merge adds no new site.
-expected_occurrences = 661
+# 661 -> 663 with the #573 review round (finding 1), measured from the validation unittests'
+# actual count, both test-only in `actor_wakes_the_executor_before_its_command_settles`: its
+# `RollingControlHandle::spawn_for_test(` (the actor and passive executor, which exit when the
+# test drops its handle) and the `tokio::spawn` that sends the decision install while the test
+# holds the actor, awaited before the test goes on. No production spawn; neither owns a
+# producer, a process or a recipe decision.
+expected_occurrences = 663
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -2233,12 +2239,13 @@ expected_occurrences = 661
 # main @ 1d70a1fed has 649; with S-14 M8's +4 reviewed above -> 653, measured by zeroing this row
 # on the merge of main into #562. Main's E0 fixtures and this branch's coexist unchanged; the merge adds no new site.
 # S-14 M8 control group: the pattern also matches `::spawn_for_test(`, the
-# test constructors that build a `RollingControlHandle` with the test hooks
-# (`spawn_for_test`, `spawn_prepublication_producer_for_test`,
-# `spawn_prepublication_transcode_for_test`). They spawn the same actor task
-# (and, for `spawn_for_test`, the same passive executor) as the production
-# constructors, so the 47 test call sites renamed from `::spawn(` stay counted
-# here; without the alias the count would have fallen to 607 while the tasks
+# test constructor that builds a `RollingControlHandle` with the test hooks.
+# It spawns the same actor task and passive executor as the production
+# `spawn`, so the 47 test call sites renamed from `::spawn(` stay counted
+# here. The prepublication test constructors
+# (`spawn_prepublication_producer_for_test`,
+# `spawn_prepublication_transcode_for_test`) are not matched, as their
+# production names were not; without the alias the count would have fallen to 607 while the tasks
 # stayed. 653 -> 654: `rolling_control_group_shipped_shape` builds one handle
 # through the production `RollingControlHandle::spawn`; the handle is dropped
 # and its actor exits through the exit fence before the test returns.
