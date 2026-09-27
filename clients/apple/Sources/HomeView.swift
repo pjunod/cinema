@@ -441,9 +441,7 @@ private struct FeaturedHero: View {
                     height: HomeHeroMetrics.compactHeight
                 )
             )
-            .frame(maxWidth: .infinity)
-            .frame(height: HomeHeroMetrics.compactHeight)
-            .clipped()
+            .modifier(IOSHomeHeroArtworkLayout())
 
             LinearGradient(
                 stops: [
@@ -624,6 +622,19 @@ enum HomeHeroMetrics {
     static let compactHeight: CGFloat = 238
     static let cornerRadius: CGFloat = 18
     static let horizontalInset = screenHPad
+}
+
+/// Aspect-fill artwork must not enlarge the stack that also positions the
+/// title and controls. Crop it inside the card's proposed width first.
+struct IOSHomeHeroArtworkLayout: ViewModifier {
+    func body(content: Content) -> some View {
+        GeometryReader { geometry in
+            content
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .clipped()
+        }
+        .frame(height: HomeHeroMetrics.compactHeight)
+    }
 }
 
 struct IOSHomeHeroCardLayout: ViewModifier {
