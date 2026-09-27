@@ -26,7 +26,7 @@
     // An in-flight fragment's first progress window can span a link change.
     // Leave room for that mixed sample and the encoded segment's peak, not
     // merely its nominal bitrate, when choosing a cliff replacement.
-    severePeakSafetyFactor: 0.84,
+    severePeakSafetyFactor: 0.95,
     mildHeadroom: 1.3,
     mildSamples: 2,
     cooldownMs: 20_000,
@@ -35,6 +35,10 @@
     // A higher prepared stream has to refill its own buffer before an
     // incumbent with little runway can be retired.
     upgradeRunwaySeconds: 10,
+    // A short fragment can drain a token bucket's burst above the sustained
+    // link rate. Keep the lower rung while a recent cliff settles, then allow
+    // a later exploratory upgrade when the link might have recovered.
+    upgradeAfterCliffMs: 90_000,
     // The estimate alone is not evidence that a higher rung is sustainable.
     // On a JIT server hls.js measures min(link, encode) of the CURRENT rung,
     // so a fast 720p encode reads as ~200 Mb/s and clears any bandwidth bar
@@ -212,6 +216,18 @@
     return (bytes * 8) / elapsedMs;
   }
 
+  function completedMediaWindowKbps(samples, nowMs, windowMs = AUTO_DEFAULTS.recentSampleMaxAgeMs) {
+    const rows = (Array.isArray(samples) ? samples : []).filter(row =>
+      Number.isFinite(row.atMs) && row.atMs <= nowMs
+      && nowMs - row.atMs <= windowMs
+      && Number(row.bytes) > 0 && Number(row.endedAtMs) > Number(row.startedAtMs));
+    if (rows.length < 2) return null;
+    const first = rows[0], last = rows.at(-1);
+    const span = last.endedAtMs - first.startedAtMs;
+    if (!(span >= 5_000)) return null;
+    return rows.reduce((sum, row) => sum + row.bytes, 0) * 8 / span;
+  }
+
   // One browser pause can be reported near its start by hls.js and again at
   // its end by the video element. Both reports carry the wait's start time as
   // their episode identity, so a long pause still contributes exactly one
@@ -317,6 +333,7 @@
     estimateKbps = null,
     recentEstimateKbps = null,
     recentEstimateAtMs = null,
+    recentMediaDeliveryKbps = null,
     runwaySeconds = null,
     previousRunwaySeconds = null,
     recentSpeed = null,
@@ -325,6 +342,7 @@
     lastStallAtMs = null,
     nowMs = 0,
     lastSwitchAtMs = null,
+    lastCliffAtMs = null,
     mildSamples = 0,
     upgradeSinceMs = null,
     playerHeight = Infinity,
@@ -519,12 +537,17 @@
       predicted == null || predicted >= defaults.upgradeSpeedFloor;
     const stallFree =
       lastStallAtMs == null || nowMs - lastStallAtMs >= defaults.stallWindowMs;
+    const cliffSettled = lastCliffAtMs == null
+      || nowMs - lastCliffAtMs >= defaults.upgradeAfterCliffMs;
+    const sustainedHeadroom = next && Number(recentMediaDeliveryKbps) >
+      (next.peak_kbps || next.total_kbps) * defaults.upgradeHeadroom;
     const upgradeReady =
       next &&
       estimate > next.total_kbps * defaults.upgradeHeadroom &&
       freshRecentEstimate > (next.peak_kbps || next.total_kbps)
         * defaults.upgradeHeadroom &&
       Number.isFinite(runway) && runway >= defaults.upgradeRunwaySeconds &&
+      (cliffSettled || sustainedHeadroom) &&
       encodeHeadroom &&
       stallFree &&
       !estimatePressure &&
@@ -2071,6 +2094,7 @@
     initialAutoRung,
     bandwidthSeedBps,
     transferSampleKbps,
+    completedMediaWindowKbps,
     recordStallEpisode,
     playerPixelHeight,
     decideRung,

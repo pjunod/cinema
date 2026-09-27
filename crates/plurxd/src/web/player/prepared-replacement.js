@@ -430,6 +430,7 @@ function notePreparedHlsFragmentLoaded(p,state,d){
       loadingStartMs:loading.start,loadingEndMs:loading.end}):null;
   if(!kbps) return;
   const now=performance.now(),url=String(d.frag.url||'');
+  if(d.frag.type==='main') noteCompletedAutoTransfer(p,loaded,loading,now);
   // A completed request can average bytes from both sides of a cliff. Keep
   // the fresher within-request progress delta until a new request measures it.
   if(p.abr.recentEstimateSource==='progress'&&p.abr.recentEstimateUrl===url

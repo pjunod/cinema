@@ -628,6 +628,16 @@ function resumeHlsStartup(video,player){
   armHlsStartupRetry(video,player,episode);
   return true;
 }
+function noteCompletedAutoTransfer(p,bytes,loading,now){
+  if(!p||!p.abr) return;
+  const elapsed=Number(loading&&loading.end)-Number(loading&&loading.start);
+  if(!(Number(bytes)>0)||!(elapsed>0)) return;
+  const age=PlaybackPolicy.AUTO_DEFAULTS.recentSampleMaxAgeMs;
+  const recent=(p.abr.completedTransfers||[]).filter(row=>
+    row.atMs<=now&&now-row.atMs<=age).slice(-31);
+  recent.push({bytes:Number(bytes),startedAtMs:now-elapsed,endedAtMs:now,atMs:now});
+  p.abr.completedTransfers=recent;
+}
 function createHlsStartupLoader(StockLoader,episode){
   return class PlurxStartupLoader extends StockLoader{
     constructor(config){ super(config); episode.loaders.add(this); this.plurxRequestOrdinal=0; }
@@ -991,6 +1001,7 @@ function wireHlsObservers(hls,startup,video,observesCurrent){
       : null;
     if(sampleKbps&&p.abr){
       const now=performance.now();
+      if(d.frag.type==='main') noteCompletedAutoTransfer(p,stats.loaded||b,loading,now);
       // The completed fragment's full-load average can include fast bytes
       // from before a cliff. Preserve a fresher within-fragment byte delta
       // until the next request supplies its own measurement.

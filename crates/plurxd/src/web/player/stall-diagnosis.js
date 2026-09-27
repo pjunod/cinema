@@ -204,13 +204,15 @@ function autoSwitchLabel(value){
   return typeof value==='number'?`${value}p`:String(value||'Auto');
 }
 function recordAutoSwitch(p,from,to,reason,position,targetSessionId){
+  const atMs=performance.now();
   const fromHeight=typeof from==='number'&&Number.isFinite(from)?from:null;
   const toHeight=typeof to==='number'&&Number.isFinite(to)?to:null;
-  const entry={seq:++AUTO_SWITCH_SEQ,at_ms:performance.now(),
+  const entry={seq:++AUTO_SWITCH_SEQ,at_ms:atMs,
     from:autoSwitchLabel(from),to:autoSwitchLabel(to),from_height:fromHeight,to_height:toHeight,reason,
     position:Math.max(0,position||0),target_method:p.method||null,
     target_session_id:targetSessionId||p.sessionId||null,target_attempt_id:p.attemptId||null};
   p.abr.switches.push(entry);
+  if(reason==='bandwidth cliff') p.abr.lastCliffAtMs=atMs;
   if(p.abr.switches.length>8) p.abr.switches.shift();
   clientLog(Object.assign({level:"warn",event:"quality_switch",reason:"auto",
     detail:`from=${entry.from} to=${entry.to} cause=${reason}`,
@@ -419,16 +421,20 @@ async function autoControllerTick(){
   const estimateBps=(p.hls&&p.hls.bandwidthEstimate)||p.bandwidthSeedBps;
   const estimateKbps=estimateBps>0?estimateBps/1000:(p.priorKbps||null);
   const runway=bufferRunway(v);
+  const recentMediaDeliveryKbps=PlaybackPolicy.completedMediaWindowKbps(
+    p.abr.completedTransfers,now);
   const activeSupplyStall=!!p.waitAt && runway<SUPPLY_RUNWAY_SECS;
   const result=PlaybackPolicy.decideRung({
     ladder,currentHeight,estimateKbps,
     recentEstimateKbps:p.abr.recentEstimateKbps,
     recentEstimateAtMs:p.abr.recentEstimateAtMs,runwaySeconds:runway,
+    recentMediaDeliveryKbps,
     previousRunwaySeconds:p.abr.previousRunway,
     recentSpeed:health.recent_speed,
     activeSupplyStall,supplyStalls:p.abr.stallEvents.supply.length,
     lastStallAtMs:p.abr.lastStallAtMs,nowMs:now,
     lastSwitchAtMs:p.abr.lastSwitchAtMs,mildSamples:p.abr.mildSamples,
+    lastCliffAtMs:p.abr.lastCliffAtMs,
     upgradeSinceMs:p.abr.upgradeSinceMs,playerHeight:playerPixelHeight(v),
     blockedHeights:p.abr.failedHeights,causeEvidence
   });
