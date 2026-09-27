@@ -1,3 +1,18 @@
+-- Preserve already-spent retry allowance when draining the legacy outbox.
+-- Backup imports have no admission command and copy the durable counts intact.
+CREATE TRIGGER IF NOT EXISTS background_subtitle_admitted
+AFTER INSERT ON background_job_waiters WHEN NEW.request_scope = 'subtitle'
+    AND EXISTS (SELECT 1 FROM background_job_commands command WHERE command.operation = 'enqueue'
+        AND json_extract(command.request_json, '$.request.scope') = NEW.request_scope
+        AND json_extract(command.request_json, '$.request.request_id') = NEW.request_id)
+BEGIN
+    UPDATE background_jobs SET
+        failed_attempts = MIN(attempt_limit, MAX(0, (SELECT attempts FROM analysis_requests WHERE request_id = NEW.request_id))),
+        state = CASE WHEN (SELECT attempts FROM analysis_requests WHERE request_id = NEW.request_id) >= attempt_limit THEN 'failed' ELSE state END,
+        last_error_code = CASE WHEN (SELECT attempts FROM analysis_requests WHERE request_id = NEW.request_id) >= attempt_limit THEN 'attempt_limit' ELSE last_error_code END
+    WHERE id = NEW.job_id AND kind = 'subtitle_extract' AND state = 'queued' AND fence = 0;
+END;
+-- next statement
 -- Subtitle demand/history keeps its public identity. Only common claims
 -- project a worker into the compatibility record.
 CREATE TRIGGER IF NOT EXISTS background_subtitle_claimed
@@ -22,7 +37,7 @@ BEGIN
     SELECT request_id, attempts, owner_node_id, fence, lease_expires_ms, 'claimed', NEW.updated_at_ms, NEW.updated_at_ms
     FROM analysis_requests WHERE request_id = json_extract(NEW.payload_json, '$.source_generation');
     DELETE FROM analysis_attempts WHERE request_id = json_extract(NEW.payload_json, '$.source_generation') AND claim_epoch NOT IN (
-        SELECT claim_epoch FROM analysis_attempts WHERE request_id = json_extract(NEW.payload_json, '$.source_generation') ORDER BY claim_epoch DESC LIMIT 32);
+        SELECT claim_epoch FROM analysis_attempts WHERE request_id = json_extract(NEW.payload_json, '$.source_generation') ORDER BY claim_epoch DESC LIMIT 64);
 END;
 -- next statement
 CREATE TRIGGER IF NOT EXISTS background_subtitle_renewed

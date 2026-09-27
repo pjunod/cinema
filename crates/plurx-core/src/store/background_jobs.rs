@@ -1105,8 +1105,10 @@ pub(super) async fn enqueue_body<T: QueueSql>(
     store: &T,
     request: &EnqueueJob,
 ) -> Result<serde_json::Value, StoreError> {
-    let fragment_policy = matches!(request.payload, JobPayload::FragmentIndexBuild { .. })
-        || matches!(&request.payload, JobPayload::ArtifactHydrate { artifact_key, .. } if artifact_key.starts_with("fragment:"));
+    let fragment_policy = matches!(
+        request.payload,
+        JobPayload::FragmentIndexBuild { .. } | JobPayload::SubtitleExtract { .. }
+    ) || matches!(&request.payload, JobPayload::ArtifactHydrate { artifact_key, .. } if artifact_key.starts_with("fragment:"));
     let limit = if fragment_policy {
         let rows = store.queue_sql("SELECT json_quote(value) AS result_json FROM settings WHERE key = json_extract($1, '$.key')".into(),
             encode(&serde_json::json!({"key": super::keys::ANALYSIS_MAX_ATTEMPTS}))?, false, true).await?;

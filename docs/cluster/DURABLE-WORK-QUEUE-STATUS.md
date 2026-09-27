@@ -2,7 +2,7 @@
 
 **Status:** M1–M3 merged; E0 adapters implemented, review pending · **Updated:** 2026-09-26 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` ·
-**Base:** `b4b488556` · **PR:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532)
+**Base:** `0386c78ec` · **PR:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -541,3 +541,9 @@ The failing replicated test is being rerun before the main fast lane starts.
   cancellation and lost-completion-acknowledgement regressions. Construction
   caught fixture-only missing imports and lint violations, all corrected.
   No E0 regression has been executed; final review precedes the fast lane.
+
+- Subtitle batch committed as `d2d41217b` through the normal hook, after
+  catalog registration and the migration fixture length were corrected.
+  Main `0386c78ec` merged cleanly into the candidate. The cutover also preserves
+  spent subtitle retry allowance and the configured analysis attempt limit.
+  Rechecking the integrated source before opening the final review.
