@@ -39,6 +39,9 @@ const PREPARED_ALIGN_ATTEMPTS=2;
 // queue. Prove the successor advances monotonically before it takes the
 // picture; the incumbent remains visible while these frames are checked.
 const PREPARED_MONOTONIC_FRAME_STEPS=3;
+// A proven successor frame must still be recent when the incumbent advances.
+// At 24/30 fps this spans one frame, leaving room under the 100 ms visible gap.
+const PREPARED_HANDOFF_FRAME_AGE_MS=50;
 // Four increasing frames need roughly one eighth of a second at 30 fps;
 // leave a bounded margin for callback jitter without holding two audio clocks.
 const PREPARED_FRAME_PROOF_MS=800;
@@ -649,7 +652,7 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
   // advancing frame proof below is the actual presentation evidence; rejecting
   // the handoff here would reopen an otherwise ready successor at the cliff.
   let settled=false,priorMediaTime=null,advancingSteps=0;
-  let videoCallbacks=0,badFrames=0,lastFrameAt=null;
+  let videoCallbacks=0,badFrames=0,lastFrameAt=null,lastAdvancingFrameAt=null;
   state.overlapPhase="video";
   const live=()=>PLAYER===p&&preparedState(p)===state
     &&document.getElementById("video")===v&&preparedVideoElement()===spare
@@ -692,19 +695,25 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
     failPreparedReplacement(p,state,`${reason}: ${diagnostic}`);
   };
   const requestFrame=()=>{
+    if(settled) return;
     try{ state.exposeFrameCallbackId=spare.requestVideoFrameCallback(observe); }
     catch(e){ finish(false,"frame-callback-error"); }
   };
   const exposeAfterIncumbentFrame=()=>{
-    // A successor callback can arrive just after the incumbent's last frame.
-    // Revealing it there discards the incumbent's next queued picture, so a
-    // delayed first successor frame can exceed the visible 100 ms boundary.
-    // Keep the old picture and audio through one more incumbent frame callback,
-    // then make the same synchronous, reversible swap.
+    // Keep both frame callbacks alive until a recent advancing successor frame
+    // and the incumbent's next frame meet. The successor can pause or step
+    // backward after its third proof frame while we wait for the incumbent.
     state.overlapPhase="incumbent-frame";
+    requestFrame();
+    if(settled) return;
+    requestIncumbentFrame();
+  };
+  const requestIncumbentFrame=()=>{
+    if(settled) return;
     try{
       state.handoffFrameCallbackId=v.requestVideoFrameCallback(()=>{
         state.handoffFrameCallbackId=null;
+        if(settled) return;
         if(!live()){ finish(false,"stale-owner"); return; }
         if(v.paused||v.seeking||spare.paused||spare.seeking||p.wantsPlayback===false){
           finish(false,"viewer-intent"); return;
@@ -714,12 +723,18 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
           ||Math.abs((spare.currentTime||0)-wanted)*1000>PREPARED_ALIGN_SLACK_MS){
           finish(false,"lost-alignment"); return;
         }
+        if(lastAdvancingFrameAt==null
+          ||performance.now()-lastAdvancingFrameAt>PREPARED_HANDOFF_FRAME_AGE_MS){
+          requestIncumbentFrame();
+          return;
+        }
         finish(true);
       });
     }catch(e){ finish(false,"incumbent-frame-callback-error"); }
   };
   const observe=(now,meta)=>{
     state.exposeFrameCallbackId=null;
+    if(settled) return;
     if(!live()){ finish(false,"stale-owner"); return; }
     lastFrameAt=performance.now();
     videoCallbacks++;
@@ -734,12 +749,15 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
       advancingSteps=priorMediaTime!=null&&mediaTime>priorMediaTime
         ?advancingSteps+1:0;
       priorMediaTime=mediaTime;
+      lastAdvancingFrameAt=advancingSteps>=PREPARED_MONOTONIC_FRAME_STEPS
+        ?performance.now():null;
       if(advancingSteps>=PREPARED_MONOTONIC_FRAME_STEPS){
         if(v.paused||v.seeking||spare.paused||spare.seeking){
           finish(false,"viewer-intent");
           return;
         }
-        if(typeof v.requestVideoFrameCallback==="function") exposeAfterIncumbentFrame();
+        if(state.overlapPhase==="incumbent-frame") requestFrame();
+        else if(typeof v.requestVideoFrameCallback==="function") exposeAfterIncumbentFrame();
         else finish(true);
         return;
       }
@@ -747,6 +765,7 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
       badFrames++;
       priorMediaTime=null;
       advancingSteps=0;
+      lastAdvancingFrameAt=null;
     }
     requestFrame();
   };
