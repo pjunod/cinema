@@ -56,14 +56,17 @@ pub(crate) const SCHEMA: &str = include_str!("background_jobs_schema.sql");
 // Both backends execute the same admission statement and schema trigger.
 // The returned snapshot is the verdict that authorized the mutation, not a
 // follow-up read which might observe a different concurrent request.
+// These single-row stages must remain materialized: flattening the repeated
+// verdict fields duplicates correlated subqueries into tens of thousands of
+// planner operations, making migration and ordinary admission needlessly slow.
 pub(super) const ENQUEUE_SQL: &str = r#"
-WITH provided AS (SELECT json($1) AS body), input AS (
+WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
  SELECT CASE WHEN EXISTS (SELECT 1 FROM background_predictions WHERE state = 'pending'
    AND request_id = COALESCE(json_extract(body,'$.subtitle_request.request_id'),json_extract(body,'$.analysis_request.request_id')))
  THEN json_set(body, '$.request.deadline_ms', (SELECT expires_ms FROM background_predictions
    WHERE request_id = COALESCE(json_extract(body,'$.subtitle_request.request_id'),json_extract(body,'$.analysis_request.request_id'))),
    '$.request.retain_identity', json('false')) ELSE body END AS body FROM provided
-), request AS (
+), request AS MATERIALIZED (
  SELECT CASE WHEN json_extract(body, '$.artwork_demand') = 1 THEN json_set(body, '$.request.request_id',
    COALESCE((SELECT request_id FROM background_job_waiters
      WHERE request_scope = json_extract(body, '$.request.scope')
@@ -71,7 +74,7 @@ WITH provided AS (SELECT json($1) AS body), input AS (
        AND (state IN ('pending','awaiting_hydration') OR updated_at_ms > json_extract(body, '$.now_ms') - 3600000)
      ORDER BY updated_at_ms DESC, request_id DESC LIMIT 1), json_extract(body, '$.request.request_id')))
  ELSE body END AS body FROM input
-), snapshot AS (
+), snapshot AS MATERIALIZED (
   SELECT body,
     (SELECT job_id FROM background_job_waiters
       WHERE request_scope = json_extract(body, '$.request.scope')
@@ -104,7 +107,7 @@ WITH provided AS (SELECT json($1) AS body), input AS (
               AND json_extract(mapped.snapshot_json, '$.cache_key') = json_extract(body, '$.payload.cache_key')))))
       ORDER BY CASE WHEN state IN ('queued','running','cancelling') THEN 0 ELSE 1 END, created_at_ms DESC, id LIMIT 1) AS active_payload
   FROM request
-), classified AS (
+), classified AS MATERIALIZED (
   SELECT *, CASE
     WHEN json_type(body, '$.legacy_key') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM background_job_legacy WHERE legacy_key = json_extract(body, '$.legacy_key')

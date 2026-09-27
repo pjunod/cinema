@@ -787,3 +787,17 @@ continue E1–E3.
   and web jobs; Rust was still running. The merged candidate requires a fresh
   fast lane. E2's embeddings and leaf probes are committed separately on
   `codex/cluster-batch-analysis` in draft PR #567; scheduled repair remains open.
+
+- 2026-09-27: E1 run 3340 reached its 30-minute Rust deadline with the
+  migration-overflow case unfinished. The full log also identified a SQLite
+  placeholder-census failure: the named-settings query added one unchecked
+  binding shape. Kept its SQL and binding in one statement; the unchanged
+  census now passes. Diagnosed queue admission with `EXPLAIN QUERY PLAN`:
+  flattened stages expanded to 21,663 planner steps; materializing the four
+  single-row stages reduces this to 120. Added a bounded-plan regression.
+  The overflow test still seeds 4,100 accepted jobs and proves the 3,840
+  background ceiling; it now frees exactly the 260 needed slots, retaining
+  the other jobs instead of spending time cancelling the whole inventory.
+  All six migration regressions pass in 47.35 seconds; the placeholder census
+  passes separately. Main advanced to `c61bb6409`; integrate and qualify that
+  candidate before resubmission. No green merge is claimed.
