@@ -2758,16 +2758,10 @@ fn classify_durable_route(
 ///
 /// **This is deliberately not a stopwatch.** The obvious design — answer
 /// "retry" for some grace period after the lease expires, then declare the
-/// owner lost — cannot be made correct here. `takeover_loop` is gated on
-/// `remote_rollout_ready`, which requires every voter reachable with a fresh
-/// snapshot, so the moment a node dies the gate that would replace its
-/// sessions *shuts*, and it stays shut until the dead node is removed from
-/// membership or comes back. A rebooting node's routes are adopted minutes
-/// later, long after any plausible grace, and any deadline chosen in advance
-/// would have told a viewer their session was over while a successor was on
-/// its way. The scan is paged (`TAKEOVER_BATCH` per `TAKEOVER_INTERVAL`,
-/// behind a semaphore of the same size), so a node dying with more sessions
-/// than one page also outlives any fixed bound.
+/// owner lost — cannot be made correct here. A rebooting node may recover
+/// later, and takeover scans are paged (`TAKEOVER_BATCH` per
+/// `TAKEOVER_INTERVAL`). One unrelated stale peer no longer stops takeover,
+/// but neither bounded scans nor source availability promise a fixed deadline.
 ///
 /// What *is* decidable is whether this route can ever be taken over at all.
 /// The recipe is durable and immutable, and the refusals in
@@ -3106,6 +3100,7 @@ fn relay_response_with_limits_observed(
                 }
                 None => return,
             };
+            crate::media_pool::observe_media_io(0, bytes.len() as u64, None);
             body_bytes = body_bytes.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
             if max_body_bytes.is_some_and(|limit| body_bytes > limit) {
                 fail(
@@ -4551,10 +4546,6 @@ pub(crate) async fn takeover_loop(state: AppState) {
             .wait_for_tick(&mut interval, state.store.as_ref())
             .await
         {
-            scan_cursor = None;
-            continue;
-        }
-        if !state.media_pool.remote_rollout_ready().await {
             scan_cursor = None;
             continue;
         }

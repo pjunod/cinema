@@ -20,7 +20,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 | E0 subtitle and library workers | Merged | PR #564 merged as `1d70a1fed`; one final review addressed and run 3322 passed all required fast-lane jobs |
 | E1 reads, caches, prediction, artwork | Reviewed; promoting with E2 in #567 | Read path, artwork, portable transcodes, bounded hot copies and durable predictive analysis implemented. Single final review addressed; focused store, image, copy and cleanup checks passed. Required fast lane remains. Scheduled verification/repair belongs to E2 |
 | E2 embeddings, probes and repair | Reviewed; combined fast lane next | Portable embeddings, bounded probes, admitted artifact verification and finite repair compiled. Three review findings addressed; focused regressions and required fast lane remain |
-| E3 placement and shared Live TV ingest | Planned | Individual peer compatibility; no fleet enablement gates |
+| E3 placement and shared Live TV ingest | In construction | Fleet gates removed from placement/takeover and settings persistence; advisory Developer enable controls and recent I/O observations added. Remote viewer processing remains |
 | Final adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
 | Core fast lane | Passed: run 3296 on `3784d5ec5` | Preflight, Rust, Windows, web and main promotion gate all passed |
 | Core merge | Complete | PR #532 merged as `b4b488556`; E0–E3 continue in the agent clone |
@@ -903,3 +903,12 @@ continue E1–E3.
   repeat adversarial review. Both inventories, capability pagination, three
   cache-verification tests and the 445-method Store inventory pass. Candidate
   `465f16594` passed the normal pinned hook; only promotion bookkeeping follows.
+
+- 2026-09-27: combined E1–E2 candidate `05192c812` is running required fast
+  lane 3358. #566 is verified draft and superseded. E3 continues separately on
+  `codex/cluster-media-placement`, based on the integrated candidate. Placement
+  and takeover no longer require a uniformly fresh fleet; saved preferences
+  always persist. Developer controls show requirements as advisory. Recent
+  storage-read latency, client delivery and peer throughput are bounded node
+  observations; missing samples never refuse work. Shared remote Live TV
+  processing remains unfinished. No E3 tests have run.

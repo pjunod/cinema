@@ -10168,12 +10168,11 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert!(
-            body["error"]
-                .as_str()
-                .is_some_and(|message| message.contains("every committed voter")),
-            "legacy settings errors retain their {{error}} response contract: {body}"
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cluster_media_pool_enabled"], true);
+        assert_eq!(
+            body["cluster_media_pool_ready"], false,
+            "standalone observation stays advisory"
         );
         let (status, body) = call(
             &app,
@@ -10208,13 +10207,8 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert!(
-            body["error"]
-                .as_str()
-                .is_some_and(|message| message.contains("remote placement")),
-            "one endpoint answers refusals one way: settings keep {{error}}: {body}"
-        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cluster_session_takeover_enabled"], true);
         let (status, body) = call(
             &app,
             put(

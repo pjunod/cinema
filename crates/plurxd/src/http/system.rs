@@ -1763,8 +1763,7 @@ pub struct SettingsDto {
     /// turns the whole thing off.
     pub subtitle_store: crate::subtitle_source::StoreDiagnostics,
     /// Cluster-wide opt-in for placing new HLS workers on another voter. The
-    /// readiness bit is true only while the replicated flag is enabled and
-    /// every committed voter publishes the current media protocol.
+    /// readiness bit reports fleet protocol observations as advisory only.
     pub cluster_media_pool_enabled: bool,
     pub cluster_media_pool_ready: bool,
     /// Opt-in replacement of expired HLS owners. This remains independently
@@ -2033,8 +2032,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     let genre_backfill = setting(keys::GENRE_BACKFILL).is_some_and(|v| v.trim() == "1");
     let cluster_media_pool_enabled =
         setting(keys::CLUSTER_MEDIA_POOL_ENABLED).as_deref() == Some("1");
-    let cluster_media_pool_ready =
-        cluster_media_pool_enabled && state.media_pool.remote_rollout_ready().await;
+    let cluster_media_pool_ready = state.media_pool.remote_rollout_ready().await;
     let cluster_session_takeover_enabled =
         setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED).as_deref() == Some("1");
     let analysis_max_attempts = plurx_core::store::bounded_analysis_max_attempts(
@@ -3265,33 +3263,7 @@ pub async fn update_settings(
         ));
     }
 
-    // Dynamic preconditions are reads/probes, not persistence. Complete them
-    // after syntax/range validation and before any of this aggregate is stored.
-    if req.cluster_media_pool_enabled == Some(true)
-        && !state.media_pool.remote_rollout_ready().await
-    {
-        return Err(ApiError::Conflict(
-            "cluster media placement cannot be enabled until every committed voter is reachable and publishing the current media protocol".into(),
-        ));
-    }
-    if req.cluster_session_takeover_enabled == Some(true) {
-        let media_pool_enabled = match req.cluster_media_pool_enabled {
-            Some(enabled) => enabled,
-            None => {
-                state
-                    .store
-                    .get_setting(keys::CLUSTER_MEDIA_POOL_ENABLED)
-                    .await?
-                    .as_deref()
-                    == Some("1")
-            }
-        };
-        if !media_pool_enabled || !state.media_pool.remote_rollout_ready().await {
-            return Err(ApiError::Conflict(
-                "cluster media session takeover requires remote placement to be enabled and every committed voter to publish the current media protocol".into(),
-            ));
-        }
-    }
+    // Cluster enable preferences always persist; fleet readiness is advisory.
     // The behavior probe may persist the effective encoder mode. Run it before
     // every ordinary store write so Busy/probe refusal also leaves the rest of
     // this request untouched.

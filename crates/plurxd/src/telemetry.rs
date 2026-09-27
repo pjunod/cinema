@@ -939,6 +939,7 @@ pub(crate) fn admission_waits_on_this_thread(pool: AdmissionPool) -> u64 {
 /// `method` is one of the playback vocabulary's values; anything else is
 /// `unknown`.
 pub(crate) fn record_delivered_bytes(method: &str, bytes: u64) {
+    crate::media_pool::observe_media_io(bytes, 0, None);
     METRICS.delivered_bytes[label_index(Some(method), &METHODS)]
         .fetch_add(bytes, Ordering::Relaxed);
     #[cfg(test)]

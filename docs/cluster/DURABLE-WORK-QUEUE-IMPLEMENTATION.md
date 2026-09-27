@@ -987,8 +987,8 @@ existing recovery/handoff protocol changes ownership.
 
 Implement the shared-ingest portion of
 [LIVE-TV-SHARED-TRANSPORT.md](../features/LIVE-TV-SHARED-TRANSPORT.md): one owner
-per `(device, channel, configuration_generation)`, separate bounded queues for
-viewer and recording consumers, and exact last-consumer cleanup. Other nodes
+per `(device identity/address, channel, serving generation)`, separate bounded queues for
+viewer and recording consumers, and exact last-consumer cleanup. Existing M1 transport identity deliberately survives unrelated settings saves (shared-transport decision D7); configuration changes still fence sessions and explicit owner drains. Other nodes
 can perform compatible viewer processing from that ingest using bounded peer
 streaming. One slow peer must be dropped independently; it cannot stall the
 tuner reader, DVR sink or other viewers. Transport occupancy, not viewer count,
