@@ -1,8 +1,8 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 and E0 merged; E1–E2 qualifying; E3 ready for final review · **Updated:** 2026-09-27 ·
+**Status:** M1–M3 and E0 merged; E1–E3 reviewed; combined promotion qualifying · **Updated:** 2026-09-27 ·
 **Core branch:** `codex/durable-cluster-work` · **Follow-on:** `codex/cluster-work-adapters` · **E1:** `codex/cluster-cache-preparation` ·
-**E2:** `codex/cluster-batch-analysis` · **E3:** `codex/cluster-media-placement` · **Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) · **E1:** [#566 — superseded by combined promotion](http://192.168.4.7:3000/noirr/plurx/pulls/566) · **E2:** [#567 — combined promotion](http://192.168.4.7:3000/noirr/plurx/pulls/567)
+**E2:** `codex/cluster-batch-analysis` · **E3:** `codex/cluster-media-placement` · **Base:** `2b09d7a32` · **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) · **E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) · **E1:** [#566 — superseded by combined promotion](http://192.168.4.7:3000/noirr/plurx/pulls/566) · **E2:** [#567 — superseded by final promotion](http://192.168.4.7:3000/noirr/plurx/pulls/567) · **Final:** [#572 — E1–E3 promotion](http://192.168.4.7:3000/noirr/plurx/pulls/572)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -14,13 +14,13 @@ implementation is claimed; “compiled” does not mean tests passed.
 |---|---|---|
 | Isolated clone | Complete | Agent-owned `/private/tmp/plurx-durable-work-agent`; original checkout untouched |
 | Compiler | Ready | Rust 1.97.1; core + Hiqlite all-target compile and baseline daemon compile passed |
-| M1 durable queue and pre-transcode | Implemented; focused validation passed | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; local exact-recipe offline joining and scheduling implemented; lost-reply and process-expiry regressions written; cross-node transcode convergence belongs to E1 |
-| M2 fragment analysis and hydration | Implemented; focused validation passed | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; final regression evidence remains |
-| M3 UI, recovery and migration | Implemented; focused validation passed | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; final regression evidence remains |
+| M1 durable queue and pre-transcode | Merged in #532 | Queue ownership, publication, upkeep and pre-transcode discovery/worker integration committed. Bounded cutover and retirement implemented; local exact-recipe offline joining and scheduling implemented; lost-reply and process-expiry regressions written; cross-node transcode convergence belongs to E1 |
+| M2 fragment analysis and hydration | Merged in #532 | Shared fragment worker, durable hydration and atomic request handoff connected; cancellation/provenance integration passed pinned workspace Clippy. Bounded repair and legacy cutover implemented; fast lane 3296 passed |
+| M3 UI, recovery and migration | Merged in #532 | Admin list/detail/cancel, paged Activity observation and independent upkeep compiled; metrics added to the Store-free scrape cache; explicit retry and advisory Developer controls implemented; fast lane 3296 passed |
 | E0 subtitle and library workers | Merged | PR #564 merged as `1d70a1fed`; one final review addressed and run 3322 passed all required fast-lane jobs |
-| E1 reads, caches, prediction, artwork | Reviewed; promoting with E2 in #567 | Read path, artwork, portable transcodes, bounded hot copies and durable predictive analysis implemented. Single final review addressed; focused store, image, copy and cleanup checks passed. Required fast lane remains. Scheduled verification/repair belongs to E2 |
-| E2 embeddings, probes and repair | Reviewed; fast lane 3360 running | Three final findings addressed; focused regressions passed. Candidate `b01b58416` includes current main and the daemon fixture deadline correction |
-| E3 placement and shared Live TV ingest | Implementation complete; final review next | Advisory enable controls, observed-resource ranking, stable remote Live TV placement and bounded shared ingest implemented. Regression targets compiled; no E3 tests executed |
+| E1 reads, caches, prediction, artwork | Reviewed; promoting in #572 | Read path, artwork, portable transcodes, bounded hot copies and durable predictive analysis implemented. Single final review addressed; focused store, image, copy and cleanup checks passed. Required fast lane remains. Scheduled verification/repair belongs to E2 |
+| E2 embeddings, probes and repair | Reviewed; promoting in #572 | Three final findings addressed; focused regressions passed. Candidate `b01b58416` includes current main and the daemon fixture deadline correction |
+| E3 placement and shared Live TV ingest | Reviewed; three findings fixed | Advisory enable controls, observed-resource ranking, stable remote Live TV placement and bounded shared ingest implemented. All 12 targeted E3/fixture regressions plus advisory settings passed; 11 docs/ownership checks passed; combined fast lane remains |
 | Final adversarial review | Complete; all four findings addressed | Reviewed `f05f664b8`; four actionable findings below. No repeat review loop |
 | Core fast lane | Passed: run 3296 on `3784d5ec5` | Preflight, Rust, Windows, web and main promotion gate all passed |
 | Core merge | Complete | PR #532 merged as `b4b488556`; E0–E3 continue in the agent clone |
@@ -967,3 +967,16 @@ continue E1–E3.
   final reviews of their respective implementation batches. #566 and #567
   will close as superseded after the combined candidate merges; no production
   deployment is authorized or claimed by these merges.
+
+- 2026-09-27: final E1–E3 candidate integrates main `9660f698a` (Apple build
+  190). E3 review fixes committed as `fd4d45ae2`. All 12 targeted daemon
+  regressions passed, plus the existing settings authorization/advisory-enable
+  regression. Two socket fixtures initially hit the local sandbox restriction;
+  rerunning those exact tests with loopback permission passed (3 tests, 4.31s,
+  including settings). The corrected E2 source-shape fixture passed as well.
+  Documentation index and transport ownership suites passed all 11 checks.
+  Commands: `cargo test -p plurxd --bin plurxd -- --exact` with the PR's E3
+  regression names and `decode_facts::tests::decode_fact_source_shipped_shape`;
+  `python3 -m unittest tests.validation.test_rolling_producer_ownership_inventory
+  tests.operations.test_docs_index`. PR #572 now targets main; #567 is draft
+  pending supersession. The final required fast lane is next.

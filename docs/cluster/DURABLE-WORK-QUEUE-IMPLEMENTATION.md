@@ -1018,7 +1018,7 @@ configured tuner owner selects a compatible voter from fresh media snapshots
 and retains the request's worker and nonce before contacting it. At most 1,024
 assigned placement/recovery records are retained; unknown retirements use a
 separate eight-entry per-user allowance. Configuration generations advance
-monotonically, so a delayed older start cannot remove newer ownership. new work is refused when ambiguous
+monotonically, so a delayed older start cannot remove newer ownership. New work is refused when ambiguous
 owners fill that bound. Retries do not choose another worker. Explicit retirement
 fences later ingest before the worker exchange; confirmed terminal records live
 for another minute. Admission sweeps at most eight old records inside 200 ms;
@@ -1197,9 +1197,9 @@ not authorize a production restart or rolling mixed-queue cutover.
 | M3 operations + recovery | merged | PR #532 | Activity, Developer controls, recovery and migration validated |
 | Core promotion/deployment | main merged; production unchanged | `b4b488556` | Required gates passed on reviewed candidate; no deployment authorized |
 | E0 preparation + maintenance adapters | merged | PR #564 | Final review addressed; fast lane 3322 green |
-| E1 reads + cache preparation | implemented and reviewed; fast lane pending | PR #566 | Copy, artwork, prediction and read-after contracts pass; current-main candidate `02b265bdf` resubmitted after lane fixes |
-| E2 embeddings + batch analysis | reviewed; fixes in qualification | Combined E1–E2 promotion PR #567 | One review completed; immediate local embeddings, lost-holder repair and probe-page result preservation corrected; focused regressions and fast lane remain |
-| E3 placement + shared ingest | not started | — | — |
+| E1 reads + cache preparation | reviewed; combined qualification | PR #572 | Copy, artwork, prediction and read-after contracts pass; review findings addressed |
+| E2 embeddings + batch analysis | reviewed; combined qualification | PR #572 | Review findings addressed; shared queue, embedding, probe and repair regressions passed |
+| E3 placement + shared ingest | reviewed; three findings addressed | PR #572 | Remote transport lifetime, per-user retirement capacity and monotonic placement generations corrected; 13 focused daemon regressions and 11 docs/ownership checks passed; final lane remains |
 
 **First-release done:** accepted jobs survive restart; both backends enforce
 exclusive publication; compatible nodes share real work; cancellation and
