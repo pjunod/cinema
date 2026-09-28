@@ -24,13 +24,13 @@ The user's existing checkouts are not build or edit workspaces for this work.
 
 ## Current-main integration
 
-Main `ffe965764` is integrated. Its background-work migrations precede this
+Main `8227b9bc8` is integrated. Its background-work migrations precede this
 feature at SQLite 83 / replicated 61. Its reserved-tuner warm-restart repair
 is preserved. Main's temporary owner-relay placement is superseded by durable
 resource admission; media-pool load ranking remains an advisory worker preference.
 Protocol 5 and `v5_` tickets distinguish durable admission from main's protocol 4.
 The advertised list is `[1, 2, 3, 5]`; old owner-relay nodes cannot receive new
-resource claims. Apple build 192 and Android build 132 preserve main's client
+resource claims. Apple build 193 and Android build 132 preserve main's client
 fixes. The existing reviewer approved this integration after correcting a legacy
 media-pool capability advertisement. Legacy relay capability is false; durable
 resource capability is separate and defaults false for older peers. Pinned
@@ -50,6 +50,13 @@ Web Live TV, 34 settings checks, API/document/mobile contracts and TypeScript
 passed. The review is closed; PR #537 is ready for its blocking fast lane and
 merge. This status update also triggers the ready PR's synchronize event on
 Forgejo, whose title-based draft change did not enqueue a ready-for-review run.
+
+The first complete run on the integration passed 1,365 core tests, 179 SQLite
+contracts, 3,045 daemon tests and both serial VOD restart checks, plus every
+platform gate. Promotion rejected the stale base after main accepted Apple-only
+seek completion changes. Those changes are now integrated; Rust, web and Android
+source trees are byte-identical to the passed candidate. Apple build 193 claims
+the next available number. The PR records the final freshness qualification.
 
 ## Delivery decisions
 
