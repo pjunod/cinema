@@ -7747,6 +7747,171 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn optical_http_rechecks_the_non_admin_grant_on_every_request() {
+        use plurx_core::optical::OpticalFormat;
+
+        let (app, _state, _fake) = test_state_with_optical(OpticalFormat::Dvd).await;
+        let admin = setup_admin(&app).await;
+        let (status, viewer) = call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({
+                    "username": "disc-viewer",
+                    "password": "longenough",
+                    "is_admin": false
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "create viewer: {viewer}");
+        assert_eq!(viewer["optical_play"], false);
+        let viewer_id = viewer["id"].as_i64().expect("viewer id");
+        let (status, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({"username": "disc-viewer", "password": "longenough"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "viewer login: {login}");
+        let viewer_token = login["token"].as_str().expect("viewer token");
+
+        let (status, forbidden) =
+            call(&app, get("/api/v1/optical/drives", Some(viewer_token))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "missing grant: {forbidden}");
+        assert_eq!(forbidden["code"], "optical_play_forbidden");
+
+        let (status, updated) = call(
+            &app,
+            put(
+                &format!("/api/v1/users/{viewer_id}"),
+                Some(&admin),
+                json!({
+                    "password": null,
+                    "is_admin": null,
+                    "optical_play": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "grant optical play: {updated}");
+        assert_eq!(updated["optical_play"], true);
+        assert_eq!(
+            call(&app, get("/api/v1/optical/drives", Some(viewer_token)),)
+                .await
+                .0,
+            StatusCode::OK
+        );
+
+        let (status, updated) = call(
+            &app,
+            put(
+                &format!("/api/v1/users/{viewer_id}"),
+                Some(&admin),
+                json!({
+                    "password": null,
+                    "is_admin": null,
+                    "optical_play": false
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "revoke optical play: {updated}");
+        assert_eq!(updated["optical_play"], false);
+        assert_eq!(
+            call(&app, get("/api/v1/optical/drives", Some(viewer_token)),)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn optical_http_rejects_forged_sources_before_host_resolution() {
+        use plurx_core::optical::OpticalFormat;
+        use plurx_core::testfixtures::optical::FakeOpticalEvent;
+
+        let (app, _state, fake) = test_state_with_optical(OpticalFormat::Bluray).await;
+        let admin = setup_admin(&app).await;
+        let (status, disc) = call(
+            &app,
+            get(
+                "/api/v1/optical/drives/test-node%3Afixture/disc",
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "disc discovery: {disc}");
+        let disc_id = disc["drive"]["disc"]["id"].as_str().expect("disc id");
+        let generation = disc["drive"]["disc"]["media_generation"]
+            .as_str()
+            .expect("media generation");
+
+        let decision = |expected_disc_id: &str, title: &str, angle: u32| {
+            post(
+                &format!("/api/v1/optical/drives/test-node%3Afixture/titles/{title}/decision"),
+                Some(&admin),
+                json!({
+                    "expected_disc_id": expected_disc_id,
+                    "media_generation": generation,
+                    "angle": angle,
+                    "caps": {"v": 2},
+                    "force": null,
+                    "audio": null,
+                    "subtitle": null
+                }),
+            )
+        };
+        assert_eq!(
+            call(&app, decision(disc_id, "missing-title", 1)).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(&app, decision(disc_id, "title-1", 2)).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        let (status, changed) = call(&app, decision("/fixture/dev/forged", "title-1", 1)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "forged disc id: {changed}");
+        assert_eq!(changed["code"], "optical_media_changed");
+
+        let (status, invalid_start) = call(
+            &app,
+            post(
+                "/api/v1/optical/drives/test-node%3Afixture/titles/title-1/sessions",
+                Some(&admin),
+                json!({
+                    "expected_disc_id": disc_id,
+                    "media_generation": generation,
+                    "angle": 2,
+                    "playback_id": "fixture-player",
+                    "request_id": "fixture-request",
+                    "start": 0.0,
+                    "height": null,
+                    "audio": null,
+                    "subtitle_burn": null,
+                    "audio_offset_ms": null,
+                    "block_budget_secs": null,
+                    "caps": {"v": 2}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "forged title angle: {invalid_start}"
+        );
+        assert!(!fake
+            .events()
+            .iter()
+            .any(|event| matches!(event, FakeOpticalEvent::Resolve { .. })));
+    }
+
     fn test_state_with_dv_disk_tools() -> (Router, AppState) {
         let store = SqliteStore::open_in_memory().expect("store");
         let base = crate::test_temp_path(format!("plurx-dv-api-{}", uuid::Uuid::new_v4()));
