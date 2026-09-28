@@ -2556,7 +2556,9 @@ their codec/HDR fallback ladders. Counters and latency are exported as
 The one-second media-session route cache that authorizes segment GETs is
 measured, not tuned, by four families (plan
 [PLEX-FACADE-PAGING](server/PLEX-FACADE-PAGING.md) §3.5):
-`plurx_media_session_route_lookups_total{result}` splits lookups into
+`plurx_media_session_route_lookups_total{result}` splits the cache's lookups
+(HLS media and status GETs and session DELETEs; direct plays never reach it)
+into
 `cache_hit`, `single_flight_hit` (answered by the cache after waiting on
 another lookup's Store read for the same session) and `store`;
 `plurx_media_session_route_lock_seconds{site}` is the wait for the cache's map

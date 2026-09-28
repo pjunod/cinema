@@ -893,7 +893,8 @@ const ROUTE_PRUNE_BUCKETS: [u64; 7] =
 const ROUTE_LOOKUP_RESULTS: [&str; 3] = ["cache_hit", "single_flight_hit", "store"];
 const ROUTE_LOCK_SITES: [&str; 4] = ["lookup", "insert", "queried_insert", "generation_insert"];
 
-/// How `raw_route_before` answered one media GET route lookup.
+/// How `raw_route_before` answered one cached route lookup (an HLS media or
+/// status GET, or a session DELETE, routed through `relay_if_remote`).
 #[derive(Clone, Copy, Debug)]
 enum RouteLookup {
     /// The first `cached_route`, before any single-flight shard is taken.
@@ -976,7 +977,7 @@ impl RouteCacheMetrics {
 
     pub(crate) fn prometheus(&self) -> String {
         let mut out = String::from(
-            "# HELP plurx_media_session_route_lookups_total Media GET route lookups by how they were answered: the one-second route cache, the cache re-read after waiting on the lookup's single-flight shard, or a Store read. Control and final-status reads bypass the cache and are not counted here.\n\
+            "# HELP plurx_media_session_route_lookups_total Media-session route lookups through the route cache (HLS media and status GETs, session DELETEs) by how they were answered: the one-second route cache, the cache re-read after waiting on the lookup's single-flight shard, or a Store read. Control and final-status reads bypass the cache and are not counted here.\n\
              # TYPE plurx_media_session_route_lookups_total counter\n",
         );
         for (index, result) in ROUTE_LOOKUP_RESULTS.iter().enumerate() {
@@ -8147,7 +8148,7 @@ mod tests {
         assert!(settling.is_empty());
     }
 
-    /// C-07 M5 (PLEX-FACADE-PAGING §5.4). The three ways a media GET route
+    /// C-07 M5 (PLEX-FACADE-PAGING §5.4). The three ways a cached route
     /// lookup is answered are three separate series, and every map-lock and
     /// sweep site the lookups pass through is recorded exactly once per pass.
     #[tokio::test]
@@ -8226,6 +8227,95 @@ mod tests {
                 "missing {line:?} in\n{exposition}"
             );
         }
+    }
+
+    /// C-07 M5 (PLEX-FACADE-PAGING §3.5 item 2). The prune histogram counts
+    /// the entries each sweep WALKS, which is the O(n) cost under the map
+    /// lock, not the entries it leaves (the gauge already says that). Time is
+    /// paused so entries expire on demand, and each of the three sweep sites
+    /// runs over expired entries: counting after `retain` would record 0
+    /// there. It also covers the gauge update when a lookup removes an
+    /// expired entry. No Store call is made, so paused time cannot fire a
+    /// lookup deadline.
+    #[tokio::test(start_paused = true)]
+    async fn each_route_sweep_counts_the_entries_it_walked_and_an_expired_lookup_lowers_the_gauge()
+    {
+        use plurx_core::cluster::membership::MembershipManager;
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let coordinator = MediaSessionCoordinator::new(MembershipManager::unavailable(), store);
+        let metrics = coordinator.route_cache_metrics();
+        let value = |name: &str| -> u64 {
+            let exposition = metrics.prometheus();
+            let prefix = format!("{name} ");
+            exposition
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix.as_str()))
+                .unwrap_or_else(|| panic!("{name} missing in\n{exposition}"))
+                .parse()
+                .expect("integer sample")
+        };
+        let sum = "plurx_media_session_route_prune_entries_sum";
+        let entries = "plurx_media_session_route_cache_entries";
+        let generation = |session_id: &str| {
+            coordinator.route_generations
+                [route_hash(session_id) % coordinator.route_generations.len()]
+            .load(std::sync::atomic::Ordering::Acquire)
+        };
+        let id = |n: u8| format!("00000000-0000-4000-8000-0000000000f{n}");
+
+        coordinator.cache_route(media_route(&id(1))).await;
+        coordinator.cache_route(media_route(&id(2))).await;
+        assert_eq!(value(entries), 2);
+        tokio::time::advance(ROUTE_CACHE_TTL).await;
+
+        // A lookup that finds its entry expired removes it and lowers the gauge.
+        assert!(coordinator.cached_route(&id(1)).await.is_none());
+        assert_eq!(value(entries), 1, "an expired lookup must lower the gauge");
+
+        // `cache_route_result` sweeps one expired entry and keeps none of it.
+        let before = value(sum);
+        coordinator.cache_route(media_route(&id(3))).await;
+        assert_eq!(
+            value(sum) - before,
+            1,
+            "insert sweep walked one expired entry"
+        );
+        assert_eq!(value(entries), 1);
+
+        // `cache_queried_route_result` sweeps two expired entries.
+        coordinator.cache_route(media_route(&id(4))).await;
+        assert_eq!(value(entries), 2);
+        tokio::time::advance(ROUTE_CACHE_TTL).await;
+        let before = value(sum);
+        assert!(coordinator
+            .cache_queried_route_result(&id(5), None, generation(&id(5)))
+            .await
+            .is_none());
+        assert_eq!(
+            value(sum) - before,
+            2,
+            "queried-insert sweep walked two expired entries"
+        );
+        assert_eq!(value(entries), 1);
+
+        // `cache_route_if_generation` sweeps two expired entries.
+        coordinator.cache_route(media_route(&id(6))).await;
+        assert_eq!(value(entries), 2);
+        tokio::time::advance(ROUTE_CACHE_TTL).await;
+        let before = value(sum);
+        assert!(
+            coordinator
+                .cache_route_if_generation(media_route(&id(7)), generation(&id(7)))
+                .await
+        );
+        assert_eq!(
+            value(sum) - before,
+            2,
+            "generation-insert sweep walked two expired entries"
+        );
+        assert_eq!(value(entries), 1);
     }
 
     /// C-07 M5 (PLEX-FACADE-PAGING §2.4, §5.4). The measurement's reading of
