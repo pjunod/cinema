@@ -2977,3 +2977,29 @@ source = "clients/apple/Sources/LiveTvCaptions.swift"
 source_anchor = "static func isSelectable(mediaType: AVMediaType, captionsAdvertised: Bool)"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testLiveCaptionsRejectSyntheticUnadvertisedCC"
+
+# M2 alternatives stay structured through admission and require a current,
+# explicit viewer action; no guessed tuning or shared-session cleanup.
+[[fixes]]
+id = "apple.live-capacity-offer-actions"
+commits = ["09d3abfbf"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "func watchOffer(_ offer: LiveTvCapacityOffer)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testWatchableCapacityOfferNeedsAnExplicitCurrentAction"
+
+[[fixes]]
+id = "apple.live-capacity-offer-envelope"
+commits = ["09d3abfbf"]
+source = "clients/apple/Sources/LiveTv.swift"
+source_anchor = "if verdict.render == \"tuner_capacity\", let capacityFailure"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLeasePreservesStructuredCapacityOffers"
+
+[[fixes]]
+id = "apple.live-capacity-offer-known-identity"
+commits = ["09d3abfbf"]
+source = "clients/apple/Sources/LiveTvCapacityOffer.swift"
+source_anchor = "static func resolve("
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testCapacityOffersResolveOnlyKnownPlayableChannels"
