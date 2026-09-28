@@ -5,6 +5,83 @@ import XCTest
 
 @MainActor
 final class LiveTvTests: XCTestCase {
+    func testLiveCaptionsRejectSyntheticUnadvertisedCC() {
+        XCTAssertFalse(LiveTvCaptions.isSelectable(mediaType: .closedCaption, captionsAdvertised: false))
+        XCTAssertTrue(LiveTvCaptions.isSelectable(mediaType: .closedCaption, captionsAdvertised: true))
+        XCTAssertTrue(LiveTvCaptions.isSelectable(mediaType: .subtitle, captionsAdvertised: false))
+        XCTAssertFalse(LiveTvCaptions.isSelectable(mediaType: .audio, captionsAdvertised: true))
+    }
+
+    func testLiveCaptionChoicesCannotChangeTheNextChannel() {
+        let captions = LiveTvCaptions()
+        let player = AVPlayer()
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        player.replaceCurrentItem(with: item)
+        captions.attach(item: item, player: player, captionsAdvertised: true)
+        let oldOff = captions.makeSelectionAction(.off)
+        oldOff()
+        XCTAssertEqual(captions.selection, .off)
+        let next = AVPlayerItem(asset: AVMutableComposition())
+        player.replaceCurrentItem(with: next)
+        captions.attach(item: next, player: player, captionsAdvertised: true)
+        oldOff()
+        XCTAssertEqual(captions.selection, .automatic, "an open predecessor menu cannot change the new channel")
+        let currentOff = captions.makeSelectionAction(.off)
+        currentOff()
+        XCTAssertEqual(captions.selection, .off, "the current menu remains enabled")
+        captions.detach()
+        player.replaceCurrentItem(with: next)
+        captions.attach(item: next, player: player, captionsAdvertised: true)
+        currentOff()
+        XCTAssertEqual(captions.selection, .automatic, "even the same item gets a new menu capability after stop")
+        captions.detach()
+    }
+
+    func testLiveCaptionNotificationsFollowOnlyCurrentAttachment() {
+        let captions = LiveTvCaptions()
+        let player = AVPlayer()
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        player.replaceCurrentItem(with: item)
+        captions.attach(item: item, player: player, captionsAdvertised: true)
+        let predecessor = captions.makeSelectionObservation(item)
+        XCTAssertTrue(predecessor())
+        captions.select(.off)
+        XCTAssertEqual(captions.summary, "Off")
+        let successor = AVPlayerItem(asset: AVMutableComposition())
+        player.replaceCurrentItem(with: successor)
+        captions.attach(item: successor, player: player, captionsAdvertised: true)
+        let successorStatus = captions.summary
+        XCTAssertFalse(predecessor(), "queued metadata must not change a new channel's caption status")
+        XCTAssertEqual(captions.summary, successorStatus)
+        captions.detach()
+        player.replaceCurrentItem(with: item)
+        captions.attach(item: item, player: player, captionsAdvertised: true)
+        XCTAssertFalse(predecessor(), "reattaching the same item cannot revive an old observation")
+        captions.detach()
+    }
+
+    func testLiveCaptionSelectionDoesNotReplaceOrResumeTheStream() {
+        let captions = LiveTvCaptions()
+        let player = AVPlayer()
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        player.replaceCurrentItem(with: item)
+        captions.attach(item: item, player: player, captionsAdvertised: true)
+        captions.select(.off)
+        XCTAssertEqual(captions.selection, .off)
+        XCTAssertEqual(captions.summary, "Off")
+        XCTAssertFalse(player.appliesMediaSelectionCriteriaAutomatically, "Off must disable system selection before tracks load")
+        captions.select(.track(0))
+        XCTAssertEqual(captions.selection, .off, "an absent service is never invented")
+        captions.select(.automatic)
+        XCTAssertEqual(captions.selection, .automatic)
+        XCTAssertTrue(player.appliesMediaSelectionCriteriaAutomatically)
+        XCTAssertTrue(player.currentItem === item, "selecting captions cannot reopen the transport")
+        XCTAssertEqual(player.rate, 0, "caption selection cannot resume a viewer pause")
+        captions.detach()
+        XCTAssertTrue(captions.choices.isEmpty)
+        XCTAssertEqual(captions.summary, "No live stream")
+    }
+
     func testLibraryChannelProgressCallbacksFollowCurrentAttachment() async {
         let controller = LibraryChannelPlayerController()
         let item = AVPlayerItem(asset: AVMutableComposition())

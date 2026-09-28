@@ -54,6 +54,7 @@ final class LiveTvPlayerController: ObservableObject {
     @Published private(set) var status: LiveTvStatus?
     @Published private(set) var delivery: LiveTvDelivery?
     let player = AVPlayer()
+    let captions = LiveTvCaptions()
     private var api: LiveTvAPI?
     private var lease: LiveTvLease?
     private var profileOrigin: String?
@@ -193,6 +194,8 @@ final class LiveTvPlayerController: ObservableObject {
         title = channel.title
         watching = info.channel
         delivery = info.delivery
+        captions.attach(item: item, player: player,
+                        captionsAdvertised: info.delivery?.reasons?.contains { $0.code == "captions_advertised" } == true)
         attachedAt = Date()
         playing = true
         player.play()
@@ -222,6 +225,8 @@ final class LiveTvPlayerController: ObservableObject {
                 switch event {
                 case .timeControl(let status, let reason):
                     self.applyTimeControl(status: status, reason: reason)
+                case .status(.readyToPlay):
+                    self.captions.refresh()
                 case .status(.failed):
                     self.itemDidFail = true
                     self.itemFailure = item.error as NSError?
@@ -586,6 +591,7 @@ final class LiveTvPlayerController: ObservableObject {
     }
 
     private func detach() {
+        captions.detach()
         remoteCommands.stop()
         heartbeat?.cancel()
         heartbeat = nil
@@ -772,6 +778,7 @@ struct LiveTvPlayerFacts: Equatable {
     let asOf: Date
     var resolution: String? = nil
     var playerState: String = "Not reported"
+    var captionStatus: String = "Not reported"
 
     static func capture(
         item: AVPlayerItem?,
@@ -779,7 +786,8 @@ struct LiveTvPlayerFacts: Equatable {
         bufferedSeconds: Double?,
         attachedAt: Date?,
         asOf: Date = Date(),
-        playerState: String = "Not reported"
+        playerState: String = "Not reported",
+        captionStatus: String = "Not reported"
     ) -> Self {
         let events = item?.accessLog()?.events.map {
             LiveTvAccessEventFacts(
@@ -799,6 +807,7 @@ struct LiveTvPlayerFacts: Equatable {
             facts.resolution = "\(Int(size.width))×\(Int(size.height))"
         }
         facts.playerState = playerState
+        facts.captionStatus = captionStatus
         return facts
     }
 
@@ -1056,7 +1065,7 @@ struct LiveTvStreamInfoPanel: View {
             PlaybackInfoFact(id: "status", label: "Server state", value: status?.state ?? "Not reported", note: playbackInfoExplanation("status"), group: "Server work"),
             PlaybackInfoFact(id: "device_audio", label: "Device audio output", value: "Not reported", note: "Track metadata does not confirm speaker or HDMI output."),
             PlaybackInfoFact(id: "decode_audio", label: "Stream audio track", value: plan?.audioDescription ?? "Not reported", note: playbackInfoExplanation("decode_audio")),
-            PlaybackInfoFact(id: "subtitles", label: "Subtitles", value: "Not reported"),
+            PlaybackInfoFact(id: "subtitles", label: "Subtitles", value: player.captionStatus, note: "Selected stream track; does not confirm rendered caption text."),
             PlaybackInfoFact(id: "player_state", label: "Player state", value: player.playerState),
             PlaybackInfoFact(id: "client_loaded", label: "Buffered on device", value: seconds(player.bufferedSeconds), note: playbackInfoExplanation("client_loaded"), group: "Buffer & delivery"),
             PlaybackInfoFact(id: "live_edge", label: "Behind stream live edge", value: seconds(player.behindEdgeSeconds), note: "Behind latest available media; not broadcast delay.", group: "Live stream & reception"),
@@ -2336,7 +2345,8 @@ struct LiveTvView: View {
                     item: live.player.currentItem,
                     behindEdgeSeconds: live.behindEdgeSeconds,
                     bufferedSeconds: live.bufferedSeconds,
-                    attachedAt: live.attachedAt, asOf: context.date, playerState: state
+                    attachedAt: live.attachedAt, asOf: context.date, playerState: state,
+                    captionStatus: live.captions.summary
                 )
                 LiveTvStreamInfoPanel(
                     programme: live.airing(channel, now: Int(context.date.timeIntervalSince1970)),
@@ -2499,6 +2509,7 @@ struct LiveTvView: View {
             .focusEffectDisabled()
             #endif
             if live.playing {
+                LiveTvCaptionMenu(captions: live.captions)
                 Button(muted ? "Unmute" : "Mute") {
                     muted.toggle()
                     live.player.isMuted = muted
@@ -2785,6 +2796,7 @@ struct LiveTvView: View {
                 Text(detail).font(.system(size: 12)).foregroundStyle(Palette.muted).lineLimit(1)
             }
             Spacer(minLength: 4)
+            LiveTvCaptionMenu(captions: live.captions).labelStyle(.iconOnly)
             Button { muted.toggle(); live.player.isMuted = muted } label: {
                 Image(systemName: muted ? "speaker.slash" : "speaker.wave.2")
                     .frame(width: 32, height: 32)
@@ -3479,6 +3491,7 @@ struct LiveTvView: View {
                         )
                     }
                     .buttonStyle(LiveTvChannelButtonStyle())
+                    .accessibilityIdentifier("live-tv-channel-\(channel.guideNumber)")
                     .focusEffectDisabled()
                     .focused($focusedChannelId, equals: channel.id)
                     .disabled(!channel.watchable)
