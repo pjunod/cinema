@@ -156,11 +156,7 @@ impl TranscodeManager {
     ) -> Result<ResolvedTranscode, String> {
         use plurx_core::transcode::ArtifactQualification;
 
-        #[cfg(test)]
-        if self
-            .force_artifact_qualification
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
+        if self.hooks.get().forces_artifact_qualification() {
             return self.resolve_movie_plan_with_qualification(
                 file,
                 options,
@@ -248,14 +244,7 @@ impl TranscodeManager {
         )
         .map_err(|error| error.to_string())?;
         let qualifying = qualification.enforces_receipt();
-        #[allow(unused_mut)]
-        let mut decoders = self.decoders.clone();
-        #[cfg(test)]
-        if decoders.is_empty() {
-            if let Some(codec) = facts.codec() {
-                decoders.push(codec.to_owned());
-            }
-        }
+        let decoders = self.decoders.clone();
         let capabilities = DecodeCapabilities::new(
             identity,
             Vec::new(),
@@ -372,9 +361,7 @@ impl TranscodeManager {
         };
         let catalog = DecodeCatalogMetadata::from_media_file(file)
             .map_err(|error| format!("decoder catalog facts are invalid: {error}"))?;
-        #[cfg(test)]
-        let fact_source =
-            fact_source.with_final_identity_delay(self.decode_source_final_identity_delay);
+        let fact_source = self.hooks.get().decode_fact_source(fact_source);
         let facts = self
             .decode_facts
             .get_or_probe(

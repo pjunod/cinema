@@ -213,10 +213,10 @@ async fn complete_subtitle_playlist_response(
     .await
     .map_err(|_| response_publication_timeout())?;
     let response = playlist_response(subtitle_media_playlist(&video).into_bytes());
-    #[cfg(test)]
     state
         .transcode
-        .pause_subtitle_playlist_commit_for_test()
+        .hooks()
+        .before_subtitle_playlist_commit()
         .await;
     // Carry the owner resolved with the exact video bytes. A rolling wait may
     // span fallback, and a VOD attachment may be replaced under the same id;

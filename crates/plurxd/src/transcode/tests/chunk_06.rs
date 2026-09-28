@@ -398,25 +398,9 @@
             ),
             child_transition: Mutex::new(()),
             replacing_child: AtomicBool::new(false),
-            replacement_pause: std::sync::Mutex::new(None),
-            activity_detail_pause: std::sync::Mutex::new(None),
-            control_applied_pause: std::sync::Mutex::new(None),
             terminal_response_pending: Arc::new(AtomicBool::new(false)),
             terminal_control: std::sync::Mutex::new(None),
-            flow_completion_pause: std::sync::Mutex::new(None),
-            playlist_publication_pause: std::sync::Mutex::new(None),
-            producer_install_pause: std::sync::Mutex::new(None),
-            refresh_after_read_pause: std::sync::Mutex::new(None),
-            path_owner_sample_pause: std::sync::Mutex::new(None),
-            retention_delete_pause: std::sync::Mutex::new(None),
-            response_projection_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            first_media_owner_claim_pause: std::sync::Mutex::new(None),
-            retirement_started: AtomicBool::new(false),
-            #[cfg(test)]
-            retirement_cleanup_handoff_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            scratch_cleanup_pause: std::sync::Mutex::new(None),
+            hooks: crate::seam_hooks::HookSlot::new(&NoopSessionHooks),
             cached,
             _cache_reader: None,
             subtitle_handle: None,
@@ -1065,11 +1049,10 @@
             .vod_playlist("vod-authority")
             .await
             .expect("VOD publication fixture");
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *manager
-            .vod_publication_admission_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let pause = manager
+            .test_hooks()
+            .vod_publication_admission
+            .arm("vod_publication_admission");
 
         let authorization = tokio::spawn({
             let manager = Arc::clone(&manager);
@@ -1084,9 +1067,9 @@
                     .await
             }
         });
-        pause.wait().await;
+        let held = pause.reached().await;
         fence.validation_set_ready(false).await;
-        pause.wait().await;
+        held.release();
 
         assert!(matches!(
             authorization.await.expect("VOD authorization task"),
@@ -1095,6 +1078,61 @@
         assert!(
             manager.serving_ready.load(Acquire),
             "the async teardown mirror is not needed for in-flight rejection"
+        );
+    }
+
+    /// S-14 M8 point position: the VOD publication point follows the serving
+    /// authority's admission, so a publication the authority refuses never
+    /// reaches it. (That it precedes the owner check is
+    /// `in_flight_vod_publication_rechecks_direct_serving_authority`.)
+    #[tokio::test]
+    async fn vod_publication_point_follows_the_serving_admission() {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("VOD admission root");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let fence =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let manager = Arc::new(
+            TranscodeManager::new(
+                Arc::clone(&store),
+                root.path().join("manager"),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            )
+            .with_serving_authority(fence.authority()),
+        );
+        manager
+            .install_vod_http_test_session("vod-admission", file_id, root.path())
+            .await;
+        let publication = manager
+            .vod_playlist("vod-admission")
+            .await
+            .expect("VOD publication fixture");
+        let point = manager
+            .test_hooks()
+            .vod_publication_admission
+            .arm("vod_publication_admission");
+        fence.validation_set_ready(false).await;
+        assert!(matches!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                manager.authorize_response_publication(
+                    "vod-admission",
+                    &publication.owner,
+                    MediaResponsePublication::attempt_media("playlist", Some("index.m3u8")),
+                    Instant::now() + Duration::from_secs(1),
+                ),
+            )
+            .await
+            .expect("a refused admission answers without waiting"),
+            Err(MediaResponsePublicationRejection::StateChanged)
+        ));
+        assert!(
+            !point.was_reached(),
+            "the serving admission comes before the point"
         );
     }
 
@@ -1370,11 +1408,7 @@
         let session =
             watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
         reserve_test_admissions(&session, &admissions);
-        let owner_pause = Arc::new(LifecycleTestPause::new());
-        *session
-            .first_media_owner_claim_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&owner_pause));
+        let owner_pause = session.test_hooks().first_media_owner_claim.arm("first_media_owner_claim");
         let reap_pause = Arc::new(LifecycleTestPause::new());
         session
             .child
@@ -1394,7 +1428,7 @@
             .await
             .expect("first-media settlement capacity");
         handoff.settle_for_test(true);
-        await_lifecycle_pause(&owner_pause).await;
+        let owner_pause_held = owner_pause.reached().await;
         assert!(!session.actor_prepublication_producer.load(Acquire));
         assert!(!session.first_media_handoff_applied.load(Acquire));
         assert!(
@@ -1411,7 +1445,7 @@
         assert_eq!(admissions.in_use(), 1);
         assert_eq!(admissions.software_in_use(), 2);
 
-        owner_pause.release.notify_one();
+        owner_pause_held.release();
         assert!(applied.await.expect("first-media handoff application"));
         reap_pause.release.notify_one();
         assert!(retirement.await.expect("retirement task"));
@@ -1513,11 +1547,7 @@
         let session =
             watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
         reserve_test_admissions(&session, &admissions);
-        let handoff_pause = Arc::new(LifecycleTestPause::new());
-        *session
-            .retirement_cleanup_handoff_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&handoff_pause));
+        let handoff_pause = session.test_hooks().retirement_cleanup_handoff.arm("retirement_cleanup_handoff");
         manager
             .sessions
             .lock()
@@ -1538,7 +1568,7 @@
                     .await
             }
         });
-        await_lifecycle_pause(&handoff_pause).await;
+        let handoff_pause_held = handoff_pause.reached().await;
         assert!(session.prepublication_cleanup_active.load(Acquire));
         assert_eq!(admissions.in_use(), 1);
         assert_eq!(admissions.software_in_use(), 2);
@@ -1573,7 +1603,7 @@
             .await
             .expect_err("retirement task must be cancelled")
             .is_cancelled());
-        handoff_pause.release.notify_one();
+        handoff_pause_held.release();
         let joined = follower
             .await
             .expect("prepublication follower task")
@@ -1610,16 +1640,8 @@
         let admissions = Admissions::new();
         let session = watchdog_session(&scratch, Some(long_running_child()), false);
         reserve_test_admissions(&session, &admissions);
-        let handoff_pause = Arc::new(LifecycleTestPause::new());
-        *session
-            .retirement_cleanup_handoff_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&handoff_pause));
-        let scratch_pause = Arc::new(LifecycleTestPause::new());
-        *session
-            .scratch_cleanup_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&scratch_pause));
+        let handoff_pause = session.test_hooks().retirement_cleanup_handoff.arm("retirement_cleanup_handoff");
+        let scratch_pause = session.test_hooks().scratch_cleanup.arm("scratch_cleanup");
         manager
             .sessions
             .lock()
@@ -1632,12 +1654,16 @@
             let session = Arc::clone(&session);
             async move { manager.retire_session("post-media", &session).await }
         });
-        await_lifecycle_pause(&handoff_pause).await;
+        let handoff_pause_held = handoff_pause.reached().await;
         assert!(session.retirement_cleanup_started.load(Acquire));
         assert!(!session.prepublication_cleanup_active.load(Acquire));
         assert_eq!(admissions.in_use(), 1);
         assert_eq!(admissions.software_in_use(), 2);
         assert!(manager.sessions.lock().await.contains_key("post-media"));
+        assert!(
+            session.child_transition.try_lock().is_err(),
+            "the handoff point comes before retirement releases the child transition"
+        );
         let follower = tokio::spawn({
             let manager = Arc::clone(&manager);
             let session = Arc::clone(&session);
@@ -1658,7 +1684,7 @@
             .await
             .expect_err("retirement waiter must cancel")
             .is_cancelled());
-        handoff_pause.release.notify_one();
+        handoff_pause_held.release();
         let joined = follower
             .await
             .expect("retirement follower task")
@@ -1666,7 +1692,7 @@
         assert_eq!(joined.participation, RollingRetirementParticipation::Joined);
         assert_eq!(joined.cause.as_ref(), "ended");
         assert!(joined.removed);
-        await_lifecycle_pause(&scratch_pause).await;
+        let scratch_pause_held = scratch_pause.reached().await;
         assert!(!manager.sessions.lock().await.contains_key("post-media"));
         assert!(session.child.lock().await.is_none());
         assert_eq!(admissions.in_use(), 0);
@@ -1675,7 +1701,7 @@
             scratch.exists(),
             "physical settlement must not wait for unique scratch I/O"
         );
-        spawn_rolling_scratch_cleanup_owner("post-media-duplicate".to_owned(), &session, None);
+        spawn_rolling_scratch_cleanup_owner("post-media-duplicate".to_owned(), &session);
         tokio::task::yield_now().await;
         assert!(session.scratch_cleanup_started.load(Acquire));
         assert!(
@@ -1709,7 +1735,7 @@
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].reason.as_deref(), Some("ended"));
 
-        scratch_pause.release.notify_one();
+        scratch_pause_held.release();
         await_scratch_removed(&scratch).await;
         assert!(!scratch.exists());
     }
@@ -1734,11 +1760,7 @@
             Pipeline::Cpu,
         ));
         let session = watchdog_session(&cached_dir, None, true);
-        let handoff_pause = Arc::new(LifecycleTestPause::new());
-        *session
-            .retirement_cleanup_handoff_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&handoff_pause));
+        let handoff_pause = session.test_hooks().retirement_cleanup_handoff.arm("retirement_cleanup_handoff");
         manager
             .sessions
             .lock()
@@ -1750,13 +1772,13 @@
             let session = Arc::clone(&session);
             async move { manager.retire_session("cached", &session).await }
         });
-        await_lifecycle_pause(&handoff_pause).await;
+        let handoff_pause_held = handoff_pause.reached().await;
         retirement.abort();
         assert!(retirement
             .await
             .expect_err("cached retirement waiter must cancel")
             .is_cancelled());
-        handoff_pause.release.notify_one();
+        handoff_pause_held.release();
         tokio::time::timeout(Duration::from_secs(2), async {
             while manager.sessions.lock().await.contains_key("cached") {
                 tokio::task::yield_now().await;
@@ -1790,11 +1812,7 @@
             Pipeline::Cpu,
         ));
         let session = watchdog_session(&cached_dir, None, true);
-        let handoff_pause = Arc::new(LifecycleTestPause::new());
-        *session
-            .retirement_cleanup_handoff_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&handoff_pause));
+        let handoff_pause = session.test_hooks().retirement_cleanup_handoff.arm("retirement_cleanup_handoff");
         manager
             .sessions
             .lock()
@@ -1803,7 +1821,7 @@
         manager.active_session_count.store(1, Relaxed);
 
         manager.fail_cached_session_integrity("cache-integrity", &session, "test");
-        await_lifecycle_pause(&handoff_pause).await;
+        let handoff_pause_held = handoff_pause.reached().await;
         assert!(manager
             .sessions
             .lock()
@@ -1825,7 +1843,7 @@
             "admin retirement must join the paused cache-integrity winner"
         );
 
-        handoff_pause.release.notify_one();
+        handoff_pause_held.release();
         let joined = follower
             .await
             .expect("cache integrity follower task")
@@ -1873,11 +1891,7 @@
             session.supersession_user = "[\"user_id\",1]".to_owned();
             session.playback_id = "http-vod-test".to_owned();
         }
-        let first_pause = Arc::new(LifecycleTestPause::new());
-        *first
-            .retirement_cleanup_handoff_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&first_pause));
+        let first_pause = first.test_hooks().retirement_cleanup_handoff.arm("retirement_cleanup_handoff");
         {
             let mut sessions = manager.sessions.lock().await;
             sessions.insert("rolling-a".to_owned(), Arc::clone(&first));
@@ -1893,7 +1907,7 @@
                     .await
             }
         });
-        await_lifecycle_pause(&first_pause).await;
+        let first_pause_held = first_pause.reached().await;
         assert!(
             !manager
                 .vod
@@ -1907,7 +1921,7 @@
             .await
             .expect_err("supersession waiter must cancel")
             .is_cancelled());
-        first_pause.release.notify_one();
+        first_pause_held.release();
 
         tokio::time::timeout(Duration::from_secs(2), async {
             while !manager.sessions.lock().await.is_empty()
@@ -1943,11 +1957,7 @@
         ));
         let session =
             watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
-        let handoff_pause = Arc::new(LifecycleTestPause::new());
-        *session
-            .retirement_cleanup_handoff_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&handoff_pause));
+        let handoff_pause = session.test_hooks().retirement_cleanup_handoff.arm("retirement_cleanup_handoff");
         manager
             .sessions
             .lock()
@@ -1960,14 +1970,14 @@
             let session = Arc::clone(&session);
             async move { manager.retire_session("provisional", &session).await }
         });
-        await_lifecycle_pause(&handoff_pause).await;
+        let handoff_pause_held = handoff_pause.reached().await;
         assert!(
             manager.adopt_session_id("provisional", "durable").await,
             "durable activation may rename the exact Arc while End is in flight"
         );
         assert!(manager.sessions.lock().await.contains_key("durable"));
 
-        handoff_pause.release.notify_one();
+        handoff_pause_held.release();
         assert!(retirement.await.expect("retirement task"));
         assert!(
             !manager.sessions.lock().await.contains_key("durable"),

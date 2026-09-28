@@ -1547,12 +1547,7 @@
         )
         .await;
 
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *fixture
-            .session
-            .control_applied_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let pause = fixture.session.test_hooks().control_applied.arm("control_applied");
         let client = uuid::Uuid::new_v4().to_string();
         let request = {
             let manager = Arc::clone(&fixture.state.transcode);
@@ -1584,7 +1579,7 @@
 
         // The actor has accepted, renewed, retained demand, and issued its
         // flow ticket, but the request still owns the child transition gate.
-        pause.wait().await;
+        let _held = pause.reached().await;
         request.abort();
         let request_error = match request.await {
             Ok(_) => panic!("request unexpectedly completed"),
@@ -1634,6 +1629,82 @@
         assert_eq!(status.hold_reason, Some(AheadHoldReason::Demand));
     }
 
+    /// S-14 M8 point positions. The flow worker's point comes after producer
+    /// policy ran (the accepted hold has suspended the producer), and the
+    /// control response's point comes before the response waits for its flow
+    /// ticket: the response reaches its point while the flow worker is held.
+    #[tokio::test]
+    async fn control_and_flow_points_bracket_producer_policy() {
+        let dir = crate::test_tempdir().expect("session dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        fixture.mark_started().await;
+        activate_control_route(
+            fixture.store.as_ref(),
+            &session_id,
+            &generation,
+            "test-node",
+        )
+        .await;
+        let flow = fixture
+            .session
+            .test_hooks()
+            .flow_completion
+            .arm("flow_completion");
+        let applied = fixture
+            .session
+            .test_hooks()
+            .control_applied
+            .arm("control_applied");
+        let request = {
+            let manager = Arc::clone(&fixture.state.transcode);
+            let session_id = session_id.clone();
+            let generation = generation.clone();
+            tokio::spawn(async move {
+                let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+                    crate::playback_control::ClientPlatform::Web,
+                );
+                snapshot.demand = crate::playback_control::PlaybackDemand::Hold;
+                snapshot.playback_rate = 0.0;
+                snapshot.render_state = crate::playback_control::RenderState::Waiting;
+                let client = uuid::Uuid::new_v4().to_string();
+                manager
+                    .hls_session_control(crate::playback_control::LocalControlRequest {
+                        session_id: &session_id,
+                        generation: &generation,
+                        owner_node_id: "test-node",
+                        owner_epoch: 1,
+                        client_instance_id: &client,
+                        sequence: 1,
+                        snapshot,
+                        prepared_successor:
+                            crate::playback_control::PreparedSuccessorObservation::NotRequested,
+                    })
+                    .await
+            })
+        };
+
+        let flow_held = flow.reached().await;
+        assert!(
+            fixture.session.suspended.load(Acquire),
+            "producer policy has applied the accepted hold before the flow point"
+        );
+        let applied_held = applied.reached().await;
+        applied_held.release();
+        flow_held.release();
+        assert!(
+            matches!(
+                tokio::time::timeout(Duration::from_secs(10), request)
+                    .await
+                    .expect("the control answers")
+                    .expect("control task"),
+                Some(Ok(_))
+            ),
+            "the accepted hold answers once its ticket completes"
+        );
+    }
+
     #[tokio::test]
     async fn retirement_before_flow_completion_cannot_escape_as_active_control() {
         let dir = crate::test_tempdir().expect("session dir");
@@ -1647,12 +1718,7 @@
             "test-node",
         )
         .await;
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *fixture
-            .session
-            .flow_completion_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let pause = fixture.session.test_hooks().flow_completion.arm("flow_completion");
         let client = uuid::Uuid::new_v4().to_string();
         let control = {
             let manager = Arc::clone(&fixture.state.transcode);
@@ -1679,7 +1745,7 @@
 
         // The actor accepted and producer policy ran, but the ticket has not
         // yet released the HTTP response. Retirement wins in that interval.
-        pause.wait().await;
+        let pause_held = pause.reached().await;
         assert!(
             fixture
                 .state
@@ -1687,7 +1753,7 @@
                 .stop_session(&session_id, "test-retirement")
                 .await
         );
-        pause.wait().await;
+        pause_held.release();
         assert!(matches!(
             control.await.expect("control task"),
             Some(Err(
@@ -1995,18 +2061,14 @@
             .lock()
             .await
             .insert("selected".to_owned(), Arc::clone(&session));
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .activity_detail_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let pause = session.test_hooks().activity_detail.arm("activity_detail");
         let reader = Arc::clone(&manager);
         let detail = tokio::spawn(async move {
             reader
                 .delivery_details_bounded(&["selected".to_owned()], 1)
                 .await
         });
-        pause.wait().await;
+        let pause_held = pause.reached().await;
 
         assert_eq!(
             tokio::time::timeout(Duration::from_millis(100), manager.active_sessions())
@@ -2014,7 +2076,7 @@
                 .expect("another map operation must not wait on selected-session telemetry"),
             1
         );
-        pause.wait().await;
+        pause_held.release();
         assert_eq!(detail.await.expect("activity reader").len(), 1);
     }
 

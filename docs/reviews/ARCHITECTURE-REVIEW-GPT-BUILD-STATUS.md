@@ -1,10 +1,10 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 07:44 UTC · **Audited main:** `b08b180b38caf780899dc9097146304759197f0f`
+**Status:** open · **Updated:** 2026-09-28 08:04 UTC · **Audited main:** `c7635af5e758bad9c84cb350175f965e675ea390`
 
 ## Current work
 
-[PR #590](http://192.168.4.7:3000/noirr/plurx/pulls/590) has exactly one completed adversarial review. Its finding and observed fast-lane failures are fixed. Exact candidate `8c5619a4132f12a3940ebb7053c704a108ee9f98` includes current main; pinned Rust1.97.1 check and Clippy pass. [Fast lane #3478](http://192.168.4.7:3000/noirr/plurx/actions/runs/3478) is running against exact base `b08b180b38caf780899dc9097146304759197f0f`. Merge and rollout follow selected green jobs and the qualification receipt.
+[PR #590](http://192.168.4.7:3000/noirr/plurx/pulls/590) has exactly one completed adversarial review. Its finding and observed fast-lane failures are fixed. Exact candidate `2aaf07356e99490ec0cf289b490d482c77b79dc5` includes current main; pinned Rust1.97.1 check and Clippy pass. The new selected fast lane is qualifying against exact base `c7635af5e758bad9c84cb350175f965e675ea390`. Peer581 Session/TranscodeManager changes are integrated; the combined ownership census1112 passes its one affected case. Old3478 was canceled after main moved. Merge and rollout follow selected green jobs and the qualification receipt.
 
 [Draft #594](http://192.168.4.7:3000/noirr/plurx/pulls/594) contains ordinary native caption controls and explicit known-channel capacity actions. Apple198 and Android135 production and regression sources compile; signed apps and physical runner products are retained. Its sole independent review and behavior tests have not run. Integrate actual590 main before review, address findings, execute focused regressions and required selected fast lane, then merge green.
 
@@ -22,7 +22,7 @@
 
 | Receipt | SHA-256 | Scope |
 |---|---|---|
-| `/private/tmp/codex-pr590-final-compiler-v8-20260928/receipt.json` | `d2982ed3bdb8f7ae4e5801397c775f11dd931ad48127a28abcf196e2f19d375f` | Exact8c candidate/baseb08, pinned check and Clippy; no tests. |
+| `/private/tmp/codex-pr590-final-compiler-v9-20260928/receipt.json` | `f37c4ad996d8fbd6a593af995b752c0d02c7c14de1f2a38495ead627e143675d` | Exact2aaf candidate/basec763, pinned check and Clippy; no tests. |
 | `/private/tmp/codex-pr590-current-base-checks-20260928/receipt.json` | `863d38f07dbd6d0bd228ea035f775e08006c00381f3105f2e95487b16709f774` | Actual2585 compiler and focused web, ownership and process checks; current source blob parity retained. |
 | `/private/tmp/codex-pr590-metadata-focused-binding-20260928.json` | `296447d9bd678f89f9985ecca058837223159f9bc324beef16bb7aa558caca50` | Actual focused metadata1/0 execution and source binding; identity amendments do not relabel its original provenance. |
 | `/private/tmp/codex-apple198-final-source-artifact-handoff-20260928/receipt.json` | `b9d2c20948b104fc4051777b9f8d4055b03d65e4ff1d92d7f995136547a117e8` | Signed production, actual Release test-source compilation and physical runner; no tests or installs. |
