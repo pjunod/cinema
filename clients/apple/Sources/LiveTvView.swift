@@ -4308,11 +4308,13 @@ struct LiveTvView: View {
         temporaryGuide = false
     }
 
-    #if os(tvOS)
     /// A sheet over the cover has closed: focus goes back to the pill that
     /// opened it (Pause/Play if nothing recorded one), deferred past the
-    /// dismissal for the same reason every other cover write is.
+    /// dismissal for the same reason every other cover write is. Called from
+    /// the sheets' `onDismiss`, which is shared code; touch has no focus to
+    /// return, so it is a no-op there.
     private func returnFocusToCoverSheetOpener() {
+        #if os(tvOS)
         // More → Layout: More's dismissal arrives with Layout already open.
         // The opener is Layout's to restore, so it is kept.
         guard fullscreen, overlayVisible, !temporaryGuide,
@@ -4328,6 +4330,7 @@ struct LiveTvView: View {
             else { return }
             focusedControl = opener
         }
+        #endif
     }
 
     /// A programme sheet opened from a grid cell hands focus back to that
@@ -4335,12 +4338,13 @@ struct LiveTvView: View {
     /// page remembered as it was focused. Left to the engine, the dismissal
     /// put focus at the top of the page.
     private func returnGuideFocusAfterProgrammeSheet() {
+        #if os(tvOS)
         guard browse == .guide, focusedGuideChannelId != nil else { return }
         guideFocusRequest &+= 1
         guideFocusRequested = true
         browseFocusRequestedAt = Date()
+        #endif
     }
-    #endif
 
     /// Every ten-foot press lands here, already decided by the shared table.
     /// The one ruling this must preserve: a direction on a hidden overlay only
