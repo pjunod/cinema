@@ -3051,3 +3051,12 @@ source = "clients/apple/Sources/LiveTvCapacityOffer.swift"
 source_anchor = "static func resolve("
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testCapacityOffersResolveOnlyKnownPlayableChannels"
+
+# Real Media3 track models need faithful Android string semantics on the host JVM.
+[[fixes]]
+id = "android.live-caption-host-text-operations"
+commits = ["677d7c499dfc"]
+source = "clients/android/app/src/test/java/android/text/TextUtils.java"
+source_anchor = "public static boolean isEmpty(CharSequence value)"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvCaptionsTest.kt"
+test_anchor = "fun captionOptionsNameOnlyActualTextTracksAndServices()"
