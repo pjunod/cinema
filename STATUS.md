@@ -302,57 +302,14 @@ The fast lane (`make unit`) was green on `main`; the red was all in what only
   by design on a host that cannot. With `cap_net_bind_service` on nuc3 all
   four pass. Not a code defect.
 
-## Resume stopped working on every client — reproduced, half fixed
-
-`PR #438`, branch `fix/resume-progress-zero-clobber`, **merged, NOT deployed**.
-RCA: [docs/streaming/RESUME-ROLLING-PUBLICATION-RCA.md](docs/streaming/RESUME-ROLLING-PUBLICATION-RCA.md).
-
-Reported 2026-09-22: "resume doesn't work for anything. it all just starts at
-the beginning now. It's been that way at least a day or two." Apple TV, iOS and
-web; the item page offers "Resume 13:04" and playback begins at zero.
-
-The watch state and the clients are innocent. The position is stored, the API
-returns it, the Resume affordance is drawn from it, the play request carries it
-and ffmpeg is given the seek. What breaks is the **rolling live-HLS recovery
-path**, taken whenever a file's cluster fragment index is still pending
-(`vod_index_pending`); a file with a complete index is served the whole title
-and resumes correctly. 4151 of 6201 files are indexed, and the backfill that
-`637ec781` unblocked on 09-19 keeps moving files across that boundary — which
-is why this arrived everywhere at once on the reported date.
-
-Localised from the shipped web client with the node instrumented. The server
-publishes a valid, growing playlist; the client fetches it and **never requests
-`init.mp4` or a single segment**, because hls.js's MediaSource is created,
-assigned to the element, and never reaches `open` — no SourceBuffer, stream
-controller IDLE, then the startup deadline and a server-side retirement. The
-`retired while waiting for scratch capacity` line that this chases is a fence
-raised after the session is already dead, not a budget refusal; the reservation
-is 315.8 MiB against an 8 GiB ledger and the subsystem is offset-blind.
-
-What #438 fixes is the ratchet, not the startup: while the player waits,
-`reportProgress` posts position 0 every five seconds over the saved resume
-point — eight of them in one reproduction — so a single failed startup destroys
-the resume position permanently. A zero beat now needs a witness, the current
-attachment having reached a timeline; a positioned beat needs none, which keeps
-a predecessor's close-time save intact.
-
-Still open: why the MediaSource never opens (the evidence points at
-`attachHls`'s internal pause reaching `handlePlaybackTransportEvent` as a
-viewer pause and stopping hls startup, and wants one reproduction with a real
-click); the inverted grant-wait deadline at `copyseg.rs:348`, which applies the
-bound to the session that *has* published; retirement fencing the writers it
-then waits for, which loses the final segment and `ENDLIST` of every killed
-copy session and misreports every retirement as a capacity problem; and 30
-titles carrying `watched = 1` below the threshold, which suppresses their
-resume outright.
-
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24, 2026-09-25 and 2026-09-26
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26 and 2026-09-27
 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-09-22 | Resume stopped working on every client — reproduced, half fixed | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-21 | An abandoned replacement held its player's key — reported, diagnosed, fixed | [docs/playback-control/STATUS-HISTORY.md](docs/playback-control/STATUS-HISTORY.md) |
 | 2026-09-20 | Architecture review, revision 3 — Astra's review merged | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-20 | Implementation plans for the architecture review, and one work board for every vendor | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
