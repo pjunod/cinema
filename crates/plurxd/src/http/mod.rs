@@ -7615,6 +7615,120 @@ mod tests {
         (router(state.clone()), state, fake)
     }
 
+    async fn test_state_with_playable_optical() -> (
+        Router,
+        AppState,
+        Arc<plurx_core::testfixtures::optical::FakeOpticalHost>,
+    ) {
+        use plurx_core::domain::AudioStream;
+        use plurx_core::optical::{
+            inspection_to_store, InspectedChapter, InspectedStream, OpticalDriveState,
+            OpticalFormat, ResolvedInput,
+        };
+        use plurx_core::playback::{PlaybackMediaFacts, SourceDelivery};
+        use plurx_core::testfixtures::optical::dvd_inspection_fixture;
+
+        let (_discarded_router, state, fake) = test_state_with_optical(OpticalFormat::Dvd).await;
+        let snapshot = state
+            .optical
+            .manager()
+            .snapshot("fixture")
+            .expect("fixture drive snapshot");
+        let (generation, current_disc_id) = match snapshot.state {
+            OpticalDriveState::Ready {
+                media_generation,
+                disc_id,
+            } => (media_generation, disc_id),
+            state => panic!("fixture drive is not ready: {state:?}"),
+        };
+        let source = plurx_core::testfixtures::source("h264");
+        let probe = std::process::Command::new(plurx_core::testfixtures::ffprobe())
+            .args([
+                "-v",
+                "error",
+                "-show_streams",
+                "-show_format",
+                "-of",
+                "json",
+            ])
+            .arg(&source)
+            .output()
+            .expect("probe authored optical fixture");
+        assert!(
+            probe.status.success(),
+            "probing authored optical fixture failed: {}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        let probe_json = String::from_utf8(probe.stdout).expect("UTF-8 probe document");
+        let facts = PlaybackMediaFacts {
+            duration_ms: Some(12_000),
+            container: Some("matroska,webm".to_owned()),
+            video_codec: Some("h264".to_owned()),
+            width: Some(640),
+            height: Some(360),
+            bitrate: Some(1_000_000),
+            audio_streams: vec![AudioStream {
+                index: 1,
+                codec: "aac".to_owned(),
+                channels: Some(2),
+                default: true,
+                ..AudioStream::default()
+            }],
+            probed: true,
+            source_delivery: SourceDelivery::ManagedOpticalTitle,
+            ..PlaybackMediaFacts::default()
+        };
+        let mut response = dvd_inspection_fixture(&generation);
+        let title = response.disc.titles.first_mut().expect("fixture title");
+        title.duration_ms = Some(12_000);
+        title.facts = facts;
+        title.probe_json = probe_json;
+        title.streams = vec![
+            InspectedStream {
+                index: 0,
+                kind: "video".to_owned(),
+                codec: Some("h264".to_owned()),
+                language: None,
+                title: None,
+                channels: None,
+                default: true,
+                forced: false,
+            },
+            InspectedStream {
+                index: 1,
+                kind: "audio".to_owned(),
+                codec: Some("aac".to_owned()),
+                language: None,
+                title: None,
+                channels: Some(2),
+                default: true,
+                forced: false,
+            },
+        ];
+        title.chapters = vec![
+            InspectedChapter {
+                index: 0,
+                start_ms: Some(0),
+                accurate: true,
+            },
+            InspectedChapter {
+                index: 1,
+                start_ms: Some(6_000),
+                accurate: true,
+            },
+        ];
+        let inspection =
+            inspection_to_store(&response, 1_750_000_000_001).expect("playable fixture inspection");
+        assert_eq!(inspection.disc.disc_id, current_disc_id);
+        state
+            .store
+            .upsert_optical_inspection(&inspection)
+            .await
+            .expect("publish playable fixture facts");
+        fake.push_resolution(Ok(ResolvedInput::File { path: source }));
+        (router(state.clone()), state, fake)
+    }
+
     #[tokio::test]
     async fn optical_http_contract_is_path_free_and_generation_fenced() {
         use plurx_core::optical::OpticalFormat;
@@ -7910,6 +8024,126 @@ mod tests {
             .events()
             .iter()
             .any(|event| matches!(event, FakeOpticalEvent::Resolve { .. })));
+    }
+
+    #[tokio::test]
+    async fn optical_http_session_uses_the_existing_immutable_vod_surface() {
+        use plurx_core::optical::OpticalDriveState;
+
+        let (app, state, _fake) = test_state_with_playable_optical().await;
+        let admin = setup_admin(&app).await;
+        let (status, disc) = call(
+            &app,
+            get(
+                "/api/v1/optical/drives/test-node%3Afixture/disc",
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "disc discovery: {disc}");
+        let disc_id = disc["drive"]["disc"]["id"].as_str().expect("disc id");
+        let generation = disc["drive"]["disc"]["media_generation"]
+            .as_str()
+            .expect("media generation");
+
+        let (status, started) = call(
+            &app,
+            post(
+                "/api/v1/optical/drives/test-node%3Afixture/titles/title-1/sessions",
+                Some(&admin),
+                json!({
+                    "expected_disc_id": disc_id,
+                    "media_generation": generation,
+                    "angle": 1,
+                    "playback_id": "fixture-player",
+                    "request_id": "fixture-request",
+                    "start": 0.0,
+                    "height": 360,
+                    "audio": 1,
+                    "subtitle_burn": null,
+                    "audio_offset_ms": 0,
+                    "block_budget_secs": 30.0,
+                    "caps": {"v": 2}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "start optical session: {started}");
+        assert_eq!(started["vod"], true);
+        assert_eq!(started["delivered_dynamic_range"], "sdr");
+        assert_eq!(
+            started["plan_notes"][0],
+            "managed optical source: encoded VOD"
+        );
+        let session_id = started["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_owned();
+        let playlist_url = started["playlist_url"]
+            .as_str()
+            .expect("playlist URL")
+            .to_owned();
+        assert_eq!(
+            state
+                .optical
+                .manager()
+                .snapshot("fixture")
+                .expect("busy drive")
+                .state,
+            OpticalDriveState::Busy {
+                media_generation: generation.to_owned(),
+                disc_id: disc_id.to_owned(),
+                title_id: "title-1".to_owned(),
+                session_id: session_id.clone(),
+            }
+        );
+
+        let (status, playlist) = call_text(&app, get(&playlist_url, None)).await;
+        assert_eq!(status, StatusCode::OK, "VOD playlist: {playlist}");
+        assert!(playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
+        assert!(playlist.contains("#EXT-X-ENDLIST"));
+        let segment = playlist
+            .lines()
+            .find(|line| line.ends_with(".m4s"))
+            .expect("media segment URI");
+        let segment_url = if segment.starts_with('/') {
+            segment.to_owned()
+        } else {
+            format!("/api/v1/hls/{session_id}/{segment}")
+        };
+        let response = app
+            .clone()
+            .oneshot(get(&segment_url, None))
+            .await
+            .expect("VOD segment response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let segment_bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("VOD segment body")
+            .to_bytes();
+        assert!(segment_bytes.len() > 1_024, "nontrivial VOD segment");
+
+        let (status, body) = call(
+            &app,
+            delete(&format!("/api/v1/hls/{session_id}"), Some(&admin)),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NO_CONTENT,
+            "stop optical session: {body}"
+        );
+        assert!(matches!(
+            state
+                .optical
+                .manager()
+                .snapshot("fixture")
+                .expect("released drive")
+                .state,
+            OpticalDriveState::Ready { .. }
+        ));
     }
 
     fn test_state_with_dv_disk_tools() -> (Router, AppState) {
