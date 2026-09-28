@@ -1043,6 +1043,14 @@ compiles when its acceptance cases remain unexecuted.
 | M6 native | partial | Commit `09cf7414` adds path-free optical models and APIs, authorized Home discovery, disc/title navigation, resume, chapters and track selection on Apple and Android. Commits `1b63b7e9`, `019d62b3` and `d2ec5f56` remove the interim players, adapt optical playback into each established full controller without fake catalog IDs, and serialize incumbent teardown/reclaim for the drive's one-reader invariant. Commits `8283bb1d` and `a058de41` retain failed insertion surfaces and give protected media a typed explanation. Commit `9bea2b27c` adds generation-fenced admin eject to both native disc surfaces without allowing busy-session takeover. Session replacement, seek, progress, teardown, Picture in Picture, TV input, telemetry and typed terminal surfaces remain single-owner. The current tree compiles for iOS/tvOS and assembles for Android; [M6 evidence](../evidence/OPTICAL-M6-2026-09-21.md). Physical focus, track-change, seek, resume, Picture in Picture and device acceptance remain open. |
 | M7 package/qualification | partial | The Linux helper, source/Docker/tagged-release packaging and operator setup are built; [packaging evidence](../evidence/OPTICAL-HELPER-PACKAGING-2026-09-21.md). Exact trees `f7d67f17d` and `35eeb0ea1` completed the Rust 1.97.1 Linux release build for `plurxd`, `plurx-cluster-check` and `plurx-optical-helper` on `nynuc`; the latest completed in 5m 46s and its credential-free source archive and temporary build tree were removed afterward. Commit `5ad89d6c7` removes the helper's compile-only Cargo feature gate: OS targeting owns runtime availability and the Unix implementation type-checks directly. The physical protected-media receipt is recorded without downloading keys, changing drive region state or modifying the running service. This compile receipt is not the deferred fast lane. Playable-media and frozen-candidate qualification remain required. |
 
+Current hardening after the milestone rows above: `ef51053a8` removes Android's
+display-position track fallback; `1f5b47aa0` keeps watched state and known
+timelines server-authoritative; `45d9c3310` bounds client-visible failure text;
+`72f6e8d52` advances the media-pool protocol to 8 with a dedicated optical
+advertisement that contains no session-capability field or private diagnostic;
+and `5a2f65351` validates the insertion generation before eject can stop a
+reader. These changes do not close the physical or copy-path acceptance rows.
+
 Before enabling release support, verify: accepted source/seek decision; both
 formats on actual hardware; all required lifecycle/authorization/concurrency
 cases; web and native playback; packaged backend capabilities; no regressions
