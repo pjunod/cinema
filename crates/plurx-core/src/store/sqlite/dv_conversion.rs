@@ -1434,7 +1434,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 41] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 42] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
