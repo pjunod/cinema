@@ -418,21 +418,6 @@ function shippedDeclares(name) {
   return DECLARATIONS.some((kind) => SHIPPED_UI.includes(`${kind}${name}(`));
 }
 
-test("Durable work settings save while readiness is unavailable", async () => {
-  const writes=[];
-  const controls={"durable-setting-error":{textContent:""},"durable-analysis":{checked:true},
-    "durable-pretranscode":{checked:true},"durable-cadence":{value:"720"},"durable-queue-settings":null};
-  const save=new Function("document","api","cacheSettings","toast","DEVELOPER_READINESS",
-    `${shippedSource("saveDurableQueueSettings")}\nreturn saveDurableQueueSettings;`)(
-    {getElementById:id=>controls[id]},async(path,options)=>{writes.push({path,...options});return options.body;},
-    value=>value,()=>{},{unavailable:"observation timed out"});
-  await save({disabled:false});
-  assert.deepEqual(writes[0],{path:"/settings",method:"PUT",body:{vod_index_cluster_cache:true,cache_produce_mins:720}});
-  controls["durable-analysis"].checked=false;controls["durable-pretranscode"].checked=false;
-  await save({disabled:false});
-  assert.deepEqual(writes[1].body,{vod_index_cluster_cache:false,cache_produce_mins:0});
-});
-
 test("Durable retry preserves its UUID after a transport failure and sends an object body", async () => {
   const writes=[],queue={retries:new Map(),epoch:0};
   const retry=new Function("DURABLE_ACTIVITY","crypto","api","toast","refreshDurableActivity",
@@ -482,9 +467,8 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // The fourth time (see above): `clusterBackupCard` shipped with the
       // portable backup and fenced restore and reached `developerPanel`
       // without being composed here, so this whole gate died on its name.
-      shippedSource("clusterBackupCard"), shippedSource("durableQueueCard"),
+      shippedSource("clusterBackupCard"),
       shippedSource("clusterPlacementCard"), shippedSource("boundedCatalogueCard"),
-      shippedSource("storageDomainsCard"),
       shippedSource("autoQualityCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       shippedSource("libraryChannelsSettingsCard"),
       shippedSource("playbackProtocolCard"), shippedSource("liveHlsRecoveryCard"),
@@ -550,7 +534,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const html = renderComposedPanel(
     "developerPanel", () => panels.developerPanel(settings, readiness),
   );
-  for (const id of ["dev-live-tv-enable", "hevc-unverified", "durable-analysis", "durable-pretranscode", "pabr", "pqh", "pdp", "dhqa", "adr", "sub503", "pgsoverlay", "subsrc", "subcluster", "subbackfill", "chthumb"])
+  for (const id of ["dev-live-tv-enable", "hevc-unverified", "pabr", "pqh", "pdp", "dhqa", "adr", "sub503", "pgsoverlay", "subsrc", "subcluster", "subbackfill", "chthumb"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
   // Parallel playback ranges are automatic: the card explains them and reads
   // peer reachability as advisory, and offers no switch of its own.
@@ -602,7 +586,15 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.match(html, /FOOT:saveAutoQuality/);
   assert.match(html, /FOOT:savePreparedQuality/);
   assert.match(html, /Seek scratch accounting/);
-  for (const id of ["pcpv1", "dvlr", "dvrenabled", "lcenabled", "lcsubjectenabled", "ca-enabled", "dvwin"])
+  // Graduated 2026-09-28: durable cluster work is deployed and its plan has no
+  // fleet receipt to wait for. Its two switches were copies of the permanent
+  // ones in Analysis and Maintenance, and the storage-domain editor moved to
+  // Libraries beside the roots it names.
+  assert.doesNotMatch(html, /Durable cluster work|Shared storage budgets|storageDomains/);
+  assert.match(shippedSource("librariesPanel"), /\$\{storageDomainsCard\(\)\}/, "Libraries owns the storage-domain editor");
+  assert.match(shippedSource("analysisSettingsPanel"), /togRow\("an-enabled"/, "Analysis keeps the analysis-worker switch");
+  assert.match(shippedSource("savePrecache"), /cache_produce_mins/, "Maintenance keeps the pre-transcoding cadence");
+  for (const id of ["pcpv1", "dvlr", "dvrenabled", "lcenabled", "lcsubjectenabled", "ca-enabled", "dvwin", "durable-analysis", "durable-pretranscode"])
     assert.ok(!html.includes(`TOG:${id}|`), `Developer no longer owns ${id}`);
   assert.doesNotMatch(html, /Playback surface contract|Web HLS startup recovery|HEVC sample-entry admission|Source probe compatibility|Search and classification|id="ui-enable"/);
   const playback = panels.playbackPanel(settings, readiness);
@@ -636,12 +628,26 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   // what it is waiting on and where it goes when that lands. A card added
   // without saying so fails here, whatever else it renders.
   const developerCards = html.split("CARD[").slice(1);
-  assert.ok(developerCards.length >= 20, `Developer renders its cards (${developerCards.length})`);
+  assert.ok(developerCards.length >= 18, `Developer renders its cards (${developerCards.length})`);
   for (const card of developerCards) {
     const title = (/CARDHEAD:([^|]*)/.exec(card) || [])[1] || card.slice(0, 80);
     assert.match(card, /<b>Leaves Developer when:<\/b> \S[^<]*<b>Then:<\/b> \S/,
       `the Developer card "${title}" names what it waits on and where it graduates`);
   }
+  // Each condition names only what is still owed on main. Already-shipped
+  // work named as a wait teaches the reader to distrust every other line
+  // (#591 review, checked against 5ba02212f, run 3205, 87ca67c0e and L-02).
+  const waitsOf = (title) => {
+    const card = developerCards.find((c) => c.startsWith(`CARDHEAD:${title}|`));
+    assert.ok(card, `Developer renders ${title}`);
+    return /Leaves Developer when:<\/b> ([^<]*)<b>Then:/.exec(card)[1];
+  };
+  assert.doesNotMatch(waitsOf("Local catalogue reads"), /echo with its normal default lands/);
+  assert.match(waitsOf("Local catalogue reads"), /already shipped \(5ba02212f\)/);
+  assert.match(waitsOf("Portable cluster backup"), /arm64 container-smoke leg \(amd64 passed in run 3205\)/);
+  assert.doesNotMatch(waitsOf("Unverified HEVC copy"), /containment is deployed and/);
+  assert.match(waitsOf("Unverified HEVC copy"), /containment itself is deployed \(87ca67c0e\)/);
+  assert.match(waitsOf("Enable Live TV"), /scratch-fault \(L9\)/);
   // Adaptive Auto's graduation is Paul's choice between two destinations.
   const autoCard = developerCards.find((card) => card.startsWith("CARDHEAD:Adaptive Auto quality|"));
   assert.ok(autoCard, "Developer renders the adaptive Auto card");

@@ -34,7 +34,7 @@ function clusterBackupCard(settings,readiness){
       ${devReq(readiness,"cluster_backup","off_node_and_space","Off-node storage and free space","Use a different failure domain and retain at least two image sizes of free space.")}
       ${devReq(readiness,"cluster_backup","recent_success","Recent successful archive","A nightly backup is healthy when the last verified publish is less than 26 hours old.")}
       <p class="devcheck-note">Restore first onto an isolated instance. A file that has never been restored is not recovery evidence.</p></div></details>
-      ${devGraduation("K-01's container smoke against a built image and its M5 loss drills (node and NAS loss, a physical restore, measured RPO and RTO) are recorded.","backup scheduling moves to Settings → Cluster beside restore guidance, as a permanent setting.")}<div class="err" id="backup-settings-error" role="alert"></div>${setCardFoot("saveClusterBackup")}`);
+      ${devGraduation("K-01's arm64 container-smoke leg (amd64 passed in run 3205) and its M5 loss drills (node and NAS loss, a physical restore, measured RPO and RTO) are recorded.","backup scheduling moves to Settings → Cluster beside restore guidance, as a permanent setting.")}<div class="err" id="backup-settings-error" role="alert"></div>${setCardFoot("saveClusterBackup")}`);
 }
 
 // A readiness status is evidence, not authority. The daemon can report facts
@@ -332,7 +332,7 @@ function liveTvEnableCard(settings){
     <p class="hint">For safe operation, upgrade cluster servers, keep their clocks synchronized, and keep a ready voter majority. At least one server needs tuner connectivity and writable scratch. DVR workers need writable recording storage; matching paths alone do not prove shared storage.</p>
     <div id="dev-live-tv-readiness" aria-live="polite">Checking current prerequisites…</div>
     <p class="hint">A lost worker can leave a physical tuner connection behind temporarily. Other free tuners remain available. DRM remains unsupported.</p>
-    ${devGraduation("the Live TV plans' outstanding acceptance is recorded (L-02 leader-restart and cold/warm-start prompts, L-03 capacity offer and caption-positive pass).","the switch moves to Settings → Live TV as a permanent on/off.")}<div id="dev-live-tv-error" class="err" role="alert"></div>${setCardFoot("saveLiveTvEnable")}`);
+    ${devGraduation("the Live TV plans' outstanding fleet prompts are recorded: L-02's leader-restart, cold/warm-start (L6) and scratch-fault (L9) prompts, and L-03's capacity offer and caption-positive pass.","the switch moves to Settings → Live TV as a permanent on/off.")}<div id="dev-live-tv-error" class="err" role="alert"></div>${setCardFoot("saveLiveTvEnable")}`);
 }
 async function refreshLiveTvEnableReadiness(mount){
   try{
@@ -375,7 +375,7 @@ function boundedCatalogueCard(settings,readiness){
     ${togRow("bounded-catalogue-reads","Enable local catalogue reads","Falls back to authority when a replica is stale or a watch-write position is unknown.",settings.bounded_replica_reads!==false)}
     ${devReq(readiness,"bounded_catalogue_reads","replica_proof","Fresh replica proof","The current term, quorum watermark and apply lag are checked for each read. Saving this preference does not require a readiness result.")}
     ${devReq(readiness,"bounded_catalogue_reads","watch_floor","Watch state consistency","The web client carries its latest acknowledged watch-write position across nodes for 60 seconds. Other clients retain authority reads until they implement the same echo.")}
-    ${devGraduation("K-04's §5.1 lab readout and rolling-upgrade check are recorded and the web echo with its normal default lands.","Paul chooses: the switch moves to Settings → Cluster, or it is removed because every replica simply serves browsing this way.")}<div class="err" id="bounded-catalogue-error" role="alert"></div>${setCardFoot("saveBoundedCatalogueReads")}`,{id:"bounded-catalogue-settings"});
+    ${devGraduation("K-04's §5.1 lab readout and rolling-upgrade check are recorded. The web read-after echo and the on-by-default preference already shipped (5ba02212f).","Paul chooses: the switch moves to Settings → Cluster, or it is removed because every replica simply serves browsing this way.")}<div class="err" id="bounded-catalogue-error" role="alert"></div>${setCardFoot("saveBoundedCatalogueReads")}`,{id:"bounded-catalogue-settings"});
 }
 async function saveBoundedCatalogueReads(btn){
   const err=document.getElementById("bounded-catalogue-error");if(err)err.textContent="";btn.disabled=true;
@@ -384,38 +384,6 @@ async function saveBoundedCatalogueReads(btn){
     const card=document.getElementById("bounded-catalogue-settings");if(card)card.outerHTML=boundedCatalogueCard(saved,DEVELOPER_READINESS);
   }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
 }
-function durableQueueCard(settings,readiness){
-  const cadence=Number(settings.cache_produce_mins)||0;
-  return setCard(`${cardHead("Durable cluster work","Share preparation across eligible idle workers and keep accepted work through restarts.",'<span class="pill">Shared queue</span>')}
-    ${togRow("durable-analysis","Enable fragment indexing and analysis workers","Use the existing analysis preference. Pausing keeps accepted requests and their history.",!!settings.vod_index_cluster_cache)}
-    ${togRow("durable-pretranscode","Enable pre-transcoding workers","Use the existing scheduled preparation preference. Enabling keeps the current cadence, or uses every six hours when it was off.",cadence>0)}
-    <input type="hidden" id="durable-cadence" value="${cadence>0?cadence:360}">
-    <p class="hint">Pre-transcoding still uses the configured <a href="#/settings/maintenance">cache disk budget</a>. A zero budget leaves no room for production. Queue cleanup and cancellation remain active while workers are paused.</p>
-    <details class="setdetails" open><summary>Requirements and current observations</summary><div class="setdetails-body">
-      ${devReq(readiness,"durable_cluster_work","durable_role","Worker authority","Ready learners can prepare immutable artifacts. Library scans and provider coordination remain voter work.")}
-      ${devReq(readiness,"durable_cluster_work","durable_store","Durable storage responds","Accepted work needs the replicated Store, or the local Store on a standalone server.")}
-      ${devReq(readiness,"durable_cluster_work","durable_tools","Compatible tools","A worker needs decoders and the exact output recipe required by its job.")}
-      ${devReq(readiness,"durable_cluster_work","durable_capacity","Spare capacity","Live playback takes precedence. Heavy jobs share one local lane and bounded source I/O across the cluster.")}
-      ${devReq(readiness,"durable_cluster_work","durable_scratch","Cache headroom","Each output needs writable local storage and enough room for its stage and final artifact.")}
-      ${devReq(readiness,"durable_cluster_work","durable_sources","Readable sources","At least one eligible worker must be able to read and validate the source.")}
-      ${devReq(readiness,"durable_cluster_work","durable_peers","Peer compatibility","Peers are checked individually. One unavailable peer does not disable the saved preference.")}
-      <p class="devcheck-note">Advisory only. Every preference can be saved regardless of these observations.</p>
-    </div></details>
-    <p><a href="#/activity">Inspect queued work, owners, retries and attempts in Activity</a>.</p>
-    ${devGraduation("durable cluster work is deployed and observed on the fleet (its status page still records production as unchanged).","this card is removed. Analysis and Maintenance already hold the permanent switches it mirrors.")}<div class="err" id="durable-setting-error" role="alert"></div>${setCardFoot("saveDurableQueueSettings")}`,{id:"durable-queue-settings"});
-}
-async function saveDurableQueueSettings(btn){
-  const err=document.getElementById("durable-setting-error");if(err)err.textContent="";btn.disabled=true;
-  try{
-    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{
-      vod_index_cluster_cache:/** @type {HTMLInputElement} */ (document.getElementById("durable-analysis")).checked,
-      cache_produce_mins:/** @type {HTMLInputElement} */ (document.getElementById("durable-pretranscode")).checked?Number(/** @type {HTMLInputElement} */ (document.getElementById("durable-cadence")).value):0
-    }}));
-    const card=document.getElementById("durable-queue-settings");if(card)card.outerHTML=durableQueueCard(saved,DEVELOPER_READINESS);
-    toast("Cluster work preferences saved");
-  }catch(error){if(err)err.textContent=error.message||String(error);btn.disabled=false;}
-}
-
 function developerPanel(settings,readiness){
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
     <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>Tuner, guide, recording and library channels</span></a>
@@ -429,7 +397,7 @@ function developerPanel(settings,readiness){
   return `${setHead("Developer","Experimental features still awaiting device qualification.")}
       ${destinations}
       <div class="setsection" id="enable-live-tv"><h2>Enable Live TV</h2><p>Cluster use of the network tuner, with advisory prerequisites.</p></div>${liveTvEnableCard(settings)}
-      <div class="setsection"><h2>Cluster work</h2><p>Shared preparation and durable job history.</p></div>${durableQueueCard(settings,readiness)}${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${storageDomainsCard()}
+      <div class="setsection"><h2>Cluster work</h2><p>Remote media placement and replica catalogue reads.</p></div>${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}
       <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
       <div class="setsection"><h2>Live TV video</h2><p>Output choices whose device and node capacity evidence remains advisory.</p></div>${liveTvDeinterlaceCard(settings)}
       <div class="setsection"><h2>Recovery</h2><p>Portable backup scheduling and visible readiness. Saving is never gated by these observations.</p></div>${clusterBackupCard(settings,readiness)}
@@ -671,7 +639,7 @@ function hevcCopyCard(settings){
     ${devStaticReq("Source held through playback and retries","VOD only","Verified VOD holds the source it analyzed. Rolling and progressive HEVC copies keep their in-band parameter sets, so they need no proof.","warn")}
     ${devStaticReq("Every worker updated","not observable here","Deploy the fix on all serving nodes and drain older sessions. This build uses media-worker protocol 7; a local settings page cannot certify every public ingress.","")}
     <p class="devcheck-note">These observations never disable the checkbox or reject its save. Turning the override off requires verified VOD for new HEVC copy starts; running sessions keep their existing policy.</p>
-    </div></details>${devGraduation("the HEVC corruption containment is deployed and complete scans prove every HEVC title it copies.","Paul chooses: the override is removed because verified VOD covers every title, or it moves to Playback → Advanced server delivery as a permanent escape hatch.")}<div class="err" id="hevc-copy-error" role="alert"></div>${setCardFoot("saveHevcCopy")}`,{id:"hevc-copy-card"});
+    </div></details>${devGraduation("complete scans prove every HEVC title that VOD copies. The proof-before-stripping containment itself is deployed (87ca67c0e).","Paul chooses: the override is removed because verified VOD covers every title, or it moves to Playback → Advanced server delivery as a permanent escape hatch.")}<div class="err" id="hevc-copy-error" role="alert"></div>${setCardFoot("saveHevcCopy")}`,{id:"hevc-copy-card"});
 }
 async function saveHevcCopy(btn){
   const err=document.getElementById("hevc-copy-error"); if(err)err.textContent="";
@@ -682,36 +650,4 @@ async function saveHevcCopy(btn){
     const card=document.getElementById("hevc-copy-card"); if(card)card.outerHTML=hevcCopyCard(saved);
     toast("HEVC copy preference saved");
   }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
-}
-
-function storageDomainsCard(){
-  return setCard(`${cardHead("Shared storage budgets","Give mount paths on the same disk or NAS the same domain name.",'<span class="pill">2 readers per domain</span>')}
-    <p class="hint">An empty domain uses the shared default. A library with multiple roots reserves each domain before starting. Library jobs also share provider concurrency. Maintenance requests are paced across nodes: TMDB at most one dispatch per 100 ms, AniList one per 2.1 seconds, with shared server cooldowns.</p>
-    <div id="storage-domain-roots"><button type="button" class="ghost" onclick="loadStorageDomains(this)">Load library roots</button></div>
-    <p class="hint">Save identity changes while background jobs are idle so existing reservations keep their meaning. This does not change any feature's enable switch.</p>
-    ${devGraduation("durable cluster work is deployed and observed on the fleet.","the domain editor moves to Settings → Libraries beside the roots it names.")}<div id="storage-domain-error" class="err" role="alert"></div>
-    <button type="button" class="ghost" onclick="saveStorageDomains(this)">Save storage domains</button>`);
-}
-async function loadStorageDomains(btn){
-  btn.disabled=true;
-  const error=document.getElementById("storage-domain-error");if(error)error.textContent="";
-  try{
-    const data=await api("/cluster/work/storage-domains");
-    const roots=document.getElementById("storage-domain-roots");if(!roots)return;
-    roots.innerHTML=(data.libraries||[]).flatMap(library=>(library.paths||[]).map(root=>{
-      const mapping=(data.mappings||[]).find(row=>String(row.library_id)===String(library.id)&&row.root_path===root);
-      return `<label class="field">${esc(library.name)} · ${esc(root)}<input class="storage-domain-input" data-library="${esc(String(library.id))}" data-root="${esc(root)}" maxlength="64" value="${esc(mapping?mapping.domain_id:"")}" placeholder="Shared default"></label>`;
-    })).join("")||'<p class="hint">No library roots configured.</p>';
-    roots.dataset.loaded="true";
-  }catch(e){if(error)error.textContent=e.message||String(e);btn.disabled=false;}
-}
-async function saveStorageDomains(btn){
-  const roots=document.getElementById("storage-domain-roots"),error=document.getElementById("storage-domain-error");
-  if(error)error.textContent="";
-  if(!roots||roots.dataset.loaded!=="true"){if(error)error.textContent="Load library roots before saving.";return;}
-  const mappings=Array.from(roots.querySelectorAll(".storage-domain-input")).map(element=>{const input=/** @type {HTMLInputElement} */(element);return {library_id:Number(input.dataset.library),root_path:input.dataset.root,domain_id:input.value.trim()};}).filter(row=>row.domain_id);
-  btn.disabled=true;
-  try{await api("/cluster/work/storage-domains",{method:"PUT",body:mappings});toast("Storage domains saved");}
-  catch(e){if(error)error.textContent=e.message||String(e);}
-  finally{btn.disabled=false;}
 }
