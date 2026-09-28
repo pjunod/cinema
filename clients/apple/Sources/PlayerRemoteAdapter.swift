@@ -60,6 +60,11 @@ struct LiveTvRemoteAdapter: ViewModifier {
     enum Scope {
         case root
         case revealSurface
+        /// A region whose directions are moved by its own navigator: the
+        /// guide grid, and the page's detail region (picture + programme
+        /// actions). `onMoveCommand` takes every direction pressed inside it,
+        /// so every focusable in such a region must have a key the navigator
+        /// can move to — one without is a trap.
         case guide
     }
 

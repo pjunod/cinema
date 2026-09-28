@@ -37,6 +37,36 @@ background permit reverses the ruling OPERATIONS.md carried ("absence after
 five seconds means that worker is stuck rather than permission to start
 beside it"); the RCA §3 argues why. Next: fast lane, merge, then GPT
 deploys the nodes and installs the two client builds.
+commit as the work it describes; a stale entry here is a bug. Newest effort
+first.
+
+## Apple TV Live TV navigation: every press reversible, every control reachable
+
+**Branch `agent/appletv-live-nav`, draft pull request; not merged, nothing
+deployed.** Paul reported 2026-09-27 that Live TV navigation on the Apple TV
+was close to broken: hard to reach anything, and a move often did not reverse.
+Two independent reads of `LiveTvView.swift` agreed on the causes, and one
+was worse than reported: Info and More on the fullscreen pills did nothing at
+all, because their sheets hung off a root that was already presenting the
+cover. Fixed in one Apple PR: the cover owns every sheet it can open; one
+`FocusTarget` key per view (the toolbar and the pills no longer share
+`.guide`/`.channels`/`.more`); Up from the guide's first row goes to the
+stage's Watch / the temporary guide's Close / Over picture's Close, and Down
+from those returns to the cell the grid held; Right past the last programme
+and Left from the header page the window and land on the same row; Up from
+the header column reaches the paging chips, which are never `.disabled`;
+channel rows are not disabled during a tune (focus used to jump to the
+toolbar); the detail region beside the list is moved by name so Left from
+the picture returns to the row you came from; the Guide pill opens on the
+channel playing and closing it restores the browse view and the pill; leaving
+the cover restores page focus from `onDismiss`; a programme sheet returns to
+its cell. The restore coordinator applies from `onChange` against the current
+view instead of the task's stale copy, and no longer cancels on an
+engine-driven arrival.
+[LIVE-TV-APPLE-TV-NAVIGATION.md](docs/features/LIVE-TV-APPLE-TV-NAVIGATION.md)
+has the focus graph and the §1 table that doubles as the device checklist.
+Verified: tvOS simulator unit + source tests green. Not verified: anything
+with a remote in hand — the GPT prompt for the physical pass is in the PR.
 
 ## Silo comparison: two implementation plans and one device census, no code
 
@@ -310,7 +340,7 @@ The fast lane (`make unit`) was green on `main`; the red was all in what only
 
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24, 2026-09-25 and 2026-09-26
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26 and 2026-09-27
 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
