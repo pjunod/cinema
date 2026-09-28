@@ -1,8 +1,34 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 14:35 UTC · **Audited main:** `569ed6e1616868f84604331af33b9a467799f1b2`
+**Status:** open · **Updated:** 2026-09-28 14:57 UTC · **Audited main:** `569ed6e1616868f84604331af33b9a467799f1b2`
 
 ## Current work
+
+Draft [PR #600](http://192.168.4.7:3000/noirr/plurx/pulls/600) received its
+sole independent review on00cc886365. It found three P2 issues. F1 is addressed
+bya60b97ddd (the missing unique corrective anchor), F2 byec259aff6 (bounded owned
+Back until player absence and exact fixture Detail before Home), and F3 by
+fb04e202a (generated invocation/identity in original benchmark names/params,
+original JSON byte hash and actual device context). All corrections are normally
+committed; the original unhooked F2 author attempt is retained and superseded by
+the final integrated tracked-hook amendment with explicit Codex identity. No
+second review. Both current signed199/136 products retain actual native input
+parity through these harness/report-only corrections. Focused regressions and
+mandatory selected qualification follow on the final committed branch.
+
+The passive86d collector now has a sealed historical hour:121 identity samples
+and13health/C08 samples per node over at least3600seconds, with bounded cadence,
+exact source and zero observed targeted failures. It does not close current569
+normal-use,24-hour or seven-day acceptance. Receipt SHA256
+`018a18dc998152a8813e798fadd460c1df96b88a162e4f71dc07f9df753e7a29`.
+
+A03 plan-source audit found five mandatory regression groups still absent:
+Apple query-to-completion/summary, stale filter-result discard and five-edit
+150ms coalescence; Android watch-filter completion and actual page-arrival focus.
+A separate next verification batch is being built in parallel. Android category
+query is expressly excluded by§5.5 and is not added to this plan. Named physical
+6000-title request/order/frame traces remain open.
+
 
 Peer C-07 PR #598 advanced main to569ed6e16. Its changes are integrated into
 `codex/native-review-completion-0928` before qualification. The four nodes still
@@ -17,7 +43,7 @@ compilation and normal hooks pass. The separate profile harness now has its own
 verified signer; the measured app remains durable signed/nondebuggable. Apple199
 and Android136 are reserved above actual main198/135. The finished candidate gets
 exactly one independent adversarial review, followed by focused regressions and
-mandatory selected qualification. No behavior tests or review have run yet.
+mandatory selected qualification. This describes the original freeze; the sole review and its corrections are recorded above.
 
 
 [PR #599](http://192.168.4.7:3000/noirr/plurx/pulls/599) merged as

@@ -1,6 +1,7 @@
 # Prefetch two rows from the measured native library grid
 
-**Status:** open — source compiles; the batch review and qualification follow.
+**Status:** open — the sole batch review found three issues, now addressed;
+focused regressions and mandatory qualification follow.
 
 Build: 199
 Issue: #465
@@ -12,8 +13,8 @@ safe. Existing item identity, merged order, search and focus ownership remain.
 
 The batch reserves Apple199 and Android136 above actual main569ed6e16,
 which carries198/135. Three Apple and four Android focused regression sources
-compile. Their execution follows the single adversarial review of the completed
-batch. The 6000-title tail, page-arrival focus and physical frame matrix remain
+compile. Their execution follows all three corrections from the single adversarial
+review of the completed batch. The 6000-title tail, page-arrival focus and physical frame matrix remain
 open; source compilation does not establish those device results.
 
 Android additions include debug-only existing-dispatcher timing, bounded Live

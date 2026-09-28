@@ -3120,7 +3120,7 @@ id = "android.release-profile-paired-evidence"
 commits = []
 supplements = "android.release-profile-capture-signing"
 source = "scripts/android-profile-report"
-source_anchor = "def build_report(without, required, macrobenchmark, signed):"
+source_anchor = "def build_report(without, required, macrobenchmark, signed, macrobenchmark_sha256):"
 test = "tests/operations/test_android_profile_report.py"
 test_anchor = "test_missing_or_malformed_device_identity_and_boundary_is_rejected"
 
@@ -3166,3 +3166,37 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreenOn.k
 source_anchor = "internal class PlayerScreenOn"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerScreenOnTest.kt"
 test_anchor = "actualPlayerCallbacksHoldVideoScreenDuringBufferingAndPlayButNotPause"
+
+[[fixes]]
+id = "android.profile-owned-playback-cleanup"
+commits = ["ec259aff6"]
+source = "clients/android/baselineprofile/src/main/java/tv/plurx/profile/ReleaseJourney.kt"
+source_anchor = "fun closeOwnedPlayback() {"
+test = "tests/operations/test_android_profile_cleanup.py"
+test_anchor = "test_cleanup_confirms_owned_player_exit_and_exact_detail_before_home"
+
+[[fixes]]
+id = "android.profile-owned-detail-boundary"
+commits = []
+supplements = "android.profile-owned-playback-cleanup"
+source = "clients/android/baselineprofile/src/main/java/tv/plurx/profile/ReleaseJourney.kt"
+source_anchor = "private fun isOwnedDetail(): Boolean ="
+test = "tests/operations/test_android_profile_cleanup.py"
+test_anchor = "test_owned_fixture_and_pending_player_markers_fence_navigation"
+
+[[fixes]]
+id = "android.profile-benchmark-run-binding"
+commits = ["fb04e202a"]
+source = "scripts/android-profile-report"
+source_anchor = "Invocation binding does not match full source/APK/device identity"
+test = "tests/operations/test_android_profile_report.py"
+test_anchor = "test_stale_or_mixed_startup_run_and_apk_are_rejected"
+
+[[fixes]]
+id = "android.profile-benchmark-harness-binding"
+commits = []
+supplements = "android.profile-benchmark-run-binding"
+source = "clients/android/baselineprofile/src/main/java/tv/plurx/profile/ReleaseProfileMeasurement.kt"
+source_anchor = "@JvmStatic @AfterClass fun sealCompletedInvocation()"
+test = "tests/operations/test_android_profile_report.py"
+test_anchor = "test_real_macrobenchmark_device_context_and_binding_are_required"

@@ -93,6 +93,7 @@ class AndroidReleaseProfileReportCase(unittest.TestCase):
         module = (ROOT / "clients/android/baselineprofile/build.gradle.kts").read_text()
         self.assertIn('experimentalProperties["android.experimental.self-instrumenting"] = true', module)
         self.assertIn('targetProjectPath = ":app"', module)
+        self.assertEqual(module.count('signingConfig = signingConfigs.getByName("debug")'), 2)
 
     def test_missing_or_malformed_device_identity_and_boundary_is_rejected(self):
         for field in ("device_alias", "device_model", "sdk", "version_code", "first_frame_boundary"):
