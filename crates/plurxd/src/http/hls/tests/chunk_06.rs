@@ -2931,6 +2931,13 @@
             ended.publication_ready_at_ms, MEDIA_SESSION_PUBLICATION_BLOCKED,
             "the durable End's terminal projection is armed before the point"
         );
+        assert!(
+            !fixture
+                .state
+                .transcode
+                .session_publication_fenced_for_test(&session_id),
+            "the durable tombstone is projected locally before the point"
+        );
         assert!(!release.is_finished(), "the release is held at the point");
         held.release();
         assert_eq!(
