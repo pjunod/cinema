@@ -188,7 +188,7 @@ had to be edited.
 | 56 | [`pages/cluster-operations.js`](../../crates/plurxd/src/web/pages/cluster-operations.js) | The operations rail and its preconditions. | 20558–20762 |
 | 57 | [`pages/cluster-database.js`](../../crates/plurxd/src/web/pages/cluster-database.js) | The replicated database ledger, and remembering what is folded. | 20763–20859 |
 | 58 | [`pages/cluster-troubleshooting.js`](../../crates/plurxd/src/web/pages/cluster-troubleshooting.js) | Cluster troubleshooting: what is wrong, and the one thing to try. | 20860–21468 |
-| 59 | [`pages/settings-playback.js`](../../crates/plurxd/src/web/pages/settings-playback.js) | Playback defaults, recovery and protocol cards, Trakt, and settings save handlers. | 21469–21740 |
+| 59 | [`pages/settings-playback.js`](../../crates/plurxd/src/web/pages/settings-playback.js) | Playback defaults, recovery and protocol cards, the chapter-thumbnail and decoder cards that graduated from Developer, Trakt, and settings save handlers. | 21469–21740 |
 | 60 | [`pages/users-admin.js`](../../crates/plurxd/src/web/pages/users-admin.js) | The admin users route. Non-contiguous with `pages/settings-system.js`'s users panel. | 21741–21787 |
 | 61 | [`layouts/catalog.js`](../../crates/plurxd/src/web/layouts/catalog.js) | The catalog layout: sidebar, phone library sheet, chrome, Home, G2b item detail, and `LAYOUTS.catalog`. | 21788–22457 |
 | 62 | [`layouts/register-classic.js`](../../crates/plurxd/src/web/layouts/register-classic.js) | **Relocated.** The eight lines registering `LAYOUTS.classic.chrome` and `.views`. See §1.3. | 5140–5147 |

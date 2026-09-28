@@ -631,7 +631,9 @@ function playbackPanel(settings,readiness){
       ${togRow("autonext","Auto-play the next episode when one finishes","",autoNextOn(),'onchange="setAutoNext(this.checked)"')}
       <div class="tog"><span>Measured playback limits<small>When an original stream loses visible frames, this browser remembers that exact media load — codec/profile, resolution, bit depth, dynamic range, and a 10 Mb/s bitrate band — and lets <b>Auto</b> transcode it next time instead of stuttering first. A measurement expires after 30 days; <b>Quality → Original</b> always bypasses it.</small></span></div>
       <div class="row" id="dlrow">${decodeLimitsSummary()}</div>`,{local:true});
-  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${local}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}${liveHlsRecoveryCard(settings,readiness)}${playbackProtocolCard(settings,readiness)}</details>`;
+  // Chapter thumbnails and both decoder controls graduated from Developer on
+  // 2026-09-28 (Paul's Developer lifecycle); each keeps its own Save.
+  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${local}${chapterThumbnailsCard(settings,readiness)}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}${liveHlsRecoveryCard(settings,readiness)}${playbackProtocolCard(settings,readiness)}${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}</details>`;
 }
 
 function searchSettingsCard(readiness){

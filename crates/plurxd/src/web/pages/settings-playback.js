@@ -150,9 +150,9 @@ async function saveVerifiedDecode(btn){
       decoder_health_qualified_artifacts:document.getElementById("dhqa").checked}});
     cacheSettings(saved);
     toast("Verified decode setting saved"); if(btn) setCardSaved(btn);
-    // Replace this card only. A full panel re-render would rebuild the four
-    // cards beside it and silently discard anything typed into them — the Live
-    // TV card next door stages a whole configuration before its own Save.
+    // Replace this card only. A full panel re-render would rebuild the other
+    // Playback cards and silently discard anything typed into them — Streaming
+    // and the other Advanced server delivery cards stage unsaved edits.
     const card=document.getElementById("vdcard");
     if(card) card.outerHTML=verifiedDecodeCard(saved);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
@@ -356,4 +356,116 @@ function liveHlsRecoveryCard(settings,readiness){
       ${devReq(readiness,"live_hls_recovery","rolling_clients_qualified","Physical-client qualification","Apple native HLS, Media3 and hls.js should be checked for startup, long playback, pause and resume.")}
       <p class="devcheck-note">Advisory only. Unmet, unavailable or unobservable rows do not gate this switch. Authorization, exact object ownership and scratch limits still protect each request.</p>
       </div></details><div class="err" id="dvlrerr" role="alert"></div>${setCardFoot("saveLiveHlsRecovery")}`);
+}
+
+// Chapter thumbnails. Graduated from Developer to Playback on 2026-09-28.
+//
+// One ffmpeg seek per chapter, on request, kept under the runtime cache.
+// There is no background producer: nothing runs unless a watch page asks
+// for that chapter, and the rows below say how much has run. The switch is
+// the enable path; off answers the route 404 and the rail shows numbered
+// tiles instead of pictures.
+function chapterThumbnailsCard(s,readiness){
+  const enabled=s.chapter_thumbnails!==false;
+  const state=enabled
+    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
+    : `<span class="pill">disabled</span>`;
+  return setCard(`${cardHead("Make chapter thumbnails","Extract one small frame per chapter the first time the watch view asks for it, and keep it on this node.",state)}
+      ${togRow("chthumb",`Make chapter thumbnails on request`,`Applies to the next thumbnail a watch page asks for. This checkbox is authoritative: nothing below turns it on or off.`,enabled)}
+      <div class="hint"><b>This checkbox is the enable path.</b> Off runs no ffmpeg for thumbnails and the chapter rail shows numbered tiles; what is already cached stays on disk and is served again when the switch comes back.</div>
+      <details class="setdetails" open><summary>What it needs</summary><div class="setdetails-body">
+      ${devReq(readiness,"chapter_thumbnails","chapter_thumbs_ffmpeg","ffmpeg can decode a frame","The configured ffmpeg answered -version at startup. Every thumbnail is one seek into the source and one decoded frame scaled to 320 px, CPU only.")}
+      ${devReq(readiness,"chapter_thumbnails","chapter_thumbs_cache_space","The runtime cache has room","Thumbnails are tens of kilobytes each and live under the runtime cache beside the other node-local stores; a full cache fails every write.")}
+      ${devReq(readiness,"chapter_thumbnails","chapter_thumbs_work","What this process has extracted","Made, served from cache, failed and running now since this process started, and what the cache holds on disk. At most two extractions run at once, each bounded to 15 seconds.")}
+      <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice.</p>
+      </div></details>
+      <div class="err" id="chthumberr" role="alert"></div>
+      ${setCardFoot("saveChapterThumbnails")}`,{id:"chthumbcard"});
+}
+// Automatic decode recovery.
+//
+// An operator's opt-in with advisory evidence. Graduated from Developer to
+// Playback → Advanced server delivery on 2026-09-28 (off by default). The retained diagnostic-contract
+// coverage still tells an operator how much confidence to place in the
+// decision, but it never disables or overrides the switch.
+function decodeRecoveryCard(s){
+  const q=s.decoder_health_qualification||{};
+  // FFmpeg's strings again — a build banner and decoder names.
+  const list=v=>`<code>${v&&v.length?v.map(esc).join(" · "):"none"}</code>`;
+  const covered=q.covered_paths_v2||q.covered_decoders||[];
+  const paths=covered.map(value=>{
+    const fields=String(value).split("/");
+    return fields.length===3?{value:String(value),codec:fields[0],backend:fields[1]}:null;
+  }).filter(Boolean);
+  const software=paths.filter(path=>path.backend==="software");
+  const hardware=paths.filter(path=>path.backend!=="software");
+  const recoverable=hardware.filter(path=>software.some(peer=>peer.codec===path.codec));
+  const enabled=!!s.automatic_decoder_recovery;
+  const ok=b=>b?"✓":"✗";
+  const state=enabled
+    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
+    : `<span class="pill">disabled</span>`;
+  return setCard(`${cardHead("Automatic decode recovery","Retry a failed hardware decode in software while keeping the hardware encoder. Recovery increases CPU use and prevents a reopen loop.",state)}
+      ${togRow("adr",`Enable automatic decoder recovery`,`Applies immediately to new producer attempts. This checkbox is authoritative: missing measurements or retained contracts never turn it back off.`,enabled)}
+      <div class="hint"><b>This checkbox is the enable path.</b> The checks below are advisory only. With incomplete coverage, the server uses its bounded selected-stream diagnostic matcher and never treats that best-effort observation as permission to reuse an artifact.</div>
+      <details class="setdetails"><summary>Recovery limits and diagnostic evidence</summary><div class="setdetails-body">
+      <h2 class="section">Safety evidence and current state</h2>
+      <div class="tog"><span>${ok(!!q.measured_build)} This node measured its own FFmpeg<small>${q.measured_build?`<code>${esc(q.measured_build)}</code>`:"Not measured. Recovery can still be enabled; diagnostics use the selected input and stream without claiming build-qualified evidence."}</small></span></div>
+      <div class="tog"><span>${ok(software.length>0)} A retained contract covers this build's software decoders<small>${list(software.map(path=>path.value))}<br>A covered software path increases confidence in the successor; absence is advisory and does not block the switch.</small></span></div>
+      <div class="tog"><span>${ok(recoverable.length>0)} The same codec has covered hardware and software paths<small>${list(recoverable.map(path=>path.value))}<br>${recoverable.length?"Each listed hardware path has a covered software alternate for the same codec.":"No matched retained pair exists yet. Recovery remains available when explicitly enabled, using best-effort selected-stream diagnostics; this row records the missing fleet evidence."}</small></span></div>
+      <div class="tog"><span>The session carries a durable recovery budget<small>Cluster sessions do. A legacy process-local start, a relayed worker start, and any session predating the recovery epoch keep the older in-process limit — one recovery per <i>session</i> rather than one per playback, which a reopen resets.</small></span></div>
+      <h2 class="section">What it costs when it does fire</h2>
+      <div class="hint"><b>One recovery per playback, and it is never given back.</b> The budget is durable and keyed by the playback, so a reopen, a seek or a track change does not buy another. A playback that has spent it is told its source did not decode — a permanent answer the client shows once, rather than an impermanent one it will follow forever. Two paths give a budget up without using it, both on purpose: an executor cancelled mid-install, and a node that cannot read the budget. Each costs that playback its automatic recovery and nothing else.</div>
+      <div class="hint">The successor keeps the hardware encoder and its slot; what grows is the CPU the pipeline spends decoding. That difference has to be available on the node at the moment of the recovery, and a recovery that cannot get it fails rather than waiting on a viewer's behalf indefinitely.</div>
+      </div></details>
+      <div class="err" id="adrerr" role="alert"></div>
+      ${setCardFoot("saveAutomaticDecoderRecovery")}`,{id:"drcard"});
+}
+// Verified decode artifacts. Graduated from Developer to Playback → Advanced
+// server delivery on 2026-09-28 (off by default).
+//
+// This control changes the identity of each covered decode path. Existing
+// transcodes on that path become unreachable and are made again; uncovered
+// paths do not move. Its prerequisites are node-measurable, so show them as
+// advice rather than asking the operator to infer them or disabling the switch.
+function verifiedDecodeCard(s){
+  const q=s.decoder_health_qualification||{};
+  const policyEnabled=q.policy_enabled===undefined?!!q.enforcing:!!q.policy_enabled;
+  const measuredPaths=q.measured_paths_v2||q.measured_decoders||[];
+  const coveredPaths=q.covered_paths_v2||q.covered_decoders||[];
+  const pill=q.pending_restart
+    ? `<span class="pill warn">Saved · restart to apply</span>`
+    : (policyEnabled
+        ? `<span class="pill">Enabled · covered paths</span>`
+        : (s.decoder_health_qualified_artifacts
+            ? `<span class="pill warn">Saved · restart to apply</span>`
+            : `<span class="pill">Off</span>`));
+  // Everything below comes from FFmpeg — a version banner and decoder names —
+  // so it is somebody else's string in this page's markup.
+  const list=v=>`<code>${v&&v.length?v.map(esc).join(" · "):"none"}</code>`;
+  const ok=b=>b?"✓":"✗";
+  const checks=`
+      <h2 class="section">What this node measured</h2>
+      <div class="tog"><span>${ok(!!q.measured_build)} This node measured its own FFmpeg<small>${q.measured_build?`<code>${esc(q.measured_build)}</code>`:"Not measured. Nothing this build prints can be matched to a contract, so nothing it prints is evidence."}</small></span></div>
+      <div class="tog"><span>${ok(measuredPaths.length>0)} The startup probe named the decode paths this build selects<small>${list(measuredPaths)}<br>Current responses use <code>codec/backend/decoder</code>; older nodes report software-only <code>codec/decoder</code> pairs. Hardware appears only when FFmpeg positively confirms it used the requested backend. FFmpeg can drop every frame of a file and still exit successfully, so a clean exit is not evidence.</small></span></div>
+      <div class="tog"><span>${ok(coveredPaths.length>0)} A retained diagnostic contract covers this build<small>${list(coveredPaths)}<br>Covered means covered as this node runs it: the same binary, backend, decoder, and qualified log flags. A contract qualified under different flags or a different backend describes a different log.</small></span></div>`;
+  const refusal=q.explanation
+    ? `<div class="hint"><b>Coverage advisory:</b> ${esc(q.explanation)}</div>`
+    : "";
+  // Conditional, because a node with no covered path pays no cache rename yet.
+  // The setting is still enabled; this is a cost projection, not a gate.
+  const cost=q.eligible
+    ? `<div class="hint"><b>This node has covered decode paths, so enabling the policy renames cached transcodes that use those paths.</b> A covered path's identity includes whether its producer health was verified, so its existing cache becomes unreachable and affected titles are transcoded again on next demand. Turning the policy off later makes those paths pay the same rename a second time. Nothing is deleted; old generations age out of the cache like any other unused generation. Newly covered paths rotate when their contracts arrive. Apply it when the node is not busy.</div>`
+    : `<div class="hint"><b>No measured path can produce a verified artifact today.</b> You may still enable the policy; it remains advisory and uncovered paths keep their current cache identity. As contracts are added, each newly covered path begins using the verified identity and pays its cache rename then.</div>`;
+  const applies=q.pending_restart
+    ? `<div class="hint"><b>Saved, and not yet in force.</b> This node applies the request when it next starts. Qualification is part of each covered path's cache key, so applying it while sessions are running could move an affected key space under work already in flight.</div>`
+    : `<div class="hint">The request takes effect when this node next starts and is stored regardless of readiness. Each exact decode path uses it only when that path has one unique covering contract; uncovered or ambiguous paths keep serving under their present identity.</div>`;
+  return setCard(`${cardHead("Verified decode artifacts","Require evidence of a clean decode before reusing transcodes on covered paths.",pill)}
+      ${togRow("dhqa",`Require a producer health receipt`,"Enables the path-scoped verified policy on the next start. Readiness checks are advisory and never disable this control.",s.decoder_health_qualified_artifacts)}
+      <div class="hint">Applies after a server restart. Covered paths use a new cache identity, so affected titles may need transcoding again.</div>
+      <details class="setdetails"><summary>Cache impact and diagnostic evidence</summary><div class="setdetails-body">
+      ${cost}${checks}${refusal}${applies}
+      </div></details>
+      <div class="err" id="dhqerr" role="alert"></div>
+      ${setCardFoot("saveVerifiedDecode")}`,{id:"vdcard"});
 }

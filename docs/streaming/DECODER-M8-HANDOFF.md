@@ -41,10 +41,12 @@ the feature as unbuilt.
 
 ## 2. Current contract — do not reintroduce a gate
 
-Settings → Developer has two independent controls relevant to this run:
+Two independent controls are relevant to this run:
 
-- **Prepared quality handoff** is a direct checkbox and is on by default.
-- **Automatic decoder recovery** is a direct checkbox and is off by default.
+- **Prepared quality handoff** (Settings → Developer) is a direct checkbox
+  and is on by default.
+- **Automatic decoder recovery** (Settings → Playback → Advanced server
+  delivery since 2026-09-28) is a direct checkbox and is off by default.
   Check it for the recovery trials. The choice applies to new attempts
   immediately.
 

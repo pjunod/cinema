@@ -866,8 +866,9 @@ browse and play directly against plurx — validated end-to-end with
 
 **Web settings:** Live TV owns tuner enablement, owner recovery, guide
 configuration, recording, library-channel playback and subject matching.
-Playback owns player defaults and advanced server delivery, including Live
-HLS recovery and protocol compatibility. Analysis owns the durable index queue.
+Playback owns player defaults, chapter thumbnails, and advanced server
+delivery, including Live HLS recovery, protocol compatibility, verified decode
+artifacts and automatic decode recovery. Analysis owns the durable index queue.
 Metadata owns search and classification settings. Maintenance owns Windows
 conversion and runtime readiness alongside Dolby Vision disk conversion.
 Cluster owns automatic transport-recovery guidance.
