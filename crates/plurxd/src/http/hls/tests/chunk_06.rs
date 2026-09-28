@@ -47,14 +47,7 @@
             control.err()
         );
 
-        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        {
-            let mut slot = super::CREATE_ASK_RECORDED_PAUSE
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *slot = Some((reached_tx, release_rx));
-        }
+        let pause = super::pause_create_after_ask_recorded(&state);
 
         let creating = {
             let state = state.clone();
@@ -78,10 +71,7 @@
             })
         };
 
-        tokio::time::timeout(Duration::from_secs(60), reached_rx)
-            .await
-            .expect("the create must reach the seam")
-            .expect("seam signal");
+        let held = pause.reached().await;
 
         // The viewer changes their mind while it is frozen.
         let moved = state
@@ -100,7 +90,7 @@
             "the ask moved while the create was frozen"
         );
 
-        let _ = release_tx.send(());
+        held.release();
         let completed = tokio::time::timeout(Duration::from_secs(120), creating)
             .await
             .expect("the create must finish once released")
@@ -2398,5 +2388,564 @@
         assert!(
             !by_request.contains("00:00:04.000 -->"),
             "shifting by the request leads the picture by the seek's distance from its keyframe"
+        );
+    }
+
+    /// The route group's shipped shape (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8,
+    /// Decision D-M8-J): a state built by the production constructor holds
+    /// the unfilled slot, so every point reads the no-op, a release runs
+    /// through its three points to a durable End, and an admitted preparation
+    /// candidate takes the priming path (see
+    /// `shipped_shape_primes_an_admitted_candidate`).
+    #[tokio::test]
+    async fn hls_route_shipped_shape() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        let root = crate::test_tempdir().expect("shipped state root");
+        let state = crate::state::AppState::new_unhooked(
+            "test".into(),
+            Arc::clone(&fixture.store),
+            crate::state::Dirs {
+                artwork: root.path().join("artwork"),
+                transcode: root.path().join("transcode"),
+                cache: root.path().join("cache"),
+                subs: root.path().join("subs"),
+                runtime_cache: root.path().join("runtime"),
+                renditions: root.path().join("renditions"),
+            },
+            "shipped-node".into(),
+            plurx_core::transcode::EncoderCaps::default(),
+            Default::default(),
+            Arc::new(crate::logbuf::LogBuffer::new(64)),
+        );
+        let hooks = state.hls_route_hooks.get();
+        let installed: &dyn std::any::Any = hooks;
+        assert!(
+            installed.is::<NoopHlsRouteHooks>(),
+            "the production constructor leaves the route group on the no-op hooks"
+        );
+        let waker = futures_util::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        for (point, mut hook) in [
+            ("after_create_ask_recorded", hooks.after_create_ask_recorded()),
+            ("before_dispatch_answer", hooks.before_dispatch_answer("p")),
+            ("before_preparation_settlement", hooks.before_preparation_settlement("i")),
+            ("before_preparation_planning", hooks.before_preparation_planning("p")),
+            ("before_preparation_registered", hooks.before_preparation_registered("p")),
+            ("after_release_fence_closed", hooks.after_release_fence_closed(&session_id)),
+            ("after_release_tombstoned", hooks.after_release_tombstoned(&session_id)),
+        ] {
+            assert!(
+                hook.as_mut().poll(&mut context).is_ready(),
+                "the production {point} point is ready at its first poll"
+            );
+        }
+        assert!(!hooks.staged_read_fault("i"));
+        assert!(!hooks.preparation_settlement_fault("i"));
+        assert!(!hooks.refuses_preparation_planning("p"));
+        assert!(!hooks.release_commit_unknown(&session_id));
+        assert!(
+            hooks.primes_prepared_successor(),
+            "production stages and primes every admitted successor"
+        );
+
+        let user = fixture
+            .store
+            .create_user("shipped-release", "hash", false)
+            .await
+            .expect("release user");
+        let route = activate_ready(
+            &fixture.store,
+            MediaSessionActivation {
+                recovery_epoch: String::new(),
+                expected_desired_revision: None,
+                incarnation_id: uuid::Uuid::new_v4().to_string(),
+                session_id: session_id.clone(),
+                user_id: user.id,
+                playback_id: "shipped-release".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: state.node_id.clone(),
+                lease_expires_at_ms: unix_ms() + 60_000,
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms: unix_ms(),
+            },
+        )
+        .await;
+        let settlement = match state
+            .media_sessions
+            .begin_release_reconciliation(&session_id)
+            .await
+        {
+            ReleaseAdmission::Won(settlement) => settlement,
+            ReleaseAdmission::Joined(_) | ReleaseAdmission::Full => panic!("first release wins"),
+        };
+        let released = tokio::time::timeout(
+            Duration::from_secs(10),
+            release_session(
+                state.clone(),
+                session_id.clone(),
+                settlement,
+                crate::vodserve::Terminal::Deleted,
+                "released by client",
+            ),
+        )
+        .await
+        .expect("the production release points do not hold the release");
+        assert_eq!(released, StatusCode::NO_CONTENT);
+        assert!(
+            fixture
+                .store
+                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .await
+                .expect("pointer after release")
+                .is_none(),
+            "the release reached its durable End"
+        );
+
+        shipped_shape_primes_an_admitted_candidate().await;
+    }
+
+    /// The production priming arm of `process_preparation_candidate`, driven
+    /// on a state built by the production constructor: an admitted candidate
+    /// stages **and primes** its successor.
+    ///
+    /// Only the priming path reaches the registration point, so the test
+    /// holds a pause there. Arming it installs the test hooks, which must keep
+    /// answering priming as the no-op did. While the successor is held, the
+    /// candidate is superseded, so after registration it tears itself down
+    /// and no encoder is launched. A production that never primed stages the
+    /// row only, never reaches the point, and fails at `reached`.
+    async fn shipped_shape_primes_an_admitted_candidate() {
+        let dir = crate::test_tempdir().expect("priming state dir");
+        let playback_id = unique_playback_id("shipped-priming");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let (fixture, session_id, route) = staging_route_on(
+            HlsDeliveryFixture::publish_unhooked(dir.path(), &session_id).await,
+            session_id,
+            &playback_id,
+        )
+        .await;
+        let installed: &dyn std::any::Any = fixture.state.hls_route_hooks.get();
+        assert!(
+            installed.is::<NoopHlsRouteHooks>(),
+            "the production constructor leaves the route group on the no-op hooks"
+        );
+        let registered = pause_before_preparation_registered(&fixture.state, &playback_id);
+        let rearmed: &dyn std::any::Any = fixture.state.hls_route_hooks.get();
+        assert!(
+            rearmed.is::<HlsRouteTestHooks>(),
+            "arming a point installs the test hooks"
+        );
+        assert!(
+            fixture.state.hls_route_hooks.get().primes_prepared_successor(),
+            "arming a point on a production-built state keeps its candidates priming"
+        );
+
+        // The admitted transition `an_admitted_preparation_candidate_reaches_the_ledger`
+        // drives: a 2160p copy being delivered, and the viewer asks for 1080p.
+        let source = staging_source(&fixture).await;
+        let mut recipe = crate::transcode::SessionRequest {
+            playback_id: playback_id.clone(),
+            ..staged_candidate_request()
+        };
+        recipe.file_id = source.id;
+        recipe.kind = crate::transcode::SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        };
+        let delivered =
+            crate::playback_control::EffectiveSelection::from_request(&recipe, 2160, None);
+        let selection = crate::playback_control::ClientSelection {
+            quality: crate::playback_control::QualitySelection::Manual { height: 1080 },
+            audio_track: None,
+            subtitle: crate::playback_control::SubtitleSelection {
+                mode: crate::playback_control::SubtitleMode::Off,
+                track: None,
+            },
+            audio_offset_ms: 0,
+            codec: crate::playback_control::CodecPolicy::Auto,
+            dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
+        };
+        let digest = selection.desired().digest();
+        let candidate = tokio::spawn(process_preparation_candidate(
+            fixture.state.clone(),
+            PendingCandidateGuard::begin(&playback_id, &digest),
+            PreparationCandidateInputs {
+                session_id: session_id.clone(),
+                route: route.clone(),
+                recipe: RemoteStartRequest {
+                    protocol_version: crate::media_pool::PROTOCOL_VERSION,
+                    incarnation_id: route.incarnation_id.clone(),
+                    user_id: route.user_id,
+                    source_size: 0,
+                    source_mtime: 0,
+                    typeless_playlist: false,
+                    library_channel: None,
+                    request: recipe,
+                },
+                planning_caps: None,
+                planning_overrides: None,
+                selection,
+                observed_download_bps: Some(100_000_000),
+                delivered,
+                delivered_bps: Some(10_000_000),
+                capabilities: Some(crate::playback_control::DynamicCapabilities {
+                    platform: crate::playback_control::ClientPlatform::Apple,
+                    max_height: 2160,
+                    codecs: vec![crate::playback_control::CodecPolicy::H264],
+                    dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+                    dual_player_preparation: true,
+                }),
+                platform: crate::playback_control::ClientPlatform::Apple,
+                purpose: PreparationPurpose::SelectionChange,
+                accepted_film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+            },
+        ));
+        let held = registered.reached().await;
+        assert!(
+            fixture
+                .store
+                .staged_media_session_for_playback(route.user_id, &playback_id)
+                .await
+                .expect("ledger read at the registration point")
+                .is_none(),
+            "the priming path reserves after it registers, so nothing is staged yet"
+        );
+        cancel_preparations_for_superseded_predecessor(&playback_id, None);
+        held.release();
+        tokio::time::timeout(Duration::from_secs(10), candidate)
+            .await
+            .expect("the superseded candidate finishes")
+            .expect("candidate task");
+        assert!(
+            !has_active_preparation_for_ask(&playback_id, &digest),
+            "the superseded successor is not left registered and priming"
+        );
+
+        // The test constructor's state is the other side: its candidates
+        // stage without priming until a test turns priming on.
+        let hooked = crate::state::AppState::new(
+            "test".into(),
+            Arc::clone(&fixture.store),
+            crate::state::Dirs {
+                artwork: dir.path().join("hooked-artwork"),
+                transcode: dir.path().join("hooked-transcode"),
+                cache: dir.path().join("hooked-cache"),
+                subs: dir.path().join("hooked-subs"),
+                runtime_cache: dir.path().join("hooked-runtime"),
+                renditions: dir.path().join("hooked-renditions"),
+            },
+            "hooked-node".into(),
+            plurx_core::transcode::EncoderCaps::default(),
+            Default::default(),
+            Arc::new(crate::logbuf::LogBuffer::new(64)),
+        );
+        assert!(!hooked.hls_route_hooks.get().primes_prepared_successor());
+        prime_prepared_successors(&hooked, true);
+        assert!(hooked.hls_route_hooks.get().primes_prepared_successor());
+    }
+
+    /// `before_dispatch_answer` sits after the dispatch and before the
+    /// exchange reads the pending map: an exchange that dispatches nothing,
+    /// held at the point while a candidate for its own ask appears, answers
+    /// `staging` from the map it reads after the point.
+    #[tokio::test]
+    async fn dispatch_answer_point_precedes_the_pending_map_read() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("preparation-answer-point");
+        let (fixture, _session_id, route) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+        let request = preparing_control_request(&route);
+        let pause = pause_before_dispatch_answer(&fixture.state, &playback_id);
+        let exchange = tokio::spawn({
+            let fixture_state = fixture.state.clone();
+            let route = route.clone();
+            let request = request.clone();
+            async move {
+                control_local_inner(&fixture_state, &route, request, unix_ms() + 4_000).await
+            }
+        });
+        let held = pause.reached().await;
+        assert!(
+            pending_candidate_for_playback(&playback_id).is_none(),
+            "the opening ask dispatches nothing"
+        );
+        let planted = PendingCandidateGuard::begin(&playback_id, &request.selection.desired().digest());
+        held.release();
+        let (status, body) = control_body(
+            tokio::time::timeout(Duration::from_secs(10), exchange)
+                .await
+                .expect("the exchange finishes once released")
+                .expect("exchange task"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            preparation_state(&body),
+            "staging",
+            "the answer reads the pending map after the point"
+        );
+        drop(planted);
+    }
+
+    /// `before_preparation_settlement` sits below the settlement's retry
+    /// deadline: a settlement delayed there past its whole retry budget
+    /// expires without committing, as one behind a Store that slow would.
+    #[tokio::test]
+    async fn a_settlement_delayed_past_its_retry_budget_expires_uncommitted() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+        fixture
+            .state
+            .transcode
+            .vod_for_test()
+            .install_http_test_session(&session_id, staged_source_file(), dir.path())
+            .await;
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &staged_candidate_request(),
+            Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
+        )
+        .await;
+        let mut request = control_request(route.incarnation_id.clone());
+        request.supported_actions = Some(vec![
+            crate::playback_control::PREPARE_REPLACEMENT_ACTION.to_owned()
+        ]);
+        let (status, prepare_body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let action_id = prepare_body["action"]["action_id"]
+            .as_str()
+            .expect("Prepare action id")
+            .to_owned();
+        tokio::time::sleep(Duration::from_millis(260)).await;
+        request.sequence = 2;
+        request.capabilities = None;
+        request.acknowledgement = Some(crate::playback_control::ActionAcknowledgement {
+            action_id,
+            state: crate::playback_control::AcknowledgementState::Committed,
+            buffered_through_ms: None,
+            committed_media_origin_ms: prepare_body["action"]["media_origin_ms"].as_i64(),
+            first_frame_unix_ms: Some(unix_ms()),
+        });
+        delay_next_preparation_settlement(
+            &fixture.state,
+            &route.incarnation_id,
+            PREPARATION_SETTLEMENT_RETRY_BUDGET + Duration::from_millis(200),
+        );
+        let (failed_status, _) = control_body(
+            control_local_inner(&fixture.state, &route, request, unix_ms().saturating_add(500))
+                .await,
+        )
+        .await;
+        assert_eq!(failed_status, StatusCode::SERVICE_UNAVAILABLE);
+        tokio::time::sleep(PREPARATION_SETTLEMENT_RETRY_BUDGET + Duration::from_secs(1)).await;
+        assert_eq!(
+            fixture
+                .state
+                .store
+                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .await
+                .expect("pointer after the expired settlement")
+                .expect("the predecessor stays current")
+                .incarnation_id,
+            route.incarnation_id,
+            "the delay spent the retry budget, so the settlement expired uncommitted"
+        );
+    }
+
+    /// `after_release_fence_closed` sits between the publication fence and the
+    /// durable End: a release held there has closed the session's publication
+    /// fence, and its durable route is still live.
+    #[tokio::test]
+    async fn release_fence_point_sits_between_the_fence_and_the_durable_end() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "release-fence-unrelated").await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let _owner = install_vod_http_session(&fixture, dir.path(), &session_id).await;
+        let user = fixture
+            .store
+            .create_user("release-fence", "hash", false)
+            .await
+            .expect("release fence user");
+        activate_ready(
+            &fixture.store,
+            MediaSessionActivation {
+                recovery_epoch: String::new(),
+                expected_desired_revision: None,
+                incarnation_id: uuid::Uuid::new_v4().to_string(),
+                session_id: session_id.clone(),
+                user_id: user.id,
+                playback_id: "release-fence".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: fixture.state.node_id.clone(),
+                lease_expires_at_ms: unix_ms() + 60_000,
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms: unix_ms(),
+            },
+        )
+        .await;
+        assert!(
+            !fixture
+                .state
+                .transcode
+                .session_publication_fenced_for_test(&session_id),
+            "no release has fenced the session yet"
+        );
+
+        let pause = pause_release_after_fence(&fixture.state, &session_id);
+        let deletion = tokio::spawn({
+            let state = fixture.state.clone();
+            let session_id = session_id.clone();
+            async move { delete(State(state), AxPath(session_id)).await }
+        });
+        let held = pause.reached().await;
+        assert!(
+            fixture
+                .state
+                .transcode
+                .session_publication_fenced_for_test(&session_id),
+            "the publication fence is closed before the point"
+        );
+        assert_eq!(
+            fixture
+                .store
+                .media_session_route(&session_id)
+                .await
+                .expect("route read")
+                .expect("the durable route")
+                .state,
+            "active",
+            "the durable End runs after the point"
+        );
+        held.release();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), deletion)
+                .await
+                .expect("the release finishes once released")
+                .expect("delete task"),
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    /// `after_release_tombstoned` sits between the durable End's proof and the
+    /// exact remote owner's terminal projection: a release held there has armed
+    /// the ended row's projection and has not yet tried the owner, which is
+    /// unreachable here, so the release is deferred only after the point.
+    #[tokio::test]
+    async fn release_tombstone_point_sits_between_the_durable_proof_and_the_remote_owner() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture =
+            HlsDeliveryFixture::publish(dir.path(), "release-tombstone-unrelated").await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let user = fixture
+            .store
+            .create_user("release-tombstone", "hash", false)
+            .await
+            .expect("release tombstone user");
+        activate_ready(
+            &fixture.store,
+            MediaSessionActivation {
+                recovery_epoch: String::new(),
+                expected_desired_revision: None,
+                incarnation_id: uuid::Uuid::new_v4().to_string(),
+                session_id: session_id.clone(),
+                user_id: user.id,
+                playback_id: "release-tombstone".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: "remote-owner-node".to_owned(),
+                lease_expires_at_ms: unix_ms() + 60_000,
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms: unix_ms(),
+            },
+        )
+        .await;
+        let pause = pause_release_after_tombstone(&fixture.state, &session_id);
+        let settlement = match fixture
+            .state
+            .media_sessions
+            .begin_release_reconciliation(&session_id)
+            .await
+        {
+            ReleaseAdmission::Won(settlement) => settlement,
+            ReleaseAdmission::Joined(_) | ReleaseAdmission::Full => panic!("first release wins"),
+        };
+        let release = tokio::spawn({
+            let state = fixture.state.clone();
+            let session_id = session_id.clone();
+            async move {
+                release_session(
+                    state,
+                    session_id,
+                    settlement,
+                    crate::vodserve::Terminal::Deleted,
+                    "released by client",
+                )
+                .await
+            }
+        });
+        let held = pause.reached().await;
+        let ended = fixture
+            .store
+            .media_session_route(&session_id)
+            .await
+            .expect("route read")
+            .expect("the ended row");
+        assert_eq!(ended.state, "ended");
+        assert_ne!(
+            ended.publication_ready_at_ms, MEDIA_SESSION_PUBLICATION_BLOCKED,
+            "the durable End's terminal projection is armed before the point"
+        );
+        assert!(
+            !fixture
+                .state
+                .transcode
+                .session_publication_fenced_for_test(&session_id),
+            "the durable tombstone is projected locally before the point"
+        );
+        assert!(!release.is_finished(), "the release is held at the point");
+        held.release();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(60), release)
+                .await
+                .expect("the release finishes once released")
+                .expect("release task"),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the unreachable remote owner is tried after the point, and the release deferred"
         );
     }

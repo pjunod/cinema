@@ -815,6 +815,52 @@ fn seam_census_skips_files_reached_only_through_test_modules() {
 
 /// The §7 Q3 census of the workspace, printed for the plan. It pins only what
 /// M8 has migrated: an owner whose seams became a hook trait keeps none.
+/// Whether a census file belongs to the HLS route group (D-M8-J): the
+/// parent `http/hls.rs` or any file under `http/hls/`.
+fn http_hls_route_file(file: &str) -> bool {
+    file.ends_with("/http/hls.rs") || file.contains("/http/hls/")
+}
+
+#[test]
+fn http_hls_route_sites_are_recognised_in_the_parent_and_every_child() {
+    // The workspace assertion that the route group keeps no site is only as
+    // good as this predicate: a gated site in the parent `http/hls.rs` or in
+    // any file under `http/hls/`, `subtitle_playlist.rs` included, must
+    // count. Spelled `cfg(TEST)` and swapped before parsing, as above.
+    let source = r#"
+        async fn complete_subtitle_playlist_response(state: &AppState) {
+            #[cfg(TEST)]
+            state
+                .transcode
+                .pause_subtitle_playlist_commit_for_test()
+                .await;
+        }
+        async fn new_route(state: &AppState) {
+            #[cfg(TEST)]
+            state.transcode.pause_new_route_for_test().await;
+        }
+        "#
+    .replace("cfg(TEST)", "cfg(test)");
+    let syntax = syn::parse_file(&source).expect("census fixture is valid Rust");
+    let counted = |file: &str| -> Vec<String> {
+        census_of(file, &syntax)
+            .into_iter()
+            .filter(|site| http_hls_route_file(&site.file))
+            .map(|site| site.owner)
+            .collect()
+    };
+    let both = ["complete_subtitle_playlist_response", "new_route"];
+    assert_eq!(counted("crates/plurxd/src/http/hls.rs"), both);
+    assert_eq!(counted("crates/plurxd/src/http/hls/new_file.rs"), both);
+    assert_eq!(
+        counted("crates/plurxd/src/http/hls/subtitle_playlist.rs"),
+        both,
+        "no file of the route group is exempt"
+    );
+    assert!(counted("crates/plurxd/src/http/hlsx.rs").is_empty());
+    assert!(counted("crates/plurxd/src/http/other.rs").is_empty());
+}
+
 /// Whether a census owner is `TranscodeManager` itself: the struct, one of
 /// its methods, or its hooks trait.
 fn transcode_manager_site(owner: &str) -> bool {
@@ -941,6 +987,17 @@ fn seam_census_of_the_workspace() {
     assert!(
         migrated.is_empty(),
         "M8-migrated owners keep no test-only seams: {migrated:?}"
+    );
+    // The HLS route group (D-M8-J) keeps no test-only site at all: none in
+    // the parent `http/hls.rs` and none under `http/hls/`. #581 took the
+    // last one, `subtitle_playlist.rs`'s `TranscodeManager` pause.
+    let routes: Vec<&Site> = sites
+        .iter()
+        .filter(|site| http_hls_route_file(&site.file))
+        .collect();
+    assert!(
+        routes.is_empty(),
+        "the HLS route group keeps no test-only site: {routes:?}"
     );
     // `TranscodeManager` keeps no test-only site at all (§5.9's zero-count
     // acceptance): no gated field, no initialiser, no gated statement in any
