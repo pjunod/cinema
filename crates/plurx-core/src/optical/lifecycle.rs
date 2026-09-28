@@ -69,6 +69,7 @@ struct ActiveReader {
     generation: String,
     kind: ReaderKind,
     revoked: bool,
+    session_id: Option<String>,
     request_id: Option<String>,
     request_digest: Option<String>,
 }
@@ -148,10 +149,10 @@ impl OpticalDriveManager {
         let mut drives = self.drives();
         let mut sessions = Vec::new();
         for slot in drives.values_mut() {
-            if let OpticalDriveState::Busy { session_id, .. } = &slot.state {
-                sessions.push(session_id.clone());
-            }
             if let Some(active) = slot.active.as_mut() {
+                if let Some(session_id) = &active.session_id {
+                    sessions.push(session_id.clone());
+                }
                 active.revoked = true;
             }
             slot.state = OpticalDriveState::Empty;
@@ -237,6 +238,7 @@ impl OpticalDriveManager {
             drive_id,
             &generation,
             ReaderKind::Inspection,
+            None,
             None,
             None,
         )
@@ -325,6 +327,7 @@ impl OpticalDriveManager {
             drive_id,
             &generation,
             ReaderKind::Playback,
+            Some(session_id.to_owned()),
             Some(request_id.to_owned()),
             Some(request_digest.to_owned()),
         )?;
@@ -343,6 +346,7 @@ impl OpticalDriveManager {
         drive_id: &str,
         generation: &str,
         kind: ReaderKind,
+        session_id: Option<String>,
         request_id: Option<String>,
         request_digest: Option<String>,
     ) -> Result<OpticalReadPermit, OpticalLifecycleError> {
@@ -356,6 +360,7 @@ impl OpticalDriveManager {
             generation: generation.to_owned(),
             kind,
             revoked: false,
+            session_id,
             request_id,
             request_digest,
         });
