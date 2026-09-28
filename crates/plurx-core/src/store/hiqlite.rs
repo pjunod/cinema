@@ -7059,9 +7059,18 @@ mod tests {
             "v47 must advance exactly one step to the read-index schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 55,
+            SUBTITLE_SETTLED_GUARD_SCHEMA_MIGRATION_SOURCE, INTEGRITY_JOBS_SCHEMA_VERSION,
+            "the subtitle settled-trigger guard must start from the exact v60 shape"
+        );
+        assert_eq!(
+            SUBTITLE_SETTLED_GUARD_SCHEMA_MIGRATION_SOURCE + 1,
+            SUBTITLE_SETTLED_GUARD_SCHEMA_VERSION,
+            "v60 must advance exactly one step to the settled-trigger guard"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 56,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v60 step"
+            "this implementation contains every additive v5→v61 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
