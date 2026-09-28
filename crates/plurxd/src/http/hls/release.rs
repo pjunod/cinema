@@ -172,11 +172,11 @@ pub(super) async fn release_session(
         .transcode
         .begin_session_publication_fence(&session)
         .await;
-    #[cfg(test)]
-    if let Some(pause) = release_pause_for(&session) {
-        pause.wait().await;
-        pause.wait().await;
-    }
+    state
+        .hls_route_hooks
+        .get()
+        .after_release_fence_closed(&session)
+        .await;
     // Never put an HTTP deadline around this mutation. SQLite blocking work
     // and a submitted Raft proposal may commit after caller cancellation, so
     // this detached capacity-owned task retains the attempt until the Store
@@ -250,11 +250,11 @@ pub(super) async fn release_session(
             state
                 .transcode
                 .complete_session_release_durable(&durable_release);
-            #[cfg(test)]
-            if let Some(pause) = release_after_tombstone_pause_for(&session) {
-                pause.wait().await;
-                pause.wait().await;
-            }
+            state
+                .hls_route_hooks
+                .get()
+                .after_release_tombstoned(&session)
+                .await;
             // A remote worker must acknowledge its local terminal generation
             // before the shared DELETE settles. The acknowledgement is fast:
             // physical reap is already transferred to the worker's bounded
@@ -349,8 +349,7 @@ async fn end_media_session_for_release(
     session: &str,
     terminal: crate::vodserve::Terminal,
 ) -> Result<Option<MediaSessionRoute>, StoreError> {
-    #[cfg(test)]
-    if take_injected_release_error(session) {
+    if state.hls_route_hooks.get().release_commit_unknown(session) {
         return Err(StoreError::Database(
             "injected commit-unknown media-session release".to_owned(),
         ));
@@ -359,63 +358,4 @@ async fn end_media_session_for_release(
         .store
         .end_media_session(session, terminal.durable_reason(), unix_ms())
         .await
-}
-
-#[cfg(test)]
-fn injected_release_errors() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
-    static ERRORS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-        std::sync::OnceLock::new();
-    ERRORS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
-}
-
-#[cfg(test)]
-pub(super) fn inject_release_error(session: &str) {
-    injected_release_errors()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(session.to_owned());
-}
-
-#[cfg(test)]
-fn take_injected_release_error(session: &str) -> bool {
-    injected_release_errors()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(session)
-}
-
-#[cfg(test)]
-pub(super) fn release_pauses(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Barrier>>> {
-    static PAUSES: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Barrier>>>,
-    > = std::sync::OnceLock::new();
-    PAUSES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-#[cfg(test)]
-fn release_pause_for(session: &str) -> Option<Arc<tokio::sync::Barrier>> {
-    release_pauses()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(session)
-        .cloned()
-}
-
-#[cfg(test)]
-pub(super) fn release_after_tombstone_pauses(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Barrier>>> {
-    static PAUSES: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Barrier>>>,
-    > = std::sync::OnceLock::new();
-    PAUSES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-#[cfg(test)]
-fn release_after_tombstone_pause_for(session: &str) -> Option<Arc<tokio::sync::Barrier>> {
-    release_after_tombstone_pauses()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(session)
-        .cloned()
 }
