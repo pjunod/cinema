@@ -180,6 +180,7 @@ impl HlsDeliveryFixture {
             None,
             false,
             false,
+            false,
         )
         .await
     }
@@ -198,8 +199,17 @@ impl HlsDeliveryFixture {
             takeover,
             copy,
             actor_managed,
+            false,
         )
         .await
+    }
+
+    /// [`Self::publish`], with the state built by
+    /// [`crate::state::AppState::new_unhooked`]: every HLS route point reads
+    /// the no-op production installs.
+    pub(crate) async fn publish_unhooked(dir: &std::path::Path, session_id: &str) -> Self {
+        Self::publish_with_takeover_and_state_root(dir, dir, session_id, None, false, false, true)
+            .await
     }
 
     async fn publish_with_takeover_and_state_root(
@@ -209,6 +219,7 @@ impl HlsDeliveryFixture {
         takeover: Option<SessionTakeoverStart>,
         copy: bool,
         actor_managed: bool,
+        production_route_hooks: bool,
     ) -> Self {
         use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
         use plurx_core::store::SqliteStore;
@@ -344,7 +355,12 @@ impl HlsDeliveryFixture {
                 .store(true, Release);
         }
         let session = Arc::new(raw_session);
-        let state = crate::state::AppState::new(
+        let construct = if production_route_hooks {
+            crate::state::AppState::new_unhooked
+        } else {
+            crate::state::AppState::new
+        };
+        let state = construct(
             "test".into(),
             Arc::clone(&store),
             crate::state::Dirs {

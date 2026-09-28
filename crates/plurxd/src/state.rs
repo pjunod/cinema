@@ -915,8 +915,10 @@ impl AppState {
     /// `node_id` is this server's stable id — the `node_id` a cache location
     /// is recorded against, so a cluster can tell whose copy is whose.
     ///
-    /// The state holds the HLS route test hooks, so its admitted preparation
-    /// candidates stage without priming (Decision D-M8-J);
+    /// The state holds the HLS route test hooks with priming turned off, so
+    /// its admitted preparation candidates stage without priming (Decision
+    /// D-M8-K) until a test calls
+    /// [`crate::http::hls::prime_prepared_successors`];
     /// [`AppState::new_unhooked`] leaves the production no-op in place.
     #[cfg(test)]
     pub fn new(
@@ -937,7 +939,7 @@ impl AppState {
             system,
             logs,
         );
-        crate::http::hls::hls_route_test_hooks(&state);
+        crate::http::hls::prime_prepared_successors(&state, false);
         state
     }
 

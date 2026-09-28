@@ -150,10 +150,13 @@ type KeySet = std::sync::Mutex<std::collections::HashSet<String>>;
 /// The route group's test hooks: the tables the routes' module statics used
 /// to be, keyed by session, incarnation or playback id, now per state.
 ///
-/// Every state built by the test-only [`AppState::new`] holds these, so its
-/// admitted candidates stage without priming, as every test build did before;
-/// a state built by the production constructor reads the no-op until a test
-/// arms a point on it.
+/// Every state built by the test-only [`AppState::new`] holds these with
+/// priming turned off, so its admitted candidates stage without priming, as
+/// every test build did before, until a test calls
+/// [`prime_prepared_successors`]. A state built by the production constructor
+/// reads the no-op until a test arms a point on it; arming installs these
+/// answering priming as the no-op did, so a test can hold a point on the
+/// production path without leaving it.
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct HlsRouteTestHooks {
@@ -168,6 +171,7 @@ pub(crate) struct HlsRouteTestHooks {
     preparation_planning_refusals: KeySet,
     primes_prepared_successors: std::sync::atomic::AtomicBool,
     preparation_registration_delays: Keyed<Duration>,
+    preparation_registration_pauses: Keyed<Arc<crate::seam_hooks::AsyncPause>>,
     release_fence_pauses: Keyed<Arc<crate::seam_hooks::AsyncPause>>,
     release_tombstone_pauses: Keyed<Arc<crate::seam_hooks::AsyncPause>>,
     release_errors: KeySet,
@@ -276,7 +280,12 @@ impl HlsRouteHooks for HlsRouteTestHooks {
     }
 
     fn before_preparation_registered(&self, playback_id: &str) -> HookFuture<'_> {
-        delayed(locked(&self.preparation_registration_delays).remove(playback_id))
+        let delay = delayed(locked(&self.preparation_registration_delays).remove(playback_id));
+        let pause = held(locked(&self.preparation_registration_pauses).remove(playback_id));
+        Box::pin(async move {
+            delay.await;
+            pause.await;
+        })
     }
 
     fn after_release_fence_closed(&self, session: &str) -> HookFuture<'_> {
@@ -299,11 +308,20 @@ impl HlsRouteHooks for HlsRouteTestHooks {
 }
 
 /// `state`'s route test hooks, installed on first use.
+///
+/// Installing them changes no path by itself: they start out answering
+/// [`HlsRouteHooks::primes_prepared_successor`] as the hooks they replace
+/// did, so arming any point on a production-built state keeps its admitted
+/// candidates priming.
 #[cfg(test)]
 pub(crate) fn hls_route_test_hooks(state: &AppState) -> &HlsRouteTestHooks {
-    let hooks: &dyn std::any::Any = state
-        .hls_route_hooks
-        .get_or_install(|| Box::new(HlsRouteTestHooks::default()));
+    let primes = state.hls_route_hooks.get().primes_prepared_successor();
+    let hooks: &dyn std::any::Any = state.hls_route_hooks.get_or_install(|| {
+        Box::new(HlsRouteTestHooks {
+            primes_prepared_successors: std::sync::atomic::AtomicBool::new(primes),
+            ..HlsRouteTestHooks::default()
+        })
+    });
     hooks
         .downcast_ref()
         .expect("the state's HLS route hook slot holds HlsRouteTestHooks")
@@ -326,6 +344,17 @@ pub(crate) fn pause_create_after_ask_recorded(
     hls_route_test_hooks(state)
         .create_ask_recorded
         .arm("create after the ask is recorded")
+}
+
+/// Whether `state`'s admitted preparation candidates stage and prime their
+/// successor (`true`, as production always does) or stage the durable row
+/// only, on this node, as a selection change (`false`, what
+/// [`AppState::new`] sets up).
+#[cfg(test)]
+pub(crate) fn prime_prepared_successors(state: &AppState, primes: bool) {
+    hls_route_test_hooks(state)
+        .primes_prepared_successors
+        .store(primes, std::sync::atomic::Ordering::Release);
 }
 
 #[cfg(test)]
@@ -421,6 +450,20 @@ pub(super) fn fault_preparation_planning(
 pub(super) fn delay_preparation_registration(state: &AppState, playback_id: &str, delay: Duration) {
     locked(&hls_route_test_hooks(state).preparation_registration_delays)
         .insert(playback_id.to_owned(), delay);
+}
+
+/// Hold the next priming successor for `playback_id` just before it
+/// registers for cancellation. Only the priming path reaches this point, so
+/// reaching it is how a test tells that an admitted candidate primed.
+#[cfg(test)]
+pub(super) fn pause_before_preparation_registered(
+    state: &AppState,
+    playback_id: &str,
+) -> Arc<crate::seam_hooks::AsyncPause> {
+    let pause = crate::seam_hooks::AsyncPause::new("priming successor before its registration");
+    locked(&hls_route_test_hooks(state).preparation_registration_pauses)
+        .insert(playback_id.to_owned(), Arc::clone(&pause));
+    pause
 }
 
 /// Hold the next release of `session` after it closes its publication fence.

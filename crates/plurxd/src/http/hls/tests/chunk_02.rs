@@ -2389,6 +2389,16 @@
     ) -> (HlsDeliveryFixture, String, MediaSessionRoute) {
         let session_id = uuid::Uuid::new_v4().to_string();
         let fixture = HlsDeliveryFixture::publish(dir, &session_id).await;
+        staging_route_on(fixture, session_id, playback_id).await
+    }
+
+    /// `staging_fixture_for_playback`'s durable route, on a fixture the
+    /// caller published under `session_id`.
+    async fn staging_route_on(
+        fixture: HlsDeliveryFixture,
+        session_id: String,
+        playback_id: &str,
+    ) -> (HlsDeliveryFixture, String, MediaSessionRoute) {
         let user = fixture
             .store
             .create_user("stage-on-prepare", "hash", false)

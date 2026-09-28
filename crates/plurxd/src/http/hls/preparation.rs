@@ -1270,8 +1270,9 @@ pub(super) async fn process_preparation_candidate(
     };
     if let Some(successor_owner) = successor_owner {
         // Production always stages and primes. Hooks that decline priming (the
-        // test hooks do, unless a test asks) stage the durable row only, on
-        // this node, as a selection change: those decision-boundary tests use
+        // test hooks of `AppState::new` do, until a test calls
+        // `prime_prepared_successors`) stage the durable row only, on this
+        // node, as a selection change: those decision-boundary tests use
         // synthetic media rows and exercise durable preparation semantics
         // without launching ffmpeg.
         let primes = state.hls_route_hooks.get().primes_prepared_successor();

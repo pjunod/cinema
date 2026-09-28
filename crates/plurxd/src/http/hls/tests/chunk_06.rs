@@ -2393,8 +2393,10 @@
 
     /// The route group's shipped shape (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8,
     /// Decision D-M8-J): a state built by the production constructor holds
-    /// the unfilled slot, so every point reads the no-op, and a release runs
-    /// through its three points to a durable End.
+    /// the unfilled slot, so every point reads the no-op, a release runs
+    /// through its three points to a durable End, and an admitted preparation
+    /// candidate takes the priming path (see
+    /// `shipped_shape_primes_an_admitted_candidate`).
     #[tokio::test]
     async fn hls_route_shipped_shape() {
         let dir = crate::test_tempdir().expect("state dir");
@@ -2506,6 +2508,149 @@
                 .is_none(),
             "the release reached its durable End"
         );
+
+        shipped_shape_primes_an_admitted_candidate().await;
+    }
+
+    /// The production priming arm of `process_preparation_candidate`, driven
+    /// on a state built by the production constructor: an admitted candidate
+    /// stages **and primes** its successor.
+    ///
+    /// Only the priming path reaches the registration point, so the test
+    /// holds a pause there. Arming it installs the test hooks, which must keep
+    /// answering priming as the no-op did. While the successor is held, the
+    /// candidate is superseded, so after registration it tears itself down
+    /// and no encoder is launched. A production that never primed stages the
+    /// row only, never reaches the point, and fails at `reached`.
+    async fn shipped_shape_primes_an_admitted_candidate() {
+        let dir = crate::test_tempdir().expect("priming state dir");
+        let playback_id = unique_playback_id("shipped-priming");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let (fixture, session_id, route) = staging_route_on(
+            HlsDeliveryFixture::publish_unhooked(dir.path(), &session_id).await,
+            session_id,
+            &playback_id,
+        )
+        .await;
+        let installed: &dyn std::any::Any = fixture.state.hls_route_hooks.get();
+        assert!(
+            installed.is::<NoopHlsRouteHooks>(),
+            "the production constructor leaves the route group on the no-op hooks"
+        );
+        let registered = pause_before_preparation_registered(&fixture.state, &playback_id);
+        let rearmed: &dyn std::any::Any = fixture.state.hls_route_hooks.get();
+        assert!(
+            rearmed.is::<HlsRouteTestHooks>(),
+            "arming a point installs the test hooks"
+        );
+        assert!(
+            fixture.state.hls_route_hooks.get().primes_prepared_successor(),
+            "arming a point on a production-built state keeps its candidates priming"
+        );
+
+        // The admitted transition `an_admitted_preparation_candidate_reaches_the_ledger`
+        // drives: a 2160p copy being delivered, and the viewer asks for 1080p.
+        let source = staging_source(&fixture).await;
+        let mut recipe = crate::transcode::SessionRequest {
+            playback_id: playback_id.clone(),
+            ..staged_candidate_request()
+        };
+        recipe.file_id = source.id;
+        recipe.kind = crate::transcode::SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        };
+        let delivered =
+            crate::playback_control::EffectiveSelection::from_request(&recipe, 2160, None);
+        let selection = crate::playback_control::ClientSelection {
+            quality: crate::playback_control::QualitySelection::Manual { height: 1080 },
+            audio_track: None,
+            subtitle: crate::playback_control::SubtitleSelection {
+                mode: crate::playback_control::SubtitleMode::Off,
+                track: None,
+            },
+            audio_offset_ms: 0,
+            codec: crate::playback_control::CodecPolicy::Auto,
+            dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
+        };
+        let digest = selection.desired().digest();
+        let candidate = tokio::spawn(process_preparation_candidate(
+            fixture.state.clone(),
+            PendingCandidateGuard::begin(&playback_id, &digest),
+            PreparationCandidateInputs {
+                session_id: session_id.clone(),
+                route: route.clone(),
+                recipe: RemoteStartRequest {
+                    protocol_version: crate::media_pool::PROTOCOL_VERSION,
+                    incarnation_id: route.incarnation_id.clone(),
+                    user_id: route.user_id,
+                    source_size: 0,
+                    source_mtime: 0,
+                    typeless_playlist: false,
+                    library_channel: None,
+                    request: recipe,
+                },
+                planning_caps: None,
+                planning_overrides: None,
+                selection,
+                observed_download_bps: Some(100_000_000),
+                delivered,
+                delivered_bps: Some(10_000_000),
+                capabilities: Some(crate::playback_control::DynamicCapabilities {
+                    platform: crate::playback_control::ClientPlatform::Apple,
+                    max_height: 2160,
+                    codecs: vec![crate::playback_control::CodecPolicy::H264],
+                    dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+                    dual_player_preparation: true,
+                }),
+                platform: crate::playback_control::ClientPlatform::Apple,
+                purpose: PreparationPurpose::SelectionChange,
+                accepted_film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+            },
+        ));
+        let held = registered.reached().await;
+        assert!(
+            fixture
+                .store
+                .staged_media_session_for_playback(route.user_id, &playback_id)
+                .await
+                .expect("ledger read at the registration point")
+                .is_none(),
+            "the priming path reserves after it registers, so nothing is staged yet"
+        );
+        cancel_preparations_for_superseded_predecessor(&playback_id, None);
+        held.release();
+        tokio::time::timeout(Duration::from_secs(10), candidate)
+            .await
+            .expect("the superseded candidate finishes")
+            .expect("candidate task");
+        assert!(
+            !has_active_preparation_for_ask(&playback_id, &digest),
+            "the superseded successor is not left registered and priming"
+        );
+
+        // The test constructor's state is the other side: its candidates
+        // stage without priming until a test turns priming on.
+        let hooked = crate::state::AppState::new(
+            "test".into(),
+            Arc::clone(&fixture.store),
+            crate::state::Dirs {
+                artwork: dir.path().join("hooked-artwork"),
+                transcode: dir.path().join("hooked-transcode"),
+                cache: dir.path().join("hooked-cache"),
+                subs: dir.path().join("hooked-subs"),
+                runtime_cache: dir.path().join("hooked-runtime"),
+                renditions: dir.path().join("hooked-renditions"),
+            },
+            "hooked-node".into(),
+            plurx_core::transcode::EncoderCaps::default(),
+            Default::default(),
+            Arc::new(crate::logbuf::LogBuffer::new(64)),
+        );
+        assert!(!hooked.hls_route_hooks.get().primes_prepared_successor());
+        prime_prepared_successors(&hooked, true);
+        assert!(hooked.hls_route_hooks.get().primes_prepared_successor());
     }
 
     /// `before_dispatch_answer` sits after the dispatch and before the
