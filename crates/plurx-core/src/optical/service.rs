@@ -31,7 +31,7 @@ pub enum OpticalServiceError {
 /// has no readiness gate. If an operator enables optical with an unmet helper
 /// or device requirement, the requested operation returns that concrete host
 /// error and the daemon remains healthy.
-pub struct OpticalService<S: ?Sized, H> {
+pub struct OpticalService<S: ?Sized, H: ?Sized> {
     manager: OpticalDriveManager,
     drives: BTreeMap<String, OpticalDriveConfig>,
     store: Arc<S>,
@@ -61,7 +61,7 @@ pub enum OpticalTitleClaim {
 impl<S, H> OpticalService<S, H>
 where
     S: OpticalStore + ?Sized,
-    H: OpticalHostAdapter,
+    H: OpticalHostAdapter + ?Sized,
 {
     pub fn new(
         owner_node_id: impl Into<String>,

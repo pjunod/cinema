@@ -7569,6 +7569,184 @@ mod tests {
         test_state_with_system(Default::default())
     }
 
+    async fn test_state_with_optical(
+        format: plurx_core::optical::OpticalFormat,
+    ) -> (
+        Router,
+        AppState,
+        Arc<plurx_core::testfixtures::optical::FakeOpticalHost>,
+    ) {
+        use plurx_core::optical::{OpticalHostAdapter, OpticalService};
+        use plurx_core::testfixtures::optical::{optical_drive_fixture, FakeOpticalHost};
+
+        let store = SqliteStore::open_in_memory().expect("store");
+        let base = crate::test_temp_path(format!("plurx-optical-api-{}", uuid::Uuid::new_v4()));
+        let mut state = AppState::new(
+            "test".into(),
+            Arc::new(store),
+            test_dirs(&base),
+            "test-node".into(),
+            Default::default(),
+            Default::default(),
+            Arc::new(crate::logbuf::LogBuffer::new(64)),
+        );
+        let fake = Arc::new(FakeOpticalHost::default());
+        let host: Arc<dyn OpticalHostAdapter> = fake.clone();
+        let optical: Arc<OpticalService<dyn plurx_core::store::Store, dyn OpticalHostAdapter>> =
+            Arc::new(OpticalService::new(
+                state.node_id.clone(),
+                vec![optical_drive_fixture("fixture", base.join("disc"))],
+                state.store.clone(),
+                host,
+                Duration::from_secs(1),
+            ));
+        state.optical = optical;
+        fake.push_inspection_for_observed_generation(format);
+        state
+            .optical
+            .inspect_insertion("fixture", 1_750_000_000_000)
+            .await
+            .expect("inspect fixture insertion");
+        state
+            .store
+            .put_setting(plurx_core::store::keys::OPTICAL_ENABLED, "1")
+            .await
+            .expect("enable optical playback");
+        (router(state.clone()), state, fake)
+    }
+
+    #[tokio::test]
+    async fn optical_http_contract_is_path_free_and_generation_fenced() {
+        use plurx_core::optical::OpticalFormat;
+        use plurx_core::testfixtures::optical::FakeOpticalEvent;
+
+        let (app, _state, fake) = test_state_with_optical(OpticalFormat::Dvd).await;
+        let admin = setup_admin(&app).await;
+
+        let (status, drives) = call(&app, get("/api/v1/optical/drives", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "drive discovery: {drives}");
+        assert_eq!(drives[0]["id"], "test-node:fixture");
+        assert_eq!(drives[0]["owner_node_id"], "test-node");
+        assert_eq!(drives[0]["enabled"], true);
+        assert_eq!(drives[0]["state"]["state"], "ready");
+        let discovery_wire = drives.to_string();
+        assert!(!discovery_wire.contains("/fixture/dev"));
+        assert!(!discovery_wire.contains("plurx-optical-api"));
+        assert!(!discovery_wire.contains("session_id"));
+
+        let (status, disc) = call(
+            &app,
+            get(
+                "/api/v1/optical/drives/test-node%3Afixture/disc",
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "disc discovery: {disc}");
+        assert_eq!(disc["titles"][0]["id"], "title-1");
+        let disc_id = disc["drive"]["disc"]["id"]
+            .as_str()
+            .expect("disc id")
+            .to_owned();
+        let generation = disc["drive"]["disc"]["media_generation"]
+            .as_str()
+            .expect("media generation")
+            .to_owned();
+
+        let decision_body = |media_generation: &str| {
+            json!({
+                "expected_disc_id": disc_id,
+                "media_generation": media_generation,
+                "angle": 1,
+                "caps": {"v": 2},
+                "force": "original",
+                "audio": null,
+                "subtitle": null
+            })
+        };
+        let (status, decision) = call(
+            &app,
+            post(
+                "/api/v1/optical/drives/test-node%3Afixture/titles/title-1/decision",
+                Some(&admin),
+                decision_body(&generation),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "optical decision: {decision}");
+        assert_eq!(decision["method"], "transcode");
+        assert_eq!(decision["delivered_dynamic_range"], "sdr");
+        assert_eq!(decision["delivery"]["mode"], "transcode");
+        assert_eq!(decision["vod_indexed"], false);
+        assert!(decision["reasons"]
+            .as_array()
+            .expect("decision reasons")
+            .iter()
+            .any(|reason| reason
+                .as_str()
+                .is_some_and(|reason| reason.contains("Original is not yet available"))));
+        let decision_wire = decision.to_string();
+        assert!(!decision_wire.contains("/fixture/dev"));
+        assert!(!decision_wire.contains("plurx-optical-api"));
+
+        let (status, changed) = call(
+            &app,
+            post(
+                "/api/v1/optical/drives/test-node%3Afixture/titles/title-1/decision",
+                Some(&admin),
+                decision_body("stale-generation"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "stale decision: {changed}");
+        assert_eq!(changed["code"], "optical_media_changed");
+
+        fake.push_eject(Ok(()));
+        let (status, stale_eject) = call(
+            &app,
+            post(
+                "/api/v1/optical/drives/test-node%3Afixture/eject",
+                Some(&admin),
+                json!({
+                    "expected_disc_id": disc_id,
+                    "media_generation": "stale-generation",
+                    "stop_active": false,
+                    "session_id": null
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "stale eject: {stale_eject}");
+        assert_eq!(stale_eject["code"], "optical_eject_conflict");
+        assert!(!fake
+            .events()
+            .iter()
+            .any(|event| matches!(event, FakeOpticalEvent::Eject(_))));
+
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/optical/drives/test-node%3Afixture/eject",
+                Some(&admin),
+                json!({
+                    "expected_disc_id": disc_id,
+                    "media_generation": generation,
+                    "stop_active": false,
+                    "session_id": null
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "eject: {body}");
+        assert_eq!(
+            fake.events()
+                .into_iter()
+                .filter(|event| matches!(event, FakeOpticalEvent::Eject(id) if id == "fixture"))
+                .count(),
+            1
+        );
+    }
+
     fn test_state_with_dv_disk_tools() -> (Router, AppState) {
         let store = SqliteStore::open_in_memory().expect("store");
         let base = crate::test_temp_path(format!("plurx-dv-api-{}", uuid::Uuid::new_v4()));

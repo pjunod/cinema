@@ -329,7 +329,7 @@ fn inspection_fixture(
                 complete: true,
                 digest: digest_byte.repeat(32),
                 navigation_bytes: 4096,
-                bounded_sample_bytes: 65_536,
+                bounded_sample_bytes: 4096,
             },
             titles: vec![InspectedTitle {
                 title_id: "title-1".to_owned(),

@@ -648,8 +648,9 @@ pub struct AppState {
     /// Node-local optical drives and their insertion-fenced reader admission.
     /// The service is always compiled; the replicated runtime switch decides
     /// whether observation is active.
-    pub(crate) optical:
-        Arc<plurx_core::optical::OpticalService<dyn Store, plurx_core::optical::SystemOpticalHost>>,
+    pub(crate) optical: Arc<
+        plurx_core::optical::OpticalService<dyn Store, dyn plurx_core::optical::OpticalHostAdapter>,
+    >,
     pub server_name: String,
     /// Stable identity of the node that owns local transcode/offline bytes.
     pub node_id: String,
@@ -951,9 +952,9 @@ impl AppState {
             live_tv_scratch,
             runtime_cache.join("live-tv"),
         );
-        let optical_host = Arc::new(plurx_core::optical::SystemOpticalHost::new(
-            optical.helper_path,
-        ));
+        let optical_host: Arc<dyn plurx_core::optical::OpticalHostAdapter> = Arc::new(
+            plurx_core::optical::SystemOpticalHost::new(optical.helper_path),
+        );
         let optical = Arc::new(plurx_core::optical::OpticalService::new(
             node_id.clone(),
             optical.drives,
