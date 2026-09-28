@@ -1515,7 +1515,11 @@ expected_occurrences = 2
 [[module_symbols]]
 id = "m4-generation-conditional-route-cache"
 pattern = "cache_route_if_generation"
-expected_occurrences = 2
+# 2 -> 3 with C-07 M5 (route-cache instrumentation), measured by zeroing this
+# row: the third occurrence is the doc comment on `RouteLockSite::GenerationInsert`
+# naming the function whose lock wait it labels. No new call site; the function
+# keeps its one caller and its generation check.
+expected_occurrences = 3
 
 [[module_symbols]]
 id = "m4-predetermined-takeover-worker-id"
@@ -2331,7 +2335,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Merge of main into #581, measured from the validation unittests' actual count: 669 (main after #537) + 6 (S-14 M8 Session/TranscodeManager) = 675.
 # Merge of main @ c7635af5e (#581; 675) into `plan/S-14-9` (673): 679 measured by zeroing this row
 # (675 + this branch's 673 - 669 = +4). Both reviews kept; the merge adds no new site.
-expected_occurrences = 679
+# 679 -> 680 with C-07 M5, measured by zeroing this row: the eight `tokio::spawn`
+# lookups in `concurrent_lookups_of_one_session_produce_one_store_read` (one site).
+# Test-only; each lookup task is joined by the test after its gate closes, and
+# none owns a producer, a process or a recipe decision.
+expected_occurrences = 680
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -4215,7 +4223,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # test-only stand-in producer's `.spawn()`.
 # Merge of main into #581, measured from the validation unittests' actual count: 403 (main after #537) + 1 (S-14 M8 stand-in producer) = 404.
 # Merge of main (#585) into #581, measured: 403 + 1 (#585) + 1 (S-14 M8 stand-in producer) = 405.
-expected_occurrences = 405
+# 405 -> 406 with C-07 M5, measured by zeroing this row: one `Response::status()`
+# assertion on the in-process `/metrics` response in
+# `metrics_render_the_media_session_route_cache_families`. It launches nothing and
+# owns nothing.
+expected_occurrences = 406
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
