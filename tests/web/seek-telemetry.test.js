@@ -143,3 +143,33 @@ test('ordinary cold starts and saved-position resumes retain one TTFF beacon',()
     assert.equal(h.posts.length,1);assert.equal(h.posts[0].event,'ttff');assert.equal(h.posts[0].ms,100);
   }
 });
+
+test('another title abandons the outgoing dispatched seek when its decoder retires',async()=>{
+  const h=harness();await h.dispatch(30);let stopped=0;
+  Object.assign(h.c,{stopPlayerTimers:()=>{stopped++;},teardownHls:()=>{},releaseSession:()=>{},
+    clearSubs:()=>{},prePlayApplication:()=>({subtitle:null,burnedSub:null}),qualityForce:()=> 'original'});
+  vm.runInContext(source('preparePlayOutgoing'),h.c);
+  const replacement=h.c.preparePlayOutgoing({video:h.video,predecessor:h.p,meta:{},selection:{}},
+    {method:'direct_play',source:{}});
+  const incoming={fileId:8,controlSeek:null,mediaPredecessor:h.p};h.c.PLAYER=incoming;
+  replacement.retireOutgoing();replacement.retireOutgoing();
+  assert.equal(stopped,1);assert.equal(h.c.PLAYER,incoming);
+  assert.equal(h.posts.filter(x=>x.event==='seek_abandoned').length,1);
+  assert.equal(h.posts.find(x=>x.event==='seek_abandoned').file_id,7);
+  h.c.finishPlaybackSeekTelemetry(h.p,h.p.controlSeek,'seek_resumed');
+  assert.equal(h.posts.filter(x=>/^seek_(resumed|abandoned)$/.test(x.event)).length,1);
+});
+test('decoder retirement preserves the exact shared seek through reopen and multipart replacement',async()=>{
+  for(const fileId of [7,8]){
+    const h=harness();const pending=await h.dispatch(30);
+    Object.assign(h.c,{stopPlayerTimers:()=>{},teardownHls:()=>{},releaseSession:()=>{},
+      clearSubs:()=>{},prePlayApplication:()=>({subtitle:null,burnedSub:null}),qualityForce:()=> 'original'});
+    vm.runInContext(source('preparePlayOutgoing'),h.c);
+    const replacement=h.c.preparePlayOutgoing({video:h.video,predecessor:h.p,meta:{},selection:{}},
+      {method:'direct_play',source:{}});
+    const incoming=Object.assign({},h.p,{fileId,controlSeek:Object.assign({},pending)});h.c.PLAYER=incoming;
+    replacement.retireOutgoing();assert.equal(h.posts.length,0);
+    h.clock.ms+=50;h.c.finishPlaybackSeekTelemetry(incoming,incoming.controlSeek,'seek_resumed');
+    assert.deepEqual(h.posts.map(x=>x.event),['seek_resumed']);
+  }
+});

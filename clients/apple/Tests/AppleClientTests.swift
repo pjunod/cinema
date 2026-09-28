@@ -6009,6 +6009,27 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(measurement.presented(generation: 1, observedAt: 13)).ms, 3_000)
     }
 
+    func testAppleSeekAwaitingItsDecisionBindsActualDeliveryWithoutRestartingItsClock() throws {
+        for method in ["direct_play", "remux"] {
+            var measurement = ApplePlaybackSeekMeasurement()
+            XCTAssertNil(measurement.dispatched(generation: 1, method: nil, fileId: 42,
+                                                attempt: "play-1", observedAt: 10))
+            XCTAssertNil(measurement.presented(generation: 1, observedAt: 11))
+            measurement.bindDelivery(generation: 2, method: "transcode")
+            XCTAssertNil(measurement.presented(generation: 1, observedAt: 11.5))
+            measurement.bindDelivery(generation: 1, method: method)
+            measurement.bindDelivery(generation: 1, method: "transcode")
+            let log = try XCTUnwrap(measurement.presented(generation: 1, observedAt: 13))
+            XCTAssertEqual(log.method, method)
+            XCTAssertEqual(log.ms, 3_000)
+            XCTAssertNil(measurement.abandoned())
+        }
+        var unsent = ApplePlaybackSeekMeasurement()
+        XCTAssertNil(unsent.dispatched(generation: 1, method: nil, fileId: 42,
+                                      attempt: "play-1", observedAt: 10))
+        XCTAssertNil(unsent.abandoned(), "a command closed before first attachment never reached a player")
+    }
+
     func testAppleLiveProgressNamesItsMethodAndOfflineReplayOmitsIt() throws {
         let live = ProgressRequest(positionMs: 12_000, durationMs: 90_000, method: "remux")
         let liveObject = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(live))

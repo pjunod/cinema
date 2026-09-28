@@ -298,8 +298,8 @@ struct ApplePlaybackTTFFState: Equatable {
 }
 
 /// A dispatched seek owns one terminal beacon, independent of startup TTFF.
-/// Coalesced slider ticks never enter this state. Context is captured when
-/// dispatch starts so supersession cannot report the successor's delivery.
+/// Coalesced slider ticks never enter this state. A command awaiting its first
+/// decision retains its clock and binds delivery only when an item attaches.
 struct ApplePlaybackSeekLog: Encodable, Equatable {
     let level = "info"
     let event: String
@@ -318,14 +318,14 @@ struct ApplePlaybackSeekMeasurement {
     private struct Pending {
         let generation: Int
         let startedAt: TimeInterval
-        let method: String
+        var method: String?
         let fileId: Int
         let attempt: String
     }
     private var pending: Pending?
 
     mutating func dispatched(
-        generation: Int, method: String, fileId: Int, attempt: String,
+        generation: Int, method: String?, fileId: Int, attempt: String,
         observedAt: TimeInterval = ProcessInfo.processInfo.systemUptime
     ) -> ApplePlaybackSeekLog? {
         // Resume/recovery can dispatch the same destination again. Its clock
@@ -337,14 +337,20 @@ struct ApplePlaybackSeekMeasurement {
         return previous
     }
 
+    mutating func bindDelivery(generation: Int, method: String) {
+        guard pending?.generation == generation, pending?.method == nil else { return }
+        pending?.method = method
+    }
+
     mutating func presented(
         generation: Int,
         observedAt: TimeInterval = ProcessInfo.processInfo.systemUptime
     ) -> ApplePlaybackSeekLog? {
-        guard let pending, pending.generation == generation else { return nil }
+        guard let pending, pending.generation == generation,
+              let method = pending.method else { return nil }
         self.pending = nil
         return ApplePlaybackSeekLog(
-            event: "seek_resumed", method: pending.method,
+            event: "seek_resumed", method: method,
             fileId: pending.fileId, attempt: pending.attempt,
             ms: max(0, Int(((observedAt - pending.startedAt) * 1_000).rounded()))
         )
@@ -353,7 +359,9 @@ struct ApplePlaybackSeekMeasurement {
     mutating func abandoned(generation: Int? = nil) -> ApplePlaybackSeekLog? {
         guard let pending, generation == nil || pending.generation == generation else { return nil }
         self.pending = nil
-        return ApplePlaybackSeekLog(event: "seek_abandoned", method: pending.method,
+        // Before the first attachment this command has not reached a player.
+        guard let method = pending.method else { return nil }
+        return ApplePlaybackSeekLog(event: "seek_abandoned", method: method,
                                     fileId: pending.fileId, attempt: pending.attempt, ms: nil)
     }
 }
@@ -3630,7 +3638,8 @@ final class PlayerController: ObservableObject {
                 let reportsSeek = true
                 #endif
                 if reportsSeek, let previous = seekMeasurement.dispatched(
-                    generation: generation, method: clientLogMethod,
+                    generation: generation,
+                    method: decision != nil && player.currentItem != nil ? clientLogMethod : nil,
                     fileId: fileId, attempt: playbackAttemptId
                 ) { postClientLog(previous) }
             }
@@ -4930,6 +4939,9 @@ final class PlayerController: ObservableObject {
         pgsOverlayWindow = nil
         stallObservation.reset()
         player.replaceCurrentItem(with: item)
+        // The authoritative direct/session delivery now exists. A seek issued
+        // during the initial decision must not inherit the default label.
+        seekMeasurement.bindDelivery(generation: seekState.generation, method: clientLogMethod)
         installItemObserver(for: item)
         // The attached media generation changed: every fault about the
         // generation this replaces stops being about anything and is dropped.
