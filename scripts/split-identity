@@ -15,32 +15,37 @@ markers in each current parent with the children named below, removes only
 the module plumbing represented by those markers, and compares the complete
 reconstructed parent byte-for-byte with BASE. The segment-index recipe also
 checks the exact count of parent-visibility additions before removing them.
-``--moves`` proves the S-14 continuation moves (M2/T3 onward) against BASE,
-which is the branch's current merge base with main: the reconstruction reads
-the working tree and BASE only supplies the expected parents, so after a merge
-of main the same proof is run against the new merge base. Every main change
-to a split parent has to be re-applied inside the child now holding its
-region; an ``OK`` against the new merge base shows none was dropped or
-duplicated, and the per-row counts below include the ``pub(super)`` that
-main's new cross-child items needed. Each row of ``MOVES`` names a parent, a marker
-and the child that marker stands for: the child's exact ``use super::*;``
-header is dropped, every ``pub(super) `` it gained is removed (and counted
-against the row's declared number), the result replaces the marker block,
-and the reconstructed parent is passed through ``rustfmt`` on stdin (the
-added visibility pushes some signatures past the line limit, so rustfmt
-wrapped them; formatting the reconstruction unwraps exactly those) before a
-byte-for-byte comparison with the base parent. The base parent is itself
-checked to be a rustfmt fixed point so formatting cannot hide a difference.
-A child's tracing events also carry an explicit ``target:`` naming the
-parent's module path, so the move does not relabel its log lines (a
-``#[path]`` child's default target is its own ``module_path!()``). Each
-was inserted in one of three spellings, which reconstruction removes
-exactly: its own line directly after a ``tracing::<level>!(`` that ends
-its line; ``target: "...", `` directly after the opening parenthesis; or,
-for a one-line call the pin would push past the line limit, the call
-wrapped as ``(`` / pin / the untouched arguments / ``)``. The base parents
-contain no ``target: "`` at all (checked), and any other spelling is left
-in place to fail the comparison.
+``--moves`` proves the M3 remainder (``plan/S-14-10``) against BASE, the
+branch's current merge base with main. #511's region moves (M2/T3 onward,
+M3, M5) were proved by the earlier ``--moves`` recipe against their own
+merge bases; that recipe is in the history of this file at ``f9c976132``
+and was retired here because the parents it reconstructed are now the base.
+The M3 remainder moves single items rather than regions, so a child's items
+need not have been contiguous and an item may join an existing child. Each
+row of ``ITEM_MOVES`` names a child, the marker it is declared under (none
+when the items are appended to an existing single-region child), its exact
+``pub(super)`` count and its items, each by its exact first line in BASE
+with its directly attached ``///``, ``//`` and ``#[...]`` lines. The proof
+has two halves. Every child is its base text unchanged (or, for a new
+child, the ``use super::*;`` header) followed by text that, once its
+``pub(super) `` additions are counted and removed and its tracing target
+pins are removed exactly as below, is rustfmt-identical to its items cut
+from BASE, joined by one blank line, in the row's order. And the current
+parent, less the new marker blocks, equals BASE less every item's lines,
+compared with runs of blank lines taken as one (rustfmt allows at most one
+blank line, so this ignores only where a seam's blank line fell). Together
+these show each moved item is byte-identical modulo visibility and target
+pins and that nothing else in the parent or an existing child changed.
+A child's tracing events carry an explicit ``target:`` naming the parent's
+module path, so a move does not relabel its log lines (a ``#[path]``
+child's default target is its own ``module_path!()``). Each was inserted
+in one of three spellings, which reconstruction removes exactly: its own
+line directly after a ``tracing::<level>!(`` that ends its line;
+``target: "...", `` directly after the opening parenthesis; or, for a
+one-line call the pin would push past the line limit, the call wrapped as
+``(`` / pin / the untouched arguments / ``)``. The base parent contains no
+``target: "`` and no ``pub(super) `` at all (checked), and any other
+spelling is left in place to fail the comparison.
 
 This one-shot helper is deleted before the plan PR is promoted.
 """
@@ -190,53 +195,6 @@ def plan_reconstructions() -> dict[str, str]:
     return {transcode_path: transcode, hls_path: hls, vod_path: vod}
 
 
-MOVES: list[tuple[str, str, str, int]] = [
-    # (parent, marker, child relative to the parent's directory, pub(super) additions)
-    ("crates/plurxd/src/transcode.rs", "flow", "transcode/rolling/flow.rs", 51),
-    ("crates/plurxd/src/transcode.rs", "spawn", "transcode/producer/spawn.rs", 22),
-    ("crates/plurxd/src/transcode.rs", "prepublication", "transcode/rolling/prepublication.rs", 44),
-    ("crates/plurxd/src/transcode.rs", "retirement", "transcode/rolling/retirement.rs", 37),
-    ("crates/plurxd/src/transcode.rs", "prepublication-executor", "transcode/producer/prepublication_executor.rs", 8),
-    ("crates/plurxd/src/transcode.rs", "attempt-child", "transcode/producer/attempt_child.rs", 38),
-    ("crates/plurxd/src/transcode.rs", "publication", "transcode/rolling/publication.rs", 63),
-    ("crates/plurxd/src/transcode.rs", "session", "transcode/rolling/session.rs", 159),
-    ("crates/plurxd/src/transcode.rs", "response", "transcode/response.rs", 31),
-    ("crates/plurxd/src/transcode.rs", "hls-codecs", "transcode/hls_codecs.rs", 2),
-    ("crates/plurxd/src/transcode.rs", "cluster-adoption", "transcode/cluster_adoption.rs", 43),
-    ("crates/plurxd/src/transcode.rs", "session-request", "transcode/session_request.rs", 22),
-    ("crates/plurxd/src/transcode.rs", "requests", "transcode/requests.rs", 12),
-    ("crates/plurxd/src/transcode.rs", "pretranscode-source", "transcode/pretranscode/source.rs", 46),
-    ("crates/plurxd/src/transcode.rs", "pretranscode-parts", "transcode/pretranscode/parts.rs", 47),
-    ("crates/plurxd/src/transcode.rs", "rate-control", "transcode/rate_control.rs", 9),
-    ("crates/plurxd/src/transcode.rs", "retention", "transcode/rolling/retention.rs", 6),
-    ("crates/plurxd/src/transcode.rs", "ladder", "transcode/ladder.rs", 7),
-    ("crates/plurxd/src/transcode.rs", "test-support", "transcode/test_support.rs", 3),
-    ("crates/plurxd/src/http/hls.rs", "hls-session-guard", "hls/session_guard.rs", 13),
-    ("crates/plurxd/src/http/hls.rs", "hls-create", "hls/create.rs", 33),
-    ("crates/plurxd/src/http/hls.rs", "hls-relay", "hls/relay.rs", 2),
-    ("crates/plurxd/src/http/hls.rs", "hls-release", "hls/release.rs", 7),
-    ("crates/plurxd/src/http/hls.rs", "hls-control", "hls/control.rs", 45),
-    ("crates/plurxd/src/http/hls.rs", "hls-preparation", "hls/preparation.rs", 47),
-    ("crates/plurxd/src/http/hls.rs", "hls-status", "hls/status.rs", 3),
-    ("crates/plurxd/src/http/hls.rs", "hls-response", "hls/response.rs", 35),
-    ("crates/plurxd/src/http/hls.rs", "hls-playlist", "hls/playlist.rs", 5),
-    ("crates/plurxd/src/http/hls.rs", "hls-subtitle-playlist", "hls/subtitle_playlist.rs", 9),
-    ("crates/plurxd/src/http/hls.rs", "hls-context", "hls/context.rs", 9),
-    ("crates/plurxd/src/http/hls.rs", "hls-subtitle-names", "hls/subtitle_names.rs", 4),
-    ("crates/plurxd/src/http/hls.rs", "hls-playlist-text", "hls/playlist_text.rs", 8),
-    ("crates/plurxd/src/http/hls.rs", "hls-segment", "hls/segment.rs", 15),
-    ("crates/plurxd/src/vodserve.rs", "vod-discovery", "vod/discovery.rs", 7),
-    ("crates/plurxd/src/vodserve.rs", "vod-reader", "vod/reader.rs", 29),
-    ("crates/plurxd/src/vodserve.rs", "vod-marker-prewarm", "vod/marker_prewarm.rs", 68),
-    ("crates/plurxd/src/vodserve.rs", "vod-session", "vod/session.rs", 115),
-    ("crates/plurxd/src/vodserve.rs", "vod-shared", "vod/shared.rs", 13),
-    ("crates/plurxd/src/vodserve.rs", "vod-driver", "vod/driver.rs", 6),
-    ("crates/plurxd/src/vodserve.rs", "vod-marker-dispatch", "vod/marker_dispatch.rs", 4),
-    ("crates/plurxd/src/vodserve.rs", "vod-generation", "vod/generation.rs", 19),
-    ("crates/plurxd/src/vodserve.rs", "vod-plan", "vod/plan.rs", 15),
-    ("crates/plurxd/src/vodserve.rs", "vod-init", "vod/init.rs", 7),
-]
-
 CHILD_HEADER = "use super::*;\n\n"
 
 # A parent's own `pub(super)` names *its* parent. Moved one level down, the
@@ -312,74 +270,6 @@ def unsplit_visibility(parent: str, text: str) -> tuple[str, int]:
         text = text.replace(*RELOCATED[parent])
     return text, added
 
-# (parent, marker, impl header line, [chunk children], pub(super) additions):
-# one `impl` block cut into contiguous chunks. Each chunk child is the
-# structural header, the same impl header line, its methods, and a closing
-# `}`; the single blank line that separated two methods at each cut is
-# structural too, so the reconstruction joins chunks with one blank line.
-IMPL_SPLITS: list[tuple[str, str, str, list[str], int]] = [
-    (
-        "crates/plurxd/src/transcode.rs",
-        "manager",
-        'impl TranscodeManager {\n',
-        [
-            "transcode/manager/construct.rs",
-            "transcode/manager/plan.rs",
-            "transcode/manager/cache.rs",
-            "transcode/manager/produce.rs",
-            "transcode/manager/create.rs",
-            "transcode/manager/describe.rs",
-            "transcode/manager/start.rs",
-            "transcode/manager/control.rs",
-            "transcode/manager/publication.rs",
-            "transcode/manager/maintenance.rs",
-        ],
-        78,
-    ),
-    (
-        "crates/plurxd/src/vodserve.rs",
-        "vod-serve",
-        'impl VodServe {\n',
-        [
-            "vod/serve/construct.rs",
-            "vod/serve/create.rs",
-            "vod/serve/delivery.rs",
-            "vod/serve/end.rs",
-            "vod/serve/control.rs",
-            "vod/serve/serve.rs",
-        ],
-        11,
-    ),
-]
-
-
-def impl_split_reconstruction(
-    parent_text: str, parent: str, marker: str, header: str, chunks: list[str], expected: int
-) -> tuple[str, str]:
-    bodies: list[str] = []
-    added = 0
-    targets = 0
-    for chunk_rel in chunks:
-        chunk_path = str(pathlib.Path(parent).parent / chunk_rel)
-        text = read(chunk_path)
-        prefix = CHILD_HEADER + header
-        if not text.startswith(prefix) or not text.endswith("\n}\n"):
-            raise SystemExit(f"{chunk_path}: lost its exact impl-chunk wrapper")
-        body, count = unsplit_visibility(parent, text[len(prefix) : -len("}\n")])
-        body, pinned = unpinned_targets(parent, body)
-        targets += pinned
-        added += count
-        bodies.append(body)
-    if added != expected:
-        raise SystemExit(f"{marker}: pub(super) additions expected {expected}, got {added}")
-    rebuilt = header + "\n".join(bodies) + "}\n"
-    return (
-        replace_marker(parent_text, marker, rebuilt),
-        f"{marker}: {len(chunks)} impl chunks, {added} pub(super) additions, "
-        f"{targets} log targets",
-    )
-
-
 def rustfmt(text: str) -> str:
     return subprocess.run(
         ["rustfmt", "--edition", "2021", "--emit", "stdout"],
@@ -389,34 +279,301 @@ def rustfmt(text: str) -> str:
     ).stdout.decode("utf-8")
 
 
-def moves_reconstructions() -> tuple[dict[str, str], list[str]]:
-    parents: dict[str, str] = {}
+# The M3 remainder (S-14-10): the items #511 left in `transcode.rs` move one
+# by one into child modules, so a child's items need not have been one
+# contiguous region of the parent. Each row names a child (relative to the
+# parent's directory), the parent marker a new child is declared under (None
+# when the items are appended to an existing single-region child, whose base
+# text must then be an exact prefix of its current text), the exact number of
+# `pub(super) ` the moved text gained, and the items in the child's order.
+# An item is named by its exact first code line in the base parent; the
+# `///`, `//` and `#[...]` lines directly above it move with it. A name that
+# starts with "=" leaves those lines in the parent (the one misplaced doc
+# comment, which documents the constant below the function it sat on).
+ITEM_PARENT = "crates/plurxd/src/transcode.rs"
+ITEM_MOVES: list[tuple[str, str | None, int, list[str]]] = [
+    (
+        "transcode/errors.rs",
+        "errors",
+        5,
+        [
+            "fn capacity_error(message: impl AsRef<str>) -> String {",
+            "fn replacement_deadline_error() -> String {",
+            "pub(crate) fn is_retryable_capacity_error(error: &str) -> bool {",
+            "fn replacement_wait_error(message: impl AsRef<str>) -> String {",
+            "pub(crate) fn is_replacement_wait_error(error: &str) -> bool {",
+            "pub(crate) fn serving_fence_error(message: impl AsRef<str>) -> String {",
+            "pub(crate) fn is_serving_fence_error(error: &str) -> bool {",
+            "pub(crate) fn start_infrastructure_error(message: impl AsRef<str>) -> String {",
+            "pub(crate) fn is_start_infrastructure_error(error: &str) -> bool {",
+            "fn unsupported_build_error(message: impl AsRef<str>) -> String {",
+            "pub(crate) fn unsupported_build_reason(error: &str) -> Option<&str> {",
+            "fn invalid_reopen_error(reason: &str) -> String {",
+            "pub(crate) fn invalid_reopen_reason(error: &str) -> Option<&str> {",
+            "pub(crate) fn vod_refusal_error(code: &'static str, message: impl AsRef<str>) -> String {",
+            "pub(crate) fn vod_refusal(error: &str) -> Option<(&str, &str)> {",
+        ],
+    ),
+    (
+        "transcode/session_log.rs",
+        "session-log",
+        3,
+        [
+            "pub(crate) fn session_log_id(session_id: &str) -> String {",
+            "fn session_log_text(text: &str, session_id: &str) -> String {",
+            "fn ffmpeg_args_log_message(label: &str, args: &[String], session_id: &str) -> String {",
+            "fn log_ffmpeg_stderr(session_id: &str, encoder: &str, line: &str) {",
+        ],
+    ),
+    (
+        "transcode/planning.rs",
+        "planning",
+        6,
+        [
+            "fn retain_production_budget_after_planning(",
+            "enum BoundPlanCaller {",
+            "impl BoundPlanCaller {",
+            "fn tone_map_pref() -> ToneMap {",
+            "=pub(crate) async fn unverified_hevc_copy_enabled(store: &dyn Store) -> Result<bool, String> {",
+        ],
+    ),
+    (
+        "transcode/media_origin.rs",
+        "media-origin",
+        1,
+        [
+            "pub(crate) async fn probe_media_origin(source_path: &std::path::Path, start_seconds: f64) -> f64 {",
+            "async fn probe_media_origin_reads_the_preceding_keyframe() {",
+        ],
+    ),
+    (
+        "transcode/live_recovery.rs",
+        "live-recovery",
+        4,
+        [
+            "pub(crate) enum LiveRecoveryReason {",
+            "impl LiveRecoveryReason {",
+            "fn record_live_recovery(reason: LiveRecoveryReason) {",
+            "pub(crate) fn live_recovery_snapshot() -> [u64; 5] {",
+            "pub(crate) fn live_recovery_prometheus() -> String {",
+        ],
+    ),
+    (
+        "transcode/producer/progress.rs",
+        "progress",
+        17,
+        [
+            "pub struct Progress {",
+            "fn recent_rate_step(prev_ewma: i64, d_wall_ms: i64, d_out_ms: i64) -> Option<i64> {",
+            "impl Progress {",
+        ],
+    ),
+    (
+        "transcode/rolling/http_wait.rs",
+        "http-wait",
+        18,
+        [
+            "struct HttpWaitLedger {",
+            "struct HttpWaitEntries {",
+            "struct HttpWaitSnapshot {",
+            "impl HttpWaitLedger {",
+            "struct HttpWaitGuard {",
+            "impl HttpWaitGuard {",
+            "impl Drop for HttpWaitGuard {",
+            "fn storage_read_is_slow(bytes: u64, elapsed: Duration) -> bool {",
+            "async fn wait_for_playlist_poll_before(deadline: Instant) {",
+        ],
+    ),
+    (
+        "transcode/metrics.rs",
+        "metrics",
+        14,
+        [
+            "pub(crate) struct TranscodeMetrics {",
+            "struct CodecQualificationMetrics {",
+            "impl Default for CodecQualificationMetrics {",
+            "impl CodecQualificationMetrics {",
+            "pub(crate) struct MediaNodeRuntime {",
+            "pub(crate) struct MediaOfferProbe {",
+            "impl TranscodeMetrics {",
+        ],
+    ),
+    (
+        "transcode/rolling/terminal_admission.rs",
+        "terminal-admission",
+        6,
+        [
+            "struct RollingTerminalAdmission {",
+            "impl crate::playback_control::RollingTerminalAdmission for RollingTerminalAdmission {",
+        ],
+    ),
+    (
+        "transcode/manager_hooks.rs",
+        "manager-hooks",
+        6,
+        [
+            "pub(crate) trait TranscodeManagerHooks: std::any::Any + Send + Sync {",
+            "pub(crate) struct NoopTranscodeManagerHooks;",
+            "impl TranscodeManagerHooks for NoopTranscodeManagerHooks {",
+            "pub(crate) struct TranscodeManagerTestHooks {",
+            "impl TranscodeManagerHooks for TranscodeManagerTestHooks {",
+            "impl TranscodeManager {",
+        ],
+    ),
+    ("transcode/response.rs", None, 1, [
+        "fn first_media_settlement_slots() -> &'static Arc<tokio::sync::Semaphore> {",
+    ]),
+    ("transcode/rolling/retirement.rs", None, 4, [
+        "struct RecentMarkerAmbiguityLedger {",
+        "async fn clear_session_dir(dir: &std::path::Path) -> std::io::Result<()> {",
+    ]),
+    ("transcode/session_request.rs", None, 0, ["pub struct StartInfo {"]),
+    ("transcode/test_support.rs", None, 0, ["pub(crate) fn require_ffmpeg() {"]),
+]
+
+ATTACHED = ("///", "//", "#[")
+
+
+def item_span(lines: list[str], name: str) -> tuple[int, int, bool]:
+    keep_comments = name.startswith("=")
+    key = name[1:] if keep_comments else name
+    hits = [index for index, line in enumerate(lines) if line.rstrip("\n") == key]
+    if len(hits) != 1:
+        raise SystemExit(f"{key!r}: expected one line in the base parent, found {len(hits)}")
+    start = end = hits[0]
+    if not keep_comments:
+        while (
+            start > 0
+            and lines[start - 1].startswith(ATTACHED)
+            and not lines[start - 1].startswith("// split:")
+        ):
+            start -= 1
+    if not key.endswith(";"):
+        end += 1
+        while lines[end].rstrip("\n") not in ("}", "};", ");"):
+            end += 1
+    return start, end + 1, keep_comments
+
+
+def item_spans(base_parent: str) -> dict[str, tuple[int, int, bool]]:
+    lines = base_parent.splitlines(keepends=True)
+    spans: dict[str, tuple[int, int, bool]] = {}
+    owner: dict[int, str] = {}
+    for _child, _marker, _expected, names in ITEM_MOVES:
+        for name in names:
+            span = item_span(lines, name)
+            for index in range(span[0], span[1]):
+                if index in owner:
+                    raise SystemExit(f"{name!r} overlaps {owner[index]!r}")
+                owner[index] = name
+            spans[name] = span
+    return spans
+
+
+def single_blank_lines(lines: list[str]) -> list[str]:
+    result: list[str] = []
+    for line in lines:
+        if line == "\n" and result and result[-1] == "\n":
+            continue
+        result.append(line)
+    return result
+
+
+def parent_without_items(base_parent: str, spans: dict[str, tuple[int, int, bool]]) -> list[str]:
+    lines = base_parent.splitlines(keepends=True)
+    removed: set[int] = set()
+    for start, end, keep_comments in spans.values():
+        removed.update(range(start, end))
+        # A kept comment now sits on the item below it; the blank line that
+        # separated the moved item from that one goes too.
+        if keep_comments and end < len(lines) and lines[end] == "\n":
+            removed.add(end)
+    return single_blank_lines([line for index, line in enumerate(lines) if index not in removed])
+
+
+def parent_without_new_markers(current: str, markers: dict[str, str]) -> list[str]:
+    text = current
+    for marker, child_rel in markers.items():
+        begin = f"// split: begin {marker}\n"
+        end = f"// split: end {marker}\n"
+        if text.count(begin) != 1 or text.count(end) != 1:
+            raise SystemExit(f"expected exactly one {marker!r} marker pair")
+        before, marked = text.split(begin, 1)
+        plumbing, after = marked.split(end, 1)
+        if f'#[path = "{child_rel}"]\n' not in plumbing:
+            raise SystemExit(f"{marker!r} does not declare {child_rel}")
+        text = before + after
+    return single_blank_lines(text.splitlines(keepends=True))
+
+
+def item_reconstructions(base: str) -> tuple[bool, list[str]]:
+    base_parent = baseline(base, ITEM_PARENT)
+    if 'target: "' in base_parent or "pub(super) " in base_parent:
+        raise SystemExit(f"{ITEM_PARENT}: base already spells a pin or a pub(super)")
+    lines = base_parent.splitlines(keepends=True)
+    spans = item_spans(base_parent)
+    parent_dir = pathlib.Path(ITEM_PARENT).parent
     report: list[str] = []
-    for parent, marker, child_rel, expected in MOVES:
-        text = parents.get(parent) or read(parent)
-        child_path = str(pathlib.Path(parent).parent / child_rel)
-        child = read(child_path)
-        if not child.startswith(CHILD_HEADER):
-            raise SystemExit(f"{child_path}: lost its exact structural header")
-        child = child[len(CHILD_HEADER) :]
-        child, added = unsplit_visibility(parent, child)
-        child, targets = unpinned_targets(parent, child)
+    ok = True
+    markers: dict[str, str] = {}
+    for child_rel, marker, expected, names in ITEM_MOVES:
+        child_path = str(parent_dir / child_rel)
+        current = read(child_path)
+        if marker is None:
+            base_child = baseline(base, child_path)
+            if not current.startswith(base_child + "\n"):
+                print(f"{child_path}: its base text is not an unchanged prefix")
+                ok = False
+                continue
+            body = current[len(base_child) + 1 :]
+        else:
+            markers[marker] = child_rel
+            if not current.startswith(CHILD_HEADER):
+                raise SystemExit(f"{child_path}: lost its exact structural header")
+            body = current[len(CHILD_HEADER) :]
+        body, added = unsplit_visibility(ITEM_PARENT, body)
+        body, targets = unpinned_targets(ITEM_PARENT, body)
         if added != expected:
-            raise SystemExit(
-                f"{child_path}: pub(super) additions expected {expected}, got {added}"
-            )
-        parents[parent] = replace_marker(text, marker, child)
+            print(f"{child_path}: pub(super) additions expected {expected}, got {added}")
+            ok = False
+        moved = "\n".join("".join(lines[spans[n][0] : spans[n][1]]) for n in names)
+        rebuilt = rustfmt(body)
+        if rebuilt != moved:
+            ok = False
+            for line in difflib.unified_diff(
+                moved.splitlines(),
+                rebuilt.splitlines(),
+                fromfile=f"{base}:{ITEM_PARENT} items",
+                tofile=child_path,
+                n=3,
+                lineterm="",
+            ):
+                print(line)
         report.append(
-            f"{child_path}: {child.count(chr(10))} lines, {added} pub(super) additions, "
-            f"{targets} log targets"
+            f"{child_path}: {len(names)} items, {moved.count(chr(10))} lines, "
+            f"{added} pub(super) additions, {targets} log targets"
         )
-    for parent, marker, header, chunks, expected in IMPL_SPLITS:
-        text = parents.get(parent) or read(parent)
-        parents[parent], line = impl_split_reconstruction(
-            text, parent, marker, header, chunks, expected
+    expected_parent = parent_without_items(base_parent, spans)
+    current_parent = parent_without_new_markers(read(ITEM_PARENT), markers)
+    if current_parent == expected_parent:
+        moved_items = sum(len(row[3]) for row in ITEM_MOVES)
+        print(
+            f"{ITEM_PARENT}: OK against {base} ({moved_items} items moved into "
+            f"{len(ITEM_MOVES)} children; {len(lines)} -> "
+            f"{read(ITEM_PARENT).count(chr(10))} lines)"
         )
-        report.append(line)
-    return parents, report
+    else:
+        ok = False
+        for line in difflib.unified_diff(
+            [line.rstrip("\n") for line in expected_parent],
+            [line.rstrip("\n") for line in current_parent],
+            fromfile=f"{base}:{ITEM_PARENT} without the moved items",
+            tofile=f"{ITEM_PARENT} without the new markers",
+            n=3,
+            lineterm="",
+        ):
+            print(line)
+    return ok, report
 
 
 def baseline(base: str, source: str) -> str:
@@ -460,26 +617,11 @@ def main() -> int:
 
     if len(sys.argv) == 3 and sys.argv[2] == "--moves":
         base = sys.argv[1]
-        reconstructions, report = moves_reconstructions()
-        ok = True
-        for source, current in reconstructions.items():
-            original = baseline(base, source)
-            if 'target: "' in original:
-                print(f"{source}: base already spells a log target; the removal is not injective")
-                ok = False
-                continue
-            if rustfmt(original) != original:
-                print(f"{source}: base is not a rustfmt fixed point")
-                ok = False
-                continue
-            raw_same = current == original
-            ok &= compare(
-                base,
-                source,
-                rustfmt(current),
-                "marker-expanded continuation split tree"
-                + ("" if raw_same else " after rustfmt"),
-            )
+        original = baseline(base, ITEM_PARENT)
+        if rustfmt(original) != original:
+            print(f"{ITEM_PARENT}: base is not a rustfmt fixed point")
+            return 1
+        ok, report = item_reconstructions(base)
         for line in report:
             print(line)
         return 0 if ok else 1

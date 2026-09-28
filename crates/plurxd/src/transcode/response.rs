@@ -854,3 +854,12 @@ impl PlaylistError {
         matches!(self, PlaylistError::StartupTimedOut(_))
     }
 }
+
+pub(super) fn first_media_settlement_slots() -> &'static Arc<tokio::sync::Semaphore> {
+    static SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    SLOTS.get_or_init(|| {
+        Arc::new(tokio::sync::Semaphore::new(
+            MAX_FIRST_MEDIA_SETTLEMENT_OWNERS,
+        ))
+    })
+}
