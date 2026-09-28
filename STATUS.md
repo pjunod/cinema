@@ -6,7 +6,7 @@ first.
 
 ## Content analysis stopped: the queue's receipt bound is the next cliff after #608
 
-**Branch `fix/queue-receipt-pressure`, PR __PR__; the retained-row half is
+**Branch `fix/queue-receipt-pressure`, [PR #610](http://192.168.4.7:3000/noirr/plurx/pulls/610), CI running; the retained-row half is
 already on `main` as [#608](http://192.168.4.7:3000/noirr/plurx/pulls/608)
 (`29358ce5`), not yet deployed — the GPT deploy/verify prompt is in the
 project doc.** Paul reported 2026-09-28 that Content analysis was not
