@@ -2833,7 +2833,7 @@ test_anchor = "seek attachment startup cannot inflate TTFF before or after its t
 id = "android.seek-picture-does-not-inflate-ttff"
 commits = ["5fd2c0ce8"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
-source_anchor = 'event = if (measurement.attempt.reason == "seek") "seek_resumed" else "ttff",'
+source_anchor = 'if (ttffTracker.currentAttempt()?.reason == "seek") return null'
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
 test_anchor = "fun seekReportsPresentedPictureOnceWithoutInflatingTtff()"
 

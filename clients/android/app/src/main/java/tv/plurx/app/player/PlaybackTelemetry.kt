@@ -147,16 +147,30 @@ internal class ControllerPlaybackTelemetry(
     private val ttffTracker = PlaybackTTFFTracker()
     private val stallTracker = BufferingStallTracker()
 
-    fun begin(reason: String, observedAtMs: Long): PlaybackAttempt {
-        cancelPending()
+    private var pendingSeekSequence: Long? = null
+
+    fun begin(reason: String, observedAtMs: Long, intentSequence: Long? = null): PlaybackAttempt {
         stallTracker.reset()
+        // A repair of the same dispatched destination is still the viewer's
+        // original seek, including the time spent waiting before the repair.
+        if (pendingSeekSequence != null && pendingSeekSequence == intentSequence) {
+            ttffTracker.retainForRecovery()?.let { return it }
+        }
+        cancelPending()
+        pendingSeekSequence = intentSequence.takeIf { reason == "seek" }
         return ttffTracker.begin(reason, observedAtMs)
+    }
+
+    fun supersedeForIntent(sequence: Long?) {
+        if (pendingSeekSequence != null && pendingSeekSequence != sequence) cancelPending()
     }
 
     fun prepared(attempt: PlaybackAttempt) = ttffTracker.prepared(attempt)
 
     fun cancel(attempt: PlaybackAttempt) {
-        if (ttffTracker.cancel(attempt) && attempt.reason == "seek") {
+        if (!ttffTracker.cancel(attempt)) return
+        pendingSeekSequence = null
+        if (attempt.reason == "seek") {
             report(
                 event = "seek_abandoned",
                 level = "info",
@@ -170,16 +184,68 @@ internal class ControllerPlaybackTelemetry(
         ttffTracker.currentAttempt()?.let(::cancel)
     }
 
-    fun firstFrame(observedAtMs: Long): TtffMeasurement? =
-        ttffTracker.firstFrame(observedAtMs)?.also { measurement ->
+    /** A startup callback is not proof that the dispatched seek target presented. */
+    fun firstFrame(observedAtMs: Long): TtffMeasurement? {
+        if (ttffTracker.currentAttempt()?.reason == "seek") return null
+        return ttffTracker.firstFrame(observedAtMs)?.also { measurement ->
             report(
-                event = if (measurement.attempt.reason == "seek") "seek_resumed" else "ttff",
+                event = "ttff",
                 level = "info",
                 message = "first frame after ${measurement.elapsedMs} ms",
                 ms = measurement.elapsedMs,
                 attempt = measurement.attempt,
             )
         }
+    }
+
+    private fun seekPresented(sequence: Long, observedAtMs: Long) {
+        if (pendingSeekSequence != sequence) return
+        val measurement = ttffTracker.firstFrame(observedAtMs, requirePrepared = false) ?: return
+        pendingSeekSequence = null
+        report(
+            event = "seek_resumed",
+            level = "info",
+            message = "seek destination presented after ${measurement.elapsedMs} ms",
+            ms = measurement.elapsedMs,
+            attempt = measurement.attempt,
+        )
+    }
+
+    // These bridges use the same destination proof that releases optimistic
+    // seek intent. Tests exercise the real landing/advancing-clock rules.
+    fun presentationAttempt(): PlaybackAttempt? = ttffTracker.currentAttempt()
+
+    fun presentedVideoFrame(
+        intent: PlaybackIntent,
+        positionMs: Long,
+        sequence: Long,
+        observedAtMs: Long,
+        expectedAttempt: PlaybackAttempt? = ttffTracker.currentAttempt(),
+    ): Boolean {
+        if (expectedAttempt != ttffTracker.currentAttempt()) return false
+        return intent.presentedVideoFrame(positionMs, sequence).also { presented ->
+            if (presented) seekPresented(sequence, observedAtMs)
+        }
+    }
+
+    fun presentedVideoProgress(intent: PlaybackIntent, positionMs: Long, sequence: Long, observedAtMs: Long): Boolean =
+        intent.presentedVideoProgress(positionMs, sequence).also { presented ->
+            if (presented) seekPresented(sequence, observedAtMs)
+        }
+
+    fun presentedAudio(
+        intent: PlaybackIntent,
+        positionMs: Long,
+        sequence: Long,
+        observedAtMs: Long,
+        playbackActive: Boolean,
+        playbackRate: Double,
+        presentationReady: Boolean,
+    ): Boolean = intent.presentedAudio(
+        positionMs, sequence, observedAtMs, playbackActive, playbackRate, presentationReady,
+    ).also { presented ->
+        if (presented) seekPresented(sequence, observedAtMs)
+    }
 
     fun sampleStall(establishedPlayback: Boolean, observedAtMs: Long): StallMeasurement? =
         stallTracker.sample(
@@ -243,6 +309,7 @@ internal data class PlaybackAttempt(
     val id: String,
     val reason: String,
     val startedAtMs: Long,
+    val executionGeneration: Long = 0,
 )
 
 internal data class TtffMeasurement(
@@ -271,12 +338,20 @@ internal class PlaybackTTFFTracker {
 
     /** Ignore any last frame from the departing item until prepare has run. */
     fun prepared(attempt: PlaybackAttempt) {
-        if (current?.id == attempt.id && completedAttemptId != attempt.id) preparedAttemptId = attempt.id
+        if (current == attempt && completedAttemptId != attempt.id) preparedAttemptId = attempt.id
     }
 
-    fun firstFrame(observedAtMs: Long): TtffMeasurement? {
+    fun retainForRecovery(): PlaybackAttempt? {
+        val attempt = current?.takeIf { it.reason == "seek" && completedAttemptId != it.id } ?: return null
+        return attempt.copy(executionGeneration = attempt.executionGeneration + 1).also {
+            current = it
+            preparedAttemptId = null
+        }
+    }
+
+    fun firstFrame(observedAtMs: Long, requirePrepared: Boolean = true): TtffMeasurement? {
         val attempt = current ?: return null
-        if (preparedAttemptId != attempt.id) return null
+        if (completedAttemptId == attempt.id || (requirePrepared && preparedAttemptId != attempt.id)) return null
         preparedAttemptId = null
         completedAttemptId = attempt.id
         return TtffMeasurement(
@@ -286,7 +361,7 @@ internal class PlaybackTTFFTracker {
     }
 
     fun cancel(attempt: PlaybackAttempt): Boolean {
-        if (current?.id != attempt.id || completedAttemptId == attempt.id) return false
+        if (current != attempt || completedAttemptId == attempt.id) return false
         current = null
         preparedAttemptId = null
         return true
