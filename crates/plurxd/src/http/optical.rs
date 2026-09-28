@@ -236,9 +236,11 @@ async fn drive_target(state: &AppState, requested: &str) -> Result<DriveTarget, 
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum OwnerRequest {
     DriveDisc {
+        user_id: i64,
         drive_id: String,
     },
     Decision {
+        user_id: i64,
         drive_id: String,
         title_id: String,
         request: DecisionRequest,
@@ -256,6 +258,7 @@ enum OwnerRequest {
         request: ProgressRequest,
     },
     Eject {
+        admin_user_id: i64,
         drive_id: String,
         request: EjectRequest,
     },
@@ -457,7 +460,7 @@ async fn drive_disc(
     authorize_play(&state, user.id).await?;
     match drive_target(&state, &drive_id).await? {
         DriveTarget::Local(drive_id) => {
-            let response = local_drive_disc(&state, &drive_id).await?;
+            let response = local_drive_disc(&state, user.id, &drive_id).await?;
             Ok(Json(response).into_response())
         }
         DriveTarget::Remote {
@@ -467,7 +470,10 @@ async fn drive_disc(
             let response = relay_owner(
                 &state,
                 &owner_node_id,
-                &OwnerRequest::DriveDisc { drive_id },
+                &OwnerRequest::DriveDisc {
+                    user_id: user.id,
+                    drive_id,
+                },
             )
             .await?;
             relayed_json(response)
@@ -475,7 +481,12 @@ async fn drive_disc(
     }
 }
 
-async fn local_drive_disc(state: &AppState, drive_id: &str) -> Result<DriveDiscDto, ApiError> {
+async fn local_drive_disc(
+    state: &AppState,
+    user_id: i64,
+    drive_id: &str,
+) -> Result<DriveDiscDto, ApiError> {
+    authorize_play(state, user_id).await?;
     let enabled = optical_enabled(state).await?;
     let snapshot = state
         .optical
@@ -735,7 +746,7 @@ async fn decision(
     require_enabled(&state).await?;
     match drive_target(&state, &drive_id).await? {
         DriveTarget::Local(drive_id) => {
-            let response = local_decision(&state, &drive_id, &title_id, request).await?;
+            let response = local_decision(&state, user.id, &drive_id, &title_id, request).await?;
             Ok(Json(response).into_response())
         }
         DriveTarget::Remote {
@@ -746,6 +757,7 @@ async fn decision(
                 &state,
                 &owner_node_id,
                 &OwnerRequest::Decision {
+                    user_id: user.id,
                     drive_id,
                     title_id,
                     request,
@@ -759,10 +771,12 @@ async fn decision(
 
 async fn local_decision(
     state: &AppState,
+    user_id: i64,
     drive_id: &str,
     title_id: &str,
     request: DecisionRequest,
 ) -> Result<OpticalDecisionResponse, ApiError> {
+    authorize_play(state, user_id).await?;
     require_enabled(state).await?;
     let snapshot = state
         .optical
@@ -1468,14 +1482,14 @@ struct EjectRequest {
 }
 
 async fn eject(
-    AdminUser(_admin): AdminUser,
+    AdminUser(admin): AdminUser,
     State(state): State<AppState>,
     Path(drive_id): Path<String>,
     Json(request): Json<EjectRequest>,
 ) -> Result<StatusCode, ApiError> {
     require_enabled(&state).await?;
     match drive_target(&state, &drive_id).await? {
-        DriveTarget::Local(drive_id) => local_eject(&state, &drive_id, request).await?,
+        DriveTarget::Local(drive_id) => local_eject(&state, admin.id, &drive_id, request).await?,
         DriveTarget::Remote {
             owner_node_id,
             drive_id,
@@ -1483,7 +1497,11 @@ async fn eject(
             let response = relay_owner(
                 &state,
                 &owner_node_id,
-                &OwnerRequest::Eject { drive_id, request },
+                &OwnerRequest::Eject {
+                    admin_user_id: admin.id,
+                    drive_id,
+                    request,
+                },
             )
             .await?;
             if !response.status.is_success() {
@@ -1496,9 +1514,22 @@ async fn eject(
 
 async fn local_eject(
     state: &AppState,
+    admin_user_id: i64,
     drive_id: &str,
     request: EjectRequest,
 ) -> Result<(), ApiError> {
+    if !state
+        .store
+        .get_user(admin_user_id)
+        .await?
+        .is_some_and(|user| user.is_admin)
+    {
+        return Err(ApiError::typed(
+            StatusCode::FORBIDDEN,
+            "optical_play_forbidden",
+            "optical eject requires an administrator",
+        ));
+    }
     require_enabled(state).await?;
     let snapshot = state
         .optical
@@ -1619,15 +1650,18 @@ pub(crate) async fn owner(
         return signed_owner_error(&state, &headers, owner_unavailable()).await;
     }
     match request {
-        OwnerRequest::DriveDisc { drive_id } => match local_drive_disc(&state, &drive_id).await {
-            Ok(response) => signed_owner_json(&state, &headers, StatusCode::OK, &response),
-            Err(error) => signed_owner_error(&state, &headers, error).await,
-        },
+        OwnerRequest::DriveDisc { user_id, drive_id } => {
+            match local_drive_disc(&state, user_id, &drive_id).await {
+                Ok(response) => signed_owner_json(&state, &headers, StatusCode::OK, &response),
+                Err(error) => signed_owner_error(&state, &headers, error).await,
+            }
+        }
         OwnerRequest::Decision {
+            user_id,
             drive_id,
             title_id,
             request,
-        } => match local_decision(&state, &drive_id, &title_id, request).await {
+        } => match local_decision(&state, user_id, &drive_id, &title_id, request).await {
             Ok(response) => signed_owner_json(&state, &headers, StatusCode::OK, &response),
             Err(error) => signed_owner_error(&state, &headers, error).await,
         },
@@ -1652,14 +1686,14 @@ pub(crate) async fn owner(
                 Err(error) => signed_owner_error(&state, &headers, error).await,
             }
         }
-        OwnerRequest::Eject { drive_id, request } => {
-            match local_eject(&state, &drive_id, request).await {
-                Ok(()) => {
-                    signed_owner_json(&state, &headers, StatusCode::OK, &serde_json::json!({}))
-                }
-                Err(error) => signed_owner_error(&state, &headers, error).await,
-            }
-        }
+        OwnerRequest::Eject {
+            admin_user_id,
+            drive_id,
+            request,
+        } => match local_eject(&state, admin_user_id, &drive_id, request).await {
+            Ok(()) => signed_owner_json(&state, &headers, StatusCode::OK, &serde_json::json!({})),
+            Err(error) => signed_owner_error(&state, &headers, error).await,
+        },
     }
 }
 
