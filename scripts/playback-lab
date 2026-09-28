@@ -2097,12 +2097,18 @@ async function prepareBrowser(driver, token) {
     native_hls:useNativeHls(document.getElementById('video')),mse:!!(window.MediaSource&&window.Hls&&Hls.isSupported())})`);
 }
 
+function diagnosticSwitchCommit(commit, stageAtMs) {
+  return commit && Number.isFinite(stageAtMs) && Number.isFinite(commit.at)
+    && commit.at >= stageAtMs ? commit : null;
+}
+
 async function setCasePreferences(driver, quality, frameDiagnostics = false) {
   await driver.exec(`
     try{closePlayer()}catch(e){}
     // Diagnostic only: keep this out of the ordinary snapshots and scorer.
     // Existing callbacks append to bounded rings; no new timer/subscription.
     globalThis.__plurxLabFrameDiagnostics=${frameDiagnostics ? `{windows:[],dropped_windows:0,max_windows:4,max_records:512}` : "null"};
+    globalThis.__plurxLabDiagnosticCommit=${diagnosticSwitchCommit.toString()};
     globalThis.__plurxLabMediaEvents=[];
     globalThis.__plurxLabMediaEventSeq=globalThis.__plurxLabMediaEventSeq||0;
     globalThis.__plurxLabInstallVideoProbe=(v)=>{
@@ -2132,7 +2138,8 @@ async function setCasePreferences(driver, quality, frameDiagnostics = false) {
             const handoff=owner.prepared||owner.preparedCommitting||owner.preparedRetiring;
             let window=diagnostic.windows[diagnostic.windows.length-1];
             if(handoff&&(!window||window.action_id!==handoff.actionId)){
-              window={action_id:handoff.actionId,records:[],next:0,total_records:0,
+              window={action_id:handoff.actionId,stage_at_ms:handoff.stageAtMs,
+                records:[],next:0,total_records:0,
                 expires_at_ms:now+1000};
               if(diagnostic.windows.length===diagnostic.max_windows){
                 diagnostic.windows.shift();diagnostic.dropped_windows++;
@@ -2142,7 +2149,7 @@ async function setCasePreferences(driver, quality, frameDiagnostics = false) {
             if(handoff&&window) window.expires_at_ms=now+1000;
             if(window&&now<=window.expires_at_ms){
               const number=value=>Number.isFinite(value)?value:null;
-              const commit=owner.switchCommit;
+              const commit=globalThis.__plurxLabDiagnosticCommit(owner.switchCommit,window.stage_at_ms);
               const visible=document.getElementById('video')===v;
               const session=visible?owner.sessionId
                 :handoff?.predecessor?.element===v?handoff.predecessor.sessionId
@@ -4471,6 +4478,7 @@ module.exports = {
   completedFragmentIndexPass,
   compactPreparationReport,
   diagnosticPath,
+  diagnosticSwitchCommit,
   deviceRunCommand,
   deviceProxyCommand,
   defaultServerBin,
