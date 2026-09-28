@@ -1,5 +1,6 @@
 package tv.plurx.app.player
 
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -59,17 +60,27 @@ internal fun clientLogRequest(origin: String, event: PlaybackClientLog): Request
  * Fire-and-forget diagnostics through the app's shared authenticated client.
  * Missing connection state means offline playback, where no beacon is sent.
  */
-internal fun postPlaybackClientLog(scope: CoroutineScope, event: PlaybackClientLog) {
+internal fun postPlaybackClientLog(
+    scope: CoroutineScope,
+    event: PlaybackClientLog,
+    dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    send: suspend (Request) -> Unit = { request ->
+        Net.capabilityClient.newCall(request).execute().use { }
+    },
+) {
     val origin = Session.origin
-    if (origin.isBlank() || Session.token.isNullOrBlank()) return
+    val token = Session.token?.takeIf { it.isNotBlank() } ?: return
+    if (origin.isBlank()) return
     val request = try {
-        clientLogRequest(origin, event)
+        clientLogRequest(origin, event).newBuilder()
+            .header("Authorization", "Bearer $token")
+            .build()
     } catch (_: Exception) {
         return
     }
-    scope.launch(Dispatchers.IO) {
+    scope.launch(dispatcher) {
         try {
-            Net.client.newCall(request).execute().use { }
+            send(request)
         } catch (_: Exception) {
             // Telemetry is best effort and must never become a playback error.
         }
@@ -110,6 +121,12 @@ internal interface PlaybackTelemetryPlayer {
     val videoHeight: Int
 }
 
+internal fun normalizedPlaybackMethod(method: String?): String? = when (method) {
+    "direct", "direct_play" -> "direct_play"
+    "remux", "transcode" -> method
+    else -> null
+}
+
 internal data class PlaybackTelemetryContext(
     val method: String,
     val encoder: String?,
@@ -130,17 +147,47 @@ internal class ControllerPlaybackTelemetry(
     private val ttffTracker = PlaybackTTFFTracker()
     private val stallTracker = BufferingStallTracker()
 
-    fun begin(reason: String, observedAtMs: Long): PlaybackAttempt {
+    private var pendingSeekSequence: Long? = null
+
+    fun begin(reason: String, observedAtMs: Long, intentSequence: Long? = null): PlaybackAttempt {
         stallTracker.reset()
+        // A repair of the same dispatched destination is still the viewer's
+        // original seek, including the time spent waiting before the repair.
+        if (pendingSeekSequence != null && pendingSeekSequence == intentSequence) {
+            ttffTracker.retainForRecovery()?.let { return it }
+        }
+        cancelPending()
+        pendingSeekSequence = intentSequence.takeIf { reason == "seek" }
         return ttffTracker.begin(reason, observedAtMs)
+    }
+
+    fun supersedeForIntent(sequence: Long?) {
+        if (pendingSeekSequence != null && pendingSeekSequence != sequence) cancelPending()
     }
 
     fun prepared(attempt: PlaybackAttempt) = ttffTracker.prepared(attempt)
 
-    fun cancel(attempt: PlaybackAttempt) = ttffTracker.cancel(attempt)
+    fun cancel(attempt: PlaybackAttempt) {
+        if (!ttffTracker.cancel(attempt)) return
+        pendingSeekSequence = null
+        if (attempt.reason == "seek") {
+            report(
+                event = "seek_abandoned",
+                level = "info",
+                message = "seek ended before a presented frame",
+                attempt = attempt,
+            )
+        }
+    }
 
-    fun firstFrame(observedAtMs: Long): TtffMeasurement? =
-        ttffTracker.firstFrame(observedAtMs)?.also { measurement ->
+    fun cancelPending() {
+        ttffTracker.currentAttempt()?.let(::cancel)
+    }
+
+    /** A startup callback is not proof that the dispatched seek target presented. */
+    fun firstFrame(observedAtMs: Long): TtffMeasurement? {
+        if (ttffTracker.currentAttempt()?.reason == "seek") return null
+        return ttffTracker.firstFrame(observedAtMs)?.also { measurement ->
             report(
                 event = "ttff",
                 level = "info",
@@ -149,6 +196,56 @@ internal class ControllerPlaybackTelemetry(
                 attempt = measurement.attempt,
             )
         }
+    }
+
+    private fun seekPresented(sequence: Long, observedAtMs: Long) {
+        if (pendingSeekSequence != sequence) return
+        val measurement = ttffTracker.firstFrame(observedAtMs, requirePrepared = false) ?: return
+        pendingSeekSequence = null
+        report(
+            event = "seek_resumed",
+            level = "info",
+            message = "seek destination presented after ${measurement.elapsedMs} ms",
+            ms = measurement.elapsedMs,
+            attempt = measurement.attempt,
+        )
+    }
+
+    // These bridges use the same destination proof that releases optimistic
+    // seek intent. Tests exercise the real landing/advancing-clock rules.
+    fun presentationAttempt(): PlaybackAttempt? = ttffTracker.currentAttempt()
+
+    fun presentedVideoFrame(
+        intent: PlaybackIntent,
+        positionMs: Long,
+        sequence: Long,
+        observedAtMs: Long,
+        expectedAttempt: PlaybackAttempt? = ttffTracker.currentAttempt(),
+    ): Boolean {
+        if (expectedAttempt != ttffTracker.currentAttempt()) return false
+        return intent.presentedVideoFrame(positionMs, sequence).also { presented ->
+            if (presented) seekPresented(sequence, observedAtMs)
+        }
+    }
+
+    fun presentedVideoProgress(intent: PlaybackIntent, positionMs: Long, sequence: Long, observedAtMs: Long): Boolean =
+        intent.presentedVideoProgress(positionMs, sequence).also { presented ->
+            if (presented) seekPresented(sequence, observedAtMs)
+        }
+
+    fun presentedAudio(
+        intent: PlaybackIntent,
+        positionMs: Long,
+        sequence: Long,
+        observedAtMs: Long,
+        playbackActive: Boolean,
+        playbackRate: Double,
+        presentationReady: Boolean,
+    ): Boolean = intent.presentedAudio(
+        positionMs, sequence, observedAtMs, playbackActive, playbackRate, presentationReady,
+    ).also { presented ->
+        if (presented) seekPresented(sequence, observedAtMs)
+    }
 
     fun sampleStall(establishedPlayback: Boolean, observedAtMs: Long): StallMeasurement? =
         stallTracker.sample(
@@ -212,6 +309,7 @@ internal data class PlaybackAttempt(
     val id: String,
     val reason: String,
     val startedAtMs: Long,
+    val executionGeneration: Long = 0,
 )
 
 internal data class TtffMeasurement(
@@ -224,6 +322,7 @@ internal class PlaybackTTFFTracker {
     private var sequence = 0L
     private var current: PlaybackAttempt? = null
     private var preparedAttemptId: String? = null
+    private var completedAttemptId: String? = null
 
     fun begin(reason: String, observedAtMs: Long): PlaybackAttempt {
         val attempt = PlaybackAttempt(
@@ -233,28 +332,39 @@ internal class PlaybackTTFFTracker {
         )
         current = attempt
         preparedAttemptId = null
+        completedAttemptId = null
         return attempt
     }
 
     /** Ignore any last frame from the departing item until prepare has run. */
     fun prepared(attempt: PlaybackAttempt) {
-        if (current?.id == attempt.id) preparedAttemptId = attempt.id
+        if (current == attempt && completedAttemptId != attempt.id) preparedAttemptId = attempt.id
     }
 
-    fun firstFrame(observedAtMs: Long): TtffMeasurement? {
+    fun retainForRecovery(): PlaybackAttempt? {
+        val attempt = current?.takeIf { it.reason == "seek" && completedAttemptId != it.id } ?: return null
+        return attempt.copy(executionGeneration = attempt.executionGeneration + 1).also {
+            current = it
+            preparedAttemptId = null
+        }
+    }
+
+    fun firstFrame(observedAtMs: Long, requirePrepared: Boolean = true): TtffMeasurement? {
         val attempt = current ?: return null
-        if (preparedAttemptId != attempt.id) return null
+        if (completedAttemptId == attempt.id || (requirePrepared && preparedAttemptId != attempt.id)) return null
         preparedAttemptId = null
+        completedAttemptId = attempt.id
         return TtffMeasurement(
             attempt = attempt,
             elapsedMs = (observedAtMs - attempt.startedAtMs).coerceAtLeast(0),
         )
     }
 
-    fun cancel(attempt: PlaybackAttempt) {
-        if (current?.id != attempt.id) return
+    fun cancel(attempt: PlaybackAttempt): Boolean {
+        if (current != attempt || completedAttemptId == attempt.id) return false
         current = null
         preparedAttemptId = null
+        return true
     }
 
     fun currentAttempt(): PlaybackAttempt? = current

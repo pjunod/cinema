@@ -133,6 +133,7 @@ function playbackSurfaceSourceIsBlocking(source,context){
 // playing. Nothing else about the sites that call this changes.
 function stopPlayerForExhaustion(){
   const p=PLAYER;
+  finishPlaybackSeekTelemetry(p,p&&p.controlSeek,"seek_abandoned");
   if(p) retireHlsTerminalAttempt(p);
   const v=document.getElementById("video");
   if(v) pausePlaybackInternally(v);
