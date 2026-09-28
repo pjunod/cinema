@@ -488,7 +488,11 @@ mod linux {
         }
         Ok(FingerprintEvidence {
             version: 1,
-            complete: true,
+            // A digest built from prefixes/suffixes is useful for bounded
+            // diagnostics but cannot safely inherit durable progress or
+            // matches across reinsertion. Only claim complete identity when
+            // every navigation byte contributed to the digest.
+            complete: sampled == navigation_bytes,
             digest: hex::encode(hash.finalize()),
             navigation_bytes,
             bounded_sample_bytes: sampled,
@@ -830,6 +834,23 @@ mod linux {
                 .expect("changed fingerprint");
             assert_ne!(first.digest, changed.digest);
             assert!(first.bounded_sample_bytes <= first.navigation_bytes.saturating_mul(2));
+        }
+
+        #[test]
+        fn sampled_navigation_fingerprint_is_not_complete_identity() {
+            let directory = tempfile::tempdir().expect("tempdir");
+            let bdmv = directory.path().join("BDMV");
+            fs::create_dir_all(bdmv.join("PLAYLIST")).expect("playlist directory");
+            fs::write(
+                bdmv.join("PLAYLIST/00001.mpls"),
+                vec![3_u8; (SAMPLE_BYTES * 2 + 1) as usize],
+            )
+            .expect("large playlist");
+
+            let evidence =
+                fingerprint(OpticalFormat::Bluray, directory.path(), &bdmv).expect("fingerprint");
+            assert!(!evidence.complete);
+            assert!(evidence.bounded_sample_bytes < evidence.navigation_bytes);
         }
     }
 }
