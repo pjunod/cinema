@@ -132,6 +132,22 @@ impl TranscodeManager {
                 }
 
                 return match decision {
+                    // Background work owned a pool for the whole cooperative
+                    // window and never yielded. That is a stuck worker, not a
+                    // busy encoder, and the viewer does not pay for it: take
+                    // the slot the cap allows (background holds still count),
+                    // or the CPU forced, and let the holder find the pool
+                    // owned at its next check. Only a live viewer earns this;
+                    // a speculative start has nobody waiting on it.
+                    Admission::WaitingForBackground if priority == Priority::Live => self
+                        .admit_over_background(
+                            preferred,
+                            max,
+                            sw_budget,
+                            estimate.as_ref(),
+                            work,
+                            max_wait,
+                        ),
                     Admission::WaitingForBackground => Err(capacity_error(format!(
                         "background encoding did not yield within {:.1}s; try again in a moment",
                         max_wait.as_secs_f64()
@@ -194,6 +210,20 @@ impl TranscodeManager {
                 tokio::time::sleep(ADMISSION_POLL.min(deadline - now)).await;
                 continue;
             }
+            if self.admissions.background_is_active() && priority == Priority::Live {
+                // Same ruling as the hardware branch: the window is the
+                // background worker's chance to checkpoint, not the viewer's
+                // deadline. The take is forced because the stuck permit still
+                // reserves the budget; the overcommit is recorded, not hidden.
+                let weight = work.software_threads();
+                let permit = self.admissions.software_pool().take_forced(weight);
+                self.note_background_overrun("software", weight, max_wait);
+                return Ok(LiveAdmission {
+                    encoder: Encoder::Software,
+                    hw_slot: None,
+                    sw_permit: Some(permit),
+                });
+            }
             let why = if self.admissions.background_is_active() {
                 format!(
                     "background encoding did not yield within {:.1}s; try again in a moment",
@@ -209,6 +239,96 @@ impl TranscodeManager {
             tracing::warn!(target: "plurxd::transcode", class = %work.software_class(), "{why}");
             return Err(capacity_error(why));
         }
+    }
+
+    /// The live admission a viewer gets when background ownership outlived
+    /// the cooperative window. Hardware within the cap first (a background
+    /// hardware hold still counts against `max`, so this never oversubscribes
+    /// the GPU); otherwise the ordinary software decision, taken forced
+    /// because the background permit still reserves the CPU it is not using.
+    /// A class software cannot carry is still refused, honestly — that
+    /// refusal is about the stream, not about the stuck worker.
+    fn admit_over_background(
+        &self,
+        preferred: Encoder,
+        max: usize,
+        sw_budget: usize,
+        estimate: Option<&TranscodeResourceEstimate>,
+        work: Workload<'_>,
+        waited: Duration,
+    ) -> Result<LiveAdmission, String> {
+        match self.admissions.admit_over_background(max, work) {
+            Admission::Hardware(slot) => {
+                // A software decode into this hardware encoder still spends
+                // the cores the estimate names; reserve them the same forced
+                // way so the pool keeps telling the truth about its load.
+                let sw_permit = estimate
+                    .filter(|estimate| estimate.hardware_slot && estimate.cpu_threads > 0)
+                    .map(|estimate| {
+                        self.admissions
+                            .software_pool()
+                            .take_forced(estimate.cpu_threads)
+                    });
+                self.note_background_overrun(
+                    "hardware",
+                    sw_permit
+                        .as_ref()
+                        .map_or(0, crate::admission::SwPermit::threads),
+                    waited,
+                );
+                Ok(LiveAdmission {
+                    encoder: preferred,
+                    hw_slot: Some(slot),
+                    sw_permit,
+                })
+            }
+            Admission::Software => {
+                let weight = work.software_threads();
+                let permit = self.admissions.software_pool().take_forced(weight);
+                self.note_background_overrun("software", weight, waited);
+                tracing::info!(
+                    target: "plurxd::transcode",
+                    class = %work.software_class(),
+                    threads = weight,
+                    "hardware transcode slots full; this class runs comfortably in software here, so starting it there"
+                );
+                Ok(LiveAdmission {
+                    encoder: Encoder::Software,
+                    hw_slot: None,
+                    sw_permit: Some(permit),
+                })
+            }
+            Admission::Refused(why) => {
+                tracing::warn!(
+                    target: "plurxd::transcode",
+                    class = %work.software_class(),
+                    software_budget = sw_budget,
+                    "{why}"
+                );
+                Err(capacity_error(why))
+            }
+            Admission::WaitingForBackground => {
+                unreachable!("admit_over_background never waits for background")
+            }
+        }
+    }
+
+    /// One log line and one counter per viewer started over a background
+    /// hold. The counter is the signal that some background worker is holding
+    /// a permit through a phase that never looks at the pool; the log line
+    /// names the pool so the worker can be found.
+    fn note_background_overrun(&self, pool: &'static str, threads: usize, waited: Duration) {
+        let snapshot = self.admissions.snapshot();
+        tracing::warn!(
+            target: "plurxd::transcode",
+            pool,
+            threads,
+            waited_s = waited.as_secs_f64(),
+            hardware_used = snapshot.hardware_used,
+            software_used = snapshot.software_used,
+            "background work did not yield within the cooperative window; starting the viewer over it"
+        );
+        crate::telemetry::record_background_overrun(pool);
     }
 
     /// Reserve the foreground encoder pool for the measured live workload.

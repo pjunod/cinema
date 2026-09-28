@@ -1652,11 +1652,15 @@
     }
 
     /// A background process that ignores the yield signal cannot turn a Play
-    /// request into an unbounded spinner. The production path uses five
-    /// seconds; this focused test supplies a small window to prove the same
-    /// deadline and error classification without sleeping for the full one.
+    /// request into an unbounded spinner — and it cannot refuse the viewer
+    /// either. The cooperative window is the worker's chance to checkpoint;
+    /// when it passes with the permit still held, the viewer is started over
+    /// it: within the hardware cap (the stuck slot still counts), as a live
+    /// permit (so the stuck worker is `background_blocked` from then on).
+    /// The production window is five seconds; this focused test supplies a
+    /// small one to prove the same deadline without sleeping for the full one.
     #[tokio::test]
-    async fn live_admission_fails_retryably_when_background_does_not_release() {
+    async fn live_admission_starts_over_a_background_permit_that_does_not_release() {
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
@@ -1676,7 +1680,7 @@
             .expect("background permit");
         let wait = Duration::from_millis(25);
         let began = Instant::now();
-        let error = match mgr
+        let admission = mgr
             .admit_live(
                 Encoder::Nvenc,
                 None,
@@ -1690,27 +1694,125 @@
                 Priority::Live,
             )
             .await
-        {
-            Err(error) => error,
-            Ok(_) => panic!("live admission overlapped a stuck background permit"),
-        };
+            .expect("the viewer starts over the stuck background permit");
         let elapsed = began.elapsed();
-        assert!(elapsed >= wait, "returned before the configured window");
+        assert!(elapsed >= wait, "started before the worker's cooperative window");
         assert!(
             elapsed < Duration::from_millis(150),
             "polling overshot the bounded window: {elapsed:?}"
         );
+        assert_eq!(admission.encoder, Encoder::Nvenc);
+        assert_eq!(
+            mgr.admissions.in_use(),
+            2,
+            "the stuck background slot still counts toward the cap"
+        );
+        assert!(
+            !mgr.admissions.live_is_waiting(),
+            "the admitted request kept its waiter registered"
+        );
+        assert!(
+            mgr.admissions
+                .try_acquire(2, Priority::Background)
+                .is_none(),
+            "a live permit now parks every background start"
+        );
+        drop(producer);
+        drop(admission);
+        assert_eq!(mgr.admissions.in_use(), 0, "both guards returned");
+    }
+
+    /// The same stuck permit with no hardware headroom left: the live start
+    /// takes the ordinary software decision, forced, because the background
+    /// permit still reserves CPU it is not using. The overcommit is visible in
+    /// the pool rather than hidden.
+    #[tokio::test]
+    async fn live_admission_over_background_takes_software_forced_when_hardware_is_capped() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work_dir = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work_dir.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let budget = mgr.software_budget().await;
+        let hog = mgr
+            .admissions
+            .try_admit_software(budget, budget.max(1), Priority::Background)
+            .expect("background CPU permit");
+        let before = mgr.admissions.software_in_use();
+        let admission = mgr
+            .admit_live(
+                Encoder::Software,
+                None,
+                Workload {
+                    source_height: 1080,
+                    codec: "h264",
+                    hdr: None,
+                    target_height: 720,
+                },
+                Duration::from_millis(25),
+                Priority::Live,
+            )
+            .await
+            .expect("the viewer starts over the stuck CPU permit");
+        assert_eq!(admission.encoder, Encoder::Software);
+        assert!(
+            mgr.admissions.software_in_use() > before,
+            "the forced take is recorded, not hidden"
+        );
+        drop(hog);
+        drop(admission);
+        assert_eq!(mgr.admissions.software_in_use(), 0);
+    }
+
+    /// Nobody is waiting on a speculative start, so it keeps the bounded
+    /// refusal: only a live viewer earns a start over background ownership.
+    #[tokio::test]
+    async fn speculative_admission_is_still_refused_while_background_holds() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work_dir = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work_dir.path().to_path_buf(),
+            EncoderCaps {
+                nvenc: true,
+                ..Default::default()
+            },
+            Pipeline::Cpu,
+        );
+        let producer = mgr
+            .admissions
+            .try_acquire(2, Priority::Background)
+            .expect("background permit");
+        let error = mgr
+            .admit_live(
+                Encoder::Nvenc,
+                None,
+                Workload {
+                    source_height: 1080,
+                    codec: "h264",
+                    hdr: None,
+                    target_height: 720,
+                },
+                Duration::from_millis(25),
+                Priority::Speculative,
+            )
+            .await
+            .err()
+            .expect("a speculative start does not cross background ownership");
         assert!(is_retryable_capacity_error(&error), "{error}");
         assert!(
             error.contains("background encoding did not yield"),
             "{error}"
         );
-        assert!(
-            !mgr.admissions.live_is_waiting(),
-            "the failed request leaked its waiter"
-        );
         drop(producer);
-        assert_eq!(mgr.admissions.in_use(), 0, "the background guard returned");
+        assert_eq!(mgr.admissions.in_use(), 0);
     }
 
     /// Cancelling the HTTP request while it is waiting must withdraw the

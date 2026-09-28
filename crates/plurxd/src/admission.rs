@@ -792,6 +792,47 @@ impl Admissions {
         true
     }
 
+    /// Take a live hardware slot within the cap while background work still
+    /// owns a pool — the one rule [`Self::try_acquire`] enforces for a live
+    /// caller that this method lifts. Everything else holds: background slots
+    /// still count toward `max`, and the slot taken is a live permit, so from
+    /// this instant every background holder is `background_blocked` and stops
+    /// at its next yield check.
+    ///
+    /// For the waiter whose cooperative window has expired. A background
+    /// holder that has not yielded in that long is not a busy encoder about to
+    /// finish, it is a worker stuck in a phase that never looks at the pool;
+    /// refusing the viewer on its behalf turns a background defect into a
+    /// foreground outage, which is exactly backwards.
+    pub(crate) fn try_acquire_over_background(&self, max: usize) -> Option<HwSlot> {
+        let mut permits = self
+            .permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if permits.hardware_used() >= max {
+            return None;
+        }
+        permits.hardware_live += 1;
+        drop(permits);
+        Some(HwSlot {
+            permits: Arc::clone(&self.permits),
+            owner: PermitOwner::Live,
+        })
+    }
+
+    /// Decide what a live start gets once background ownership has outlived
+    /// the cooperative window: the same hardware-or-software decision as
+    /// [`Self::admit_with_priority`], with the background rule lifted. Never
+    /// answers `WaitingForBackground`. Software here means the caller takes
+    /// the CPU forced (`SwPool::take_forced`), because the background permit
+    /// still reserves the budget it will not release.
+    pub(crate) fn admit_over_background(&self, max: usize, work: Workload<'_>) -> Admission {
+        if let Some(slot) = self.try_acquire_over_background(max) {
+            return Admission::Hardware(slot);
+        }
+        self.software_decision(max, work)
+    }
+
     /// Take a slot if one is free. Capacity and owner change under the same
     /// mutex, which makes two racing starts unable to both succeed on the last
     /// slot and closes the waiter-registration/background-acquisition race.
@@ -884,6 +925,13 @@ impl Admissions {
         if self.background_is_active() {
             return Admission::WaitingForBackground;
         }
+        self.software_decision(max, work)
+    }
+
+    /// Hardware is full: run in software, or say why not. Shared by the
+    /// ordinary decision and the over-background one so the two can never
+    /// disagree about what software can carry.
+    fn software_decision(&self, max: usize, work: Workload<'_>) -> Admission {
         match self.measured(&work.software_class()) {
             Some(speed) if speed >= SOFTWARE_SAFE_SPEED => Admission::Software,
             Some(speed) => Admission::Refused(format!(
