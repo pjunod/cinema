@@ -139,7 +139,7 @@ this from real tuner exhaustion.
 | `transcode/manager/start.rs` | `admit_live` admits over background after the window for `Priority::Live` on both the hardware and software routes; `note_background_overrun` log + counter. |
 | `telemetry.rs` | `plurx_transcode_background_overrun_total{pool="hardware"\|"software"}`. |
 | `live_tv.rs`, `http/live_tv.rs`, `http/internal_live_tv.rs`, `http/live_tv_cluster.rs` | `EncoderCapacity` / `encoder_capacity`. |
-| `web/live-tv.js`, Android `LiveTvApi.kt`, Apple `LiveTv.swift` | Copy for `encoder_capacity`; Android build 133, Apple build bumped. |
+| `web/live-tv.js`, Android `LiveTvApi.kt`, Apple `LiveTv.swift` | Copy for `encoder_capacity`; Android build 134, Apple build bumped. |
 | `tests/playback/live-tv-start-cases.json` | The `encoder_capacity` answer row. |
 | `docs/API.md`, `docs/OPERATIONS.md` | The code, and the troubleshooting row rewritten for the new behaviour. |
 
@@ -188,7 +188,7 @@ this from real tuner exhaustion.
   churn from the reorder, and tests that did not reach the arms they named.
   Rollout notes from it: an ingress older than this build folds
   `encoder_capacity` to its fallback code, and clients older than Android
-  133 / Apple 194 print the raw sentence; a healthy producer whose
+  134 / Apple 195 print the raw sentence; a healthy producer whose
   checkpoint-and-kill runs past five seconds counts as an overrun.
 - Live TV HTTP: `encoder_capacity` code, 503, `retry: later`, preserved
   through the ingress relay.
