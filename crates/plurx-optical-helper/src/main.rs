@@ -43,6 +43,7 @@ mod linux {
     const SAMPLE_BYTES: u64 = 64 * 1024;
     const MAX_TITLES: usize = 512;
     const MAX_PROBE_BYTES: usize = 4 * 1024 * 1024;
+    const PROTECTION_ERROR_PREFIX: &str = "optical-protection-unsupported:";
 
     #[derive(Parser)]
     #[command(name = "plurx-optical-helper")]
@@ -81,9 +82,25 @@ mod linux {
         presence: &'static str,
     }
 
+    #[derive(Serialize)]
+    struct FailureReply<'a> {
+        code: &'static str,
+        message: &'a str,
+    }
+
     pub(super) fn run_main() {
         if let Err(error) = run(Args::parse()) {
-            eprintln!("{error}");
+            if let Some(message) = error.strip_prefix(PROTECTION_ERROR_PREFIX) {
+                let reply = FailureReply {
+                    code: "optical_protection_unsupported",
+                    message,
+                };
+                if write_json(&reply).is_err() {
+                    eprintln!("{message}");
+                }
+            } else {
+                eprintln!("{error}");
+            }
             std::process::exit(1);
         }
     }
@@ -225,6 +242,15 @@ mod linux {
                 Ok(title) => titles.push(title),
                 Err(error) => diagnostics.push(error),
             }
+        }
+        if titles.is_empty()
+            && diagnostics
+                .iter()
+                .any(|error| error.starts_with(PROTECTION_ERROR_PREFIX))
+        {
+            return Err(format!(
+                "{PROTECTION_ERROR_PREFIX}the inserted disc is protected and the configured reader cannot decrypt it"
+            ));
         }
         if titles.is_empty() {
             return Err(format!(
@@ -489,10 +515,13 @@ mod linux {
             .output()
             .map_err(|error| format!("ffprobe is unavailable: {error}"))?;
         if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr)
-                .chars()
-                .take(512)
-                .collect());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if probe_reports_unsupported_protection(&stderr) {
+                return Err(format!(
+                    "{PROTECTION_ERROR_PREFIX}the inserted disc is protected and the configured reader cannot decrypt it"
+                ));
+            }
+            return Err(stderr.chars().take(512).collect());
         }
         if output.stdout.len() > MAX_PROBE_BYTES {
             return Err("ffprobe title reply exceeded its byte bound".into());
@@ -500,6 +529,20 @@ mod linux {
         let document: Value =
             serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
         title_from_probe(format, locator, &document)
+    }
+
+    fn probe_reports_unsupported_protection(stderr: &str) -> bool {
+        let normalized = stderr.to_ascii_lowercase();
+        [
+            "can't decrypt this media",
+            "cannot decrypt this media",
+            "aacs_open() failed",
+            "no valid aacs configuration files found",
+            "no usable aacs libraries found",
+            "bdplus_init() failed",
+        ]
+        .iter()
+        .any(|marker| normalized.contains(marker))
     }
 
     fn string(value: &Value, key: &str) -> Option<String> {
@@ -684,6 +727,19 @@ mod linux {
                     },
                 ]
             );
+        }
+
+        #[test]
+        fn bluray_probe_protection_failures_have_a_stable_classification() {
+            assert!(probe_reports_unsupported_protection(
+                "[bluray] Your libaacs can't decrypt this media"
+            ));
+            assert!(probe_reports_unsupported_protection(
+                "aacs.c:121: No usable AACS libraries found!"
+            ));
+            assert!(!probe_reports_unsupported_protection(
+                "bluray: Input/output error"
+            ));
         }
 
         #[test]

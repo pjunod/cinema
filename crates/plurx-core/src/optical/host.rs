@@ -46,6 +46,14 @@ struct PresenceReply {
     presence: OpticalMediaPresence,
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HelperFailureReply {
+    code: String,
+    message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HostRequirement {
     pub id: &'static str,
@@ -65,6 +73,8 @@ pub enum OpticalHostError {
     OutputLimit,
     #[error("the optical helper exited unsuccessfully")]
     Failed,
+    #[error("the inserted optical media uses protection this host cannot decrypt")]
+    ProtectionUnsupported,
     #[error("the optical helper returned invalid JSON: {0}")]
     InvalidReply(String),
     #[error("the optical helper answered for a stale insertion")]
@@ -165,6 +175,13 @@ impl SystemOpticalHost {
             }
             let status = child.wait().await.map_err(|_| OpticalHostError::Failed)?;
             if !status.success() {
+                if let Ok(reply) = serde_json::from_slice::<HelperFailureReply>(&bytes) {
+                    if reply.code == "optical_protection_unsupported"
+                        && !reply.message.trim().is_empty()
+                    {
+                        return Err(OpticalHostError::ProtectionUnsupported);
+                    }
+                }
                 return Err(OpticalHostError::Failed);
             }
             Ok(bytes)

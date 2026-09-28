@@ -1602,6 +1602,13 @@ fn service_error(error: OpticalServiceError) -> ApiError {
                 error.to_string(),
             )
         }
+        OpticalServiceError::Host(plurx_core::optical::OpticalHostError::ProtectionUnsupported) => {
+            ApiError::typed(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "optical_protection_unsupported",
+                "the inserted disc is protected and the configured reader cannot decrypt it",
+            )
+        }
         OpticalServiceError::Host(_) | OpticalServiceError::Inspection(_) => ApiError::typed(
             StatusCode::SERVICE_UNAVAILABLE,
             "optical_read_failed",
