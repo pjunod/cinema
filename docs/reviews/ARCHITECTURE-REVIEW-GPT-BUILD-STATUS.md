@@ -1,8 +1,45 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 15:11 UTC · **Audited main:** `569ed6e1616868f84604331af33b9a467799f1b2`
+**Status:** open · **Updated:** 2026-09-28 16:09 UTC · **Audited main:** `b5649e55d9826500dbbc92160e0374e7a1bc6021`
 
 ## Current work
+
+[PR #600](http://192.168.4.7:3000/noirr/plurx/pulls/600) merged as
+`b5649e55d9826500dbbc92160e0374e7a1bc6021`. Its sole review's three P2
+findings are addressed. All 40 focused checks pass: six Apple simulator cases,
+17 Android JVM cases, one Android player instrumentation case and 16 Python
+cases. Fast lane API3535 / [UI3514](http://192.168.4.7:3000/noirr/plurx/actions/runs/3514)
+passed all eight selected jobs; the unselected web job skipped. The gate
+records 4726 Rust passes, zero failures and 16 ignored cases. Qualification
+SHA256 `28759841e20e1226f277c4e0da45ff4e98d225d557248245f1248545b9c8eda7`
+binds candidate `cb3eaa819aab08394004e94e50224acf0b0ce0d7` to that
+canonical local Git merge tree. This qualifies Apple199/Android136 source;
+physical acceptance and baseline-profile gains are not claimed.
+
+The next A03 batch retains compiled source
+`f91b881c419ec350325313970a86b7355d0b2dad`, now merged with actual PR600
+without a tree change. Apple200 iOS/tvOS Release production and XCTest sources
+compile; signed Release apps are retained with development provisioning
+(`get-task-allow=true`). Android137 also compiles and is durably signed.
+Apple signed receipt SHA256
+`047bd9bd55c2afcb0c026a17774a5f0ed5fea93c847e0ec05517a4dde1e155b1`,
+Apple source-compile receipt SHA256
+`07e8a4e0deeaf27e8b930332ba481faba1e423eea9a38b1d71cdee8ca1964312`
+and Android signed receipt SHA256
+`3e469c9e6112e4e4fb306e2394863658987831e24811a7e6ec0e49bfd24ce857`
+retain their original source attribution. All five A03 regression groups have
+executable source; the next batch's sole review, focused tests, qualification
+and installation remain pending. Named Apple TV/Lenovo 6000-title tail, order,
+request, focus and frame measurements remain open. Android category query is
+excluded by the maintained plan's section 5.5.
+
+The four-node rollout and native installation will follow the final qualified
+A03 batch together. The retained86d collector and its passive historical hour
+remain prior-source evidence; they do not close a current-main normal-use
+hour, 24-hour or seven-day window. Physical controller/lifecycle, PDF/EPUB,
+caption/capacity and native HDR matrices retain the scopes and failures below.
+
+## Historical PR600 preparation and earlier evidence
 
 Draft [PR #600](http://192.168.4.7:3000/noirr/plurx/pulls/600) received its
 sole independent review on00cc886365. It found three P2 issues. F1 is addressed
