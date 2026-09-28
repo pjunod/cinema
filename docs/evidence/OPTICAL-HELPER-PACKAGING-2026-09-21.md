@@ -26,6 +26,14 @@ The Compose example, example TOML, systemd unit comments and deployment runbook
 describe the exact device, mount and group grants without recommending
 privileged mode.
 
+Commit `2d1472a17` adds the dependency-free `scripts/optical-lab` source-reader
+runner and the maintained operations runbook. Its explicit Linux invocation
+selects a helper, FFmpeg/FFprobe pair, device, read-only mount, drive, format,
+title, fixture, case list and output directory. It never calls eject or writes
+decoded frames. Its bounded JSON records source/tool/host/drive identity,
+inspection, per-case latency and failure, and cleanup; a pass is explicitly
+scoped below plurxd VOD and client qualification.
+
 ## Construction evidence
 
 The helper's focused fixture suite passed 3/3 before the packaging edits. The
@@ -47,13 +55,20 @@ receive the single fast-lane run after the requested adversarial review.
 
 ## Deliberately open acceptance
 
-- No reachable machine has an operator-identified optical drive.
-- The available local FFmpeg 9.0.1 build reports both `dvdvideo` and
-  `bluray` inputs missing.
-- No physical insertion, removal, read, seek, angle selection, protected-disc
-  response or eject has been observed.
-- The production source-aware VOD controller and cluster owner routing remain
-  later milestones; installing the helper does not claim playback is ready.
+- A reachable Linux host now has an operator-identified Pioneer
+  `BD-RW BDR-XD07U`. With one inserted commercial Blu-ray, the helper observed
+  a consumable `changed` edge followed by stable `present`; the installed
+  FFmpeg 8.0.1 build reports its Blu-ray protocol.
+- That disc is AACS-protected and the host has no configured authorized
+  decryption material. Inspection produced the stable
+  `optical_protection_unsupported` classification, so no decoded first frame,
+  seek, chapter or track change was claimed.
+- DVD reader capability, removal, angle selection and API-controlled eject
+  remain unobserved. The tray was not opened by this work.
+- Source-aware VOD and cluster owner routing are implemented, but playable
+  media, owner-loss behavior and physical-client acceptance remain open. The
+  new lab has not been run on a playable fixture and does not by itself claim
+  end-to-end playback.
 
 These are visible advisory failures and promotion blockers, not reasons to
 override the operator's saved enable choice.
