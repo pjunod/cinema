@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 05:24 UTC · **Audited main:** `c983989813d0819ed54dc1b1e115c08b60a059e8`
+**Status:** open · **Updated:** 2026-09-28 06:07 UTC · **Audited main:** `c983989813d0819ed54dc1b1e115c08b60a059e8`
 
 [PR #582](http://192.168.4.7:3000/noirr/plurx/pulls/582) merged after its
 single adversarial review; all four findings were fixed. The exact candidate
@@ -10,10 +10,10 @@ against `d2a9d8fb78f785f3daf0469937d7139f979d3b27`: **4,693 Rust tests passed,
 zero failures**. All24 regression fields resolved before publication and are
 in the landing commit. No second review was run.
 
-[Draft PR #590](http://192.168.4.7:3000/noirr/plurx/pulls/590) batches the
+[PR #590](http://192.168.4.7:3000/noirr/plurx/pulls/590) batches the
 HLS readiness clock observation repair, physical TV focus navigation repair,
 and this evidence. Apple source196 is reserved; actual devices remain194
-until signed qualification/install. Android133 is unchanged. The sole590 adversarial review found one P2 retained-grouping prerequisite; it is addressed by observed grouping selection and deferred restoration. Review receipt SHA256 `cba5a86abee8bef0a2e342479ef9b75565a41eb26c52cdf81699ab6a29dfb89f`. No second review. Main #589 changes native Live TV inputs and claims195; exact candidate72d69a32 reserves196. Fresh signed iOS/tvOS196 production apps and physical runner compiled with strict signature checks (production receipt `fbb84ecec8239b086bcdc735ddcb24bc206305bf46c26244465bfad58875ff78`; runner `812251e60224059b6308514a38cd4ca34bca1ab3a078284ab927d8ad11cfcf20`). No196 production install or590 fast unit gate has run.
+until signed qualification/install. Android133 is unchanged. The sole590 adversarial review found one P2 retained-grouping prerequisite; it is addressed by observed grouping selection and deferred restoration. Review receipt SHA256 `cba5a86abee8bef0a2e342479ef9b75565a41eb26c52cdf81699ab6a29dfb89f`. No second review. Main #589 changes native Live TV inputs and claims195; exact candidate72d69a32 reserves196. Fresh signed iOS/tvOS196 production apps and physical runner compiled with strict signature checks (production receipt `fbb84ecec8239b086bcdc735ddcb24bc206305bf46c26244465bfad58875ff78`; runner `812251e60224059b6308514a38cd4ca34bca1ab3a078284ab927d8ad11cfcf20`). No196 production install has run. Fast lane3484 selected Rust units; its startup-race failure and repair are recorded below.
 
 Focused web readiness passed; old-source negative control failed the intended no-new-append assertion (receipt `9d3e13f0dd2fe8466b4f723ddf761084d259fe8257442c418a7dec507621b44d`). Against canonical194, paging passed twice and restored Library grouping. Three Settings failures remain retained. A bounded diagnostic proved that Quality's actual focus owner is an anonymous leaf Other with exactly the identified Button frame, not a focused Cell. The helper now accepts only that unique leaf proxy with nonzero matching geometry. The diagnostic restored the first failed case's observed Autoplay Off to its original On, through an observed focused toggle and one ordinary Select. Receipt `8913c0eebbffad9a012102e0dc6adfad542ed233872f167a41d7d7dfe8917132`. The corrected196 runner passed paging and Settings once each against canonical194, zero failures/skips; original grouping restored and Quality opened both menu choices (receipt `545c1f86dda7c1ee9628d494aba892c12cf4eb0975f58c288dc82f3fd2940c20`). Exact72d69a32/basef400 web readiness passed and unchanged old-source control failed its intended assertion (receipt `a292af7ad3a7da325514c38a43b8f1f8ba30f8e1fc07c914b8bc32f832b92be2`). These source-scoped regressions are not final196/current-main installed product acceptance. Fast qualification and final deployment are next.
 
@@ -22,6 +22,10 @@ D-03 actual API36 local synthetic-data backup/restore passed on exact signed non
 Read-only actual installed ART diagnostics on four reachable signed133 devices report compiler status `verify`, reason `install`. Baseline-profile consumption and cold-start performance remain unproved; Lenovo is now unavailable. Actual ART receipt `715b9deb059a0c7620a58031a2f3f8bb61fb317f9ad41da508f3eea4c25722f1`. No launch, forced compilation or profile-content access was used.
 
 Fast lane API3480/UI3459 stopped at history preflight before Rust tests: five corrective client commits lacked required rows in the history anchor table. Those commits now map to their existing HLS, paging and Settings regressions; local history audit passes all311 client anchors. Main #593 advances to c9839898 with only STATUS.md, integrated into this candidate. No app source, signed input or test behavior changed; the sole review remains complete and a new exact-head/base gate is required.
+
+Fast lane API3484/UI3463 passed policy, Apple, Windows and web checks. Rust core reported1365passed/1failed/1ignored: `dropping_the_future_kills_the_child` failed at the missing PID file because the200ms timer cancelled the re-executed test process before startup completed. Corrective commit `4a9e8c84dba3a826cb911fd2c89fa616b8f3e0da` atomically publishes the PID and waits for observed child readiness before starting the unchanged cancellation deadline. The actual future is dropped before the preserved child-death assertion; production process handling is unchanged. One focused regression and a fresh exact-candidate fast gate are required. No second590review.
+
+Separate parallel client work has compiled ordinary Release LiveTV caption controls for Apple and actual-track controls for Android. Both clients also lose the server's actionable watchable-capacity offer before rendering it; that client follow-up is being implemented in the next batch. These branches have not run tests or their batch review and are not deployed. Their acceptance cannot be attributed to installed194/133 or sealed196 products.
 
 The four-node strict uniform deployment passed on `dfef993b9`. Browser cases ran on that exact
 merged binary and unchanged scorers; failures are retained. Main subsequently moved through
