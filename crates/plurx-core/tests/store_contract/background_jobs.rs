@@ -4310,6 +4310,38 @@ async fn background_subtitles_replicated_ready_orphans_are_refused_and_retired()
     .expect("fixture client");
     client.execute("UPDATE analysis_requests SET state='ready', result_cache_key='published-source' WHERE request_id=$1",
         hiqlite::params!(request.request_id.clone())).await.expect("historical ready demand");
+    // v61 differs only in this trigger. Upgrade the exact predecessor with the
+    // historical orphan present, rather than reconstructing unrelated v10 DDL.
+    drop(store);
+    let old_projection = include_str!("../../src/store/background_jobs_subtitle.sql")
+        .split("-- next statement\n")
+        .find(|sql| sql.contains("CREATE TRIGGER IF NOT EXISTS background_subtitle_settled"))
+        .expect("predecessor projection trigger");
+    for result in client
+        .txn(vec![
+            (
+                "DROP TRIGGER background_subtitle_settled".to_owned(),
+                hiqlite::params!(),
+            ),
+            (old_projection.to_owned(), hiqlite::params!()),
+            (
+                "UPDATE cluster_meta SET schema_version=61 WHERE singleton=1".to_owned(),
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("install predecessor fixture")
+    {
+        result.expect("predecessor statement");
+    }
+    let store: Arc<dyn Store> = Arc::new(
+        plurx_core::store::HiqliteAuthStore::open_or_migrate(
+            client.clone(),
+            &cluster._root.path().join("subtitle-upgrade-telemetry.db"),
+        )
+        .await
+        .expect("upgrade v61 to current schema"),
+    );
     let job = store
         .background_job(&job_id)
         .await

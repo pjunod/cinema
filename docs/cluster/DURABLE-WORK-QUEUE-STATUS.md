@@ -13,7 +13,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 
 ## Activity and subtitle throughput follow-up
 
-**2026-09-27:** implemented on `codex/durable-activity-diagnostics`; final review addressed.
+**2026-09-27:** implemented in [PR #588](http://192.168.4.7:3000/noirr/plurx/pulls/588); final review addressed.
 The existing programme is merged; this follow-up addresses the production
 observation that one old job appears to run indefinitely.
 
@@ -56,7 +56,11 @@ Subtitle source-change, orphan-demand and ownership/publication contracts passed
 against SQLite and real three-voter Hiqlite. The source-change fixture was
 corrected to respect existing automatic cancellation; historical ready-request
 orphans are independently reproduced through the replicated SQL log.
-The main-bound fast lane follows these focused checks.
+The current PR and its checks are the promotion record. A broader historical
+v10 migration test failed while constructing its old fixture: it drops
+`cluster_fragment_index_jobs.index_diagnostic_json` while a later queue trigger
+still references it. That unrelated fixture was not changed. The focused
+replicated regression upgrades the exact v61 predecessor with the orphan present.
 
 ## Delivery progress
 
