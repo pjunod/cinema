@@ -232,8 +232,13 @@ struct OpticalProgressRequest: Codable {
     let positionMs: Int
     var durationMs: Int?
     var audio: Int?
-    var subtitle: Int?
+    var subtitle: OpticalProgressSubtitleSelection?
     let recordedAtMs: Int
+}
+
+struct OpticalProgressSubtitleSelection: Codable {
+    let index: Int
+    let burned: Bool
 }
 
 struct OpticalEjectRequest: Codable {

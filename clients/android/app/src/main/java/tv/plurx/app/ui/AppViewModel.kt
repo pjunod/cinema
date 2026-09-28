@@ -16,7 +16,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.JsonPrimitive
 import retrofit2.HttpException
 import java.net.URI
 import tv.plurx.app.data.Caps
@@ -34,6 +33,7 @@ import tv.plurx.app.data.OpticalDriveDiscDto
 import tv.plurx.app.data.OpticalEjectRequest
 import tv.plurx.app.data.OpticalProgressDto
 import tv.plurx.app.data.OpticalProgressRequest
+import tv.plurx.app.data.OpticalProgressSubtitleSelection
 import tv.plurx.app.data.OpticalSessionRequest
 import tv.plurx.app.data.OpticalTitleDetailDto
 import tv.plurx.app.data.PosterSize
@@ -917,8 +917,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         session_id = sessionId,
                         position_ms = positionMs,
                         duration_ms = durationMs,
-                        audio = audio?.let(::JsonPrimitive),
-                        subtitle = subtitle?.let(::JsonPrimitive),
+                        audio = audio,
+                        subtitle = subtitle?.let {
+                            OpticalProgressSubtitleSelection(index = it, burned = true)
+                        },
                         recorded_at_ms = System.currentTimeMillis(),
                     ),
                 )

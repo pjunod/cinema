@@ -1,8 +1,6 @@
 package tv.plurx.app.data
 
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonElement
-
 @Serializable
 data class OpticalDriveStateDto(
     val state: String,
@@ -168,9 +166,15 @@ data class OpticalProgressRequest(
     val angle: Int = 1,
     val position_ms: Long,
     val duration_ms: Long? = null,
-    val audio: JsonElement? = null,
-    val subtitle: JsonElement? = null,
+    val audio: Long? = null,
+    val subtitle: OpticalProgressSubtitleSelection? = null,
     val recorded_at_ms: Long? = null,
+)
+
+@Serializable
+data class OpticalProgressSubtitleSelection(
+    val index: Long,
+    val burned: Boolean,
 )
 
 @Serializable

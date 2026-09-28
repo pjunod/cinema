@@ -8065,7 +8065,9 @@ final class PlayerController: ObservableObject {
                         positionMs: globalPosition,
                         durationMs: duration,
                         audio: audio,
-                        subtitle: subtitle,
+                        subtitle: subtitle.map {
+                            OpticalProgressSubtitleSelection(index: $0, burned: true)
+                        },
                         recordedAtMs: Int(Date().timeIntervalSince1970 * 1_000)
                     )
                 )
