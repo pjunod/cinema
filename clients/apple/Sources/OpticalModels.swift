@@ -238,6 +238,7 @@ struct OpticalProgressRequest: Codable {
 }
 
 struct OpticalEjectRequest: Codable {
+    let expectedDiscId: String
     let mediaGeneration: String
     var sessionId: String?
     let stopActive: Bool

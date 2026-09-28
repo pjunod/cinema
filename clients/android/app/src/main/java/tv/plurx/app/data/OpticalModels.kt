@@ -176,6 +176,7 @@ data class OpticalProgressRequest(
 
 @Serializable
 data class OpticalEjectRequest(
+    val expected_disc_id: String,
     val media_generation: String,
     val session_id: String? = null,
     val stop_active: Boolean = false,

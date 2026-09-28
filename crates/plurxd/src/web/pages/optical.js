@@ -131,7 +131,9 @@ async function viewDisc(driveId,titleId=null,generation=++PAGE_RENDER_GENERATION
   let body=pageHead(trail,disc?opticalDiscName(drive):drive.name);
   if(!disc){
     const state=drive.state?.state;
-    body+=`<div class="empty">${state==="inspecting"?"Reading disc…":state==="failed"?esc(drive.state.reason||"The disc could not be read."):state==="busy"?"Drive in use.":"No disc is inserted."}</div>`;
+    const failedEject=ME.is_admin&&state==="failed"&&drive.state.media_generation
+      ?` <button class="ghost sm" onclick="opticalEject(${esc(JSON.stringify(drive.id))})">Eject</button>`:"";
+    body+=`<div class="empty">${state==="inspecting"?"Reading disc…":state==="failed"?esc(drive.state.reason||"The disc could not be read."):state==="busy"?"Drive in use.":"No disc is inserted."}${failedEject}</div>`;
   }else{
     body+=`<section class="optical-hero"><div class="optical-mark large">${disc.format==="bluray"?"BD":"DVD"}</div><div>
       <div class="vbadges"><span>${esc(opticalFormatLabel(disc.format))}</span><span>${esc(drive.name)}</span><span>${esc(opticalStateName(drive))}</span></div>
@@ -228,10 +230,13 @@ async function opticalPlayAt(driveId,titleId,startMs){
 }
 async function opticalEject(driveId){
   const data=await opticalLoadDrive(driveId), drive=data.drive, disc=drive.disc;
-  if(!disc) return toast("No disc is inserted");
-  if(!confirm(`Eject ${opticalDiscName(drive)} from ${drive.name}?`)) return;
+  const failedGeneration=drive.state?.state==="failed"?drive.state.media_generation:null;
+  if(!disc&&!failedGeneration) return toast("No disc is available to eject");
+  const label=disc?opticalDiscName(drive):"the unreadable disc";
+  if(!confirm(`Eject ${label} from ${drive.name}?`)) return;
   await api(`/optical/drives/${encodeURIComponent(drive.id)}/eject`,{method:"POST",body:{
-    expected_disc_id:disc.id,media_generation:disc.media_generation,stop_active:false,session_id:null
+    expected_disc_id:disc?disc.id:"",media_generation:disc?disc.media_generation:failedGeneration,
+    stop_active:false,session_id:null
   }});
   toast("Disc ejected");
   if(location.hash.startsWith("#/discs/")) location.hash="#/discs";

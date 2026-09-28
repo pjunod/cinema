@@ -1367,22 +1367,25 @@ async fn local_eject(
         .manager()
         .snapshot(drive_id)
         .ok_or(ApiError::NotFound("drive"))?;
-    let current_disc_id = match &snapshot.state {
+    match &snapshot.state {
         OpticalDriveState::Ready { disc_id, .. } | OpticalDriveState::Busy { disc_id, .. } => {
-            disc_id
+            if disc_id != &request.expected_disc_id {
+                return Err(optical_conflict(
+                    "optical_eject_conflict",
+                    "the disc changed before eject",
+                ));
+            }
         }
+        OpticalDriveState::Failed {
+            media_generation: Some(_),
+            ..
+        } if request.expected_disc_id.is_empty() => {}
         _ => {
             return Err(optical_conflict(
                 "optical_eject_conflict",
                 "the requested insertion is not available to eject",
             ));
         }
-    };
-    if current_disc_id != &request.expected_disc_id {
-        return Err(optical_conflict(
-            "optical_eject_conflict",
-            "the disc changed before eject",
-        ));
     }
     let stopped = request
         .stop_active
