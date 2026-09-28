@@ -68,7 +68,11 @@ also_in = ["crates/plurxd/src/transcode"]
 # manufacture it before the path under test runs; the fourteenth is the
 # `AtomicBool::new(false)` initializer in the watchdog session fixture. None
 # elects or starts a replacement.
-expected_occurrences = 35
+# 35 -> 37 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: two
+# test-only stores in `path_owner_sample_point_follows_the_marker_check_and_precedes_the_sample`,
+# which sets the mask so a marked path reader must answer before the hook point and clears it
+# again. No production reader or writer was added and nothing elects a replacement.
+expected_occurrences = 37
 kind = "recovery_election"
 replacement = "retained process-replacement serialization projection; actor decisions and exact attempts own transcode prepublication"
 
@@ -85,7 +89,11 @@ also_in = ["crates/plurxd/src/transcode"]
 # existing transition guard so teardown, retirement or a predecessor reap stays
 # blocked while the regression observes the other side of it. None creates a
 # new transition owner.
-expected_occurrences = 18
+# 18 -> 19 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count:
+# `post_media_retirement_keeps_exact_resources_after_caller_cancellation` asserts that
+# `child_transition.try_lock()` fails while retirement is held at its cleanup-handoff point. A
+# test-only probe that is expected to fail and takes nothing; no transition owner is created.
+expected_occurrences = 19
 kind = "mixed_ownership_lock"
 replacement = "specific attempt, response-admission, copy replacement, published cleanup, retirement, resource, or catalog-revision fences"
 
@@ -122,7 +130,12 @@ also_in = ["crates/plurxd/src/transcode"]
 # cancellation regressions — each driving the same exact-attempt supervisor.
 # The one left in `transcode.rs` is the production definition; no new killer
 # was added.
-expected_occurrences = 12
+# 12 -> 15 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: three
+# test-only calls of the replacement driver in
+# `producer_install_points_follow_authorization_and_precede_the_final_fence`, each admitting the
+# producer attempt the test then installs through a production install path. The driver stays
+# test-only; its pause moved from a Session field to `SessionTestHooks`.
+expected_occurrences = 15
 kind = "replacement_owner"
 replacement = "the exact-attempt supervisor executing one actor decision"
 
@@ -136,7 +149,10 @@ also_in = ["crates/plurxd/src/transcode"]
 # unchanged. Both are test-only calls asserting that an expired attempt and a
 # retired session cannot install a spawned replacement. The one left in
 # `transcode.rs` is the production definition; no new installer was added.
-expected_occurrences = 3
+# 3 -> 4 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: one test-only
+# call in the same position test, installing into a retired session so the actor refuses the
+# install before its hook point. No production caller added.
+expected_occurrences = 4
 kind = "replacement_owner"
 replacement = "the session executor installing one actor-authorized attempt"
 
@@ -155,7 +171,11 @@ also_in = ["crates/plurxd/src/transcode"]
 # the total is unchanged. All four are test-only calls injecting a terminal
 # cause into a fixture session so a later reader, deadline or reap can be
 # observed against it. No production failure owner moved or was added.
-expected_occurrences = 15
+# 15 -> 16 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count:
+# `first_media_owner_point_follows_an_accepted_settlement` fails its fixture session when it
+# ends, as `first_media_settlement_gap_keeps_confirmed_reap_ownership` does. Test-only; no
+# production failure path added.
+expected_occurrences = 16
 kind = "failure_owner"
 replacement = "typed producer facts entering the actor; only prepublication and compatibility failures project Session::failed, while published actor failures retain admitted media"
 
@@ -345,7 +365,12 @@ also_in = ["crates/plurxd/src/transcode"]
 # `rate_control_refresh_once`) driven directly by the fixture. Each belongs to
 # the per-test runtime that spawned it and dies with it; none is a shipped task
 # owner.
-expected_occurrences = 87
+# 87 -> 93 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count, all
+# test-only and each awaited by its test within a bound: the control request in
+# `control_and_flow_points_bracket_producer_policy`, and in `transcode/tests/chunk_09.rs` the
+# path-owner reader, the compatibility publication, the playlist request, the refresh and the
+# activity read of the position tests. None owns a producer, a process or a recipe decision.
+expected_occurrences = 93
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
 
@@ -448,7 +473,11 @@ also_in = ["crates/plurxd/src/transcode"]
 # for the marker the hardware-encoder stand-in writes when it starts. Test-only;
 # the stand-in producer is started and stopped by the manager under test, and
 # the poll owns no producer, process or recovery decision.
-expected_occurrences = 48
+# 48 -> 51 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count, all
+# test-side: `session_shipped_shape`'s two polling sleeps (the playlist poll and the retirement
+# poll, each inside a bound) and the position test's `PLAYLIST_WAIT_POLL * 2` wait that shows a
+# playlist below the first-playlist gate has not reached its hook point. No production timer.
+expected_occurrences = 51
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -575,7 +604,9 @@ pattern = "child_transition"
 # reason this teardown may not sleep is exactly the reason worth writing down.
 # +1 is the immutable publication critical section reviewed under
 # `shared-child-transition-lock` above.
-expected_occurrences = 34
+# 34 -> 35 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same
+# test-only failing `try_lock()` probe at the retirement handoff point.
+expected_occurrences = 35
 
 [[module_symbols]]
 id = "legacy-watchdog-election"
@@ -590,7 +621,9 @@ pattern = "replacing_child"
 # +2 for the shipped telemetry read and its test-only state setup, reviewed
 # under `replacement-mask-flag` above.
 # +2 are the publication/lookup read fences reviewed under that same symbol.
-expected_occurrences = 35
+# 35 -> 37 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same two
+# test-only stores of the mask in the path-owner position test. No production owner added.
+expected_occurrences = 37
 
 [[module_symbols]]
 id = "legacy-downgrade-owner"
@@ -849,7 +882,10 @@ expected_occurrences = 13
 [[module_symbols]]
 id = "m4-first-media-owner-claim-latch"
 pattern = "first_media_handoff_applied"
-expected_occurrences = 18
+# 18 -> 19 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: one test-only
+# read in `first_media_owner_point_follows_an_accepted_settlement`, asserting a refused
+# settlement leaves the latch unset. No production reader or writer added.
+expected_occurrences = 19
 
 [[module_symbols]]
 id = "m4-published-attempt-cleanup-owner"
@@ -1260,7 +1296,12 @@ expected_occurrences = 9
 id = "m4-exact-rolling-scratch-owner-latch"
 pattern = "(?:spawn_rolling_scratch_cleanup_owner|scratch_cleanup_started)"
 # +1 is the retired-object cleanup owner's one-shot session latch.
-expected_occurrences = 13
+# 13 -> 15 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count:
+# `scratch_cleanup_points_follow_the_release_and_precede_the_removal` starts the scratch owner
+# directly (test-only), and `seam_census_of_the_workspace` names it among the M8-migrated owners
+# (a string). The three production calls are unchanged apart from losing their `cfg(test)` pause
+# argument; the owner now takes its point where it is spawned.
+expected_occurrences = 15
 
 [[module_symbols]]
 id = "m4-bounded-rolling-scratch-cleanup"
@@ -2257,7 +2298,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # adds no new site.
 # PR #537 current-main integration: measured after replacing the temporary
 # owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
-expected_occurrences = 669
+# 670 -> 676 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same
+# six test-only `tokio::spawn`s as `all-detached-tokio-tasks`, each awaited by its test within a
+# bound. None owns a producer, a process or a recipe decision.
+# Merge of main into #581, measured from the validation unittests' actual count: 669 (main after #537) + 6 (S-14 M8 Session/TranscodeManager) = 675.
+expected_occurrences = 675
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -2422,7 +2467,11 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 50 measured by zeroing this row.
 # Both +1s retained unchanged (main's `write_test_executable` child and this branch's fake
 # dormant producer, reviewed above); the merge adds no new site.
-expected_occurrences = 50
+# 50 -> 51 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the
+# `.spawn()` of the piped stand-in producer (`sleep 60`, `kill_on_drop`) in
+# `install_stand_in_producer`, test-only; the production install path puts it under
+# `AttemptChild` supervision or its refusal cleanup reaps it.
+expected_occurrences = 51
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -3333,13 +3382,34 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # detaches a task, changes production recovery, or owns a new child. The
 # unchanged 200ms cancellation timeout starts only after atomic PID readiness,
 # and the actual pinned future leaves scope before the child-death assertion.
-expected_occurrences = 1090
 # PR #537: +13 bounded transport/finalizer lease waits, guide replica polling
 # and release, worker readiness/snapshot bounds. Transport/finalizer futures
 # belong to the operation's cancellation scope; replica polling ends on the
 # daemon shutdown token. None independently selects or starts a producer.
 # The slow-sink regression switches two existing observations from std to
 # Tokio time; the inventory counts both, so no constructor is added.
+# 1082 -> 1101 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count (+19):
+# -4 in `http/hls/tests/chunk_02.rs`, the bounds on the subtitle-commit and publication Barrier
+# waits (the AsyncPause that replaces them is bounded itself), and +1 there for the missing-track
+# test's bound; `session_shipped_shape` +8 (its start, playlist, segment, activity, stop and
+# retirement bounds and two polling sleeps); +1 for `control_and_flow_points_bracket_producer_policy`'s
+# answer bound; +1 for `vod_publication_point_follows_the_serving_admission`'s bound; +12 in
+# `transcode/tests/chunk_09.rs` for the position tests' bounds and their first-playlist-gate
+# wait. The `timeout_at` around the media-committed point in `manager/publication.rs` was counted
+# before and still is: it moved from `cfg(test)` into every build, where it bounds the no-op
+# hook, which is ready at its first poll, so the deadline timer is never registered. No
+# production timer was added.
+# 1101 -> 1104 with #581's review round, measured from the validation unittests' actual count
+# (+3): `transcode_manager_shipped_shape` now drives the manager's migrated paths through the
+# production no-op hooks and bounds two of them, the unscripted offline production (30 s) and
+# the VOD publication (5 s); its HTTP half, `transcode_manager_shipped_shape_subtitle_playlist`
+# in `http/hls/tests/chunk_02.rs`, bounds the subtitle playlist (10 s). Each is a
+# `tokio::time::timeout` in a `#[cfg(test)]` test that asserts rather than hangs; none owns a
+# producer, process or timer. No production timer was added.
+# Merge of main into #581, measured from the validation unittests' actual count: 1088 (main after #537) + 22 (S-14 M8 incl. its review round) = 1110.
+# PR590 integration keeps its two owned test-only readiness constructors above:
+# 1110 (current main S-14) + 2 (process cancellation regression) = 1112.
+expected_occurrences = 1112
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3656,7 +3726,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 198 measured by zeroing this
 # row. Both sets retained unchanged (main's and this branch's, reviewed above); the merge
 # adds no new site.
-expected_occurrences = 198
+# 198 -> 199 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same
+# test-only piped stand-in producer's `tokio::process::Command::new("sleep")`.
+expected_occurrences = 199
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -4099,7 +4171,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +1 (406 -> 407) with the Live TV encoder_capacity code: one `Response::status()`
 # assertion in the error-advice test, on an in-process typed ApiError. It
 # launches nothing and owns nothing; #585 adds no command construction.
-expected_occurrences = 404
+# 406 -> 407 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same
+# test-only stand-in producer's `.spawn()`.
+# Merge of main into #581, measured from the validation unittests' actual count: 403 (main after #537) + 1 (S-14 M8 stand-in producer) = 404.
+# Merge of main (#585) into #581, measured: 403 + 1 (#585) + 1 (S-14 M8 stand-in producer) = 405.
+expected_occurrences = 405
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -4310,7 +4386,14 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # `vod/shared.rs` -4) for `VodSharedHooks`, and their race tests moved from Barrier pairs to
 # `seam_hooks::AsyncPause` (`vod/tests/chunk_02.rs` -4, `chunk_03.rs` -8,
 # `http/hls/tests/chunk_01.rs` -2). No kill, wait or reap of a process changed.
-expected_occurrences = 325
+# 325 -> 248 with S-14 M8 (`Session`, `TranscodeManager`) (net -77, all `Barrier::wait` calls removed), measured from the
+# validation unittests' actual count: the Session's and the manager's pauses left the production
+# functions (`rolling/session.rs` -16, `rolling/retention.rs` -3, `manager/maintenance.rs` -4,
+# `manager/publication.rs` -4, `manager/control.rs` -2) for `SessionHooks` and
+# `TranscodeManagerHooks`, and their race tests moved from Barrier pairs to
+# `seam_hooks::AsyncPause` (the rest, in the HTTP and transcode tests). No kill, wait or reap of a
+# process changed.
+expected_occurrences = 248
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -4473,7 +4556,9 @@ pattern = "kill_on_drop\\s*\\("
 # zeroing this row: the `kill_on_drop(true)` of that same test child.
 # 90 -> 91 with S-14 M8 (VOD `Shared`), measured from the validation unittests' actual count:
 # the same test-only fake producer is `kill_on_drop(true)`.
-expected_occurrences = 91
+# 91 -> 92 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same
+# test-only stand-in producer is `kill_on_drop(true)`.
+expected_occurrences = 92
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

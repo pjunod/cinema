@@ -256,9 +256,7 @@ impl TranscodeManager {
     /// identity every deployed node already has and says it could not read the
     /// setting, which is true and is visible on the settings surface.
     pub async fn publish_artifact_qualification(&self) -> ArtifactQualificationReadiness {
-        #[cfg(test)]
-        self.force_artifact_qualification
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.hooks.get().artifact_qualification_published();
         let stored = self
             .store
             .get_setting(plurx_core::store::keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS)
@@ -324,7 +322,7 @@ impl TranscodeManager {
             published.requested = qualification.enforces_receipt();
             published.refusal = None;
         }
-        self.force_artifact_qualification.store(
+        self.test_hooks().force_artifact_qualification.store(
             qualification.enforces_receipt(),
             std::sync::atomic::Ordering::Relaxed,
         );
@@ -342,7 +340,8 @@ impl TranscodeManager {
         &self,
         outcomes: impl IntoIterator<Item = OfflineProduceOutcome>,
     ) {
-        self.offline_produce_script
+        self.test_hooks()
+            .offline_produce_script
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .extend(outcomes);
@@ -350,7 +349,8 @@ impl TranscodeManager {
 
     #[cfg(test)]
     pub(crate) fn test_offline_produced_recipes(&self) -> Vec<String> {
-        self.offline_produced_recipes
+        self.test_hooks()
+            .offline_produced_recipes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -358,14 +358,16 @@ impl TranscodeManager {
 
     #[cfg(test)]
     pub(crate) fn test_fail_next_offline_recovery_begin(&self) {
-        self.fail_next_offline_recovery_begin
+        self.test_hooks()
+            .fail_next_offline_recovery_begin
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// How many generation manifests this manager has published.
     #[cfg(test)]
     pub(crate) fn test_manifests_published(&self) -> usize {
-        self.manifests_published
+        self.test_hooks()
+            .manifests_published
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
