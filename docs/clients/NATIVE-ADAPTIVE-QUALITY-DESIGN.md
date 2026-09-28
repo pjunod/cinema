@@ -576,16 +576,14 @@ Server-side, one metric with bounded labels:
 
 Both label sets are closed enums; the values come from the typed beacon,
 never from a free string. No new settings key: `playback_auto_abr` is the
-switch that already exists. It is replicated (`http/system.rs:71-75`, off
-unless stored as `1`), but it is **not** in Settings → Developer and has no
-readiness information: it is an ordinary toggle, "Adjust Auto quality while
-playing", in the Playback panel's Streaming card
-(`web/pages/settings-panels.js:546`), and `http/system.rs` builds no
-readiness entry for it. The project rule is that optional functionality
-lives in Developer with advisory readiness that never gates enablement, so
-moving it there, with per-platform readiness rows such as "controller
-present on this client" and "shaped trace recorded", is follow-up **F-1** in
-the build plan. A-04 does not move it.
+switch that already exists. It is replicated (`http/system.rs`, off unless
+stored as `1`). When this design was written it was an ordinary Playback
+toggle with no readiness information; follow-up **F-1** in the build plan
+moved it to Settings → Developer (`autoQualityCard` in
+`web/pages/settings-developer.js`, merged through PR #506) with dated
+per-platform readiness rows that never gate enablement. Under Paul's
+Developer lifecycle it leaves Developer once D3 is complete and the native
+controllers ship (build plan F-2). A-04 itself does not move it.
 
 ## 4. Guardrails (non-goals)
 
