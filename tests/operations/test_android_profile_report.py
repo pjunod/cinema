@@ -4,6 +4,9 @@ import importlib.util
 from pathlib import Path
 import unittest
 import re
+import json
+import hashlib
+import base64
 
 ROOT = Path(__file__).resolve().parents[2]
 loader = importlib.machinery.SourceFileLoader("android_profile_report", str(ROOT / "scripts/android-profile-report"))
@@ -14,18 +17,31 @@ loader.exec_module(reporter)
 
 class AndroidReleaseProfileReportCase(unittest.TestCase):
     def fixture(self):
-        common = dict(schema="plurx_release_profile_ttff_v1", source_sha="a" * 40, apk_sha256="b" * 64,
+        common = dict(schema="plurx_release_profile_ttff_v2", source_sha="a" * 40, apk_sha256="b" * 64,
                       package="tv.plurx.app", version_code=135, device_alias="fixture-device",
-                      device_model="fixture-model", sdk=34, startup_mode="COLD", iterations=5,
+                      device_model="fixture-model", sdk=34, device_fingerprint="fixture-fingerprint",
+                      device_build_device="fixture-hardware", run_id="1" * 32, startup_mode="COLD", iterations=5,
                       media3_ttff_ms=[100, 120, 110, 130, 90], first_frame_boundary="fixture-boundary")
         without = dict(common, compilation_mode="none")
         required = dict(common, compilation_mode="required")
-        macro = {"benchmarks": [{"className": "tv.plurx.profile.ReleaseProfileMeasurement", "name": n,
+        fields = [str(common[k]) for k in ("source_sha", "apk_sha256", "package", "version_code", "device_alias",
+                                           "device_model", "sdk", "device_fingerprint", "device_build_device")]
+        binding = hashlib.sha256("".join(f"{len(v.encode('utf-8'))}:{v}" for v in fields).encode()).hexdigest()
+        benchmark_binding = base64.urlsafe_b64encode(bytes.fromhex(binding)).decode("ascii").rstrip("=")
+        macro = {"context": {"build": {"model": common["device_model"], "fingerprint": common["device_fingerprint"],
+                                       "device": common["device_build_device"], "version": {"sdk": 34}}},
+                 "benchmarks": [{"className": "tv.plurx.profile.ReleaseProfileMeasurement",
+                                 "name": f"{n}[run={common['run_id']},binding={benchmark_binding}]",
+                                 "params": {"run": common["run_id"], "binding": benchmark_binding},
+                                 "repeatIterations": 5, "warmupIterations": 0,
                                  "metrics": {"timeToInitialDisplayMs": {"runs": [5, 3, 4, 6, 2]}}}
                                 for n in ("withoutProfileFiveColdIterations", "requiredProfileFiveColdIterations")]}
+        macro_hash = hashlib.sha256(json.dumps(macro).encode()).hexdigest()
+        for ttff in (without, required):
+            ttff.update(invocation_binding_sha256=binding, macrobenchmark_sha256=macro_hash)
         signed = dict(package=common["package"], version_code=135, artifact_sha256="b" * 64,
                       source_candidate="a" * 40, signature_verified=True, debuggable=False)
-        return without, required, macro, signed
+        return without, required, macro, signed, macro_hash
 
     def test_complete_pair_keeps_raw_samples_and_medians_without_acceptance(self):
         report = reporter.build_report(*self.fixture())
@@ -96,3 +112,41 @@ class AndroidReleaseProfileReportCase(unittest.TestCase):
                 with self.assertRaises(ValueError): reporter.build_report(*args)
         args = list(self.fixture()); args[1]["first_frame_boundary"] = "different-boundary"
         with self.assertRaises(ValueError): reporter.build_report(*args)
+
+    def test_stale_or_mixed_startup_run_and_apk_are_rejected(self):
+        args = list(self.fixture()); args[4] = "c" * 64
+        with self.assertRaisesRegex(ValueError, "original Macrobenchmark bytes"): reporter.build_report(*args)
+        args = list(self.fixture()); args[1]["run_id"] = "2" * 32
+        with self.assertRaises(ValueError): reporter.build_report(*args)
+        args = list(self.fixture())
+        for ttff in args[:2]: ttff["run_id"] = "2" * 32
+        with self.assertRaisesRegex(ValueError, "matching Macrobenchmark"): reporter.build_report(*args)
+        args = list(self.fixture())
+        for ttff in args[:2]: ttff["apk_sha256"] = "c" * 64
+        args[3]["artifact_sha256"] = "c" * 64
+        with self.assertRaisesRegex(ValueError, "Invocation binding"): reporter.build_report(*args)
+        for key in ("run_id", "invocation_binding_sha256", "macrobenchmark_sha256"):
+            with self.subTest(missing=key):
+                args = list(self.fixture())
+                for ttff in args[:2]: del ttff[key]
+                with self.assertRaises(ValueError): reporter.build_report(*args)
+
+    def test_real_macrobenchmark_device_context_and_binding_are_required(self):
+        for field, value in (("model", "other-model"), ("fingerprint", "other-fingerprint"),
+                             ("device", "other-hardware"), ("version", {"sdk": 35})):
+            with self.subTest(field=field):
+                args = list(self.fixture()); args[2]["context"]["build"][field] = value
+                # Even relabeling the freely supplied TTFF hashes cannot turn another device into this run.
+                args[4] = hashlib.sha256(json.dumps(args[2]).encode()).hexdigest()
+                for ttff in args[:2]: ttff["macrobenchmark_sha256"] = args[4]
+                with self.assertRaisesRegex(ValueError, "device context differs"): reporter.build_report(*args)
+        for mutation in ("context", "params", "binding", "iterations"):
+            with self.subTest(mutation=mutation):
+                args = list(self.fixture())
+                if mutation == "context": del args[2]["context"]
+                elif mutation == "params": del args[2]["benchmarks"][0]["params"]
+                elif mutation == "binding": args[2]["benchmarks"][0]["params"]["binding"] = "c" * 64
+                else: args[2]["benchmarks"][0]["repeatIterations"] = 4
+                args[4] = hashlib.sha256(json.dumps(args[2]).encode()).hexdigest()
+                for ttff in args[:2]: ttff["macrobenchmark_sha256"] = args[4]
+                with self.assertRaises(ValueError): reporter.build_report(*args)

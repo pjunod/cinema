@@ -2,14 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Paired physical Android release profile measurement",
   "type": "object",
-  "required": ["schema", "identity", "iterations_per_mode", "modes", "first_frame_boundary", "inputs", "acceptance", "measured_gain_claimed"],
+  "required": ["schema", "identity", "iterations_per_mode", "modes", "first_frame_boundary", "inputs", "acceptance", "measured_gain_claimed", "invocation_binding_sha256", "macrobenchmark_sha256"],
   "properties": {
-    "schema": {"const": "plurx_release_profile_measurement_v1"},
+    "schema": {"const": "plurx_release_profile_measurement_v2"},
     "iterations_per_mode": {"const": 5},
     "measured_gain_claimed": {"const": false},
     "identity": {
       "type": "object",
-      "required": ["source_sha", "apk_sha256", "package", "version_code", "device_alias", "device_model", "sdk"],
+      "required": ["source_sha", "apk_sha256", "package", "version_code", "device_alias", "device_model", "sdk", "device_fingerprint", "device_build_device", "run_id"],
       "properties": {
         "source_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
         "apk_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -17,7 +17,10 @@
         "version_code": {"type": "integer", "minimum": 1},
         "device_alias": {"type": "string", "minLength": 1},
         "device_model": {"type": "string", "minLength": 1},
-        "sdk": {"type": "integer", "minimum": 28}
+        "sdk": {"type": "integer", "minimum": 28},
+        "device_fingerprint": {"type": "string", "minLength": 1},
+        "device_build_device": {"type": "string", "minLength": 1},
+        "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"}
       }
     },
     "modes": {
@@ -25,6 +28,8 @@
       "properties": {"none": {"$ref": "#/$defs/mode"}, "required": {"$ref": "#/$defs/mode"}}
     },
     "first_frame_boundary": {"type": "string", "minLength": 1},
+    "invocation_binding_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "macrobenchmark_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "acceptance": {"type": "string", "minLength": 1},
     "inputs": {
       "type": "array", "minItems": 4, "maxItems": 4,

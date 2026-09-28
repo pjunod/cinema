@@ -410,13 +410,39 @@ ANDROID_SERIAL="$LENOVO_SERIAL" ./clients/android/gradlew -p clients/android \
   -Pandroid.testInstrumentationRunnerArguments.plurxApkSha256="$RELEASE_APK_SHA256" \
   -Pandroid.testInstrumentationRunnerArguments.plurxDeviceAlias=Lenovo
 
-# Retain both harness TTFF JSON files from its external-files output and the
-# matching Macrobenchmark JSON/Perfetto traces before producing this report.
+# Retain the single completed invocation's run-named Macrobenchmark snapshot,
+# both run-named TTFF files, original AndroidX result and Perfetto traces from
+# the benchmark additional-output directory before producing this report.
 scripts/android-profile-report \
   --without-ttff "$WITHOUT_TTFF_JSON" --required-ttff "$REQUIRED_TTFF_JSON" \
   --macrobenchmark "$MACROBENCHMARK_JSON" \
   --signed-artifact-receipt "$SIGNED_RELEASE_RECEIPT" --output "$NEW_REPORT_JSON"
 ```
+
+Run the entire `ReleaseProfileMeasurement` class in one instrumentation
+invocation. Its parameterized tests generate one random run identifier and a
+SHA-256 binding of the full source, installed APK, counter and observed device
+identity (full 256 bits in compact base64url in the test parameter so trace
+filenames remain within AndroidX limits). AndroidX records those parameters in the original benchmark result
+names and `params`. After both methods and their owned-playback cleanup finish,
+the harness copies the original AndroidX JSON bytes to
+`plurx-<run>-macrobenchmark.json` and emits
+`plurx-<run>-none-ttff.json` and `plurx-<run>-required-ttff.json`. A missing mode
+or failed cleanup prevents a paired output. Filenames are unique to the run;
+keep the reported additional-output artifacts, not an older fixed-name file.
+
+The v2 TTFF records carry the actual snapshot SHA-256. The report checks that
+byte hash, generated run and full identity binding against both original
+AndroidX result names/parameters, and checks the result's real
+`context.build` model, hardware device, fingerprint and SDK. It requires five
+recorded iterations and zero warmups in each original result. Relabeling an
+arbitrary sidecar or supplying a prior startup JSON cannot associate it with a
+new TTFF pair. This binds recorded artifacts; it does not attest Lenovo
+ownership or create a startup-gain claim. Retain the original source and signed
+APK receipt, physical-device attestation and traces for acceptance. AndroidX's
+[result writer](https://github.com/androidx/androidx/blob/androidx-main/benchmark/benchmark-common/src/main/java/androidx/benchmark/ResultWriter.kt)
+and [result format](https://github.com/androidx/androidx/blob/androidx-main/benchmark/benchmark-common/src/main/java/androidx/benchmark/json/BenchmarkData.kt)
+define the original parameter and device-context fields.
 
 **How to read it:** `CompilationMode.None()` is the without-profile arm;
 `Partial(BaselineProfileMode.Require, warmupIterations = 0)` is the required
