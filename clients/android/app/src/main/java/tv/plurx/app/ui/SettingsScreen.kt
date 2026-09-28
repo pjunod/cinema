@@ -67,7 +67,12 @@ internal fun appVersionLabel(versionName: String, versionCode: Int): String =
     "$versionName ($versionCode)"
 
 @Composable
-fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDeveloper: () -> Unit = {}) {
+fun SettingsScreen(
+    vm: AppViewModel,
+    onBack: () -> Unit,
+    onOpenDeveloper: () -> Unit = {},
+    onOpenLiveTvSettings: () -> Unit = {},
+) {
     val preferences by vm.preferences.collectAsStateWithLifecycle()
     val offlineRecords by vm.offlineRecords.collectAsStateWithLifecycle()
     val offlineBookRecords by vm.offlineBookRecords.collectAsStateWithLifecycle()
@@ -215,6 +220,16 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDeveloper: () -> 
                 }
             }
 
+            // Server Live TV settings, as on the web's Settings → Live TV. The
+            // tuner, guide, recording and Library channel cards used to sit in
+            // Developer; they are finished settings, so they live here.
+            SettingsSection(
+                "Live TV",
+                "Tuner, programme guide, recording and Library channels for this server. Administrator access is required.",
+            ) {
+                PreferenceAction("Tuner, guide, recording and Library channels", onClick = onOpenLiveTvSettings)
+            }
+
             SettingsSection("Account", null) {
                 LabeledValueRow("Signed in as", vm.username ?: "—")
                 LabeledValueRow("Server", vm.serverName ?: vm.origin)
@@ -229,7 +244,7 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDeveloper: () -> 
             }
 
             SettingsSection("Developer", "Runtime enablement with the requirements needed to use each feature safely.") {
-                PreferenceAction("HDHomeRun Live TV setup and enablement", onClick = onOpenDeveloper)
+                PreferenceAction("Enable Live TV and match television refresh rate", onClick = onOpenDeveloper)
                 PreparedReplacementEnable(
                     enabled = preferences.preparedReplacement,
                     isTelevision = isTelevision(LocalContext.current),
@@ -264,6 +279,12 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDeveloper: () -> 
  * Two of the four conditions belong to a session rather than to the device, so
  * this screen states them and says so rather than scoring them.
  */
+/** The web's line for the same device-local permission, adapted to a device. */
+internal const val PREPARED_REPLACEMENT_GRADUATION: String =
+    "Leaves Developer when: prepared quality handoff graduates (the quality-switch continuity " +
+        "build finishes M2-Android, M1-web and M3). Then: this device's switch moves with it to " +
+        "Settings → Playback."
+
 @Composable
 private fun PreparedReplacementEnable(
     enabled: Boolean,
@@ -322,6 +343,12 @@ private fun PreparedReplacementEnable(
                     modifier = Modifier.padding(horizontal = 8.dp),
                 )
             }
+        Text(
+            PREPARED_REPLACEMENT_GRADUATION,
+            color = Muted,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(horizontal = 8.dp),
+        )
         preparedReplacementRequirements(
             isTelevision = isTelevision,
             // The successor inherits the incumbent's tunneling, and tunneling
