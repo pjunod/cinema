@@ -17,12 +17,14 @@ struct OpticalPlaybackContext: Hashable {
 struct OpticalHomeRow: View {
     let drives: [OpticalDriveDTO]
 
-    private var inserted: [OpticalDriveDTO] { drives.filter { $0.disc != nil } }
+    private var inserted: [OpticalDriveDTO] {
+        drives.filter { $0.disc != nil || ["inspecting", "failed"].contains($0.state.state) }
+    }
 
     var body: some View {
         if !inserted.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Inserted disc")
+                Text("Optical media")
                     .font(.headline.weight(.semibold))
                     .foregroundStyle(Palette.onBg)
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -52,11 +54,12 @@ private struct OpticalDriveCard: View {
                 .frame(width: 72, height: 96)
                 .background(Palette.surface, in: RoundedRectangle(cornerRadius: 12))
             VStack(alignment: .leading, spacing: 6) {
-                Text(drive.disc?.title ?? "Inserted disc")
+                Text(drive.disc?.title ?? drive.name)
                     .font(.headline).foregroundStyle(Palette.onBg).lineLimit(2)
-                Text("\((drive.disc?.format ?? "disc").uppercased()) · \(drive.name)")
+                Text(drive.disc.map { "\($0.format.uppercased()) · \(drive.name)" }
+                    ?? opticalDriveStateMessage(drive))
                     .font(.caption).foregroundStyle(Palette.muted)
-                Label("Browse disc", systemImage: "play.fill")
+                Label(drive.disc == nil ? "Open drive" : "Browse disc", systemImage: "play.fill")
                     .font(.caption.weight(.semibold)).foregroundStyle(Palette.accent)
             }
         }
@@ -75,7 +78,14 @@ struct OpticalDiscView: View {
     var body: some View {
         Group {
             if let content {
-                ScrollView {
+                if content.drive.disc == nil {
+                    ContentUnavailableView(
+                        "Disc unavailable",
+                        systemImage: "exclamationmark.opticaldisc",
+                        description: Text(opticalDriveStateMessage(content.drive))
+                    )
+                } else {
+                    ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
                         VStack(alignment: .leading, spacing: 7) {
                             Text(content.drive.disc?.title ?? "Inserted disc")
@@ -109,6 +119,7 @@ struct OpticalDiscView: View {
                         }
                     }
                     .padding(screenHPad)
+                    }
                 }
             } else if let error {
                 ContentUnavailableView("Disc unavailable", systemImage: "opticaldisc", description: Text(error))
@@ -250,6 +261,18 @@ private func opticalDuration(_ milliseconds: Int?) -> String {
     guard let milliseconds, milliseconds > 0 else { return "Duration unavailable" }
     let minutes = milliseconds / 60_000
     return minutes >= 60 ? "\(minutes / 60)h \(minutes % 60)m" : "\(minutes)m"
+}
+
+private func opticalDriveStateMessage(_ drive: OpticalDriveDTO) -> String {
+    switch drive.state.state {
+    case "inspecting": return "Reading disc information…"
+    case "failed": return drive.state.reason?.isEmpty == false
+        ? drive.state.reason!
+        : "The drive could not inspect this disc."
+    case "empty": return "No disc is inserted."
+    case "busy": return "This drive is already in use."
+    default: return "The optical source is unavailable."
+    }
 }
 
 private func opticalTrackLabel(_ track: OpticalTrackDTO) -> String {

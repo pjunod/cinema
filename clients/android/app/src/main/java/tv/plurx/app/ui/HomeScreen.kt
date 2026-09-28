@@ -132,7 +132,7 @@ fun HomeScreen(
                 // up/down pointed straight past it at each other, so the only
                 // way to change the grouping was to have a touchscreen.
                 val visibleShelfKeys = buildList {
-                    if (state.opticalDrives.any { it.disc != null }) add("optical")
+                    if (state.opticalDrives.any { it.disc != null || it.state.state in setOf("inspecting", "failed") }) add("optical")
                     if (continueShelfItems.isNotEmpty()) add("continue")
                     if (state.hubs.next_up.isNotEmpty()) add("next")
                     if (state.hubs.recently_added.isNotEmpty()) add("recent")
@@ -307,11 +307,11 @@ private fun OpticalHomeShelf(
     nextRowFocusRequester: FocusRequester?,
     onOpen: (String) -> Unit,
 ) {
-    val inserted = drives.filter { it.disc != null }
+    val inserted = drives.filter { it.disc != null || it.state.state in setOf("inspecting", "failed") }
     if (inserted.isEmpty()) return
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(
-            "Inserted disc",
+            "Optical media",
             modifier = Modifier.padding(horizontal = side),
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
@@ -344,17 +344,22 @@ private fun OpticalHomeShelf(
                     Text("◉", color = Accent, fontSize = 40.sp)
                     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                         Text(
-                            drive.disc?.title ?: "Inserted disc",
+                            drive.disc?.title ?: drive.name,
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             maxLines = 2,
                         )
                         Text(
-                            "${drive.disc?.format?.uppercase() ?: "DISC"} · ${drive.name}",
+                            drive.disc?.let { "${it.format.uppercase()} · ${drive.name}" }
+                                ?: opticalDriveStateMessage(drive),
                             color = Muted,
                             style = MaterialTheme.typography.labelMedium,
                         )
-                        Text("Browse disc", color = Accent, style = MaterialTheme.typography.labelMedium)
+                        Text(
+                            if (drive.disc == null) "Open drive" else "Browse disc",
+                            color = Accent,
+                            style = MaterialTheme.typography.labelMedium,
+                        )
                     }
                 }
             }

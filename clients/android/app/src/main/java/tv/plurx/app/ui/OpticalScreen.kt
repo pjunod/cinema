@@ -56,27 +56,35 @@ fun OpticalDiscScreen(
             content != null -> {
                 val loaded = content!!
                 val disc = loaded.drive.disc
-                Text(disc?.title ?: "Inserted disc", style = MaterialTheme.typography.headlineLarge)
-                Text("${disc?.format?.uppercase() ?: "DISC"} · ${loaded.drive.name}", color = Muted)
-                Spacer(Modifier.height(18.dp))
-                loaded.titles.forEach { title ->
-                    Row(
-                        Modifier.fillMaxWidth().clickable {
-                            if (disc != null) onOpenTitle(
+                if (disc == null) {
+                    Text(loaded.drive.name, style = MaterialTheme.typography.headlineLarge)
+                    Text(
+                        opticalDriveStateMessage(loaded.drive),
+                        color = if (loaded.drive.state.state == "failed") MaterialTheme.colorScheme.error else Muted,
+                    )
+                } else {
+                    Text(disc.title, style = MaterialTheme.typography.headlineLarge)
+                    Text("${disc.format.uppercase()} · ${loaded.drive.name}", color = Muted)
+                    Spacer(Modifier.height(18.dp))
+                    loaded.titles.forEach { title ->
+                        Row(
+                            Modifier.fillMaxWidth().clickable {
+                                onOpenTitle(
                                 loaded.drive.id,
                                 loaded.drive.name,
                                 disc.id,
                                 disc.media_generation,
                                 title.id,
-                            )
-                        }.padding(vertical = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Title ${title.id}", style = MaterialTheme.typography.titleMedium)
-                            Text(opticalDuration(title.duration_ms), color = Muted)
+                                )
+                            }.padding(vertical = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Title ${title.id}", style = MaterialTheme.typography.titleMedium)
+                                Text(opticalDuration(title.duration_ms), color = Muted)
+                            }
+                            Text("Browse", color = Accent)
                         }
-                        Text("Browse", color = Accent)
                     }
                 }
             }
@@ -200,6 +208,14 @@ private fun opticalDuration(milliseconds: Long?): String {
     if (milliseconds == null || milliseconds <= 0) return "Duration unavailable"
     val minutes = milliseconds / 60_000
     return if (minutes >= 60) "${minutes / 60}h ${minutes % 60}m" else "${minutes}m"
+}
+
+internal fun opticalDriveStateMessage(drive: tv.plurx.app.data.OpticalDriveDto): String = when (drive.state.state) {
+    "inspecting" -> "Reading disc information…"
+    "failed" -> drive.state.reason?.takeIf { it.isNotBlank() } ?: "The drive could not inspect this disc."
+    "empty" -> "No disc is inserted."
+    "busy" -> "This drive is already in use."
+    else -> "The optical source is unavailable."
 }
 
 private fun opticalTrackLabel(track: OpticalTrackDto): String = listOfNotNull(
