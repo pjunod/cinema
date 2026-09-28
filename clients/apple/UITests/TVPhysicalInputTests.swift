@@ -149,6 +149,37 @@ final class TVPhysicalInputTests: XCTestCase {
                       "Could not focus Libraries tab with remote")
         remote.press(.select)
 
+        // Grouping is a saved user preference. Establish the named fixture
+        // through ordinary UI, and restore it even if navigation/paging fails.
+        let category = app.buttons["Category"]
+        let library = app.buttons["Library"]
+        XCTAssertTrue(category.waitForExistence(timeout: 10) && library.exists,
+                      "Library grouping choices are unavailable")
+        let originalGrouping = try XCTUnwrap(
+            category.isSelected != library.isSelected
+                ? (category.isSelected ? "Category" : "Library") : nil,
+            "Could not observe the current library grouping")
+        defer {
+            // Relaunch returns from a collection detail to the ordinary root;
+            // it retains the account and lets cleanup use the same controls.
+            app.launch()
+            let restoreLibraries = app.tabBars.buttons["Libraries"]
+            if restoreLibraries.waitForExistence(timeout: 30)
+                && focus(restoreLibraries, in: app) {
+                remote.press(.select)
+                XCTAssertTrue(setLibraryGrouping(originalGrouping, in: app),
+                              "Could not restore the original library grouping")
+            } else {
+                XCTFail("Could not return to Libraries to restore grouping")
+            }
+        }
+        let requiredGrouping = try XCTUnwrap(
+            collectionID.hasPrefix("category:") ? "Category"
+                : collectionID.hasPrefix("share:") ? "Library" : nil,
+            "Collection must name a category or share")
+        XCTAssertTrue(setLibraryGrouping(requiredGrouping, in: app),
+                      "Could not establish the requested collection grouping")
+
         let openCollection = app.buttons["library-open-\(collectionID)"]
         for _ in 0..<60 where !openCollection.exists { remote.press(.down) }
         XCTAssertTrue(openCollection.exists,
@@ -272,6 +303,23 @@ final class TVPhysicalInputTests: XCTestCase {
         let reached = target.hasFocus
         if !reached { attachScreen(app, name: "focus-path-exhausted") }
         return reached
+    }
+
+    private func setLibraryGrouping(_ label: String, in app: XCUIApplication) -> Bool {
+        let choice = app.buttons[label]
+        guard choice.waitForExistence(timeout: 10) else { return false }
+        if !choice.isSelected {
+            guard focus(choice, in: app) else { return false }
+            // A tvOS segmented picker can select while focus moves onto it.
+            if !choice.isSelected { remote.press(.select) }
+        }
+        let end = Date().addingTimeInterval(5)
+        while Date() < end {
+            if choice.exists && choice.isSelected { return true }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        attachScreen(app, name: "library-grouping-not-selected")
+        return false
     }
 
     private func loadedCount(_ label: String) throws -> Int {
