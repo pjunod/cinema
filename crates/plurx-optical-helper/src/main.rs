@@ -22,7 +22,7 @@ mod linux {
     use std::fs::{self, File};
     use std::io::{Read, Seek, SeekFrom};
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
 
@@ -230,6 +230,7 @@ mod linux {
         let mount = fs::canonicalize(mount)
             .map_err(|error| format!("cannot resolve optical mount: {error}"))?;
         require_read_only_mount(&mount)?;
+        require_mount_matches_device(&args.paths.device, &mount)?;
         let mut paths = args.paths;
         paths.mount = Some(mount.clone());
         let (format, navigation_root, locators) =
@@ -324,6 +325,20 @@ mod linux {
         let stats = unsafe { stats.assume_init() };
         if stats.f_flag & (libc::ST_RDONLY as libc::c_ulong) == 0 {
             return Err("optical mount must be read-only".into());
+        }
+        Ok(())
+    }
+
+    fn require_mount_matches_device(device: &Path, mount: &Path) -> Result<(), String> {
+        let device = fs::metadata(device)
+            .map_err(|error| format!("cannot inspect optical device identity: {error}"))?;
+        if !device.file_type().is_block_device() {
+            return Err("configured device is not a block device".into());
+        }
+        let mount = fs::metadata(mount)
+            .map_err(|error| format!("cannot inspect optical mount identity: {error}"))?;
+        if mount.dev() != device.rdev() {
+            return Err("configured optical mount does not belong to the configured device".into());
         }
         Ok(())
     }
@@ -851,6 +866,16 @@ mod linux {
                 fingerprint(OpticalFormat::Bluray, directory.path(), &bdmv).expect("fingerprint");
             assert!(!evidence.complete);
             assert!(evidence.bounded_sample_bytes < evidence.navigation_bytes);
+        }
+
+        #[test]
+        fn production_mount_binding_rejects_a_regular_device_path() {
+            let directory = tempfile::tempdir().expect("tempdir");
+            let device = directory.path().join("not-a-device");
+            let mount = directory.path().join("mount");
+            fs::write(&device, []).expect("regular device decoy");
+            fs::create_dir(&mount).expect("mount directory");
+            assert!(require_mount_matches_device(&device, &mount).is_err());
         }
     }
 }

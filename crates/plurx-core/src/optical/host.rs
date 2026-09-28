@@ -338,7 +338,7 @@ impl OpticalHostAdapter for SystemOpticalHost {
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::ffi::OsStrExt;
-            use std::os::unix::fs::FileTypeExt;
+            use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
             if angle == 0 {
                 return Err(OpticalHostError::InvalidMount);
@@ -362,9 +362,18 @@ impl OpticalHostAdapter for SystemOpticalHost {
                     if drive.mount_path.as_os_str().is_empty() {
                         return Err(OpticalHostError::InvalidMount);
                     }
+                    let device = std::fs::canonicalize(&drive.device_path)
+                        .map_err(|_| OpticalHostError::InvalidDevice)?;
+                    let device_metadata =
+                        std::fs::metadata(&device).map_err(|_| OpticalHostError::InvalidDevice)?;
+                    if !device_metadata.file_type().is_block_device() {
+                        return Err(OpticalHostError::InvalidDevice);
+                    }
                     let mount = std::fs::canonicalize(&drive.mount_path)
                         .map_err(|_| OpticalHostError::InvalidMount)?;
-                    if !mount.is_dir() {
+                    let mount_metadata =
+                        std::fs::metadata(&mount).map_err(|_| OpticalHostError::InvalidMount)?;
+                    if !mount_metadata.is_dir() || mount_metadata.dev() != device_metadata.rdev() {
                         return Err(OpticalHostError::InvalidMount);
                     }
                     let bytes = mount.as_os_str().as_bytes();
