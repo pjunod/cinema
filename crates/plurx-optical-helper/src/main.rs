@@ -43,6 +43,7 @@ mod linux {
     const SAMPLE_BYTES: u64 = 64 * 1024;
     const MAX_TITLES: usize = 512;
     const MAX_PROBE_BYTES: usize = 4 * 1024 * 1024;
+    const MAX_PROBE_STDERR_BYTES: usize = 64 * 1024;
     const PROTECTION_ERROR_PREFIX: &str = "optical-protection-unsupported:";
 
     #[derive(Parser)]
@@ -527,14 +528,38 @@ mod linux {
             "-of".into(),
             "json".into(),
         ]);
-        let output = Command::new(ffprobe)
+        let mut child = Command::new(ffprobe)
             .args(args)
             .stdin(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
+            .spawn()
             .map_err(|error| format!("ffprobe is unavailable: {error}"))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "ffprobe stdout is unavailable".to_owned())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "ffprobe stderr is unavailable".to_owned())?;
+        // Drain both pipes concurrently so neither can block the child, but
+        // retain only bounded prefixes. The daemon supplies the outer process
+        // timeout and kills this helper (and its ffprobe child) on expiry.
+        let stdout = std::thread::spawn(move || read_bounded_and_drain(stdout, MAX_PROBE_BYTES));
+        let stderr =
+            std::thread::spawn(move || read_bounded_and_drain(stderr, MAX_PROBE_STDERR_BYTES));
+        let status = child
+            .wait()
+            .map_err(|error| format!("waiting for ffprobe failed: {error}"))?;
+        let stdout = stdout
+            .join()
+            .map_err(|_| "ffprobe stdout reader failed".to_owned())??;
+        let stderr = stderr
+            .join()
+            .map_err(|_| "ffprobe stderr reader failed".to_owned())??;
+        if !status.success() {
+            let stderr = String::from_utf8_lossy(&stderr);
             if probe_reports_unsupported_protection(&stderr) {
                 return Err(format!(
                     "{PROTECTION_ERROR_PREFIX}the inserted disc is protected and the configured reader cannot decrypt it"
@@ -542,12 +567,27 @@ mod linux {
             }
             return Err(stderr.chars().take(512).collect());
         }
-        if output.stdout.len() > MAX_PROBE_BYTES {
+        if stdout.len() > MAX_PROBE_BYTES {
             return Err("ffprobe title reply exceeded its byte bound".into());
         }
-        let document: Value =
-            serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+        let document: Value = serde_json::from_slice(&stdout).map_err(|error| error.to_string())?;
         title_from_probe(format, locator, &document)
+    }
+
+    fn read_bounded_and_drain(mut reader: impl Read, limit: usize) -> Result<Vec<u8>, String> {
+        let mut retained = Vec::with_capacity(limit.min(64 * 1024).saturating_add(1));
+        let mut buffer = [0_u8; 16 * 1024];
+        loop {
+            let count = reader
+                .read(&mut buffer)
+                .map_err(|error| format!("reading ffprobe output failed: {error}"))?;
+            if count == 0 {
+                break;
+            }
+            let remaining = limit.saturating_add(1).saturating_sub(retained.len());
+            retained.extend_from_slice(&buffer[..count.min(remaining)]);
+        }
+        Ok(retained)
     }
 
     fn probe_reports_unsupported_protection(stderr: &str) -> bool {
@@ -759,6 +799,14 @@ mod linux {
             assert!(!probe_reports_unsupported_protection(
                 "bluray: Input/output error"
             ));
+        }
+
+        #[test]
+        fn probe_output_reader_drains_while_retaining_only_the_bound() {
+            let input = vec![7_u8; 128];
+            let retained =
+                read_bounded_and_drain(std::io::Cursor::new(input), 32).expect("bounded reader");
+            assert_eq!(retained, vec![7_u8; 33]);
         }
 
         #[test]
