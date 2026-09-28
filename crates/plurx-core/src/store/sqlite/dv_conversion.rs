@@ -1270,7 +1270,11 @@ mod tests {
                 // `media_playback_desired` is dropped, any write to
                 // `media_playback_pointers` fails with "no such table" rather
                 // than with anything about this fixture.
-                "DROP TRIGGER IF EXISTS cache_publication_generation_guard;
+                "DROP TRIGGER IF EXISTS live_tv_capture_revision_update;
+             DROP TRIGGER IF EXISTS live_tv_capture_revision_delete;
+             DROP TABLE IF EXISTS live_tv_resource_records;
+             DROP TABLE IF EXISTS live_tv_resource_revision;
+             DROP TRIGGER IF EXISTS cache_publication_generation_guard;
                  DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_advance;
                  DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_delete_source;
                  DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_supersede_source;
@@ -1430,7 +1434,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 38] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 40] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1497,6 +1501,11 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS background_embeddings",
             "CREATE TRIGGER IF NOT EXISTS background_job_publish_probe_command",
             "CREATE TABLE IF NOT EXISTS background_artifact_repairs",
+            // v83 adds the claim ledger and DVR revision triggers; both fixtures drop all four.
+            "CREATE TABLE IF NOT EXISTS live_tv_resource_records",
+            // v84 replaces a background-prefixed trigger. Both fixtures call
+            // remove_common_queue_schema before dropping older domain columns.
+            "DROP TRIGGER IF EXISTS background_subtitle_settled",
         ];
 
         assert!(

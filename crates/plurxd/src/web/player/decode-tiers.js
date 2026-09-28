@@ -741,8 +741,9 @@ function capturePlayInputs(fileId,meta,retryIntent){
         priorKbps:PLAYER.priorKbps})
     : null;
   const continuingPlayback=!!(PLAYER&&PLAYER.fileId===fileId);
-  const replacementControlSeek=continuingPlayback&&PLAYER.controlSeek
-    ? Object.assign({},PLAYER.controlSeek,{executed:false,frameFloor:0,audioPositionMs:null})
+  const carriedSeek=retryIntent?.controlSeek||(continuingPlayback&&PLAYER.controlSeek);
+  const replacementControlSeek=carriedSeek
+    ? Object.assign({},carriedSeek,{executed:false,frameFloor:0,audioPositionMs:null})
     : null;
   const replacementControlSequenceFloor=continuingPlayback
     ? Math.max(Number(PLAYER.controlSequenceFloor)||0,
@@ -853,6 +854,10 @@ function preparePlayOutgoing(attempt,decision){
     if(retired) return;retired=true;
     const incoming=PLAYER;
     if(outgoing){
+      // Reopens and multipart transitions share the exact pending command.
+      // A different title retires it while its old callbacks are fenced.
+      if(outgoing.controlSeek?.seekTelemetry!==incoming?.controlSeek?.seekTelemetry)
+        finishPlaybackSeekTelemetry(outgoing,outgoing.controlSeek,"seek_abandoned");
       PLAYER=outgoing;
       stopPlayerTimers();
       teardownHls();

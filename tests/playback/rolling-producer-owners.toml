@@ -1025,7 +1025,9 @@ pattern = "ServingAuthority"
 # delegates to. It carries the same authority into the same struct field; no
 # new projection reader.
 # E3: one shared-ingest body carries the existing serving authority; it owns no task.
-expected_occurrences = 36
+# PR #537 current-main integration: measured after replacing the temporary
+# owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
+expected_occurrences = 35
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -2294,10 +2296,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 670 measured by zeroing this
 # row. Both sets retained unchanged (main's and this branch's, reviewed above); the merge
 # adds no new site.
+# PR #537 current-main integration: measured after replacing the temporary
+# owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
 # 670 -> 676 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same
 # six test-only `tokio::spawn`s as `all-detached-tokio-tasks`, each awaited by its test within a
 # bound. None owns a producer, a process or a recipe decision.
-expected_occurrences = 676
+# Merge of main into #581, measured from the validation unittests' actual count: 669 (main after #537) + 6 (S-14 M8 Session/TranscodeManager) = 675.
+expected_occurrences = 675
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -2323,6 +2328,9 @@ expected_occurrences = 676
 # stayed. 653 -> 654: `rolling_control_group_shipped_shape` builds one handle
 # through the production `RollingControlHandle::spawn`; the handle is dropped
 # and its actor exits through the exit fence before the test returns.
+# PR #537: +1 guide_replica_loop spawn in main. It belongs to the existing
+# background shutdown token, copies sanitized guide state, and starts no
+# media process or tuner transport. Reviewed with the cluster resource change.
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -3366,6 +3374,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 1082 measured by zeroing this
 # row. Both sets retained unchanged (main's and this branch's, reviewed above); the merge
 # adds no new site.
+# PR #537 current-main integration: measured after replacing the temporary
+# owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
+# PR #537: +13 bounded transport/finalizer lease waits, guide replica polling
+# and release, worker readiness/snapshot bounds. Transport/finalizer futures
+# belong to the operation's cancellation scope; replica polling ends on the
+# daemon shutdown token. None independently selects or starts a producer.
+# The slow-sink regression switches two existing observations from std to
+# Tokio time; the inventory counts both, so no constructor is added.
 # 1082 -> 1101 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count (+19):
 # -4 in `http/hls/tests/chunk_02.rs`, the bounds on the subtitle-commit and publication Barrier
 # waits (the AsyncPause that replaces them is bounded itself), and +1 there for the missing-track
@@ -3384,7 +3400,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # in `http/hls/tests/chunk_02.rs`, bounds the subtitle playlist (10 s). Each is a
 # `tokio::time::timeout` in a `#[cfg(test)]` test that asserts rather than hangs; none owns a
 # producer, process or timer. No production timer was added.
-expected_occurrences = 1104
+# Merge of main into #581, measured from the validation unittests' actual count: 1088 (main after #537) + 22 (S-14 M8 incl. its review round) = 1110.
+expected_occurrences = 1110
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -4141,9 +4158,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 406 measured by zeroing this
 # row. Both sets retained unchanged (main's and this branch's, reviewed above); the merge
 # adds no new site.
+# PR #537 current-main integration: measured after replacing the temporary
+# owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
 # 406 -> 407 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same
 # test-only stand-in producer's `.spawn()`.
-expected_occurrences = 407
+# Merge of main into #581, measured from the validation unittests' actual count: 403 (main after #537) + 1 (S-14 M8 stand-in producer) = 404.
+expected_occurrences = 404
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

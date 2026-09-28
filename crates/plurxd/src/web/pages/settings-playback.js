@@ -193,6 +193,18 @@ async function saveSubtitleStoredSources(btn){
     if(card) card.outerHTML=subtitleStoredSourcesCard(saved,DEVELOPER_READINESS);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
+async function savePgsOverlay(btn){
+  const err=document.getElementById("pgsoverlayerr"); err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    const saved=await api("/settings",{method:"PUT",body:{
+      pgs_overlay:(/** @type {HTMLInputElement} */ (document.getElementById("pgsoverlay"))).checked}});
+    cacheSettings(saved);
+    toast("PGS overlay setting saved"); if(btn) setCardSaved(btn);
+    const card=document.getElementById("pgsoverlaycard");
+    if(card) card.outerHTML=pgsOverlayCard(saved,DEVELOPER_READINESS);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
 async function saveSubtitleClusterSources(btn){
   const err=document.getElementById("subclustererr");err.textContent="";if(btn)btn.disabled=true;
   try{

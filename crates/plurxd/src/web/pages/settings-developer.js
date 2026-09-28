@@ -316,6 +316,31 @@ function seekScratchReservationsCard(){
       <p class="devcheck-note">Advisory only. Capacity, authorization and retention rules are unchanged by anything on this card; the global scratch ceiling is still the one on <a href="#/settings/playback">Playback</a>.</p>
       </div></details>`);
 }
+function liveTvEnableCard(settings){
+  queueMicrotask(()=>{const mount=document.getElementById("dev-live-tv-readiness");if(mount)refreshLiveTvEnableReadiness(mount);});
+  return setCard(`${cardHead("Enable Live TV","Allow eligible servers to use the network tuner.",`<span class="pill">${settings.live_tv_enabled?"enabled":"off"}</span>`)}
+    ${togRow("dev-live-tv-enable","Enable Live TV","This saved choice is authoritative. Readiness observations never disable the control.",!!settings.live_tv_enabled)}
+    <p class="hint">For safe operation, upgrade cluster servers, keep their clocks synchronized, and keep a ready voter majority. At least one server needs tuner connectivity and writable scratch. DVR workers need writable recording storage; matching paths alone do not prove shared storage.</p>
+    <div id="dev-live-tv-readiness" aria-live="polite">Checking current prerequisites…</div>
+    <p class="hint">A lost worker can leave a physical tuner connection behind temporarily. Other free tuners remain available. DRM remains unsupported.</p>
+    <div id="dev-live-tv-error" class="err" role="alert"></div>${setCardFoot("saveLiveTvEnable")}`);
+}
+async function refreshLiveTvEnableReadiness(mount){
+  try{
+    const r=await api("/live-tv/readiness",{signal:AbortSignal.timeout(40000)});
+    if(!mount.isConnected)return;
+    mount.innerHTML=`<ul>${r.checks.map(c=>`<li><strong>${c.ready?"Met":"Not met"}:</strong> ${esc(c.message)}</li>`).join("")}</ul><p class="hint">Advisory only. Unknown or unmet requirements do not prevent enabling.</p>`;
+  }catch(e){if(mount.isConnected)mount.textContent=`Readiness unavailable: ${e.message}. You can still enable Live TV.`;}
+}
+async function saveLiveTvEnable(button){
+  const err=document.getElementById("dev-live-tv-error");if(err)err.textContent="";
+  if(button)button.disabled=true;
+  try{
+    const saved=await api("/settings",{method:"PUT",body:{live_tv_config_generation:SETTINGS.live_tv_config_generation,
+      live_tv_enabled:/** @type {HTMLInputElement} */ (document.getElementById("dev-live-tv-enable")).checked},signal:AbortSignal.timeout(45000)});
+    cacheSettings(saved);toast("Live TV enablement saved");if(button)setCardSaved(button);
+  }catch(e){if(err&&err.isConnected)err.textContent=e.message;if(button&&button.isConnected)button.disabled=false;}
+}
 function clusterPlacementCard(settings){
   const ready=!!settings.cluster_media_pool_ready;
   return setCard(`${cardHead("Cluster media placement","Place new streams on compatible workers with spare capacity.",'<span class="pill">Cluster</span>')}
@@ -394,6 +419,7 @@ function developerPanel(settings,readiness){
       ${directedChangeDeveloperRows()}`,{local:true});
   return `${setHead("Developer","Experimental features still awaiting device qualification.")}
       ${destinations}
+      <div class="setsection" id="enable-live-tv"><h2>Enable Live TV</h2><p>Cluster use of the network tuner, with advisory prerequisites.</p></div>${liveTvEnableCard(settings)}
       <div class="setsection"><h2>Cluster work</h2><p>Shared preparation and durable job history.</p></div>${durableQueueCard(settings,readiness)}${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${storageDomainsCard()}
       <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
       <div class="setsection"><h2>Live TV video</h2><p>Output choices whose device and node capacity evidence remains advisory.</p></div>${liveTvDeinterlaceCard(settings)}
@@ -402,6 +428,7 @@ function developerPanel(settings,readiness){
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
       <div class="setsection" id="enable-quality"><h2>Prepared quality handoff</h2><p>Prepare a replacement stream using a second player. Device qualification is still incomplete.</p></div>${preparedQualityCard(settings,readiness)}${browser}
       <div class="setsection" id="enable-subtitle-refusal"><h2>Subtitle delivery</h2><p>Experimental error handling that still needs observations on each playback engine.</p></div>${subtitleNotReadyCard(settings,readiness)}
+      <div class="setsection" id="enable-pgs-overlay"><h2>PGS subtitle overlay</h2><p>Serve bitmap subtitles separately from the video on capable clients.</p></div>${pgsOverlayCard(settings,readiness)}
       <div class="setsection" id="enable-subtitle-sources"><h2>Stored subtitle tracks</h2><p>Keep tracks during indexing and share verified tracks across the cluster.</p></div>${subtitlePlaybackRangesCard(readiness)}${subtitleStoredSourcesCard(settings,readiness)}${subtitleClusterSourcesCard(settings,readiness)}${subtitleBackfillCard(settings,readiness)}
       <div class="setsection" id="enable-chapter-thumbnails"><h2>Chapter thumbnails</h2><p>A frame per chapter for the watch view's chapter rail, made the first time a page asks for it.</p></div>${chapterThumbnailsCard(settings,readiness)}
       <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}`;
@@ -439,6 +466,22 @@ function subtitleNotReadyCard(s,readiness){
       </div></details>
       <div class="err" id="sub503err" role="alert"></div>
       ${setCardFoot("saveSubtitleNotReady")}`,{id:"sub503card"});
+}
+function pgsOverlayCard(s,readiness){
+  const enabled=!!s.pgs_overlay;
+  const state=enabled
+    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
+    : `<span class="pill">disabled</span>`;
+  return setCard(`${cardHead("Serve PGS subtitles as an overlay","Give capable clients a bitmap subtitle overlay while keeping the video in its original grade.",state)}
+      ${togRow("pgsoverlay",`Serve PGS subtitles as an overlay <span class="pill warn">experimental</span>`,`Applies immediately to new playback requests on every node. Only clients that advertise pgs-v1 receive an overlay.`,enabled)}
+      <div class="hint"><b>This checkbox is the enable path.</b> Physical playback and seek checks are required before leaving it on. If they fail, turn it off here; no restart is needed.</div>
+      <details class="setdetails" open><summary>Readiness and device qualification</summary><div class="setdetails-body">
+      ${devReq(readiness,"pgs_overlay","clients_render_overlays","A client renders pgs-v1","A served manifest proves a client requested an overlay, not that it drew the cues correctly.")}
+      ${devReq(readiness,"pgs_overlay","overlay_acceptance","Physical-client acceptance","Confirm cue timing, placement and seeking on Android and Apple hardware while video remains HDR or Dolby Vision.")}
+      <p class="devcheck-note">These observations are advisory. The saved switch remains authoritative.</p>
+      </div></details>
+      <div class="err" id="pgsoverlayerr" role="alert"></div>
+      ${setCardFoot("savePgsOverlay")}`,{id:"pgsoverlaycard"});
 }
 // Stored PGS tracks.
 //

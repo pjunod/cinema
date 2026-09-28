@@ -289,7 +289,7 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
     ${d.scans.length? `<h2 class="section">Library scans</h2><table><tbody>${scans}</tbody></table>` : ""}
     ${activityProcessesHtml(d.processes)}
     <div class="activity-idle">${[!d.scans.length?"No scans running":"",!p?"No media preparation running":"",!offline.length?"No downloads in progress":""].filter(Boolean).join(" · ")}</div>
-    <div id="durable-activity">${durableQueueHtml()}</div>
+    <div id="durable-activity">${durableQueueHtml(nodeNames)}</div>
     <h2 class="section">Trakt</h2>
     <div class="card">${trakt}</div>`;
   dvrRestoreUi(m,dvrUi);

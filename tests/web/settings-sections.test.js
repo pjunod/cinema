@@ -211,7 +211,7 @@ test("a card's Save wakes on a change and sleeps again once saved", () => {
 test("Playback saves per card, and each card writes only its own fields", () => {
   const writes = {};
   const run = (fn, ids) => new Function(
-    "api", "document", "cacheSettings", "toast", "setCardSaved", "SERVER", "SETTINGS", "verifiedDecodeCard", "decodeRecoveryCard",
+    "api", "document", "cacheSettings", "toast", "setCardSaved", "SERVER", "SETTINGS", "verifiedDecodeCard", "decodeRecoveryCard", "pgsOverlayCard", "DEVELOPER_READINESS",
     // The newline matters: a shipped function may be followed by a line
     // comment, and `shippedSource` returns everything up to the next
     // declaration. Without it the injected `return` lands inside that comment
@@ -220,7 +220,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   )(
     async (path, opts) => { writes[fn] = { path, body: opts.body }; return {}; },
     { getElementById: (id) => { assert.ok(ids.includes(id), `${fn} reads ${id}`); return { value: "v", checked: true, textContent: "" }; } },
-    (v) => v, () => {}, () => {}, {}, {}, () => "", () => "",
+    (v) => v, () => {}, () => {}, {}, {}, () => "", () => "", () => "", null,
   );
   const defaults = ["pal", "psl", "psm", "perr"];
   // Protocol and quality switching have separate cards. Streaming must not
@@ -237,6 +237,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   // the id has to be listed here for the guard to mean anything.
   const verifiedDecode = ["dhqa", "dhqerr", "vdcard"];
   const automaticRecovery = ["adr", "adrerr", "drcard"];
+  const pgsOverlay = ["pgsoverlay", "pgsoverlayerr", "pgsoverlaycard"];
   return Promise.all([
     run("savePlaybackDefaults", defaults)({ disabled: false }),
     run("saveStreaming", streaming)({ disabled: false }),
@@ -246,6 +247,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     run("savePreparedQuality", prepared)({ disabled: false }),
     run("saveVerifiedDecode", verifiedDecode)({ disabled: false }),
     run("saveAutomaticDecoderRecovery", automaticRecovery)({ disabled: false }),
+    run("savePgsOverlay", pgsOverlay)({ disabled: false }),
   ]).then(() => {
     assert.deepEqual(Object.keys(writes.savePlaybackDefaults.body).sort(), ["default_audio_lang", "default_sub_lang", "sub_mode"]);
     assert.deepEqual(Object.keys(writes.saveStreaming.body).sort(), [
@@ -269,10 +271,61 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     assert.equal(writes.saveVerifiedDecode.path, "/settings");
     assert.deepEqual(Object.keys(writes.saveAutomaticDecoderRecovery.body).sort(), ["automatic_decoder_recovery"]);
     assert.equal(writes.saveAutomaticDecoderRecovery.path, "/settings");
+    assert.deepEqual(writes.savePgsOverlay.body, { pgs_overlay: true });
+    assert.equal(writes.savePgsOverlay.path, "/settings");
     assert.equal(writes.savePlaybackDefaults.path, "/settings");
     assert.equal(writes.saveStreaming.path, "/settings");
     assert.equal(writes.savePlaybackCompatibility.path, "/settings");
   });
+});
+
+test("PGS overlay saves either choice despite unmet readiness and reports a failed save", async () => {
+  const nodes = {
+    pgsoverlay: { checked: false },
+    pgsoverlayerr: { textContent: "" },
+    pgsoverlaycard: { outerHTML: "original" },
+  };
+  const readiness = { items: [{ id: "pgs_overlay", requirements: [
+    { id: "clients_render_overlays", status: "unmet" },
+    { id: "overlay_acceptance", status: "unobservable" },
+  ] }] };
+  const writes = [], cached = [], notices = [];
+  let reject = false;
+  const save = new Function(
+    "document", "api", "cacheSettings", "toast", "setCardSaved", "pgsOverlayCard", "DEVELOPER_READINESS",
+    `${shippedSource("savePgsOverlay")}\nreturn savePgsOverlay;`,
+  )(
+    { getElementById: (id) => { assert.ok(id in nodes); return nodes[id]; } },
+    async (path, request) => {
+      assert.equal(path, "/settings");
+      assert.equal(request.method, "PUT");
+      writes.push(request.body);
+      if (reject) throw new Error("Setting write refused");
+      return { pgs_overlay: request.body.pgs_overlay };
+    },
+    (value) => { cached.push(value); return value; },
+    (message) => notices.push(message),
+    () => {},
+    (value, evidence) => { assert.equal(evidence, readiness); return `saved:${value.pgs_overlay}`; },
+    readiness,
+  );
+  for (const enabled of [true, false]) {
+    nodes.pgsoverlay.checked = enabled;
+    await save({ disabled: false });
+    assert.deepEqual(writes.at(-1), { pgs_overlay: enabled });
+    assert.deepEqual(cached.at(-1), { pgs_overlay: enabled });
+    assert.equal(nodes.pgsoverlaycard.outerHTML, `saved:${enabled}`);
+    assert.equal(nodes.pgsoverlayerr.textContent, "");
+  }
+  reject = true;
+  nodes.pgsoverlay.checked = true;
+  const button = { disabled: false };
+  await save(button);
+  assert.equal(nodes.pgsoverlayerr.textContent, "Setting write refused");
+  assert.equal(button.disabled, false, "a failed save can be retried");
+  assert.equal(nodes.pgsoverlaycard.outerHTML, "saved:false", "failure cannot repaint a saved value");
+  assert.equal(cached.length, 2, "failure cannot update the settings cache");
+  assert.equal(notices.length, 2, "failure cannot report success");
 });
 
 test("quality switching renders the server's saved value", async () => {
@@ -404,11 +457,14 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   // `//` comment and swallow whatever follows it.
   const composedBody = [
       shippedSource("preparedHandoffEnabled"), shippedSource("liveTvSettingsCard"),
+      shippedSource("liveTvEnableCard"),
+      "const document={getElementById:()=>null};",
       shippedSource("verifiedDecodeCard"), shippedSource("decodeRecoveryCard"), shippedSource("hevcCopyCard"),
       // #309's sibling problem, twice over: a card or fragment `developerPanel`
       // calls has to be composed here or the panel throws on the name and this
       // whole gate reports one failure instead of checking anything.
       shippedSource("subtitleNotReadyCard"),
+      shippedSource("pgsOverlayCard"),
       // The fifth time: #517 put the automatic playback-ranges card at the
       // head of the stored-subtitle section without composing it here.
       shippedSource("subtitlePlaybackRangesCard"),
@@ -478,6 +534,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     automatic_decoder_recovery: true,
     vod_live_recovery: true,
     subtitle_not_ready_503: false,
+    pgs_overlay: false,
     live_tv_guide_source: "hdhomerun",
     live_tv_guide_hours: 24,
     dvr_enabled: false,
@@ -492,7 +549,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const html = renderComposedPanel(
     "developerPanel", () => panels.developerPanel(settings, readiness),
   );
-  for (const id of ["hevc-unverified", "durable-analysis", "durable-pretranscode", "pabr", "pqh", "pdp", "dhqa", "adr", "sub503", "subsrc", "subcluster", "subbackfill", "chthumb"])
+  for (const id of ["dev-live-tv-enable", "hevc-unverified", "durable-analysis", "durable-pretranscode", "pabr", "pqh", "pdp", "dhqa", "adr", "sub503", "pgsoverlay", "subsrc", "subcluster", "subbackfill", "chthumb"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
   // Parallel playback ranges are automatic: the card explains them and reads
   // peer reachability as advisory, and offers no switch of its own.
@@ -504,6 +561,8 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.match(unverified, /TOG:hevc-unverified\|[^|]*\|[^|]*\|checked=true\|/);
   assert.match(unverified, /FOOT:saveHevcCopy/);
   assert.match(unverified, /not configured/);
+  assert.match(html, /FOOT:saveLiveTvEnable/);
+  assert.match(html, /Readiness observations never disable the control/);
   // Absent from the settings document is on: chapter thumbnails default on.
   assert.match(html, /TOG:chthumb\|[^|]*\|[^|]*\|checked=true/);
   assert.match(html, /FOOT:saveChapterThumbnails/);
@@ -511,6 +570,10 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     panels.developerPanel({ ...settings, chapter_thumbnails: false }, readiness),
     /TOG:chthumb\|[^|]*\|[^|]*\|checked=false/,
   );
+  assert.match(html, /TOG:pgsoverlay\|[^|]*\|[^|]*\|checked=false/);
+  assert.match(html, /FOOT:savePgsOverlay/);
+  assert.match(panels.developerPanel({ ...settings, pgs_overlay: true }, readiness),
+    /TOG:pgsoverlay\|[^|]*\|[^|]*\|checked=true/);
   // Absent from the settings document is on: the store's switch defaults on.
   assert.match(html, /TOG:subsrc\|[^|]*\|[^|]*\|checked=true/);
   assert.match(html, /FOOT:saveSubtitleStoredSources/);
@@ -614,8 +677,9 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.match(live, /FOOT:saveDvrSettings/);
   assert.match(live, /FOOT:saveLibraryChannelsSettings/);
   assert.match(live, /HDHomeRun Live TV/);
-  assert.match(live, /Save the configuration, check readiness, then enable/);
-  assert.match(live, /Readiness is advice, not a gate/);
+  assert.match(live, /tuner itself belongs to the cluster/);
+  assert.match(live, /Developer → Enable Live TV/);
+  assert.doesNotMatch(live, /ltowner|ltfenced|setLiveTvEnabled/);
   assert.match(live, /Programme guide/);
   assert.match(live, /Saved-configuration evidence/);
   assert.match(live, /api\.hdhomerun\.com/);
@@ -652,11 +716,16 @@ test("unmet subtitle readiness cannot refuse the saved cluster or backfill switc
 
 test("server guidance sends disabled Live TV features to their current settings", () => {
   const sourceRoot = path.resolve(__dirname, "../../crates/plurxd/src");
-  for (const file of ["http/dvr.rs", "http/library_channels.rs", "channel_subjects.rs", "http/live_tv.rs", "live_tv.rs"]) {
+  for (const file of ["http/dvr.rs", "http/library_channels.rs", "channel_subjects.rs"]) {
     const source = fs.readFileSync(path.join(sourceRoot, file), "utf8");
     assert.match(source, /Settings → Live TV/, `${file} names the current destination`);
     assert.doesNotMatch(source, /Settings → Developer|Developer settings|use Developer recovery|Run the Developer readiness check/,
       `${file} must not send an operator to the retired destination`);
+  }
+  for (const file of ["http/live_tv.rs", "live_tv.rs"]) {
+    const source = fs.readFileSync(path.join(sourceRoot, file), "utf8");
+    assert.match(source, /Live TV is disabled[^"\n]*Settings → Developer/,
+      `${file} sends enablement to its advisory Developer control`);
   }
 });
 
@@ -796,9 +865,9 @@ test("Live TV mutations repaint only the card that owns the saved fields", () =>
   assert.match(shippedSource("saveLiveTvGuide"),
     /replaceLiveTvCard\("live-tv-guide-settings",liveTvGuideCard\(saved\),"ltgsrc"\)/);
   assert.match(shippedSource("saveLiveTvSettings"),
-    /replaceLiveTvCard\("live-tv-settings",liveTvSettingsCard\(saved\),"ltenable"\)/);
-  assert.match(shippedSource("setLiveTvEnabled"),
-    /replaceLiveTvCard\("live-tv-settings",liveTvSettingsCard\(saved\),"ltenable"\)/);
+    /replaceLiveTvCard\("live-tv-settings",liveTvSettingsCard\(saved\),"ltip"\)/);
+  assert.doesNotMatch(shippedSource("saveLiveTvEnable"), /renderSettings\(|replaceLiveTvCard\(/,
+    "saving Developer enablement cannot erase a tuner or guide draft");
 });
 
 test("every asynchronous Live TV settings response is fenced to the Live TV route", () => {

@@ -1,5 +1,13 @@
 package tv.plurx.app.player
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okio.Buffer
@@ -10,6 +18,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import tv.plurx.app.data.Net
 import tv.plurx.app.data.PlaybackQuality
+import tv.plurx.app.data.ProgressReq
+import tv.plurx.app.data.Session
 
 class PlaybackTelemetryTest {
 
@@ -102,6 +112,215 @@ class PlaybackTelemetryTest {
         assertEquals("session-7", event.sessionId)
         assertEquals(3.0, event.runway)
         assertEquals(1080, event.height)
+    }
+
+    private fun telemetry(events: MutableList<PlaybackClientLog>) = ControllerPlaybackTelemetry(
+        fakePlan,
+        StubTelemetryPlayer(),
+        { PlaybackTelemetryContext("remux", null, null) },
+        events::add,
+    )
+
+    @Test
+    fun seekReportsPresentedPictureOnceWithoutInflatingTtff() {
+        val events = mutableListOf<PlaybackClientLog>()
+        val telemetry = telemetry(events)
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val pending = intent.beginSeek(10_000, 0)
+        val attempt = telemetry.begin("seek", 100, pending.sequence)
+        assertNull(telemetry.firstFrame(120))
+        telemetry.prepared(attempt)
+        intent.markExecuted(pending.sequence, observedAtMs = 100)
+        assertNull(telemetry.firstFrame(450)) // Startup renderer edge is not the seek proof.
+        assertFalse(telemetry.presentedVideoFrame(intent, 7_000, pending.sequence, 450))
+        assertTrue(events.isEmpty())
+        assertTrue(telemetry.presentedVideoFrame(intent, 10_000, pending.sequence, 450))
+        assertFalse(telemetry.presentedVideoFrame(intent, 10_000, pending.sequence, 500))
+        telemetry.cancel(attempt)
+        telemetry.cancelPending()
+        assertEquals(listOf("seek_resumed"), events.map { it.event })
+        assertEquals(350L, events.single().ms)
+        assertEquals("remux", events.single().method)
+        assertEquals(42L, events.single().fileId)
+    }
+
+    @Test
+    fun supersededAndClosedSeeksEachEndOnceAndStaleCancellationCannotEndTheNextSeek() {
+        val events = mutableListOf<PlaybackClientLog>()
+        val telemetry = telemetry(events)
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val first = intent.beginSeek(10_000, 0)
+        val old = telemetry.begin("seek", 100, first.sequence)
+        telemetry.prepared(old)
+        intent.markExecuted(first.sequence, observedAtMs = 100)
+        val next = intent.beginSeek(20_000, 0)
+        telemetry.supersedeForIntent(next.sequence) // Only the old dispatched command ends.
+        telemetry.supersedeForIntent(next.sequence)
+        val current = telemetry.begin("seek", 200, next.sequence)
+        telemetry.cancel(old)
+        telemetry.prepared(current)
+        intent.markExecuted(next.sequence, observedAtMs = 200)
+        assertFalse(telemetry.presentedVideoFrame(intent, 10_000, first.sequence, 400))
+        assertTrue(telemetry.presentedVideoFrame(intent, 20_000, next.sequence, 500))
+        val closing = intent.beginSeek(30_000, 20_000)
+        val closed = telemetry.begin("seek", 600, closing.sequence)
+        telemetry.prepared(closed)
+        telemetry.cancelPending()
+        telemetry.cancel(closed)
+        assertNull(telemetry.firstFrame(800))
+        assertEquals(listOf("seek_abandoned", "seek_resumed", "seek_abandoned"), events.map { it.event })
+        assertEquals(listOf(old.id, current.id, closed.id), events.map { it.attempt })
+        assertNull(events.first().ms)
+        assertEquals(300L, events[1].ms)
+    }
+
+    @Test
+    fun remuxKeyframeBeforeTargetWaitsForRenderedProgressAcrossTheDestination() {
+        val events = mutableListOf<PlaybackClientLog>()
+        val telemetry = telemetry(events)
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val pending = intent.beginSeek(10_000, 0)
+        val attempt = telemetry.begin("seek", 100, pending.sequence)
+        telemetry.prepared(attempt)
+        intent.markExecuted(pending.sequence, observedAtMs = 100)
+        assertNull(telemetry.firstFrame(200))
+        assertFalse(telemetry.presentedVideoFrame(intent, 8_900, pending.sequence, 200))
+        assertFalse(telemetry.presentedVideoProgress(intent, 9_999, pending.sequence, 300))
+        assertTrue(events.isEmpty())
+        assertTrue(telemetry.presentedVideoProgress(intent, 10_100, pending.sequence, 500))
+        assertEquals("seek_resumed", events.single().event)
+        assertEquals(400L, events.single().ms)
+    }
+
+    @Test
+    fun sameIntentRecoveryKeepsTheOriginalSeekClockAndCannotBecomeStartupTtff() {
+        val events = mutableListOf<PlaybackClientLog>()
+        val telemetry = telemetry(events)
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val pending = intent.beginSeek(10_000, 0)
+        val attempt = telemetry.begin("seek", 100, pending.sequence)
+        telemetry.prepared(attempt)
+        intent.markExecuted(pending.sequence, observedAtMs = 100)
+        for (reason in listOf("presentation-recovery", "fallback", "stall")) {
+            telemetry.supersedeForIntent(pending.sequence)
+            val repairing = telemetry.begin(reason, 400, pending.sequence)
+            assertEquals(attempt.id, repairing.id)
+            assertEquals(attempt.startedAtMs, repairing.startedAtMs)
+            telemetry.cancel(attempt) // A cancelled predecessor repair no longer owns the seek.
+            telemetry.prepared(attempt) // Its late readiness cannot arm this replacement.
+            telemetry.prepared(repairing)
+            intent.markExecuted(pending.sequence, observedAtMs = 400)
+            assertNull(telemetry.firstFrame(450))
+            assertFalse(telemetry.presentedVideoFrame(intent, 10_000, pending.sequence, 450, expectedAttempt = attempt))
+            assertFalse(telemetry.presentedVideoFrame(intent, 1_000, pending.sequence, 450))
+        }
+        assertTrue(events.isEmpty())
+        assertTrue(telemetry.presentedVideoFrame(intent, 10_000, pending.sequence, 650))
+        assertEquals(listOf("seek_resumed"), events.map { it.event })
+        assertEquals(550L, events.single().ms)
+        assertEquals(attempt.id, events.single().attempt)
+    }
+
+    @Test
+    fun audioSeekRequiresAnActiveReadyAdvancingDestinationClockAcrossRecovery() {
+        val events = mutableListOf<PlaybackClientLog>()
+        val telemetry = telemetry(events)
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val pending = intent.beginSeek(10_000, 0)
+        val attempt = telemetry.begin("seek", 100, pending.sequence)
+        telemetry.prepared(attempt)
+        intent.markExecuted(pending.sequence, observedAtMs = 100)
+        assertFalse(telemetry.presentedAudio(intent, 10_000, pending.sequence, 600, true, 1.0, false))
+        assertFalse(telemetry.presentedAudio(intent, 10_000, pending.sequence, 800, false, 1.0, true))
+        val repaired = telemetry.begin("presentation-recovery", 900, pending.sequence)
+        assertEquals(attempt.id, repaired.id)
+        assertEquals(attempt.startedAtMs, repaired.startedAtMs)
+        telemetry.cancel(attempt)
+        telemetry.prepared(repaired)
+        intent.markExecuted(pending.sequence, observedAtMs = 900)
+        assertFalse(telemetry.presentedAudio(intent, 10_030, pending.sequence, 1200, true, 1.0, true))
+        assertFalse(telemetry.presentedAudio(intent, 10_030, pending.sequence, 1400, true, 1.0, true))
+        assertTrue(events.isEmpty())
+        assertTrue(telemetry.presentedAudio(intent, 10_100, pending.sequence, 1600, true, 1.0, true))
+        assertEquals(listOf("seek_resumed"), events.map { it.event })
+        assertEquals(1500L, events.single().ms)
+    }
+
+    @Test
+    fun coldStartStillReportsTtffAndItsCancellationNeverReportsASeek() {
+        val events = mutableListOf<PlaybackClientLog>()
+        val telemetry = telemetry(events)
+        val cold = telemetry.begin("cold-start", 100)
+        telemetry.prepared(cold)
+        telemetry.firstFrame(900)
+        val next = telemetry.begin("resume", 1000)
+        telemetry.cancel(next)
+        assertEquals(listOf("ttff"), events.map { it.event })
+        assertEquals(800L, events.single().ms)
+    }
+
+    @Test
+    fun liveProgressNamesNormalizedDeliveryWhileRecordedReplayAlwaysOmitsMethod() {
+        for ((delivery, expected) in listOf("direct" to "direct_play", "direct_play" to "direct_play", "remux" to "remux", "transcode" to "transcode")) {
+            val live = ProgressReq(2000, 9000, deliveryMethod = normalizedPlaybackMethod(delivery))
+            val json = Net.json.parseToJsonElement(Net.json.encodeToString(live)).jsonObject
+            assertEquals(expected, json.getValue("method").jsonPrimitive.content)
+            assertFalse(json.containsKey("recorded_at"))
+            val replay = ProgressReq(2000, 9000, 1234, deliveryMethod = delivery)
+            val offline = Net.json.parseToJsonElement(Net.json.encodeToString(replay)).jsonObject
+            assertNull(replay.method)
+            assertFalse(offline.containsKey("method"))
+            assertEquals("1234", offline.getValue("recorded_at").jsonPrimitive.content)
+            assertFalse(offline.containsKey("deliveryMethod"))
+        }
+        assertNull(normalizedPlaybackMethod("unknown"))
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun dismissalCannotCancelQueuedAbandonmentOrRebindItToTheNextProfile() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val appScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val screenScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val transportReady = CompletableDeferred<Unit>()
+        val delivered = mutableListOf<okhttp3.Request>()
+        val origin = Session.origin
+        val token = Session.token
+        try {
+            Session.origin = "http://original.test:32400"
+            Session.token = "original-test-profile"
+            val bridge = ControllerPlaybackTelemetry(fakePlan, StubTelemetryPlayer(),
+                { PlaybackTelemetryContext("remux", null, null) },
+                { event ->
+                    postPlaybackClientLog(appScope, event, dispatcher) { request ->
+                        transportReady.await()
+                        delivered.add(request)
+                    }
+                },
+            )
+            val seek = bridge.begin("seek", 100)
+            bridge.prepared(seek)
+            bridge.cancelPending()
+            runCurrent() // The real diagnostic coroutine has reached its transport.
+            screenScope.cancel() // Composition's scope ends before HTTP delivery.
+            Session.origin = "http://next.test:32400"
+            Session.token = "next-test-profile"
+            transportReady.complete(Unit)
+            runCurrent()
+            bridge.cancelPending()
+            runCurrent()
+            val request = delivered.single()
+            assertEquals("http://original.test:32400/api/v1/client-log", request.url.toString())
+            assertEquals("Bearer original-test-profile", request.header("Authorization"))
+            val body = Buffer().also { request.body!!.writeTo(it) }.readUtf8()
+            assertEquals("seek_abandoned", Net.json.parseToJsonElement(body).jsonObject.getValue("event").jsonPrimitive.content)
+            assertFalse(body.contains("test-profile"))
+        } finally {
+            Session.origin = origin
+            Session.token = token
+            screenScope.cancel()
+            appScope.cancel()
+        }
     }
 
     @Test

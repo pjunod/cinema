@@ -128,6 +128,36 @@ pub async fn place(
     library: &Library,
     path: &Path,
 ) -> Result<Option<home::Placed>, StoreError> {
+    let sidecar_id = read_sidecar(path).and_then(|s| s.recording_id);
+    let epoch_output = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.rsplit_once(".f"))
+        .is_some_and(|(_, epoch)| !epoch.is_empty() && epoch.bytes().all(|b| b.is_ascii_digit()));
+    if epoch_output && sidecar_id.is_none() {
+        return Ok(None);
+    }
+    if let Some(id) = sidecar_id {
+        if let Some(crate::live_tv_resource::Record::Capture(claim)) = store
+            .raw()
+            .live_tv_resource_lookup(&format!("capture:{id}"), 0)
+            .await?
+        {
+            if claim.deleted || claim.published_path.as_deref() != path.to_str() {
+                return Ok(None);
+            }
+            if store.raw().get_dvr_recording(&id).await?.is_none_or(|row| {
+                !matches!(
+                    row.state,
+                    crate::dvr::DvrState::Done | crate::dvr::DvrState::Partial
+                )
+            }) {
+                return Ok(None);
+            }
+        } else if epoch_output {
+            return Ok(None);
+        }
+    }
     let Some(dirs) = home::relative_dirs(library, path) else {
         return Ok(None);
     };

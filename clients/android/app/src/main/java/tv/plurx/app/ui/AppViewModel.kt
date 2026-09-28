@@ -43,6 +43,9 @@ import tv.plurx.app.data.LoginReq
 import tv.plurx.app.data.Net
 import tv.plurx.app.data.PlurxApi
 import tv.plurx.app.data.parseRefusal
+import tv.plurx.app.player.PlaybackClientLog
+import tv.plurx.app.player.postPlaybackClientLog
+import tv.plurx.app.player.normalizedPlaybackMethod
 import tv.plurx.app.data.ProgressReq
 import tv.plurx.app.data.Session
 import tv.plurx.app.data.ServerDiscovery
@@ -898,9 +901,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    suspend fun reportProgress(itemId: Long, positionMs: Long, durationMs: Long?) {
+    /** Diagnostic delivery survives player-screen dismissal, like final progress. */
+    internal fun postPlaybackDiagnostic(event: PlaybackClientLog) {
+        postPlaybackClientLog(viewModelScope, event)
+    }
+
+    suspend fun reportProgress(itemId: Long, positionMs: Long, durationMs: Long?, method: String? = null) {
         try {
-            api().progress(itemId, ProgressReq(positionMs, durationMs))
+            api().progress(itemId, ProgressReq(positionMs, durationMs, deliveryMethod = normalizedPlaybackMethod(method)))
         } catch (_: Exception) {
             // Progress is best-effort; a dropped beat shouldn't surface an error.
         }
@@ -912,8 +920,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * screen, so the final position — and the server-side Trakt scrobble it
      * drives — still lands.
      */
-    fun postProgress(itemId: Long, positionMs: Long, durationMs: Long?) {
-        viewModelScope.launch { reportProgress(itemId, positionMs, durationMs) }
+    fun postProgress(itemId: Long, positionMs: Long, durationMs: Long?, method: String? = null) {
+        viewModelScope.launch { reportProgress(itemId, positionMs, durationMs, method) }
     }
 
     private suspend fun connectToOrigin(normalized: String) {
