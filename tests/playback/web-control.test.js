@@ -21,6 +21,13 @@ function shippedSource(name) {
   const ends = TERMINATORS.map((kind) => rest.indexOf(kind, 1)).filter((at) => at !== -1);
   return (ends.length ? rest.slice(0, Math.min(...ends)) : rest).trimEnd();
 }
+// The sliced owners now call these production telemetry edges. Keep their
+// dependencies in each owner harness, rather than replacing the beacons by
+// no-ops that would hide command/presentation regressions.
+function seekTelemetrySources(){
+  return ["dispatchPlaybackSeekTelemetry","finishPlaybackSeekTelemetry",
+    "watchPlaybackSeekTelemetry"].map(shippedSource).join("\n");
+}
 // A shipped top-level constant, so a scope built out of source cannot drift
 // from the value the page actually uses.
 function shippedConst(name) {
@@ -117,7 +124,7 @@ function fullOpenHarness() {
     shippedSource("beginPlaybackPreparation"),
     shippedSource("takePlaybackAttemptReason"), shippedSource("playbackSelection"),
     shippedSource("positionForPlaybackIntent"), shippedSource("supersedePlaybackControlIntent"),
-    shippedSource("beginPlaybackControlSeek"), shippedSource("rememberPlaybackSelection"),
+    seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"), shippedSource("rememberPlaybackSelection"),
     shippedSource("noSegments"), shippedSource("copyHlsMseOk"),
     shippedSource("playbackInitialRoute"), shippedSource("restartPendingPlaybackOpen"),
     shippedSource("unexecutedPlaybackDestinationSec"),
@@ -830,7 +837,7 @@ async function main() {
     "function clearPlaybackControlWaiters(){}",
     "function notifyPlaybackControl(){notifications+=1;}",
     shippedSource("supersedePlaybackControlIntent"),
-    shippedSource("beginPlaybackControlSeek"),
+    seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"),
     shippedSource("markPlaybackControlSeekExecuted"),
     shippedSource("samplePlaybackPresentationClock"),
     shippedSource("settlePlaybackControlSeek"),
@@ -1075,7 +1082,7 @@ async function main() {
       "function remuxUrl(path,audio,pos){calls.push({kind:'remux',position:pos*1000});return '/remux';}",
       shippedSource("supersedePlaybackControlIntent"),
       shippedSource("positionForPlaybackIntent"),
-      shippedSource("beginPlaybackControlSeek"),
+      seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"),
       shippedSource("markPlaybackControlSeekExecuted"),
       shippedSource("samplePlaybackPresentationClock"),
       shippedSource("streamGeneration"),
@@ -1833,7 +1840,7 @@ async function main() {
       shippedSource("streamHasVideo"),shippedSource("persistentWaitEvidence"),shippedSource("endWait"),
       shippedSource("samplePlaybackPresentationClock"),shippedSource("pausePlaybackInternally"),
       shippedSource("playbackTransportEvents"),
-      shippedSource("playbackProgressTick"),shippedSource("playbackWaitNeedsProgress"),shippedSource("handlePlaybackPlaying"),
+      seekTelemetrySources(), shippedSource("playbackProgressTick"),shippedSource("playbackWaitNeedsProgress"),shippedSource("handlePlaybackPlaying"),
       shippedSource("samplePreparedSwitchFrames"),shippedConst("SWITCH_FRAME_SAMPLES_MAX"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       "return {p,v,tick(time){now=time;playbackProgressTick(v,p);},playing(){handlePlaybackPlaying(v,p);},attempts:()=>attempts,recovered:()=>recovered};",
@@ -2589,7 +2596,7 @@ async function main() {
         "function playbackExhaustedActions(){return ['keep_waiting','retry','close'];}",
         shippedSource("streamHasVideo"),
         shippedSource("samplePlaybackPresentationClock"),
-        shippedSource("playbackProgressTick"),
+        seekTelemetrySources(), shippedSource("playbackProgressTick"),
         shippedSource("samplePreparedSwitchFrames"),shippedConst("SWITCH_FRAME_SAMPLES_MAX"),
         shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
         "return {",
@@ -4049,7 +4056,7 @@ async function main() {
         shippedSource("playbackControlSelection"),
         shippedSource("positionForPlaybackIntent"),
         shippedSource("supersedePlaybackControlIntent"),
-        shippedSource("beginPlaybackControlSeek"),
+        seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"),
         shippedSource("clearPlaybackControlWaiters"),
         shippedSource("settlePlaybackControlWaiters"),
         shippedSource("settlePreparedOfferWaiter"),
@@ -6571,7 +6578,7 @@ function terminalHlsStopTests(){
     "function pausePlaybackInternally(){calls.push(['pause']);}function stopPlayerTimers(){calls.push(['timers']);}",
     shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),
     shippedSource("abortHlsStartupLoaders"),shippedSource("retireHlsTerminalAttempt"),
-    shippedSource("stopPlayerForExhaustion"),shippedSource("scheduleHlsNetworkRetry"),
+    seekTelemetrySources(), shippedSource("stopPlayerForExhaustion"),shippedSource("scheduleHlsNetworkRetry"),
     shippedSource("beginPlaybackMediaAttachment"),
     "const owned=()=>attachment.current()&&player.hls===hls&&!playbackAttemptTerminallyStopped(player,token);",
     "return {calls,player,episode,stop:stopPlayerForExhaustion,current:()=>hlsStartupCurrent(player,episode),retry:()=>scheduleHlsNetworkRetry(video,player,'late fatal'),late(){if(owned())surface='recovering';return surface;},reopen(){player.attemptId='a2';const next=beginPlaybackMediaAttachment(player);return {current:next.current(),terminal:player.terminalStop};}};",
