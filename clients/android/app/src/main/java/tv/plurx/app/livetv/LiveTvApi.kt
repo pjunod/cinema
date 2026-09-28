@@ -738,6 +738,15 @@ class LiveTvApi(origin: String, private val token: String, context: Context? = n
     suspend fun readiness(): LiveTvReadiness = Net.json.decodeFromString(request(url("live-tv", "readiness", "refresh"), "POST", authenticated = true))
 
     /**
+     * The enable card's prerequisites as the server last observed them — the
+     * same `GET /live-tv/readiness` the web's Enable Live TV card reads when it
+     * renders. Advisory: nothing reads it back into the enable.
+     */
+    suspend fun currentReadiness(): LiveTvReadiness = Net.json.decodeFromString(
+        request(url("live-tv", "readiness"), authenticated = true),
+    )
+
+    /**
      * The guide's advisory rows. A read, never a refresh: it answers with
      * whatever the owner's cache already knows, so opening the Developer tab
      * cannot itself become a device or network request.

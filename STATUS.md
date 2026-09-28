@@ -6,7 +6,7 @@ first.
 
 ## Android Live TV fullscreen on tablets: every box gets its own player view
 
-**Branch `fix/android-live-tv-fullscreen-own-surface` (`726f1241` + ledger), Android 137; not yet merged or installed.**
+**Branch `fix/android-live-tv-fullscreen-own-surface` (`726f1241` + ledger + review), Android 138 (#602 took 137 first); not yet merged or installed.**
 Paul reported 2026-09-28 that fullscreen Live TV on the tablets still shows
 the small inline picture in a mostly black screen. #509's relayout + surface
 rebind *is* on `main` (re-landed by #546 after the push-mirror rewind, in

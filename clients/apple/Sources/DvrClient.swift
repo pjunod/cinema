@@ -404,7 +404,7 @@ struct DvrFailure: Error, LocalizedError, Sendable {
     let code: String
     var errorDescription: String? {
         switch code {
-        case "dvr_disabled": return "Recording is off. An administrator can enable it in Settings → Developer."
+        case "dvr_disabled": return "Recording is off. An administrator can turn it on in Settings → Live TV → Recording."
         case "airing_unknown": return "The guide no longer has that programme at that time. Refresh the guide and try again."
         case "airing_past": return "That programme has already finished, or has less than a minute left."
         case "rule_limit": return "This server already has the maximum number of recording rules."

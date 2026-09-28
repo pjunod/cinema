@@ -1241,7 +1241,7 @@ test_anchor = "testTheTenFootSurfaceKeepsSomethingFocusableWhileTheOverlayIsHidd
 # A transient settings request may not disable the Library-channel switch.
 id = "apple.library-channel-enablement-remains-advisory"
 commits = ["9bfef968"]
-source = "clients/apple/Sources/LiveTvDeveloperView.swift"
+source = "clients/apple/Sources/LiveTvSettingsView.swift"
 source_anchor = "Toggle(\"Enable Library channels\""
 test = "tests/operations/test_evidence_workflows.py"
 test_anchor = "test_apple_prepared_enablement_is_visible_and_advisory"
