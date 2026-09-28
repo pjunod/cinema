@@ -42,6 +42,9 @@ mod linux {
     use sha2::{Digest, Sha256};
 
     const MAX_NAVIGATION_FILES: usize = 4096;
+    const MAX_NAVIGATION_ENTRIES: usize = 16_384;
+    const MAX_NAVIGATION_DEPTH: usize = 16;
+    const MAX_PLAYLIST_ENTRIES: usize = 4096;
     const MAX_NAVIGATION_BYTES: u64 = 16 * 1024 * 1024;
     const SAMPLE_BYTES: u64 = 64 * 1024;
     const MAX_TITLES: usize = 512;
@@ -392,10 +395,14 @@ mod linux {
             .ok_or_else(|| "Blu-ray PLAYLIST directory is missing".to_owned())?;
         reject_symlink(&playlist)?;
         let mut numbers = BTreeSet::new();
-        for entry in fs::read_dir(playlist)
+        for (entry_index, entry) in fs::read_dir(playlist)
             .map_err(|error| error.to_string())?
-            .flatten()
+            .enumerate()
         {
+            if entry_index >= MAX_PLAYLIST_ENTRIES {
+                return Err("Blu-ray playlist entry count exceeds its bound".into());
+            }
+            let entry = entry.map_err(|error| error.to_string())?;
             let path = entry.path();
             reject_symlink(&path)?;
             if !path
@@ -424,12 +431,15 @@ mod linux {
 
     fn navigation_files(format: OpticalFormat, root: &Path) -> Result<Vec<PathBuf>, String> {
         let mut files = Vec::new();
-        let mut stack = vec![root.to_owned()];
-        while let Some(directory) = stack.pop() {
-            for entry in fs::read_dir(&directory)
-                .map_err(|error| error.to_string())?
-                .flatten()
-            {
+        let mut entries_seen = 0_usize;
+        let mut stack = vec![(root.to_owned(), 0_usize)];
+        while let Some((directory, depth)) = stack.pop() {
+            for entry in fs::read_dir(&directory).map_err(|error| error.to_string())? {
+                entries_seen = entries_seen.saturating_add(1);
+                if entries_seen > MAX_NAVIGATION_ENTRIES {
+                    return Err("optical navigation entry count exceeds its bound".into());
+                }
+                let entry = entry.map_err(|error| error.to_string())?;
                 let path = entry.path();
                 let metadata = fs::symlink_metadata(&path)
                     .map_err(|error| format!("cannot inspect optical path: {error}"))?;
@@ -437,7 +447,11 @@ mod linux {
                     return Err("optical navigation paths must not contain symlinks".into());
                 }
                 if metadata.is_dir() {
-                    stack.push(path);
+                    let child_depth = depth.saturating_add(1);
+                    if child_depth > MAX_NAVIGATION_DEPTH {
+                        return Err("optical navigation directory depth exceeds its bound".into());
+                    }
+                    stack.push((path, child_depth));
                     continue;
                 }
                 let keep = match format {
@@ -912,6 +926,20 @@ mod linux {
             assert!(!evidence.complete);
             assert!(evidence.bounded_sample_bytes < evidence.navigation_bytes);
             assert!(evidence.bounded_sample_bytes <= MAX_NAVIGATION_BYTES);
+        }
+
+        #[test]
+        fn navigation_walk_rejects_excessive_directory_depth() {
+            let directory = tempfile::tempdir().expect("tempdir");
+            let root = directory.path().join("BDMV");
+            fs::create_dir(&root).expect("navigation root");
+            let mut nested = root.clone();
+            for index in 0..=MAX_NAVIGATION_DEPTH {
+                nested = nested.join(format!("level-{index}"));
+                fs::create_dir(&nested).expect("nested navigation directory");
+            }
+
+            assert!(navigation_files(OpticalFormat::Bluray, &root).is_err());
         }
 
         #[test]
