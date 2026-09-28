@@ -68,6 +68,7 @@ struct ActiveReader {
     lease_id: u64,
     generation: String,
     kind: ReaderKind,
+    revoked: bool,
     request_id: Option<String>,
     request_digest: Option<String>,
 }
@@ -158,7 +159,9 @@ impl OpticalDriveManager {
             .get_mut(drive_id)
             .ok_or(OpticalLifecycleError::UnknownDrive)?;
         let generation = uuid::Uuid::new_v4().to_string();
-        slot.active = None;
+        if let Some(active) = &mut slot.active {
+            active.revoked = true;
+        }
         slot.state = OpticalDriveState::Inspecting {
             media_generation: generation.clone(),
         };
@@ -171,7 +174,9 @@ impl OpticalDriveManager {
         let slot = drives
             .get_mut(drive_id)
             .ok_or(OpticalLifecycleError::UnknownDrive)?;
-        slot.active = None;
+        if let Some(active) = &mut slot.active {
+            active.revoked = true;
+        }
         slot.state = OpticalDriveState::Empty;
         Ok(())
     }
@@ -320,6 +325,7 @@ impl OpticalDriveManager {
             lease_id,
             generation: generation.to_owned(),
             kind,
+            revoked: false,
             request_id,
             request_digest,
         });
@@ -442,7 +448,7 @@ impl OpticalReadPermit {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         drives
             .get(&self.drive_id)
-            .is_some_and(|slot| active_matches(slot, self.lease_id, &self.generation, self.kind))
+            .is_some_and(|slot| current_matches(slot, self.lease_id, &self.generation, self.kind))
     }
 
     pub fn playback_source(
@@ -480,7 +486,7 @@ impl OpticalReadPermit {
         let slot = drives
             .get_mut(&self.drive_id)
             .ok_or(OpticalLifecycleError::UnknownDrive)?;
-        if !active_matches(slot, self.lease_id, &self.generation, self.kind) {
+        if !current_matches(slot, self.lease_id, &self.generation, self.kind) {
             return Err(OpticalLifecycleError::StaleGeneration);
         }
         slot.active = None;
@@ -504,7 +510,7 @@ impl OpticalReadPermit {
         let slot = drives
             .get_mut(&self.drive_id)
             .ok_or(OpticalLifecycleError::UnknownDrive)?;
-        if !active_matches(slot, self.lease_id, &self.generation, self.kind) {
+        if !current_matches(slot, self.lease_id, &self.generation, self.kind) {
             return Err(OpticalLifecycleError::StaleGeneration);
         }
         slot.active = None;
@@ -517,10 +523,15 @@ impl OpticalReadPermit {
     }
 }
 
-fn active_matches(slot: &DriveSlot, lease_id: u64, generation: &str, kind: ReaderKind) -> bool {
+fn reader_matches(slot: &DriveSlot, lease_id: u64, generation: &str, kind: ReaderKind) -> bool {
     slot.active.as_ref().is_some_and(|active| {
         active.lease_id == lease_id && active.generation == generation && active.kind == kind
     })
+}
+
+fn current_matches(slot: &DriveSlot, lease_id: u64, generation: &str, kind: ReaderKind) -> bool {
+    reader_matches(slot, lease_id, generation, kind)
+        && slot.active.as_ref().is_some_and(|active| !active.revoked)
 }
 
 impl Drop for OpticalReadPermit {
@@ -536,7 +547,7 @@ impl Drop for OpticalReadPermit {
         let Some(slot) = drives.get_mut(&self.drive_id) else {
             return;
         };
-        if !active_matches(slot, self.lease_id, &self.generation, self.kind) {
+        if !reader_matches(slot, self.lease_id, &self.generation, self.kind) {
             return;
         }
         slot.active = None;
@@ -618,10 +629,15 @@ mod tests {
             .expect("first inspection");
         manager.observe_removal("drive-a").expect("remove");
         let second = manager.observe_insertion("drive-a").expect("second insert");
+        assert!(!stale.is_current());
+        assert!(matches!(
+            manager.claim_inspection("drive-a", &second),
+            Err(OpticalLifecycleError::Busy)
+        ));
+        drop(stale);
         let current = manager
             .claim_inspection("drive-a", &second)
             .expect("second inspection");
-        drop(stale);
         assert!(matches!(
             manager.claim_inspection("drive-a", &second),
             Err(OpticalLifecycleError::Busy)

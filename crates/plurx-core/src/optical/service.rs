@@ -115,13 +115,25 @@ where
         drive_id: &str,
         now_ms: i64,
     ) -> Result<OpticalDriveSnapshot, OpticalServiceError> {
+        let generation = self.manager.observe_insertion(drive_id)?;
+        self.inspect_generation(drive_id, &generation, now_ms).await
+    }
+
+    /// Finish an already-minted insertion after a revoked reader has drained.
+    /// This does not mint another generation, so clients keep observing one
+    /// stable replacement epoch while the drive becomes available.
+    async fn inspect_generation(
+        &self,
+        drive_id: &str,
+        generation: &str,
+        now_ms: i64,
+    ) -> Result<OpticalDriveSnapshot, OpticalServiceError> {
         let drive = self
             .drives
             .get(drive_id)
             .ok_or(OpticalServiceError::UnknownDrive)?;
-        let generation = self.manager.observe_insertion(drive_id)?;
-        let permit = self.manager.claim_inspection(drive_id, &generation)?;
-        let response = match self.host.inspect(drive, &generation).await {
+        let permit = self.manager.claim_inspection(drive_id, generation)?;
+        let response = match self.host.inspect(drive, generation).await {
             Ok(response) => response,
             Err(error) => {
                 let _ = permit.publish_failed(&error.to_string());
@@ -178,6 +190,17 @@ where
                     // The kernel change edge therefore revokes the old
                     // generation even though no Empty state was observed.
                     if let Err(error) = self.inspect_insertion(drive_id, now_ms).await {
+                        errors.push((drive_id.clone(), error));
+                    }
+                }
+                (
+                    OpticalMediaPresence::Present,
+                    Some(super::OpticalDriveState::Inspecting { media_generation }),
+                ) => {
+                    if let Err(error) = self
+                        .inspect_generation(drive_id, &media_generation, now_ms)
+                        .await
+                    {
                         errors.push((drive_id.clone(), error));
                     }
                 }
@@ -464,8 +487,22 @@ mod tests {
 
         host.push_presence(Ok(OpticalMediaPresence::Changed));
         host.push_inspection_for_observed_generation(OpticalFormat::Bluray);
-        assert!(service.observe_once(200).await.is_empty());
+        assert!(matches!(
+            service.observe_once(200).await.as_slice(),
+            [(
+                drive_id,
+                OpticalServiceError::Lifecycle(OpticalLifecycleError::Busy)
+            )] if drive_id == "drive-a"
+        ));
         assert!(!stale_lease.permit.is_current());
+        assert!(matches!(
+            service.manager().snapshot("drive-a").map(|row| row.state),
+            Some(OpticalDriveState::Inspecting { .. })
+        ));
+
+        drop(stale_lease);
+        host.push_presence(Ok(OpticalMediaPresence::Present));
+        assert!(service.observe_once(201).await.is_empty());
 
         let second = service.manager().snapshot("drive-a").expect("drive");
         let OpticalDriveState::Ready {
