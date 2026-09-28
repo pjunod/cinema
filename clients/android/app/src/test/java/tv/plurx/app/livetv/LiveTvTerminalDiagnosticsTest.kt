@@ -13,8 +13,18 @@ import tv.plurx.app.data.Net
 class LiveTvTerminalDiagnosticsTest {
     private class CapabilitySecretException : IOException("https://private.invalid?capability=secret")
 
+    // Media3 1.10.1's default constructor reads Android elapsedRealtime.
+    // Its actual protected explicit-timestamp constructor retains the exact
+    // PlaybackException class/cause/code; extras are unused by this diagnostic.
+    // No Android clock stub or default-value mock changes the production path.
+    private fun playbackError(message: String, cause: Throwable, code: Int): PlaybackException =
+        PlaybackException::class.java.getDeclaredConstructor(
+            String::class.java, Throwable::class.java, Integer.TYPE,
+            android.os.Bundle::class.java, java.lang.Long.TYPE,
+        ).apply { isAccessible = true }.newInstance(message, cause, code, null, 0L)
+
     @Test fun terminalWireKeepsActualMedia3CodeButNeverExceptionPayloadOrDynamicClassName() {
-        val error = PlaybackException("private title/account/session", CapabilitySecretException(),
+        val error = playbackError("private title/account/session", CapabilitySecretException(),
             PlaybackException.ERROR_CODE_IO_UNSPECIFIED)
         val diagnostic = LiveTvTerminalDiagnostics { 10L }.terminal(
             LiveTvTerminalTrigger.PLAYER_ERROR, LiveTvTerminalAction.STOPPED,
@@ -87,7 +97,7 @@ class LiveTvTerminalDiagnosticsTest {
             .getConstructor(android.net.Uri::class.java).newInstance(null)
         val event = diagnostic.terminal(LiveTvTerminalTrigger.PLAYER_ERROR,
             LiveTvTerminalAction.COMPATIBILITY_RETRY, Long.MAX_VALUE, false, Int.MAX_VALUE,
-            Long.MAX_VALUE, PlaybackException("secret", stuck, PlaybackException.ERROR_CODE_IO_UNSPECIFIED))!!
+            Long.MAX_VALUE, playbackError("secret", stuck, PlaybackException.ERROR_CODE_IO_UNSPECIFIED))!!
         assertTrue(event.message.length <= 200)
         assertTrue(event.detail!!.length <= 200)
         assertTrue(event.message.contains("known_type=HlsPlaylistTracker.PlaylistStuckException"))
