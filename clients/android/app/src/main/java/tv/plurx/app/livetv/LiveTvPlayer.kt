@@ -4,6 +4,7 @@ package tv.plurx.app.livetv
 
 import android.app.Activity
 import android.content.Context
+import android.os.SystemClock
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
@@ -268,6 +269,22 @@ class LiveTvPlayer private constructor(context: Context) {
         )
         player = output
         val watchdog = LiveTvWatchdog()
+        val diagnostics = LiveTvTerminalDiagnostics(SystemClock::elapsedRealtime)
+        fun reportTerminal(
+            trigger: LiveTvTerminalTrigger,
+            action: LiveTvTerminalAction,
+            error: Throwable? = null,
+            observedAt: Long = SystemClock.elapsedRealtime(),
+            playing: Boolean = output.isPlaying,
+            playbackState: Int = output.playbackState,
+            positionMs: Long = output.currentPosition,
+        ) {
+            // A diagnostic must never prevent the existing Stop/retry action.
+            runCatching {
+                diagnostics.terminal(trigger, action, observedAt, playing, playbackState, positionMs, error)
+                    ?.let { postPlaybackClientLog(scope, it) }
+            }
+        }
         val liveEdgeRecovery = LiveEdgeRecovery().also { it.attached() }
         fun reportLiveEdge(outcome: String) {
             postPlaybackClientLog(
@@ -290,9 +307,16 @@ class LiveTvPlayer private constructor(context: Context) {
         // rather than the scope's `Main.immediate`, which would run it
         // inline and change nothing.
         output.addListener(object : Player.Listener {
+            override fun onRenderedFirstFrame() {
+                if (mine == serial) diagnostics.firstFrame()
+            }
             override fun onPlayerError(error: PlaybackException) {
                 if (mine != serial) return
                 val code = liveTvPlaybackErrorCode(error.errorCode)
+                val observedAt = SystemClock.elapsedRealtime()
+                val playing = output.isPlaying
+                val playbackState = output.playbackState
+                val positionMs = output.currentPosition
                 scope.launch(Dispatchers.Main) {
                     if (mine != serial) return@launch
                     if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
@@ -311,16 +335,30 @@ class LiveTvPlayer private constructor(context: Context) {
                         }
                     }
                     if (mine == serial && code == "codec_unsupported" && !compatibilityRetry) {
+                        reportTerminal(LiveTvTerminalTrigger.PLAYER_ERROR, LiveTvTerminalAction.COMPATIBILITY_RETRY,
+                            error, observedAt, playing, playbackState, positionMs)
                         retryCompatible(channel, api, lease, LiveTvCompatibility(
                             failed_video = true, failed_audio = true, failed_container = true,
                         ))
-                    } else if (mine == serial) stopWithMessage(liveTvMessage(code))
+                    } else if (mine == serial) {
+                        reportTerminal(LiveTvTerminalTrigger.PLAYER_ERROR, LiveTvTerminalAction.STOPPED,
+                            error, observedAt, playing, playbackState, positionMs)
+                        stopWithMessage(liveTvMessage(code))
+                    }
                 }
             }
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (mine != serial || playbackState != Player.STATE_ENDED) return
+                val observedAt = SystemClock.elapsedRealtime()
+                val playing = output.isPlaying
+                val positionMs = output.currentPosition
                 scope.launch(Dispatchers.Main) {
-                    if (mine == serial) stopWithMessage(liveTvMessage("stream_failed"))
+                    if (mine == serial) {
+                        reportTerminal(LiveTvTerminalTrigger.PLAYER_ENDED, LiveTvTerminalAction.STOPPED,
+                            observedAt = observedAt, playing = playing, playbackState = playbackState,
+                            positionMs = positionMs)
+                        stopWithMessage(liveTvMessage("stream_failed"))
+                    }
                 }
             }
         })
@@ -338,7 +376,9 @@ class LiveTvPlayer private constructor(context: Context) {
                     if (mine != serial) break
                     val counters = output.videoDecoderCounters
                     counters?.ensureUpdated()
-                    if (watchdog.observe(counters?.renderedOutputBufferCount ?: 0, output.isPlaying)) {
+                    val renderedFrames = counters?.renderedOutputBufferCount ?: 0
+                    diagnostics.decoderSample(renderedFrames, output.isPlaying)
+                    if (watchdog.observe(renderedFrames, output.isPlaying)) {
                         lease.touchHint()
                         api.keepalive(started.session_id)
                         if (mine != serial) break
@@ -358,14 +398,19 @@ class LiveTvPlayer private constructor(context: Context) {
                             expireSourceFormats(System.currentTimeMillis() / 1000)
                         }
                     } else if (watchdog.expired) {
+                        reportTerminal(LiveTvTerminalTrigger.NO_PROGRESS, LiveTvTerminalAction.STOPPED)
                         stopWithMessage("Live TV stopped after the 30-second no-progress budget. Select a channel to resume.")
                     }
                 }
             } catch (error: Exception) {
                 if (mine == serial && error is LiveTvFailure &&
                     error.code == "source_format_changed" && !compatibilityRetry) {
+                    reportTerminal(LiveTvTerminalTrigger.LEASE_ERROR, LiveTvTerminalAction.COMPATIBILITY_RETRY, error)
                     retryCompatible(channel, api, lease, null)
-                } else if (mine == serial) stopWithMessage(message(error))
+                } else if (mine == serial) {
+                    reportTerminal(LiveTvTerminalTrigger.LEASE_ERROR, LiveTvTerminalAction.STOPPED, error)
+                    stopWithMessage(message(error))
+                }
             }
         }
         return true
