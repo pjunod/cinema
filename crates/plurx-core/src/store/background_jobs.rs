@@ -354,6 +354,14 @@ UPDATE background_jobs SET
 WHERE id = json_extract($1, '$.job_id')
   AND revision = json_extract($1, '$.expected_revision')
   AND kind = json_extract($1, '$.kind') AND payload_version = json_extract($1, '$.payload_version')
+  -- Match the subtitle projection's preconditions before its trigger runs. A
+  -- settled request is an ordinary lost claim, never an ambiguous SQL failure.
+  AND (kind != 'subtitle_extract' OR EXISTS (SELECT 1 FROM analysis_requests request JOIN files file ON file.id = request.file_id
+        AND file.size = request.source_size AND file.mtime = request.source_mtime
+      WHERE request.request_id = json_extract(background_jobs.payload_json, '$.source_generation')
+        AND request.file_id = json_extract(background_jobs.payload_json, '$.file_id')
+        AND request.component = 'subtitle_source' AND request.state IN ('queued','running')
+        AND request.cancel_requested = 0))
   AND (kind != 'media_probe' OR (EXISTS (SELECT 1 FROM job_leases lease
  WHERE lease.resource = json_extract(background_jobs.payload_json,'$.coordinator.resource')
  AND lease.owner_node_id = json_extract(background_jobs.payload_json,'$.coordinator.node_id')
@@ -1819,6 +1827,12 @@ impl<T: QueueSql> BackgroundJobStore for T {
                 FROM background_jobs job JOIN interests interest ON interest.job_id = job.id
                 LEFT JOIN scope_usage usage ON usage.scheduling_scope = interest.scheduling_scope
                 WHERE job.kind IN (SELECT value FROM json_each($1, '$.kinds')) AND job.payload_version = 1
+                    AND (job.kind != 'subtitle_extract' OR EXISTS (SELECT 1 FROM analysis_requests request JOIN files file ON file.id = request.file_id
+        AND file.size = request.source_size AND file.mtime = request.source_mtime
+      WHERE request.request_id = json_extract(job.payload_json, '$.source_generation')
+        AND request.file_id = json_extract(job.payload_json, '$.file_id')
+        AND request.component = 'subtitle_source' AND request.state IN ('queued','running')
+        AND request.cancel_requested = 0))
                     AND (job.target_node_id IS NULL OR job.target_node_id = json_extract($1, '$.node_id'))
                     AND (job.state = 'queued' OR (job.state = 'running' AND job.lease_expires_ms <= json_extract($1, '$.now_ms')))
                     AND (job.retry_deadline_ms = 0 OR job.retry_deadline_ms > json_extract($1, '$.now_ms'))
@@ -1901,12 +1915,13 @@ impl<T: QueueSql> BackgroundJobStore for T {
         let request = encode(
             &serde_json::json!({"now_ms": now_ms, "command_id": uuid::Uuid::new_v4().to_string()}),
         )?;
+        let reconciled = super::background_jobs_subtitle::reconcile(self, &request).await?;
         if self
             .queue_sql(MAINTENANCE_NEEDED.to_owned(), request.clone(), false, false)
             .await?
             .is_empty()
         {
-            return Ok(false);
+            return Ok(reconciled);
         }
         self.queue_sql(MAINTENANCE_SQL.to_owned(), request, true, true)
             .await?;

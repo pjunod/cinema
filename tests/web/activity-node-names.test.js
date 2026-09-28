@@ -65,6 +65,9 @@ const BORROWED = [
   "liveTvActivityRows",
   // DVR cards/details have a full-browser regression in dvr-ui.browser.cjs.
   "liveTvNowSeconds",
+  "durableDuration",
+  "durableLeaseExpired",
+  "durableStateLabel",
   "durableQueueHtml",
   "paintActivityBody",
 ];
@@ -494,6 +497,78 @@ test("durable work renders escaped observations beside current activity", () => 
   assert.match(html, /cancelDurableJob/);
   assert.match(html, /2 min/);
   painter.durable.rows = [];
+});
+
+test("durable owners, attempts and repair destinations use roster names", () => {
+  const now=Date.now();
+  const job={id:"job",kind:"subtitle_extract",state:"running",owner_node_id:"owner-id",
+    priority:0,age_ms:1427*60000,not_before_ms:0,supported:true,
+    lease_expires_ms:now+30000,observed_at_ms:now};
+  Object.assign(painter.durable,{observed:now,rows:[job],repairs:[{kind:"subtitle",target_node_id:"owner-id",phase:"copying",age_ms:1000}],
+    detail:{job,waiters:[],attempts:[{node_id:"owner-id",started_at_ms:now-120000,outcome:null}]}});
+  const html=paint(snapshot({node_hostnames:{"owner-id":"m6"}}));
+  assert.match(html, /title="owner-id">m6<\/span>/);
+  assert.match(html, /<td>m6<\/td><td>copying/);
+  assert.match(html, /m6 · running · .*2 min this attempt/);
+  assert.match(html, /Since requested/);
+  assert.match(html, /23h 47m/);
+  assert.doesNotMatch(html, /1427 min/);
+  const missing=paint(snapshot());
+  assert.match(missing, /title="owner-id">owner-id<\/span>/);
+  Object.assign(painter.durable,{rows:[],repairs:[],detail:null});
+});
+
+test("expired durable leases do not masquerade as live executions", () => {
+  const now=Date.now();
+  const job={id:"expired",kind:"subtitle_extract",state:"running",owner_node_id:"owner-id",
+    priority:0,age_ms:1427*60000,not_before_ms:0,supported:true,
+    lease_expires_ms:now-3600000,observed_at_ms:now};
+  Object.assign(painter.durable,{observed:now,rows:[job],detail:{job,waiters:[],
+    attempts:[{node_id:"owner-id",started_at_ms:job.lease_expires_ms-120000,outcome:null}]}});
+  const html=paint(snapshot({node_hostnames:{"owner-id":"<m6>"}}));
+  assert.match(html, /Lease expired · awaiting recovery/);
+  assert.match(html, /previous owner/);
+  assert.match(html, /&lt;m6&gt; · lease expired · .*2 min until lease expired/);
+  assert.doesNotMatch(html, /<m6>/);
+  Object.assign(painter.durable,{rows:[],detail:null});
+});
+
+function refreshingQueue(q,api){
+  return new Function("DURABLE_ACTIVITY","api",`
+    const ME={is_admin:true},location={hash:"#/activity"};
+    const PAGE_RENDER_GENERATION=1;
+    function paintDurableActivity(){}
+    ${["esc","nodeLabel","durableDuration","durableLeaseExpired","durableStateLabel","durableQueueHtml","refreshDurableActivity"].map(shippedSource).join("\n")}
+    return {refresh:refreshDurableActivity,html:()=>durableQueueHtml({node:"m6"})};
+  `)(q,api);
+}
+test("bounded queue refresh updates the open attempt when execution completes", async () => {
+  const now=Date.now(),job={id:"job",kind:"subtitle_extract",state:"running",observed_at_ms:now-60000,lease_expires_ms:now-30000};
+  const q={state:"running",epoch:0,observed:0,rows:[],counts:[],selectedId:"job",
+    detail:{job,waiters:[],attempts:[{node_id:"node",started_at_ms:now-120000,outcome:null}]}};
+  const calls=[];
+  const runner=refreshingQueue(q,async url=>{
+    calls.push(url);
+    if(url.includes("?"))return {jobs:[],counts:[],observed_at_ms:now};
+    return {job:{...job,state:"succeeded",observed_at_ms:now,lease_expires_ms:null},waiters:[],
+      attempts:[{node_id:"node",started_at_ms:now-120000,finished_at_ms:now,outcome:"succeeded"}]};
+  });
+  await runner.refresh(true);
+  assert.deepEqual(calls,["/cluster/jobs?state=running","/cluster/jobs/job"]);
+  assert.match(runner.html(), /m6 · succeeded · .*2 min elapsed/);
+  assert.doesNotMatch(runner.html(), /this attempt|awaiting recovery/);
+});
+test("a late detail refresh cannot reopen closed or replace newly selected details", async () => {
+  for(const change of [q=>{q.detail=null;q.selectedId=null;},q=>{q.detail={job:{id:"other"}};q.selectedId="other";}]){
+    const q={state:"running",epoch:0,observed:0,rows:[],counts:[],selectedId:"job",detail:{job:{id:"job"}}};
+    const runner=refreshingQueue(q,async url=>{
+      if(url.includes("?"))return {jobs:[],counts:[],observed_at_ms:Date.now()};
+      change(q);
+      return {job:{id:"job",state:"succeeded"}};
+    });
+    await runner.refresh(true);
+    assert.notEqual(q.detail?.job.id,"job");
+  }
 });
 
 let reported = false;

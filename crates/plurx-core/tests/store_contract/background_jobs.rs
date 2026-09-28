@@ -4149,3 +4149,247 @@ async fn artwork_repair_contract(holder_disappears: bool) {
     })
     .await;
 }
+
+#[tokio::test]
+async fn background_subtitles_source_changes_cancel_selected_candidates() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "subtitle-obsolete").await;
+        let request = store
+            .enqueue_or_promote_subtitle_source(
+                &super::subtitle_source_stamp(file_id),
+                "foreground",
+                1_000,
+            )
+            .await
+            .expect("subtitle reconciliation fixture")
+            .expect("subtitle reconciliation fixture");
+        let admitted = store
+            .enqueue_subtitle_job(request, 1_000)
+            .await
+            .expect("subtitle reconciliation fixture");
+        let EnqueueOutcome::Accepted { job_id, .. } = admitted else {
+            panic!("{backend}: admission")
+        };
+        let query = CandidateQuery {
+            node_id: "node-a".into(),
+            kinds: vec![JobKind::SubtitleExtract],
+            after: None,
+            now_ms: 1_001,
+            limit: 100,
+        };
+        assert_eq!(
+            store
+                .job_candidates(query.clone())
+                .await
+                .expect("subtitle reconciliation fixture")
+                .jobs
+                .len(),
+            1
+        );
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("subtitle reconciliation fixture")
+            .expect("subtitle reconciliation fixture");
+        store
+            .upsert_file(
+                file.item_id,
+                &file.path.to_string_lossy(),
+                file.size + 1,
+                file.mtime + 1,
+                &plurx_core::domain::ProbeResult::default(),
+            )
+            .await
+            .expect("subtitle reconciliation fixture");
+        // The source can change after candidate selection. The atomic claim must
+        // return an ordinary refusal, not throw the subtitle projection trigger.
+        let job = store
+            .background_job(&job_id)
+            .await
+            .expect("subtitle reconciliation fixture")
+            .expect("subtitle reconciliation fixture");
+        let outcome = store
+            .claim_artifact_job(ClaimJob {
+                job_id: job_id.clone(),
+                expected_revision: job.revision,
+                node_id: "node-a".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::SubtitleExtract,
+                payload_version: 1,
+                now_ms: 1_001,
+                dispatched_at_ms: 1_001,
+            })
+            .await
+            .expect("obsolete demand is not an ambiguous database error");
+        assert!(
+            !matches!(outcome, ClaimOutcome::Claimed { .. }),
+            "{backend}"
+        );
+        assert!(store
+            .job_candidates(query)
+            .await
+            .expect("subtitle reconciliation fixture")
+            .jobs
+            .is_empty());
+        store
+            .maintain_jobs(1_002)
+            .await
+            .expect("source-change upkeep");
+        let retired = store
+            .background_job(&job_id)
+            .await
+            .expect("subtitle reconciliation fixture")
+            .expect("subtitle reconciliation fixture");
+        assert_eq!(retired.state, JobState::Cancelled, "{backend}");
+        assert_eq!(
+            retired.last_error_code.as_deref(),
+            Some("subtitle_request_cancelled")
+        );
+        assert!(store
+            .job_attempts(&job_id)
+            .await
+            .expect("subtitle reconciliation fixture")
+            .is_empty());
+    })
+    .await;
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test]
+async fn background_subtitles_replicated_ready_orphans_are_refused_and_retired() {
+    use plurx_core::store::Store;
+    use std::sync::Arc;
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store: Arc<dyn Store> = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    let (_, file_id) = seed_file(&store, "subtitle-ready-orphan").await;
+    let request = store
+        .enqueue_or_promote_subtitle_source(
+            &super::subtitle_source_stamp(file_id),
+            "foreground",
+            1_000,
+        )
+        .await
+        .expect("request")
+        .expect("request");
+    let EnqueueOutcome::Accepted { job_id, .. } = store
+        .enqueue_subtitle_job(request.clone(), 1_000)
+        .await
+        .expect("admit")
+    else {
+        panic!("admission")
+    };
+    let query = CandidateQuery {
+        node_id: "node-a".into(),
+        kinds: vec![JobKind::SubtitleExtract],
+        after: None,
+        now_ms: 1_001,
+        limit: 100,
+    };
+    assert_eq!(
+        store
+            .job_candidates(query.clone())
+            .await
+            .expect("candidate")
+            .jobs
+            .len(),
+        1
+    );
+    // Manufacture the historical split projection through the replicated log.
+    // Ordinary source changes already cancel both records together.
+    let client = hiqlite::Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        super::CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("fixture client");
+    client.execute("UPDATE analysis_requests SET state='ready', result_cache_key='published-source' WHERE request_id=$1",
+        hiqlite::params!(request.request_id.clone())).await.expect("historical ready demand");
+    // v61 differs only in this trigger. Upgrade the exact predecessor with the
+    // historical orphan present, rather than reconstructing unrelated v10 DDL.
+    drop(store);
+    let old_projection = include_str!("../../src/store/background_jobs_subtitle.sql")
+        .split("-- next statement\n")
+        .find(|sql| sql.contains("CREATE TRIGGER IF NOT EXISTS background_subtitle_settled"))
+        .expect("predecessor projection trigger");
+    for result in client
+        .txn(vec![
+            (
+                "DROP TRIGGER background_subtitle_settled".to_owned(),
+                hiqlite::params!(),
+            ),
+            (old_projection.to_owned(), hiqlite::params!()),
+            (
+                "UPDATE cluster_meta SET schema_version=61 WHERE singleton=1".to_owned(),
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("install predecessor fixture")
+    {
+        result.expect("predecessor statement");
+    }
+    let store: Arc<dyn Store> = Arc::new(
+        plurx_core::store::HiqliteAuthStore::open_or_migrate(
+            client.clone(),
+            &cluster._root.path().join("subtitle-upgrade-telemetry.db"),
+        )
+        .await
+        .expect("upgrade v61 to current schema"),
+    );
+    let job = store
+        .background_job(&job_id)
+        .await
+        .expect("job")
+        .expect("job");
+    let outcome = store
+        .claim_artifact_job(ClaimJob {
+            job_id: job_id.clone(),
+            expected_revision: job.revision,
+            node_id: "node-a".into(),
+            boot_id: uuid::Uuid::new_v4().to_string(),
+            claim_id: uuid::Uuid::new_v4().to_string(),
+            kind: JobKind::SubtitleExtract,
+            payload_version: 1,
+            now_ms: 1_001,
+            dispatched_at_ms: 1_001,
+        })
+        .await
+        .expect("obsolete demand must not raise an ambiguous SQL error");
+    assert!(matches!(outcome, ClaimOutcome::Contended));
+    assert!(store
+        .job_candidates(query)
+        .await
+        .expect("candidates")
+        .jobs
+        .is_empty());
+    assert!(store.maintain_jobs(1_002).await.expect("reconcile"));
+    let retired = store
+        .background_job(&job_id)
+        .await
+        .expect("read")
+        .expect("retained job");
+    assert_eq!(retired.state, JobState::Cancelled);
+    assert_eq!(
+        retired.last_error_code.as_deref(),
+        Some("subtitle_demand_obsolete")
+    );
+    let preserved = store
+        .analysis_request(&request.request_id)
+        .await
+        .expect("read")
+        .expect("retained request");
+    assert_eq!(preserved.state, "ready");
+    assert_eq!(preserved.result_cache_key, "published-source");
+    assert!(store
+        .job_attempts(&job_id)
+        .await
+        .expect("no fabricated attempt")
+        .is_empty());
+    assert!(!store.maintain_jobs(1_003).await.expect("idle upkeep"));
+}

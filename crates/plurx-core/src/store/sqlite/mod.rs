@@ -1175,6 +1175,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // Distributed Live TV intents, ingest claims, and capture authority.
     // v83: durable cluster tuner admission, capture claims and fenced output.
     crate::live_tv_resource::SCHEMA,
+    // v84: preserve published subtitle history when obsolete common work retires.
+    super::background_jobs_subtitle::RECONCILE_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2898,7 +2900,7 @@ mod tests {
         // provider dispatch budgets and the subtitle adapter; v77 adds artwork holders,
         // and v78 retains portable transcode source/manifest provenance.
         assert_eq!(
-            version, 83,
+            version, 84,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
