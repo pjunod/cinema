@@ -1,12 +1,13 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 02:48 UTC · **Audited main:** `60ed569ede8ddb3402fbbb9593dd2947ce52b3dc`
+**Status:** open · **Updated:** 2026-09-28 02:57 UTC · **Audited main:** `d2a9d8fb78f785f3daf0469937d7139f979d3b27`
 
 [PR #582](http://192.168.4.7:3000/noirr/plurx/pulls/582) remains open.
 Its sole adversarial review is complete and all four findings were addressed.
-The frozen Live TV candidate from #537 is integrated locally for parallel
-Apple194/Android133 release builds. #537 lands first; its actual main landing
-will then be integrated before #582's one final exact-base promotion lane.
+PR #537 passed all nine checks and4693tests without failures, then merged as
+`d2a9d8fb78f785f3daf0469937d7139f979d3b27`. Its actual landing is integrated
+in #582. Apple194/Android133 signed Release builds run in parallel from
+byte-identical combined native inputs. Final exact-base promotion is next.
 No final deployment or device acceptance has occurred.
 
 The earlier gate #3419 completed4692 Rust tests without assertion failures,
