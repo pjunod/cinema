@@ -898,189 +898,184 @@ async fn background_jobs_global_history_pressure_preserves_resolution_and_restor
     assert_eq!(job.failed_attempts, 0);
 }
 
-/// The claim trigger aborts when the demand behind a queued `subtitle_extract`
-/// job is no longer claimable. The shape production grew (nynuc, 2026-09-27,
-/// eight rows): the analysis request already `ready` with `attempts = 1`,
-/// and a job for it still `queued` at revision 0, so every candidate walk
-/// listed it and every claim aborted. That is a definite refusal: the job is
-/// retired at the revision the claimant saw, answered `Cancelled`, and drops
-/// off the candidate page. Left `queued`, each walker paid a full lease of
-/// ambiguity resolution for it, with the software encoder pool held.
-///
-/// Written directly, because no public store path admits a job for a ready
-/// request (the enqueue fence refuses) — how the fleet reached this shape is
-/// not reproduced here, only that the claim path now heals it.
 #[tokio::test]
-async fn a_subtitle_claim_the_demand_trigger_refuses_retires_the_zombie_job() {
+async fn background_subtitles_reconcile_historical_ready_demand_without_overwriting_history() {
+    use super::{ClusterFragmentIndexStore, LibraryStore, MediaStore};
     use crate::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
-    use crate::store::fragment_index_cluster::ClusterFragmentIndexStore;
-    use crate::store::{LibraryStore, MediaStore};
-
-    let store = SqliteStore::open_in_memory().expect("store");
+    let dir = tempfile::tempdir().expect("subtitle reconciliation fixture");
+    let path = dir.path().join("subtitle-reconcile.db");
+    let store = SqliteStore::open(&path).expect("subtitle reconciliation fixture");
     let library = store
         .create_library(&NewLibrary {
-            name: "zombie".into(),
+            name: "Subtitles".into(),
             kind: LibraryKind::Movies,
-            paths: vec!["/zombie".into()],
+            paths: vec!["/media".into()],
             anime: false,
         })
         .await
-        .expect("library");
+        .expect("subtitle reconciliation fixture");
     let item = store
         .insert_item(&NewItem {
             library_id: library.id,
             kind: ItemKind::Movie,
             parent_id: None,
-            title: "Zombie".into(),
-            year: Some(2024),
+            title: "Source".into(),
+            year: None,
             season_number: None,
             episode_number: None,
         })
         .await
-        .expect("item");
+        .expect("subtitle reconciliation fixture");
     let file_id = store
-        .upsert_file(
-            item,
-            "/zombie/movie.mkv",
-            10_000,
-            1,
-            &ProbeResult {
-                duration_ms: Some(7_200_000),
-                container: Some("mkv".into()),
-                ..Default::default()
+        .upsert_file(item, "/media/source.mkv", 100, 1, &ProbeResult::default())
+        .await
+        .expect("subtitle reconciliation fixture");
+    let request = store
+        .enqueue_or_promote_subtitle_source(
+            &super::SubtitleSourceStamp {
+                file_id,
+                source_size: 100,
+                source_mtime: 1,
+                pipeline_version: "subtitle-source-v1".into(),
             },
+            "foreground",
+            1_000,
         )
         .await
-        .expect("file");
-    let now = 5_000;
-    let stamp = crate::store::fragment_index_cluster::SubtitleSourceStamp {
-        file_id,
-        source_size: 10_000,
-        source_mtime: 1,
-        pipeline_version: "subtitle-source-v1".into(),
-    };
-    let queued = store
-        .enqueue_or_promote_subtitle_source(&stamp, "normal", now)
+        .expect("subtitle reconciliation fixture")
+        .expect("subtitle reconciliation fixture");
+    let EnqueueOutcome::Accepted { job_id, .. } = store
+        .enqueue_subtitle_job(request.clone(), 1_000)
         .await
-        .expect("demand")
-        .expect("demand");
-    let job_id = match store
-        .enqueue_subtitle_job(queued.clone(), now + 1)
-        .await
-        .expect("admission")
-    {
-        EnqueueOutcome::Accepted { job_id, .. } => job_id,
-        other => panic!("subtitle admission: {other:?}"),
+        .expect("subtitle reconciliation fixture")
+    else {
+        panic!("admission")
     };
-    // The demand is satisfied behind the queued job's back — with the
-    // published attempt that satisfied it on record, exactly as the fleet had
-    // it (`attempts = 1`, one `published` row at the request's fence).
-    QueueSql::queue_sql(
-        &store,
-        "UPDATE analysis_requests SET state = 'ready', attempts = 1, fence = 1, owner_node_id = NULL,
-            lease_expires_ms = NULL WHERE request_id = json_extract($1, '$.request_id')"
-            .into(),
-        serde_json::json!({"request_id": queued.request_id}).to_string(),
-        true,
-        true,
-    )
-    .await
-    .expect("finished demand");
-    QueueSql::queue_sql(
-        &store,
-        "INSERT INTO analysis_attempts(request_id, attempt, claim_node_id, claim_epoch, claim_expires_at_ms,
-            phase, started_at_ms, phase_updated_at_ms, terminal_code)
-         VALUES (json_extract($1, '$.request_id'), 1, 'node-z', 1, 6000, 'published', 5000, 5500, NULL)"
-            .into(),
-        serde_json::json!({"request_id": queued.request_id}).to_string(),
-        true,
-        true,
-    )
-    .await
-    .expect("published attempt");
-    let attempt_phase = || async {
-        QueueSql::queue_sql(
-            &store,
-            "SELECT json_object('phase', phase, 'terminal_code', terminal_code) AS result_json
-               FROM analysis_attempts WHERE request_id = json_extract($1, '$.request_id') AND claim_epoch = 1"
-                .into(),
-            serde_json::json!({"request_id": queued.request_id}).to_string(),
-            false,
-            true,
-        )
+    let mut claim = claim(&job_id, 0, 1_001);
+    claim.kind = JobKind::SubtitleExtract;
+    let ClaimOutcome::Claimed { job } = store
+        .claim_artifact_job(claim)
         .await
-        .expect("attempt row")
-        .first()
-        .map(|row| serde_json::from_str::<serde_json::Value>(row).expect("json"))
-        .expect("the attempt row exists")
+        .expect("subtitle reconciliation fixture")
+    else {
+        panic!("claim")
     };
-    assert_eq!(attempt_phase().await["phase"], "published");
-    let store = &store;
-    let candidates = |now_ms: i64| async move {
+    let token = job.token.expect("subtitle reconciliation fixture");
+    let query = CandidateQuery {
+        node_id: "node-b".into(),
+        kinds: vec![JobKind::SubtitleExtract],
+        after: None,
+        now_ms: token.lease_expires_ms,
+        limit: 100,
+    };
+    // A valid abandoned owner remains reclaimable; upkeep must not discard it.
+    assert!(!store
+        .maintain_jobs(token.lease_expires_ms)
+        .await
+        .expect("subtitle reconciliation fixture"));
+    assert_eq!(
         store
-            .job_candidates(CandidateQuery {
-                node_id: "node-a".into(),
-                kinds: vec![JobKind::SubtitleExtract],
-                after: None,
-                now_ms,
-                limit: 64,
-            })
+            .job_candidates(query.clone())
             .await
-            .expect("candidates")
+            .expect("subtitle reconciliation fixture")
             .jobs
-            .into_iter()
-            .map(|job| job.id)
-            .collect::<Vec<_>>()
-    };
-    assert!(
-        candidates(now + 2).await.contains(&job_id),
-        "the zombie is listed before anyone claims it"
+            .len(),
+        1
     );
-    let job = store
-        .background_job(&job_id)
+    // Reproduce historical independent publication without modifying the common
+    // lease, then prove retirement preserves both the result and its history.
+    let body = serde_json::json!({"request_id":request.request_id}).to_string();
+    store.queue_transaction(vec![
+        ("UPDATE analysis_requests SET state='ready', result_cache_key='published-source' WHERE request_id=json_extract($1,'$.request_id')".into(), body.clone()),
+        ("UPDATE analysis_attempts SET phase='published', terminal_code=NULL WHERE request_id=json_extract($1,'$.request_id')".into(), body.clone()),
+    ]).await.expect("subtitle reconciliation fixture");
+    // Reopen the predecessor database with its old projection trigger so this
+    // also exercises the SQLite upgrade, not only a fresh bootstrap.
+    drop(store);
+    {
+        let connection =
+            rusqlite::Connection::open(&path).expect("subtitle reconciliation fixture");
+        connection
+            .execute_batch("DROP TRIGGER background_subtitle_settled;")
+            .expect("subtitle reconciliation fixture");
+        connection
+            .execute_batch(super::background_jobs_subtitle::SCHEMA)
+            .expect("subtitle reconciliation fixture");
+        connection
+            .pragma_update(
+                None,
+                "user_version",
+                super::sqlite::SQLITE_SCHEMA_VERSION - 1,
+            )
+            .expect("subtitle reconciliation fixture");
+    }
+    let store = SqliteStore::open(&path).expect("subtitle reconciliation fixture");
+    assert!(
+        !store
+            .maintain_jobs(2_000)
+            .await
+            .expect("subtitle reconciliation fixture"),
+        "live owner retained"
+    );
+    assert!(store
+        .job_candidates(query)
         .await
-        .expect("job")
-        .expect("job");
-    assert_eq!(job.state, JobState::Queued);
-    let claim = |revision: i64, now_ms: i64| ClaimJob {
-        kind: JobKind::SubtitleExtract,
-        ..claim(&job_id, revision, now_ms)
-    };
-    let outcome = store
-        .claim_job(claim(job.revision, now + 3))
+        .expect("subtitle reconciliation fixture")
+        .jobs
+        .is_empty());
+    let mut retry = claim_for_subtitle(&job_id, job.revision, token.lease_expires_ms);
+    retry.node_id = "node-b".into();
+    assert!(!matches!(
+        store
+            .claim_artifact_job(retry)
+            .await
+            .expect("subtitle reconciliation fixture"),
+        ClaimOutcome::Claimed { .. }
+    ));
+    assert!(store
+        .maintain_jobs(token.lease_expires_ms)
         .await
-        .expect("a refused claim is an answer, not an error");
-    assert!(matches!(outcome, ClaimOutcome::Cancelled), "{outcome:?}");
+        .expect("subtitle reconciliation fixture"));
     let retired = store
         .background_job(&job_id)
         .await
-        .expect("job")
-        .expect("job");
+        .expect("subtitle reconciliation fixture")
+        .expect("subtitle reconciliation fixture");
     assert_eq!(retired.state, JobState::Cancelled);
+    assert!(retired.token.is_none());
     assert_eq!(
-        retired.last_error_code.as_deref(),
-        Some("subtitle_demand_gone")
+        store
+            .job_attempts(&job_id)
+            .await
+            .expect("subtitle reconciliation fixture")[0]
+            .outcome
+            .as_deref(),
+        Some("cancelled")
     );
-    assert!(retired.revision > job.revision);
+    let preserved = store
+        .analysis_request(&request.request_id)
+        .await
+        .expect("subtitle reconciliation fixture")
+        .expect("subtitle reconciliation fixture");
+    assert_eq!(preserved.state, "ready");
+    assert_eq!(preserved.result_cache_key, "published-source");
+    let rows = store.queue_sql("SELECT json_object('phase',phase,'terminal_code',terminal_code) AS result_json FROM analysis_attempts WHERE request_id=json_extract($1,'$.request_id')".into(), body, false, false).await.expect("subtitle reconciliation fixture");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&rows[0])
+            .expect("subtitle reconciliation fixture"),
+        serde_json::json!({"phase":"published","terminal_code":null})
+    );
     assert!(
-        !candidates(now + 4).await.contains(&job_id),
-        "a retired job is not listed again"
+        !store
+            .maintain_jobs(token.lease_expires_ms + 1)
+            .await
+            .expect("subtitle reconciliation fixture"),
+        "idle upkeep stays read-only"
     );
-    let again = store
-        .claim_job(claim(job.revision, now + 5))
-        .await
-        .expect("claim");
-    assert!(matches!(again, ClaimOutcome::Cancelled), "{again:?}");
-    // The finished demand — and the attempt that finished it — are untouched
-    // by the retirement: the settled trigger only rewrites the attempt of a
-    // demand that is still open.
-    let request = store
-        .analysis_request(&queued.request_id)
-        .await
-        .expect("request")
-        .expect("request");
-    assert_eq!(request.state, "ready");
-    let attempt = attempt_phase().await;
-    assert_eq!(attempt["phase"], "published", "{attempt}");
-    assert!(attempt["terminal_code"].is_null(), "{attempt}");
+}
+
+fn claim_for_subtitle(id: &str, revision: i64, now: i64) -> ClaimJob {
+    let mut request = claim(id, revision, now);
+    request.kind = JobKind::SubtitleExtract;
+    request
 }

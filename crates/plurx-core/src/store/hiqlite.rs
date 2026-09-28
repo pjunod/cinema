@@ -140,11 +140,9 @@ const INTEGRITY_JOBS_SCHEMA_VERSION: i64 = 60;
 const INTEGRITY_JOBS_SCHEMA_MIGRATION_SOURCE: i64 = PROBE_JOBS_SCHEMA_VERSION;
 const LIVE_TV_RESOURCE_SCHEMA_VERSION: i64 = 61;
 const LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE: i64 = INTEGRITY_JOBS_SCHEMA_VERSION;
-/// The subtitle adapter's settled trigger guarded against terminal demand:
-/// re-runs the adapter schema, whose DROP + CREATE carries the new body.
-const SUBTITLE_SETTLED_GUARD_SCHEMA_VERSION: i64 = 62;
-const SUBTITLE_SETTLED_GUARD_SCHEMA_MIGRATION_SOURCE: i64 = LIVE_TV_RESOURCE_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = SUBTITLE_SETTLED_GUARD_SCHEMA_VERSION;
+const SUBTITLE_RECONCILE_SCHEMA_VERSION: i64 = 62;
+const SUBTITLE_RECONCILE_SCHEMA_MIGRATION_SOURCE: i64 = LIVE_TV_RESOURCE_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = SUBTITLE_RECONCILE_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -2985,24 +2983,6 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(INTEGRITY_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
-                SchemaMigrationAction::MigrateFrom(
-                    SUBTITLE_SETTLED_GUARD_SCHEMA_MIGRATION_SOURCE,
-                ) => {
-                    let now = self.now()?;
-                    let mut statements: Vec<(String, hiqlite::Params)> =
-                        super::background_jobs_subtitle::SCHEMA
-                            .split("-- next statement\n")
-                            .map(|sql| (sql.to_owned(), params!()))
-                            .collect();
-                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
-                        params!(SUBTITLE_SETTLED_GUARD_SCHEMA_VERSION, now, SUBTITLE_SETTLED_GUARD_SCHEMA_MIGRATION_SOURCE)));
-                    let attempt = self.client().txn(statements).await;
-                    self.settle_migration_attempt(
-                        SUBTITLE_SETTLED_GUARD_SCHEMA_MIGRATION_SOURCE,
-                        attempt,
-                    )
-                    .await?;
-                }
                 SchemaMigrationAction::MigrateFrom(LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
                     let mut statements = super::hiqlite_live_tv_resource::schema_statements();
@@ -3013,6 +2993,22 @@ impl HiqliteAuthStore {
                     let attempt = self.client().txn(statements).await;
                     self.settle_migration_attempt(
                         LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(SUBTITLE_RECONCILE_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_subtitle::RECONCILE_SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(SUBTITLE_RECONCILE_SCHEMA_VERSION, now, SUBTITLE_RECONCILE_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        SUBTITLE_RECONCILE_SCHEMA_MIGRATION_SOURCE,
                         attempt,
                     )
                     .await?;
@@ -5057,7 +5053,7 @@ fn schema_migration_action(
         | PROBE_JOBS_SCHEMA_MIGRATION_SOURCE
         | INTEGRITY_JOBS_SCHEMA_MIGRATION_SOURCE
         | LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE
-        | SUBTITLE_SETTLED_GUARD_SCHEMA_MIGRATION_SOURCE => {
+        | SUBTITLE_RECONCILE_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -7087,15 +7083,6 @@ mod tests {
             INTEGRITY_JOBS_SCHEMA_VERSION + 1,
             LIVE_TV_RESOURCE_SCHEMA_VERSION,
             "v60 advances to the Live TV resource schema"
-        );
-        assert_eq!(
-            SUBTITLE_SETTLED_GUARD_SCHEMA_MIGRATION_SOURCE, LIVE_TV_RESOURCE_SCHEMA_VERSION,
-            "the subtitle settled-trigger guard must start from the exact v61 shape"
-        );
-        assert_eq!(
-            SUBTITLE_SETTLED_GUARD_SCHEMA_MIGRATION_SOURCE + 1,
-            SUBTITLE_SETTLED_GUARD_SCHEMA_VERSION,
-            "v61 must advance exactly one step to the settled-trigger guard"
         );
         assert_eq!(
             AUTH_SCHEMA_MIGRATION_SOURCE + 57,

@@ -1503,10 +1503,8 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS background_artifact_repairs",
             // v83 adds the claim ledger and DVR revision triggers; both fixtures drop all four.
             "CREATE TABLE IF NOT EXISTS live_tv_resource_records",
-            // v84 re-runs the subtitle adapter schema so its settled trigger
-            // is dropped and recreated with the terminal-demand guard. It
-            // creates no new object; the trigger it recreates is a
-            // background-prefixed one the fixture helper already removes.
+            // v84 replaces a background-prefixed trigger. Both fixtures call
+            // remove_common_queue_schema before dropping older domain columns.
             "DROP TRIGGER IF EXISTS background_subtitle_settled",
         ];
 

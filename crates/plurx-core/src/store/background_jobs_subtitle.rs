@@ -11,23 +11,9 @@ use sha2::{Digest, Sha256};
 
 pub(crate) const RESET_LEGACY: &str = "UPDATE analysis_requests SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL, fence = fence + 1 WHERE component = 'subtitle_source' AND state IN ('running','submitted');";
 
+pub(crate) const RECONCILE_SCHEMA: &str = include_str!("background_jobs_subtitle_reconcile.sql");
+
 pub(crate) const SCHEMA: &str = include_str!("background_jobs_subtitle.sql");
-
-/// The message `background_subtitle_claimed` raises when the demand behind a
-/// queued `subtitle_extract` job is no longer claimable — cancelled, already
-/// settled, or its source superseded since the job was admitted. The trigger
-/// aborts the claim, so the job row stays `queued` and comes back on every
-/// candidate page; without [`demand_gone`] each walker then treats the
-/// refusal as an ambiguous write and waits out a full lease before moving on.
-pub(crate) const DEMAND_GONE: &str = "subtitle demand no longer claimable";
-
-/// Whether a claim error is that trigger speaking.
-pub(crate) fn demand_gone(error: &StoreError) -> bool {
-    error.to_string().contains(DEMAND_GONE)
-}
-
-/// The error code a job retired for that reason carries.
-pub(crate) const DEMAND_GONE_CODE: &str = "subtitle_demand_gone";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -192,4 +178,44 @@ pub(super) async fn write<T: QueueSql>(
         rows.first()
             .ok_or_else(|| StoreError::Task("missing subtitle publication verdict".into()))?,
     )
+}
+
+// Historical cutover/independent publication can leave demand settled while its
+// common job remains queued. Never mutate a live owner's row. Recheck the whole
+// predicate in the replicated update, and bound each upkeep pass to 128 rows.
+const OBSOLETE_DEMAND: &str = r#"
+job.kind = 'subtitle_extract' AND job.payload_version = 1
+AND json_extract(job.payload_json, '$.track') IS NULL
+AND (job.state = 'queued' OR (job.state = 'running' AND job.lease_expires_ms <= json_extract($1, '$.now_ms')))
+AND NOT EXISTS (SELECT 1 FROM analysis_requests request JOIN files file ON file.id = request.file_id
+        AND file.size = request.source_size AND file.mtime = request.source_mtime
+      WHERE request.request_id = json_extract(job.payload_json, '$.source_generation')
+        AND request.file_id = json_extract(job.payload_json, '$.file_id')
+        AND request.component = 'subtitle_source' AND request.state IN ('queued','running')
+        AND request.cancel_requested = 0)
+"#;
+
+pub(super) async fn reconcile<T: QueueSql>(store: &T, request: &str) -> Result<bool, StoreError> {
+    if store.queue_sql(format!("SELECT '{{}}' AS result_json FROM background_jobs job WHERE {OBSOLETE_DEMAND} LIMIT 1"),
+        request.into(), false, false).await?.is_empty() {
+        return Ok(false);
+    }
+    let rows = store
+        .queue_sql(
+            format!(
+                r#"
+UPDATE background_jobs SET state = 'cancelled', last_error_code = 'subtitle_demand_obsolete',
+    owner_node_id = NULL, owner_boot_id = NULL, claim_id = NULL, lease_expires_ms = NULL,
+    revision = revision + 1, updated_at_ms = json_extract($1, '$.now_ms')
+WHERE id IN (SELECT job.id FROM background_jobs job WHERE {OBSOLETE_DEMAND}
+    ORDER BY job.id LIMIT 128)
+RETURNING json_object('id', id) AS result_json
+"#
+            ),
+            request.into(),
+            true,
+            true,
+        )
+        .await?;
+    Ok(!rows.is_empty())
 }

@@ -1175,12 +1175,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // Distributed Live TV intents, ingest claims, and capture authority.
     // v83: durable cluster tuner admission, capture claims and fenced output.
     crate::live_tv_resource::SCHEMA,
-    // v84: the subtitle adapter's settled trigger no longer rewrites the
-    // finished attempt of a demand that is already terminal (the zombie a
-    // refused claim retires). Every statement in the adapter schema is
-    // idempotent, and the trigger is dropped and recreated, so re-running
-    // the file is the migration.
-    super::background_jobs_subtitle::SCHEMA,
+    // v84: preserve published subtitle history when obsolete common work retires.
+    super::background_jobs_subtitle::RECONCILE_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2902,10 +2898,7 @@ mod tests {
         // v70 adds K-05 M5's catalogue read indexes; v71 adds the common queue.
         // v72–v76 add library work, domain leases, source-I/O reservations,
         // provider dispatch budgets and the subtitle adapter; v77 adds artwork holders,
-        // v78 retains portable transcode source/manifest provenance, v79–v82
-        // add predictions, embeddings, probe and integrity jobs, v83 the cluster
-        // Live TV resource ledger, and v84 guards the subtitle settled trigger
-        // against terminal demand.
+        // and v78 retains portable transcode source/manifest provenance.
         assert_eq!(
             version, 84,
             "a new migration must be a deliberate bump, not a surprise — \

@@ -288,7 +288,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 ## cluster/ — replication, membership, and recovery
 
 Durable cluster work: [implementation](cluster/DURABLE-WORK-QUEUE-IMPLEMENTATION.md) ·
-[build status](cluster/DURABLE-WORK-QUEUE-STATUS.md) — **done**.
+[build status](cluster/DURABLE-WORK-QUEUE-STATUS.md) — **built**; [Activity and subtitle-throughput follow-up](http://192.168.4.7:3000/noirr/plurx/pulls/588).
 
 Phase 4 and everything under it: the clustering transition, the performance
 and media-pool work built on top, and the diagnoses of specific replicated

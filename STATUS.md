@@ -20,18 +20,18 @@ definite `no longer claimable` abort was surfaced as an error and nothing
 retired the row; a live start that waited out the 5 s window with only
 background work in the way was **refused, by design**; and the Live TV layer
 labelled an encoder refusal a tuner one. Fixed at each layer: the store
-retires the zombie and answers `Cancelled`; the backfill claims before it
+side landed first on `main` as #588 (claim/candidate precondition, bounded
+reconcile, guarded settled trigger, SQLite v84 / cluster v62) and this
+branch dropped its own copy at the merge; the backfill claims before it
 takes the pool; a `Priority::Live` start is admitted over background
 ownership after the window (hardware within the cap, software forced, one
 WARN + `plurx_transcode_background_overrun_total{pool}`); and the refusal is
 `encoder_capacity` with its own copy on all three clients, pinned by the
 shared start-cases fixture (Android 134, Apple 195).
 One adversarial review round (five findings, all taken): the take over a
-stuck permit is now bounded by live usage, the store's settled trigger no
-longer rewrites a finished attempt (SQLite v83 / cluster v61 — a rolling
-deploy holds membership until every voter runs it), expired-lease zombies
-retire too, the subtitle pre-check is the admission's own predicate, and
-the tests reach the arms they name.
+stuck permit is now bounded by live usage, the settled-trigger guard the
+review asked for is the one #588 shipped, the subtitle pre-check is the
+admission's own predicate, and the tests reach the arms they name.
 **Decision for Paul to look over:** admitting a viewer over a stuck
 background permit reverses the ruling OPERATIONS.md carried ("absence after
 five seconds means that worker is stuck rather than permission to start

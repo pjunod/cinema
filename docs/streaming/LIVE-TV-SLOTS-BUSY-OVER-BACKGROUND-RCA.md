@@ -42,27 +42,33 @@ for the next real job appears at 00:08:21, seconds after it ended.
 The trigger's abort is the store saying *this demand is gone* — cancelled,
 already settled, or its source superseded since the job was admitted. The
 statement rolled back, so the job stayed `queued`, and nothing ever retired
-it. `claim_job` now recognises that message (it is the repository's own SQL,
-exported as `background_jobs_subtitle::DEMAND_GONE`), retires the row at the
-revision the claimant saw (`state = 'cancelled'`, `last_error_code =
-'subtitle_demand_gone'`) and answers `ClaimOutcome::Cancelled`, which the
-walker handles immediately. The row never returns to a candidate page. A
-`running` job whose lease has lapsed (a takeover candidate) in the same
-situation is retired the same way.
+it; `claim_with_resolution_inner` then polled `resolve_claim` for the full
+30 s lease before moving to the next candidate.
 
-Two things the review made this carry. First, the store's
-`background_subtitle_settled` trigger fires on the retirement and used to
-rewrite the demand's attempt row at its fence to `canceled` — for the fleet's
-shape that is the *published* attempt of a finished request. The trigger's
-attempt update is now guarded the way its request update already was (only a
-demand still `queued`/`running`), shipped as **SQLite schema v83 / cluster
-schema v61**, each of which re-runs the idempotent adapter schema whose
-`DROP TRIGGER` + `CREATE TRIGGER` carries the new body; the store test
-writes the published attempt and proves it survives. Second, the match is on
-the trigger's message text (`StoreError::to_string()`); on the replicated
-backend that is proven by the owner's own log line — `error=database error:
-Sqlite: subtitle demand no longer claimable` came from nynuc's hiqlite
-store — and the match is gated to `SubtitleExtract` claims.
+**Fixed on `main` by #588 (`40dae5ce1`, 2026-09-28), which landed while this
+branch was in the lane.** Its shape is the better one and this branch carries
+no store change of its own: `CLAIM_SQL` and the candidate query both carry
+the subtitle projection's precondition (an open `analysis_requests` row whose
+file still matches), so an obsolete job is never listed and a racing claim
+answers `Contended` rather than aborting in the trigger; a bounded upkeep
+pass (`background_jobs_subtitle::reconcile`, 128 rows) retires the obsolete
+rows with `last_error_code = subtitle_demand_obsolete`; and the
+`background_subtitle_settled` trigger's attempt update is guarded to open
+demand — SQLite v84 / cluster v62 — so retiring an obsolete job leaves the
+finished attempt of its demand alone. This branch had built the same trigger
+guard and a claim-time retirement (`subtitle_demand_gone`); both were dropped
+at the merge in favour of #588's.
+
+One fact from this branch's investigation that #588's record does not carry:
+the eight fleet rows had their request `ready` with `attempts = 1` and a job
+`queued` at revision 0, admitted in one 300 ms burst on 2026-09-26 04:36 UTC
+(the intents loop's cadence). The enqueue fence refuses a job for a ready
+request and the dedupe key folds a second admission into a running one, so
+the ordinary paths cannot grow the shape; a boot-time legacy drain or a
+migration replay is the likeliest origin. The replicated backend's
+`StoreError` Display carries the trigger text — the owner's own log line
+`error=database error: Sqlite: subtitle demand no longer claimable` came from
+nynuc's hiqlite store.
 
 ### 3. A live start that waited out background work was refused
 
@@ -132,9 +138,8 @@ this from real tuner exhaustion.
 
 | Area | Change |
 |---|---|
-| `plurx-core` store | `claim_job` retires a subtitle job the demand trigger refuses and answers `Cancelled`; `background_jobs_subtitle::{DEMAND_GONE, demand_gone, DEMAND_GONE_CODE}`. Store test `a_subtitle_claim_the_demand_trigger_refuses_retires_the_zombie_job` grows the exact fleet shape (request ready, job queued) and proves the claim heals it. |
+| `plurx-core` store | No change on this branch: #588 landed the claim/candidate precondition, the bounded reconcile and the guarded settled trigger (SQLite v84 / cluster v62) first. |
 | `subtitle_work.rs` | Claim first, then `admit_fragment`; a claim the pool then refuses is settled `Yield` (5 s) and released. `fragment_worker_may_start` — the admission's own predicate (pool idle **and** the shared heavy-worker gate free) — before the claim, so neither a viewer nor another heavy worker causes claim/yield churn (a claim charges the demand an attempt and two replicated writes). |
-| `background_jobs_subtitle.sql`, `sqlite/mod.rs`, `hiqlite.rs` | The settled trigger's attempt update guarded to open demand; SQLite v83, cluster v61. |
 | `admission.rs` | `try_acquire_over_background`, `admit_over_background`, `software_decision` (shared). |
 | `transcode/manager/start.rs` | `admit_live` admits over background after the window for `Priority::Live` on both the hardware and software routes; `note_background_overrun` log + counter. |
 | `telemetry.rs` | `plurx_transcode_background_overrun_total{pool="hardware"\|"software"}`. |
@@ -154,15 +159,6 @@ this from real tuner exhaustion.
   a single ambiguous claim costs at most one lease under the pool, and the
   admission-layer change now covers them from the viewer's side. Worth the
   same reorder if `plurx_transcode_background_overrun_total` ever moves.
-- How the eight zombie rows came to exist. Each had its analysis request
-  `ready` with `attempts = 1` and a job `queued` at revision 0, admitted in
-  one 300 ms burst on 2026-09-26 04:36 UTC (the intents loop's cadence). The
-  enqueue fence refuses a job for a ready request and the dedupe key folds a
-  second admission into a running one, so the ordinary paths cannot grow it;
-  a boot-time legacy drain or a migration replay is the likeliest origin.
-  The claim path now heals the shape whatever produced it, and
-  `last_error_code = subtitle_demand_gone` on the retired rows is the
-  breadcrumb for whoever chases the origin.
 - `claim_with_resolution_inner`'s treatment of *every* store error as
   ambiguous. A typed distinction between "refused" and "lost" would be the
   right general fix; this change handles the one message that was
@@ -170,7 +166,7 @@ this from real tuner exhaustion.
 
 ## Verification
 
-- Store test `a_subtitle_claim_the_demand_trigger_refuses_retires_the_zombie_job` (the fleet shape written directly: no public store path admits a job for a ready request, so how the eight rows arose is still open — see below).
+- The store side is #588's: `background_subtitles_reconcile_historical_ready_demand_without_overwriting_history` and the replicated `background_subtitles_replicated_ready_orphans_are_refused_and_retired`.
 - `live_admission_starts_over_a_background_permit_that_does_not_release`
   (hardware arm, the live permit parks background at a cap with headroom,
   the counter moves),
@@ -184,7 +180,8 @@ this from real tuner exhaustion.
   `speculative_software_admission_is_still_refused_while_background_holds`.
 - Adversarial review of the branch (one round, five findings, all
   addressed): the unbounded forced take, the settled trigger clobbering the
-  finished attempt, the SQLite-only proof of the message match, claim/yield
+  finished attempt (fixed here first, then superseded by #588's identical
+  guard at the merge), the SQLite-only proof of the message match, claim/yield
   churn from the reorder, and tests that did not reach the arms they named.
   Rollout notes from it: an ingress older than this build folds
   `encoder_capacity` to its fallback code, and clients older than Android

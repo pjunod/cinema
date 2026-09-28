@@ -47,12 +47,6 @@ BEGIN
     UPDATE analysis_requests SET lease_expires_ms = NEW.lease_expires_ms, updated_at_ms = NEW.updated_at_ms
     WHERE request_id = json_extract(NEW.payload_json, '$.source_generation') AND state = 'running' AND owner_node_id = NEW.owner_node_id;
 END;
--- A job settled while its demand is already terminal — the zombie a refused
--- claim retires — must leave the demand's finished attempt row as it was.
--- The attempt update is guarded the same way the request update below is;
--- dropped and recreated because CREATE TRIGGER IF NOT EXISTS keeps the old body.
--- next statement
-DROP TRIGGER IF EXISTS background_subtitle_settled;
 -- next statement
 CREATE TRIGGER IF NOT EXISTS background_subtitle_settled
 AFTER UPDATE OF state ON background_jobs
@@ -62,8 +56,7 @@ BEGIN
         WHEN 'failed' THEN 'failed' ELSE 'canceled' END,
         terminal_code = NEW.last_error_code, phase_updated_at_ms = NEW.updated_at_ms
     WHERE request_id = json_extract(NEW.payload_json, '$.source_generation') AND claim_epoch = (
-        SELECT fence FROM analysis_requests WHERE request_id = json_extract(NEW.payload_json, '$.source_generation')
-            AND state IN ('queued','running'));
+        SELECT fence FROM analysis_requests WHERE request_id = json_extract(NEW.payload_json, '$.source_generation'));
     UPDATE analysis_requests SET state = CASE NEW.state WHEN 'queued' THEN 'queued' WHEN 'succeeded' THEN 'ready'
         WHEN 'failed' THEN 'failed' ELSE 'cancelled' END,
         owner_node_id = NULL, lease_expires_ms = NULL, not_before_ms = NEW.not_before_ms,
