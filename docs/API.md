@@ -911,7 +911,7 @@ file read. Two extractions run at once per node, each bounded to 15 s and
 `Retry-After`. A failed extraction leaves a marker and the route answers 404
 for that chapter for an hour without running ffmpeg again. The response
 carries `ETag` (file id, size, mtime, index) and `private, max-age=604800`.
-When Settings → Developer → Chapter thumbnails is off the route answers 404
+When Settings → Playback → Chapter thumbnails is off the route answers 404
 and runs nothing. See [clients/WATCH-VIEW-LAYOUT.md](clients/WATCH-VIEW-LAYOUT.md).
 
 ## 7. Playback — the decision

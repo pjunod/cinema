@@ -891,7 +891,11 @@ yielded, or superseded job cannot publish a late artifact.
 ## 9. Operational controls — visible enablement, qualified paths only
 
 Put decoder controls in **Settings → Developer → Decoder selection and
-recovery**. They are persisted settings, apply to newly prepared work without
+recovery**. *(Amended 2026-09-28: under Paul's Developer lifecycle the shipped
+controls — verified decode artifacts and automatic decoder recovery — graduated
+to **Settings → Playback → Advanced server delivery**. Read "Developer" below
+as that section; see SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS decision 6.)*
+They are persisted settings, apply to newly prepared work without
 a binary rebuild or daemon restart, and are never compile features or hidden
 environment gates. The card shows current qualification, missing prerequisites,
 the effect of each mode, and the last refusal. A saved value is the operator's
