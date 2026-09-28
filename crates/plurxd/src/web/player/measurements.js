@@ -213,6 +213,10 @@ async function probeDecode(){
 }
 function reportTtff(){
   const p=PLAYER; if(!playbackOwnsAttachedMedia(p)||!p.playStartedAt) return;
+  if(p.attemptReason==="seek"||p.controlSeek?.seekTelemetry){
+    p.playStartedAt=null;
+    return;
+  }
   const ms=Math.round(performance.now()-p.playStartedAt);
   p.playStartedAt=null;   // first frame only; a seek is not a start
   p.ttffMs=ms;

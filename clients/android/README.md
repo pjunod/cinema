@@ -20,7 +20,7 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `132` — cluster Live TV intents and advisory Developer enablement.
+> Status: **v0.3.0**, build `133` — cluster Live TV intents and advisory Developer enablement.
 > Build 131 adds in-app PDF/EPUB reading. Build 129 restores
 > the Live TV picture to the fullscreen box on tablets after a push-mirror
 > rewind erased its earlier merge. Build 128 rotates the signed release key
