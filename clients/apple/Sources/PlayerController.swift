@@ -297,6 +297,67 @@ struct ApplePlaybackTTFFState: Equatable {
     }
 }
 
+/// A dispatched seek owns one terminal beacon, independent of startup TTFF.
+/// Coalesced slider ticks never enter this state. Context is captured when
+/// dispatch starts so supersession cannot report the successor's delivery.
+struct ApplePlaybackSeekLog: Encodable, Equatable {
+    let level = "info"
+    let event: String
+    let method: String
+    let fileId: Int
+    let attempt: String
+    let ms: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case level, event, method, attempt, ms
+        case fileId = "file_id"
+    }
+}
+
+struct ApplePlaybackSeekMeasurement {
+    private struct Pending {
+        let generation: Int
+        let startedAt: TimeInterval
+        let method: String
+        let fileId: Int
+        let attempt: String
+    }
+    private var pending: Pending?
+
+    mutating func dispatched(
+        generation: Int, method: String, fileId: Int, attempt: String,
+        observedAt: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) -> ApplePlaybackSeekLog? {
+        // Resume/recovery can dispatch the same destination again. Its clock
+        // remains the original command's clock, and it still owes one result.
+        guard pending?.generation != generation else { return nil }
+        let previous = abandoned()
+        pending = Pending(generation: generation, startedAt: observedAt,
+                          method: method, fileId: fileId, attempt: attempt)
+        return previous
+    }
+
+    mutating func presented(
+        generation: Int,
+        observedAt: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) -> ApplePlaybackSeekLog? {
+        guard let pending, pending.generation == generation else { return nil }
+        self.pending = nil
+        return ApplePlaybackSeekLog(
+            event: "seek_resumed", method: pending.method,
+            fileId: pending.fileId, attempt: pending.attempt,
+            ms: max(0, Int(((observedAt - pending.startedAt) * 1_000).rounded()))
+        )
+    }
+
+    mutating func abandoned(generation: Int? = nil) -> ApplePlaybackSeekLog? {
+        guard let pending, generation == nil || pending.generation == generation else { return nil }
+        self.pending = nil
+        return ApplePlaybackSeekLog(event: "seek_abandoned", method: pending.method,
+                                    fileId: pending.fileId, attempt: pending.attempt, ms: nil)
+    }
+}
+
 /// Last server status the Apple client observed before a stall. Recovery can
 /// supersede the session before the best-effort beacon reaches `/client-log`,
 /// so the snapshot travels with the client evidence and the server replaces
@@ -2234,6 +2295,8 @@ final class PlayerController: ObservableObject {
     private var blackFrameWatchdog = BlackFrameWatchdog()
     private var establishedHDRRetryAttempted = false
     private var ttffMeasurement = ApplePlaybackTTFFState()
+    private var seekMeasurement = ApplePlaybackSeekMeasurement()
+    private var requestedSeekGeneration: Int?
     private var ttffReason = "cold-start"
     private var diagnosticProbesEnabled = false
     private var stallObservation = PlaybackStallObservationState()
@@ -3445,6 +3508,8 @@ final class PlayerController: ObservableObject {
             observedMs: positionForPlaybackIntent(),
             durationMs: knownDurationMs
         )
+        abandonSeekMeasurement()
+        requestedSeekGeneration = request.generation
         issueSeek(to: request.target, generation: request.generation)
     }
 
@@ -3519,6 +3584,8 @@ final class PlayerController: ObservableObject {
             lastMarkerSkipEndMs = nil
         }
         let request = seekState.absolute(requested, durationMs: knownDurationMs)
+        abandonSeekMeasurement()
+        requestedSeekGeneration = request.generation
         issueSeek(to: request.target, generation: request.generation)
     }
 
@@ -3556,6 +3623,17 @@ final class PlayerController: ObservableObject {
             guard !Task.isCancelled,
                   attemptStillCurrent(seekAttempt, fence: .seekIntentAfterControl)
             else { return }
+            if requestedSeekGeneration == generation {
+                #if os(iOS)
+                let reportsSeek = offlineId == nil
+                #else
+                let reportsSeek = true
+                #endif
+                if reportsSeek, let previous = seekMeasurement.dispatched(
+                    generation: generation, method: clientLogMethod,
+                    fileId: fileId, attempt: playbackAttemptId
+                ) { postClientLog(previous) }
+            }
             if recipeRevision.needsReopen {
                 await reopen(at: target)
                 return
@@ -4132,6 +4210,8 @@ final class PlayerController: ObservableObject {
     }
 
     func stop(deactivateAudioSession: Bool = true) {
+        abandonSeekMeasurement()
+        requestedSeekGeneration = nil
         resetSurface()
         surfaceLifecycleObservation.removeAll()
         let wasStarted = started
@@ -6158,6 +6238,7 @@ final class PlayerController: ObservableObject {
     /// implementation, and `wantsPlayback` — which is also the presenter's
     /// `playback_requested` — has one owner-side writer rather than five.
     private func stopForBlockingSurface(revokingPlaybackIntent: Bool = false) {
+        abandonSeekMeasurement()
         player.pause()
         isPlaying = false
         // Deliberate, and told to the presenter: a `buffering` fault is about a
@@ -6936,6 +7017,11 @@ final class PlayerController: ObservableObject {
         }
         sampleSeekPresentationClocks()
         seekPresentationTask = Task { [weak self, weak item] in
+            defer {
+                if let self, self.seekState.generation != generation {
+                    self.abandonSeekMeasurement(generation: generation)
+                }
+            }
             while !Task.isCancelled {
                 guard let self, let item,
                       self.player.currentItem === item,
@@ -6974,6 +7060,12 @@ final class PlayerController: ObservableObject {
                 }
 
                 if settled {
+                    if let log = self.seekMeasurement.presented(generation: generation) {
+                        self.postClientLog(log)
+                        if self.requestedSeekGeneration == generation {
+                            self.requestedSeekGeneration = nil
+                        }
+                    }
                     self.currentMs = self.realPositionMs()
                     self.playbackControlPlayerChanged()
                     self.updateNowPlaying()
@@ -7660,6 +7752,13 @@ final class PlayerController: ObservableObject {
         ))
     }
 
+    private func abandonSeekMeasurement(generation: Int? = nil) {
+        if let log = seekMeasurement.abandoned(generation: generation) { postClientLog(log) }
+        if generation == nil || requestedSeekGeneration == generation {
+            requestedSeekGeneration = nil
+        }
+    }
+
     private func reportPlaybackTTFFIfNeeded(at positionMs: Int, playing: Bool) {
         #if os(iOS)
         if offlineId != nil { return }
@@ -8314,7 +8413,11 @@ final class PlayerController: ObservableObject {
         #endif
         let itemId = itemId
         let model = model
-        Task { await model?.reportProgress(itemId: itemId, positionMs: globalPosition, durationMs: duration) }
+        let method = clientLogMethod
+        Task {
+            await model?.reportProgress(itemId: itemId, positionMs: globalPosition,
+                                        durationMs: duration, method: method)
+        }
     }
 
     /// Wait for the attached item to reach `.readyToPlay`, or give up.
