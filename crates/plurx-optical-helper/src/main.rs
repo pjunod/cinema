@@ -151,18 +151,24 @@ mod linux {
 
     fn presence(paths: &Paths) -> Result<&'static str, String> {
         validate_paths(paths)?;
-        if mount_has_media(paths.mount.as_deref()) {
-            return Ok("present");
-        }
         if !paths.device.exists() {
-            return Ok("unknown");
+            return Ok(if mount_has_media(paths.mount.as_deref()) {
+                "present"
+            } else {
+                "unknown"
+            });
         }
-        let file = std::fs::OpenOptions::new()
+        let file = match std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NONBLOCK)
             .open(&paths.device)
-            .map_err(|error| format!("cannot open optical device: {error}"))?;
+        {
+            Ok(file) => file,
+            Err(_) if mount_has_media(paths.mount.as_deref()) => return Ok("present"),
+            Err(error) => return Err(format!("cannot open optical device: {error}")),
+        };
         const CDROM_DRIVE_STATUS: libc::c_ulong = 0x5326;
+        const CDROM_MEDIA_CHANGED: libc::c_ulong = 0x5325;
         const CDSL_CURRENT: libc::c_int = i32::MAX;
         let status = unsafe {
             libc::ioctl(
@@ -172,7 +178,20 @@ mod linux {
             )
         };
         Ok(match status {
-            4 => "present",
+            4 => {
+                let changed = unsafe {
+                    libc::ioctl(
+                        std::os::fd::AsRawFd::as_raw_fd(&file),
+                        CDROM_MEDIA_CHANGED,
+                        CDSL_CURRENT,
+                    )
+                };
+                if changed == 1 {
+                    "changed"
+                } else {
+                    "present"
+                }
+            }
             1 | 2 => "empty",
             _ => "unknown",
         })

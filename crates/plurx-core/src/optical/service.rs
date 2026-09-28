@@ -165,7 +165,18 @@ where
                 .snapshot(drive_id)
                 .map(|snapshot| snapshot.state);
             match (presence, state) {
-                (OpticalMediaPresence::Present, Some(super::OpticalDriveState::Empty)) => {
+                (
+                    OpticalMediaPresence::Present | OpticalMediaPresence::Changed,
+                    Some(super::OpticalDriveState::Empty),
+                ) => {
+                    if let Err(error) = self.inspect_insertion(drive_id, now_ms).await {
+                        errors.push((drive_id.clone(), error));
+                    }
+                }
+                (OpticalMediaPresence::Changed, Some(_)) => {
+                    // A tray can be swapped completely between two polls.
+                    // The kernel change edge therefore revokes the old
+                    // generation even though no Empty state was observed.
                     if let Err(error) = self.inspect_insertion(drive_id, now_ms).await {
                         errors.push((drive_id.clone(), error));
                     }
@@ -178,7 +189,8 @@ where
                     }
                 }
                 // A stable present signal does not prove a change. Host event
-                // adapters call `inspect_insertion` for explicit change edges.
+                // adapters and Linux's media-changed ioctl provide explicit
+                // change edges.
                 (OpticalMediaPresence::Present, Some(_)) => {}
                 (_, None) => errors.push((drive_id.clone(), OpticalServiceError::UnknownDrive)),
             }
@@ -403,5 +415,68 @@ mod tests {
             2
         );
         assert_eq!(title.locator, OpticalTitleLocator::Dvd { title_number: 1 });
+    }
+
+    #[tokio::test]
+    async fn media_changed_edge_re_fences_a_swap_without_observed_empty_state() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let host = Arc::new(FakeOpticalHost::default());
+        host.push_inspection_for_observed_generation(OpticalFormat::Dvd);
+        let mount = optical_folder_fixture(OpticalFormat::Dvd, "unused-generation").root;
+        let service = OpticalService::new(
+            "node-a",
+            vec![optical_drive_fixture("drive-a", mount.clone())],
+            store.clone(),
+            host.clone(),
+            std::time::Duration::from_secs(5),
+        );
+
+        let first = service
+            .inspect_insertion("drive-a", 100)
+            .await
+            .expect("first insertion");
+        let OpticalDriveState::Ready {
+            media_generation: first_generation,
+            disc_id: first_disc_id,
+        } = first.state
+        else {
+            panic!("first insertion did not become ready")
+        };
+        let title = store
+            .optical_title(&first_disc_id, "title-1")
+            .await
+            .expect("title read")
+            .expect("stored title");
+        host.push_resolution(Ok(ResolvedInput::Dvd {
+            path: mount,
+            title_number: 1,
+            angle: 1,
+        }));
+        let stale_lease = service
+            .claim_playback_title(
+                "drive-a",
+                &first_generation,
+                &first_disc_id,
+                &title,
+                1,
+                "session-a",
+            )
+            .expect("first playback lease");
+
+        host.push_presence(Ok(OpticalMediaPresence::Changed));
+        host.push_inspection_for_observed_generation(OpticalFormat::Bluray);
+        assert!(service.observe_once(200).await.is_empty());
+        assert!(!stale_lease.permit.is_current());
+
+        let second = service.manager().snapshot("drive-a").expect("drive");
+        let OpticalDriveState::Ready {
+            media_generation: second_generation,
+            disc_id: second_disc_id,
+        } = second.state
+        else {
+            panic!("replacement insertion did not become ready")
+        };
+        assert_ne!(first_generation, second_generation);
+        assert_ne!(first_disc_id, second_disc_id);
     }
 }

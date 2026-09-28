@@ -36,6 +36,10 @@ pub enum HostRequirementStatus {
 pub enum OpticalMediaPresence {
     Empty,
     Present,
+    /// The drive reports that its media changed since the previous query.
+    /// This is stronger than `Present`: callers must mint a fresh insertion
+    /// generation even when an empty tray was never observed.
+    Changed,
     Unknown,
 }
 
