@@ -1,5 +1,6 @@
 package tv.plurx.app.player
 
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okio.Buffer
@@ -10,6 +11,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import tv.plurx.app.data.Net
 import tv.plurx.app.data.PlaybackQuality
+import tv.plurx.app.data.ProgressReq
 
 class PlaybackTelemetryTest {
 
@@ -102,6 +104,81 @@ class PlaybackTelemetryTest {
         assertEquals("session-7", event.sessionId)
         assertEquals(3.0, event.runway)
         assertEquals(1080, event.height)
+    }
+
+    private fun telemetry(events: MutableList<PlaybackClientLog>) = ControllerPlaybackTelemetry(
+        fakePlan,
+        StubTelemetryPlayer(),
+        { PlaybackTelemetryContext("remux", null, null) },
+        events::add,
+    )
+
+    @Test
+    fun seekReportsPresentedPictureOnceWithoutInflatingTtff() {
+        val events = mutableListOf<PlaybackClientLog>()
+        val telemetry = telemetry(events)
+        val attempt = telemetry.begin("seek", 100)
+        assertNull(telemetry.firstFrame(120)) // The command has not been sent/prepared.
+        telemetry.prepared(attempt)
+        telemetry.firstFrame(450)
+        telemetry.firstFrame(500)
+        telemetry.cancel(attempt)
+        telemetry.cancelPending()
+        assertEquals(listOf("seek_resumed"), events.map { it.event })
+        assertEquals(350L, events.single().ms)
+        assertEquals("remux", events.single().method)
+        assertEquals(42L, events.single().fileId)
+    }
+
+    @Test
+    fun supersededAndClosedSeeksEachEndOnceAndStaleCancellationCannotEndTheNextSeek() {
+        val events = mutableListOf<PlaybackClientLog>()
+        val telemetry = telemetry(events)
+        val old = telemetry.begin("seek", 100)
+        telemetry.prepared(old)
+        val current = telemetry.begin("seek", 200)
+        telemetry.cancel(old)
+        telemetry.prepared(current)
+        telemetry.firstFrame(500)
+        val closed = telemetry.begin("seek", 600)
+        telemetry.prepared(closed)
+        telemetry.cancelPending()
+        telemetry.cancel(closed)
+        assertNull(telemetry.firstFrame(800))
+        assertEquals(listOf("seek_abandoned", "seek_resumed", "seek_abandoned"), events.map { it.event })
+        assertEquals(listOf(old.id, current.id, closed.id), events.map { it.attempt })
+        assertNull(events.first().ms)
+        assertEquals(300L, events[1].ms)
+    }
+
+    @Test
+    fun coldStartStillReportsTtffAndItsCancellationNeverReportsASeek() {
+        val events = mutableListOf<PlaybackClientLog>()
+        val telemetry = telemetry(events)
+        val cold = telemetry.begin("cold-start", 100)
+        telemetry.prepared(cold)
+        telemetry.firstFrame(900)
+        val next = telemetry.begin("resume", 1000)
+        telemetry.cancel(next)
+        assertEquals(listOf("ttff"), events.map { it.event })
+        assertEquals(800L, events.single().ms)
+    }
+
+    @Test
+    fun liveProgressNamesNormalizedDeliveryWhileRecordedReplayAlwaysOmitsMethod() {
+        for ((delivery, expected) in listOf("direct" to "direct_play", "direct_play" to "direct_play", "remux" to "remux", "transcode" to "transcode")) {
+            val live = ProgressReq(2000, 9000, deliveryMethod = normalizedPlaybackMethod(delivery))
+            val json = Net.json.parseToJsonElement(Net.json.encodeToString(live)).jsonObject
+            assertEquals(expected, json.getValue("method").jsonPrimitive.content)
+            assertFalse(json.containsKey("recorded_at"))
+            val replay = ProgressReq(2000, 9000, 1234, deliveryMethod = delivery)
+            val offline = Net.json.parseToJsonElement(Net.json.encodeToString(replay)).jsonObject
+            assertNull(replay.method)
+            assertFalse(offline.containsKey("method"))
+            assertEquals("1234", offline.getValue("recorded_at").jsonPrimitive.content)
+            assertFalse(offline.containsKey("deliveryMethod"))
+        }
+        assertNull(normalizedPlaybackMethod("unknown"))
     }
 
     @Test

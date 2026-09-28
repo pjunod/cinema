@@ -504,7 +504,7 @@ class Controller internal constructor(
         },
         context = {
             PlaybackTelemetryContext(
-                method = if (deliveryMode == "direct") "direct_play" else deliveryMode,
+                method = normalizedPlaybackMethod(deliveryMode) ?: "unknown",
                 encoder = encoder,
                 sessionId = sessionId,
             )
@@ -574,7 +574,10 @@ class Controller internal constructor(
                     // resulting `onPlayWhenReadyChanged` before this setter has
                     // returned, and that callback is where the owner's own stop
                     // has to be told apart from a viewer's pause.
-                    if (!value) viewerTransport.ownerStopping()
+                    if (!value) {
+                        playbackTelemetry.cancelPending()
+                        viewerTransport.ownerStopping()
+                    }
                     if (value && lifecyclePaused) applyEffectivePlayWhenReady()
                     else player.playWhenReady = value
                 }
@@ -1377,8 +1380,9 @@ class Controller internal constructor(
         armTrackSelections(recipe)
         when (recipe.recipe.desiredTransport) {
             PlaybackMediaTransport.Direct -> {
-                beginPlaybackAttempt("seek")
+                val attempt = beginPlaybackAttempt("seek")
                 player.seekTo(t)
+                playbackTelemetry.prepared(attempt)
                 markIntentExecuted(sequence)
             }
             PlaybackMediaTransport.ProgressiveRemux -> {
@@ -1401,8 +1405,9 @@ class Controller internal constructor(
             // session churn. A live one can't be range-sought, so it reopens.
             PlaybackMediaTransport.HlsCopy,
             PlaybackMediaTransport.HlsTranscode -> if (sessionIsVod) {
-                beginPlaybackAttempt("seek")
+                val attempt = beginPlaybackAttempt("seek")
                 player.seekTo(t)
+                playbackTelemetry.prepared(attempt)
                 markIntentExecuted(sequence)
             } else {
                 val attempt = beginPlaybackAttempt("seek")
@@ -1597,6 +1602,7 @@ class Controller internal constructor(
 
     fun release() {
         if (!playbackControlBootstrapFence.isActive()) return
+        playbackTelemetry.cancelPending()
         playbackControlBootstrapFence.release()
         displayModeOwner?.let { owner -> displayModeMatcher?.reset(owner) }
         seekJob?.cancel()
@@ -3196,6 +3202,7 @@ class Controller internal constructor(
      * Sign in. Anything else is the owner's `stopped` with today's sentence.
      */
     private fun stopAndRaisePlaybackFailure(refusal: MediaRefusal?, sentence: String) {
+        playbackTelemetry.cancelPending()
         val attached = mediaMutationEpoch
         if (refusal != null && refusal.source == SurfaceSources.MEDIA_OWNER_LOST_410) {
             surfaceOwner.recoveringMediaOwnerLost(

@@ -1143,7 +1143,7 @@ private fun PlayerContent(
             override fun onIsPlayingChanged(playing: Boolean) {
                 updateScreenOn()
                 isPlaying = playing
-                if (!playing) vm.postProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs)
+                if (!playing) vm.postProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs, method = controller.deliveryMode)
             }
 
             override fun onPlaybackStateChanged(state: Int) {
@@ -1151,7 +1151,7 @@ private fun PlayerContent(
                 // No screen-held copy of "the player is buffering": that is the
                 // presenter's `media_waiting` now, and one of it is the point.
                 if (state == Player.STATE_ENDED) {
-                    vm.postProgress(itemId, plan.globalPosition(plan.durationMs), plan.progressDurationMs)
+                    vm.postProgress(itemId, plan.globalPosition(plan.durationMs), plan.progressDurationMs, method = controller.deliveryMode)
                     controlsVisible = true
                     if (plan.nextAudiobookPartId != null) {
                         playNext(PlaybackTarget(itemId, plan.nextAudiobookPartId, 0))
@@ -1189,7 +1189,7 @@ private fun PlayerContent(
         controller.addPlayerListener(listener)
         controller.startAt(startMs, startReason, attemptOpenedAtMs)
         onDispose {
-            vm.postProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs)
+            vm.postProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs, method = controller.deliveryMode)
             controller.removePlayerListener(listener)
             controller.release()
         }
@@ -1297,7 +1297,7 @@ private fun PlayerContent(
     LaunchedEffect(controller) {
         while (true) {
             delay(10_000)
-            if (isPlaying) vm.reportProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs)
+            if (isPlaying) vm.reportProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs, method = controller.deliveryMode)
         }
     }
     LaunchedEffect(lastInteraction, isPlaying, panel, pendingMs, blockingFault) {

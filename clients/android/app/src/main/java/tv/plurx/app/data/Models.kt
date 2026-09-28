@@ -860,7 +860,11 @@ data class ProgressReq(
     val position_ms: Long,
     val duration_ms: Long? = null,
     val recorded_at: Long? = null,
-)
+    @kotlinx.serialization.Transient private val deliveryMethod: String? = null,
+) {
+    // Offline replays carry history, never seconds of live delivery.
+    val method: String? = deliveryMethod.takeIf { recorded_at == null }
+}
 
 @Serializable
 data class OfflineQualityOption(
