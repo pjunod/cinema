@@ -21,7 +21,8 @@ has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
 > Status: **v0.3.0**, build `135` — actual Live TV caption choices and
-> explicit watchable channel actions; source compiled, physical acceptance pending.
+> explicit watchable channel actions; eight focused regressions pass,
+> physical acceptance pending.
 > Build 134 names an encoder refusal as the encoder being busy.
 > Build 133 — cluster Live TV intents and advisory Developer enablement.
 > Build 131 adds in-app PDF/EPUB reading. Build 129 restores

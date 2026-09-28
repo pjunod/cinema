@@ -1,7 +1,8 @@
 # Choose Live TV captions and available channels
 
-**Status:** open — source committed and compiled; the batch review, focused tests,
-fast qualification, deployment and physical acceptance remain pending.
+**Status:** open — the single batch review approved the source and all fifteen
+focused cases pass. Fast qualification, deployment and physical acceptance
+remain pending (2026-09-28).
 
 Build: 198
 Issue: #594
@@ -30,8 +31,13 @@ after which the current main is integrated and qualified. Prior signed products
 retain their original source-specific evidence. The earlier feature134 APK from
 this draft is sealed as unqualified history and must not be installed.
 
-Seven Apple regression sources and Android caption, offer-identity and actual
-lease regressions are prepared. Their compilation is source evidence; they have
-not run before this batch's single adversarial review. Final rendered captions,
-shared-capacity alternatives, DVR preservation and the named device matrix
-remain open until actual qualified-build receipts exist.
+The single adversarial review approved frozen7fd with no findings. Seven Apple
+cases pass on an owned iOS26.5 simulator using SDK27 compiled products; the
+simulator was deleted afterward. Eight Android caption, offer-identity and
+actual lease cases pass. The initial four caption failures reached host Android
+TextUtils stubs before assertions; a faithful test-only framework fixture fixes
+the runtime while preserving every assertion. Production198/135 inputs remain
+unchanged. [The execution status](../reviews/ARCHITECTURE-REVIEW-GPT-BUILD-STATUS.md)
+records the actual source scopes, receipts and retained failures. Final rendered
+captions, shared-capacity alternatives, DVR preservation and the named device
+matrix remain open until qualified-build receipts exist.

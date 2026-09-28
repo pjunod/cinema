@@ -14,8 +14,9 @@ only what this hardware genuinely can't play.
 
 > Status: **v0.3.0**, build `198` in [`project.yml`](project.yml) — working
 > development client. Browse, resume, discover, and play on both iOS and tvOS.
-> Both targets compile against the iOS/tvOS 26.5 SDKs and share the same
-> regression suite.
+> Build198 production and regression sources compile against the iOS/tvOS27
+> SDKs. Its seven new Live TV cases pass on an owned iOS26.5 simulator;
+> physical acceptance remains pending.
 >
 > Per-build release notes live in
 > [`docs/apple-builds/`](../../docs/apple-builds/README.md). Builds through 78
