@@ -1519,7 +1519,11 @@ pattern = "cache_route_if_generation"
 # row: the third occurrence is the doc comment on `RouteLockSite::GenerationInsert`
 # naming the function whose lock wait it labels. No new call site; the function
 # keeps its one caller and its generation check.
-expected_occurrences = 3
+# 3 -> 5 with the C-07 M5 review round (PR #598, comment 6123), measured by zeroing
+# this row: the paused-time sweep test calls it once, on a coordinator it owns, to run
+# the generation-insert sweep over expired entries, and names it once in a comment.
+# Test-only; the shipped function still has its one production caller.
+expected_occurrences = 5
 
 [[module_symbols]]
 id = "m4-predetermined-takeover-worker-id"
