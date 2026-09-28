@@ -68,7 +68,9 @@ function fixture({readyState = "complete", fetchImpl = null} = {}) {
 }
 
 async function drainMicrotasks() {
-  for (let index = 0; index < 50; index += 1) await Promise.resolve();
+  // VM/host promise adoption needs multiple jobs for each serialized report.
+  // Yield a complete event-loop turn instead of assuming a fixed job count.
+  await new Promise((resolve) => setImmediate(resolve));
 }
 
 test("early errors queue, redact, cap, deduplicate and drain on authentication", async () => {
