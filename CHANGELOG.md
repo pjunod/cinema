@@ -21,9 +21,10 @@ bump may break compatibility and a **patch** bump never does.
   admission evicts the oldest evictable settled rows when the table is at its
   bound, upkeep drains history from 9,000 rows so admission rarely has to,
   and the queue refuses for size only when nothing is evictable. Rows a
-  pending waiter or a legacy fragment import still needs are never evicted,
-  and waiters keep their receipts. SQLite migration 85 and replicated schema
-  63 replace the enqueue and upkeep triggers. A refused admission on
+  pending waiter or a legacy fragment import still needs are never evicted;
+  waiters keep their seven-day receipts, so under pressure a receipt can now
+  outlive its job row. SQLite migration 85 and replicated schema 63 replace
+  the enqueue and upkeep triggers. A refused admission on
   `POST /api/v1/scan` is now a 503 naming the refusal, so a caller retries
   instead of reading a crash that never happened.
 

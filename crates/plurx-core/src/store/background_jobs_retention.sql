@@ -9,10 +9,12 @@
 -- Now the enqueue trigger evicts the oldest evictable settled rows when the
 -- table is at its bound, upkeep starts evicting at 9,000 so the enqueue path
 -- rarely has to, and the admission statement refuses only when nothing is
--- evictable. Evictable means settled, not pinned by a pending waiter, and not
--- the fragment history a legacy import still needs. Waiters keep their
--- receipts; a settled job row going early is the same state the seven-day
--- prune already produces.
+-- evictable. Evictable means settled, not pinned by a pending waiter, not
+-- the fragment history a legacy import still needs, and not the row the
+-- accepted command itself names (a legacy import can re-admit a settled job
+-- by id; evicting it first would let the INSERT below resurrect it as
+-- queued). Waiters keep their receipts; a settled job row going early is
+-- the state the seven-day prune already produces, only sooner.
 DROP TRIGGER IF EXISTS background_job_enqueue_command;
 -- next statement
 CREATE TRIGGER IF NOT EXISTS background_job_enqueue_command
@@ -29,6 +31,7 @@ BEGIN
         AND (SELECT COUNT(*) FROM background_jobs) >= 10000
         AND id IN (SELECT job.id FROM background_jobs job
         WHERE job.state IN ('succeeded','failed','cancelled')
+          AND job.id != json_extract(NEW.result_json, '$.job_id')
           AND NOT EXISTS (SELECT 1 FROM background_job_legacy remaining WHERE remaining.state = 'awaiting_import'
             AND remaining.kind = 'fragment_index_build'
             AND json_extract(remaining.snapshot_json, '$.cache_key') = json_extract(job.payload_json, '$.cache_key'))

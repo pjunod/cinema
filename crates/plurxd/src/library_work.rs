@@ -81,9 +81,19 @@ impl JobManager {
                 self.library_wake.notify_one();
                 Ok(())
             }
-            outcome => Err(TargetError::Refused(format!(
+            // Full, or the same request is still being cancelled: nothing is
+            // wrong and trying again is the answer. A conflict, a library that
+            // vanished, or fenced producer is not — those stay failures.
+            outcome @ (EnqueueOutcome::QueueFull
+            | EnqueueOutcome::JobCancelling { .. }
+            | EnqueueOutcome::Existing {
+                cancelled: true, ..
+            }) => Err(TargetError::Refused(format!(
                 "library work was not accepted: {outcome:?}"
             ))),
+            outcome => Err(TargetError::Store(StoreError::Task(format!(
+                "library work was not accepted: {outcome:?}"
+            )))),
         }
     }
 
