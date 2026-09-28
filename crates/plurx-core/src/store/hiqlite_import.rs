@@ -1525,6 +1525,15 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "live_tv_resource_records",
+        columns: &["id", "kind", "user_id", "live", "expires_at_ms", "body"],
+        order_by: "id",
+        minimum_schema: 83,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "dvr_recordings",
         columns: &[
             "id",
@@ -1946,6 +1955,17 @@ impl HiqliteAuthStore {
         for table in TABLES {
             self.import_table(&source, schema_version, *table).await?;
         }
+
+        // This CAS counter is derived coordination state, not application
+        // data. Rebuild it above every imported attempt epoch before serving.
+        self.client()
+            .execute(
+                "UPDATE live_tv_resource_revision SET revision=MAX(revision,
+            COALESCE((SELECT MAX(CAST(json_extract(body,'$.value.epoch') AS INTEGER))
+                FROM live_tv_resource_records),0)),nonce='' WHERE singleton=1",
+                params!(),
+            )
+            .await?;
 
         let search_rows = self.rebuild_search_index().await?;
         let item_count = self.target_count("items", None).await?;
@@ -3403,7 +3423,10 @@ mod tests {
             assert!(names.contains(&name));
         }
         assert!(!names.contains(&"classification_fts"));
-        assert_eq!(names.len(), 69, "review every imported durable table");
+        assert!(names.contains(&"live_tv_resource_records"));
+        // The revision/nonce is reconstructed above the greatest restored epoch.
+        assert!(!names.contains(&"live_tv_resource_revision"));
+        assert_eq!(names.len(), 70, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its

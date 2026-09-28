@@ -457,6 +457,8 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   // `//` comment and swallow whatever follows it.
   const composedBody = [
       shippedSource("preparedHandoffEnabled"), shippedSource("liveTvSettingsCard"),
+      shippedSource("liveTvEnableCard"),
+      "const document={getElementById:()=>null};",
       shippedSource("verifiedDecodeCard"), shippedSource("decodeRecoveryCard"), shippedSource("hevcCopyCard"),
       // #309's sibling problem, twice over: a card or fragment `developerPanel`
       // calls has to be composed here or the panel throws on the name and this
@@ -547,7 +549,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const html = renderComposedPanel(
     "developerPanel", () => panels.developerPanel(settings, readiness),
   );
-  for (const id of ["hevc-unverified", "durable-analysis", "durable-pretranscode", "pabr", "pqh", "pdp", "dhqa", "adr", "sub503", "pgsoverlay", "subsrc", "subcluster", "subbackfill", "chthumb"])
+  for (const id of ["dev-live-tv-enable", "hevc-unverified", "durable-analysis", "durable-pretranscode", "pabr", "pqh", "pdp", "dhqa", "adr", "sub503", "pgsoverlay", "subsrc", "subcluster", "subbackfill", "chthumb"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
   // Parallel playback ranges are automatic: the card explains them and reads
   // peer reachability as advisory, and offers no switch of its own.
@@ -559,6 +561,8 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.match(unverified, /TOG:hevc-unverified\|[^|]*\|[^|]*\|checked=true\|/);
   assert.match(unverified, /FOOT:saveHevcCopy/);
   assert.match(unverified, /not configured/);
+  assert.match(html, /FOOT:saveLiveTvEnable/);
+  assert.match(html, /Readiness observations never disable the control/);
   // Absent from the settings document is on: chapter thumbnails default on.
   assert.match(html, /TOG:chthumb\|[^|]*\|[^|]*\|checked=true/);
   assert.match(html, /FOOT:saveChapterThumbnails/);
@@ -673,8 +677,9 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.match(live, /FOOT:saveDvrSettings/);
   assert.match(live, /FOOT:saveLibraryChannelsSettings/);
   assert.match(live, /HDHomeRun Live TV/);
-  assert.match(live, /Save the configuration, check readiness, then enable/);
-  assert.match(live, /Readiness is advice, not a gate/);
+  assert.match(live, /tuner itself belongs to the cluster/);
+  assert.match(live, /Developer → Enable Live TV/);
+  assert.doesNotMatch(live, /ltowner|ltfenced|setLiveTvEnabled/);
   assert.match(live, /Programme guide/);
   assert.match(live, /Saved-configuration evidence/);
   assert.match(live, /api\.hdhomerun\.com/);
@@ -711,11 +716,16 @@ test("unmet subtitle readiness cannot refuse the saved cluster or backfill switc
 
 test("server guidance sends disabled Live TV features to their current settings", () => {
   const sourceRoot = path.resolve(__dirname, "../../crates/plurxd/src");
-  for (const file of ["http/dvr.rs", "http/library_channels.rs", "channel_subjects.rs", "http/live_tv.rs", "live_tv.rs"]) {
+  for (const file of ["http/dvr.rs", "http/library_channels.rs", "channel_subjects.rs"]) {
     const source = fs.readFileSync(path.join(sourceRoot, file), "utf8");
     assert.match(source, /Settings → Live TV/, `${file} names the current destination`);
     assert.doesNotMatch(source, /Settings → Developer|Developer settings|use Developer recovery|Run the Developer readiness check/,
       `${file} must not send an operator to the retired destination`);
+  }
+  for (const file of ["http/live_tv.rs", "live_tv.rs"]) {
+    const source = fs.readFileSync(path.join(sourceRoot, file), "utf8");
+    assert.match(source, /Live TV is disabled[^"\n]*Settings → Developer/,
+      `${file} sends enablement to its advisory Developer control`);
   }
 });
 
@@ -855,9 +865,9 @@ test("Live TV mutations repaint only the card that owns the saved fields", () =>
   assert.match(shippedSource("saveLiveTvGuide"),
     /replaceLiveTvCard\("live-tv-guide-settings",liveTvGuideCard\(saved\),"ltgsrc"\)/);
   assert.match(shippedSource("saveLiveTvSettings"),
-    /replaceLiveTvCard\("live-tv-settings",liveTvSettingsCard\(saved\),"ltenable"\)/);
-  assert.match(shippedSource("setLiveTvEnabled"),
-    /replaceLiveTvCard\("live-tv-settings",liveTvSettingsCard\(saved\),"ltenable"\)/);
+    /replaceLiveTvCard\("live-tv-settings",liveTvSettingsCard\(saved\),"ltip"\)/);
+  assert.doesNotMatch(shippedSource("saveLiveTvEnable"), /renderSettings\(|replaceLiveTvCard\(/,
+    "saving Developer enablement cannot erase a tuner or guide draft");
 });
 
 test("every asynchronous Live TV settings response is fenced to the Live TV route", () => {

@@ -69,6 +69,8 @@ mod hiqlite_import;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_library_channels;
 #[cfg(feature = "hiqlite-store")]
+mod hiqlite_live_tv_resource;
+#[cfg(feature = "hiqlite-store")]
 mod hiqlite_media;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_pretranscode;
@@ -5237,7 +5239,8 @@ pub trait TimelineAnnotationStore: Send + Sync + 'static {
 
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
-    SettingsStore
+    crate::live_tv_resource::LiveTvResourceStore
+    + SettingsStore
     + BackgroundJobStore
     + DvConversionStore
     + MetricsStore
@@ -5273,7 +5276,8 @@ pub trait Store:
 }
 
 impl<T> Store for T where
-    T: SettingsStore
+    T: crate::live_tv_resource::LiveTvResourceStore
+        + SettingsStore
         + BackgroundJobStore
         + DvConversionStore
         + MetricsStore
