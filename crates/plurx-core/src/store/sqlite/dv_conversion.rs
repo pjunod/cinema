@@ -1506,6 +1506,9 @@ mod tests {
             // v84 replaces a background-prefixed trigger. Both fixtures call
             // remove_common_queue_schema before dropping older domain columns.
             "DROP TRIGGER IF EXISTS background_subtitle_settled",
+            // v85 replaces the background-prefixed maintenance trigger with
+            // its retention-pressure shape; the same helper removes it.
+            "DROP TRIGGER IF EXISTS background_job_maintenance_command",
         ];
 
         assert!(
