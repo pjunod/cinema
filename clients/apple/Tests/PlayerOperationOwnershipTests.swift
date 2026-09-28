@@ -53,6 +53,55 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         }
     }
 
+    func testPreparedSeekDeadlineFailsWithoutWaitingForAVPlayer() async throws {
+        let decisionEntered = expectation(description: "decision suspended")
+        let seekEntered = expectation(description: "replacement seek suspended")
+        let deadlineEntered = expectation(description: "replacement deadline suspended")
+        let returned = expectation(description: "replacement preparation returned")
+        var decision: CheckedContinuation<(decision: Decision, caps: DeviceCaps), Error>?
+        var finishSeek: CheckedContinuation<Void, Never>?
+        var expire: CheckedContinuation<Void, Error>?
+        let preparation = PlayerController.ItemPreparation(ready: { _ in }, seek: { _, _ in
+            await withCheckedContinuation {
+                finishSeek = $0
+                seekEntered.fulfill()
+            }
+        })
+        let controller = PlayerController(requestPlaybackDecision: { _, _, _, _ in
+            try await withCheckedThrowingContinuation {
+                decision = $0
+                decisionEntered.fulfill()
+            }
+        }, itemPreparation: preparation, waitNativeSeekDeadline: {
+            try await withCheckedThrowingContinuation {
+                expire = $0
+                deadlineEntered.fulfill()
+            }
+        })
+        let model = AppModel()
+        start(controller, model: model)
+        let load = try XCTUnwrap(controller.loadingTask)
+        await fulfillment(of: [decisionEntered], timeout: 3)
+        let item = AVPlayerItem(url: URL(fileURLWithPath: "/replacement-seek-timeout"))
+        controller.player.replaceCurrentItem(with: item)
+        let owner = controller.seekPreparationOwner(at: 90_000)
+        var failure: Error?
+        let operation = Task {
+            do { try await controller.seekWhenReady(item, ms: 90_000, owner: owner) }
+            catch { failure = error }
+            returned.fulfill()
+        }
+        await fulfillment(of: [seekEntered, deadlineEntered], timeout: 3)
+        try XCTUnwrap(expire).resume()
+        await fulfillment(of: [returned], timeout: 3)
+        await operation.value
+        XCTAssertTrue(try XCTUnwrap(failure).localizedDescription.contains("took too long"))
+        controller.stop()
+        finishSeek?.resume()
+        decision?.resume(throwing: CancellationError())
+        await load.value
+    }
+
     func testPreparedSeekRejectsANewerDestinationBeforeMutatingThePlayer() async throws {
         try await checkPreparedSeek(change: "seek")
     }
@@ -978,6 +1027,92 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         XCTAssertEqual(controller.realPositionMs(), 2_000, accuracy: 100)
         XCTAssertFalse(controller.wantsPlayback)
         controller.stop()
+    }
+
+    func testNativeSeekDeadlineRecoversASeekThatNeverCompletes() async throws {
+        let (path, url) = try makeOfflineAudio()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let seekEntered = expectation(description: "native seek suspended")
+        let deadlineEntered = expectation(description: "seek deadline suspended")
+        var finishSeek: CheckedContinuation<Bool, Never>?
+        var fireDeadline: CheckedContinuation<Void, Error>?
+        var preparation = PlayerController.MediaSelectionPreparation()
+        preparation.audio = { _, _ in nil }
+        preparation.native = { _, _, _ in .init(hasSubtitleOptions: true, apply: { true }) }
+        let controller = PlayerController(
+            mediaSelectionPreparation: preparation,
+            nativeSeek: { _, _ in
+                await withCheckedContinuation {
+                    finishSeek = $0
+                    seekEntered.fulfill()
+                }
+            },
+            waitNativeSeekDeadline: {
+                try await withCheckedThrowingContinuation {
+                    fireDeadline = $0
+                    deadlineEntered.fulfill()
+                }
+            },
+            canPlayOffline: { _ in true }
+        )
+        defer {
+            controller.stop()
+            finishSeek?.resume(returning: false)
+        }
+        let model = AppModel()
+        controller.startOffline(model: model, item: offlineItem(path: path))
+        await controller.loadingTask?.value
+        let predecessor = try XCTUnwrap(controller.player.currentItem)
+        controller.seek(toMs: 2_000)
+        await fulfillment(of: [seekEntered, deadlineEntered], timeout: 3)
+        try XCTUnwrap(fireDeadline).resume()
+        try await waitUntil("native seek repair attached a fresh item") {
+            controller.player.currentItem !== predecessor
+        }
+        XCTAssertEqual(controller.currentMs, 2_000)
+    }
+
+    func testSupersededNativeSeekDeadlineCannotReplaceTheNewerItem() async throws {
+        let (path, url) = try makeOfflineAudio()
+        defer { try? FileManager.default.removeItem(at: url) }
+        var finishSeeks: [CheckedContinuation<Bool, Never>] = []
+        var fireDeadlines: [CheckedContinuation<Void, Error>] = []
+        var preparation = PlayerController.MediaSelectionPreparation()
+        preparation.audio = { _, _ in nil }
+        preparation.native = { _, _, _ in .init(hasSubtitleOptions: true, apply: { true }) }
+        let controller = PlayerController(
+            mediaSelectionPreparation: preparation,
+            nativeSeek: { _, _ in
+                await withCheckedContinuation { finishSeeks.append($0) }
+            },
+            waitNativeSeekDeadline: {
+                try await withCheckedThrowingContinuation { fireDeadlines.append($0) }
+            },
+            canPlayOffline: { _ in true }
+        )
+        defer {
+            controller.stop()
+            for continuation in finishSeeks { continuation.resume(returning: false) }
+            for continuation in fireDeadlines { continuation.resume() }
+        }
+        let model = AppModel()
+        controller.startOffline(model: model, item: offlineItem(path: path))
+        await controller.loadingTask?.value
+        let item = try XCTUnwrap(controller.player.currentItem)
+        let generation = controller.openGenerationForTesting
+        controller.seek(toMs: 2_000)
+        try await waitUntil("first native seek started") {
+            finishSeeks.count == 1 && fireDeadlines.count == 1
+        }
+        controller.seek(toMs: 4_000)
+        try await waitUntil("newer native seek started") {
+            finishSeeks.count == 2 && fireDeadlines.count == 2
+        }
+        fireDeadlines.removeFirst().resume()
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(controller.player.currentItem === item)
+        XCTAssertEqual(controller.openGenerationForTesting, generation)
+        XCTAssertEqual(controller.currentMs, 4_000)
     }
 
     func testCancelledOfflineStartCannotAttachIntoANewerOnlineTitle() async throws {

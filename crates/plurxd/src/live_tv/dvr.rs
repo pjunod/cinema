@@ -134,8 +134,6 @@ pub(crate) const TRANSPORT_FACTS_MAX_AGE: std::time::Duration = std::time::Durat
 pub(crate) enum TransportOrigin {
     Viewer,
     Recording,
-    /// A processor's bounded connection to the owner, never a device GET.
-    PeerViewer,
 }
 
 /// One tuner GET on one channel of one device, feeding every recording sink
@@ -1550,12 +1548,8 @@ impl LiveTvManager {
         Ok(())
     }
 
-    /// The owner's recording loop.
-    ///
-    /// Owner-only by construction, like the guide loop, and holding no job
-    /// lease: the tuner configuration already names one owner, and a lease
-    /// would be a second authority over the same resource that could disagree
-    /// with it.
+    /// Every serving worker may plan recordings; replicated capture claims
+    /// choose the executor before it opens a file or tuner response.
     pub(crate) async fn dvr_loop(
         self: Arc<Self>,
         events: super::webhook::DvrEventSink,
@@ -1580,16 +1574,12 @@ impl LiveTvManager {
                         );
                     }
                 } else if !ours || !live_tv.enabled {
-                    if live_tv.enabled {
-                        // A processor owns peer feeds, not the physical tuner.
-                        // Reconcile former local-device ownership without
-                        // ending the viewer work delegated by the current owner.
-                        self.close_device_transports().await;
-                    } else {
-                        self.close_all_transports().await;
-                    }
                     self.dvr_storage_free_bytes
-                        .store(u64::MAX, Ordering::Release);
+                        .store(u64::MAX, Ordering::Relaxed);
+                    // Not this node's work any more, or Live TV switched off.
+                    // Close what we hold rather than leaving a tuner occupied
+                    // by a feature the operator has turned off.
+                    self.close_all_transports().await;
                 } else if !dvr.enabled {
                     self.dvr_storage_free_bytes
                         .store(u64::MAX, Ordering::Relaxed);
@@ -1597,6 +1587,34 @@ impl LiveTvManager {
                     // captures, and leave the transports viewers are watching
                     // (they are not the DVR's to close).
                     self.close_recordings().await;
+                }
+                // Finalization consumes sealed bytes, not tuner authority.
+                // Disabling capture must still preserve useful partial work.
+                if self.serving.admit().is_some() {
+                    if !live_tv.enabled || !dvr.enabled {
+                        if let Ok(rows) = self.dvr_rows(&[DvrState::Recording]).await {
+                            for row in rows {
+                                let _ = self.stop_sink(&row.id, row.attempt).await;
+                                if let Err(error) = self
+                                    .finish_row(
+                                        &row,
+                                        &events,
+                                        unix_seconds(),
+                                        (row.capture_end - unix_seconds()).max(0),
+                                        None,
+                                        "recording disabled",
+                                        live_tv.generation,
+                                    )
+                                    .await
+                                {
+                                    tracing::debug!(recording = %row.id, %error, "finalization will retry");
+                                }
+                            }
+                        }
+                    }
+                    if let Err(error) = self.dvr_purge_deleted().await {
+                        tracing::debug!(%error, "recording deletion will retry");
+                    }
                 }
             }
             tokio::select! {
@@ -1682,6 +1700,13 @@ impl LiveTvManager {
         let live = self.live_recording_ids();
         let rows = self.dvr_rows(&[DvrState::Recording]).await?;
         for row in rows {
+            if self
+                .resource_capture(&row.id)
+                .await?
+                .is_some_and(|c| c.expires_at_ms > super::resource::now_ms())
+            {
+                continue;
+            }
             if live.contains(&row.id) {
                 continue;
             }
@@ -1740,18 +1765,7 @@ impl LiveTvManager {
                     .await
                 {
                     Ok(()) => {
-                        self.transition(
-                            &row.id,
-                            &[DvrState::Recording],
-                            DvrState::Recording,
-                            Some("resumed after the capture lost its worker"),
-                            DvrStatePatch::Reattempt {
-                                attempt,
-                                gap_s: row.gap_s + gap,
-                            },
-                            Some(generation),
-                        )
-                        .await?;
+                        tracing::info!(recording = %row.id, attempt, "recording capture reclaimed");
                         continue;
                     }
                     Err(error) => {
@@ -1769,8 +1783,12 @@ impl LiveTvManager {
             } else {
                 "worker lost"
             };
-            self.finish_row(&row, events, now, gap, None, reason, generation)
-                .await?;
+            if let Err(error) = self
+                .finish_row(&row, events, now, gap, None, reason, generation)
+                .await
+            {
+                tracing::debug!(recording = %row.id, %error, "finalization deferred to an eligible storage worker");
+            }
         }
         Ok(())
     }
@@ -2047,17 +2065,21 @@ impl LiveTvManager {
                 );
                 continue;
             }
-            self.finish_row_with_facts(
-                &row,
-                facts,
-                events,
-                now,
-                0,
-                row.stop_requested_by_user_id,
-                "stopped by a viewer",
-                generation,
-            )
-            .await?;
+            if let Err(error) = self
+                .finish_row_with_facts(
+                    &row,
+                    facts,
+                    events,
+                    now,
+                    0,
+                    row.stop_requested_by_user_id,
+                    "stopped by a viewer",
+                    generation,
+                )
+                .await
+            {
+                tracing::debug!(recording = %row.id, %error, "stopped recording finalization deferred");
+            }
             self.close_finished_transports().await;
         }
         Ok(())
@@ -2121,13 +2143,11 @@ impl LiveTvManager {
             .into_iter()
             .map(|rule| (rule.id, rule.priority))
             .collect::<BTreeMap<_, _>>();
-        let floor_met = super::free_space_bytes(&dvr.root).is_none_or(|free| {
-            free >= (dvr.free_floor_gb.max(0) as u64).saturating_mul(1_000_000_000)
-        });
         let plan = schedule::allocate(
             &rows,
             dvr.recording_slots(live_tv.max_sessions),
-            floor_met,
+            // A local disk reading cannot reject work for the whole cluster.
+            true,
             &|rule_id| priorities.get(rule_id).copied().unwrap_or(i64::MAX),
         );
         for entry in plan {
@@ -2176,30 +2196,13 @@ impl LiveTvManager {
                 );
                 continue;
             }
-            let late = (now - row.capture_start).max(0);
             // If the row moved under us — a viewer cancelled it, or the
             // configuration generation changed — the capture that is already
             // opened has no row to belong to. Close it rather than letting a
             // file grow for a recording nobody asked for.
-            let claimed = self
-                .transition(
-                    &row.id,
-                    &[DvrState::Scheduled],
-                    DvrState::Recording,
-                    (late > 0).then_some("started late"),
-                    DvrStatePatch::Started {
-                        attempt: 1,
-                        tuner_owner_node_id: self.node_id.clone(),
-                        started_at_ms: now.saturating_mul(1000),
-                        late_start_s: late,
-                        path: self
-                            .recording_final_path(dvr, &row)
-                            .to_string_lossy()
-                            .into_owned(),
-                    },
-                    Some(generation),
-                )
-                .await?;
+            let claimed = self.resource_capture(&row.id).await?.is_some_and(|c| {
+                c.worker == self.resource_worker() && c.epoch == 1 && !c.stopped && !c.deleted
+            });
             if !claimed {
                 tracing::info!(
                     recording = %row.id,
@@ -2274,8 +2277,12 @@ impl LiveTvManager {
                 );
                 continue;
             }
-            self.finish_row(&row, events, now, 0, None, "capture complete", generation)
-                .await?;
+            if let Err(error) = self
+                .finish_row(&row, events, now, 0, None, "capture complete", generation)
+                .await
+            {
+                tracing::debug!(recording = %row.id, %error, "completed recording finalization deferred");
+            }
         }
         self.close_finished_transports().await;
         Ok(())
@@ -2293,7 +2300,9 @@ impl LiveTvManager {
             if row.path.is_none() {
                 continue;
             }
-            self.delete_recording_files(&row).await;
+            if !self.delete_recording_files(&row).await {
+                continue;
+            }
             self.transition(
                 &row.id,
                 &[DvrState::Deleted],
@@ -2349,7 +2358,6 @@ impl LiveTvManager {
                 }
             };
             for row in doomed {
-                self.delete_recording_files(row).await;
                 self.transition(
                     &row.id,
                     &[DvrState::Done, DvrState::Partial],
@@ -2386,9 +2394,19 @@ impl LiveTvManager {
                 "no DVR root is configured, so a recording has nowhere to go".to_owned(),
             ));
         }
-        let channel = self
-            .cached_lineup(live_tv)
-            .await
+        if super::free_space_bytes(&dvr.root).is_some_and(|free| {
+            free < (dvr.free_floor_gb.max(0) as u64).saturating_mul(1_000_000_000)
+        }) {
+            return Err(LiveTvError::Capacity(
+                "this worker's recording storage is below its free-space floor".into(),
+            ));
+        }
+        let snapshot = self.local_snapshot(live_tv, true, false).await?;
+        let device_id = snapshot.device.device_id.clone();
+        let mut effective = live_tv.clone();
+        effective.max_sessions = live_tv.max_sessions.min(snapshot.device.tuner_count);
+        let channel = snapshot
+            .channels
             .into_iter()
             .find(|channel| channel.id == row.channel_id)
             .ok_or_else(|| {
@@ -2416,7 +2434,15 @@ impl LiveTvManager {
             LiveTvError::OwnerUnavailable(crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned())
         })?;
 
-        let device_id = self.cached_device_id(live_tv).await.unwrap_or_default();
+        let claim = self
+            .resource_capture_claim(&effective, dvr, row, &device_id, &base)
+            .await?;
+        let base = PathBuf::from(&claim.base_path);
+        if claim.epoch != attempt {
+            return Err(LiveTvError::Conflict(
+                "the recording attempt changed; retry the current claim".into(),
+            ));
+        }
 
         // Decide about the tuner before touching the disk. The attempt file is
         // created with `O_EXCL`, so a file left behind by a refusal makes this
@@ -2445,7 +2471,6 @@ impl LiveTvManager {
                 match registry.transports.get(&row.channel_id).cloned() {
                     Some(transport)
                         if !transport.is_closing()
-                            && transport.origin != TransportOrigin::PeerViewer
                             && transport.same_tuner(&device_id, address)
                             && transport.owner_serving_generation == serving_generation
                             && schedule::may_share_transport(
@@ -2621,27 +2646,45 @@ impl LiveTvManager {
         transport: &Arc<DvrTransport>,
         client: reqwest::Client,
     ) {
-        self.spawn_transport_worker_with_input(transport, client, None);
-    }
-
-    pub(crate) fn spawn_transport_worker_with_input(
-        self: &Arc<Self>,
-        transport: &Arc<DvrTransport>,
-        client: reqwest::Client,
-        peer_response: Option<reqwest::Response>,
-    ) {
         let manager = Arc::downgrade(self);
         let worker_transport = Arc::clone(transport);
         let serving = self.serving.clone();
         let worker = tokio::spawn(async move {
-            let result = run_transport(
+            let stream = run_transport(
                 client,
                 manager.clone(),
                 serving,
                 Arc::clone(&worker_transport),
-                peer_response,
-            )
-            .await;
+            );
+            let result = if let Some(authority) = manager.upgrade() {
+                match authority.resource_transport_admit(&worker_transport).await {
+                    Ok((valid_until, ingest)) => {
+                        let result = tokio::select! {
+                            result = stream => result,
+                            result = authority.resource_transport_lease(&worker_transport, valid_until, ingest.clone()) => result,
+                        };
+                        // The exact claim used to open this body, never a new
+                        // channel lookup that could now name a successor.
+                        if !matches!(
+                            tokio::time::timeout(
+                                std::time::Duration::from_secs(2),
+                                authority.resource_transport_release(&ingest)
+                            )
+                            .await,
+                            Ok(Ok(()))
+                        ) {
+                            tracing::warn!("closed tuner transport awaits lease expiry");
+                        }
+                        result
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                Err(LiveTvError::OwnerUnavailable(
+                    "Live TV worker stopped".into(),
+                ))
+            };
+            worker_transport.cancel.cancel();
             worker_transport.finish(&result);
             if let Some(manager) = manager.upgrade() {
                 // Cleanup must not await the JoinHandle of the task that is
@@ -2704,6 +2747,10 @@ impl LiveTvManager {
         if settling {
             SinkStopResult::Settling
         } else {
+            if let Err(error) = self.resource_capture_detach(recording_id, attempt).await {
+                tracing::warn!(%error, "recording writer closed but durable detach is pending");
+                return SinkStopResult::Settling;
+            }
             SinkStopResult::Settled
         }
     }
@@ -2896,21 +2943,6 @@ impl LiveTvManager {
         transport.closed.cancel();
     }
 
-    async fn close_device_transports(&self) {
-        let transports = self
-            .registry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .transports
-            .values()
-            .filter(|transport| transport.origin != TransportOrigin::PeerViewer)
-            .cloned()
-            .collect::<Vec<_>>();
-        for transport in transports {
-            self.close_transport_arc(transport).await;
-        }
-    }
-
     pub(crate) async fn close_all_transports(&self) {
         let transports = {
             let registry = self
@@ -3022,10 +3054,6 @@ impl LiveTvManager {
             ))
     }
 
-    fn recording_final_path(&self, dvr: &DvrConfig, row: &DvrRecording) -> PathBuf {
-        final_path(&self.recording_base_path(dvr, row))
-    }
-
     /// Close a capture out: join its attempts into one file, write the
     /// sidecar, and record honestly what it managed to get.
     #[allow(clippy::too_many_arguments)]
@@ -3056,12 +3084,52 @@ impl LiveTvManager {
         extra_gap: i64,
         stopped_by: Option<i64>,
         reason: &str,
-        generation: i64,
+        _generation: i64,
     ) -> Result<(), LiveTvError> {
         let (_, dvr) = self.dvr_configs().await?;
-        let base = self.recording_base_path(&dvr, row);
+        let finalizer_deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(plurx_core::live_tv_resource::LEASE_MS as u64);
+        let claim = tokio::time::timeout_at(
+            finalizer_deadline,
+            self.resource_finalize(&row.id, &dvr.root),
+        )
+        .await
+        .map_err(|_| {
+            LiveTvError::OwnerUnavailable("recording finalization authority timed out".into())
+        })??;
+        let current = self
+            .store
+            .get_dvr_recording(&row.id)
+            .await
+            .map_err(store_error)?
+            .ok_or_else(|| LiveTvError::Conflict("recording was removed".into()))?;
+        if current.attempt != claim.epoch || current.state != DvrState::Recording {
+            return Err(LiveTvError::Conflict(
+                "recording changed during finalizer admission".into(),
+            ));
+        }
+        let extra_gap = if row.attempt == claim.epoch {
+            extra_gap
+        } else {
+            (now - current
+                .last_progress_ms
+                .or(current.started_at_ms)
+                .unwrap_or(current.created_at_ms)
+                / 1000)
+                .max(0)
+        };
+        let row = &current;
+        let input_base = PathBuf::from(&claim.base_path);
+        let base = sibling(&input_base, &format!(".f{}", claim.finalizer_epoch));
         let gap = row.gap_s + extra_gap;
-        let bytes = match concatenate_attempts(&base, row.attempt).await {
+        let assembled = tokio::select! {
+            result = concatenate_sealed_attempts(&input_base, &base, claim.epoch) => result,
+            result = self.resource_finalize_lease(&claim, finalizer_deadline) => {
+                let _ = tokio::fs::remove_file(final_path(&base)).await;
+                return result;
+            }
+        };
+        let bytes = match assembled {
             Ok(bytes) => bytes,
             Err(error) => {
                 tracing::warn!(
@@ -3069,7 +3137,10 @@ impl LiveTvManager {
                     %error,
                     "could not assemble a recording's attempts"
                 );
-                0
+                let _ = tokio::fs::remove_file(final_path(&base)).await;
+                return Err(LiveTvError::DeviceUnavailable(format!(
+                    "assembling recording: {error}"
+                )));
             }
         };
         let state = if bytes == 0 {
@@ -3085,23 +3156,25 @@ impl LiveTvManager {
             reason.to_owned()
         };
         if bytes > 0 {
-            write_sidecar(&base, row, &facts, state, bytes, gap, now).await;
+            if let Err(error) = write_sidecar(&base, row, &facts, state, bytes, gap, now).await {
+                let _ = tokio::fs::remove_file(final_path(&base)).await;
+                let _ = tokio::fs::remove_file(sidecar_path(&base)).await;
+                return Err(LiveTvError::DeviceUnavailable(format!(
+                    "recording sidecar: {error}"
+                )));
+            }
         }
-        self.transition(
-            &row.id,
-            &[DvrState::Recording],
-            state,
-            Some(&reason),
-            DvrStatePatch::Finished {
-                finished_at_ms: now.saturating_mul(1000),
-                bytes: i64::try_from(bytes).unwrap_or(i64::MAX),
-                gap_s: gap,
-                path: final_path(&base).to_str().map(str::to_owned),
-                stopped_by_user_id: stopped_by,
-            },
-            Some(generation),
+        self.resource_publish(
+            &claim,
+            &final_path(&base),
+            i64::try_from(bytes).unwrap_or(i64::MAX),
+            gap,
+            stopped_by,
         )
         .await?;
+        for attempt in 1..=claim.epoch {
+            let _ = tokio::fs::remove_file(attempt_path(&input_base, attempt)).await;
+        }
         tracing::info!(
             recording = %row.id,
             title = %row.title,
@@ -3153,9 +3226,55 @@ impl LiveTvManager {
         facts
     }
 
-    async fn delete_recording_files(&self, row: &DvrRecording) {
+    async fn delete_recording_files(&self, row: &DvrRecording) -> bool {
+        let mut artifacts = Vec::new();
+        match self.resource_capture(&row.id).await {
+            Ok(Some(claim)) => {
+                let Ok((_, dvr)) = self.dvr_configs().await else {
+                    return false;
+                };
+                if super::resource::storage_identity(&dvr.root)
+                    .await
+                    .ok()
+                    .as_deref()
+                    != Some(claim.storage_id.as_str())
+                {
+                    return false;
+                }
+                if !matches!(
+                    self.store
+                        .live_tv_resource_command(
+                            plurx_core::live_tv_resource::Command::StopCapture {
+                                recording_id: row.id.clone(),
+                                delete: true,
+                            },
+                            super::resource::now_ms(),
+                        )
+                        .await,
+                    Ok(plurx_core::live_tv_resource::Outcome::Applied)
+                ) {
+                    return false;
+                }
+                // Fence first, then let every previously authorized writer's
+                // deadline elapse before removing its private artifacts.
+                if claim.expires_at_ms > super::resource::now_ms() {
+                    return false;
+                }
+                let base = PathBuf::from(&claim.base_path);
+                for attempt in 1..=claim.epoch {
+                    artifacts.push(attempt_path(&base, attempt));
+                }
+                for epoch in 1..=claim.finalizer_epoch {
+                    let output = sibling(&base, &format!(".f{epoch}"));
+                    artifacts.push(final_path(&output));
+                    artifacts.push(sibling(&output, ".json"));
+                }
+            }
+            Ok(None) if row.tuner_owner_node_id.as_deref() == Some(self.node_id.as_str()) => {}
+            _ => return false,
+        }
         let Some(path) = row.path.as_deref() else {
-            return;
+            return true;
         };
         let base = PathBuf::from(path);
         // The row stores the final `.ts` path, so the sidecar is found by
@@ -3165,13 +3284,19 @@ impl LiveTvManager {
             .to_str()
             .and_then(|path| path.strip_suffix(".ts"))
             .map(|stem| PathBuf::from(format!("{stem}.json")));
-        for candidate in std::iter::once(base.clone()).chain(sidecar) {
+        let mut removed = true;
+        for candidate in std::iter::once(base.clone())
+            .chain(sidecar)
+            .chain(artifacts)
+        {
             if let Err(error) = tokio::fs::remove_file(&candidate).await {
                 if error.kind() != std::io::ErrorKind::NotFound {
+                    removed = false;
                     tracing::warn!(%error, path = %candidate.display(), "could not remove a recording");
                 }
             }
         }
+        removed
     }
 }
 
@@ -3186,18 +3311,19 @@ async fn run_transport(
     manager: std::sync::Weak<LiveTvManager>,
     serving: crate::serving_fence::ServingAuthority,
     transport: Arc<DvrTransport>,
-    peer_response: Option<reqwest::Response>,
 ) -> Result<(), LiveTvError> {
+    if !serving.is_current(transport.owner_serving_generation) {
+        return Err(LiveTvError::OwnerUnavailable(
+            crate::serving_fence::SERVING_FENCED_MESSAGE.into(),
+        ));
+    }
     let guide_number = transport.channel.guide_number.clone();
     let url = pinned_url(transport.address, 5004, &format!("/auto/v{guide_number}"))?;
     let deadline = tokio::time::Instant::now() + super::STARTUP_TIMEOUT;
-    let response = match peer_response {
-        Some(response) => response,
-        None => tokio::select! {
-            biased;
-            _ = transport.cancel.cancelled() => return Ok(()),
-            response = open_tuner_stream(&client, url, deadline) => response?,
-        },
+    let response = tokio::select! {
+        biased;
+        _ = transport.cancel.cancelled() => return Ok(()),
+        response = open_tuner_stream(&client, url, deadline) => response?,
     };
     // A warm opening keeps no prefix: its opener's FFmpeg was planned from
     // cached facts and is fed from the first byte, while the fan-out probes
@@ -3529,10 +3655,41 @@ async fn prior_attempt_bytes(base: &std::path::Path, attempt: i64) -> Option<u64
     Some(total)
 }
 
+/// Copy a stable prefix of each append-only attempt into an exclusive output.
+/// Expired writers may still append; they cannot alter bytes already copied or
+/// extend this finalizer's captured length. Publication is a separate epoch CAS.
+async fn concatenate_sealed_attempts(
+    input_base: &std::path::Path,
+    output_base: &std::path::Path,
+    attempts: i64,
+) -> std::io::Result<u64> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut output = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(final_path(output_base))
+        .await?;
+    let mut written = 0;
+    for attempt in 1..=attempts.max(1) {
+        let input = match tokio::fs::File::open(attempt_path(input_base, attempt)).await {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        let length = input.metadata().await?.len();
+        let mut sealed = input.take(length);
+        written += tokio::io::copy(&mut sealed, &mut output).await?;
+    }
+    output.flush().await?;
+    output.sync_all().await?;
+    Ok(written)
+}
+
 /// Join `<base>.a1.part`, `<base>.a2.part`, … into `<base>.ts` and remove the
 /// parts. MPEG-TS packets concatenate, so the join is a byte copy; the
 /// discontinuity between attempts is a gap, which the row and the sidecar name
 /// rather than paper over.
+#[cfg(test)]
 async fn concatenate_attempts(base: &std::path::Path, attempts: i64) -> std::io::Result<u64> {
     use tokio::io::AsyncWriteExt as _;
 
@@ -3580,7 +3737,8 @@ async fn write_sidecar(
     bytes: u64,
     gap_s: i64,
     now: i64,
-) {
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
     let document = serde_json::json!({
         "plurx_dvr": 1,
         "recording_id": row.id,
@@ -3614,16 +3772,15 @@ async fn write_sidecar(
         "bytes": bytes,
     });
     let path = sidecar_path(base);
-    let body = match serde_json::to_vec_pretty(&document) {
-        Ok(body) => body,
-        Err(error) => {
-            tracing::warn!(%error, "could not serialise a recording sidecar");
-            return;
-        }
-    };
-    if let Err(error) = tokio::fs::write(&path, body).await {
-        tracing::warn!(%error, path = %path.display(), "could not write a recording sidecar");
-    }
+    let body = serde_json::to_vec_pretty(&document)?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .await?;
+    file.write_all(&body).await?;
+    file.sync_all().await?;
+    Ok(())
 }
 
 /// Byte counts reaching the Store, so the Activity row's number rises without
@@ -3644,11 +3801,19 @@ pub(crate) async fn dvr_progress_loop(manager: Arc<LiveTvManager>, shutdown: Can
                 continue;
             }
             last.insert(activity.recording_id.clone(), activity.bytes);
+            let epoch = match manager.resource_capture(&activity.recording_id).await {
+                Ok(Some(c)) if c.worker == manager.resource_worker() => c.epoch,
+                _ => continue,
+            };
             if let Err(error) = manager
                 .store
-                .progress_dvr_recording(
-                    &activity.recording_id,
-                    i64::try_from(activity.bytes).unwrap_or(i64::MAX),
+                .live_tv_resource_command(
+                    plurx_core::live_tv_resource::Command::ProgressCapture {
+                        recording_id: activity.recording_id.clone(),
+                        worker: manager.resource_worker(),
+                        epoch,
+                        bytes: i64::try_from(activity.bytes).unwrap_or(i64::MAX),
+                    },
                     now_ms,
                 )
                 .await
@@ -4385,7 +4550,7 @@ mod tests {
 
     fn tuner_input(
         chunks: Vec<bytes::Bytes>,
-        pulled_at: Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+        pulled_at: Arc<std::sync::Mutex<Vec<tokio::time::Instant>>>,
     ) -> LiveTunerInput {
         use futures_util::StreamExt as _;
 
@@ -4402,7 +4567,7 @@ mod tests {
                 pulled_at
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(std::time::Instant::now());
+                    .push(tokio::time::Instant::now());
                 Some((
                     Ok::<_, reqwest::Error>(chunks[index].clone()),
                     (chunks, index + 1, pulled_at),
@@ -4417,7 +4582,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_slow_sink_never_delays_the_tuner_reader_or_its_sibling() {
         let metrics = Arc::new(LiveTvMetrics::default());
         let delivered = Arc::new(AtomicU64::new(0));
@@ -4457,7 +4622,10 @@ mod tests {
             .collect::<Vec<_>>();
         let pulled_at = Arc::new(std::sync::Mutex::new(Vec::new()));
 
-        let started = std::time::Instant::now();
+        // Virtual time measures waiting on the blocked sink without charging
+        // unrelated runner CPU scheduling to the fanout. A blocking sink still
+        // advances the timer and violates the latency bound.
+        let started = tokio::time::Instant::now();
         let result = pump_tuner_fanout(
             tuner_input(chunks, Arc::clone(&pulled_at)),
             serving,
@@ -6003,7 +6171,8 @@ mod tests {
             41,
             1_789_002_700,
         )
-        .await;
+        .await
+        .expect("sidecar");
         let parsed = plurx_core::scan::recordings::read_sidecar(&final_path(&base))
             .expect("the scan must be able to read what the engine wrote");
         let programme = parsed.programme.expect("programme");

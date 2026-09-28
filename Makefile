@@ -61,11 +61,14 @@ test-full: test-socket-permission-check ## Run every Rust test, including replic
 	$(MAKE) vodencode-restart-check CARGO="$(CARGO_RAW)"
 
 .PHONY: vodencode-restart-check
+# Keep the same package selection as `unit`: selecting only plurxd changes
+# dependency feature unification and rebuilds the already-tested daemon. The
+# exact filters still execute only the two resource-heavy restart regressions.
 vodencode-restart-check: ## Run resource-heavy real-FFmpeg restart regressions serially
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked --workspace --exclude plurx-cluster-check \
 	  vodserve::tests::encoded_vod_vfr_input_is_sampled_on_the_declared_rational_grid \
 	  -- --exact --ignored --test-threads=1
-	$(CARGO) test --locked -p plurxd --bin plurxd \
+	$(CARGO) test --locked --workspace --exclude plurx-cluster-check \
 	  vodserve::tests::encoded_vod_bitmap_burn_restores_cues_that_predate_video_seek_landing \
 	  -- --exact --ignored --test-threads=1
 
@@ -1476,6 +1479,7 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	# A startup that never presented a frame must not post position 0 over a
 	# resume point. One failed session used to erase it for good.
 	@node --test tests/web/progress-never-presented.test.js
+	@node --test tests/web/seek-telemetry.test.js
 	@node tests/web/nav-keyboard.test.js
 	@node tests/web/reader.test.js
 	@node tests/web/library-channels.test.js

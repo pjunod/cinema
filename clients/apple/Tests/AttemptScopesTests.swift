@@ -80,6 +80,8 @@ final class AttemptScopesTests: XCTestCase {
         // `self.viewerActionEpoch == recoveryActionEpoch`,
         // `self.seekState.generation == generation`
         .seekPresentationDeadline: [.open, .viewerAction, .seek],
+        // A seek beacon survives Pause/reopen and ends only with its destination.
+        .seekTelemetrySupersession: [.seek],
         // `self.isCurrentLifecycle(lifecycle)`,
         // `self.viewerActionEpoch == actionEpoch`
         .blackFrameDecodeFailure: [.lifecycle, .viewerAction],
@@ -135,9 +137,9 @@ final class AttemptScopesTests: XCTestCase {
                 [.viewerAction],
                 "a Pause is expected to move the viewer-action epoch and nothing else"
             )
-            if fence == .recoveryEvidencePoll {
+            if fence == .recoveryEvidencePoll || fence == .seekTelemetrySupersession {
                 XCTAssertTrue(controller.attemptStillCurrent(captured, fence: fence),
-                              "the status poll must survive a viewer Pause")
+                              "status sampling and seek telemetry must survive a viewer Pause")
                 XCTAssertNil(controller.lastAttemptStaleDetail)
             } else {
                 XCTAssertFalse(
@@ -161,6 +163,7 @@ final class AttemptScopesTests: XCTestCase {
     func testEveryMigratedFenceRefusesAContinuationFromThePreviousTitle() {
         let attachScope: [AttemptFence: Attempt.Scope] = [
             .seekPresentationDeadline: .open,
+            .seekTelemetrySupersession: .seek,
             .blackFrameDecodeFailure: .lifecycle,
             .stallRecovery: .open,
             .itemFailureLadder: .open,

@@ -165,6 +165,9 @@ pub(crate) struct MediaNodeSnapshot {
     pub io: MediaIoObservation,
     #[serde(default)]
     pub live_tv_processing: bool,
+    /// Durable resource admission; distinct from the removed protocol-4 relay.
+    #[serde(default)]
+    pub live_tv_resource_processing: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -924,7 +927,8 @@ fn select_live_tv_worker(
     nodes
         .into_iter()
         .filter(|n| {
-            (n.node_id == local_node_id || voters.contains(&n.node_id)) && n.live_tv_processing
+            (n.node_id == local_node_id || voters.contains(&n.node_id))
+                && n.live_tv_resource_processing
         })
         .max_by_key(|n| {
             (
@@ -1099,7 +1103,9 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
         live_waiting: runtime.live_waiting,
         background_active: runtime.background_active,
         io: media_io_observation(),
-        live_tv_processing: state.serving.is_ready()
+        // Older owners must not dispatch their removed relay endpoint here.
+        live_tv_processing: false,
+        live_tv_resource_processing: state.serving.is_ready()
             && !state.membership.local_maintenance_active(),
     }
 }
@@ -1552,7 +1558,8 @@ mod tests {
             live_waiting: false,
             background_active: false,
             io: MediaIoObservation::default(),
-            live_tv_processing: true,
+            live_tv_processing: false,
+            live_tv_resource_processing: true,
         }
     }
 
@@ -1944,7 +1951,8 @@ mod tests {
         free.io = MediaIoObservation::default();
         let mut old = free.clone();
         old.node_id = "old".into();
-        old.live_tv_processing = false;
+        old.live_tv_processing = true;
+        old.live_tv_resource_processing = false;
         old.hardware_slots_max = 100;
         let mut learner = free.clone();
         learner.node_id = "learner".into();
@@ -2000,7 +2008,8 @@ mod tests {
                     live_waiting: false,
                     background_active: false,
                     io: MediaIoObservation::default(),
-                    live_tv_processing: true,
+                    live_tv_processing: false,
+                    live_tv_resource_processing: true,
                 },
                 expires_at: tokio::time::Instant::now() + SNAPSHOT_EXPIRY,
             },

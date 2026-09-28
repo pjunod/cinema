@@ -336,6 +336,8 @@ player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
+| [Live TV cluster resource](apple-builds/537-live-tv-cluster-resource.md) | Apple build 193 durable cluster start intents and protocol negotiation; validation limits. | built |
+| [Native seek completion deadline](apple-builds/473-native-seek-deadline.md) | Apple recovery for seeks that never complete, cancellation and late-callback ownership. | built |
 | [Live TV station startup](apple-builds/568-live-tv-session-url.md) | Apple build 189 repair for valid station URLs rejected as expired sessions; regression and delivery limits. | built |
 | [STATUS-HISTORY.md](clients/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
 | [NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md](clients/NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md) | The build plan the adaptive-quality design produced: settle the four policy disagreements in the web first, type the reopen cause on the wire only in the change that first sends one, add the Swift and JVM runners of the shared fixture, then one adapter at a time — each one disabled until its own shaped-network trace beats its own baseline. | open |
@@ -363,6 +365,7 @@ player obeys, subtitles and overlays, layouts and themes.
 | [PLAYBACK-INFO-MISSING-FIELDS-RCA.md](clients/PLAYBACK-INFO-MISSING-FIELDS-RCA.md) | Why clients omit output facts or display source dimensions for a converted stream, with reviewed provenance rules. | open |
 | [PLAYBACK-INFO-IMPLEMENTATION-HANDOFF.md](clients/PLAYBACK-INFO-IMPLEMENTATION-HANDOFF.md) | Build sequence for output metadata, safe client collectors, attachment fencing, package ownership, and acceptance. | open |
 | [330-calm-library-pages.md](apple-builds/330-calm-library-pages.md) | Apple build 162 quiet Home and open media details. | built |
+| [582-seek-observability.md](apple-builds/582-seek-observability.md) | Apple build194 seek terminal beacons and live viewing method. | open |
 | [359-apple-pause-resume.md](apple-builds/359-apple-pause-resume.md) | Apple return-to-picture owner, deadline, and advisory enablement. | built |
 | [playback-info-redesign.md](apple-builds/playback-info-redesign.md) | Apple build 161 playback-info changes. | open |
 | [328-native-stall-parity.md](apple-builds/328-native-stall-parity.md) | Apple release note for recipe-preserving native stall recovery. | open |
@@ -477,6 +480,9 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
+| [LIVE-TV-CLUSTER-RESOURCE-IMPLEMENTATION.md](features/LIVE-TV-CLUSTER-RESOURCE-IMPLEMENTATION.md) | Remove permanent tuner ownership with distributed admission, session recovery, recording claims and safe storage publication. | open |
+| [LIVE-TV-CLUSTER-RESOURCE-REVIEW.md](features/LIVE-TV-CLUSTER-RESOURCE-REVIEW.md) | Design review findings and accepted corrections for distributed tuner access. | done |
+| [LIVE-TV-CLUSTER-RESOURCE-STATUS.md](features/LIVE-TV-CLUSTER-RESOURCE-STATUS.md) | Current implementation progress, decisions, commits, review and fast-lane evidence. | live |
 | [SUBTITLE-DOWNLOADS-IMPLEMENTATION.md](features/SUBTITLE-DOWNLOADS-IMPLEMENTATION.md) | Online subtitle search, durable captions, playback integration and optional automatic acquisition. | open |
 | [STATUS-HISTORY.md](features/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
 | [DVR-SCHEDULER-GUIDE-VIEW-AND-SINK-ISOLATION.md](features/DVR-SCHEDULER-GUIDE-VIEW-AND-SINK-ISOLATION.md) | Implementation plan from the 2026-09-20 architecture review: why a series rule missed an airing ten days out and why one slow recording disk stalls the shared tuner; the scheduler's full-guide view and per-sink owned writers behind bounded queues. | open |

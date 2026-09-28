@@ -989,7 +989,9 @@ pattern = "ServingAuthority"
 # delegates to. It carries the same authority into the same struct field; no
 # new projection reader.
 # E3: one shared-ingest body carries the existing serving authority; it owns no task.
-expected_occurrences = 36
+# PR #537 current-main integration: measured after replacing the temporary
+# owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
+expected_occurrences = 35
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -2273,6 +2275,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # release-fence and release-tombstone tests each run the exchange or the
 # release on a task the test joins, so it can hold it at its point.
 # Test-only; no shipped task is added.
+# PR #537 current-main integration: measured after replacing the temporary
+# owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
+# 673 -> 674 with the #583 review round (finding 1): `hls_route_shipped_shape` runs
+# `process_preparation_candidate` on a task it joins (bounded, below), so it can hold the
+# candidate at its registration point and supersede it there. Test-only; the candidate
+# tears itself down after registration and owns no producer, process or recipe decision.
+# Merge of main @ dfef993b9 (669) into `plan/S-14-9` (674): 673 measured by zeroing
+# this row (669 + 3 + 1). Both sets retained unchanged (main's and this branch's,
+# reviewed above); the merge adds no new site.
 expected_occurrences = 673
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
@@ -2299,6 +2310,9 @@ expected_occurrences = 673
 # stayed. 653 -> 654: `rolling_control_group_shipped_shape` builds one handle
 # through the production `RollingControlHandle::spawn`; the handle is dropped
 # and its actor exits through the exit fence before the test returns.
+# PR #537: +1 guide_replica_loop spawn in main. It belongs to the existing
+# background shutdown token, copies sanitized guide state, and starts no
+# media process or tuner transport. Reviewed with the cluster resource change.
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -3344,7 +3358,21 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # in the release and create tests lose three timeouts (-3), and the new
 # shipped-shape and position tests bound their joins and waits with six
 # (+6). All test-only; no shipped timer is added.
-expected_occurrences = 1083
+# PR #537 current-main integration: measured after replacing the temporary
+# owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
+# PR #537: +13 bounded transport/finalizer lease waits, guide replica polling
+# and release, worker readiness/snapshot bounds. Transport/finalizer futures
+# belong to the operation's cancellation scope; replica polling ends on the
+# daemon shutdown token. None independently selects or starts a producer.
+# The slow-sink regression switches two existing observations from std to
+# Tokio time; the inventory counts both, so no constructor is added.
+# 1083 -> 1084 with the #583 review round (finding 1): the ten-second
+# `tokio::time::timeout` bound on joining the superseded candidate in
+# `hls_route_shipped_shape`. Test-only; no shipped timer is added.
+# Merge of main @ dfef993b9 (1088) into `plan/S-14-9` (1084): 1090 measured by
+# zeroing this row (1088 + 1 + 1). Both sets retained unchanged (main's and this
+# branch's, reviewed above); the merge adds no new site.
+expected_occurrences = 1090
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -4099,7 +4127,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 406 measured by zeroing this
 # row. Both sets retained unchanged (main's and this branch's, reviewed above); the merge
 # adds no new site.
-expected_occurrences = 406
+# PR #537 current-main integration: measured after replacing the temporary
+# owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
+expected_occurrences = 403
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

@@ -715,14 +715,16 @@ struct PlurxAPI {
         itemId: Int,
         positionMs: Int,
         durationMs: Int?,
-        recordedAt: Int? = nil
+        recordedAt: Int? = nil,
+        method: String? = nil
     ) async throws {
         try await postNoContent(
             "items/\(itemId)/progress",
             body: ProgressRequest(
                 positionMs: positionMs,
                 durationMs: durationMs,
-                recordedAt: recordedAt
+                recordedAt: recordedAt,
+                method: recordedAt == nil ? method : nil
             )
         )
     }

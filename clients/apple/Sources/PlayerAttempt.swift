@@ -147,6 +147,8 @@ struct Attempt: Equatable, Sendable {
 enum AttemptFence: String, CaseIterable, Sendable {
     /// `beginSeekPresentationMonitor`: the eight-second deadline reopen.
     case seekPresentationDeadline = "seek_presentation_deadline"
+    /// Seek telemetry survives Pause and same-target reopen, but not a new destination.
+    case seekTelemetrySupersession = "seek_telemetry_supersession"
     /// `makePeriodicPlaybackObservation`: the black-frame decode-failure
     /// handler. `started` stays beside it as a predicate.
     case blackFrameDecodeFailure = "black_frame_decode_failure"
@@ -172,6 +174,7 @@ enum AttemptFence: String, CaseIterable, Sendable {
     var scopes: Set<Attempt.Scope> {
         switch self {
         case .seekPresentationDeadline: return [.open, .viewerAction, .seek]
+        case .seekTelemetrySupersession: return [.seek]
         case .blackFrameDecodeFailure: return [.lifecycle, .viewerAction]
         case .stallRecovery: return [.open, .viewerAction]
         case .itemFailureLadder: return [.open, .viewerAction]

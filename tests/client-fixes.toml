@@ -2818,3 +2818,79 @@ source = "clients/apple/Sources/LiveTv.swift"
 source_anchor = "return value.addingPercentEncoding(withAllowedCharacters: unreserved)"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "func testRealCapabilityMasterIsAcceptedAfterStartAndResume() throws"
+
+# Seek attachment pictures belong to the dispatched seek, not a title startup.
+[[fixes]]
+id = "web.seek-picture-does-not-inflate-ttff"
+commits = ["3dc5464a5"]
+source = "crates/plurxd/src/web/player/measurements.js"
+source_anchor = 'if(p.attemptReason==="seek"||p.controlSeek?.seekTelemetry){'
+test = "tests/web/seek-telemetry.test.js"
+test_anchor = "seek attachment startup cannot inflate TTFF before or after its target frame"
+
+# Seek first-frame measurements must not enter startup TTFF histograms.
+[[fixes]]
+id = "android.seek-picture-does-not-inflate-ttff"
+commits = ["5fd2c0ce8"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
+source_anchor = 'if (ttffTracker.currentAttempt()?.reason == "seek") return null'
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "fun seekReportsPresentedPictureOnceWithoutInflatingTtff()"
+
+# A player dismissal cannot cancel the terminal seek beacon or rebind its identity.
+[[fixes]]
+id = "android.seek-abandonment-survives-dismissal"
+commits = ["70df10111"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/AppViewModel.kt"
+source_anchor = "postPlaybackClientLog(viewModelScope, event)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "fun dismissalCannotCancelQueuedAbandonmentOrRebindItToTheNextProfile() = runTest {"
+
+# A title replacement retires the outgoing seek unless its exact command continues.
+[[fixes]]
+id = "web.title-replacement-abandons-outgoing-seek"
+commits = ["5733161de"]
+source = "crates/plurxd/src/web/player/decode-tiers.js"
+source_anchor = 'if(outgoing.controlSeek?.seekTelemetry!==incoming?.controlSeek?.seekTelemetry)'
+test = "tests/web/seek-telemetry.test.js"
+test_anchor = "another title abandons the outgoing dispatched seek when its decoder retires"
+
+# The batched Apple late-delivery correction shares commit5733161de with the
+# title-retirement correction above; its named Swift regression is carried by
+# the commit and PR regression trailers rather than a duplicate prefix row.
+
+# Repairing the same destination retains its original seek clock and outcome.
+[[fixes]]
+id = "android.same-intent-recovery-retains-seek"
+commits = ["714ee9e40"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
+source_anchor = "if (pendingSeekSequence != null && pendingSeekSequence == intentSequence) {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "fun sameIntentRecoveryKeepsTheOriginalSeekClockAndCannotBecomeStartupTtff()"
+
+# The serializer must emit initialized live delivery labels rather than treating them as defaults.
+[[fixes]]
+id = "android.live-progress-method-is-encoded"
+commits = ["c6127e068"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "@kotlinx.serialization.EncodeDefault"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "fun liveProgressNamesNormalizedDeliveryWhileRecordedReplayAlwaysOmitsMethod()"
+
+# Seek telemetry cleanup is fenced by its destination, independently of Pause.
+[[fixes]]
+id = "apple.seek-telemetry-cleanup-follows-destination"
+commits = ["f50e56ef7"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "!self.attemptStillCurrent(telemetryOwner, fence: .seekTelemetrySupersession)"
+test = "clients/apple/Tests/AttemptScopesTests.swift"
+test_anchor = "func testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid()"
+
+# Missing AVPlayer callbacks must not keep a viewer seek pending forever.
+[[fixes]]
+id = "apple.native-seek-completion-deadline"
+commits = ["abd6dbbbd"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "case .finished(false), .timedOut:"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "func testNativeSeekDeadlineRecoversASeekThatNeverCompletes()"
