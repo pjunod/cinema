@@ -330,10 +330,14 @@ mod tests {
     #[tokio::test]
     async fn a_descendant_cannot_hold_probe_pipes_past_the_wall_time() {
         let started = tokio::time::Instant::now();
+        // This proves cleanup after the leader exits, not that the runner can
+        // schedule a shell and drain two pipes within 50 ms under suite load.
+        // Keep the success bound below the probe deadline: a descendant left
+        // holding a pipe must still fail rather than pass by timing out.
         let output = output(
             "/bin/sh",
             &["-c", "sleep 300 & exit 0"],
-            Duration::from_millis(50),
+            Duration::from_secs(5),
             1024,
             TEST_WORK,
         )

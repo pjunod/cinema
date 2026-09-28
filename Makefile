@@ -62,7 +62,8 @@ test-full: test-socket-permission-check ## Run every Rust test, including replic
 
 .PHONY: vodencode-restart-check
 vodencode-restart-check: ## Run resource-heavy real-FFmpeg restart regressions serially
-	# Keep the workspace feature union so the unit test binaries are reused.
+	# Keep the workspace feature selection from `unit`; narrowing to plurxd
+	# rebuilds rusqlite, hiqlite and the daemon before these two filtered tests.
 	$(CARGO) test --locked --workspace --exclude plurx-cluster-check \
 	  vodserve::tests::encoded_vod_vfr_input_is_sampled_on_the_declared_rational_grid \
 	  -- --exact --ignored --test-threads=1
