@@ -522,6 +522,19 @@ fun LiveTvScreen(
                 onLeave = { controller.stop(); onBack() },
             )
         }
+        if (!fullscreen && !isInPip && !recordingsOpen && !state.busy && !state.playing) {
+            state.capacityOffer?.let { offer ->
+                val choices = liveTvWatchableChoices(offer, state.channels)
+                if (choices.isNotEmpty()) {
+                    Text("Watch an available channel instead")
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        choices.forEach { (row, _) ->
+                            TextButton(onClick = { controller.watchOffered(offer, row) }) { Text(row.offer) }
+                        }
+                    }
+                }
+            }
+        }
         if (wideBrowser && !fullscreen && !isInPip) {
             WideLiveTvBrowser(
                 state = state,
