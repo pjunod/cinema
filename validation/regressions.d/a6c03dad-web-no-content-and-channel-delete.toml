@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["a6c03dad", "07ecee85"]
+commits = ["a6c03dad", "07ecee85", "a1099a40"]
 points = ["web.experience", "library.channels"]
 checks = ["web-static"]
-reason = "read-after.test.js resolves DELETE replies with status 204 and 205 whose json() throws WebKit's \"string did not match the expected pattern\" SyntaxError and requires null, and fails against the previous api(). library-channels.test.js drives the real editor and list code: an editor delete sends the revisioned DELETE, leaves the editor, forgets the saved draft and announces the deletion; a 409 stays in the editor with the reason; a 404 counts as deleted; the list paints Delete and selection only on editable channels; bulk delete sends one DELETE per selected channel and reports a partial failure while keeping the failed channel selected. Five of these fail against the previous page. Run node --test tests/web/*.test.js."
+reason = "read-after.test.js resolves DELETE replies with status 204 and 205 whose json() throws WebKit's \"string did not match the expected pattern\" SyntaxError and requires null, and fails against the previous api(). library-channels.test.js drives the real editor and list code: an editor delete sends the revisioned DELETE, leaves the editor, forgets the saved draft and announces the deletion; a 409 stays in the editor with the reason; a 404 counts as deleted; the list paints Delete and selection only on editable channels; bulk delete sends one DELETE per selected channel and reports a partial failure while keeping the failed channel selected. Later cases fence the revision (a restored draft at revision 3 deletes at the server's revision 4), re-entry (a second bulk or card delete during a running one sends nothing and the bar shows Deleting…), and route changes (a delete that finishes after navigation toasts but does not repaint). Seven of these fail against the previous page. Run node --test tests/web/*.test.js."
