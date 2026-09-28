@@ -24,7 +24,9 @@ The user's existing checkouts are not build or edit workspaces for this work.
 
 ## Current-main integration
 
-Main `8227b9bc8` is integrated. Its background-work migrations precede this
+Main `60ed569ed` is integrated, including the Developer PGS control and the
+loaded-runner subprocess regression repair from #477. Both Developer controls
+are retained in the combined settings contract. Its background-work migrations precede this
 feature at SQLite 83 / replicated 61. Its reserved-tuner warm-restart repair
 is preserved. Main's temporary owner-relay placement is superseded by durable
 resource admission; media-pool load ranking remains an advisory worker preference.
