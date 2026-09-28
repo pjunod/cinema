@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 05:16 UTC · **Audited main:** `f400c0ea2650823cee6832d214cab111bd3a18d3`
+**Status:** open · **Updated:** 2026-09-28 05:24 UTC · **Audited main:** `c983989813d0819ed54dc1b1e115c08b60a059e8`
 
 [PR #582](http://192.168.4.7:3000/noirr/plurx/pulls/582) merged after its
 single adversarial review; all four findings were fixed. The exact candidate
@@ -20,6 +20,8 @@ Focused web readiness passed; old-source negative control failed the intended no
 D-03 actual API36 local synthetic-data backup/restore passed on exact signed nondebuggable133. After metadata and app backup, clearing only the owned emulator app removed all three sentinels. Framework restore returned0; the nonexcluded positive-control file returned with identical hash while offline/datastore sentinels stayed absent. Receipt `4d809da05634861585d2bc379b414ed76d52502d6ae6044382b8ded16daf9380`. The earlier restore-1000 failure is retained. Own emulator, private ADB and disks are cleaned (receipt `030975bf9a9eb48ef3a98cff9453d31a99d6ba0242a29aa62d8839ce506e1450`). This proves API36 local file exclusions; API37, cloud, D2D, physical restore and functional offline/account/reader acceptance remain owed.
 
 Read-only actual installed ART diagnostics on four reachable signed133 devices report compiler status `verify`, reason `install`. Baseline-profile consumption and cold-start performance remain unproved; Lenovo is now unavailable. Actual ART receipt `715b9deb059a0c7620a58031a2f3f8bb61fb317f9ad41da508f3eea4c25722f1`. No launch, forced compilation or profile-content access was used.
+
+Fast lane API3480/UI3459 stopped at history preflight before Rust tests: five corrective client commits lacked required rows in the history anchor table. Those commits now map to their existing HLS, paging and Settings regressions; local history audit passes all311 client anchors. Main #593 advances to c9839898 with only STATUS.md, integrated into this candidate. No app source, signed input or test behavior changed; the sole review remains complete and a new exact-head/base gate is required.
 
 The four-node strict uniform deployment passed on `dfef993b9`. Browser cases ran on that exact
 merged binary and unchanged scorers; failures are retained. Main subsequently moved through
