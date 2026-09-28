@@ -2829,3 +2829,12 @@ source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvApi.kt"
 source_anchor = "\"encoder_capacity\" -> \"The tuner owner's video encoder is busy, so this channel cannot be converted right now. Try again in a moment.\""
 test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvStartCasesTest.kt"
 test_anchor = "fun everyRenderKeyTheFixtureNamesHasCopyOfItsOwn()"
+
+# Missing AVPlayer callbacks must not keep a viewer seek pending forever.
+[[fixes]]
+id = "apple.native-seek-completion-deadline"
+commits = ["abd6dbbbd"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "case .finished(false), .timedOut:"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "func testNativeSeekDeadlineRecoversASeekThatNeverCompletes()"

@@ -337,6 +337,7 @@ player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
+| [Native seek completion deadline](apple-builds/473-native-seek-deadline.md) | Apple recovery for seeks that never complete, cancellation and late-callback ownership. | built |
 | [Live TV station startup](apple-builds/568-live-tv-session-url.md) | Apple build 189 repair for valid station URLs rejected as expired sessions; regression and delivery limits. | built |
 | [STATUS-HISTORY.md](clients/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
 | [NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md](clients/NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md) | The build plan the adaptive-quality design produced: settle the four policy disagreements in the web first, type the reopen cause on the wire only in the change that first sends one, add the Swift and JVM runners of the shared fixture, then one adapter at a time — each one disabled until its own shaped-network trace beats its own baseline. | open |
