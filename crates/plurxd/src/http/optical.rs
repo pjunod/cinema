@@ -860,6 +860,7 @@ async fn local_decision(
                 .to_owned(),
         );
     }
+    let route_drive_id = format!("{}:{}", snapshot.owner_node_id, drive_id);
     let source = PlaybackSourceRef::Optical {
         owner_node_id: snapshot.owner_node_id,
         drive_id: drive_id.to_owned(),
@@ -873,7 +874,7 @@ async fn local_decision(
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
     let sessions_url = format!(
         "/api/v1/optical/drives/{}/titles/{}/sessions",
-        drive_id, title_id
+        route_drive_id, title_id
     );
     let source_summary = optical_source_summary(&title.facts);
     let audio = optical_audio_tracks(&title.facts, request.audio);
