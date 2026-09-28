@@ -1127,15 +1127,13 @@ final class LiveTvTests: XCTestCase {
         ] {
             XCTAssertTrue(fullscreen.contains(guardPart), guardPart)
         }
+        // Info, More and Layout all return focus to the pill that opened them,
+        // through one deferred write from each sheet's `onDismiss` — not from
+        // the flag's `onChange`, which fires while the sheet still covers.
         let infoDismissal = fullscreen
             .components(separatedBy: ".onChange(of: showingInfo)")[1]
             .components(separatedBy: ".onChange(of: showingMore)")[0]
-        XCTAssertTrue(infoDismissal.contains(
-            "guard !visible, fullscreen, overlayVisible else { return }"
-        ))
-        // Info, More and Layout all return focus to the pill that opened them,
-        // through one deferred write.
-        XCTAssertTrue(infoDismissal.contains("returnFocusToCoverSheetOpener()"))
+        XCTAssertFalse(infoDismissal.contains("focusedControl"))
         let opener = source
             .components(separatedBy: "private func returnFocusToCoverSheetOpener()")[1]
             .components(separatedBy: "#endif")[0]
@@ -1163,7 +1161,17 @@ final class LiveTvTests: XCTestCase {
             .components(separatedBy: ".fullScreenCover(isPresented: $fullscreen, onDismiss: {")[1]
             .components(separatedBy: "#if os(iOS)")[0]
         for sheet in ["coverSheet($showingInfo)", "coverSheet($showingLayout)", "coverSheet($showingMore)"] {
-            XCTAssertTrue(cover.contains(".sheet(isPresented: \(sheet))"), sheet)
+            XCTAssertTrue(cover.contains(".sheet(isPresented: \(sheet),\n                       onDismiss: { returnFocusToCoverSheetOpener() })"),
+                          "\(sheet) returns focus from onDismiss, after the sheet has gone")
+        }
+        XCTAssertEqual(cover.components(separatedBy: "onDismiss: { returnGuideFocusAfterProgrammeSheet() }").count - 1, 1)
+        XCTAssertTrue(source.contains(".sheet(item: rootProgrammeDetail, onDismiss: { returnGuideFocusAfterProgrammeSheet() })"))
+        // Closing the cover clears anything it was still showing.
+        let coverClosed = source
+            .components(separatedBy: ".onChange(of: fullscreen) { _, presented in")[1]
+            .components(separatedBy: ".onAppear {")[0]
+        for cleared in ["showingInfo = false", "showingMore = false", "showingLayout = false", "coverSheetOpener = nil"] {
+            XCTAssertTrue(coverClosed.contains(cleared), cleared)
         }
         for sheet in ["rootSheet($showingInfo)", "rootSheet($showingLayout)", "rootSheet($showingMore)"] {
             XCTAssertTrue(source.contains(".sheet(isPresented: \(sheet))"), sheet)
@@ -1264,7 +1272,30 @@ final class LiveTvTests: XCTestCase {
         // Selecting the playing channel inside the temporary guide closes it.
         XCTAssertTrue(source.contains("if fullscreen && temporaryGuide {\n                closeTemporaryGuide()"))
         // A programme sheet opened from a cell hands focus back to that cell.
-        XCTAssertTrue(source.contains("guard programme == nil, browse == .guide, focusedGuideChannelId != nil else { return }"))
+        XCTAssertTrue(source.contains("guard browse == .guide, focusedGuideChannelId != nil else { return }"))
+        // The grid holds the requested position itself: an engine-driven
+        // arrival in between rewrites the parent's memory.
+        XCTAssertTrue(source.contains("@State private var requestedTarget: LiveTvGuideFocusPosition?"))
+        XCTAssertTrue(source.contains("if restoreRequest > lastRequestSeen {"))
+        XCTAssertTrue(source.contains("guard requestedTarget == nil else { return }"))
+        // The temporary guide opens on the current window, on what is playing.
+        let opening = source
+            .components(separatedBy: "private func openTemporaryGuide() {")[1]
+            .components(separatedBy: "private func closeTemporaryGuide()")[0]
+        XCTAssertTrue(opening.contains("returnGuideToNow()"))
+        XCTAssertTrue(opening.contains("focusedGuideChannelId = watching.id"))
+        // Recordings is not the list.
+        XCTAssertTrue(source.contains("case .recordings:\n            // A schedule page has no row to return to"))
+        // An arrival on a page key right after a request is the engine's.
+        XCTAssertTrue(source.contains("if let at = browseFocusRequestedAt, Date().timeIntervalSince(at) < 1 { return }"))
+        // The list still lets a press during its yield win; the grid does not.
+        let guideSource = try String(
+            contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+                .appendingPathComponent("../Sources/LiveTvGuide.swift").standardizedFileURL,
+            encoding: .utf8)
+        XCTAssertTrue(guideSource.contains("LiveTvFocusRestoreCoordinator(arrivalInvalidates: false)"))
+        XCTAssertTrue(source.contains("@State private var channelFocusCoordinator = LiveTvFocusRestoreCoordinator()"),
+                      "the list keeps arrival-invalidates: its arrivals are presses")
     }
 
     func testTheProgressRowSurvivesAMissingNextProgramme() {

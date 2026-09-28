@@ -1372,6 +1372,15 @@ struct LiveTvGuideGrid: View {
     /// left. `onChange` runs against the current view, so it sees the layout
     /// the restore is meant for.
     @State private var restoreTick = 0
+    /// The position an explicit request asked for, copied when the request
+    /// arrives and held until the restore lands. The parent's `restore*`
+    /// inputs cannot be read for this at restore time: an engine-driven
+    /// arrival on some cell in between — the Guide pill removed under the
+    /// finger that pressed it — runs `onFocus`, and the parent then
+    /// remembers THAT cell. Restoring from the parent would write the
+    /// accident back and call it a success.
+    @State private var requestedTarget: LiveTvGuideFocusPosition?
+    @State private var lastRequestSeen = 0
     /// Right past the last cell / left past the header asked for the next
     /// window; when the new layout arrives, land on this row's edge cell.
     @State private var pendingLanding: (channelId: String, edge: LiveTvGuidePageLanding)?
@@ -1570,15 +1579,23 @@ struct LiveTvGuideGrid: View {
             // owning a cell: claiming ownership here would arm the restore
             // pass, which would then take the focus straight back off the chip.
             guard let target, target.paging == nil else {
+                // A landing is for the row it left from; leaving the cells
+                // (to the chips, the stage, or nothing) ends it.
+                pendingLanding = nil
+                // While a requested restore is outstanding, an arrival on a
+                // chip is the engine's accident, not the viewer leaving:
+                // reporting it would drop `restoreAllowed` and deny the
+                // restore that is about to correct it.
+                guard requestedTarget == nil else { return }
                 focusCoordinator.focusChanged(active: false)
                 onFocusOwnershipChanged(false)
                 return
             }
             focusCoordinator.focusChanged(active: true)
             onFocusOwnershipChanged(true)
-            // A landing is for the window change that asked for it. Once focus
-            // is on a programme cell again — the landing itself, or a press the
-            // viewer made in the meantime — it has nothing left to do.
+            // Once focus is on a programme cell again — the landing itself,
+            // or a press the viewer made in the meantime — a landing has
+            // nothing left to do.
             if !target.channelHeader { pendingLanding = nil }
             guard
                   let row = layout.rows.first(where: { $0.channel.id == target.channelId })
@@ -1603,20 +1620,39 @@ struct LiveTvGuideGrid: View {
             }
         )
         .onChange(of: restoreAllowed) { _, allowed in
-            if !allowed { focusCoordinator.leave() }
+            if !allowed {
+                focusCoordinator.leave()
+                pendingLanding = nil
+                requestedTarget = nil
+            }
         }
         // Content changes may reconcile the currently focused cell, but they
         // cannot create focus ownership. Only a new explicit request or a
         // grid that still owns focus receives a valid post-yield ticket.
         .task(id: gridRestoreIdentity) {
+            // The task starts in the render that carried the new request, so
+            // the parent's inputs are the requested position right now — and
+            // only right now. Copy them (see `requestedTarget`).
+            if restoreRequest > lastRequestSeen {
+                lastRequestSeen = restoreRequest
+                requestedTarget = LiveTvGuideFocusPosition(
+                    channelId: restoreChannelId ?? "",
+                    programmeStart: restoreProgrammeStart,
+                    channelHeader: restoreChannelHeader,
+                    anchorTime: restoreAnchorTime
+                )
+            }
             guard let ticket = focusCoordinator.beginRestore(
                 request: restoreRequest,
                 ownerRequested: restoreAllowed
             ) else { return }
             await Task.yield()
-            guard !Task.isCancelled,
-                  focusCoordinator.permits(ticket, ownerRequested: restoreAllowed)
-            else { return }
+            guard !Task.isCancelled else { return }
+            guard focusCoordinator.permits(ticket, ownerRequested: restoreAllowed) else {
+                // A press or a departure overtook the request; it is done.
+                requestedTarget = nil
+                return
+            }
             // Not the restore itself from here: see `restoreTick`.
             restoreTick &+= 1
         }
@@ -1728,7 +1764,7 @@ struct LiveTvGuideGrid: View {
             if let target { focusedCell = pagingKey(target) }
         case .right where index < 2:
             let target = ((index + 1)...2).first(where: pagingChipEnabled)
-            if let target { focusedCell = pagingKey(target) }
+            if let target { focusedCell = pagingKey(target) } else { focusGridCandidate() }
         case .up:
             onTopBoundary(.pagingChips)
         case .down, .right:
@@ -1760,6 +1796,34 @@ struct LiveTvGuideGrid: View {
     }
 
     private func focusGridCandidate() {
+        if let requested = requestedTarget {
+            requestedTarget = nil
+            pendingLanding = nil
+            if let row = layout.rows.first(where: { $0.channel.id == requested.channelId }) {
+                anchorTime = requested.anchorTime
+                if requested.channelHeader {
+                    focusedCell = FocusKey(channelId: row.channel.id, programmeStart: nil, channelHeader: true)
+                    return
+                }
+                let candidate = requested.programmeStart.flatMap { start in
+                    row.cells.first(where: { $0.programme.start == start })
+                } ?? requested.anchorTime.flatMap { anchor in
+                    row.cells.first(where: { $0.programme.start <= anchor && anchor < $0.programme.end })
+                        ?? row.cells.min {
+                            abs(($0.programme.start + $0.programme.end) / 2 - anchor)
+                                < abs(($1.programme.start + $1.programme.end) / 2 - anchor)
+                        }
+                } ?? row.cells.first
+                focusedCell = FocusKey(
+                    channelId: row.channel.id,
+                    programmeStart: candidate?.programme.start,
+                    channelHeader: false
+                )
+                return
+            }
+            // The requested channel is not in this layout (filtered away):
+            // fall through to the parent's memory, then the first row.
+        }
         if let landing = pendingLanding {
             pendingLanding = nil
             if let position = LiveTvGuideFocusNavigator.landing(
@@ -1911,6 +1975,9 @@ struct LiveTvView: View {
     /// to Guide, restored when the guide closes so "return to browser" returns
     /// to the page the viewer actually left.
     @State private var browseBeforeTemporaryGuide: LiveTvBrowseView?
+    /// When the page last asked the list or the grid to take focus; see
+    /// `onChange(of: focusedControl)`.
+    @State private var browseFocusRequestedAt: Date?
     #endif
     @State private var now = Int(Date().timeIntervalSince1970)
 
@@ -2101,14 +2168,23 @@ struct LiveTvView: View {
             // root copies below are inert while `fullscreen` is up — Info and
             // More on the ten-foot pills did nothing at all until these three
             // joined `detail` and the DVR activity here.
+            //
+            // Focus returns through each sheet's `onDismiss` — after the sheet
+            // has gone — because a write made while it is still animating out
+            // targets a covered presentation and is dropped.
             fullscreenSurface
-                .sheet(item: $detail) { programme in programmeDetail(programme) }
+                .sheet(item: $detail, onDismiss: { returnGuideFocusAfterProgrammeSheet() }) {
+                    programme in programmeDetail(programme)
+                }
                 .sheet(isPresented: $showingDvrActivity) {
                     NavigationStack { DvrCaptureActivityView() }
                 }
-                .sheet(isPresented: coverSheet($showingInfo)) { streamInfoPanel }
-                .sheet(isPresented: coverSheet($showingLayout)) { layoutPanel }
-                .sheet(isPresented: coverSheet($showingMore)) { morePanel }
+                .sheet(isPresented: coverSheet($showingInfo),
+                       onDismiss: { returnFocusToCoverSheetOpener() }) { streamInfoPanel }
+                .sheet(isPresented: coverSheet($showingLayout),
+                       onDismiss: { returnFocusToCoverSheetOpener() }) { layoutPanel }
+                .sheet(isPresented: coverSheet($showingMore),
+                       onDismiss: { returnFocusToCoverSheetOpener() }) { morePanel }
         }
         #if os(iOS)
         .sheet(isPresented: $showingTouchRecordings) {
@@ -2123,7 +2199,7 @@ struct LiveTvView: View {
                 .sheet(item: $detail) { programme in programmeDetail(programme) }
         }
         #endif
-        .sheet(item: rootProgrammeDetail) { programme in
+        .sheet(item: rootProgrammeDetail, onDismiss: { returnGuideFocusAfterProgrammeSheet() }) { programme in
             programmeDetail(programme)
         }
         .sheet(isPresented: rootDvrActivity) {
@@ -2166,17 +2242,16 @@ struct LiveTvView: View {
             // Page keys only: a pill taking focus on the cover is not the
             // viewer leaving the list or the grid.
             guard let target, !target.isOnCover else { return }
-            cancelBrowseFocusRestoration()
             if target.isToolbar { lastToolbarFocus = target }
-        }
-        // A programme sheet opened from a grid cell hands focus back to that
-        // cell when it closes — the cell the sheet was about, which the page
-        // remembered as it was focused. Left to the engine, the sheet's
-        // dismissal put focus at the top of the page.
-        .onChange(of: detail) { _, programme in
-            guard programme == nil, browse == .guide, focusedGuideChannelId != nil else { return }
-            guideFocusRequest &+= 1
-            guideFocusRequested = true
+            // An arrival in the second after a request is the engine, not the
+            // viewer: the cover's dismissal hands focus back to the picture
+            // that opened it, and a Close button that just vanished sends it
+            // to whatever is nearest. Cancelling then would defeat the very
+            // restore the press asked for. A viewer's own move to the toolbar
+            // comes later, or leaves through a boundary that clears the flags
+            // itself.
+            if let at = browseFocusRequestedAt, Date().timeIntervalSince(at) < 1 { return }
+            cancelBrowseFocusRestoration()
         }
         #endif
         #if os(iOS)
@@ -2194,6 +2269,13 @@ struct LiveTvView: View {
             guard !presented else { return }
             #if os(tvOS)
             closeTemporaryGuide()
+            // A sheet still open when the session ended would otherwise
+            // re-present on the page — an Info panel with nothing to show —
+            // and a stale opener would send the next Info close to More.
+            showingInfo = false
+            showingMore = false
+            showingLayout = false
+            coverSheetOpener = nil
             #else
             temporaryGuide = false
             #endif
@@ -3448,6 +3530,7 @@ struct LiveTvView: View {
         focusedChannelId = nil
         guideFocusRequest &+= 1
         guideFocusRequested = true
+        browseFocusRequestedAt = Date()
     }
 
     private func requestChannelFocus() {
@@ -3455,6 +3538,7 @@ struct LiveTvView: View {
         guideFocusRequested = false
         channelFocusRequest &+= 1
         channelFocusRequested = true
+        browseFocusRequestedAt = Date()
     }
 
     private func cancelBrowseFocusRestoration() {
@@ -3471,12 +3555,18 @@ struct LiveTvView: View {
     /// dropped.
     private func restoreBrowseFocusAfterCover() {
         closeTemporaryGuide()
-        if browse == .guide {
+        switch browse {
+        case .guide:
             guideFocusRequest &+= 1
             guideFocusRequested = true
-        } else {
+            browseFocusRequestedAt = Date()
+        case .list:
             if let watching = live.watching?.id { tvFocusedChannelId = watching }
             requestChannelFocus()
+        case .recordings:
+            // A schedule page has no row to return to; the engine's own
+            // restoration is as good as anything the page could name.
+            break
         }
     }
 
@@ -3493,6 +3583,9 @@ struct LiveTvView: View {
             focusedGuideChannelHeader = false
             guideAnchorTime = now
         }
+        // The window is shared with the page's grid, which may have been
+        // paged into the evening; what is playing is on now.
+        returnGuideToNow()
         temporaryGuide = true
         overlayGeneration &+= 1
         requestGuideFocus()
@@ -4188,29 +4281,10 @@ struct LiveTvView: View {
             }
         }
         #endif
-        .onChange(of: showingInfo) { _, visible in
-            overlayGeneration &+= 1
-            #if os(tvOS)
-            guard !visible, fullscreen, overlayVisible else { return }
-            returnFocusToCoverSheetOpener()
-            #endif
-        }
-        .onChange(of: showingMore) { _, visible in
-            overlayGeneration &+= 1
-            #if os(tvOS)
-            // More → Layout: the Layout sheet is opening as this one closes,
-            // and its own dismissal restores the opener.
-            guard !visible, !showingLayout, fullscreen, overlayVisible else { return }
-            returnFocusToCoverSheetOpener()
-            #endif
-        }
-        .onChange(of: showingLayout) { _, visible in
-            overlayGeneration &+= 1
-            #if os(tvOS)
-            guard !visible, fullscreen, overlayVisible else { return }
-            returnFocusToCoverSheetOpener()
-            #endif
-        }
+        // Focus after a cover sheet closes is the sheet's `onDismiss`, above.
+        .onChange(of: showingInfo) { _, _ in overlayGeneration &+= 1 }
+        .onChange(of: showingMore) { _, _ in overlayGeneration &+= 1 }
+        .onChange(of: showingLayout) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: live.paused) { _, _ in overlayGeneration &+= 1 }
         // Only a session that has actually finished closes the surface, and
         // it can finish on either edge. `watch()` detaches before it awaits
@@ -4239,6 +4313,11 @@ struct LiveTvView: View {
     /// opened it (Pause/Play if nothing recorded one), deferred past the
     /// dismissal for the same reason every other cover write is.
     private func returnFocusToCoverSheetOpener() {
+        // More → Layout: More's dismissal arrives with Layout already open.
+        // The opener is Layout's to restore, so it is kept.
+        guard fullscreen, overlayVisible, !temporaryGuide,
+              !showingInfo, !showingMore, !showingLayout, detail == nil
+        else { return }
         let opener = coverSheetOpener ?? .pillPlay
         coverSheetOpener = nil
         focusedControl = nil
@@ -4249,6 +4328,17 @@ struct LiveTvView: View {
             else { return }
             focusedControl = opener
         }
+    }
+
+    /// A programme sheet opened from a grid cell hands focus back to that
+    /// cell once the sheet has gone — the cell the sheet was about, which the
+    /// page remembered as it was focused. Left to the engine, the dismissal
+    /// put focus at the top of the page.
+    private func returnGuideFocusAfterProgrammeSheet() {
+        guard browse == .guide, focusedGuideChannelId != nil else { return }
+        guideFocusRequest &+= 1
+        guideFocusRequested = true
+        browseFocusRequestedAt = Date()
     }
     #endif
 

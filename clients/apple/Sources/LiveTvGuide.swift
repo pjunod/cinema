@@ -188,9 +188,27 @@ enum LiveTvGuideFocusEffect: Equatable, Sendable {
 struct LiveTvFocusRestoreCoordinator: Equatable, Sendable {
     private enum Owner: Equatable, Sendable { case outside, requested, grid }
 
+    /// Whether focus ARRIVING on a member invalidates a pending restore.
+    ///
+    /// The On now list says yes: it has no remote adapter, so an arrival on
+    /// a row is a press the viewer made, and a restore that then wrote the
+    /// row it computed before its yield would override that press.
+    ///
+    /// The guide grid says no: its adapter takes every press, so an arrival
+    /// the coordinator did not order is the engine relocating focus after
+    /// the focused view went away — the Guide pill removed under the finger
+    /// that pressed it, a cell removed by a window change. Those arrivals
+    /// are accidents; the requested restore is the viewer's intent and
+    /// still has to run. A press inside the grid invalidates through
+    /// `invalidateForNavigation` instead.
+    private let arrivalInvalidates: Bool
     private var owner: Owner = .outside
     private var request = 0
     private var revision: UInt = 0
+
+    init(arrivalInvalidates: Bool = true) {
+        self.arrivalInvalidates = arrivalInvalidates
+    }
 
     /// Begin either a new explicit entry request or a reconciliation while the
     /// grid still owns focus. A passive content refresh cannot resurrect an
@@ -215,21 +233,12 @@ struct LiveTvFocusRestoreCoordinator: Equatable, Sendable {
             && ticket.request == request && ticket.revision == revision
     }
 
-    /// Focus arriving on a member of this region does NOT invalidate a pending
-    /// restore; focus leaving it does.
-    ///
-    /// It used to invalidate both ways, and that is why a guide opened from
-    /// fullscreen landed on an arbitrary cell: removing the focused pill made
-    /// the engine drop focus onto whatever cell it liked, that arrival killed
-    /// the ticket, and the requested restore never ran. The restore writes the
-    /// position the view *currently* remembers — it is applied through
-    /// `onChange`, not from the task's stale copy of the view — so letting it
-    /// run after an engine-driven arrival can only move focus from an
-    /// accidental cell to the intended one. A remote press is different: it
-    /// goes through `invalidateForNavigation`, and still wins.
+    /// Focus leaving the region always invalidates a pending restore; focus
+    /// arriving does so only when `arrivalInvalidates` (see there).
     mutating func focusChanged(active: Bool) {
         if active {
             owner = .grid
+            if arrivalInvalidates { advanceRevision() }
             return
         }
         owner = .outside
@@ -251,7 +260,7 @@ struct LiveTvFocusRestoreCoordinator: Equatable, Sendable {
 }
 
 struct LiveTvGuideFocusCoordinator: Equatable, Sendable {
-    private var restoration = LiveTvFocusRestoreCoordinator()
+    private var restoration = LiveTvFocusRestoreCoordinator(arrivalInvalidates: false)
 
     mutating func beginRestore(request: Int,
                                ownerRequested: Bool) -> LiveTvFocusRestoreTicket? {

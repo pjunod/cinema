@@ -80,18 +80,31 @@ segment under the cover and be dropped.
    and the reveal layer. A focusable added inside one of them without a key
    is a trap with no exit — the paging chips were exactly that once.
 2. **A write aimed at a view being inserted or removed in the same update is
-   deferred.** tvOS drops a `@FocusState` write to a view that does not exist
-   yet, and a covered presentation. So: `focusedControl = nil`, `await
-   Task.yield()`, re-check the state, write. Closing the temporary guide,
-   closing a cover sheet, revealing the overlay and leaving the cover
-   (`onDismiss`) all do this.
-3. **Focus arriving in the grid does not cancel a requested restore; focus
-   leaving does.** `LiveTvFocusRestoreCoordinator.focusChanged(active:)`.
-   The restore is applied through `onChange(of: restoreTick)` against the
-   *current* view, never from the yielded task's stale copy of `layout`, so
-   after an engine-driven arrival it can only move focus from an accidental
-   cell to the requested one. A remote press inside the grid still wins —
-   it goes through `invalidateForNavigation`.
+   deferred, and a write after a presentation closes waits for `onDismiss`.**
+   tvOS drops a `@FocusState` write to a view that does not exist yet, and
+   to a covered presentation — a sheet animating out is still covering.
+   So: `focusedControl = nil`, `await Task.yield()`, re-check the state,
+   write (closing the temporary guide, revealing the overlay); and every
+   sheet and the cover request their focus return from `onDismiss`, not
+   from the `onChange` of the flag that started the dismissal. Closing the
+   cover also clears any sheet it was still showing, so an Info panel with
+   nothing to show does not re-present on the page.
+3. **A requested restore survives the engine's accidents, in the grid.**
+   `LiveTvFocusRestoreCoordinator(arrivalInvalidates: false)` for the grid:
+   focus *arriving* on a cell does not cancel a pending restore, because
+   inside an `onMoveCommand` region an arrival the coordinator did not
+   order is the engine relocating focus after the focused view went away
+   (the Guide pill removed under the finger that pressed it). The grid
+   copies the requested position into its own `requestedTarget` the moment
+   the request arrives, because that accidental arrival runs `onFocus` and
+   the parent then remembers the accident. The restore is applied through
+   `onChange(of: restoreTick)` against the *current* view, never from the
+   yielded task's stale copy of `layout`. A remote press inside the grid
+   still wins (`invalidateForNavigation`). The On now list keeps
+   `arrivalInvalidates: true`: it has no adapter, so an arrival on a row
+   *is* a press. On the page, an arrival on a toolbar or detail key within
+   one second of a request is likewise the engine's (the cover handing
+   focus back to the picture that opened it) and does not cancel.
 4. **A focused control never becomes disabled under the viewer.** Rows check
    `live.busy` in the action; chips are dimmed and inert, not `.disabled`;
    the restore never targets an unwatchable row.
