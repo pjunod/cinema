@@ -1,6 +1,6 @@
 # Make every Live TV remote press on Apple TV reversible
 
-Build: 193
+Build: 195
 Issue: #587
 
 Live TV on the Apple TV now answers every direction press with a named
