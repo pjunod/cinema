@@ -54,6 +54,17 @@
       ]
     },
     {
+      "case": "the owner had a tuner but its video encoder pool refused the transcode this route needs",
+      "body": {
+        "code": "encoder_capacity",
+        "retry": "later",
+        "owner_decided": true
+      },
+      "render": "encoder_capacity",
+      "offer_retry": true,
+      "keep_hint": false
+    },
+    {
       "case": "the ingress could not reach the owner at all",
       "body": {
         "code": "owner_unavailable",

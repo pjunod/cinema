@@ -4,6 +4,44 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Live TV said "all slots are busy" with every tuner idle
+
+**[PR #585](http://192.168.4.7:3000/noirr/plurx/pulls/585), merged 2026-09-28 as `2694db665`; not yet deployed — the GPT deploy/verify prompt is in the project doc.**
+Paul reported 2026-09-27 (web and iOS) that channels intermittently refuse
+with *All Live TV slots are busy*; the FLEX 4K had four idle tuners each
+time. The owner's own log named the cause — `tuner_capacity` with
+`cause=transcode capacity is temporarily unavailable: background encoding
+did not yield within 5.0s` — and the RCA
+([LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md](docs/streaming/LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md))
+found four layers: the subtitle backfill held the whole software encoder
+pool while walking candidate jobs; eight zombie `subtitle_extract` rows each
+cost that walk a full 30 s ambiguity wait because the claim trigger's
+definite `no longer claimable` abort was surfaced as an error and nothing
+retired the row; a live start that waited out the 5 s window with only
+background work in the way was **refused, by design**; and the Live TV layer
+labelled an encoder refusal a tuner one. Fixed at each layer: the store
+side landed first on `main` as #588 (claim/candidate precondition, bounded
+reconcile, guarded settled trigger, SQLite v84 / cluster v62) and this
+branch dropped its own copy at the merge; the backfill claims before it
+takes the pool; a `Priority::Live` start is admitted over background
+ownership after the window (hardware within the cap, software forced, one
+WARN + `plurx_transcode_background_overrun_total{pool}`); and the refusal is
+`encoder_capacity` with its own copy on all three clients, pinned by the
+shared start-cases fixture (Android 134, Apple 196).
+One adversarial review round (five findings, all taken): the take over a
+stuck permit is now bounded by live usage, the settled-trigger guard the
+review asked for is the one #588 shipped, the subtitle pre-check is the
+admission's own predicate, and the tests reach the arms they name.
+**Decision for Paul to look over:** admitting a viewer over a stuck
+background permit reverses the ruling OPERATIONS.md carried ("absence after
+five seconds means that worker is stuck rather than permission to start
+beside it"); the RCA §3 argues why. Next (GPT): deploy the three voters then nuc3,
+confirm the eight zombie rows retire on the first upkeep pass, tune 6.1
+under backfill load twenty times from web and iPhone, screenshot the
+`encoder_capacity` copy, and install Android 134 / Apple 196.
+commit as the work it describes; a stale entry here is a bug. Newest effort
+first.
+
 ## Apple TV Live TV navigation: every press reversible, every control reachable
 
 **[PR #589](http://192.168.4.7:3000/noirr/plurx/pulls/589) merged to `main`
@@ -276,34 +314,6 @@ layout goldens, which need `scripts/ui-baseline --self-host --update` on a
 machine with Playwright (the golden is also stale on `main` for unrelated
 routes).
 
-## The full Rust suite and the release build are clean again
-
-`PR #443`, branch `fix/red-suite-2026-09-22`. Nothing here changes runtime
-behaviour except one allocation at daemon startup; nothing to deploy for it.
-
-The fast lane (`make unit`) was green on `main`; the red was all in what only
-`make test-full` builds, which no CI lane runs any more.
-
-- **Release/Docker build warning.** `AvcCLocation.entry` and `.ancestors` in
-  `plurx-core/src/fmp4.rs` are read only by the `fixtures` builders, so every
-  release build warned they were never read. `expect(dead_code)` outside that
-  cfg.
-- **plurx-core lib aborted on a stack overflow** with `hiqlite-store` on, in two
-  join tests, taking every later test in the binary with it.
-  `select_daemon_store` awaited its join, reopen and activation branches
-  inline, so its future carried all of them (9,984 bytes; 496 boxed). Branches
-  are boxed now, and `select_daemon_store_future_stays_small` holds it under
-  2 KiB.
-- **14 hiqlite store contracts** failed in their fixtures: the downgrade
-  helpers stopped at schema v34, so replaying v40/v42/v43/v44 collided with
-  their own `ADD COLUMN`s, and v42's index over `video_identity` blocked the
-  v27 rewind. One shared reversal list now walks back v44..v40. Two stale
-  expectations were updated with it (the v42 index split; 46 to 52 import
-  tables).
-- **`live_tv_two_node`** (4 cases) needs to bind ports 80 and 5004, and fails
-  by design on a host that cannot. With `cap_net_bind_service` on nuc3 all
-  four pass. Not a code defect.
-
 ## Older efforts — where each one now lives
 
 Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26 and 2026-09-27
@@ -311,6 +321,7 @@ into the status history of their subject folder. One row per section, newest fir
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-09-22 | The full Rust suite and the release build are clean again | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-09-22 | Resume stopped working on every client — reproduced, half fixed | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-21 | An abandoned replacement held its player's key — reported, diagnosed, fixed | [docs/playback-control/STATUS-HISTORY.md](docs/playback-control/STATUS-HISTORY.md) |
 | 2026-09-20 | Architecture review, revision 3 — Astra's review merged | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |

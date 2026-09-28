@@ -4160,10 +4160,14 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # adds no new site.
 # PR #537 current-main integration: measured after replacing the temporary
 # owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
+# +1 (406 -> 407) with the Live TV encoder_capacity code: one `Response::status()`
+# assertion in the error-advice test, on an in-process typed ApiError. It
+# launches nothing and owns nothing; #585 adds no command construction.
 # 406 -> 407 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same
 # test-only stand-in producer's `.spawn()`.
 # Merge of main into #581, measured from the validation unittests' actual count: 403 (main after #537) + 1 (S-14 M8 stand-in producer) = 404.
-expected_occurrences = 404
+# Merge of main (#585) into #581, measured: 403 + 1 (#585) + 1 (S-14 M8 stand-in producer) = 405.
+expected_occurrences = 405
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

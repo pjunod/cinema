@@ -953,6 +953,15 @@ impl TranscodeManager {
                 .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Whether [`Self::admit_fragment`] would answer right now, evaluated
+    /// without taking anything: the pool idle and the shared heavy-worker
+    /// gate free. For a worker that has to claim durable work before it can
+    /// hold the pool, so it does not claim (and then yield) a job on every
+    /// tick while another heavy worker or a viewer has the box.
+    pub(crate) fn fragment_worker_may_start(&self) -> bool {
+        self.pretranscode_worker_idle() && self.background_heavy.available_permits() > 0
+    }
+
     pub fn pretranscode_worker_idle(&self) -> bool {
         !self.admissions.live_is_waiting()
             && self.admissions.in_use() == 0
