@@ -46,7 +46,23 @@ it. `claim_job` now recognises that message (it is the repository's own SQL,
 exported as `background_jobs_subtitle::DEMAND_GONE`), retires the row at the
 revision the claimant saw (`state = 'cancelled'`, `last_error_code =
 'subtitle_demand_gone'`) and answers `ClaimOutcome::Cancelled`, which the
-walker handles immediately. The row never returns to a candidate page.
+walker handles immediately. The row never returns to a candidate page. A
+`running` job whose lease has lapsed (a takeover candidate) in the same
+situation is retired the same way.
+
+Two things the review made this carry. First, the store's
+`background_subtitle_settled` trigger fires on the retirement and used to
+rewrite the demand's attempt row at its fence to `canceled` — for the fleet's
+shape that is the *published* attempt of a finished request. The trigger's
+attempt update is now guarded the way its request update already was (only a
+demand still `queued`/`running`), shipped as **SQLite schema v83 / cluster
+schema v61**, each of which re-runs the idempotent adapter schema whose
+`DROP TRIGGER` + `CREATE TRIGGER` carries the new body; the store test
+writes the published attempt and proves it survives. Second, the match is on
+the trigger's message text (`StoreError::to_string()`); on the replicated
+backend that is proven by the owner's own log line — `error=database error:
+Sqlite: subtitle demand no longer claimable` came from nynuc's hiqlite
+store — and the match is gated to `SubtitleExtract` claims.
 
 ### 3. A live start that waited out background work was refused
 
@@ -75,9 +91,18 @@ owning a pool:
 - **Otherwise the ordinary software decision**, shared with the normal path
   (`software_decision`): a class measured or shaped as hopeless in software
   is still refused, honestly, because that refusal is about the stream. A
-  class that fits takes its CPU **forced** (`SwPool::take_forced`), because
-  the background permit still reserves budget it is not using. The
-  overcommit is recorded in the pool, not hidden.
+  class that fits takes its CPU through `SwPool::take_over_background`,
+  which discounts the stuck background reservation **and nothing else**:
+  every live reservation still counts against the budget, so a pool other
+  viewers have spent is refused with the ordinary bounded answer ("spent by
+  live sessions"). The review's first finding was that an unbounded forced
+  take here would have let one stuck worker pile forced permits until every
+  session ran below realtime; the bound is what keeps this a reclaim of the
+  worker's share rather than a licence to oversubscribe. The mixed pipeline
+  (hardware slot plus a software decode's cores) is taken whole or not at
+  all, as the ordinary bundle is.
+- This applies to **every `Priority::Live` start** — VOD as much as Live
+  TV — since both go through `admit_live`. Live TV is where it was reported.
 - The admitted permit is a live one, so from that instant every background
   holder is `background_blocked` and stops at its next yield check.
 - Only `Priority::Live` earns this. A speculative start (prepared
@@ -108,7 +133,8 @@ this from real tuner exhaustion.
 | Area | Change |
 |---|---|
 | `plurx-core` store | `claim_job` retires a subtitle job the demand trigger refuses and answers `Cancelled`; `background_jobs_subtitle::{DEMAND_GONE, demand_gone, DEMAND_GONE_CODE}`. Store test `a_subtitle_claim_the_demand_trigger_refuses_retires_the_zombie_job` grows the exact fleet shape (request ready, job queued) and proves the claim heals it. |
-| `subtitle_work.rs` | Claim first, then `admit_fragment`; a claim the pool then refuses is settled `Yield` (5 s) and released. Cheap `pretranscode_worker_idle` check before the claim so an active viewer does not cause claim/yield churn. |
+| `subtitle_work.rs` | Claim first, then `admit_fragment`; a claim the pool then refuses is settled `Yield` (5 s) and released. `fragment_worker_may_start` — the admission's own predicate (pool idle **and** the shared heavy-worker gate free) — before the claim, so neither a viewer nor another heavy worker causes claim/yield churn (a claim charges the demand an attempt and two replicated writes). |
+| `background_jobs_subtitle.sql`, `sqlite/mod.rs`, `hiqlite.rs` | The settled trigger's attempt update guarded to open demand; SQLite v83, cluster v61. |
 | `admission.rs` | `try_acquire_over_background`, `admit_over_background`, `software_decision` (shared). |
 | `transcode/manager/start.rs` | `admit_live` admits over background after the window for `Priority::Live` on both the hardware and software routes; `note_background_overrun` log + counter. |
 | `telemetry.rs` | `plurx_transcode_background_overrun_total{pool="hardware"\|"software"}`. |
@@ -145,9 +171,25 @@ this from real tuner exhaustion.
 ## Verification
 
 - Store test `a_subtitle_claim_the_demand_trigger_refuses_retires_the_zombie_job` (the fleet shape written directly: no public store path admits a job for a ready request, so how the eight rows arose is still open — see below).
-- `live_admission_starts_over_a_background_permit_that_does_not_release`,
-  `live_admission_over_background_takes_software_forced_when_hardware_is_capped`,
-  `speculative_admission_is_still_refused_while_background_holds`.
+- `live_admission_starts_over_a_background_permit_that_does_not_release`
+  (hardware arm, the live permit parks background at a cap with headroom,
+  the counter moves),
+  `live_admission_over_background_falls_to_software_when_the_cap_is_held`
+  (the `Admission::Software` arm),
+  `live_admission_over_background_takes_software_forced_when_hardware_is_capped`
+  (the pure-software route),
+  `live_admission_over_background_is_still_bounded_by_live_usage` (a pool
+  spent by viewers is refused, background hold or not),
+  `speculative_admission_is_still_refused_while_background_holds` and
+  `speculative_software_admission_is_still_refused_while_background_holds`.
+- Adversarial review of the branch (one round, five findings, all
+  addressed): the unbounded forced take, the settled trigger clobbering the
+  finished attempt, the SQLite-only proof of the message match, claim/yield
+  churn from the reorder, and tests that did not reach the arms they named.
+  Rollout notes from it: an ingress older than this build folds
+  `encoder_capacity` to its fallback code, and clients older than Android
+  132 / Apple 192 print the raw sentence; a healthy producer whose
+  checkpoint-and-kill runs past five seconds counts as an overrun.
 - Live TV HTTP: `encoder_capacity` code, 503, `retry: later`, preserved
   through the ingress relay.
 - Fleet: after deploy, `plurx_transcode_background_overrun_total` on nynuc

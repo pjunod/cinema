@@ -26,11 +26,17 @@ ownership after the window (hardware within the cap, software forced, one
 WARN + `plurx_transcode_background_overrun_total{pool}`); and the refusal is
 `encoder_capacity` with its own copy on all three clients, pinned by the
 shared start-cases fixture (Android 132, Apple 192).
+One adversarial review round (five findings, all taken): the take over a
+stuck permit is now bounded by live usage, the store's settled trigger no
+longer rewrites a finished attempt (SQLite v83 / cluster v61 — a rolling
+deploy holds membership until every voter runs it), expired-lease zombies
+retire too, the subtitle pre-check is the admission's own predicate, and
+the tests reach the arms they name.
 **Decision for Paul to look over:** admitting a viewer over a stuck
 background permit reverses the ruling OPERATIONS.md carried ("absence after
 five seconds means that worker is stuck rather than permission to start
-beside it"); the RCA §3 argues why. Next: adversarial review, fast lane,
-merge, then GPT deploys the nodes and installs the two client builds.
+beside it"); the RCA §3 argues why. Next: fast lane, merge, then GPT
+deploys the nodes and installs the two client builds.
 
 ## Silo comparison: two implementation plans and one device census, no code
 
