@@ -1,6 +1,10 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 06:28 UTC · **Audited main:** `c983989813d0819ed54dc1b1e115c08b60a059e8`
+**Status:** open · **Updated:** 2026-09-28 06:37 UTC · **Audited main:** `2694db665eedcb8c00c4caee15e72a897cd7f4c2`
+
+Main #585 merged independently as `2694db665eedcb8c00c4caee15e72a897cd7f4c2` during590 qualification. Its actual server admission changes and native encoder-capacity message are integrated. It claims Apple196/Android134, so590 now reserves Apple197 and requires fresh197 apps/runner plus exact134 Android compilation and installation. The prior196/133 artifacts and physical observations keep their historical/source scope. No second590review. Its old-base gate3489 cannot qualify this new main; current combined compilation/focused checks and a new exact-base fast lane are required.
+
+Parallel draft594 will integrate this current source and reserve Apple198/Android135 for caption selectors and explicit watchable actions. Any feature134 APK from its previous e51 source is sealed unqualified and must not be installed. Actual API37 synthetic local backup/restore passed on historical signed133 (receipt b4059fc12eac56421264142580403a74d24114e1b5a672dfef321b87402924c5); owned emulator/privateADB/temporary image storage cleaned (d3b8efd21467aa005a9092d235ccb72d0d66e18d1a590fc5ad49353b4fd20f03). Cloud/D2D/physical/final134 acceptance remains owed.
 
 [PR #582](http://192.168.4.7:3000/noirr/plurx/pulls/582) merged after its
 single adversarial review; all four findings were fixed. The exact candidate
@@ -28,12 +32,6 @@ Fast lane API3484/UI3463 passed policy, Apple, Windows and web checks. Rust core
 Fast lane API3488/UI3467 stopped in preflight before Rust units: the fixed test adds two test-only awaited timers, and the mechanical ownership census still expected1088 rather than1090. Its ledger now names the20ms readiness poll and10s startup budget, both owned by the same test and retained output future; no detached task or production timer was added. The exact focused Rust case already passed1/0 in2.23s. The one failing ownership-census case is the next focused check, followed by a new exact-candidate gate; no second review or full-unit optional run.
 
 Separate parallel client work has compiled ordinary Release LiveTV caption controls for Apple and actual-track controls for Android. Both clients also lose the server's actionable watchable-capacity offer before rendering it; that client follow-up is being implemented in the next batch. These branches have not run tests or their batch review and are not deployed. Their acceptance cannot be attributed to installed194/133 or sealed196 products.
-
-[Draft PR #594](http://192.168.4.7:3000/noirr/plurx/pulls/594) now integrates both clients' committed L-03 M2/M4 caption and capacity actions with all original corrective anchors preserved. Apple197 and Android134 are reserved for this source; installed194/133 and signed196 products retain their separate provenance. Compilation passed on both platform branches; the completed batch gets its one independent review only after #590 lands and current main is integrated. No594 behavior tests or review has run.
-
-D-03 actual API37 local synthetic-data backup/restore also passed on exact nondebuggable signed133. Official ARM64 revision6/extension22 image and actual API37/rootable owned guest were verified. Framework metadata and app backups succeeded; clearing only the synthetic app preceded restore0. The positive-control file returned with identical hash and excluded offline/datastore sentinels stayed absent. Receipt `b4059fc12eac56421264142580403a74d24114e1b5a672dfef321b87402924c5`. Owned emulator, private ADB, disks, temporary SDK/image/archive are cleaned; receipt `d3b8efd21467aa005a9092d235ccb72d0d66e18d1a590fc5ad49353b4fd20f03`. API36 and API37 local133 policy proof does not settle cloud, D2D, physical, account/reader/offline behavior or installed134 acceptance.
-
-The final #590 candidate168be3bd passed policy preflight in fast laneAPI3489/UI3468; selected Rust/Windows/web/Apple jobs are running, unchanged Android is unselected. The repaired cancellation case and precise ownership census passed once; no second590review.
 
 The four-node strict uniform deployment passed on `dfef993b9`. Browser cases ran on that exact
 merged binary and unchanged scorers; failures are retained. Main subsequently moved through

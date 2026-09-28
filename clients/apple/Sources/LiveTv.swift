@@ -680,6 +680,7 @@ struct LiveTvFailure: Error, LocalizedError, Sendable {
                 copy += " " + watchable.map { "Watch \($0.guideNumber) instead" }.joined(separator: " · ") + "."
             }
             return copy
+        case "encoder_capacity": return "The tuner owner's video encoder is busy, so this channel cannot be converted right now. Try again in a moment."
         case "tuner_unavailable": return "The tuner cannot start this channel. Check reception and other tuner clients."
         case "channel_not_found": return "This channel is no longer available. Refresh the lineup."
         case "drm_unsupported": return "DRM-protected television is not supported."
