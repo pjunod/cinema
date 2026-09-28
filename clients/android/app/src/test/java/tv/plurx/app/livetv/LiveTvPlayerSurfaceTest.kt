@@ -1,6 +1,7 @@
 package tv.plurx.app.livetv
 
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -32,6 +33,22 @@ class LiveTvPlayerSurfaceTest {
         val surface = screen.substringAfter("private fun LiveTvPlayerSurface(")
             .substringBefore("internal data class LiveTvPictureInfo(")
         assertTrue("each host creates its PlayerView", surface.contains("PlayerView(context)"))
+        assertEquals(
+            "the screen builds its PlayerView in exactly one place, the per-host composable",
+            1, Regex("""PlayerView\(context\)""").findAll(screen).count(),
+        )
+        assertEquals(
+            "the screen hosts exactly one AndroidView, the per-host PlayerView",
+            1, Regex("""\bAndroidView\(""").findAll(screen).count(),
+        )
+        assertTrue(
+            "every recomposition rebinds the current player, so a retune's new ExoPlayer reaches the view",
+            Regex("""update\s*=\s*\{\s*view\s*->\s*view\.player\s*=\s*controller\.player""").containsMatchIn(surface),
+        )
+        assertTrue(
+            "the in-place resize path keeps the API 34 SurfaceView sync workaround on",
+            surface.contains("setEnableComposeSurfaceSyncWorkaround(true)"),
+        )
         assertTrue(
             "a host leaving composition must unbind the shared player",
             Regex("""onRelease\s*=\s*\{\s*view\s*->\s*view\.player\s*=\s*null\s*}""").containsMatchIn(surface),

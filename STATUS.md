@@ -16,7 +16,13 @@ fullscreen box with `movableContentOf`, and its SurfaceView kept its creation
 geometry. Each host box now composes its own PlayerView on the shared
 ExoPlayer and unbinds on release; phones are unchanged (same slot, just a
 resize). `LiveTvPlayerSurfaceTest` fails against `main` and passes here;
-`testDebugUnitTest` (799/0), `lintDebug` and `assembleDebug` green. Not yet: adversarial review, history-audit, CI, the tablets.
+`testDebugUnitTest` (799/0), `lintDebug` and `assembleDebug` green;
+`history-audit` ok. Open as [PR #606](http://192.168.4.7:3000/noirr/plurx/pulls/606).
+The adversarial review found no blocker and confirmed the release/bind order
+against Media3 1.10.1 and Compose's apply order; it added PlayerView's API 34
+SurfaceView sync workaround for the boxes that resize in place, an honest
+KDoc (one black frame per swap, no PiP host on the wide layout) and a
+tighter source pin. Not yet: CI, the merge, the tablets.
 
 ## Live TV said "all slots are busy" with every tuner idle
 

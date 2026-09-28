@@ -2278,10 +2278,13 @@ private fun LiveTvOverlay(
 
 /**
  * The Live TV picture for one host box. Every box that shows the picture —
- * the inline box, each wide-browser preview, fullscreen and PiP — composes
- * its own PlayerView, and the shared ExoPlayer moves its video output to
- * whichever view was bound last. Media3 swaps the codec output surface in
- * place, so the tuner, the session and the decoder all carry on.
+ * the phone's inline/fullscreen/PiP box, each wide-browser preview and the
+ * wide fullscreen box — composes its own PlayerView, and the shared ExoPlayer
+ * moves its video output to whichever view was bound last. Media3 swaps the
+ * codec output surface in place, so the tuner, the session and the decoder
+ * all carry on; the new box is black for the one frame between its surface
+ * being created and the first frame landing on it, and Media3 releases that
+ * frame whether or not playback is paused.
  *
  * This replaced moving one PlayerView between the boxes with
  * `movableContentOf`. A SurfaceView's window surface is positioned and sized
@@ -2290,6 +2293,17 @@ private fun LiveTvOverlay(
  * box's geometry in the corner of a black screen — including after a forced
  * layout pass and a surface rebind (#509, #546). A view created in the box it
  * draws in has no earlier geometry to keep.
+ *
+ * No two hosts are ever composed at once: the phone box, the empty-channels
+ * box, the Over picture, the Guide preview and the watch pane are separated
+ * by `return` or if/else, so the player never has two live views fighting
+ * over its output.
+ *
+ * The box that is resized in place — the phone box between inline,
+ * fullscreen and PiP, the Guide preview when its constraints change — still
+ * relies on the SurfaceView following its View bounds, which on API 34 is
+ * androidx/media#1237; PlayerView's opt-in `SurfaceSyncGroup` workaround
+ * covers that case and is a no-op on every other API level.
  */
 @Composable
 private fun LiveTvPlayerSurface(controller: LiveTvPlayer) {
@@ -2302,6 +2316,10 @@ private fun LiveTvPlayerSurface(controller: LiveTvPlayer) {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT,
                 )
+                // API 34 can draw a SurfaceView inside a Compose AndroidView at
+                // its old geometry after an in-place resize (androidx/media#1237);
+                // this keeps the surface and the View in one sync group.
+                setEnableComposeSurfaceSyncWorkaround(true)
                 player = controller.player
                 keepScreenOn = state.playing
             }
