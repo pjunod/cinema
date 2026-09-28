@@ -11,8 +11,8 @@ use axum::{Json, Router};
 use plurx_core::domain::{ItemKind, MediaSessionActivation, MEDIA_SESSION_PUBLICATION_BLOCKED};
 use plurx_core::optical::{
     optical_output_identity, DurableOpticalSessionSource, HostRequirement, HostRequirementStatus,
-    OpticalDisc, OpticalDriveSnapshot, OpticalDriveState, OpticalLifecycleError, OpticalMatchKind,
-    OpticalProgress, OpticalProgressWrite, OpticalServiceError, OpticalTitle, PlaybackSourceRef,
+    OpticalDriveSnapshot, OpticalDriveState, OpticalLifecycleError, OpticalMatchKind,
+    OpticalProgress, OpticalProgressWrite, OpticalServiceError, PlaybackSourceRef,
     OPTICAL_SESSION_PAYLOAD_V1,
 };
 use plurx_core::playback::{self, Decision, DeviceCaps, Force, PlaybackMediaFacts};
@@ -94,10 +94,58 @@ struct TitleSummary {
 
 #[derive(Serialize)]
 struct TitleDetailDto {
-    disc: OpticalDisc,
-    title: OpticalTitle,
+    disc: PublicOpticalDisc,
+    title: PublicOpticalTitle,
     chapters: serde_json::Value,
-    progress: Option<OpticalProgress>,
+    progress: Option<PublicOpticalProgress>,
+}
+
+/// Public title detail is an explicit allow-list. Store records also retain
+/// fingerprint evidence, bounded helper diagnostics, title locators and the
+/// ffprobe document used to freeze a decode plan; none of those belong on a
+/// client wire response.
+#[derive(Serialize)]
+struct PublicOpticalDisc {
+    disc_id: String,
+    format: plurx_core::optical::OpticalFormat,
+    volume_label: Option<String>,
+    display_title: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PublicOpticalTitle {
+    disc_id: String,
+    title_id: String,
+    angles: u32,
+    facts: PlaybackMediaFacts,
+    duration_ms: Option<i64>,
+    matched_item_id: Option<i64>,
+    match_kind: Option<OpticalMatchKind>,
+}
+
+#[derive(Serialize)]
+struct PublicOpticalProgress {
+    disc_id: String,
+    title_id: String,
+    angle: u32,
+    position_ms: i64,
+    duration_ms: Option<i64>,
+    watched: bool,
+    updated_at_ms: i64,
+}
+
+impl From<OpticalProgress> for PublicOpticalProgress {
+    fn from(progress: OpticalProgress) -> Self {
+        Self {
+            disc_id: progress.disc_id,
+            title_id: progress.title_id,
+            angle: progress.angle,
+            position_ms: progress.position_ms,
+            duration_ms: progress.duration_ms,
+            watched: progress.watched,
+            updated_at_ms: progress.updated_at_ms,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -492,10 +540,24 @@ async fn title_detail(
     let progress = state
         .store
         .optical_progress(user.id, &disc_id, &title_id, query.angle)
-        .await?;
+        .await?
+        .map(PublicOpticalProgress::from);
     Ok(Json(TitleDetailDto {
-        disc,
-        title,
+        disc: PublicOpticalDisc {
+            disc_id: disc.disc_id,
+            format: disc.format,
+            volume_label: disc.volume_label,
+            display_title: disc.display_title,
+        },
+        title: PublicOpticalTitle {
+            disc_id: title.disc_id,
+            title_id: title.title_id,
+            angles: title.angles,
+            facts: title.facts,
+            duration_ms: title.duration_ms,
+            matched_item_id: title.matched_item_id,
+            match_kind: title.match_kind,
+        },
         chapters,
         progress,
     }))
@@ -1215,7 +1277,7 @@ async fn local_progress(
     title_id: &str,
     drive_id: &str,
     request: ProgressRequest,
-) -> Result<OpticalProgress, ApiError> {
+) -> Result<PublicOpticalProgress, ApiError> {
     authorize_play(state, user_id).await?;
     state
         .optical
@@ -1242,7 +1304,7 @@ async fn local_progress(
             recorded_at_ms: request.recorded_at_ms,
         })
         .await?;
-    Ok(progress)
+    Ok(progress.into())
 }
 
 #[derive(Deserialize)]
