@@ -1,26 +1,61 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 11:39 UTC · **Audited main:** `b5b8d5d521e451369d1e672d3b62d6c41e7cfcd1`
+**Status:** open · **Updated:** 2026-09-28 12:55 UTC · **Audited main:** `d66e6ed8582cfcf518f11765bf3489a44ce6ccca`
 
 ## Current work
 
 [PR #590](http://192.168.4.7:3000/noirr/plurx/pulls/590) and [PR #594](http://192.168.4.7:3000/noirr/plurx/pulls/594) are merged green. Each received exactly one adversarial review. Final #594 candidate `3a36f3497170ce4dbf3b58ad0890b05cce2c5a9a` passed all eight mandatory selected jobs against actual #590 main; unchanged web syntax was independently unselected. Its landing preserves20 regression fields. The final selected Rust lane recorded4721 passes, zero failures and16 ignored cases. Actual focused Apple7 and Android8 results and earlier failed attempts retain their original source identity.
 
-The final server image is built once on m6 for exact merged main `9c5a28983`; all four nodes passed strict exact source/content/health/quorum proof. A six-minute checkpoint passed13 uniform identity rows per node at30-second maximum gap. Each node also supplied two health rows over299–300s and two C08/hygiene scrapes over300s, with zero targeted errors. Main then advanced through qualified peer596 to `b5b8d5d52`; this9c5 runtime evidence remains historical. Final browser compilation passed in123.023s with the exact merged source and original scorers. All six distinct browser cases passed once against measured9c5; physical inputs stopped when main moved. Consolidate596 and this evidence batch597 before one successor current-main rollout. Native198/135 inputs are unchanged; no repeated device install is required.
+[PR #597](http://192.168.4.7:3000/noirr/plurx/pulls/597) merged green
+as `d66e6ed8582cfcf518f11765bf3489a44ce6ccca`. Its sole adversarial
+review found two P2 evidence-scope issues, both addressed before the four
+focused documentation checks and selected fast lane3525 passed. All four
+nodes now pass strict exact-source, binary, content, health and quorum
+proof. One collector75753 began at12:17:11UTC; its five-minute checkpoint
+has13 identity rows per node over360s, maxgap30s, two health rows over300–301s
+and two C08 scrapes over301s. Passive points do not close normal-use or
+24-hour/seven-day acceptance. Native198/135 inputs match the installed
+products; the source-only merge requires no repeated installation.
 
 | Work | Verified now | Remaining |
 |---|---|---|
-| Fleet | All four9c5 sources, running binaries and strict health passed. Docker backend raw IDs differ; normalized config/layers/binary bytes match. Six-minute uniform identity checkpoint passed; health and C08/hygiene were sampled twice per node. | Consolidated current-main597 successor deployment and a new bounded exact-source window. Historical9c5 collector66961 remains active pending guarded successor swap. |
-| Devices / D-02 | Apple198 installed/read back in place on all six reachable paired Apple devices. Signed Android135 installed/read back on GoogleTV and both Pixels; checked UID/firstInstall/data identity retained. | Apple16pro is unavailable; reachable Apple phones/tablets and both Pixels are locked (iPadPro lock query unavailable). Physical lifecycle/controller/decoder/error matrix remains owed. |
-| D-03 | Signed133 synthetic local restore/exclusions passed on actual API36 and37 with positive controls and owned-emulator cleanup. | Actual mobile PDF/EPUB/offline, cloud/D2D/physical restore and ART consumption/performance. GoogleTV cannot supply the mobile reader matrix. |
-| A-02 / A-03 | Historical TV paging/Settings and GoogleTV459/325 counts remain scoped to their original builds. Ordinary Release Bedroom diagnostic compiled. | Bedroom diagnostics failed on asleep then absent screenshot screen0; production198 retained and own runner removed. GoogleTVHome recovered after one Refresh, then source guard stopped before playback. Controller/lifecycle/remote and named Lenovo6000-item matrix remain owed. |
-| W-02 / A-04 | Final merged browser binary compiled; original scorers and prior failures retained. | Actual Chrome/Firefox one/two cliffs and both official W02 fixtures pass once on9c5. Current-main association, LG/FireTV, Safari/HDR and native matrix remain owed. |
-| L-03 M2/M4 | Native captions and known-channel capacity actions merged through594;15 focused native cases pass. Real6.1 source contains439 caption packets. | Final installed HLS advertisement, actual selector and rendered text; shared-capacity/DVR and Shield HDMI matrix. Source packets do not prove rendering. |
+| Fleet | All fourd66 strict source/binary/content/health/quorum checks pass, lag0/restarts0. One bounded collector75753 is active. | Real elapsed current-build hour/24h/7d and active normal-use evidence. Historical66961 collector was closed before the successor swap. |
+| Devices / D-02 | Six Apple198 and three Android135 installs remain valid through exact native-input parity. Fresh Pixels readback confirms user0/locked. | Named absent or locked hardware and lifecycle/controller/decoder/error matrix. No unlocking or profile borrowing. |
+| D-03 | Signed133 synthetic API36/37 local restore/exclusions passed with positive controls and owned-emulator cleanup. | Physical mobile PDF/EPUB/offline, cloud/D2D restore and ART consumption/performance. |
+| A-02 / A-03 | GoogleTV authenticated Home and one owned supplemental 1000 to1 session reached. Bedroom metadata/capture case passed1/0, canonical198 retained and own runner removed. | GoogleTV and Bedroom exported images are black, so visible rendering is unproved. Night Tide search returned no results; named-title/remote/controller/Lenovo6000 matrix remains owed. Supplemental finite checks are running. |
+| W-02 / A-04 | Exactd66 Chrome one/two cliffs and subtitle-readiness pass. Firefox one/two cliffs and official HLS-startup fail unchanged predicates; all six ran once. | Gaps116.68/133.34ms exceed100ms, with one retained backward frame. HLS worker/seek pass but reports arrive reversed. Reporter repair and Firefox diagnosis are underway; no scorer weakening or blind rerun. Full named-platform matrix remains owed. |
+| L-03 M2/M4 | Native code/native15 focused checks and real6.1 source439 caption packets are retained; four-tuner/server idle preflight is sealed. | Actual installed source→HLS advertisement→selector→rendered text, shared-capacity/DVR and Shield HDMI matrix. |
+
+[Draft #599](http://192.168.4.7:3000/noirr/plurx/pulls/599) batches bounded
+report delivery sequencing, diagnostic handoff records and these evidence
+updates. Its single adversarial review found one P2: second-handoff records
+could reuse the first switch timestamps. Commit86f0c047 fences the actual
+diagnostic helper to its current preparation boundary and adds a focused
+regression. The sole review receipt is
+`/private/tmp/codex-pr599-single-adversarial-review-20260928.json`, SHA256
+`66c212c3cfc49149ce55ec7ea532e2470ecfd6d87f8f9910ed01d9e2b1283148`.
+Focused tests, one targeted Firefox diagnostic observation and the selected
+fast lane follow; no second review is requested.
+
+GoogleTV's same owned supplemental1000 to1 session now has five actual
+Forward10 remote inputs with8.8–10.7s UIclock jumps beyond wall time. Two
+further keys were2.039s apart because of fresh ownership checks, so rapid
+overlap remains unproved. The420s paused-state experiment is running.
+Physical display metadata reports ON, but the captures remain black; this
+does not establish either advancing visible frames or absent decoder output.
 
 ## Current immutable evidence
 
 | Receipt | SHA-256 | Scope |
 |---|---|---|
+| `/private/tmp/codex-pr597-final-qualification-20260928.json` | `f635f68bf5e9c53a880a0114f5267de0795ec020a5a58db18484640dcbc9a468` | Exact candidate/base, one review with both findings addressed, four focused docs passes and selected gate3525 green. |
+| `/private/tmp/codex-fleet-post597-prep-20260928/run-d66e6ed8582c-540d6a1d/strict-uniform-health.json` | `d9ab86867ec46e7b0eacb3fd7c414777e94d4ab88adb6c3b05e89fdfe525d7be` | All-four exactd66 strict source/content/binary/health/quorum proof. |
+| `/private/tmp/codex-fleet-post597-prep-20260928/run-d66e6ed8582c-540d6a1d/five-minute-checkpoint.json` | `a7b77792d74be3e81280b537231699eb4879a1fbe778c2ada676f1a975a80084` | Identity13/node over360s/maxgap30s; health2/node over300–301s; C08 two/node over301s. Passive scope. |
+| `/private/tmp/codex-pr597-browser-evidence-20260928/qualification-receipt.json` | `f0f4dc762865444c9ec8f1941d34b63abfa35ba06e2c5f7c3ea1770cff0e8fe1` | Six distinct cases once on d66: three pass, three fail. Original predicates and raw evidence retained. |
+| `/private/tmp/codex-pr597-firefox-gap-data-diagnosis-20260928/receipt.json` | `69c1925005864ddad57429d24f061843d65d2e6e8354cea09974ab09ef27fcf6` | 116.68ms rVFC callback gap at successor exposure; raw evidence cannot resolve compositor gap versus delayed callback delivery. |
+| `/private/tmp/codex-pr597-bedroom-metadata-attachments-20260928/export-receipt.json` | `9b7709c291f34788670f857a95c672e6c4b40439e8d5d3a2bb422ea620b292f9` | Actual metadata and screenshot attachments exported; PNG black, no visible-render/controller pass. |
+| `/private/tmp/codex-pr597-pixel-lock-readonly-20260928/receipt.json` | `c324f780b143a9d2a9a44f324729172d1749fe04a5ba6b5cdc3e016c69b7dc44` | Both Pixels currentOSuser0, showing/inputRestricted true. Read-only, no input or unlocking. |
+| `/private/tmp/codex-pr597-final-native-reader-source-parity-20260928.json` | `4079bf23b8a49e48cc4cdb77dc014f9902d2f144fbe8ec23d53cc142b22493da` | Exact installed Apple198/Android135 native and reader input parity through merged d66, no reinstall required. |
 | `/private/tmp/codex-pr594-browser-evidence-20260928/qualification-receipt.json` | `54a95dd86f54fcfb4f083b825c94fd811a9c6ef0d01a1baf049717ce6588ade2` | Four actual A04 cases plus two official W02 cases pass once on9c5; original scorers/thresholds unchanged, runtimes cleaned. |
 | `/private/tmp/codex-pr594-browser-evidence-20260928/evidence-summary.json` | `9e0570feba432e8b1d0346d8df5bcde390b5fa02da8d0aec0c91d2921cf35566` | Raw/normalized hashes and per-cliff gaps/downshifts; no b5/current-main, native, audio, HDR, Safari or fleet-playback acceptance claim. |
 | `/private/tmp/codex-peer596-main-qualification-readonly-20260928.json` | `286ddb495e843758be1288d0a89392736518c22078b2ae06db16d6b43d908e82` | Actual596/a71/API3523 selected jobs green; single review6083 and addressed disposition;63item transcode move, no native/reader input changes. |
@@ -37,7 +72,7 @@ The final server image is built once on m6 for exact merged main `9c5a28983`; al
 | `/private/tmp/codex-android135-six-device-install-20260928T105749Z/receipt.json` | `ea67d96898e8d36f4b43b6b4153d144da9e3764ec9e60c2075e27b42a19ada0e` | Three exact signed135 installs/readbacks; GoogleTV unlocked, both Pixels locked. No content/auth/offline claim. |
 | `/private/tmp/codex-browser-pr594-final-compiled-20260928/receipt.json` | `c89bbcbe081a7454180552ef0ddffc73c374338d0d72a107aee6325e67bc2149` | Exact merged final binary compiled in123.023s; no tests or traces. |
 
-The checkpoint retains its original `collector_running:false` from a sandboxed `kill(0)` check that returned EPERM. The separately escalated process check corroborated PID66961 and its detached tmux session as live without a restart: `/private/tmp/codex-fleet-post594-prep-20260928/resume-9c5a28983c3d-77811a78/five-minute-checkpoint-process-corroboration.json`, SHA256 `710c0662f12b5e37f5b2b0b5766ebedc3a139fa4afa4b4b43172587d12cdeba3`. Both measurements remain preserved. The historical collector must be closed through the attributed successor handoff before a new collector starts.
+The checkpoint retains its original `collector_running:false` from a sandboxed `kill(0)` check that returned EPERM. The separately escalated process check corroborated PID66961 and its detached tmux session as live without a restart: `/private/tmp/codex-fleet-post594-prep-20260928/resume-9c5a28983c3d-77811a78/five-minute-checkpoint-process-corroboration.json`, SHA256 `710c0662f12b5e37f5b2b0b5766ebedc3a139fa4afa4b4b43172587d12cdeba3`. Both measurements remain preserved. That historical collector was closed through the attributed successor handoff before collector75753 started.
 
 The seven assigned workboard notes retain their dated history in [the preserved snapshot](ARCHITECTURE-REVIEW-GPT-WORKBOARD-HISTORY-2026-09-28.md). Missing hardware, unperformed actions and real duration windows remain open. The live external status is `/private/tmp/codex-fleet-final-status-20260927.md`.
 
