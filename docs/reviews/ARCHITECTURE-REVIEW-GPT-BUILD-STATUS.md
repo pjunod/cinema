@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 14:57 UTC · **Audited main:** `569ed6e1616868f84604331af33b9a467799f1b2`
+**Status:** open · **Updated:** 2026-09-28 15:11 UTC · **Audited main:** `569ed6e1616868f84604331af33b9a467799f1b2`
 
 ## Current work
 
@@ -12,9 +12,14 @@ fb04e202a (generated invocation/identity in original benchmark names/params,
 original JSON byte hash and actual device context). All corrections are normally
 committed; the original unhooked F2 author attempt is retained and superseded by
 the final integrated tracked-hook amendment with explicit Codex identity. No
-second review. Both current signed199/136 products retain actual native input
-parity through these harness/report-only corrections. Focused regressions and
-mandatory selected qualification follow on the final committed branch.
+second review. Apple6 and Python16 post-review checks pass. Android configuration
+failed before executing any cases: the debug test selector ReleaseProfileStatusTest
+was mistaken for a release task. Task options are now excluded from task signing
+selection; release and profileCapture still require the durable signer. The
+original zero-case failure is retained. Android136 is rebuilt in a separate
+retained attempt because its Gradle input changes; Apple199 actual inputs remain
+unchanged. Corrected Android17 plus one player instrumentation case and the
+mandatory selected qualification remain pending.
 
 The passive86d collector now has a sealed historical hour:121 identity samples
 and13health/C08 samples per node over at least3600seconds, with bounded cadence,

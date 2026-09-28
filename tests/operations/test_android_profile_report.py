@@ -71,7 +71,18 @@ class AndroidReleaseProfileReportCase(unittest.TestCase):
 
     def test_capture_tasks_require_release_signing_and_non_debuggable_target(self):
         gradle = (ROOT / "clients/android/app/build.gradle.kts").read_text()
-        expression = re.search(r"gradle.startParameter.taskNames.any \{([^}]+)\}", gradle).group(1)
+        # Task options are not task names: the real debug JVM invocation uses
+        # --tests tv.plurx.app.diagnostics.ReleaseProfileStatusTest without keys.
+        selection = gradle.split("val requestedTaskNames =", 1)[1].split(
+            "val releaseTaskRequested", 1)[0]
+        self.assertIn("gradle.startParameter.taskNames.mapNotNull", selection)
+        self.assertIn('argument == "--tests"', selection)
+        self.assertIn("testSelectorExpected = true", selection)
+        self.assertIn("testSelectorExpected ->", selection)
+        self.assertIn("testSelectorExpected = false", selection)
+        self.assertIn('argument.startsWith("--") -> null', selection)
+        self.assertIn("else -> argument.substringAfterLast(':')", selection)
+        expression = re.search(r"requestedTaskNames.any \{([^}]+)\}", gradle).group(1)
         tokens = re.findall(r'it.contains\("([^"\n]+)"\)', expression)
         for task in (":app:assembleRelease", ":app:assembleProfileCapture",
                      ":baselineprofile:connectedProfileCaptureAndroidTest",

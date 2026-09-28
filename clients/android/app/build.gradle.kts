@@ -54,8 +54,25 @@ val generateReaderAssets = tasks.register<GenerateReaderAssets>("generateReaderA
  * tests/operations/test_android_credential_exposure.py scans the Makefile and
  * scripts/ to keep that true.
  */
+// Gradle retains task options and their values here too. A debug test filter
+// such as ReleaseProfileStatusTest is not a request to build a release.
+var testSelectorExpected = false
+val requestedTaskNames = gradle.startParameter.taskNames.mapNotNull { argument ->
+    when {
+        testSelectorExpected -> {
+            testSelectorExpected = false
+            null
+        }
+        argument == "--tests" -> {
+            testSelectorExpected = true
+            null
+        }
+        argument.startsWith("--") -> null
+        else -> argument.substringAfterLast(':')
+    }
+}
 val releaseTaskRequested: Boolean =
-    gradle.startParameter.taskNames.any { it.contains("Release") || it.contains("ProfileCapture") }
+    requestedTaskNames.any { it.contains("Release") || it.contains("ProfileCapture") }
 
 /**
  * Resolve one piece of release signing material, or fail the build naming it.
