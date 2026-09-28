@@ -1756,46 +1756,7 @@ async fn local_eject(
         .manager()
         .snapshot(drive_id)
         .ok_or(ApiError::NotFound("drive"))?;
-    let active_session = match &snapshot.state {
-        OpticalDriveState::Ready { disc_id, .. } => {
-            if disc_id != &request.expected_disc_id {
-                return Err(optical_conflict(
-                    "optical_eject_conflict",
-                    "the disc changed before eject",
-                ));
-            }
-            None
-        }
-        OpticalDriveState::Busy {
-            disc_id,
-            session_id,
-            ..
-        } => {
-            if disc_id != &request.expected_disc_id {
-                return Err(optical_conflict(
-                    "optical_eject_conflict",
-                    "the disc changed before eject",
-                ));
-            }
-            if !request.stop_active || request.session_id.as_deref() != Some(session_id.as_str()) {
-                return Err(optical_conflict(
-                    "optical_drive_busy",
-                    "stop-and-eject requires the exact active optical session",
-                ));
-            }
-            Some(session_id.clone())
-        }
-        OpticalDriveState::Failed {
-            media_generation: Some(_),
-            ..
-        } if request.expected_disc_id.is_empty() => None,
-        _ => {
-            return Err(optical_conflict(
-                "optical_eject_conflict",
-                "the requested insertion is not available to eject",
-            ));
-        }
-    };
+    let active_session = eject_target(&snapshot.state, &request)?;
     if let Some(session_id) = active_session {
         let status = super::hls::release_with_terminal(
             state.clone(),
@@ -1836,6 +1797,64 @@ async fn local_eject(
         .await
         .map_err(service_error)?;
     Ok(())
+}
+
+/// Validate every stale-confirmation fence before stopping an active reader.
+/// The manager repeats the generation check at the eventual hardware call,
+/// but that later fence cannot undo a session stop performed for an old UI
+/// confirmation.
+fn eject_target(
+    state: &OpticalDriveState,
+    request: &EjectRequest,
+) -> Result<Option<String>, ApiError> {
+    match state {
+        OpticalDriveState::Ready {
+            media_generation,
+            disc_id,
+        } => {
+            if media_generation != &request.media_generation || disc_id != &request.expected_disc_id
+            {
+                return Err(optical_conflict(
+                    "optical_eject_conflict",
+                    "the disc changed before eject",
+                ));
+            }
+            Ok(None)
+        }
+        OpticalDriveState::Busy {
+            media_generation,
+            disc_id,
+            session_id,
+            ..
+        } => {
+            if media_generation != &request.media_generation || disc_id != &request.expected_disc_id
+            {
+                return Err(optical_conflict(
+                    "optical_eject_conflict",
+                    "the disc changed before eject",
+                ));
+            }
+            if !request.stop_active || request.session_id.as_deref() != Some(session_id.as_str()) {
+                return Err(optical_conflict(
+                    "optical_drive_busy",
+                    "stop-and-eject requires the exact active optical session",
+                ));
+            }
+            Ok(Some(session_id.clone()))
+        }
+        OpticalDriveState::Failed {
+            media_generation: Some(media_generation),
+            ..
+        } if media_generation == &request.media_generation
+            && request.expected_disc_id.is_empty() =>
+        {
+            Ok(None)
+        }
+        _ => Err(optical_conflict(
+            "optical_eject_conflict",
+            "the requested insertion is not available to eject",
+        )),
+    }
 }
 
 pub(crate) async fn owner(
@@ -2087,8 +2106,8 @@ fn service_error(error: OpticalServiceError) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        optical_audio_tracks, optical_subtitle_tracks, progress_audio_index,
-        progress_subtitle_selection, PublicOpticalDriveState,
+        eject_target, optical_audio_tracks, optical_subtitle_tracks, progress_audio_index,
+        progress_subtitle_selection, EjectRequest, PublicOpticalDriveState,
     };
     use plurx_core::domain::{AudioStream, SubtitleStream};
     use plurx_core::optical::OpticalDriveState;
@@ -2138,6 +2157,47 @@ mod tests {
             "The optical drive could not inspect this disc. Check server logs."
         );
         assert!(!admin_json.to_string().contains("sensitive host diagnostic"));
+    }
+
+    #[test]
+    fn eject_validates_generation_before_returning_an_active_session() {
+        let state = OpticalDriveState::Busy {
+            media_generation: "generation-new".to_owned(),
+            disc_id: "disc-a".to_owned(),
+            title_id: "title-a".to_owned(),
+            session_id: "session-new".to_owned(),
+        };
+        let stale = EjectRequest {
+            expected_disc_id: "disc-a".to_owned(),
+            media_generation: "generation-old".to_owned(),
+            stop_active: true,
+            session_id: Some("session-new".to_owned()),
+        };
+        assert!(eject_target(&state, &stale).is_err());
+
+        let current = EjectRequest {
+            media_generation: "generation-new".to_owned(),
+            ..stale
+        };
+        assert_eq!(
+            eject_target(&state, &current).expect("current eject target"),
+            Some("session-new".to_owned())
+        );
+    }
+
+    #[test]
+    fn failed_drive_recovery_eject_is_generation_fenced() {
+        let state = OpticalDriveState::Failed {
+            media_generation: Some("generation-new".to_owned()),
+            reason: "private diagnostic".to_owned(),
+        };
+        let request = EjectRequest {
+            expected_disc_id: String::new(),
+            media_generation: "generation-old".to_owned(),
+            stop_active: false,
+            session_id: None,
+        };
+        assert!(eject_target(&state, &request).is_err());
     }
 
     #[test]
