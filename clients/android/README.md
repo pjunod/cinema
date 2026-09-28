@@ -20,10 +20,13 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `137` — the tuner, programme guide, recording
-> and Library channel settings leave Developer for Settings → Live TV, as on
-> the web; the Developer Enable Live TV card shows its live readiness rows;
-> physical acceptance pending.
+> Status: **v0.3.0**, build `138` — every Live TV box builds its own player
+> view, so fullscreen fills the screen on tablets instead of keeping the
+> inline picture in a corner; accepted on the Lenovo TB322FC and the Google
+> TV Streamer 2026-09-28, TCL 9445X still owed.
+> Build 137 — the tuner, programme guide, recording and Library channel
+> settings leave Developer for Settings → Live TV, as on the web; the
+> Developer Enable Live TV card shows its live readiness rows.
 > Build 136 — measured library prefetch, bounded debug/Live diagnostics and
 > release profile tooling.
 > Build 135 adds actual Live TV caption choices and explicit watchable
