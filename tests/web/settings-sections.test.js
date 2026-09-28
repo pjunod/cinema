@@ -477,7 +477,8 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       shippedConst("DEV_READINESS_LABEL"), shippedConst("LIVE_TV_GUIDE_DRAFT"),
       shippedSource("devReadinessRow"), shippedSource("devReadinessPill"),
       shippedSource("devReadinessEvidence"), shippedSource("devReq"),
-      shippedSource("devStaticReq"), shippedSource("clusterTransportRecoveryCard"),
+      shippedSource("devStaticReq"), shippedSource("devGraduation"),
+      shippedSource("clusterTransportRecoveryCard"),
       // The fourth time (see above): `clusterBackupCard` shipped with the
       // portable backup and fenced restore and reached `developerPanel`
       // without being composed here, so this whole gate died on its name.
@@ -627,8 +628,24 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.match(html, /reopen loop/);
   assert.match(html, /One recovery per playback, and it is never given back/);
   assert.match(html, /best-effort selected-stream diagnostics/);
-  assert.match(html, /Chrome shaped-network recovery[\s\S]*?not met/);
+  assert.match(html, /Native controllers[\s\S]*?not met in this build/);
+  assert.match(html, /HDR playback[\s\S]*?not measured/);
   assert.match(html, /These observations never gate this checkbox/);
+  // Paul's Developer lifecycle (2026-09-28): a card lives on this page only
+  // while its feature is not fully active or not fully tested, and it says
+  // what it is waiting on and where it goes when that lands. A card added
+  // without saying so fails here, whatever else it renders.
+  const developerCards = html.split("CARD[").slice(1);
+  assert.ok(developerCards.length >= 20, `Developer renders its cards (${developerCards.length})`);
+  for (const card of developerCards) {
+    const title = (/CARDHEAD:([^|]*)/.exec(card) || [])[1] || card.slice(0, 80);
+    assert.match(card, /<b>Leaves Developer when:<\/b> \S[^<]*<b>Then:<\/b> \S/,
+      `the Developer card "${title}" names what it waits on and where it graduates`);
+  }
+  // Adaptive Auto's graduation is Paul's choice between two destinations.
+  const autoCard = developerCards.find((card) => card.startsWith("CARDHEAD:Adaptive Auto quality|"));
+  assert.ok(autoCard, "Developer renders the adaptive Auto card");
+  assert.match(autoCard, /Leaves Developer when:<\/b> A-04's D3 matrix[^<]*A-05's native controllers[^<]*<b>Then:<\/b> Paul chooses: the switch returns to Playback as a permanent toggle, or it is removed/);
   const quality = panels.preparedQualityCard(settings, readiness);
   assert.match(quality, /TOG:pqh\|[^|]*\|[^|]*\|checked=true/);
   assert.match(quality, /FOOT:savePreparedQuality/);
@@ -947,7 +964,7 @@ test("a rejected guide refresh reports into the replacement card", async () => {
 test("Verified decode states its cost, its prerequisites, and what this node measured", () => {
   const card = new Function(
     "setCard", "cardHead", "togRow", "setCardFoot", "esc",
-    `${shippedSource("verifiedDecodeCard")}\nreturn verifiedDecodeCard;`,
+    `${shippedSource("devGraduation")}\n${shippedSource("verifiedDecodeCard")}\nreturn verifiedDecodeCard;`,
   )(
     (body) => `CARD[${body}]`,
     (title, sub, tools) => `CARDHEAD:${title}|${sub || ""}|${tools || ""}`,
@@ -1052,7 +1069,7 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
 test("Automatic recovery is directly enabled and coverage remains advisory", () => {
   const card = new Function(
     "setCard", "cardHead", "togRow", "setCardFoot", "esc",
-    `${shippedSource("decodeRecoveryCard")}\nreturn decodeRecoveryCard;`,
+    `${shippedSource("devGraduation")}\n${shippedSource("decodeRecoveryCard")}\nreturn decodeRecoveryCard;`,
   )(
     (body) => `CARD[${body}]`,
     (title, sub, tools) => `CARDHEAD:${title}|${sub || ""}|${tools || ""}`,
