@@ -50,6 +50,7 @@ async fn exchange<T: serde::de::DeserializeOwned>(
             .to_owned();
         return Err(match code {
             "tuner_capacity" => LiveTvError::Capacity(message),
+            "encoder_capacity" => LiveTvError::EncoderCapacity(message),
             "codec_unsupported" => LiveTvError::CodecUnsupported(message),
             "settings_conflict" => LiveTvError::Conflict(message),
             "stream_failed" => LiveTvError::StreamFailed(message),

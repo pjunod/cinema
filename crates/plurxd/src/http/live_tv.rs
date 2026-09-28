@@ -1733,6 +1733,7 @@ pub(super) fn wire_api_error(status: reqwest::StatusCode, body: &[u8]) -> ApiErr
     let stable = match code.as_str() {
         "live_tv_disabled" => "live_tv_disabled",
         "tuner_capacity" => "tuner_capacity",
+        "encoder_capacity" => "encoder_capacity",
         "tuner_unavailable" => "tuner_unavailable",
         "channel_not_found" => "channel_not_found",
         "drm_unsupported" => "drm_unsupported",
@@ -1906,6 +1907,7 @@ fn retry_advice(error: &LiveTvError) -> &'static str {
         | LiveTvError::InvalidResponse(_)
         | LiveTvError::DeviceUnavailable(_)
         | LiveTvError::Capacity(_)
+        | LiveTvError::EncoderCapacity(_)
         | LiveTvError::StartupTimeout(_) => "later",
         LiveTvError::OwnerUnavailable(_)
         | LiveTvError::TunerUnavailable(_)
@@ -1923,7 +1925,8 @@ fn retry_advice_for_code(code: &str) -> &'static str {
         "live_tv_disabled" | "channel_not_found" | "drm_unsupported" | "codec_unsupported" => {
             "never"
         }
-        "tuner_capacity" | "startup_timeout" | "device_unavailable" | "invalid_settings" => "later",
+        "tuner_capacity" | "encoder_capacity" | "startup_timeout" | "device_unavailable"
+        | "invalid_settings" => "later",
         _ => "now",
     }
 }
@@ -1951,6 +1954,7 @@ pub(crate) fn api_error_from(error: LiveTvError, decided: Decided) -> ApiError {
         ),
         LiveTvError::Disabled(message)
         | LiveTvError::Capacity(message)
+        | LiveTvError::EncoderCapacity(message)
         | LiveTvError::TunerUnavailable(message) => {
             (StatusCode::SERVICE_UNAVAILABLE, message.clone())
         }
@@ -2155,6 +2159,28 @@ mod tests {
             body_of(api_error(LiveTvError::Capacity("full".into()))).await["retry"],
             "later"
         );
+        // An encoder refusal is not a tuner refusal: its own code, so a
+        // client never says "slots are busy" over idle tuners, same advice.
+        use axum::response::IntoResponse as _;
+        let encoder = body_of(api_error(LiveTvError::EncoderCapacity("busy".into()))).await;
+        assert_eq!(encoder["code"], "encoder_capacity");
+        assert_eq!(encoder["retry"], "later");
+        assert_eq!(
+            api_error(LiveTvError::EncoderCapacity("busy".into()))
+                .into_response()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let relayed = body_of(wire_api_error(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            br#"{"code":"encoder_capacity","message":"busy"}"#,
+        ))
+        .await;
+        assert_eq!(
+            relayed["code"], "encoder_capacity",
+            "the ingress keeps the code"
+        );
+        assert_eq!(relayed["retry"], "later");
     }
 
     #[tokio::test]

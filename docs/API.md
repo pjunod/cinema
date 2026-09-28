@@ -2350,7 +2350,11 @@ Error codes: `invalid_request` (400), `channel_not_found` (404),
 `request_timeout`/`startup_timeout` (408), `settings_conflict` (409),
 `capability_expired` (410), `drm_unsupported`/`codec_unsupported` (415),
 `stream_failed` (502), and `live_tv_disabled`, `tuner_capacity`,
-`tuner_unavailable`, `device_unavailable`, `owner_unavailable` (503).
+`encoder_capacity`, `tuner_unavailable`, `device_unavailable`,
+`owner_unavailable` (503). `tuner_capacity` means every tuner plurx may use is
+held and carries `holders`/`watchable`; `encoder_capacity` means the tuners
+were free but the owner's video encoder pool refused the transcode this route
+needs — a copy route on the same channel would have started.
 
 ---
 
