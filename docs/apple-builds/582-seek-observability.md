@@ -1,5 +1,7 @@
 # Measure dispatched seeks and attribute live viewing time
 
+**Status:** open — implementation complete; merge and physical rollout pending.
+
 Build: 193
 Issue: #582
 
