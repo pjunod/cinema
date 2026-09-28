@@ -10,3 +10,5 @@ The physical TV navigation helper crosses tab/content boundaries vertically and 
 This batch also repairs web prepared-HLS readiness observation and records exact PR582 deployment and device evidence. Apple source build195 requires fresh signed artifacts and installed-build readback after qualification. Android133 inputs remain unchanged.
 
 The sole PR590 review identified the retained Library grouping prerequisite. The paging case now observes the original selected grouping, chooses the requested category/share through ordinary UI, and restores the original preference in deferred cleanup even on failure. No second review is requested.
+
+Focused regressions ran after that review. Web readiness passed and the unchanged old source failed its intended assertion; physical paging passed against canonical194 with grouping restored. Settings exposed a focused Form toggle Cell that the Button-only query missed. The helper now observes that focus owner and refuses when none is observable; it does not guess with Up presses. The corrected affected cases are rerun before readiness.

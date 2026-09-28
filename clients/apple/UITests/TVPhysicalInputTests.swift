@@ -19,7 +19,10 @@ final class TVPhysicalInputTests: XCTestCase {
         let quality = app.descendants(matching: .any)
             .matching(identifier: "settings-quality").firstMatch
         XCTAssertTrue(quality.waitForExistence(timeout: 10), app.debugDescription)
-        XCTAssertTrue(focus(quality, in: app), "Could not focus Quality picker")
+        guard focus(quality, in: app) else {
+            XCTFail("Could not focus Quality picker")
+            return
+        }
         remote.press(.select)
 
         let auto = app.descendants(matching: .any)
@@ -278,8 +281,16 @@ final class TVPhysicalInputTests: XCTestCase {
                 remote.press(.down)
                 continue
             }
-            let current = app.buttons.matching(focused).firstMatch
-            guard current.exists else { remote.press(.up); continue }
+            let focusedButton = app.buttons.matching(focused).firstMatch
+            // SwiftUI Form toggles focus an accessibility Cell, while the
+            // picker/shelf controls focus Buttons. Observe that actual owner
+            // rather than sending blind Up presses that bounce back to tabs.
+            let current = focusedButton.exists ? focusedButton
+                : app.descendants(matching: .any).matching(focused).firstMatch
+            guard current.exists else {
+                attachScreen(app, name: "focus-owner-unavailable")
+                return false
+            }
             let targetFrame = target.frame
             let currentFrame = current.frame
             // Leave the Category/Library segmented row downwards before

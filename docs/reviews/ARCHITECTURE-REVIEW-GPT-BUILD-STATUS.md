@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 04:37 UTC · **Audited main:** `40dae5ce1e680f0a41e38fe0e5ee5913be7ce54f`
+**Status:** open · **Updated:** 2026-09-28 04:45 UTC · **Audited main:** `40dae5ce1e680f0a41e38fe0e5ee5913be7ce54f`
 
 [PR #582](http://192.168.4.7:3000/noirr/plurx/pulls/582) merged after its
 single adversarial review; all four findings were fixed. The exact candidate
@@ -14,6 +14,14 @@ in the landing commit. No second review was run.
 HLS readiness clock observation repair, physical TV focus navigation repair,
 and this evidence. Apple source195 is reserved; actual devices remain194
 until signed qualification/install. Android133 is unchanged. The sole590 adversarial review found one P2 retained-grouping prerequisite; it is addressed by observed grouping selection and deferred restoration. Review receipt SHA256 `cba5a86abee8bef0a2e342479ef9b75565a41eb26c52cdf81699ab6a29dfb89f`. No second review. Signed195 production apps and physical runner compiled; focused and fast-lane qualification are next, and no590 unit tests have run.
+
+Focused web readiness passed; old-source negative control failed the intended
+no-new-append assertion (receipt `9d3e13f0dd2fe8466b4f723ddf761084d259fe8257442c418a7dec507621b44d`).
+Against canonical194, reviewed195 runner paging passed and restored Library grouping.
+Settings failed because the focused Form toggle was an accessibility Cell outside the
+Button query (retained receipt `19ae137042bc4ef3c703a75dd1ed3dad31021e9b82c952db4e8af1923ac04b24`).
+The focused-owner query is repaired; affected cases rerun before PR readiness.
+These are source-scoped regressions, not final195/current-main product acceptance.
 
 The four-node strict uniform deployment passed on `dfef993b9`. Browser cases ran on that exact
 merged binary and unchanged scorers; failures are retained. Main subsequently moved through
