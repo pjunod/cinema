@@ -27,12 +27,16 @@ exact source and zero observed targeted failures. It does not close current569
 normal-use,24-hour or seven-day acceptance. Receipt SHA256
 `018a18dc998152a8813e798fadd460c1df96b88a162e4f71dc07f9df753e7a29`.
 
-A03 plan-source audit found five mandatory regression groups still absent:
-Apple query-to-completion/summary, stale filter-result discard and five-edit
-150ms coalescence; Android watch-filter completion and actual page-arrival focus.
-A separate next verification batch is being built in parallel. Android category
-query is expressly excluded by§5.5 and is not added to this plan. Named physical
-6000-title request/order/frame traces remain open.
+The next A03 verification batch integrates Apple `5b32b380e` and Android
+`75e3d561f` above the corrected PR600 source. All five previously absent
+regression groups now have executable source: Apple query-driven completion
+and summary, stale filter-result discard and five-edit 150 ms cancellation;
+Android watch-filter completion and actual Compose page-arrival focus. Author
+app and regression sources compile. The integrated batch reserves Apple200
+and Android137; its single review, focused execution and qualification have
+not run. This work leaves PR600's sole review and artifacts intact. Android
+category query is expressly excluded by section 5.5. Named physical 6000-title
+request/order/frame traces remain open.
 
 
 Peer C-07 PR #598 advanced main to569ed6e16. Its changes are integrated into

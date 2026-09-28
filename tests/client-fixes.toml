@@ -3200,3 +3200,64 @@ source = "clients/android/baselineprofile/src/main/java/tv/plurx/profile/Release
 source_anchor = "@JvmStatic @AfterClass fun sealCompletedInvocation()"
 test = "tests/operations/test_android_profile_report.py"
 test_anchor = "test_real_macrobenchmark_device_context_and_binding_are_required"
+
+[[fixes]]
+id = "apple.library-query-task-ownership"
+commits = ["5b32b380e"]
+source = "clients/apple/Sources/LibraryGridCoordinator.swift"
+source_anchor = "final class LibraryGridCoordinator: ObservableObject"
+test = "clients/apple/Tests/LibraryGridCoordinatorTests.swift"
+test_anchor = "testQueryDrivesActualPagerToCompletionAndSummaryReportsProgress"
+
+[[fixes]]
+id = "apple.library-stale-filter-result"
+commits = []
+supplements = "apple.library-query-task-ownership"
+source = "clients/apple/Sources/LibraryGridCoordinator.swift"
+source_anchor = "private func filterNow()"
+test = "clients/apple/Tests/LibraryGridCoordinatorTests.swift"
+test_anchor = "testLateFilterResultCannotReplaceNewerQuerySnapshot"
+
+[[fixes]]
+id = "apple.library-query-cancellation"
+commits = []
+supplements = "apple.library-query-task-ownership"
+source = "clients/apple/Sources/LibraryGridCoordinator.swift"
+source_anchor = "func queryChanged(_ text: String) async"
+test = "clients/apple/Tests/LibraryGridCoordinatorTests.swift"
+test_anchor = "testFiveQueryEditsCoalesceIntoOneActualFilterPassAfter150msWait"
+
+[[fixes]]
+id = "android.library-filter-and-focus-wiring"
+commits = ["75e3d561f"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryPager.kt"
+source_anchor = "fun setWatchFilter(filter: WatchFilter)"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/LibraryPagerWatchFilterTest.kt"
+test_anchor = "watchFilterLoadsTheUnfetchedTailAndPublishesActualLoadedTotals"
+
+[[fixes]]
+id = "android.library-filter-drive-cancellation"
+commits = []
+supplements = "android.library-filter-and-focus-wiring"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryPager.kt"
+source_anchor = "fun setWatchFilter(filter: WatchFilter)"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/LibraryPagerWatchFilterTest.kt"
+test_anchor = "clearingTheWatchFilterCancelsTheDriveWithoutDiscardingLoadedTitles"
+
+[[fixes]]
+id = "android.library-page-arrival-dpad-focus"
+commits = []
+supplements = "android.library-filter-and-focus-wiring"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryScreen.kt"
+source_anchor = "internal fun LibraryScreen("
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/LibraryPageArrivalFocusTest.kt"
+test_anchor = "arrivingPagePreservesTheDpadSelectedCardAndItsOpenAction"
+
+[[fixes]]
+id = "android.library-local-loader-production-bridge"
+commits = []
+supplements = "android.library-filter-and-focus-wiring"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryScreen.kt"
+source_anchor = "pager.setWatchFilter(filter)"
+test = "tests/operations/test_android_library_paging_wiring.py"
+test_anchor = "test_view_model_route_uses_the_same_grid_and_watch_filter_policy"
