@@ -116,6 +116,17 @@ struct PlurxAPI {
         return comps.url
     }
 
+    private func pathComponent(_ value: String) throws -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/?#%")
+        guard !value.isEmpty,
+              let encoded = value.addingPercentEncoding(withAllowedCharacters: allowed),
+              !encoded.isEmpty else {
+            throw APIError.badURL
+        }
+        return encoded
+    }
+
     private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
         guard let url = makeURL(path, query: query) else { throw APIError.badURL }
         var req = URLRequest(url: url)
@@ -314,7 +325,7 @@ struct PlurxAPI {
     }
 
     func opticalDrive(_ driveId: String) async throws -> OpticalDriveDiscDTO {
-        try await get("optical/drives/\(driveId)/disc")
+        try await get("optical/drives/\(try pathComponent(driveId))/disc")
     }
 
     func opticalTitle(
@@ -323,7 +334,7 @@ struct PlurxAPI {
         angle: Int = 1
     ) async throws -> OpticalTitleDetailDTO {
         try await get(
-            "optical/discs/\(discId)/titles/\(titleId)",
+            "optical/discs/\(try pathComponent(discId))/titles/\(try pathComponent(titleId))",
             query: [URLQueryItem(name: "angle", value: String(angle))]
         )
     }
@@ -333,7 +344,10 @@ struct PlurxAPI {
         titleId: String,
         body: OpticalDecisionRequest
     ) async throws -> OpticalDecisionDTO {
-        try await post("optical/drives/\(driveId)/titles/\(titleId)/decision", body: body)
+        try await post(
+            "optical/drives/\(try pathComponent(driveId))/titles/\(try pathComponent(titleId))/decision",
+            body: body
+        )
     }
 
     func createOpticalSession(
@@ -342,7 +356,7 @@ struct PlurxAPI {
         body: OpticalSessionRequest
     ) async throws -> HlsStart {
         try await post(
-            "optical/drives/\(driveId)/titles/\(titleId)/sessions",
+            "optical/drives/\(try pathComponent(driveId))/titles/\(try pathComponent(titleId))/sessions",
             body: body,
             using: Self.playbackPreparationSession
         )
@@ -353,11 +367,17 @@ struct PlurxAPI {
         titleId: String,
         body: OpticalProgressRequest
     ) async throws -> OpticalProgressDTO {
-        try await post("optical/discs/\(discId)/titles/\(titleId)/progress", body: body)
+        try await post(
+            "optical/discs/\(try pathComponent(discId))/titles/\(try pathComponent(titleId))/progress",
+            body: body
+        )
     }
 
     func ejectOpticalDrive(driveId: String, body: OpticalEjectRequest) async throws {
-        try await postNoContent("optical/drives/\(driveId)/eject", body: body)
+        try await postNoContent(
+            "optical/drives/\(try pathComponent(driveId))/eject",
+            body: body
+        )
     }
 
     func readingState(itemId: Int, fileId: Int) async throws -> ReadingStateResponse {
