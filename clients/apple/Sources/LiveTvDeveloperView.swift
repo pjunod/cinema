@@ -10,7 +10,7 @@ struct LiveTvDeveloperView: View {
     @AppStorage("plurx.preparedHandoff") private var preparedHandoffEnabled = true
     @AppStorage("plurx.boundedResume") private var boundedResumeEnabled = true
     @ObservedObject private var handoff = Caps.PreparedHandoffTelemetry.shared
-    @StateObject private var admin = LiveTvAdminModel(readsGuide: false)
+    @StateObject private var admin = LiveTvAdminModel(surface: .developer)
 
     var body: some View {
         Form {
@@ -75,8 +75,21 @@ struct LiveTvDeveloperView: View {
                     Button(saved.liveTvEnabled ? "Disable Live TV and drain sessions" : "Enable Live TV") {
                         admin.write(.enabled(!saved.liveTvEnabled))
                     }.disabled(admin.busy)
-                    Text("Readiness is advisory; unmet checks do not prevent enabling. Configure the tuner and check the saved configuration in Settings → Live TV.").font(.caption)
                 }
+                // The prerequisites as the server last observed them, every row
+                // it sent in the order it sent them — the web card's
+                // `/live-tv/readiness` read. Advisory: no row reaches the button.
+                if let prerequisites = admin.prerequisites {
+                    ForEach(prerequisites.checks) { check in
+                        Label("\(check.ready ? "Met" : "Not met"): \(check.message)",
+                              systemImage: check.ready ? "checkmark.circle" : "exclamationmark.triangle")
+                    }
+                    Text("Advisory only. Unknown or unmet requirements do not prevent enabling.").font(.caption)
+                } else if let error = admin.prerequisitesError {
+                    Text("Readiness unavailable: \(error). You can still enable Live TV.").font(.caption)
+                }
+                Button("Refresh Live TV prerequisites") { Task { await admin.loadPrerequisites() } }
+                Text("The tuner address, stream limit and quality ceiling are set in Settings → Live TV.").font(.caption)
                 Text(LiveTvSettingsPlacement.enableLiveTvGraduation).font(.caption)
             }
             Section {

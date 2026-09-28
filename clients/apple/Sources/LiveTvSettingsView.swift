@@ -36,7 +36,7 @@ enum LiveTvSettingsPlacement {
 /// and the saved generation; every readiness row here is advisory.
 struct LiveTvSettingsView: View {
     @EnvironmentObject private var model: AppModel
-    @StateObject private var admin = LiveTvAdminModel(readsGuide: true)
+    @StateObject private var admin = LiveTvAdminModel(surface: .liveTvSettings)
 
     var body: some View {
         Form {
@@ -63,7 +63,7 @@ struct LiveTvSettingsView: View {
                                                sessions: admin.sessions, height: 720, maxHeight: admin.height))
                     }.disabled(admin.busy || !admin.dirty)
                     Button("Check saved configuration") { admin.checkReadiness() }.disabled(admin.busy || admin.dirty)
-                    Text("Saving preserves enablement and ends streams using the previous configuration. Enablement and its advisory prerequisites are in Settings → Developer → Enable Live TV.").font(.caption)
+                    Text("Saving preserves enablement and ends streams using the previous configuration. The Live TV on/off switch is in Settings → Developer → Enable Live TV.").font(.caption)
                 }
             }
             if let readiness = admin.readiness {

@@ -8,6 +8,38 @@ import Foundation
 /// The server enforces administrator access and the saved generation; enabling
 /// is a separate runtime mutation, never a build switch. Nothing here reads a
 /// readiness value back into an enable or a save.
+/// Which settings screen a `LiveTvAdminModel` serves: what it reads and how it speaks.
+enum LiveTvAdminSurface: Sendable {
+    case liveTvSettings
+    case developer
+
+    /// Only Settings → Live TV draws the guide, so only it reads the guide.
+    var readsGuide: Bool { self == .liveTvSettings }
+    /// Only Developer draws the enable card, so only it reads its prerequisites.
+    var readsEnablePrerequisites: Bool { self == .developer }
+
+    var loadedMessage: String {
+        switch self {
+        case .liveTvSettings: return "Settings loaded. Save the configuration, then check it."
+        case .developer: return "Settings loaded. The prerequisites are advisory; enabling is a separate action."
+        }
+    }
+
+    var readyMessage: String {
+        switch self {
+        case .liveTvSettings: return "The saved configuration is ready. Live TV is switched on or off in Settings → Developer."
+        case .developer: return "Ready. Enable is a separate action."
+        }
+    }
+
+    var needsAttentionMessage: String {
+        switch self {
+        case .liveTvSettings: return "Some checks need attention. They are advisory and never block the switch in Settings → Developer."
+        case .developer: return "Some prerequisites need attention. They never prevent enabling."
+        }
+    }
+}
+
 @MainActor
 final class LiveTvAdminModel: ObservableObject {
     @Published private(set) var api: LiveTvAPI?
@@ -15,6 +47,10 @@ final class LiveTvAdminModel: ObservableObject {
     @Published private(set) var readiness: LiveTvReadiness?
     @Published private(set) var guideReadiness: LiveTvGuideReadiness?
     @Published private(set) var developerReadiness: DeveloperReadiness?
+    /// The enable card's prerequisites (`GET /live-tv/readiness`); advisory only.
+    @Published private(set) var prerequisites: LiveTvReadiness?
+    /// Why `prerequisites` could not be read, when it could not. Never a gate.
+    @Published private(set) var prerequisitesError: String?
     @Published var ipv4 = ""
     @Published private(set) var owner = ""
     @Published var sessions = 2
@@ -22,11 +58,10 @@ final class LiveTvAdminModel: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var message = "Administrator access is required."
     private var revision = UUID()
-    /// Developer no longer draws the guide, so it does not read it.
-    private let readsGuide: Bool
+    private let surface: LiveTvAdminSurface
 
-    init(readsGuide: Bool) {
-        self.readsGuide = readsGuide
+    init(surface: LiveTvAdminSurface) {
+        self.surface = surface
     }
 
     var dirty: Bool {
@@ -64,7 +99,10 @@ final class LiveTvAdminModel: ObservableObject {
             apply(settings)
             await loadDeveloperReadiness(app: app)
             await loadGuideReadiness()
-            message = "Settings loaded. Save, check readiness, then enable."
+            // A failed read is a sentence on the card, never this load's
+            // failure and never a reason the enable cannot be pressed.
+            await loadPrerequisites()
+            message = surface.loadedMessage
         } catch {
             guard revision == expected else { return }
             saved = nil
@@ -83,6 +121,7 @@ final class LiveTvAdminModel: ObservableObject {
                 guard revision == expected else { return }
                 apply(settings)
                 await loadGuideReadiness()
+                await loadPrerequisites()
                 message = "Saved. Recording is \(settings.dvrEnabled ? "enabled" : "disabled"); Library channels are \(settings.libraryChannelsEnabled ? "enabled" : "disabled"); Live TV is \(settings.liveTvEnabled ? "enabled" : "disabled")."
             } catch {
                 guard revision == expected else { return }
@@ -108,7 +147,7 @@ final class LiveTvAdminModel: ObservableObject {
                     throw LiveTvFailure(code: "settings_conflict")
                 }
                 readiness = result
-                message = result.ready ? "Ready. Enable is a separate action." : "Resolve the failed checks before enabling."
+                message = result.ready ? surface.readyMessage : surface.needsAttentionMessage
             } catch {
                 guard revision == expected else { return }
                 readiness = nil
@@ -123,8 +162,20 @@ final class LiveTvAdminModel: ObservableObject {
     /// saving or enabling. A non-owner node answers `owner_unavailable` here
     /// and that is a normal, expected answer.
     func loadGuideReadiness() async {
-        guard readsGuide, let api else { return }
+        guard surface.readsGuide, let api else { return }
         guideReadiness = try? await api.guideReadiness()
+    }
+
+    /// The Developer enable card's prerequisites, as the web card reads them.
+    func loadPrerequisites() async {
+        guard surface.readsEnablePrerequisites, let api else { return }
+        do {
+            prerequisites = try await api.currentReadiness()
+            prerequisitesError = nil
+        } catch {
+            prerequisites = nil
+            prerequisitesError = error.localizedDescription
+        }
     }
 
     func loadDeveloperReadiness(app: AppModel) async {

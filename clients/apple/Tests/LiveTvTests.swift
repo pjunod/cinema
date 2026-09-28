@@ -643,8 +643,41 @@ final class LiveTvTests: XCTestCase {
     /// tab says what is needed and whether each part is met, and never refuses
     /// the enable. These two tests are that rule, pinned.
     func testTheDeveloperCardDrawsEveryReadinessRowTheServerSendsAndGatesNothing() throws {
-        // The readiness cards moved to Settings → Live TV with their owner
-        // model; the enable stayed in Developer. The rule is the same on both.
+        // The Developer enable card: what is needed to turn Live TV on safely
+        // and whether each part is met right now, from the same
+        // `/live-tv/readiness` read the web card makes — beside the button,
+        // never in its way.
+        let developer = try Self.appleSource("LiveTvDeveloperView.swift")
+        let model = try Self.appleSource("LiveTvAdminModel.swift")
+        let section = try XCTUnwrap(developer.range(of: "Section(\"Enable Live TV · advisory enablement\")"))
+        let card = String(developer[section.lowerBound...])
+        XCTAssertEqual(card.components(separatedBy: "ForEach(prerequisites.checks) { check in").count - 1, 1,
+                       "every row the server sends, drawn on the Developer card")
+        XCTAssertTrue(card.contains("Label(\"\\(check.ready ? \"Met\" : \"Not met\"): \\(check.message)\","))
+        XCTAssertTrue(card.contains("Readiness unavailable: \\(error). You can still enable Live TV."))
+        XCTAssertTrue(card.contains("await admin.loadPrerequisites()"))
+        XCTAssertFalse(card.contains("check.id =="))
+        for gate in ["disabled(!admin.prerequisites", "disabled(admin.prerequisites", "prerequisites.ready",
+                     "prerequisitesError == nil"] {
+            XCTAssertFalse(developer.contains(gate), "\(gate) would let an advisory check block the enable")
+        }
+        // The enable gates on an in-flight request only.
+        XCTAssertTrue(card.contains("Button(saved.liveTvEnabled ? \"Disable Live TV and drain sessions\" : \"Enable Live TV\")"))
+        XCTAssertTrue(card.contains("}.disabled(admin.busy)"))
+        // Loaded when the card opens, re-read after a save, and read from GET
+        // /live-tv/readiness — never the refresh the Live TV screen's check makes.
+        XCTAssertTrue(model.contains("await loadPrerequisites()\n            message = surface.loadedMessage"))
+        XCTAssertTrue(model.contains("prerequisites = try await api.currentReadiness()"))
+        XCTAssertTrue(LiveTvAdminSurface.developer.readsEnablePrerequisites)
+        XCTAssertFalse(LiveTvAdminSurface.liveTvSettings.readsEnablePrerequisites)
+        XCTAssertTrue(developer.contains("LiveTvAdminModel(surface: .developer)"))
+        let api = try Self.appleSource("LiveTv.swift")
+        XCTAssertTrue(api.contains("request(\"live-tv/readiness\", method: \"GET\""))
+    }
+
+    func testTheLiveTvSettingsReadinessCardsDrawEveryRowAndGateNothing() throws {
+        // The saved-configuration and guide cards moved to Settings → Live TV
+        // with their owner model. The rule is the same there.
         let source = try Self.appleSource("LiveTvSettingsView.swift")
         let model = try Self.appleSource("LiveTvAdminModel.swift")
         let developer = try Self.appleSource("LiveTvDeveloperView.swift")
@@ -667,10 +700,8 @@ final class LiveTvTests: XCTestCase {
                      "disabled(guideReadiness", "readiness.ready ||", "!readiness.ready"] {
             XCTAssertFalse(source.contains(gate), "\(gate) would let an advisory check block an operator")
         }
-        // The enable and save controls gate on exactly what they always did:
-        // an in-flight request and unsaved edits. Never on a check.
-        XCTAssertTrue(developer.contains("Button(saved.liveTvEnabled ? \"Disable Live TV and drain sessions\" : \"Enable Live TV\")"))
-        XCTAssertTrue(developer.contains("}.disabled(admin.busy)"))
+        // The save controls gate on exactly what they always did: an in-flight
+        // request and unsaved edits. Never on a check.
         XCTAssertTrue(source.contains("}.disabled(admin.busy || admin.dirty)"))
         for file in [developer, model] {
             for gate in ["disabled(!readiness", "disabled(readiness", "readiness.ready ||", "!readiness.ready"] {
@@ -720,8 +751,10 @@ final class LiveTvTests: XCTestCase {
             }
         }
         // The Developer view no longer reads the guide it no longer draws.
-        XCTAssertTrue(developer.contains("LiveTvAdminModel(readsGuide: false)"))
-        XCTAssertTrue(settings.contains("LiveTvAdminModel(readsGuide: true)"))
+        XCTAssertTrue(developer.contains("LiveTvAdminModel(surface: .developer)"))
+        XCTAssertTrue(settings.contains("LiveTvAdminModel(surface: .liveTvSettings)"))
+        XCTAssertFalse(LiveTvAdminSurface.developer.readsGuide)
+        XCTAssertTrue(LiveTvAdminSurface.liveTvSettings.readsGuide)
     }
 
     /// Every Developer card that stays says what it is waiting on — the web's

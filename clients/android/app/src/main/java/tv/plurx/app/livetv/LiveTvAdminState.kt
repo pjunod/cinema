@@ -21,11 +21,37 @@ import tv.plurx.app.data.Session
  * Administrator authority and generation CAS are server-enforced; nothing here
  * reads a readiness value back into an enable or a save.
  */
+/** Which settings screen a [LiveTvAdminState] serves: what it reads and how it speaks. */
+enum class LiveTvAdminSurface(
+    /** Only Settings → Live TV draws the guide, so only it reads the guide. */
+    val readsGuide: Boolean,
+    /** Only Developer draws the enable card, so only it reads its prerequisites. */
+    val readsEnablePrerequisites: Boolean,
+    val loadedMessage: String,
+    val readyMessage: String,
+    val needsAttentionMessage: String,
+) {
+    LiveTvSettings(
+        readsGuide = true,
+        readsEnablePrerequisites = false,
+        loadedMessage = "Settings loaded. Save the configuration, then check it.",
+        readyMessage = "The saved configuration is ready. Live TV is switched on or off in Settings → Developer.",
+        needsAttentionMessage = "Some checks need attention. They are advisory and never block the switch in Settings → Developer.",
+    ),
+    Developer(
+        readsGuide = false,
+        readsEnablePrerequisites = true,
+        loadedMessage = "Settings loaded. The prerequisites are advisory; enabling is a separate action.",
+        readyMessage = "Ready. Enable is a separate action.",
+        needsAttentionMessage = "Some prerequisites need attention. They never prevent enabling.",
+    ),
+}
+
 @Stable
 class LiveTvAdminState internal constructor(
     private val api: LiveTvApi?,
     private val scope: CoroutineScope,
-    private val readsGuide: Boolean,
+    private val surface: LiveTvAdminSurface,
 ) {
     var saved by mutableStateOf<LiveTvSettings?>(null)
         private set
@@ -34,6 +60,12 @@ class LiveTvAdminState internal constructor(
     var developerReadiness by mutableStateOf<DeveloperReadiness?>(null)
         private set
     var guideReadiness by mutableStateOf<LiveTvGuideReadiness?>(null)
+        private set
+    /** The enable card's prerequisites (`GET /live-tv/readiness`); advisory only. */
+    var prerequisites by mutableStateOf<LiveTvReadiness?>(null)
+        private set
+    /** Why [prerequisites] could not be read, when it could not. Never a gate. */
+    var prerequisitesError by mutableStateOf<String?>(null)
         private set
     var ipv4 by mutableStateOf("")
     var owner by mutableStateOf("")
@@ -74,8 +106,12 @@ class LiveTvAdminState internal constructor(
                 // read must not cost the operator the settings form it sits
                 // under, so its failure is not this load's failure. Developer
                 // no longer draws the guide, so it does not ask for it.
-                if (readsGuide) guideReadiness = runCatching { client.guideReadiness() }.getOrNull()
-                message = "Settings loaded. Save, check readiness, then enable."
+                if (surface.readsGuide) guideReadiness = runCatching { client.guideReadiness() }.getOrNull()
+                // The same for the enable card's prerequisites: a failed read
+                // is a sentence on the card, never this load's failure and
+                // never a reason the enable cannot be pressed.
+                if (surface.readsEnablePrerequisites) readPrerequisites(client)
+                message = surface.loadedMessage
             }
             catch (error: Exception) { saved = null; message = failure(error) }
             finally { busy = false }
@@ -91,6 +127,7 @@ class LiveTvAdminState internal constructor(
             try {
                 val result = client.save(previous, change)
                 apply(result)
+                if (surface.readsEnablePrerequisites) readPrerequisites(client)
                 message = "Saved. Recording is ${if (result.dvr_enabled) "enabled" else "disabled"}; Library channels are ${if (result.library_channels_enabled) "enabled" else "disabled"}; Live TV is ${if (result.live_tv_enabled) "enabled" else "disabled"}."
             } catch (error: Exception) {
                 // Never retry an uncertain mutation with stale generation/CAS.
@@ -118,6 +155,20 @@ class LiveTvAdminState internal constructor(
         }
     }
 
+    private suspend fun readPrerequisites(client: LiveTvApi) {
+        try { prerequisites = client.currentReadiness(); prerequisitesError = null }
+        catch (error: Exception) { prerequisites = null; prerequisitesError = failure(error) }
+    }
+
+    fun refreshPrerequisites() {
+        busy = true
+        scope.launch {
+            try { readPrerequisites(api ?: throw LiveTvFailure("invalid_settings")) }
+            catch (error: Exception) { prerequisites = null; prerequisitesError = failure(error) }
+            finally { busy = false }
+        }
+    }
+
     fun checkSavedConfiguration() {
         val settings = saved ?: return
         busy = true
@@ -126,7 +177,7 @@ class LiveTvAdminState internal constructor(
                 val result = (api ?: throw LiveTvFailure("invalid_settings")).readiness()
                 if (result.generation != settings.live_tv_config_generation) throw LiveTvFailure("settings_conflict")
                 readiness = result
-                message = if (result.ready) "Ready. Enable is a separate action." else "Resolve the failed checks before enabling."
+                message = if (result.ready) surface.readyMessage else surface.needsAttentionMessage
             } catch (error: Exception) { readiness = null; message = failure(error) }
             finally { busy = false }
         }
@@ -139,10 +190,10 @@ class LiveTvAdminState internal constructor(
  * message every other Live TV surface shows.
  */
 @Composable
-fun rememberLiveTvAdminState(origin: String, readsGuide: Boolean): LiveTvAdminState {
+fun rememberLiveTvAdminState(origin: String, surface: LiveTvAdminSurface): LiveTvAdminState {
     val scope = rememberCoroutineScope()
     val token = Session.token.orEmpty()
-    return remember(origin, token, readsGuide) {
-        LiveTvAdminState(runCatching { LiveTvApi(origin, token) }.getOrNull(), scope, readsGuide)
+    return remember(origin, token, surface) {
+        LiveTvAdminState(runCatching { LiveTvApi(origin, token) }.getOrNull(), scope, surface)
     }
 }

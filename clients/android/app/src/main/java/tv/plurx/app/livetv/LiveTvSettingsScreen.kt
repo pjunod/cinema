@@ -41,7 +41,7 @@ import tv.plurx.app.ui.components.TvTextButton as TextButton
 fun LiveTvSettingsScreen(origin: String, onBack: () -> Unit) {
     val backFocus = remember { FocusRequester() }
     RequestInitialFocus(backFocus)
-    val state = rememberLiveTvAdminState(origin, readsGuide = true)
+    val state = rememberLiveTvAdminState(origin, LiveTvAdminSurface.LiveTvSettings)
     val busy = state.busy
     LaunchedEffect(state) { state.load() }
 
@@ -87,7 +87,7 @@ private fun HdHomeRunCard(state: LiveTvAdminState) {
             Text("Save configuration")
         }
         Button(enabled = !busy && !state.dirty, onClick = state::checkSavedConfiguration) { Text("Check saved configuration") }
-        Text("Saving preserves enablement and ends streams using the previous configuration. Enablement and its advisory prerequisites are in Settings → Developer → Enable Live TV.")
+        Text("Saving preserves enablement and ends streams using the previous configuration. The Live TV on/off switch is in Settings → Developer → Enable Live TV.")
     }
     // Every row the server sends, in the order it sent them — never a
     // hand-written subset. `start_recovery` arrived this way without this

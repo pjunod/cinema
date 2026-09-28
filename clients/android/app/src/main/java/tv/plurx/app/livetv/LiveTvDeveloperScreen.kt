@@ -35,7 +35,7 @@ import tv.plurx.app.ui.components.safeDisplayInsets
 fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
     val backFocus = remember { FocusRequester() }
     RequestInitialFocus(backFocus)
-    val state = rememberLiveTvAdminState(origin, readsGuide = false)
+    val state = rememberLiveTvAdminState(origin, LiveTvAdminSurface.Developer)
     val busy = state.busy
     LaunchedEffect(state) { state.load() }
 
@@ -89,7 +89,17 @@ private fun EnableLiveTvCard(state: LiveTvAdminState) {
         Button(enabled = !state.busy, onClick = { state.write(LiveTvSettingsChange.Enabled(!settings.live_tv_enabled)) }) {
             Text(if (settings.live_tv_enabled) "Disable Live TV and drain sessions" else "Enable Live TV")
         }
-        Text("Readiness is advisory; unmet checks do not prevent enabling. Configure the tuner and check the saved configuration in Settings → Live TV.")
     }
+    // The prerequisites as the server last observed them, every row it sent
+    // in the order it sent them — the web card's `/live-tv/readiness` read.
+    // Advisory: no row reaches the button above.
+    state.prerequisites?.let { prerequisites ->
+        prerequisites.checks.forEach { Text("${if (it.ready) "Met" else "Not met"}: ${it.message}") }
+        Text("Advisory only. Unknown or unmet requirements do not prevent enabling.", style = MaterialTheme.typography.bodySmall)
+    } ?: state.prerequisitesError?.let {
+        Text("Readiness unavailable: $it. You can still enable Live TV.")
+    }
+    Button(enabled = !state.busy, onClick = state::refreshPrerequisites) { Text("Refresh Live TV prerequisites") }
+    Text("The tuner address, stream limit and quality ceiling are set in Settings → Live TV.", style = MaterialTheme.typography.bodySmall)
     Text(LiveTvSettingsPlacement.ENABLE_LIVE_TV_GRADUATION, style = MaterialTheme.typography.bodySmall)
 }

@@ -352,7 +352,7 @@ class DvrFailure(
 ) : Exception(dvrMessage(code))
 
 internal fun dvrMessage(code: String): String = when (code) {
-    "dvr_disabled" -> "Recording is switched off. An administrator can enable it in Settings → Developer."
+    "dvr_disabled" -> "Recording is switched off. An administrator can turn it on in Settings → Live TV → Recording."
     "airing_unknown" -> "The guide no longer has that programme at that time. Reload the guide and try again."
     "airing_past" -> "That programme has already started, or has less than a minute left."
     "rule_limit" -> "This server already holds the maximum number of recording rules."
