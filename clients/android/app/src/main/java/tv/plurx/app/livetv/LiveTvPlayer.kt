@@ -41,6 +41,37 @@ internal class LiveEdgeRecovery {
     }
 }
 
+/** A refused tune's offer; never a capability or a saved account preference. */
+data class LiveTvCapacityOffer(val generation: Long, val watchable: List<LiveTvWatchable>)
+
+internal fun liveTvCapacityOffer(error: Exception?, generation: Long): LiveTvCapacityOffer? =
+    (error as? LiveTvFailure)?.takeIf {
+        it.code == "tuner_capacity" && it.ownerDecided == true && it.watchable.isNotEmpty()
+    }?.let { LiveTvCapacityOffer(generation, it.watchable) }
+
+/** A row can offer only a unique, playable entry from this profile's lineup. */
+internal fun liveTvWatchableChoices(
+    offer: LiveTvCapacityOffer?,
+    channels: List<LiveTvChannel>,
+): List<Pair<LiveTvWatchable, LiveTvChannel>> = offer?.watchable.orEmpty()
+    .distinctBy { it.channelId }.mapNotNull { row ->
+        val channel = channels.singleOrNull { it.id == row.channelId } ?: return@mapNotNull null
+        if (!channel.watchable || channel.guide_number != row.guideNumber) null else row to channel
+    }
+
+internal fun liveTvCapacityChoice(
+    current: LiveTvCapacityOffer?,
+    expected: LiveTvCapacityOffer,
+    row: LiveTvWatchable,
+    generation: Long,
+    channels: List<LiveTvChannel>,
+    busy: Boolean,
+    playing: Boolean,
+): LiveTvChannel? {
+    if (current !== expected || expected.generation != generation || busy || playing) return null
+    return liveTvWatchableChoices(current, channels).firstOrNull { it.first == row }?.second
+}
+
 data class LiveTvPlayerState(
     val channels: List<LiveTvChannel> = emptyList(),
     val title: String = "Live TV",
@@ -49,6 +80,7 @@ data class LiveTvPlayerState(
     val playing: Boolean = false,
     val paused: Boolean = false,
     val muted: Boolean = false,
+    val capacityOffer: LiveTvCapacityOffer? = null,
     /**
      * A second, independent read. It never gates the lineup and never gates a
      * start: a screen that waited on it would be a screen that cannot tune
@@ -158,7 +190,7 @@ class LiveTvPlayer private constructor(context: Context) {
         val mine = ++serial
         detach()
         mutableState.value = mutableState.value.copy(busy = true, playing = false, title = channel.title,
-            watching = channel, status = null, message = "Starting ${channel.title}…")
+            watching = channel, status = null, capacityOffer = null, message = "Starting ${channel.title}…")
         val launched = scope.launch(start = CoroutineStart.LAZY) {
             try {
                 val started = lease.start(channel.id).await() ?: return@launch
@@ -167,7 +199,9 @@ class LiveTvPlayer private constructor(context: Context) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
-                if (mine == serial) { fail(error); stopWithMessage(message(error)) }
+                if (mine == serial) {
+                    stopWithMessage(message(error), capacityFailure = error as? LiveTvFailure)
+                }
             }
         }
         tuneJob = launched
@@ -409,6 +443,17 @@ class LiveTvPlayer private constructor(context: Context) {
         }
     }
 
+    /** Explicit choice starts normally; it never stops another viewer or recording. */
+    fun watchOffered(expected: LiveTvCapacityOffer, row: LiveTvWatchable) {
+        val latest = mutableState.value
+        val channel = liveTvCapacityChoice(latest.capacityOffer, expected, row, serial,
+            latest.channels, latest.busy, latest.playing) ?: return
+        // A failed cleanup still owns its old capability. The ordinary lease
+        // path must confirm that release before any replacement can be offered.
+        if (player != null || lease?.current != null) return
+        watch(channel)
+    }
+
     fun togglePause() {
         val output = player ?: return
         val paused = output.playWhenReady
@@ -458,12 +503,15 @@ class LiveTvPlayer private constructor(context: Context) {
         displayModeMatcher = null
         displayModeActivity = null
     }
-    private fun stopWithMessage(message: String, clearProfile: Boolean = false) {
+    private fun stopWithMessage(
+        message: String, clearProfile: Boolean = false, capacityFailure: LiveTvFailure? = null,
+    ) {
         val mine = ++serial
         detach()
         resetDisplayModeForNextStart()
         mutableState.value = mutableState.value.copy(
             busy = false, playing = false, message = message,
+            capacityOffer = if (clearProfile) null else liveTvCapacityOffer(capacityFailure, mine),
             // A released tuner is not "Watching". Carrying `watching` forward
             // left the list row labelled and the grid cell highlighted for a
             // session that no longer exists.
@@ -488,7 +536,7 @@ class LiveTvPlayer private constructor(context: Context) {
                     api = null; profile = null; lease = null
                 }
             } catch (_: Exception) {
-                if (mine == serial) mutableState.value = mutableState.value.copy(message = "Owner cleanup is unconfirmed. Retry Stop before opening another channel.")
+                if (mine == serial) mutableState.value = mutableState.value.copy(message = "Owner cleanup is unconfirmed. Retry Stop before opening another channel.", capacityOffer = null)
                 // Preserve the old immutable profile and capability for retry.
             }
         }
@@ -515,7 +563,11 @@ class LiveTvPlayer private constructor(context: Context) {
         output?.release()
     }
     private fun fail(error: Exception) { mutableState.value = mutableState.value.copy(busy = false, playing = false, message = message(error)) }
-    private fun message(error: Exception): String = if (error is LiveTvFailure) error.message.orEmpty() else liveTvMessage("stream_failed")
+    private fun message(error: Exception): String = when {
+        error is LiveTvFailure && error.code == "tuner_capacity" -> liveTvMessage(error.code)
+        error is LiveTvFailure -> error.message.orEmpty()
+        else -> liveTvMessage("stream_failed")
+    }
 
     /**
      * The one predicate every teardown path asks. It is here rather than in

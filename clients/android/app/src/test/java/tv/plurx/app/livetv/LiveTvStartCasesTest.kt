@@ -89,6 +89,41 @@ class LiveTvStartCasesTest {
     }
 
     @Test
+    fun capacityOffersSurviveTheActualLeaseWithoutStartingUntilChosen() = runTest {
+        val row = cases.getValue("answers").jsonArray.map { it.jsonObject }
+            .single { it["offer_watchable"] != null }
+        val requests = Requests().apply { error = { failureFor(row) } }
+        val hints = Hints(null)
+        val scope = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
+        val lease = LiveTvLease(requests, hints, scope) { 10_000L }
+        try {
+            val refused = try {
+                lease.start("full").await()
+                error("expected capacity refusal")
+            } catch (failure: LiveTvFailure) { failure }
+            assertEquals(failureFor(row).watchable, refused.watchable)
+            assertEquals(true, refused.ownerDecided)
+            assertNull(hints.hint)
+            assertNull(lease.current)
+            assertEquals(1, requests.events.size)
+            val lineup = refused.watchable.map { LiveTvChannel(it.channelId, it.guideNumber, "Fixture") }
+            val offer = checkNotNull(liveTvCapacityOffer(refused, 4))
+            val chosen = checkNotNull(liveTvCapacityChoice(offer, offer, refused.watchable.last(),
+                4, lineup, busy = false, playing = false))
+            // Resolving/painting an offer has issued no start or DELETE.
+            assertEquals(1, requests.events.size)
+            requests.error = null
+            lease.start(chosen.id).await()
+            assertEquals(2, requests.events.size)
+            assertTrue(requests.events.last().startsWith("start:${chosen.id}:"))
+            assertTrue(requests.events.none { it.startsWith("release:") })
+            lease.stop().await()
+            assertEquals(listOf("release:cap-${chosen.id}"),
+                requests.events.filter { it.startsWith("release:") })
+        } finally { scope.cancel() }
+    }
+
+    @Test
     fun everyRenderKeyTheFixtureNamesHasCopyOfItsOwn() {
         // A render key with no string is a viewer looking at the generic "the
         // live stream could not continue", which is exactly the sentence this

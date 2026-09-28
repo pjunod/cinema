@@ -2969,3 +2969,104 @@ source = "clients/apple/UITests/TVPhysicalInputTests.swift"
 source_anchor = "if current.elementType == .other && !target.identifier.isEmpty"
 test = "clients/apple/UITests/TVPhysicalInputTests.swift"
 test_anchor = "func testSettingsChoicesOpenAsMenusOnAppleTV() throws {"
+
+# Live TV exposes actual discovered text services and keeps stale menu rows
+# from changing the replacement player; Off retains the audio selection.
+[[fixes]]
+id = "android.live-tv-caption-selection"
+commits = ["7592def8587b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvCaptions.kt"
+source_anchor = "internal fun liveTvCaptionSelection("
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvCaptionsTest.kt"
+test_anchor = "fun selectionDisablesOnlyTextAndPinsTheObservedService()"
+
+# A selected track is not proof that captions reached the screen.
+[[fixes]]
+id = "android.live-tv-caption-cue-observation"
+# Additional live obligation belonging to the primary corrective fix.
+supplements = "android.live-tv-caption-selection"
+commits = []
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvCaptions.kt"
+source_anchor = "internal fun liveTvCaptionSummary(tracks: Tracks, cuesPresent: Boolean): String {"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvCaptionsTest.kt"
+test_anchor = "fun captionSummarySeparatesSelectionFromCueDelivery()"
+
+# Owner-decided watchable rows survive the reducer without issuing a tune.
+[[fixes]]
+id = "android.live-tv-capacity-offer-payload"
+commits = ["367f65f2df89"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvLease.kt"
+source_anchor = "watchable = if (decision.render == \"tuner_capacity\") typed?.watchable.orEmpty() else emptyList()"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvStartCasesTest.kt"
+test_anchor = "fun capacityOffersSurviveTheActualLeaseWithoutStartingUntilChosen()"
+
+# Only the explicit current refusal can choose a known playable channel.
+[[fixes]]
+id = "android.live-tv-capacity-offer-explicit-choice"
+# Additional live obligation belonging to the primary corrective fix.
+supplements = "android.live-tv-capacity-offer-payload"
+commits = []
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt"
+source_anchor = "internal fun liveTvCapacityChoice("
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvCapacityOffersTest.kt"
+test_anchor = "fun capacityChoiceRequiresSameRefusalGenerationAndIdleState()"
+
+# Ordinary Release Live TV has a native selector independent of the finite
+# player's Debug acceptance launch route. Runtime caption text remains a
+# separate physical M4 acceptance check.
+[[fixes]]
+id = "apple.live-caption-menu-attachment-ownership"
+commits = ["18326122d"]
+source = "clients/apple/Sources/LiveTvCaptions.swift"
+source_anchor = "func makeSelectionAction(_ choice: Selection)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLiveCaptionChoicesCannotChangeTheNextChannel"
+
+[[fixes]]
+id = "apple.live-caption-advertised-options"
+# Additional live obligation belonging to the primary corrective fix.
+supplements = "apple.live-caption-menu-attachment-ownership"
+commits = []
+source = "clients/apple/Sources/LiveTvCaptions.swift"
+source_anchor = "static func isSelectable(mediaType: AVMediaType, captionsAdvertised: Bool)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLiveCaptionsRejectSyntheticUnadvertisedCC"
+
+# M2 alternatives stay structured through admission and require a current,
+# explicit viewer action; no guessed tuning or shared-session cleanup.
+[[fixes]]
+id = "apple.live-capacity-offer-actions"
+commits = ["09d3abfbf"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "func watchOffer(_ offer: LiveTvCapacityOffer)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testWatchableCapacityOfferNeedsAnExplicitCurrentAction"
+
+[[fixes]]
+id = "apple.live-capacity-offer-envelope"
+# Additional live obligation belonging to the primary corrective fix.
+supplements = "apple.live-capacity-offer-actions"
+commits = []
+source = "clients/apple/Sources/LiveTv.swift"
+source_anchor = "if verdict.render == \"tuner_capacity\", let capacityFailure"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLeasePreservesStructuredCapacityOffers"
+
+[[fixes]]
+id = "apple.live-capacity-offer-known-identity"
+# Additional live obligation belonging to the primary corrective fix.
+supplements = "apple.live-capacity-offer-actions"
+commits = []
+source = "clients/apple/Sources/LiveTvCapacityOffer.swift"
+source_anchor = "static func resolve("
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testCapacityOffersResolveOnlyKnownPlayableChannels"
+
+# Real Media3 track models need faithful Android string semantics on the host JVM.
+[[fixes]]
+id = "android.live-caption-host-text-operations"
+commits = ["677d7c499dfc"]
+source = "clients/android/app/src/test/java/android/text/TextUtils.java"
+source_anchor = "public static boolean isEmpty(CharSequence value)"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvCaptionsTest.kt"
+test_anchor = "fun captionOptionsNameOnlyActualTextTracksAndServices()"

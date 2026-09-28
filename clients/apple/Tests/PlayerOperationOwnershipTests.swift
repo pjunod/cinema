@@ -453,6 +453,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
     /// serves never readies. The decision is left pending, so nothing is ever
     /// attached, nothing is changing, and the context is `attached` the moment
     /// a frame is declared.
+    #if DEBUG
     func testTheViewersPauseRetiresTheWaitThePresentersClockRaised() async throws {
         let decisions = Decisions()
         let controller = PlayerController(
@@ -488,6 +489,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         )
         XCTAssertTrue(controller.surface.faults.isEmpty)
     }
+    #endif
 
     /// A6, closed. Two create sequences overlap by the ordinary route — the
     /// viewer leaves a cold start that is still waiting on its create and puts
@@ -608,6 +610,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
     /// Row 6 is the `start` context. A create refused over a picture the viewer
     /// is watching is a refused CHANGE, and the sequence must not run there at
     /// all — no ladder, and no sixty-second watchdog stopping that player.
+    #if DEBUG
     func testAChangeContextCreateIsNotRetriedAndArmsNoDeadline() async throws {
         let decisions = Decisions()
         let creates = Creates()
@@ -644,6 +647,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         XCTAssertEqual(waits.waits.count, 1, "a change context arms no deadline watchdog")
         XCTAssertNotEqual(controller.surface.surface.cls, .exhausted)
     }
+    #endif
 
     private final class Decisions {
         struct Request {
