@@ -2307,14 +2307,44 @@ impl<T: QueueSql> BackgroundJobStore for T {
         if matches!(previous.state, JobState::Cancelling | JobState::Cancelled) {
             return Ok(ClaimOutcome::Cancelled);
         }
-        let rows = self
+        let rows = match self
             .queue_sql(
                 format!("{CLAIM_SQL} RETURNING {JOB_JSON} AS result_json"),
                 encode(&request)?,
                 true,
                 true,
             )
-            .await?;
+            .await
+        {
+            Ok(rows) => rows,
+            Err(error)
+                if request.kind == JobKind::SubtitleExtract
+                    && super::background_jobs_subtitle::demand_gone(&error) =>
+            {
+                // A definite refusal, not a lost write: the trigger aborted
+                // this claim because the demand is gone. Left `queued`, the
+                // row is re-listed on every candidate page and costs each
+                // walker a full lease of ambiguity resolution. Retire it at
+                // the revision the caller saw; a concurrent claimant that
+                // moved the row first wins and this is a no-op.
+                self.queue_sql(
+                    format!(
+                        "UPDATE background_jobs SET state = 'cancelled', revision = revision + 1,
+                            last_error_code = '{}', updated_at_ms = json_extract($1, '$.now_ms')
+                          WHERE id = json_extract($1, '$.job_id') AND state = 'queued'
+                            AND revision = json_extract($1, '$.expected_revision')
+                            AND revision < 9223372036854775807",
+                        super::background_jobs_subtitle::DEMAND_GONE_CODE
+                    ),
+                    encode(&request)?,
+                    true,
+                    true,
+                )
+                .await?;
+                return Ok(ClaimOutcome::Cancelled);
+            }
+            Err(error) => return Err(error),
+        };
         match rows.first() {
             Some(row) => Ok(ClaimOutcome::Claimed { job: decode(row)? }),
             None => Ok(ClaimOutcome::Contended),

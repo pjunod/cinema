@@ -13,6 +13,22 @@ pub(crate) const RESET_LEGACY: &str = "UPDATE analysis_requests SET state = 'que
 
 pub(crate) const SCHEMA: &str = include_str!("background_jobs_subtitle.sql");
 
+/// The message `background_subtitle_claimed` raises when the demand behind a
+/// queued `subtitle_extract` job is no longer claimable — cancelled, already
+/// settled, or its source superseded since the job was admitted. The trigger
+/// aborts the claim, so the job row stays `queued` and comes back on every
+/// candidate page; without [`demand_gone`] each walker then treats the
+/// refusal as an ambiguous write and waits out a full lease before moving on.
+pub(crate) const DEMAND_GONE: &str = "subtitle demand no longer claimable";
+
+/// Whether a claim error is that trigger speaking.
+pub(crate) fn demand_gone(error: &StoreError) -> bool {
+    error.to_string().contains(DEMAND_GONE)
+}
+
+/// The error code a job retired for that reason carries.
+pub(crate) const DEMAND_GONE_CODE: &str = "subtitle_demand_gone";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SubtitleJobWrite {

@@ -897,3 +897,154 @@ async fn background_jobs_global_history_pressure_preserves_resolution_and_restor
     assert_eq!(job.fence, 17);
     assert_eq!(job.failed_attempts, 0);
 }
+
+/// The claim trigger aborts when the demand behind a queued `subtitle_extract`
+/// job is no longer claimable. The shape production grew (nynuc, 2026-09-27,
+/// eight rows): the analysis request already `ready` with `attempts = 1`,
+/// and a job for it still `queued` at revision 0, so every candidate walk
+/// listed it and every claim aborted. That is a definite refusal: the job is
+/// retired at the revision the claimant saw, answered `Cancelled`, and drops
+/// off the candidate page. Left `queued`, each walker paid a full lease of
+/// ambiguity resolution for it, with the software encoder pool held.
+///
+/// Written directly, because no public store path admits a job for a ready
+/// request (the enqueue fence refuses) — how the fleet reached this shape is
+/// not reproduced here, only that the claim path now heals it.
+#[tokio::test]
+async fn a_subtitle_claim_the_demand_trigger_refuses_retires_the_zombie_job() {
+    use crate::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    use crate::store::fragment_index_cluster::ClusterFragmentIndexStore;
+    use crate::store::{LibraryStore, MediaStore};
+
+    let store = SqliteStore::open_in_memory().expect("store");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "zombie".into(),
+            kind: LibraryKind::Movies,
+            paths: vec!["/zombie".into()],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "Zombie".into(),
+            year: Some(2024),
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("item");
+    let file_id = store
+        .upsert_file(
+            item,
+            "/zombie/movie.mkv",
+            10_000,
+            1,
+            &ProbeResult {
+                duration_ms: Some(7_200_000),
+                container: Some("mkv".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("file");
+    let now = 5_000;
+    let stamp = crate::store::fragment_index_cluster::SubtitleSourceStamp {
+        file_id,
+        source_size: 10_000,
+        source_mtime: 1,
+        pipeline_version: "subtitle-source-v1".into(),
+    };
+    let queued = store
+        .enqueue_or_promote_subtitle_source(&stamp, "normal", now)
+        .await
+        .expect("demand")
+        .expect("demand");
+    let job_id = match store
+        .enqueue_subtitle_job(queued.clone(), now + 1)
+        .await
+        .expect("admission")
+    {
+        EnqueueOutcome::Accepted { job_id, .. } => job_id,
+        other => panic!("subtitle admission: {other:?}"),
+    };
+    // The demand is satisfied behind the queued job's back.
+    QueueSql::queue_sql(
+        &store,
+        "UPDATE analysis_requests SET state = 'ready', attempts = 1, owner_node_id = NULL,
+            lease_expires_ms = NULL WHERE request_id = json_extract($1, '$.request_id')"
+            .into(),
+        serde_json::json!({"request_id": queued.request_id}).to_string(),
+        true,
+        true,
+    )
+    .await
+    .expect("finished demand");
+    let store = &store;
+    let candidates = |now_ms: i64| async move {
+        store
+            .job_candidates(CandidateQuery {
+                node_id: "node-a".into(),
+                kinds: vec![JobKind::SubtitleExtract],
+                after: None,
+                now_ms,
+                limit: 64,
+            })
+            .await
+            .expect("candidates")
+            .jobs
+            .into_iter()
+            .map(|job| job.id)
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        candidates(now + 2).await.contains(&job_id),
+        "the zombie is listed before anyone claims it"
+    );
+    let job = store
+        .background_job(&job_id)
+        .await
+        .expect("job")
+        .expect("job");
+    assert_eq!(job.state, JobState::Queued);
+    let claim = |revision: i64, now_ms: i64| ClaimJob {
+        kind: JobKind::SubtitleExtract,
+        ..claim(&job_id, revision, now_ms)
+    };
+    let outcome = store
+        .claim_job(claim(job.revision, now + 3))
+        .await
+        .expect("a refused claim is an answer, not an error");
+    assert!(matches!(outcome, ClaimOutcome::Cancelled), "{outcome:?}");
+    let retired = store
+        .background_job(&job_id)
+        .await
+        .expect("job")
+        .expect("job");
+    assert_eq!(retired.state, JobState::Cancelled);
+    assert_eq!(
+        retired.last_error_code.as_deref(),
+        Some("subtitle_demand_gone")
+    );
+    assert!(retired.revision > job.revision);
+    assert!(
+        !candidates(now + 4).await.contains(&job_id),
+        "a retired job is not listed again"
+    );
+    let again = store
+        .claim_job(claim(job.revision, now + 5))
+        .await
+        .expect("claim");
+    assert!(matches!(again, ClaimOutcome::Cancelled), "{again:?}");
+    // The finished demand is untouched by the retirement.
+    let request = store
+        .analysis_request(&queued.request_id)
+        .await
+        .expect("request")
+        .expect("request");
+    assert_eq!(request.state, "ready");
+}
