@@ -79,6 +79,11 @@ class AndroidReleaseProfileReportCase(unittest.TestCase):
         self.assertIn('targetProjectPath = ":app"', module)
 
     def test_missing_or_malformed_device_identity_and_boundary_is_rejected(self):
+        for field in ("device_alias", "device_model", "sdk", "version_code", "first_frame_boundary"):
+            with self.subTest(missing=field):
+                args = list(self.fixture())
+                del args[0][field]; del args[1][field]
+                with self.assertRaises(ValueError): reporter.build_report(*args)
         for field, value in (("device_alias", None), ("device_alias", ""),
                              ("device_alias", "bad alias"), ("device_model", None),
                              ("device_model", []), ("device_model", "  "),

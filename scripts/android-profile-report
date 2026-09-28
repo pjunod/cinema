@@ -28,14 +28,6 @@ def build_report(without, required, macrobenchmark, signed):
             without.get("startup_mode") != "COLD" or required.get("startup_mode") != "COLD" or
             without.get("iterations") != 5 or required.get("iterations") != 5):
         raise ValueError("Require five cold iterations for None and Partial(Require,warmup=0)")
-    if (without.get("package") != "tv.plurx.app" or signed.get("package") != without["package"] or
-            signed.get("version_code") != without["version_code"] or
-            signed.get("artifact_sha256") != without["apk_sha256"] or
-            signed.get("source_candidate") != without["source_sha"] or
-            signed.get("signature_verified") is not True or signed.get("debuggable") is not False):
-        raise ValueError("Samples must bind the independently signed non-debuggable release receipt")
-    if not re.fullmatch(r"[0-9a-f]{40}", str(without.get("source_sha", ""))) or not re.fullmatch(r"[0-9a-f]{64}", str(without.get("apk_sha256", ""))):
-        raise ValueError("Require full source and APK identities")
     for key in ("device_alias", "device_model", "first_frame_boundary"):
         if not isinstance(without.get(key), str) or not without[key].strip():
             raise ValueError(f"Require nonempty {key}")
@@ -47,6 +39,14 @@ def build_report(without, required, macrobenchmark, signed):
         value = without.get(key)
         if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
             raise ValueError(f"Require valid integer {key}")
+    if (without.get("package") != "tv.plurx.app" or signed.get("package") != without["package"] or
+            signed.get("version_code") != without["version_code"] or
+            signed.get("artifact_sha256") != without["apk_sha256"] or
+            signed.get("source_candidate") != without["source_sha"] or
+            signed.get("signature_verified") is not True or signed.get("debuggable") is not False):
+        raise ValueError("Samples must bind the independently signed non-debuggable release receipt")
+    if not re.fullmatch(r"[0-9a-f]{40}", str(without.get("source_sha", ""))) or not re.fullmatch(r"[0-9a-f]{64}", str(without.get("apk_sha256", ""))):
+        raise ValueError("Require full source and APK identities")
     modes = {}
     for mode, ttff, name in (("none", without, "withoutProfileFiveColdIterations"),
                             ("required", required, "requiredProfileFiveColdIterations")):

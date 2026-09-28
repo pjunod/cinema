@@ -338,6 +338,10 @@ performance artifact. The paired measurements target the optimized `release`
 APK. Capturing an obfuscated release and committing those names as input to
 another R8 build would bind the profile to the wrong program.
 
+The separate self-instrumenting `tv.plurx.profile` harness is debug-signed
+and can be debugged. It never replaces the measured `tv.plurx.app` durable
+release signer, and survives the measured app process being cold-killed.
+
 Capture requires three stable profile iterations within fifteen attempts
 and keeps actual `Ltv/plurx/app/` rules; library profiles remain supplied by
 their dependencies. Android documents [profile generation](https://developer.android.com/topic/performance/baselineprofiles/create-baselineprofile),

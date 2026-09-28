@@ -12,11 +12,16 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildTypes {
-        create("profileCapture") { isDebuggable = true }
+        create("profileCapture") {
+            isDebuggable = true
+            signingConfig = signingConfigs.getByName("debug")
+        }
         create("release") {
             // The instrumentation APK can be debugged; the target remains the
             // signed, R8-optimized, non-debuggable app release.
             isDebuggable = true
+            // Separate self-instrumenting harness only, never the measured APK.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
     compileOptions {

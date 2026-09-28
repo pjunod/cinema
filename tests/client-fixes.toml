@@ -3088,3 +3088,81 @@ source = "scripts/playback-lab"
 source_anchor = "function diagnosticSwitchCommit(commit, stageAtMs)"
 test = "tests/playback/frame-diagnostics.test.js"
 test_anchor = "frame diagnostics never attribute a previous switch to the next preparation"
+
+# D-03 M5 measures the existing shared debug network path before any split.
+[[fixes]]
+id = "android.debug-dispatcher-observation-wiring"
+commits = ["07a78b030"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Net.kt"
+source_anchor = "if (BuildConfig.DEBUG) eventListenerFactory(NetCallDiagnostics.factory())"
+test = "tests/operations/test_android_credential_exposure.py"
+test_anchor = "test_debug_timing_is_installed_without_a_dispatcher_split"
+
+# Exact native Live diagnostics retain static cause/state within wire limits.
+[[fixes]]
+id = "android.live-terminal-observation-wire-boundary"
+commits = ["afd07b31a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvTerminalDiagnostics.kt"
+source_anchor = "internal class LiveTvTerminalDiagnostics"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvTerminalDiagnosticsTest.kt"
+test_anchor = "terminalWireKeepsActualMedia3CodeButNeverExceptionPayloadOrDynamicClassName"
+
+[[fixes]]
+id = "android.release-profile-capture-signing"
+commits = ["cc4bcb9c1"]
+source = "clients/android/app/build.gradle.kts"
+source_anchor = "create(\"profileCapture\") {"
+test = "tests/operations/test_android_profile_report.py"
+test_anchor = "test_capture_tasks_require_release_signing_and_non_debuggable_target"
+
+[[fixes]]
+id = "android.release-profile-paired-evidence"
+commits = []
+supplements = "android.release-profile-capture-signing"
+source = "scripts/android-profile-report"
+source_anchor = "def build_report(without, required, macrobenchmark, signed):"
+test = "tests/operations/test_android_profile_report.py"
+test_anchor = "test_missing_or_malformed_device_identity_and_boundary_is_rejected"
+
+[[fixes]]
+id = "android.release-profile-advisory-scope"
+commits = []
+supplements = "android.release-profile-capture-signing"
+source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/ReleaseProfileStatus.kt"
+source_anchor = "internal fun releaseProfileSummary(facts: ReleaseProfileFacts): String"
+test = "clients/android/app/src/test/java/tv/plurx/app/diagnostics/ReleaseProfileStatusTest.kt"
+test_anchor = "compiledDifferentProfileNeverClaimsMeasuredAppJourney"
+
+[[fixes]]
+id = "clients.library-two-measured-rows"
+commits = ["b0933f3a5"]
+source = "clients/apple/Sources/LibraryGridPrefetch.swift"
+source_anchor = "enum LibraryGridPrefetch"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testLibraryPrefetchIncludesVisibleCardAndTwoRowsAtExclusiveBoundary"
+
+[[fixes]]
+id = "android.library-two-measured-rows"
+commits = []
+supplements = "clients.library-two-measured-rows"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryPrefetch.kt"
+source_anchor = "internal fun libraryPrefetchExclusive"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/LibraryPrefetchTest.kt"
+test_anchor = "lastVisibleCardAndTwoCompleteRowsUseAnExclusiveBoundary"
+
+[[fixes]]
+id = "android.screen-on-owned-callback-wiring"
+commits = ["b5c745c0b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "controller.addPlayerListener(screenOn)"
+test = "tests/operations/test_android_player_builder.py"
+test_anchor = "test_screen_on_binder_follows_the_owned_player_and_view_lifecycle"
+
+[[fixes]]
+id = "android.screen-on-real-player-callbacks"
+commits = []
+supplements = "android.screen-on-owned-callback-wiring"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreenOn.kt"
+source_anchor = "internal class PlayerScreenOn"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerScreenOnTest.kt"
+test_anchor = "actualPlayerCallbacksHoldVideoScreenDuringBufferingAndPlayButNotPause"

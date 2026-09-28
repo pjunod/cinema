@@ -7,7 +7,7 @@ Android SDK or Gradle toolchain runs in this suite: these cases cannot tell a
 working build from a broken one, but each one fails the moment the exposure it
 describes is reintroduced, which is the property the plan asks for.
 
-Four boundaries, four sections:
+Covered boundaries:
 
 * the mobile book buttons must keep account URLs inside Plurx rather than
   putting them in an external reader's history;
@@ -15,6 +15,8 @@ Four boundaries, four sections:
   (`§3.2`), pinned against both rule files *and* against the store that
   actually holds the token, so moving the token out from under `datastore/`
   fails here rather than silently leaving the exclusion pointing at nothing;
+* debug request timing is registered on the shared network path without an
+  unmeasured dispatcher split (`§3.4`);
 * a release APK signed with the debug key or falling back to it (`§3.5`);
 * a shipping path — `make android-publish` or the `scripts/ship-physical`
   fallback — putting a debuggable build on a device, or publishing a release
@@ -67,6 +69,25 @@ CREDENTIAL_DIR = "datastore/"
 # `cloud-backup` alone leaves device-to-device transfer free to copy the same
 # credential to a new handset (F-android-7).
 TRANSFER_SECTIONS = ("cloud-backup", "device-transfer")
+
+
+class AndroidDispatcherDiagnosticWiringCase(unittest.TestCase):
+    """The behavioral listener is installed on the shared debug network path."""
+
+    def test_debug_timing_is_installed_without_a_dispatcher_split(self) -> None:
+        net = (ANDROID / "app/src/main/java/tv/plurx/app/data/Net.kt").read_text(encoding="utf-8")
+        app = (ANDROID / "app/src/main/java/tv/plurx/app/PlurxApp.kt").read_text(encoding="utf-8")
+        client = net.split("val client:", 1)[1].split("val capabilityClient:", 1)[0]
+        self.assertRegex(
+            client,
+            r"if \(BuildConfig\.DEBUG\) eventListenerFactory\(NetCallDiagnostics\.factory\(\)\)",
+        )
+        self.assertEqual(1, net.count("eventListenerFactory("))
+        for override in (".dispatcher(", "maxRequestsPerHost", "maxRequests ="):
+            self.assertNotIn(override, net)
+        self.assertIn("api(origin, client)", net)
+        self.assertIn("OkHttpDataSource.Factory(client)", net)
+        self.assertIn("Net.client", app)
 
 
 class BookReaderCredentialBoundaryCase(unittest.TestCase):
