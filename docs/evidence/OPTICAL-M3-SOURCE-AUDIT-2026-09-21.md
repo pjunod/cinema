@@ -27,6 +27,13 @@ not physical-drive evidence.
 | Activity | Built | Managed optical sessions publish through the existing local and cluster Activity inventory with `source: optical` and optional catalog IDs; no synthetic IDs are emitted. |
 | Progress | Built | Progress writes require the current disc, title, drive generation and active session. Clients report the logical title position through the established player lifecycle. Unknown duration is preserved as unknown. |
 
+Commit `35eeb0ea1` closes a stream-identity hole in those built paths: title
+responses, decision/start validation, encoder selection and progress validation
+now preserve the semantic FFmpeg `a:n` / `s:n` index even when the displayed
+track list is sparse or reordered. Native integer selections and browser object
+selections remain wire-compatible; unknown fields, negative values and invalid
+bitmap-burn claims fail before persistence.
+
 ## Acceptance boundary
 
 The encoded path has a complete typed source-to-player route and pinned Rust,
