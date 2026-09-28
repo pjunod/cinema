@@ -1231,7 +1231,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("CARGO_TARGET_DIR=/src/target-plurxd", dockerfile)
         # Cache-mounted target dirs must never serve a stale workspace crate.
         self.assertIn(
-            "find crates vendor -type f -name '*.rs' -exec touch {} + \\\n"
+            "find crates vendor -type f -exec touch {} + \\\n"
             "    && ! cargo tree --locked -p plurxd",
             dockerfile,
         )
@@ -2568,7 +2568,7 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertIn("--test store_contract --no-run", dockerfile)
         self.assertIn(
-            "find crates vendor -type f -name '*.rs' -exec touch {} + \\\n"
+            "find crates vendor -type f -exec touch {} + \\\n"
             "    && mkdir -p /src/target-store-contract/debug/deps",
             dockerfile,
         )

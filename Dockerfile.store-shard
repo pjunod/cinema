@@ -13,11 +13,11 @@ ENV PLURX_BUILD_SHA=${PLURX_BUILD_SHA}
 ARG TARGETARCH
 WORKDIR /src
 COPY . .
-# Cache-mounted target dir: touch sources so cargo never trusts a stale
+# Cache-mounted target dir: touch every workspace file so cargo never trusts a stale
 # workspace-crate rlib by mtime (see the same note in Dockerfile).
 RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=plurx-target-store-contract-${TARGETARCH},sharing=locked,target=/src/target-store-contract \
-    find crates vendor -type f -name '*.rs' -exec touch {} + \
+    find crates vendor -type f -exec touch {} + \
     && mkdir -p /src/target-store-contract/debug/deps \
     && find /src/target-store-contract/debug/deps -maxdepth 1 \
         -type f -name 'store_contract-*' -delete \
