@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 12:36 UTC · **Audited main:** `d66e6ed8582cfcf518f11765bf3489a44ce6ccca`
+**Status:** open · **Updated:** 2026-09-28 12:55 UTC · **Audited main:** `d66e6ed8582cfcf518f11765bf3489a44ce6ccca`
 
 ## Current work
 
@@ -25,6 +25,24 @@ products; the source-only merge requires no repeated installation.
 | A-02 / A-03 | GoogleTV authenticated Home and one owned supplemental 1000 to1 session reached. Bedroom metadata/capture case passed1/0, canonical198 retained and own runner removed. | GoogleTV and Bedroom exported images are black, so visible rendering is unproved. Night Tide search returned no results; named-title/remote/controller/Lenovo6000 matrix remains owed. Supplemental finite checks are running. |
 | W-02 / A-04 | Exactd66 Chrome one/two cliffs and subtitle-readiness pass. Firefox one/two cliffs and official HLS-startup fail unchanged predicates; all six ran once. | Gaps116.68/133.34ms exceed100ms, with one retained backward frame. HLS worker/seek pass but reports arrive reversed. Reporter repair and Firefox diagnosis are underway; no scorer weakening or blind rerun. Full named-platform matrix remains owed. |
 | L-03 M2/M4 | Native code/native15 focused checks and real6.1 source439 caption packets are retained; four-tuner/server idle preflight is sealed. | Actual installed source→HLS advertisement→selector→rendered text, shared-capacity/DVR and Shield HDMI matrix. |
+
+[Draft #599](http://192.168.4.7:3000/noirr/plurx/pulls/599) batches bounded
+report delivery sequencing, diagnostic handoff records and these evidence
+updates. Its single adversarial review found one P2: second-handoff records
+could reuse the first switch timestamps. Commit86f0c047 fences the actual
+diagnostic helper to its current preparation boundary and adds a focused
+regression. The sole review receipt is
+`/private/tmp/codex-pr599-single-adversarial-review-20260928.json`, SHA256
+`66c212c3cfc49149ce55ec7ea532e2470ecfd6d87f8f9910ed01d9e2b1283148`.
+Focused tests, one targeted Firefox diagnostic observation and the selected
+fast lane follow; no second review is requested.
+
+GoogleTV's same owned supplemental1000 to1 session now has five actual
+Forward10 remote inputs with8.8–10.7s UIclock jumps beyond wall time. Two
+further keys were2.039s apart because of fresh ownership checks, so rapid
+overlap remains unproved. The420s paused-state experiment is running.
+Physical display metadata reports ON, but the captures remain black; this
+does not establish either advancing visible frames or absent decoder output.
 
 ## Current immutable evidence
 
