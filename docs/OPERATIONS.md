@@ -4181,7 +4181,7 @@ fragment indexing share one ownership queue, one heavy worker per node and two
 reader slots per shared storage domain. Unmapped roots use one global domain. Spare nodes can prepare different titles
 without duplicating the same computation or multiplying NAS reads by node count.
 
-Settings → Developer → Shared storage budgets assigns the same domain name to
+Settings → Libraries → Shared storage budgets assigns the same domain name to
 mount paths on the same NAS. Independent storage may use different names. A
 multi-root library conservatively reserves all of its domains, even for a
 file-specific job. Save mapping changes while background jobs are idle; an
@@ -4281,10 +4281,12 @@ permissions; an exact recipe already preparing on their delivery node can be
 joined at priority 2 without starting another encoder. Cross-node offline
 transcode delivery is not yet provided by this queue adapter.
 
-Settings → Developer contains enable controls and timestamped advisory
-requirements for the existing analysis and speculative-preparation preferences.
-Unknown or unmet observations do not prevent saving the choice. There is no
-queue certification or fleet receipt to obtain. The first schema conversion
+The analysis and speculative-preparation preferences are ordinary settings:
+Settings → Analysis enables the analysis workers and Settings → Maintenance
+sets the pre-transcoding cadence. Their Developer card graduated on
+2026-09-28; `GET /api/v1/developer/readiness` still reports the advisory
+`durable_cluster_work` requirements. There is no queue certification or
+fleet receipt to obtain. The first schema conversion
 requires the stopped-writer maintenance procedure in the
 [queue migration contract](cluster/DURABLE-WORK-QUEUE-IMPLEMENTATION.md#7-migration-and-rollback--one-ownership-system-after-cutover);
 do not perform a mixed-version rolling cutover or a binary-only downgrade.

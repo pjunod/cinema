@@ -175,7 +175,7 @@ had to be edited.
 | 43 | [`pages/analysis.js`](../../crates/plurxd/src/web/pages/analysis.js) | Analysis status: the queue, its failures, and what to do about them. | 15448–16149 |
 | 44 | [`pages/activity-stream.js`](../../crates/plurxd/src/web/pages/activity-stream.js) | Now playing: the Stream cell — state pill, meter strip, details disclosure. | 16150–16560 |
 | 45 | [`pages/settings.js`](../../crates/plurxd/src/web/pages/settings.js) | The Settings frame: `SETTINGS_MANIFEST`, `SETTINGS_ENDPOINTS`, tab routing. | 16561–16838 |
-| 46 | [`pages/settings-panels.js`](../../crates/plurxd/src/web/pages/settings-panels.js) | Shared panel machinery, Metadata/search, Maintenance/Windows, Analysis and Playback. | 16839–17349 |
+| 46 | [`pages/settings-panels.js`](../../crates/plurxd/src/web/pages/settings-panels.js) | Shared panel machinery, Libraries (including the shared storage budget editor), Metadata/search, Maintenance/Windows, Analysis and Playback. | 16839–17349 |
 | 47 | [`pages/live-tv.js`](../../crates/plurxd/src/web/pages/live-tv.js) | `LIVE_TV`, `viewLiveTv`, the guide, the grid, the popover, and the `live-tv-input-adapter` region. | 17350–18465 |
 | 48 | [`pages/live-tv-dvr.js`](../../crates/plurxd/src/web/pages/live-tv-dvr.js) | Recording from the Live TV page. | 18466–18751 |
 | 49 | [`pages/recordings.js`](../../crates/plurxd/src/web/pages/recordings.js) | The Recordings page: what is scheduled, what recorded, and what failed. | 18752–18983 |
