@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 06:07 UTC · **Audited main:** `c983989813d0819ed54dc1b1e115c08b60a059e8`
+**Status:** open · **Updated:** 2026-09-28 06:15 UTC · **Audited main:** `c983989813d0819ed54dc1b1e115c08b60a059e8`
 
 [PR #582](http://192.168.4.7:3000/noirr/plurx/pulls/582) merged after its
 single adversarial review; all four findings were fixed. The exact candidate
@@ -24,6 +24,8 @@ Read-only actual installed ART diagnostics on four reachable signed133 devices r
 Fast lane API3480/UI3459 stopped at history preflight before Rust tests: five corrective client commits lacked required rows in the history anchor table. Those commits now map to their existing HLS, paging and Settings regressions; local history audit passes all311 client anchors. Main #593 advances to c9839898 with only STATUS.md, integrated into this candidate. No app source, signed input or test behavior changed; the sole review remains complete and a new exact-head/base gate is required.
 
 Fast lane API3484/UI3463 passed policy, Apple, Windows and web checks. Rust core reported1365passed/1failed/1ignored: `dropping_the_future_kills_the_child` failed at the missing PID file because the200ms timer cancelled the re-executed test process before startup completed. Corrective commit `4a9e8c84dba3a826cb911fd2c89fa616b8f3e0da` atomically publishes the PID and waits for observed child readiness before starting the unchanged cancellation deadline. The actual future is dropped before the preserved child-death assertion; production process handling is unchanged. One focused regression and a fresh exact-candidate fast gate are required. No second590review.
+
+Fast lane API3488/UI3467 stopped in preflight before Rust units: the fixed test adds two test-only awaited timers, and the mechanical ownership census still expected1088 rather than1090. Its ledger now names the20ms readiness poll and10s startup budget, both owned by the same test and retained output future; no detached task or production timer was added. The exact focused Rust case already passed1/0 in2.23s. The one failing ownership-census case is the next focused check, followed by a new exact-candidate gate; no second review or full-unit optional run.
 
 Separate parallel client work has compiled ordinary Release LiveTV caption controls for Apple and actual-track controls for Android. Both clients also lose the server's actionable watchable-capacity offer before rendering it; that client follow-up is being implemented in the next batch. These branches have not run tests or their batch review and are not deployed. Their acceptance cannot be attributed to installed194/133 or sealed196 products.
 

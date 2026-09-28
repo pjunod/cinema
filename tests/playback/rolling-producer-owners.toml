@@ -3327,7 +3327,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # adds no new site.
 # PR #537 current-main integration: measured after replacing the temporary
 # owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
-expected_occurrences = 1088
+# 1088 -> 1090: process::tests::dropping_the_future_kills_the_child adds
+# one 20ms readiness poll and one 10s startup timeout. Both are test-only,
+# awaited by the same test while it retains the owned output future; neither
+# detaches a task, changes production recovery, or owns a new child. The
+# unchanged 200ms cancellation timeout starts only after atomic PID readiness,
+# and the actual pinned future leaves scope before the child-death assertion.
+expected_occurrences = 1090
 # PR #537: +13 bounded transport/finalizer lease waits, guide replica polling
 # and release, worker readiness/snapshot bounds. Transport/finalizer futures
 # belong to the operation's cancellation scope; replica polling ends on the
