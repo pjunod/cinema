@@ -1054,7 +1054,11 @@ refusal instead of a panic and versions its field-wise cache identity. Commit
 `657b31ba5` bounds the helper's complete navigation walk, `d3633ecd0` maps
 remote validation and subtitle refusals without relaying peer diagnostics,
 and `bf6c00cde` uses local monotonic receipt time for owner expiry. These
-changes do not close the physical or copy-path acceptance rows.
+changes do not close the physical or copy-path acceptance rows. Commits
+`8a9715cf0`, `2a789da94` and `942f182cd` additionally reject control-bearing
+identities, sanitize bounded helper/configuration display strings, and
+validate inspected display, suggestion, stream and chapter metadata at the
+shared trust boundary.
 
 Before enabling release support, verify: accepted source/seek decision; both
 formats on actual hardware; all required lifecycle/authorization/concurrency
