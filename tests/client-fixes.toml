@@ -2983,7 +2983,8 @@ test_anchor = "fun selectionDisablesOnlyTextAndPinsTheObservedService()"
 # A selected track is not proof that captions reached the screen.
 [[fixes]]
 id = "android.live-tv-caption-cue-observation"
-# Additional source/test obligation; the original commit is anchored once above.
+# Additional live obligation belonging to the primary corrective fix.
+supplements = "android.live-tv-caption-selection"
 commits = []
 source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvCaptions.kt"
 source_anchor = "internal fun liveTvCaptionSummary(tracks: Tracks, cuesPresent: Boolean): String {"
@@ -3002,7 +3003,8 @@ test_anchor = "fun capacityOffersSurviveTheActualLeaseWithoutStartingUntilChosen
 # Only the explicit current refusal can choose a known playable channel.
 [[fixes]]
 id = "android.live-tv-capacity-offer-explicit-choice"
-# Additional source/test obligation; the original commit is anchored once above.
+# Additional live obligation belonging to the primary corrective fix.
+supplements = "android.live-tv-capacity-offer-payload"
 commits = []
 source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt"
 source_anchor = "internal fun liveTvCapacityChoice("
@@ -3022,7 +3024,8 @@ test_anchor = "testLiveCaptionChoicesCannotChangeTheNextChannel"
 
 [[fixes]]
 id = "apple.live-caption-advertised-options"
-# Additional source/test obligation; the original commit is anchored once above.
+# Additional live obligation belonging to the primary corrective fix.
+supplements = "apple.live-caption-menu-attachment-ownership"
 commits = []
 source = "clients/apple/Sources/LiveTvCaptions.swift"
 source_anchor = "static func isSelectable(mediaType: AVMediaType, captionsAdvertised: Bool)"
@@ -3041,7 +3044,8 @@ test_anchor = "testWatchableCapacityOfferNeedsAnExplicitCurrentAction"
 
 [[fixes]]
 id = "apple.live-capacity-offer-envelope"
-# Additional source/test obligation; the original commit is anchored once above.
+# Additional live obligation belonging to the primary corrective fix.
+supplements = "apple.live-capacity-offer-actions"
 commits = []
 source = "clients/apple/Sources/LiveTv.swift"
 source_anchor = "if verdict.render == \"tuner_capacity\", let capacityFailure"
@@ -3050,7 +3054,8 @@ test_anchor = "testLeasePreservesStructuredCapacityOffers"
 
 [[fixes]]
 id = "apple.live-capacity-offer-known-identity"
-# Additional source/test obligation; the original commit is anchored once above.
+# Additional live obligation belonging to the primary corrective fix.
+supplements = "apple.live-capacity-offer-actions"
 commits = []
 source = "clients/apple/Sources/LiveTvCapacityOffer.swift"
 source_anchor = "static func resolve("

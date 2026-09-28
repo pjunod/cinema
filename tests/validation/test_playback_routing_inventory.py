@@ -5,6 +5,7 @@ import tomllib
 import unittest
 from pathlib import Path
 
+from validation.history import load_client_fixes
 from validation.rust_modules import module_source
 
 
@@ -69,7 +70,9 @@ class PlaybackRoutingInventoryTest(unittest.TestCase):
         catalog = tomllib.loads(CLIENT_FIXES.read_text(encoding="utf-8"))
         self.assertEqual(catalog.get("version"), 1)
         self.assertRegex(catalog.get("enforce_after", ""), r"^[0-9a-f]{7,40}$")
+        ledger = load_client_fixes(CLIENT_FIXES)
         fixes = catalog["fixes"]
+        by_id = {entry.id: entry for entry in ledger.fixes}
         ids = [entry["id"] for entry in fixes]
         self.assertEqual(len(ids), len(set(ids)), "client fix ids must be unique")
         self.assertGreaterEqual(len(fixes), 3)
@@ -84,8 +87,15 @@ class PlaybackRoutingInventoryTest(unittest.TestCase):
         commit_claims: set[str] = set()
         for entry in fixes:
             with self.subTest(client_fix=entry.get("id", "(missing id)")):
-                self.assertEqual(required, set(entry))
-                self.assertTrue(entry["commits"])
+                if "supplements" in entry:
+                    self.assertEqual(required | {"supplements"}, set(entry))
+                    self.assertFalse(entry["commits"])
+                    primary = by_id[entry["supplements"]]
+                    self.assertIsNone(primary.supplements)
+                    self.assertTrue(primary.commits)
+                else:
+                    self.assertEqual(required, set(entry))
+                    self.assertTrue(entry["commits"])
                 for commit in entry["commits"]:
                     self.assertRegex(commit, r"^[0-9a-f]{7,40}$")
                     self.assertNotIn(commit, commit_claims, "commit has two client fix rows")
