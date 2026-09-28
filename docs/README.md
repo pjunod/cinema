@@ -366,6 +366,7 @@ player obeys, subtitles and overlays, layouts and themes.
 | [PLAYBACK-INFO-IMPLEMENTATION-HANDOFF.md](clients/PLAYBACK-INFO-IMPLEMENTATION-HANDOFF.md) | Build sequence for output metadata, safe client collectors, attachment fencing, package ownership, and acceptance. | open |
 | [330-calm-library-pages.md](apple-builds/330-calm-library-pages.md) | Apple build 162 quiet Home and open media details. | built |
 | [582-seek-observability.md](apple-builds/582-seek-observability.md) | Apple build194 seek terminal beacons and live viewing method. | open |
+| [590-acceptance-focus.md](apple-builds/590-acceptance-focus.md) | Apple build195 physical TV focus navigation correction and acceptance provenance. | open |
 | [359-apple-pause-resume.md](apple-builds/359-apple-pause-resume.md) | Apple return-to-picture owner, deadline, and advisory enablement. | built |
 | [playback-info-redesign.md](apple-builds/playback-info-redesign.md) | Apple build 161 playback-info changes. | open |
 | [328-native-stall-parity.md](apple-builds/328-native-stall-parity.md) | Apple release note for recipe-preserving native stall recovery. | open |

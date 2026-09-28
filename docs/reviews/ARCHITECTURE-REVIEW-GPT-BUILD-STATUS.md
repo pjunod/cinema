@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 03:38 UTC · **Audited main:** `dfef993b903e62a9dabc05ebdff98ff2a57ada21`
+**Status:** open · **Updated:** 2026-09-28 04:14 UTC · **Audited main:** `dfef993b903e62a9dabc05ebdff98ff2a57ada21`
 
 [PR #582](http://192.168.4.7:3000/noirr/plurx/pulls/582) merged after its
 single adversarial review; all four findings were fixed. The exact candidate
@@ -10,25 +10,43 @@ against `d2a9d8fb78f785f3daf0469937d7139f979d3b27`: **4,693 Rust tests passed,
 zero failures**. All24 regression fields resolved before publication and are
 in the landing commit. No second review was run.
 
-Three parallel lanes are building the four final server images, qualifying
-merged-source browser traces, and collecting Android installation/device
-receipts. Root installed Apple194 and owns the bounded Bedroom TV checks.
-Deployment and behavior acceptance are recorded separately.
+[Draft PR #590](http://192.168.4.7:3000/noirr/plurx/pulls/590) batches the
+HLS readiness clock observation repair, physical TV focus navigation repair,
+and this evidence. Apple source195 is reserved; actual devices remain194
+until signed qualification/install. Android133 is unchanged. No590 adversarial
+review or unit tests have run; the complete candidate gets exactly one review
+before focused/fast-lane tests.
+
+The four-node strict uniform deployment passed. Browser cases ran on the exact
+merged binary and unchanged scorers; failures are retained. Actual GoogleTV
+UI and corrective source work proceed in parallel.
 
 | Work | Current evidence | Next action |
 |---|---|---|
 | C-08 client §7.9 | Web, Apple and Android follow-ups merged in #582. Sole-review findings fixed; final compile gates green. | Actual5settled+2quick dispatched-seek/method evidence and seven-minute pause/resume remain owed. |
-| Fleet | Four exact-main images building in parallel; activation remains serial with quorum/WAL/readiness checks. | Independently verify all four checkouts, OCI labels and running binary stamps. |
-| Duration | Historical collectors preserved. | Start one bounded reset-aware collector after uniform deployment and retarget the existing quiet heartbeat;24h/7d and normal-use windows remain owed. |
+| Fleet | All four exactdfef checkouts/OCI/running binaries verified healthy, readyz/metrics200, quorum/leader, lag0/restarts0. | Retain this point; next qualified source needs a new exact deployment. |
+| Duration | One30s/256MiB collector and existing quiet heartbeat are active from03:59:15UTC, Sep28 toOct5. Initial5m clean; historical windows preserved. |24h/7d and normal-use windows remain owed; a future source change interrupts exact-build continuity. |
 | Physical devices | Signed Apple194 installed/read back on six physical devices. Signed nondebuggable Android133 installed/read back on five, with APK/signer/firstInstall/UID/CE continuity. |16pro/TCL unavailable; Shield/Xiaomi absent. Locked devices cannot supply UI acceptance. |
 | D-02 | Actual133 APK/signature verified on GoogleTV,Lenovo,Pixel10ProFold,razrUltra2025 andPixel11ProXL. GoogleTV unlocked; other four currently locked. | Runtimecodec/frame, Home/notification, PiP/controller, lifecycle and named Shield/Lenovo prompts remain owed. |
-| D-03 | Signed133 packaged backup/cloud/D2D XML excludes offline/ and datastore/. | Packaged policy is not restore proof. Disposable exact-release synthetic-data backup/restore, physical PDF/EPUB/account/offline/startup acceptance remain owed; external chooser remains separately refused by its plan. |
-| A-02 / A-03 | Signed194 installed on17air,17promax,Bedroom,iPadMini,iPadPro,and paired device named iPhone. Five post-install data-path queries succeeded; iPadPro query unavailable. | Controller/notification/Now Playing, full ordering/request/frame and named Lenovo6000-title acceptance remain owed. Separate TV runner retained for ordinary UI. |
-| W-02 §5.4–5.5 | Final binary and two unchanged official browser checks prepared. | Execute after deployed-source parity; LGwebOS/FireTV remote prompts remain owed. |
+| D-03 | Signed133 packaged backup/cloud/D2D XML excludes offline/ and datastore/. Actual packaged baseline.prof/profm retained; ART consumption/startup timing unproved. | Packaged policy is not restore proof. Disposable exact-release synthetic-data backup/restore, physical PDF/EPUB/account/offline/startup acceptance remain owed; external chooser remains separately refused by its plan. |
+| A-02 / A-03 | Signed194 installed on17air,17promax,Bedroom,iPadMini,iPadPro,and paired device named iPhone. All six post-install data-path inventories now succeeded; the first iPadPro query disconnected, then one bounded reconnect succeeded. | Controller/notification/Now Playing, full ordering/request/frame and named Lenovo6000-title acceptance remain owed. Actual194 paging case failed14.46s in focus helper after Category→Library grouping removed its target. Draft590 repairs navigation; canonical194 restored in place. |
+| W-02 §5.4–5.5 | Both unchanged official HLS-startup and subtitle-readiness browser checks passed on exactdfef source/binary with deployed parity. | LGwebOS/FireTV remote prompts remain owed. |
 | L-03 M2/M4 | Confirmed real6.1 source contains439 caption packets, CC1 140 printable characters and SERVICE1 176; temporary capture removed and tuners idle afterward. | HLS advertisement/selector/rendered-text and named shared-capacity/ShieldHDMI prompts remain owed. Prior zero-frame-side-data observations are method limits, not caption-negative evidence. |
-| A-04 | Four bounded Chrome/Firefox SDR traces prepared against actual merged source and unchanged scorers. | Safari/HDR and named native/Android matrix remain owed. Mac lock blocks normal browser UI; SafariWebDriver session creation timed out with unknown cause. |
+| A-04 | Chromeone-cliff passed66.7ms; Chrometwo-cliff first-stage failed12.4094s/1333.2ms/restart1. Firefoxboth cases failed before playback at WebDriverstartup. | Narrow HLS clock-readiness observation repair is in draft590; cause of the particular failed trace remains unproved. Original traces stay immutable; corrected source and Safari/HDR/native/Android matrix need qualification. |
 | C-08 fleet §7.10 | Historical owned direct-play observation retained. | Authenticated owned real-UI/blank-ID checks remain owed; automatic approval refused saved-login probing, and no credential access occurred. |
 | K-06 | Explicitly design-only; runtime measurements absent. | Keep its prerequisite and Claude ownership; NTP/absent series do not prove clock uncertainty. |
+
+## Current deployed and acceptance receipts
+
+| Receipt | SHA-256 | Scope |
+|---|---|---|
+| `/private/tmp/codex-fleet-post582-prep-20260928/run-dfef993b903e-1c946919/uniform-health.json` | `ba628663997446da2242947ae51eb4a97d9b70dbd1754aab8fbdf34bc7fed4fe` | Strict all-four exact checkout/OCI/binary, health/quorum/leader/lag0/restarts0. First learner missing-gauge scrape retained separately. |
+| `/private/tmp/codex-fleet-post582-prep-20260928/run-dfef993b903e-1c946919/collector-start-receipt.json` | `b1c04bdcad3843ee7906014c98b9671c04e323bfe750ba6955ac18e4ebd511a7` | One bounded collector; slot0 clean. Future window not complete. |
+| `/private/tmp/codex-fleet-post582-prep-20260928/run-dfef993b903e-1c946919/five-minute-checkpoint.json` | `c9b45f5242734f85c60a30ac4b46251a8bee75b6f9a5770583e334997a73cd96` |11uniform rows/node,30smaximum gap; no reset/build/HTTP/quorum/lag errors. Passive5m only. |
+| `/private/tmp/codex-browser-final-evidence-binding-20260928/binding.json` | `31b357f1a413b3bc1bc5c6713ec903fe711f5d881e7dec85ee392e212225a0b3` | Exactdfef binary/source/scorers, four retained A04 attempts and two official W02 passes; deployed parity. FullD3 not met. |
+| `/private/tmp/codex-browser-final-evidence-binding-20260928/failure-diagnosis.json` | `3def6c7c547859f0c0617bc28db0157d888aeddd4508181b08d15f6be07646ba` | Chrome first preparation hit10s timeout without buffer/proof readiness. Later503s began75.078s after fallback, so did not cause it. Clock-observation gap is a source-level risk; trace-specific causation unproved. |
+| `/private/tmp/codex-apple194-tv-acceptance-default-iteration-20260928/receipt.json` | `2d505eb1ecd0f85d2b7f65dea01cc636be32aaccee24edc8d243da9f0d6d8eea` | One actual paging case failed14.46s in focus navigation; Settings not executed. Earlier CLI-iteration invocation executed0tests and is separately retained. |
+| `/private/tmp/codex-apple194-bedroom-canonical-restore-20260928/receipt.json` | `f675be93cc44c8f66a020603adaa6ffcd854259d14648e031615db432961f9af` | Strict verified canonical194 payload restored in place/read back after failed UI case. No uninstall/data clear; installed binary hashing unavailable. |
 
 ## Latest immutable receipts
 
@@ -37,7 +55,10 @@ Deployment and behavior acceptance are recorded separately.
 | `/private/tmp/codex-pr582-final-qualification-20260928.json` | `5fe96092224330b4ba9b97e8797788a94c450c29889baf9169c2ce3a2ab34464` | Exact candidate/base, all9green jobs, one sealed review and actual merge. |
 | `/private/tmp/codex-apple194-rollout-20260928/receipt.json` | `8debdbef17fa381e1360b9cfb2ba0e859c4174f000f1189ef75fc24daec219fa` | Six in-place installed-build194 readbacks;16pro unreachable. Container UUIDs rotated; unchanged-container claim is false. |
 | `/private/tmp/codex-apple194-data-path-comparison-20260928.json` | `403b9ab0e893823be9a339778a37aa386de1929fe958761b87dbec32eb753638` | Five relative-path comparisons; iPadPro query unavailable. Changed paths are under Library caches/SplashBoard. Contents/login/Keychain unproved. |
+| `/private/tmp/codex-apple194-ipadpro-data-reconnect-20260928.json` | `549f7471feebee7f0ed1f1b046b8041458c9ff31b17550643fa7fce11d1cff67` | One bounded reconnect resolves the first iPadPro disconnect:6225 paths before/after,6217 retained,8 added/8 removed under cache/SplashBoard. Contents/login/Keychain unproved. |
+| `/private/tmp/codex-apple194-data-all-path-categories-20260928.json` | `d1c7f4f80fd6d756991c8198ee8a358c21831abd520abdf46c2f9898ef149b07` | Five earlier devices: every added/removed path is under Library/Caches or Library/SplashBoard. |
 | `/private/tmp/codex-android133-six-device-install-20260928T033537Z/receipt.json` | `d17b2c317ee98bd57ea63b25e085a39a294ca8faf381b757373ba95162198c77` | Five actual signed133 installed APKs, data-identity readbacks. GoogleTV DEinode unavailable. |
+| `/private/tmp/codex-android133-release-profile-package-20260928.json` | `7efd69ec369680ed497840c6f77f0424b3d5925583d0b1d42a9c18a7671eb72b` | Actual signed133 APK contains baseline.prof/profm. No installed ART or cold-start performance assertion. |
 | `/private/tmp/codex-android133-packaged-backup-policy-20260928/receipt.json` | `4a079ad5e2c374fcd648e9b1fc8087212af8fbcdd287197902e9cda7d70abfbe` | Actual packaged exclusions; no backup or restore executed. |
 | `/private/tmp/codex-l03-owned-caption-packet-receipt-20260928.json` | `01672864ea6c9904a2d26088a0ce1f0c2fecfeccbbe9907dd4045272689cfd07` | Caption-positive real source: canonical packet extraction439 while same-capture frame-side-data probe reportedzero. Source proof only. |
 

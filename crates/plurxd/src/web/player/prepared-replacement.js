@@ -386,9 +386,30 @@ function preparedHlsAttach(p,state,spare){
       state.incumbentResumeTimer=setTimeout(()=>resumePreparedIncumbentLoad(p,state),pauseMs);
     }catch(e){}
   }
+  const incumbentElement=state.incumbentElement;
+  const current=()=>preparedState(p)===state&&PLAYER===p
+    &&document.getElementById("video")===incumbentElement
+    &&preparedVideoElement()===spare;
+  // An append can finish while the successor's first range is still ahead
+  // of the incumbent. Advancing into that existing range changes readiness
+  // without another append. Observe the incumbent's clock with the same gate;
+  // the overlap-listener owner clears these on commit, failure and teardown.
+  const checkReadiness=()=>{
+    // An already-queued event must not detach the frame-proof listeners that
+    // replace these, or observe a newer preparation on the same elements.
+    if(state.overlapListeners!==readinessListeners) return;
+    if(!current()||!playbackOwnsAttachedMedia(p)){
+      detachPreparedOverlapListeners(state);
+      return;
+    }
+    notePreparedBuffer(p,state);
+  };
+  const readinessListeners=[["timeupdate",checkReadiness],["progress",checkReadiness]];
+  state.overlapListeners=readinessListeners;
+  for(const [name,listener] of readinessListeners)
+    incumbentElement.addEventListener(name,listener);
   hls.loadSource(state.playlistUrl);
   hls.attachMedia(spare);
-  const current=()=>preparedState(p)===state&&PLAYER===p;
   hls.on(Hls.Events.MANIFEST_PARSED,()=>{
     if(!current()) return;
     notePreparedMetadata(p,state);
@@ -398,7 +419,7 @@ function preparedHlsAttach(p,state,spare){
     try{ const started=spare.play(); if(started&&started.catch) started.catch(()=>{}); }catch(e){}
   });
   if(Hls.Events.BUFFER_APPENDED) hls.on(Hls.Events.BUFFER_APPENDED,()=>{
-    if(current()) notePreparedBuffer(p,state);
+    checkReadiness();
   });
   if(Hls.Events.FRAG_LOADED) hls.on(Hls.Events.FRAG_LOADED,(_,d)=>{
     notePreparedHlsFragmentLoaded(p,state,d);
@@ -570,6 +591,7 @@ function commitPreparedReplacement(p,state){
   if(!v||!spare||PLAYER!==p||preparedState(p)!==state) return false;
   if(state.state==="committing"||state.state==="committed") return false;
   if(!playbackOwnsAttachedMedia(p)) return false;
+  detachPreparedOverlapListeners(state);
   state.state="committing";
   const filmMs=playbackFilmPositionMs(v,p);
   const wanted=preparedLocalPositionMs(filmMs,state.mediaOriginMs)/1000;

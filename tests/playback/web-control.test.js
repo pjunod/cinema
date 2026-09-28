@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const test = require("node:test");
 const fs = require("node:fs");
 const path = require("node:path");
 const control = require("../../crates/plurxd/src/web/playback-control.js");
@@ -4184,6 +4185,9 @@ async function main() {
     controlAcknowledgement: null, pendingMediaChange: null, wantsPlayback: true,
   }, overrides);
 
+  await test("prepared HLS buffer readiness follows incumbent clock and releases listener ownership",
+    ()=>preparedBufferObservationTests(preparedHarness,preparedPlayer,prepareAction));
+
   // A warmed successor remains under the incumbent until aligned advancing
   // successor frames meet a fresh incumbent frame.
   {
@@ -6277,6 +6281,114 @@ async function main() {
 // length and the chained-buffer gap. Each one is written so that changing the
 // arithmetic it pins makes it fail -- the mutation checks in the PR name which
 // constant each case is holding.
+// A buffered successor can earn overlap by the incumbent advancing, without
+// another append. Exercise the shipped attach, gate and cleanup functions.
+function preparedBufferObservationTests(preparedHarness,preparedPlayer,prepareAction){
+  const stage=()=>{
+    const h=preparedHarness();
+    h.live.currentTime=20;
+    h.live.paused=false;
+    h.live.ranges=[[18,30]];
+    const incumbent={stopLoad(){},startLoad(){},destroy(){}};
+    const p=h.set(preparedPlayer({hls:incumbent}));
+    const state=h.handle(prepareAction());
+    h.instances[0].events.manifest();
+    h.spare.currentTime=23;
+    h.spare.readyState=4;
+    h.spare.ranges=[[23,29]];
+    const readiness=(state.overlapListeners||[]).slice();
+    return {h,p,state,readiness};
+  };
+  const removed=({h,readiness})=>{
+    for(const [name,listener] of readiness)
+      assert.ok(!(h.live.listeners[name]||[]).includes(listener),
+        `${name}: preparation must release its readiness listener`);
+  };
+  {
+    const f=stage(),{h,p,state}=f;
+    h.instances[0].events.append();
+    assert.equal(state.buffered,false,'an ahead range cannot skip the incumbent');
+    h.live.currentTime=22;
+    h.live.emit('timeupdate');
+    assert.equal(state.buffered,false,'the clock still has not reached overlap');
+    h.live.currentTime=23;
+    h.live.emit('timeupdate');
+    assert.equal(state.buffered,true,'existing buffer becomes ready without another append');
+    assert.equal(state.state,'committing');
+    assert.equal(p.hls,state.incumbentHls,'frame proof still owns exposure');
+    removed(f);
+    const frameListeners=state.overlapListeners;
+    for(const [,callback] of f.readiness) callback();
+    assert.equal(state.overlapListeners,frameListeners,
+      'queued readiness callbacks cannot clear the later frame-proof owner');
+    h.provePrepared();
+    assert.equal(state.state,'committed');
+    removed(f);
+  }
+  {
+    const f=stage(),{h,state}=f;
+    h.live.currentTime=23;
+    h.spare.ranges=[[23,24.5]];
+    h.live.emit('progress');
+    assert.equal(state.buffered,false,'clock observations still require two seconds of lead');
+    h.abandon('aborted','insufficient lead');
+    removed(f);
+  }
+  for(const terminal of ['failure','abandon','supersede','teardown']){
+    const f=stage(),{h,state}=f;
+    if(terminal==='failure') h.failPrepared('fixture failure');
+    else if(terminal==='abandon') h.abandon('aborted','fixture abort');
+    else if(terminal==='supersede')
+      h.handle(prepareAction({action_id:'817334fb-1472-4be4-9240-fc890a346cf8'}));
+    else h.teardown();
+    removed(f);
+    const next=h.current().prepared;
+    const nextListeners=next&&next.overlapListeners;
+    h.live.currentTime=23;
+    for(const [,callback] of f.readiness) callback();
+    h.instances[0].events.append();
+    assert.equal(state.buffered,false,`${terminal}: stale callbacks cannot commit`);
+    assert.equal(next&&next.overlapListeners,nextListeners,
+      `${terminal}: stale callbacks cannot detach a newer listener owner`);
+    if(next) h.abandon('aborted','fixture cleanup');
+  }
+  {
+    const f=stage(),{h,state}=f;
+    h.set(preparedPlayer());
+    h.live.currentTime=23;
+    h.live.emit('timeupdate');
+    removed(f);
+    assert.equal(state.buffered,false,'a replaced player cannot earn buffer readiness');
+  }
+  for(const stale of ['incumbent-element','successor-element','pending-media-change']){
+    const f=stage(),{h,p,state}=f;
+    if(stale==='incumbent-element'){
+      h.live.id='retired-video';
+      h.attached.push({id:'video'});
+    }else if(stale==='successor-element'){
+      h.spare.id='orphaned-prepared';
+      h.attached.push({id:'video-prepared'});
+    }else p.pendingMediaChange={};
+    h.live.currentTime=23;
+    h.live.emit('timeupdate');
+    removed(f);
+    assert.equal(state.buffered,false,`${stale}: stale media cannot earn readiness`);
+  }
+  {
+    const f=stage(),{h,p,state}=f;
+    h.live.currentTime=23;
+    h.live.emit('timeupdate');
+    h.provePrepared(false);
+    assert.equal(p.preparedCommitting,state);
+    removed(f);
+    h.cancelFrame();
+    assert.equal(state.state,'failed');
+    removed(f);
+    for(const [,callback] of f.readiness) callback();
+    assert.equal(p.prepared,null,'canceled exposure cannot restart preparation');
+  }
+}
+
 function preparedSwitchMeasurementTests(){
   const delta=(options)=>control.preparedSwitchCounterDelta(options);
 

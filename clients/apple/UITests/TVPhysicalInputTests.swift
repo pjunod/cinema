@@ -220,25 +220,58 @@ final class TVPhysicalInputTests: XCTestCase {
                              "\(name) must not be empty")
     }
 
-    /// Steer toward an identified visible control using the focused control's
-    /// accessibility frame. The bounded path fails visibly if focus is trapped.
+    /// Cross the tab/content boundary vertically before steering within a row.
+    /// Horizontal presses on a tab or segmented picker can replace the target's
+    /// entire view, so geometry must not steer across those rows first.
     private func focus(_ target: XCUIElement, in app: XCUIApplication) -> Bool {
+        guard target.exists else { return false }
+        let targetIsTab = app.tabBars.buttons.matching(
+            NSPredicate(format: "identifier == %@ AND label == %@",
+                        target.identifier, target.label)
+        ).firstMatch.exists
+        let focused = NSPredicate(format: "hasFocus == true")
         for _ in 0..<80 {
+            // A vanished target is a failed navigation path, not a snapshot
+            // exception or a reason to select a different control.
+            guard target.exists else {
+                attachScreen(app, name: "focus-target-disappeared")
+                return false
+            }
             if target.hasFocus { return true }
-            // Use the previous physical paging path's focused Button query.
-            let current = app.buttons.matching(
-                NSPredicate(format: "hasFocus == true")
-            ).firstMatch
+            let focusedTab = app.tabBars.buttons.matching(focused).firstMatch
+            if targetIsTab && !focusedTab.exists {
+                remote.press(.up)
+                continue
+            }
+            if !targetIsTab && focusedTab.exists {
+                remote.press(.down)
+                continue
+            }
+            let current = app.buttons.matching(focused).firstMatch
             guard current.exists else { remote.press(.up); continue }
-            let dx = target.frame.midX - current.frame.midX
-            let dy = target.frame.midY - current.frame.midY
-            if abs(dx) > abs(dy) {
-                remote.press(dx > 0 ? .right : .left)
+            let targetFrame = target.frame
+            let currentFrame = current.frame
+            // Leave the Category/Library segmented row downwards before
+            // seeking a shelf's See All button horizontally. Otherwise Right
+            // changes grouping and removes library-open-category:*.
+            if targetFrame.minY >= currentFrame.maxY {
+                remote.press(.down)
+            } else if targetFrame.maxY <= currentFrame.minY {
+                remote.press(.up)
             } else {
-                remote.press(dy > 0 ? .down : .up)
+                let dx = targetFrame.midX - currentFrame.midX
+                let dy = targetFrame.midY - currentFrame.midY
+                if abs(dx) > abs(dy) {
+                    remote.press(dx > 0 ? .right : .left)
+                } else {
+                    remote.press(dy > 0 ? .down : .up)
+                }
             }
         }
-        return target.hasFocus
+        guard target.exists else { return false }
+        let reached = target.hasFocus
+        if !reached { attachScreen(app, name: "focus-path-exhausted") }
+        return reached
     }
 
     private func loadedCount(_ label: String) throws -> Int {
