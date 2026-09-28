@@ -1298,6 +1298,11 @@ async fn local_progress(
     request: ProgressRequest,
 ) -> Result<PublicOpticalProgress, ApiError> {
     authorize_play(state, user_id).await?;
+    if request.angle == 0 {
+        return Err(ApiError::BadRequest(
+            "angle must be at least one".to_owned(),
+        ));
+    }
     state
         .optical
         .manager()
@@ -1309,6 +1314,58 @@ async fn local_progress(
             &request.session_id,
         )
         .map_err(lifecycle_error)?;
+    let route = state
+        .store
+        .media_session_route(&request.session_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::typed(
+                StatusCode::FORBIDDEN,
+                "optical_play_forbidden",
+                "the optical session is not authorized for this user",
+            )
+        })?;
+    if route.user_id != user_id {
+        return Err(ApiError::typed(
+            StatusCode::FORBIDDEN,
+            "optical_play_forbidden",
+            "the optical session is not authorized for this user",
+        ));
+    }
+    let durable_source = DurableOpticalSessionSource::decode(&route.recipe_json).map_err(|_| {
+        ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "optical_read_failed",
+            "the optical session source could not be verified",
+        )
+    })?;
+    let PlaybackSourceRef::Optical {
+        owner_node_id,
+        drive_id: source_drive_id,
+        media_generation,
+        disc_id: source_disc_id,
+        title_id: source_title_id,
+        angle,
+    } = durable_source.source
+    else {
+        return Err(ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "optical_read_failed",
+            "the optical session source could not be verified",
+        ));
+    };
+    if owner_node_id != state.node_id
+        || source_drive_id != drive_id
+        || media_generation != request.media_generation
+        || source_disc_id != disc_id
+        || source_title_id != title_id
+        || angle != request.angle
+    {
+        return Err(optical_conflict(
+            "optical_media_changed",
+            "the progress update does not match the active optical title",
+        ));
+    }
     let progress = state
         .store
         .put_optical_progress(&OpticalProgressWrite {
