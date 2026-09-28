@@ -19,7 +19,10 @@ final class TVPhysicalInputTests: XCTestCase {
         let quality = app.descendants(matching: .any)
             .matching(identifier: "settings-quality").firstMatch
         XCTAssertTrue(quality.waitForExistence(timeout: 10), app.debugDescription)
-        XCTAssertTrue(focus(quality, in: app), "Could not focus Quality picker")
+        guard focus(quality, in: app) else {
+            XCTFail("Could not focus Quality picker")
+            return
+        }
         remote.press(.select)
 
         let auto = app.descendants(matching: .any)
@@ -149,6 +152,37 @@ final class TVPhysicalInputTests: XCTestCase {
                       "Could not focus Libraries tab with remote")
         remote.press(.select)
 
+        // Grouping is a saved user preference. Establish the named fixture
+        // through ordinary UI, and restore it even if navigation/paging fails.
+        let category = app.buttons["Category"]
+        let library = app.buttons["Library"]
+        XCTAssertTrue(category.waitForExistence(timeout: 10) && library.exists,
+                      "Library grouping choices are unavailable")
+        let originalGrouping = try XCTUnwrap(
+            category.isSelected != library.isSelected
+                ? (category.isSelected ? "Category" : "Library") : nil,
+            "Could not observe the current library grouping")
+        defer {
+            // Relaunch returns from a collection detail to the ordinary root;
+            // it retains the account and lets cleanup use the same controls.
+            app.launch()
+            let restoreLibraries = app.tabBars.buttons["Libraries"]
+            if restoreLibraries.waitForExistence(timeout: 30)
+                && focus(restoreLibraries, in: app) {
+                remote.press(.select)
+                XCTAssertTrue(setLibraryGrouping(originalGrouping, in: app),
+                              "Could not restore the original library grouping")
+            } else {
+                XCTFail("Could not return to Libraries to restore grouping")
+            }
+        }
+        let requiredGrouping = try XCTUnwrap(
+            collectionID.hasPrefix("category:") ? "Category"
+                : collectionID.hasPrefix("share:") ? "Library" : nil,
+            "Collection must name a category or share")
+        XCTAssertTrue(setLibraryGrouping(requiredGrouping, in: app),
+                      "Could not establish the requested collection grouping")
+
         let openCollection = app.buttons["library-open-\(collectionID)"]
         for _ in 0..<60 where !openCollection.exists { remote.press(.down) }
         XCTAssertTrue(openCollection.exists,
@@ -220,25 +254,99 @@ final class TVPhysicalInputTests: XCTestCase {
                              "\(name) must not be empty")
     }
 
-    /// Steer toward an identified visible control using the focused control's
-    /// accessibility frame. The bounded path fails visibly if focus is trapped.
+    /// Cross the tab/content boundary vertically before steering within a row.
+    /// Horizontal presses on a tab or segmented picker can replace the target's
+    /// entire view, so geometry must not steer across those rows first.
     private func focus(_ target: XCUIElement, in app: XCUIApplication) -> Bool {
+        guard target.exists else { return false }
+        let targetIsTab = app.tabBars.buttons.matching(
+            NSPredicate(format: "identifier == %@ AND label == %@",
+                        target.identifier, target.label)
+        ).firstMatch.exists
+        let focused = NSPredicate(format: "hasFocus == true")
         for _ in 0..<80 {
+            // A vanished target is a failed navigation path, not a snapshot
+            // exception or a reason to select a different control.
+            guard target.exists else {
+                attachScreen(app, name: "focus-target-disappeared")
+                return false
+            }
             if target.hasFocus { return true }
-            // Use the previous physical paging path's focused Button query.
-            let current = app.buttons.matching(
-                NSPredicate(format: "hasFocus == true")
-            ).firstMatch
-            guard current.exists else { remote.press(.up); continue }
-            let dx = target.frame.midX - current.frame.midX
-            let dy = target.frame.midY - current.frame.midY
-            if abs(dx) > abs(dy) {
-                remote.press(dx > 0 ? .right : .left)
+            let focusedTab = app.tabBars.buttons.matching(focused).firstMatch
+            if targetIsTab && !focusedTab.exists {
+                remote.press(.up)
+                continue
+            }
+            if !targetIsTab && focusedTab.exists {
+                remote.press(.down)
+                continue
+            }
+            let focusedButton = app.buttons.matching(focused).firstMatch
+            // SwiftUI Form toggles focus an accessibility Cell, while the
+            // picker/shelf controls focus Buttons. Observe that actual owner
+            // rather than sending blind Up presses that bounce back to tabs.
+            let focusedCell = app.cells.matching(focused).firstMatch
+            let current = focusedButton.exists ? focusedButton
+                : focusedCell.exists ? focusedCell
+                : app.descendants(matching: .any).matching(focused).firstMatch
+            guard current.exists else {
+                attachScreen(app, name: "focus-owner-unavailable")
+                return false
+            }
+            let targetFrame = target.frame
+            let currentFrame = current.frame
+            // Physical SwiftUI menu pickers can give focus to an anonymous
+            // leaf Other with exactly the identified Button's frame. Accept
+            // only that observed proxy, never a larger ancestor or nearby row.
+            if current.elementType == .other && !target.identifier.isEmpty
+                && targetFrame.width > 0 && targetFrame.height > 0
+                && current.descendants(matching: .any).matching(focused).count == 0
+                && app.descendants(matching: .any).matching(
+                    identifier: target.identifier).count == 1
+                && abs(targetFrame.minX - currentFrame.minX) <= 1
+                && abs(targetFrame.minY - currentFrame.minY) <= 1
+                && abs(targetFrame.width - currentFrame.width) <= 1
+                && abs(targetFrame.height - currentFrame.height) <= 1 {
+                return true
+            }
+            // Leave the Category/Library segmented row downwards before
+            // seeking a shelf's See All button horizontally. Otherwise Right
+            // changes grouping and removes library-open-category:*.
+            if targetFrame.minY >= currentFrame.maxY {
+                remote.press(.down)
+            } else if targetFrame.maxY <= currentFrame.minY {
+                remote.press(.up)
             } else {
-                remote.press(dy > 0 ? .down : .up)
+                let dx = targetFrame.midX - currentFrame.midX
+                let dy = targetFrame.midY - currentFrame.midY
+                if abs(dx) > abs(dy) {
+                    remote.press(dx > 0 ? .right : .left)
+                } else {
+                    remote.press(dy > 0 ? .down : .up)
+                }
             }
         }
-        return target.hasFocus
+        guard target.exists else { return false }
+        let reached = target.hasFocus
+        if !reached { attachScreen(app, name: "focus-path-exhausted") }
+        return reached
+    }
+
+    private func setLibraryGrouping(_ label: String, in app: XCUIApplication) -> Bool {
+        let choice = app.buttons[label]
+        guard choice.waitForExistence(timeout: 10) else { return false }
+        if !choice.isSelected {
+            guard focus(choice, in: app) else { return false }
+            // A tvOS segmented picker can select while focus moves onto it.
+            if !choice.isSelected { remote.press(.select) }
+        }
+        let end = Date().addingTimeInterval(5)
+        while Date() < end {
+            if choice.exists && choice.isSelected { return true }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        attachScreen(app, name: "library-grouping-not-selected")
+        return false
     }
 
     private func loadedCount(_ label: String) throws -> Int {

@@ -292,7 +292,10 @@ mod tests {
             }
             Ok("sleep") => {
                 if let Ok(path) = std::env::var("PLURX_CHILD_PID_FILE") {
-                    std::fs::write(path, std::process::id().to_string()).expect("pid file");
+                    let path = Path::new(&path);
+                    let ready = path.with_extension("ready");
+                    std::fs::write(&ready, std::process::id().to_string()).expect("pid file");
+                    std::fs::rename(ready, path).expect("publish complete pid file");
                 }
                 std::thread::sleep(Duration::from_secs(300));
             }
@@ -337,16 +340,35 @@ mod tests {
         let mut command = child("sleep");
         command.env("PLURX_CHILD_PID_FILE", &pid_file);
 
-        let result = tokio::time::timeout(
-            Duration::from_millis(200),
-            output_job_owned(&mut command, TEST_WORK),
-        )
-        .await;
-        assert!(result.is_err(), "sleeping child exceeded the deadline");
-        let pid: u32 = std::fs::read_to_string(&pid_file)
-            .expect("sleeping child published its pid")
-            .parse()
-            .expect("numeric child pid");
+        let pid: u32 = {
+            let output = output_job_owned(&mut command, TEST_WORK);
+            tokio::pin!(output);
+            // Startup can exceed the cancellation deadline on a busy runner.
+            // Keep polling the output future until the child confirms readiness;
+            // only then measure cancellation of a running, sleeping child.
+            let ready = async {
+                loop {
+                    match std::fs::read_to_string(&pid_file) {
+                        Ok(pid) => break pid.parse::<u32>().expect("numeric child pid"),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                        Err(error) => panic!("read sleeping child pid: {error}"),
+                    }
+                }
+            };
+            let pid = tokio::select! {
+                result = &mut output => panic!("sleeping child exited before readiness: {result:?}"),
+                result = tokio::time::timeout(Duration::from_secs(10), ready) => {
+                    result.expect("sleeping child published its pid within startup budget")
+                }
+            };
+            let result = tokio::time::timeout(Duration::from_millis(200), &mut output).await;
+            assert!(result.is_err(), "sleeping child exceeded the deadline");
+            // Leave this scope to drop the actual future, not just its pinned
+            // reference, before checking that cancellation killed the child.
+            pid
+        };
 
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(

@@ -1,0 +1,27 @@
+# Keep physical TV focus on the requested control
+
+**Status:** open — sole review finding addressed; signed compilation and source-scoped regressions pass; fast qualification and final installed acceptance pending.
+
+Build: 197
+Issue: #590
+
+The physical TV navigation helper crosses tab/content boundaries vertically and moves between disjoint rows before steering horizontally. This prevents a rightward move on Category from changing grouping to Library and removing the requested movie shelf. The original build194 failed focus observation remains retained; no production view or playback contract changes.
+
+This batch also repairs web prepared-HLS readiness observation and records exact PR582 deployment and device evidence. Apple source build197 requires fresh signed artifacts and installed-build readback after qualification. Android133 inputs remain unchanged.
+
+The sole PR590 review identified the retained Library grouping prerequisite. The paging case now observes the original selected grouping, chooses the requested category/share through ordinary UI, and restores the original preference in deferred cleanup even on failure. No second review is requested.
+
+Focused regressions ran after that review. Web readiness passed and unchanged old source failed its intended assertion; physical paging passed against canonical194 with grouping restored. Three retained Settings failures led to one bounded diagnostic: Quality focus is an anonymous leaf Other with exactly the uniquely identified Button's frame. The helper accepts only that observed proxy, with nonzero matching geometry and no focused descendants. A larger Cell is not evidence of picker focus. The diagnostic also restored the first failed case's Autoplay change from Off to its original On through observed ordinary UI.
+
+Main moved through #589 to f400c0ea with native Live TV changes and claimed195. This candidate reserves196; fresh signed production apps and focused runner compilation precede qualification. Previous195 artifacts remain historical. No second adversarial review is requested.
+
+Fresh signed196 iOS/tvOS and physical runner compilation passed on72d69a32/mainf400. The corrected runner passed paging and Settings once each against canonical194, zero failures/skips; original grouping restored and Auto/Original menu observed. Receipt545c1f86dda7c1ee9628d494aba892c12cf4eb0975f58c288dc82f3fd2940c20. Final196 installed/current-main acceptance follows qualified deployment.
+
+Current main #585 lands at2694db66 with admission/encoder advice and native Apple196/Android134 claims. This branch integrates it and reserves Apple197. The earlier signed196 artifacts remain historical; new signed197 apps/runner and current-source Android134 must compile before final qualification. The sole review and finding disposition remain immutable.
+
+Current-source197 iOS/tvOS and physical runner compile/signature receipts are
+sealed from2585; correct Android134 is separately signed from that source.
+Main595 subsequently changes STATUS.md only. Old-base fast3489 reported one
+metadata deadline test failure; the test-only virtual-clock repair preserves
+production deadlines and recovery assertions. Final current-base qualification
+and in-place197/134 installation remain pending.

@@ -1,56 +1,105 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 02:57 UTC · **Audited main:** `d2a9d8fb78f785f3daf0469937d7139f979d3b27`
+**Status:** open · **Updated:** 2026-09-28 07:02 UTC · **Audited main:** `862372aa4ac8663b560e507a084f554f7084501a`
 
-[PR #582](http://192.168.4.7:3000/noirr/plurx/pulls/582) remains open.
-Its sole adversarial review is complete and all four findings were addressed.
-PR #537 passed all nine checks and4693tests without failures, then merged as
-`d2a9d8fb78f785f3daf0469937d7139f979d3b27`. Its actual landing is integrated
-in #582. Apple194/Android133 signed Release builds run in parallel from
-byte-identical combined native inputs. Final exact-base promotion is next.
-No final deployment or device acceptance has occurred.
+Main595 changes STATUS.md only and is integrated as c6b7ced949729143f9d5c69aebdc94a632ea5207. Exact2585 pinned compiler/Clippy and focused web, ownership census and process cancellation all pass (combined receipt863d38f07dbd6d0bd228ea035f775e08006c00381f3105f2e95487b16709f774). Signed Apple197 production and physical runner are sealed; exact current-source Android134 signing and regression-source compilation pass. These products are not yet installed.
 
-The earlier gate #3419 completed4692 Rust tests without assertion failures,
-then timed out rebuilding dependency features for the serial VOD checks.
-Commit `2854047a5` keeps both exact serial checks on workspace feature selection
-and uses a bounded35-minute lane. Its focused regression passed and failed
-when the old selection was restored. All23PRregressionfields validate.
-Normal commits run pinned Clippy, formatting, catalog and JavaScript syntax.
-No second adversarial review is requested.
+Actual old-base fast3489 failed only metadata::tests::an_item_that_exceeds_its_deadline_is_retryable_and_the_loop_continues:1365 core passes,1failure,1ignored. The loaded runner expired both real-socket50ms budgets. Test-only38b19ec9d19121578dd073f6b27a80f782e5d46d controls the virtual clock after observed slow-handler entry while preserving production deadlines and every continuation/retry assertion. Its one focused case is running; final integrated compilation and fast qualification follow. No second590 review. All timer/spawn census shapes remain unchanged.
+
+Draft594 current source7a5e929d3d396a8b6c5953c5589a59b9e7379801 reserves Apple198/Android135. Correct native134 source2585 and the unqualified historical feature134 APK are separate. One594 review, affected qualification, final deployment and rendered-caption/capacity evidence remain owed.
+
+
+Main #585 merged independently as `2694db665eedcb8c00c4caee15e72a897cd7f4c2` during590 qualification. Its actual server admission changes and native encoder-capacity message are integrated. It claims Apple196/Android134, so590 now reserves Apple197 and requires fresh197 apps/runner plus exact134 Android compilation and installation. The prior196/133 artifacts and physical observations keep their historical/source scope. No second590review. Its old-base gate3489 cannot qualify this new main; current combined compilation/focused checks and a new exact-base fast lane are required.
+
+Parallel draft594 will integrate this current source and reserve Apple198/Android135 for caption selectors and explicit watchable actions. Any feature134 APK from its previous e51 source is sealed unqualified and must not be installed. Actual API37 synthetic local backup/restore passed on historical signed133 (receipt b4059fc12eac56421264142580403a74d24114e1b5a672dfef321b87402924c5); owned emulator/privateADB/temporary image storage cleaned (d3b8efd21467aa005a9092d235ccb72d0d66e18d1a590fc5ad49353b4fd20f03). Cloud/D2D/physical/final134 acceptance remains owed.
+
+[PR #582](http://192.168.4.7:3000/noirr/plurx/pulls/582) merged after its
+single adversarial review; all four findings were fixed. The exact candidate
+`ac7290602931ddbe635a1263a8d7a133f45cc9be` passed all nine jobs in
+[fast lane #3435](http://192.168.4.7:3000/noirr/plurx/actions/runs/3435)
+against `d2a9d8fb78f785f3daf0469937d7139f979d3b27`: **4,693 Rust tests passed,
+zero failures**. All24 regression fields resolved before publication and are
+in the landing commit. No second review was run.
+
+[PR #590](http://192.168.4.7:3000/noirr/plurx/pulls/590) batches the
+HLS readiness clock observation repair, physical TV focus navigation repair,
+and this evidence. Apple source196 is reserved; actual devices remain194
+until signed qualification/install. Android133 is unchanged. The sole590 adversarial review found one P2 retained-grouping prerequisite; it is addressed by observed grouping selection and deferred restoration. Review receipt SHA256 `cba5a86abee8bef0a2e342479ef9b75565a41eb26c52cdf81699ab6a29dfb89f`. No second review. Main #589 changes native Live TV inputs and claims195; exact candidate72d69a32 reserves196. Fresh signed iOS/tvOS196 production apps and physical runner compiled with strict signature checks (production receipt `fbb84ecec8239b086bcdc735ddcb24bc206305bf46c26244465bfad58875ff78`; runner `812251e60224059b6308514a38cd4ca34bca1ab3a078284ab927d8ad11cfcf20`). No196 production install has run. Fast lane3484 selected Rust units; its startup-race failure and repair are recorded below.
+
+Focused web readiness passed; old-source negative control failed the intended no-new-append assertion (receipt `9d3e13f0dd2fe8466b4f723ddf761084d259fe8257442c418a7dec507621b44d`). Against canonical194, paging passed twice and restored Library grouping. Three Settings failures remain retained. A bounded diagnostic proved that Quality's actual focus owner is an anonymous leaf Other with exactly the identified Button frame, not a focused Cell. The helper now accepts only that unique leaf proxy with nonzero matching geometry. The diagnostic restored the first failed case's observed Autoplay Off to its original On, through an observed focused toggle and one ordinary Select. Receipt `8913c0eebbffad9a012102e0dc6adfad542ed233872f167a41d7d7dfe8917132`. The corrected196 runner passed paging and Settings once each against canonical194, zero failures/skips; original grouping restored and Quality opened both menu choices (receipt `545c1f86dda7c1ee9628d494aba892c12cf4eb0975f58c288dc82f3fd2940c20`). Exact72d69a32/basef400 web readiness passed and unchanged old-source control failed its intended assertion (receipt `a292af7ad3a7da325514c38a43b8f1f8ba30f8e1fc07c914b8bc32f832b92be2`). These source-scoped regressions are not final196/current-main installed product acceptance. Fast qualification and final deployment are next.
+
+D-03 actual API36 local synthetic-data backup/restore passed on exact signed nondebuggable133. After metadata and app backup, clearing only the owned emulator app removed all three sentinels. Framework restore returned0; the nonexcluded positive-control file returned with identical hash while offline/datastore sentinels stayed absent. Receipt `4d809da05634861585d2bc379b414ed76d52502d6ae6044382b8ded16daf9380`. The earlier restore-1000 failure is retained. Own emulator, private ADB and disks are cleaned (receipt `030975bf9a9eb48ef3a98cff9453d31a99d6ba0242a29aa62d8839ce506e1450`). This proves API36 local file exclusions; API37, cloud, D2D, physical restore and functional offline/account/reader acceptance remain owed.
+
+Read-only actual installed ART diagnostics on four reachable signed133 devices report compiler status `verify`, reason `install`. Baseline-profile consumption and cold-start performance remain unproved; Lenovo is now unavailable. Actual ART receipt `715b9deb059a0c7620a58031a2f3f8bb61fb317f9ad41da508f3eea4c25722f1`. No launch, forced compilation or profile-content access was used.
+
+Fast lane API3480/UI3459 stopped at history preflight before Rust tests: five corrective client commits lacked required rows in the history anchor table. Those commits now map to their existing HLS, paging and Settings regressions; local history audit passes all311 client anchors. Main #593 advances to c9839898 with only STATUS.md, integrated into this candidate. No app source, signed input or test behavior changed; the sole review remains complete and a new exact-head/base gate is required.
+
+Fast lane API3484/UI3463 passed policy, Apple, Windows and web checks. Rust core reported1365passed/1failed/1ignored: `dropping_the_future_kills_the_child` failed at the missing PID file because the200ms timer cancelled the re-executed test process before startup completed. Corrective commit `4a9e8c84dba3a826cb911fd2c89fa616b8f3e0da` atomically publishes the PID and waits for observed child readiness before starting the unchanged cancellation deadline. The actual future is dropped before the preserved child-death assertion; production process handling is unchanged. One focused regression and a fresh exact-candidate fast gate are required. No second590review.
+
+Fast lane API3488/UI3467 stopped in preflight before Rust units: the fixed test adds two test-only awaited timers, and the mechanical ownership census still expected1088 rather than1090. Its ledger now names the20ms readiness poll and10s startup budget, both owned by the same test and retained output future; no detached task or production timer was added. The exact focused Rust case already passed1/0 in2.23s. The one failing ownership-census case is the next focused check, followed by a new exact-candidate gate; no second review or full-unit optional run.
+
+Separate parallel client work has compiled ordinary Release LiveTV caption controls for Apple and actual-track controls for Android. Both clients also lose the server's actionable watchable-capacity offer before rendering it; that client follow-up is being implemented in the next batch. These branches have not run tests or their batch review and are not deployed. Their acceptance cannot be attributed to installed194/133 or sealed196 products.
+
+The four-node strict uniform deployment passed on `dfef993b9`. Browser cases ran on that exact
+merged binary and unchanged scorers; failures are retained. Main subsequently moved through
+[PR #588](http://192.168.4.7:3000/noirr/plurx/pulls/588) to `40dae5ce1`, which is integrated
+into this candidate. Main then moved through [PR #589](http://192.168.4.7:3000/noirr/plurx/pulls/589) to `f400c0ea`, also integrated. Queue/Activity and native Live TV changes require fresh final server and Apple deployment; Android inputs remain unchanged. Current-main physical UI actions paused at the guard.
+GoogleTV reached 459/459 Everything and 325 Unwatched in four filter cycles, restored
+Everything with Title(A–Z) unchanged; tail, fresh request counts and 6,000-item acceptance remain unproved.
 
 | Work | Current evidence | Next action |
 |---|---|---|
-| C-08 client §7.9 | All three client follow-ups integrated in #582. Postreview focused checks passed23iOS/21tvOS,23Android and15web cases. | Qualify and merge the combined exact candidate, then collect actual5settled+2quick dispatched-seek and live method evidence on accessible clients. |
-| Fleet | At02:17 all four nodes healthy/ready, quorum/leader present, lag0/restarts0. m6/nynuc/nuc3 ran8227; nuc4historical86f. | Build four exact merged images in parallel, activate serially with existing guarded Ansible, independently verify one uniform point. |
-| Duration | One historical/source-mixed collector and heartbeat remain. | Retain the old window and retarget the existing heartbeat to one bounded collector after uniform final deployment;24h/7d and normal-use acceptance remain owed. |
-| Physical devices | Apple194/Android133 combined-source releases are reserved. Historical193 receipts remain, but its Build/Products directories are absent. Six Apple data-path baselines succeeded; contents/Keychain unproved. Pixel131 reachable, signed/nondebuggable and locked. | Retain newly signed apps outside DerivedData, verify final native-input parity, install in place and read back signer/build/data identifiers. |
-| D-02 | Pixel131 packaged media service and foreground/audio-service permissions verified; notification permission denied. VendorcodecXML has25entries/17distinctnames. | Actual runtimecodec/profile/decoded-frame, foreground/background audio, PiP/controller and notification behavior remain owed; XML is configuration evidence only. |
-| D-03 | Actual signedAPK132 backup/cloud/D2D policies exclude offline/ and datastore/. Pixel backup enabled with Google cloud transport. | Disposable exact-release installation with synthetic data and a positive control is required for restore acceptance; real excluded user data is not recoverable via APK rollback. Physical PDF/EPUB, account/offline and startup acceptance remain owed. |
-| A-02 / A-03 | Six Apple profile/lock prerequisites and data-path baselines recorded; ordinary Release tvOS paging/Settings runner prepared. | Run ordinary UI after final install; collect controller/notification/Now Playing, request/frame ordering and named Lenovo acceptance separately. |
-| W-02 §5.4–5.5 | Two official browser fixture checks prepared. Historical passes apply to their recorded source only. | Requalify final stamped merged binary/web inputs; LG/FireTV physical remote acceptance remains owed. |
-| L-03 M2/M4 | Historical graphs20/30/30/30 and four caption-negative samples recorded; tuners returned idle and clips deleted. | Final-source graph, caption-positive source/HLS/selector/rendering and named physical capacity offer remain owed. Shared Stop refusal is retained. |
-| A-04 | Four bounded Chrome/Firefox SDR runs prepared. Native iPad raw events lack complete D3 measurement oracles. | Run final source matrix after merged/deployed parity; Safari/HDR and named native/Android D3 prerequisites remain open. |
-| C-08 fleet §7.10 | Historical owned Chrome direct play/Close measured+1direct_play/ok onffe965. New owned tabs sign out; another session's signed-in tab is preserved. | Supported owned app sign-in is needed for blank-ID/refused/cancelled and real UI seeks; seven-minute native pause/resume and cluster/mobile attribution remain open. |
-| K-06 | Clock plan is explicitly design-only; runtime measurement release absent. | Retain prerequisite; NTP and absent metrics do not establish peer-uncertainty acceptance. |
+| C-08 client §7.9 | Web, Apple and Android follow-ups merged in #582. Sole-review findings fixed; final compile gates green. | Actual5settled+2quick dispatched-seek/method evidence and seven-minute pause/resume remain owed. |
+| Fleet | All four exactdfef checkouts/OCI/running binaries verified healthy, readyz/metrics200, quorum/leader, lag0/restarts0. | Retain this point; next qualified source needs a new exact deployment. |
+| Duration | Historical exactdfef one30s/256MiB collector and existing quiet heartbeat are active from03:59:15UTC, Sep28 toOct5. Initial5m clean; historical windows preserved. |24h/7d and normal-use windows remain owed; a future source change interrupts exact-build continuity. |
+| Physical devices | Signed Apple194 installed/read back on six physical devices. Signed nondebuggable Android133 installed/read back on five, with APK/signer/firstInstall/UID/CE continuity. |16pro/TCL unavailable; Shield/Xiaomi absent. Locked devices cannot supply UI acceptance. |
+| D-02 | Actual133 APK/signature verified on GoogleTV,Lenovo,Pixel10ProFold,razrUltra2025 andPixel11ProXL. GoogleTV unlocked; other four currently locked. | Runtimecodec/frame, Home/notification, PiP/controller, lifecycle and named Shield/Lenovo prompts remain owed. |
+| D-03 | Signed133 packaged backup/cloud/D2D XML excludes offline/ and datastore/. Actual packaged baseline.prof/profm retained; ART consumption/startup timing unproved. | Packaged policy is not restore proof. API36 local synthetic-data exclusions now pass; API37/cloud/D2D/physical restore and PDF/EPUB/account/offline/startup acceptance remain owed; external chooser remains separately refused by its plan. |
+| A-02 / A-03 | Signed194 installed on17air,17promax,Bedroom,iPadMini,iPadPro,and paired device named iPhone. All six post-install data-path inventories now succeeded; the first iPadPro query disconnected, then one bounded reconnect succeeded. | Controller/notification/Now Playing, full ordering/request/frame and named Lenovo6000-title acceptance remain owed. Actual194 paging case failed14.46s in focus helper after Category→Library grouping removed its target. Draft590 repairs navigation; canonical194 restored in place. |
+| W-02 §5.4–5.5 | Both unchanged official HLS-startup and subtitle-readiness browser checks passed on exactdfef source/binary with deployed parity. | LGwebOS/FireTV remote prompts remain owed. |
+| L-03 M2/M4 | Confirmed real6.1 source contains439 caption packets, CC1 140 printable characters and SERVICE1 176; temporary capture removed and tuners idle afterward. | HLS advertisement/selector/rendered-text and named shared-capacity/ShieldHDMI prompts remain owed. Prior zero-frame-side-data observations are method limits, not caption-negative evidence. |
+| A-04 | Chromeone-cliff passed66.7ms; Chrometwo-cliff first-stage failed12.4094s/1333.2ms/restart1. Firefoxboth cases failed before playback at WebDriverstartup. | Narrow HLS clock-readiness observation repair is in draft590; cause of the particular failed trace remains unproved. Original traces stay immutable; corrected source and Safari/HDR/native/Android matrix need qualification. |
+| C-08 fleet §7.10 | Historical owned direct-play observation retained. | Authenticated owned real-UI/blank-ID checks remain owed; automatic approval refused saved-login probing, and no credential access occurred. |
+| K-06 | Explicitly design-only; runtime measurements absent. | Keep its prerequisite and Claude ownership; NTP/absent series do not prove clock uncertainty. |
 
-**Immutable preparation evidence.** These receipts record prerequisites and
-historical observations; they are not final-main deployment or device passes.
+## Current deployed and acceptance receipts
 
-| Receipt | SHA-256 | What it proves |
+| Receipt | SHA-256 | Scope |
 |---|---|---|
-| `/private/tmp/codex-fleet-pre582-health-20260928T014820Z.json` | `7422562ac08c996994393318608e0482dc7f7dd887aa99b71041d93ba02e7a4c` | Mixed but healthy fleet point. |
-| `/private/tmp/codex-fleet-controller-point-20260928T015624Z.json` | `07258ca2f6e6e33e661b4d8ecc28dbab50a5416c5cb574df23b8e1878f8c13c8` | No deployment-checkout build at that point. |
-| `/private/tmp/codex-android132-final-lane-prepared-20260928.json` | `78305d6e248e6ff1f4c4b3ab7808736c013fc1d2e2da708ad57b08936a1e0ad9` | Retained signedAPK/hash and8f→6688 production/build/signing parity. |
-| `/private/tmp/codex-android132-final-lane-preflight-20260928.json` | `661eecd3d827b83de33ef28fae4f6791cad28a96b9c382cb372cb474337ce9ed` | Exact paired Pixel131 identity/data identifiers, locked; no media session. |
-| `/private/tmp/codex-android132-packaged-backup-policy-20260928/receipt.json` | `2bf7a7c6123392cd3ed16d1473c83906c8a9d377f92193cf14df82d1b7a95a2c` | Actual packaged backup exclusions; restore behavior unproved. |
-| `/private/tmp/codex-apple193-hardware-profile-coverage-20260928.json` | `fe58e0454e9921d647cf2af4ab3c287b8db87a496cdc9596207f35316be94753` | Six paired target UDIDs covered by candidate profiles. |
-| `/private/tmp/codex-apple193-lock-preflight-20260928/receipt.json` | `63534213e8a03508f466118c876c29e68c2e25c3bb7f7d4646a99d7078c28ba9` | Read-only passcode prerequisites; current UI access not inferred. |
-| `/private/tmp/codex-c08-browser-prerequisites-20260928.json` | `09033de23766f06f2cdb771858ce465ae8b55663d6e0c39281f1b6d7933688e4` | Browser runner/readiness prepared, owned tab closed; final execution pending. |
-| `/private/tmp/codex-l03-m4-final86f-source-graph-20260927.json` | `aad91c1643d6ba1c7d64af8a55bcffef673165240aebc614b36598222c577dd9` | Historical caption-negative source/boot-graph sample with cleanup. |
+| `/private/tmp/codex-fleet-post582-prep-20260928/run-dfef993b903e-1c946919/uniform-health.json` | `ba628663997446da2242947ae51eb4a97d9b70dbd1754aab8fbdf34bc7fed4fe` | Strict all-four exact checkout/OCI/binary, health/quorum/leader/lag0/restarts0. First learner missing-gauge scrape retained separately. |
+| `/private/tmp/codex-fleet-post582-prep-20260928/run-dfef993b903e-1c946919/collector-start-receipt.json` | `b1c04bdcad3843ee7906014c98b9671c04e323bfe750ba6955ac18e4ebd511a7` | One bounded collector; slot0 clean. Future window not complete. |
+| `/private/tmp/codex-fleet-post582-prep-20260928/run-dfef993b903e-1c946919/five-minute-checkpoint.json` | `c9b45f5242734f85c60a30ac4b46251a8bee75b6f9a5770583e334997a73cd96` |11uniform rows/node,30smaximum gap; no reset/build/HTTP/quorum/lag errors. Passive5m only. |
+| `/private/tmp/codex-android133-ui-61171HFAG1GG00-20260928T041152986239Z/receipt.json` | `f23610e07c89751b08ce64f19b51ae5bbe85d66faea5e47da49f4a22598a7576` | Actual historicaldfef459/459 Everything,325 Unwatched stable over four cycles. Original filter/sort restored. Tail/full order/request counts/frame target unproved. |
+| `/private/tmp/codex-android133-main-move-ui-hold-20260928.json` | `fa117843d56c58d50c544eeff483e0390a0a0269db0b6e22693a9de526597e3b` | Next action refused before UI input because main moved. No new movie, seek or LiveTV stream started. |
+| `/private/tmp/codex-browser-final-evidence-binding-20260928/binding.json` | `31b357f1a413b3bc1bc5c6713ec903fe711f5d881e7dec85ee392e212225a0b3` | Exactdfef binary/source/scorers, four retained A04 attempts and two official W02 passes; deployed parity. FullD3 not met. |
+| `/private/tmp/codex-browser-final-evidence-binding-20260928/failure-diagnosis.json` | `3def6c7c547859f0c0617bc28db0157d888aeddd4508181b08d15f6be07646ba` | Chrome first preparation hit10s timeout without buffer/proof readiness. Later503s began75.078s after fallback, so did not cause it. Clock-observation gap is a source-level risk; trace-specific causation unproved. |
+| `/private/tmp/codex-apple194-tv-acceptance-default-iteration-20260928/receipt.json` | `2d505eb1ecd0f85d2b7f65dea01cc636be32aaccee24edc8d243da9f0d6d8eea` | One actual paging case failed14.46s in focus navigation; Settings not executed. Earlier CLI-iteration invocation executed0tests and is separately retained. |
+| `/private/tmp/codex-apple194-bedroom-canonical-restore-20260928/receipt.json` | `f675be93cc44c8f66a020603adaa6ffcd854259d14648e031615db432961f9af` | Strict verified canonical194 payload restored in place/read back after failed UI case. No uninstall/data clear; installed binary hashing unavailable. |
 
-Live lane updates remain in
-`/private/tmp/codex-fleet-final-status-20260927.md`. Exact merge, installed
-artifact and final trace receipts will replace pending actions when observed.
+## Latest immutable receipts
+
+| Receipt | SHA-256 | Scope |
+|---|---|---|
+| `/private/tmp/codex-pr582-final-qualification-20260928.json` | `5fe96092224330b4ba9b97e8797788a94c450c29889baf9169c2ce3a2ab34464` | Exact candidate/base, all9green jobs, one sealed review and actual merge. |
+| `/private/tmp/codex-apple194-rollout-20260928/receipt.json` | `8debdbef17fa381e1360b9cfb2ba0e859c4174f000f1189ef75fc24daec219fa` | Six in-place installed-build194 readbacks;16pro unreachable. Container UUIDs rotated; unchanged-container claim is false. |
+| `/private/tmp/codex-apple194-data-path-comparison-20260928.json` | `403b9ab0e893823be9a339778a37aa386de1929fe958761b87dbec32eb753638` | Five relative-path comparisons; iPadPro query unavailable. Changed paths are under Library caches/SplashBoard. Contents/login/Keychain unproved. |
+| `/private/tmp/codex-apple194-ipadpro-data-reconnect-20260928.json` | `549f7471feebee7f0ed1f1b046b8041458c9ff31b17550643fa7fce11d1cff67` | One bounded reconnect resolves the first iPadPro disconnect:6225 paths before/after,6217 retained,8 added/8 removed under cache/SplashBoard. Contents/login/Keychain unproved. |
+| `/private/tmp/codex-apple194-data-all-path-categories-20260928.json` | `d1c7f4f80fd6d756991c8198ee8a358c21831abd520abdf46c2f9898ef149b07` | Five earlier devices: every added/removed path is under Library/Caches or Library/SplashBoard. |
+| `/private/tmp/codex-android133-six-device-install-20260928T033537Z/receipt.json` | `d17b2c317ee98bd57ea63b25e085a39a294ca8faf381b757373ba95162198c77` | Five actual signed133 installed APKs, data-identity readbacks. GoogleTV DEinode unavailable. |
+| `/private/tmp/codex-android133-release-profile-package-20260928.json` | `7efd69ec369680ed497840c6f77f0424b3d5925583d0b1d42a9c18a7671eb72b` | Actual signed133 APK contains baseline.prof/profm. No installed ART or cold-start performance assertion. |
+| `/private/tmp/codex-android133-packaged-backup-policy-20260928/receipt.json` | `4a079ad5e2c374fcd648e9b1fc8087212af8fbcdd287197902e9cda7d70abfbe` | Actual packaged exclusions; no backup or restore executed. |
+| `/private/tmp/codex-l03-owned-caption-packet-receipt-20260928.json` | `01672864ea6c9904a2d26088a0ce1f0c2fecfeccbbe9907dd4045272689cfd07` | Caption-positive real source: canonical packet extraction439 while same-capture frame-side-data probe reportedzero. Source proof only. |
+
+Prior frame-side-data samples remain immutable historical measurements. Their
+zero A/53 counts cannot establish absent captions: the same observation
+method missed439 canonical caption packets in a confirmed positive capture.
+No HLS advertisement or rendered-caption pass follows from source counts.
+
+Live progress is in `/private/tmp/codex-fleet-final-status-20260927.md`.
+The requested `claude/architecture-review-gpt-build-handoff-2026-09-24.md`
+was absent in the agent clone and both known read-only repository locations;
+this run follows the explicit user work list and maintained workboard/plans.
+It does not claim to have read the missing handoff.
 
 **Historical records below.** These dated checkpoints describe the builds they name. Their pending-gate and locked-device statements are retained as history; the current queue is above.
 
