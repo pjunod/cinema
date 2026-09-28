@@ -210,7 +210,7 @@ pub(crate) async fn readiness(
 }
 
 fn optical_media(state: &AppState, enabled: bool) -> DeveloperEnableItem {
-    use plurx_core::optical::{HostRequirementStatus, OpticalDriveState};
+    use plurx_core::optical::{HostRequirementStatus, OpticalCapability, OpticalDriveState};
 
     let snapshots = state.optical.manager().snapshots();
     let mut requirements = vec![DeveloperRequirement {
@@ -277,6 +277,69 @@ fn optical_media(state: &AppState, enabled: bool) -> DeveloperEnableItem {
                 evidence: evidence.join(" "),
             }),
     );
+    for (id, title, capability, format_name) in [
+        (
+            "optical_dvd_reader",
+            "DVD-Video title reader",
+            state
+                .system
+                .optical_capabilities
+                .as_ref()
+                .map(|capabilities| &capabilities.dvd_titles),
+            "DVD-Video demuxer",
+        ),
+        (
+            "optical_bluray_reader",
+            "Blu-ray title reader",
+            state
+                .system
+                .optical_capabilities
+                .as_ref()
+                .map(|capabilities| &capabilities.bluray_titles),
+            "Blu-ray protocol",
+        ),
+    ] {
+        let (status, evidence) = match capability {
+            Some(OpticalCapability::Available) => (
+                RequirementStatus::Met,
+                format!("The configured FFmpeg reports its {format_name} options."),
+            ),
+            Some(OpticalCapability::Missing) => (
+                RequirementStatus::Unmet,
+                format!("The configured FFmpeg does not report a usable {format_name}."),
+            ),
+            Some(OpticalCapability::ProbeFailed { detail }) => (
+                RequirementStatus::Unobservable,
+                format!("The bounded capability probe did not produce positive evidence: {detail}"),
+            ),
+            None => (
+                RequirementStatus::Unobservable,
+                "No drive is configured, so this node skipped the optical reader probe.".to_owned(),
+            ),
+        };
+        requirements.push(DeveloperRequirement {
+            id,
+            title,
+            status,
+            evidence,
+        });
+    }
+    requirements.push(DeveloperRequirement {
+        id: "optical_cluster_compatibility",
+        title: "Cluster optical protocol compatibility",
+        status: if state.membership.is_replicated() {
+            RequirementStatus::Unobservable
+        } else {
+            RequirementStatus::Met
+        },
+        evidence: if state.membership.is_replicated() {
+            "Drive owners advertise optical_v1 in fresh media-pool snapshots. This node cannot prove every peer's rollout state from its local startup record; stale or incompatible owners are refused at operation time."
+                .to_owned()
+        } else {
+            "This is a single-node installation, so no peer protocol rollout is required."
+                .to_owned()
+        },
+    });
     let ready_count = snapshots
         .iter()
         .filter(|snapshot| matches!(snapshot.state, OpticalDriveState::Ready { .. }))

@@ -227,9 +227,12 @@ function opticalMediaCard(settings,readiness){
       ${devReq(readiness,"optical_media","optical_drive_configured","Configured drive","Add one or more node-local <code>[[optical.drives]]</code> entries with stable IDs and trusted device/mount paths.")}
       ${devReq(readiness,"optical_media","optical_linux_host","Supported host","This release hosts physical drives on Linux. Web, Apple and Android clients may connect from any supported platform.")}
       ${devReq(readiness,"optical_media","optical_helper","Inspection helper","Install the versioned <code>plurx-optical-helper</code> with DVD/Blu-ray title inspection support.")}
+      ${devReq(readiness,"optical_media","optical_dvd_reader","DVD-Video reader","The configured FFmpeg build must report the DVD-Video title demuxer; a version string or zero exit alone is not evidence.")}
+      ${devReq(readiness,"optical_media","optical_bluray_reader","Blu-ray reader","The configured FFmpeg build must report the Blu-ray protocol and playlist selection options.")}
       ${devReq(readiness,"optical_media","optical_device","Drive device","The configured optical device must exist on its owner node.")}
       ${devReq(readiness,"optical_media","optical_mount","Read-only media mount","The configured mount must exist where the Blu-ray reader expects it.")}
       ${devReq(readiness,"optical_media","optical_permissions","Runtime permissions","The daemon must be able to read the device and perform explicitly authorized ejects. This is checked again for each operation.")}
+      ${devReq(readiness,"optical_media","optical_cluster_compatibility","Cluster compatibility","Every drive owner must advertise the versioned optical protocol in a fresh media-pool snapshot; incompatible or stale owners are refused, never guessed.")}
       ${devReq(readiness,"optical_media","optical_physical_acceptance","Physical-media qualification","Qualify representative authored and retail DVD/Blu-ray media, seeks, chapters, track changes and installed-package behavior on the real drive.")}
       <p class="devcheck-note">Readiness is advisory and never changes this checkbox. Authorization, drive ownership, one-reader admission and insertion-generation checks remain enforced operational safety rules.</p>
       </div></details>

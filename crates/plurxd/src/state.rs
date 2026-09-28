@@ -58,6 +58,9 @@ pub struct SystemInfo {
     /// Digest of the canonical FFprobe executable bytes plus its complete
     /// bounded `-version` output. Decoder facts are scoped to this identity.
     pub ffprobe_build_digest: Option<String>,
+    /// Bounded startup readings for configured optical hosts. `None` means no
+    /// drive was configured, so the process deliberately skipped the probes.
+    pub optical_capabilities: Option<plurx_core::optical::OpticalCapabilities>,
     /// Runtime-only binding to the executable that produced the digest.
     #[serde(skip)]
     pub(crate) decode_probe_identity: Option<crate::decode_facts::DecodeProbeIdentity>,

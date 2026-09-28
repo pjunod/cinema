@@ -1924,6 +1924,11 @@ async fn probe_system(
         transcode_dir,
     )
     .await;
+    let optical_capabilities = if config.optical.drives.is_empty() {
+        None
+    } else {
+        Some(probe_optical_capabilities(&ffmpeg, &ffprobe, &config.optical.helper_path).await)
+    };
     for (codec, backend, decoder) in measured_decoders.measured_paths() {
         tracing::info!(%codec, backend = backend.name(), %decoder, "measured the decoder this ffmpeg selects");
     }
@@ -1949,6 +1954,7 @@ async fn probe_system(
         ffprobe_build_digest: decode_probe_identity
             .as_ref()
             .map(|identity| identity.build_digest().to_owned()),
+        optical_capabilities,
         decode_probe_identity,
         pacing: crate::ffmpeg::pacing_caps().await,
         dovi_rpu: crate::ffmpeg::has_dovi_rpu().await,
@@ -1986,6 +1992,7 @@ async fn probe_system(
 struct Measured {
     ffmpeg_version: Option<String>,
     ffprobe_build_digest: Option<String>,
+    optical_capabilities: Option<plurx_core::optical::OpticalCapabilities>,
     decode_probe_identity: Option<crate::decode_facts::DecodeProbeIdentity>,
     pacing: crate::ffmpeg::PacingCaps,
     dovi_rpu: bool,
@@ -2019,6 +2026,7 @@ fn system_info(
         data_dir: config.storage.data_dir.display().to_string(),
         ffmpeg_version: measured.ffmpeg_version,
         ffprobe_build_digest: measured.ffprobe_build_digest,
+        optical_capabilities: measured.optical_capabilities,
         decode_probe_identity: measured.decode_probe_identity,
         ffmpeg,
         ffprobe,
@@ -3131,6 +3139,58 @@ async fn ffmpeg_version(bin: &str) -> Option<String> {
         return None;
     }
     first_version_line(&out.stdout)
+}
+
+/// Measure title readers only on nodes that actually configure a drive.
+/// FFmpeg help may exit zero for an unknown component, so the shared
+/// classifier requires positive markers and reads the bounded diagnostic body.
+async fn probe_optical_capabilities(
+    ffmpeg: &str,
+    ffprobe: &str,
+    helper: &std::path::Path,
+) -> plurx_core::optical::OpticalCapabilities {
+    async fn help(
+        bin: &str,
+        args: &[&str],
+        expected: &[&str],
+    ) -> plurx_core::optical::OpticalCapability {
+        match crate::bounded_process::output(bin, args, Duration::from_secs(5), 256 * 1024).await {
+            Ok(output) => {
+                plurx_core::optical::classify_help_output(&output.stdout, &output.stderr, expected)
+            }
+            Err(error) => plurx_core::optical::OpticalCapability::ProbeFailed {
+                detail: error.to_string().chars().take(240).collect(),
+            },
+        }
+    }
+
+    let helper = helper.to_string_lossy();
+    let (dvd_titles, bluray_titles, helper_available, ffmpeg_reporter, ffprobe_reporter) = tokio::join!(
+        help(
+            ffmpeg,
+            &["-hide_banner", "-h", "demuxer=dvdvideo"],
+            &["dvdvideo", "title"]
+        ),
+        help(
+            ffmpeg,
+            &["-hide_banner", "-h", "protocol=bluray"],
+            &["bluray avoptions", "playlist"]
+        ),
+        async {
+            crate::bounded_process::output(&helper, &["--help"], Duration::from_secs(5), 64 * 1024)
+                .await
+                .is_ok_and(|output| output.status.success())
+        },
+        ffmpeg_version(ffmpeg),
+        ffmpeg_version(ffprobe),
+    );
+    plurx_core::optical::OpticalCapabilities {
+        ffmpeg_reporter,
+        ffprobe_reporter,
+        dvd_titles,
+        bluray_titles,
+        helper_available,
+    }
 }
 
 /// The banner's first line, or nothing.
@@ -5684,6 +5744,7 @@ mod startup_tests {
             Measured {
                 ffmpeg_version: Some("ffmpeg version 7.1.1".to_owned()),
                 ffprobe_build_digest: Some("a".repeat(64)),
+                optical_capabilities: None,
                 decode_probe_identity: None,
                 measured_decoders:
                     plurx_core::transcode::decoder_inventory::MeasuredDecoders::from_measured(&[
