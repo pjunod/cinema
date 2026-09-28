@@ -1429,33 +1429,83 @@ async fn local_eject(
         .manager()
         .snapshot(drive_id)
         .ok_or(ApiError::NotFound("drive"))?;
-    match &snapshot.state {
-        OpticalDriveState::Ready { disc_id, .. } | OpticalDriveState::Busy { disc_id, .. } => {
+    let active_session = match &snapshot.state {
+        OpticalDriveState::Ready { disc_id, .. } => {
             if disc_id != &request.expected_disc_id {
                 return Err(optical_conflict(
                     "optical_eject_conflict",
                     "the disc changed before eject",
                 ));
             }
+            None
+        }
+        OpticalDriveState::Busy {
+            disc_id,
+            session_id,
+            ..
+        } => {
+            if disc_id != &request.expected_disc_id {
+                return Err(optical_conflict(
+                    "optical_eject_conflict",
+                    "the disc changed before eject",
+                ));
+            }
+            if !request.stop_active || request.session_id.as_deref() != Some(session_id.as_str()) {
+                return Err(optical_conflict(
+                    "optical_drive_busy",
+                    "stop-and-eject requires the exact active optical session",
+                ));
+            }
+            Some(session_id.clone())
         }
         OpticalDriveState::Failed {
             media_generation: Some(_),
             ..
-        } if request.expected_disc_id.is_empty() => {}
+        } if request.expected_disc_id.is_empty() => None,
         _ => {
             return Err(optical_conflict(
                 "optical_eject_conflict",
                 "the requested insertion is not available to eject",
             ));
         }
+    };
+    if let Some(session_id) = active_session {
+        let status = super::hls::release_with_terminal(
+            state.clone(),
+            session_id.clone(),
+            crate::vodserve::Terminal::AdminStop,
+            "stopped by admin before optical eject",
+        )
+        .await;
+        if status != StatusCode::NO_CONTENT {
+            return Err(ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "optical_drive_busy",
+                "the active optical session is still settling; retry eject shortly",
+            ));
+        }
+        // Durable terminal projection intentionally detaches physical cleanup.
+        // Rejoin that exact cleanup before asking the drive to open its tray.
+        let stopped = state
+            .transcode
+            .stop_session(&session_id, "stopped by admin before optical eject")
+            .await;
+        if !stopped
+            && matches!(
+                state.optical.manager().snapshot(drive_id).map(|row| row.state),
+                Some(OpticalDriveState::Busy { session_id: current, .. }) if current == session_id
+            )
+        {
+            return Err(ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "optical_drive_busy",
+                "the active optical reader has not released the drive",
+            ));
+        }
     }
-    let stopped = request
-        .stop_active
-        .then_some(request.session_id.as_deref())
-        .flatten();
     state
         .optical
-        .eject(drive_id, &request.media_generation, stopped)
+        .eject(drive_id, &request.media_generation)
         .await
         .map_err(service_error)?;
     Ok(())

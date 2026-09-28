@@ -296,14 +296,13 @@ where
         &self,
         drive_id: &str,
         expected_generation: &str,
-        stopped_session_id: Option<&str>,
     ) -> Result<(), OpticalServiceError> {
         let drive = self
             .drives
             .get(drive_id)
             .ok_or(OpticalServiceError::UnknownDrive)?;
         self.manager
-            .authorize_eject(drive_id, expected_generation, stopped_session_id)?;
+            .authorize_eject(drive_id, expected_generation)?;
         self.host.eject(drive).await?;
         self.manager.observe_removal(drive_id)?;
         Ok(())

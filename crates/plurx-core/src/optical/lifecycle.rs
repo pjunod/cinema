@@ -333,13 +333,13 @@ impl OpticalDriveManager {
         })
     }
 
-    /// Check an eject against the exact insertion. Busy ejects require the
-    /// caller to name the exact active session it already authorized stopping.
+    /// Check an eject against the exact insertion. A busy reader must be
+    /// stopped and physically released before this primitive can authorize
+    /// the drive ioctl; naming a session is not proof of cleanup.
     pub fn authorize_eject(
         &self,
         drive_id: &str,
         expected_generation: &str,
-        stopped_session_id: Option<&str>,
     ) -> Result<(), OpticalLifecycleError> {
         let drives = self.drives();
         let slot = drives
@@ -362,14 +362,10 @@ impl OpticalDriveManager {
                 }
             }
             OpticalDriveState::Busy {
-                media_generation,
-                session_id,
-                ..
+                media_generation, ..
             } => {
                 if media_generation != expected_generation {
                     Err(OpticalLifecycleError::StaleGeneration)
-                } else if stopped_session_id == Some(session_id.as_str()) {
-                    Ok(())
                 } else {
                     Err(OpticalLifecycleError::Busy)
                 }
@@ -641,16 +637,16 @@ mod tests {
             .claim_playback("drive-a", &generation, "disc-a", "title-a", "session-a")
             .expect("playback");
         assert_eq!(
-            manager.authorize_eject("drive-a", "stale", Some("session-a")),
+            manager.authorize_eject("drive-a", "stale"),
             Err(OpticalLifecycleError::StaleGeneration)
         );
         assert_eq!(
-            manager.authorize_eject("drive-a", &generation, None),
+            manager.authorize_eject("drive-a", &generation),
             Err(OpticalLifecycleError::Busy)
         );
-        manager
-            .authorize_eject("drive-a", &generation, Some("session-a"))
-            .expect("exact stop-and-eject");
         drop(permit);
+        manager
+            .authorize_eject("drive-a", &generation)
+            .expect("released reader may be ejected");
     }
 }
