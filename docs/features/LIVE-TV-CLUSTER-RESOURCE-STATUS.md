@@ -56,7 +56,13 @@ contracts, 3,045 daemon tests and both serial VOD restart checks, plus every
 platform gate. Promotion rejected the stale base after main accepted Apple-only
 seek completion changes. Those changes are now integrated; Rust, web and Android
 source trees are byte-identical to the passed candidate. Apple build 193 claims
-the next available number. The PR records the final freshness qualification.
+the next available number. The PR records the final freshness qualification. The refreshed run again passed
+all core, contract and daemon tests, then hit the 30-minute job limit rebuilding
+the daemon for the serial restart target. That target now retains the same
+workspace package selection as `unit`, preserving dependency feature unification
+and reusing its compiled binaries. Exact filters still run only the same two
+ignored regressions serially. The job permits 35 minutes of bounded cold-build
+headroom; no test or lint is removed.
 
 ## Delivery decisions
 
