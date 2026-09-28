@@ -1,13 +1,14 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-27 · Kept current by the working agent in the same
+**Updated:** 2026-09-28 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
 ## Apple TV Live TV navigation: every press reversible, every control reachable
 
-**Branch `agent/appletv-live-nav`, draft pull request; not merged, nothing
-deployed.** Paul reported 2026-09-27 that Live TV navigation on the Apple TV
+**[PR #589](http://192.168.4.7:3000/noirr/plurx/pulls/589) merged to `main`
+2026-09-28 as `f400c0ea2`, Apple build 195; not yet installed on any device.**
+Paul reported 2026-09-27 that Live TV navigation on the Apple TV
 was close to broken: hard to reach anything, and a move often did not reverse.
 Two independent reads of `LiveTvView.swift` agreed on the causes, and one
 was worse than reported: Info and More on the fullscreen pills did nothing at
@@ -29,8 +30,9 @@ view instead of the task's stale copy, and no longer cancels on an
 engine-driven arrival.
 [LIVE-TV-APPLE-TV-NAVIGATION.md](docs/features/LIVE-TV-APPLE-TV-NAVIGATION.md)
 has the focus graph and the §1 table that doubles as the device checklist.
-Verified: tvOS simulator unit + source tests green. Not verified: anything
-with a remote in hand — the GPT prompt for the physical pass is in the PR.
+Verified: `make apple-test` (iOS 674 + tvOS 690, 0 failures) and the full
+fast lane, including the promotion gate. Not verified: anything with a remote
+in hand — the device pass is `~/Downloads/kit 2/APPLETV-LIVE-TV-NAVIGATION-PHYSICAL-VERIFICATION-PROMPT.md`.
 
 ## Silo comparison: two implementation plans and one device census, no code
 
