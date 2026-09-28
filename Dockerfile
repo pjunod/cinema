@@ -19,10 +19,17 @@ ENV PLURX_BUILD_SHA=${PLURX_BUILD_SHA}
 ARG TARGETARCH
 WORKDIR /src
 COPY . .
+# The target dirs below are cache mounts that outlive any one checkout, and
+# cargo decides a path crate is fresh from file mtimes, not contents. A node
+# that builds several commits can therefore end up linking plurxd against a
+# stale workspace-crate rlib (2026-09-28: `normalize_sup_cancellable_into`
+# "not found" in a tree that defines it). Touching every workspace and vendored
+# source first makes the mounts cache registry dependencies only.
 RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=plurx-target-plurxd-${TARGETARCH},sharing=locked,target=/src/target-plurxd \
     --mount=type=cache,id=plurx-target-cluster-check-${TARGETARCH},sharing=locked,target=/src/target-cluster-check \
-    ! cargo tree --locked -p plurxd -e features \
+    find crates vendor -type f -name '*.rs' -exec touch {} + \
+    && ! cargo tree --locked -p plurxd -e features \
         | grep -q 'cluster-read-cost-validation' \
     && CARGO_TARGET_DIR=/src/target-plurxd cargo build --locked --release -p plurxd \
     && cp target-plurxd/release/plurxd /plurxd \
