@@ -133,7 +133,18 @@ where
             .get(drive_id)
             .ok_or(OpticalServiceError::UnknownDrive)?;
         let permit = self.manager.claim_inspection(drive_id, generation)?;
-        let response = match self.host.inspect(drive, generation).await {
+        let inspection = self.host.inspect(drive, generation);
+        tokio::pin!(inspection);
+        let response = match loop {
+            tokio::select! {
+                response = &mut inspection => break response,
+                () = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
+                    if !permit.is_current() {
+                        return Err(OpticalLifecycleError::StaleGeneration.into());
+                    }
+                }
+            }
+        } {
             Ok(response) => response,
             Err(error) => {
                 let _ = permit.publish_failed(&error.to_string());
