@@ -7641,7 +7641,7 @@ mod tests {
             } => (media_generation, disc_id),
             state => panic!("fixture drive is not ready: {state:?}"),
         };
-        let source = plurx_core::testfixtures::source("h264");
+        let source = plurx_core::testfixtures::source_with_two_audio_tracks();
         let probe = std::process::Command::new(plurx_core::testfixtures::ffprobe())
             .args([
                 "-v",
@@ -7667,13 +7667,23 @@ mod tests {
             width: Some(640),
             height: Some(360),
             bitrate: Some(1_000_000),
-            audio_streams: vec![AudioStream {
-                index: 1,
-                codec: "aac".to_owned(),
-                channels: Some(2),
-                default: true,
-                ..AudioStream::default()
-            }],
+            audio_streams: vec![
+                AudioStream {
+                    index: 1,
+                    codec: "aac".to_owned(),
+                    channels: Some(2),
+                    language: Some("eng".to_owned()),
+                    default: true,
+                    ..AudioStream::default()
+                },
+                AudioStream {
+                    index: 2,
+                    codec: "aac".to_owned(),
+                    channels: Some(1),
+                    language: Some("fra".to_owned()),
+                    ..AudioStream::default()
+                },
+            ],
             probed: true,
             source_delivery: SourceDelivery::ManagedOpticalTitle,
             ..PlaybackMediaFacts::default()
@@ -7702,6 +7712,16 @@ mod tests {
                 title: None,
                 channels: Some(2),
                 default: true,
+                forced: false,
+            },
+            InspectedStream {
+                index: 2,
+                kind: "audio".to_owned(),
+                codec: Some("aac".to_owned()),
+                language: Some("fra".to_owned()),
+                title: None,
+                channels: Some(1),
+                default: false,
                 forced: false,
             },
         ];
@@ -8030,7 +8050,9 @@ mod tests {
     async fn optical_http_session_uses_the_existing_immutable_vod_surface() {
         use plurx_core::optical::OpticalDriveState;
 
-        let (app, state, _fake) = test_state_with_playable_optical().await;
+        use plurx_core::optical::ResolvedInput;
+
+        let (app, state, fake) = test_state_with_playable_optical().await;
         let admin = setup_admin(&app).await;
         let (status, disc) = call(
             &app,
@@ -8046,28 +8068,22 @@ mod tests {
             .as_str()
             .expect("media generation");
 
-        let (status, started) = call(
-            &app,
-            post(
-                "/api/v1/optical/drives/test-node%3Afixture/titles/title-1/sessions",
-                Some(&admin),
-                json!({
-                    "expected_disc_id": disc_id,
-                    "media_generation": generation,
-                    "angle": 1,
-                    "playback_id": "fixture-player",
-                    "request_id": "fixture-request",
-                    "start": 0.0,
-                    "height": 360,
-                    "audio": 1,
-                    "subtitle_burn": null,
-                    "audio_offset_ms": 0,
-                    "block_budget_secs": 30.0,
-                    "caps": {"v": 2}
-                }),
-            ),
-        )
-        .await;
+        let start_body = json!({
+            "expected_disc_id": disc_id,
+            "media_generation": generation,
+            "angle": 1,
+            "playback_id": "fixture-player",
+            "request_id": "fixture-request",
+            "start": 0.0,
+            "height": 360,
+            "audio": 1,
+            "subtitle_burn": null,
+            "audio_offset_ms": 0,
+            "block_budget_secs": 30.0,
+            "caps": {"v": 2}
+        });
+        let start_url = "/api/v1/optical/drives/test-node%3Afixture/titles/title-1/sessions";
+        let (status, started) = call(&app, post(start_url, Some(&admin), start_body.clone())).await;
         assert_eq!(status, StatusCode::OK, "start optical session: {started}");
         assert_eq!(started["vod"], true);
         assert_eq!(started["delivered_dynamic_range"], "sdr");
@@ -8083,6 +8099,18 @@ mod tests {
             .as_str()
             .expect("playlist URL")
             .to_owned();
+        let (status, replay) = call(&app, post(start_url, Some(&admin), start_body.clone())).await;
+        assert_eq!(status, StatusCode::OK, "idempotent start replay: {replay}");
+        assert_eq!(replay["session_id"], session_id);
+        let mut conflicting_start = start_body.clone();
+        conflicting_start["start"] = json!(1.0);
+        let (status, conflict) = call(&app, post(start_url, Some(&admin), conflicting_start)).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "conflicting replay: {conflict}"
+        );
+        assert_eq!(conflict["code"], "optical_request_conflict");
         assert_eq!(
             state
                 .optical
@@ -8096,6 +8124,66 @@ mod tests {
                 title_id: "title-1".to_owned(),
                 session_id: session_id.clone(),
             }
+        );
+
+        let (status, progress) = call(
+            &app,
+            post(
+                &format!("/api/v1/optical/discs/{disc_id}/titles/title-1/progress"),
+                Some(&admin),
+                json!({
+                    "drive_id": "test-node:fixture",
+                    "media_generation": generation,
+                    "session_id": session_id,
+                    "angle": 1,
+                    "position_ms": 4_500,
+                    "duration_ms": 12_000,
+                    "audio": {"index": 1},
+                    "subtitle": null,
+                    "recorded_at_ms": 1_750_000_004_500_i64
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "write optical progress: {progress}");
+        assert_eq!(progress["disc_id"], disc_id);
+        assert_eq!(progress["title_id"], "title-1");
+        assert_eq!(progress["position_ms"], 4_500);
+        assert_eq!(progress["watched"], false);
+        let (status, detail) = call(
+            &app,
+            get(
+                &format!("/api/v1/optical/discs/{disc_id}/titles/title-1"),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "read optical progress: {detail}");
+        assert_eq!(detail["progress"], progress);
+
+        let (status, forged_progress) = call(
+            &app,
+            post(
+                &format!("/api/v1/optical/discs/{disc_id}/titles/title-1/progress"),
+                Some(&admin),
+                json!({
+                    "drive_id": "test-node:fixture",
+                    "media_generation": generation,
+                    "session_id": session_id,
+                    "angle": 1,
+                    "position_ms": 5_000,
+                    "duration_ms": 12_000,
+                    "audio": {"index": 0},
+                    "subtitle": null,
+                    "recorded_at_ms": 1_750_000_005_000_i64
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "forged rendition progress: {forged_progress}"
         );
 
         let (status, playlist) = call_text(&app, get(&playlist_url, None)).await;
@@ -8141,6 +8229,98 @@ mod tests {
                 .manager()
                 .snapshot("fixture")
                 .expect("released drive")
+                .state,
+            OpticalDriveState::Ready { .. }
+        ));
+
+        fake.push_resolution(Ok(ResolvedInput::File {
+            path: plurx_core::testfixtures::source_with_two_audio_tracks(),
+        }));
+        let mut replacement_body = start_body;
+        replacement_body["request_id"] = json!("fixture-track-replacement");
+        replacement_body["start"] = json!(6.0);
+        replacement_body["audio"] = json!(2);
+        let (status, replacement) =
+            call(&app, post(start_url, Some(&admin), replacement_body)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "replace optical audio track: {replacement}"
+        );
+        let replacement_session = replacement["session_id"]
+            .as_str()
+            .expect("replacement session id");
+        assert_ne!(replacement_session, session_id);
+        let replacement_playlist = replacement["playlist_url"]
+            .as_str()
+            .expect("replacement playlist URL");
+        let (status, playlist) = call_text(&app, get(replacement_playlist, None)).await;
+        assert_eq!(status, StatusCode::OK, "replacement playlist: {playlist}");
+        let segment = playlist
+            .lines()
+            .find(|line| line.ends_with(".m4s"))
+            .expect("replacement media segment URI");
+        let segment_url = if segment.starts_with('/') {
+            segment.to_owned()
+        } else {
+            format!("/api/v1/hls/{replacement_session}/{segment}")
+        };
+        let response = app
+            .clone()
+            .oneshot(get(&segment_url, None))
+            .await
+            .expect("replacement VOD segment response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .expect("replacement VOD segment body")
+                .to_bytes()
+                .len()
+                > 1_024
+        );
+        let (status, replacement_progress) = call(
+            &app,
+            post(
+                &format!("/api/v1/optical/discs/{disc_id}/titles/title-1/progress"),
+                Some(&admin),
+                json!({
+                    "drive_id": "test-node:fixture",
+                    "media_generation": generation,
+                    "session_id": replacement_session,
+                    "angle": 1,
+                    "position_ms": 6_500,
+                    "duration_ms": 12_000,
+                    "audio": {"index": 2},
+                    "subtitle": null,
+                    "recorded_at_ms": 1_750_000_006_500_i64
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "replacement progress: {replacement_progress}"
+        );
+        assert_eq!(replacement_progress["position_ms"], 6_500);
+        assert_eq!(
+            call(
+                &app,
+                delete(&format!("/api/v1/hls/{replacement_session}"), Some(&admin),),
+            )
+            .await
+            .0,
+            StatusCode::NO_CONTENT
+        );
+        assert!(matches!(
+            state
+                .optical
+                .manager()
+                .snapshot("fixture")
+                .expect("released replacement drive")
                 .state,
             OpticalDriveState::Ready { .. }
         ));

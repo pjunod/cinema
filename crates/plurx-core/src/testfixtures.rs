@@ -236,6 +236,45 @@ pub fn source_with_eac3_audio() -> PathBuf {
     path
 }
 
+/// The H.264 fixture with two independently selectable AAC tracks.
+///
+/// Optical lifecycle tests use it to prove that a track replacement opens a
+/// new admitted rendition instead of treating display order as a stream ID.
+pub fn source_with_two_audio_tracks() -> PathBuf {
+    let src = source("h264");
+    let path = fixture_dir().join("h264-two-audio.mkv");
+    publish_fixture_if_absent(&path, "h264-two-audio.mkv", |temporary| {
+        run(Command::new(ffmpeg())
+            .args(["-y", "-v", "error", "-i"])
+            .arg(&src)
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=880:sample_rate=48000:duration=12",
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0",
+                "-map",
+                "1:a:0",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-metadata:s:a:0",
+                "language=eng",
+                "-metadata:s:a:1",
+                "language=fra",
+                "-shortest",
+                "-f",
+                "matroska",
+            ])
+            .arg(temporary));
+    });
+    path
+}
+
 /// The production pipe command — the same arguments `copy_pipe_args` builds —
 /// run against a fixture, cached beside the source.
 pub fn pipe(kind: &str) -> Vec<u8> {
