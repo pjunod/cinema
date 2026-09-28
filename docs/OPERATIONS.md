@@ -2553,6 +2553,20 @@ their codec/HDR fallback ladders. Counters and latency are exported as
 `plurx_media_session_takeovers_total{method,outcome}` and
 `plurx_media_session_takeover_seconds{method}`.
 
+The one-second media-session route cache that authorizes segment GETs is
+measured, not tuned, by four families (plan
+[PLEX-FACADE-PAGING](server/PLEX-FACADE-PAGING.md) §3.5):
+`plurx_media_session_route_lookups_total{result}` splits lookups into
+`cache_hit`, `single_flight_hit` (answered by the cache after waiting on
+another lookup's Store read for the same session) and `store`;
+`plurx_media_session_route_lock_seconds{site}` is the wait for the cache's map
+lock at each of its four call sites; `plurx_media_session_route_prune_entries`
+is how many entries each expired-entry sweep walks; and
+`plurx_media_session_route_cache_entries` is the cache's size against its
+4,096 ceiling. Control mutations and final-status reads bypass the cache and
+are not in the lookup counts. None of these changes the cache; the plan's §6.4
+says how to read them.
+
 Backups do not become interchangeable merely because the database is
 replicated. Preserve the data directory, node identity, and cluster secrets for
 each voter in host/storage backups so the original majority can be restored.
