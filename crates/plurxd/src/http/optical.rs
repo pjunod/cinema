@@ -748,14 +748,13 @@ fn optical_audio_tracks(
     facts
         .audio_streams
         .iter()
-        .enumerate()
-        .map(|(index, track)| OpticalAudioTrack {
-            index: index as i64,
+        .map(|track| OpticalAudioTrack {
+            index: track.index,
             codec: track.codec.clone(),
             channels: track.channels,
             language: track.language.clone(),
             title: track.title.clone(),
-            default: selected.map_or(track.default, |selected| selected == index as i64),
+            default: selected.map_or(track.default, |selected| selected == track.index),
         })
         .collect()
 }
@@ -767,13 +766,12 @@ fn optical_subtitle_tracks(
     facts
         .subtitle_streams
         .iter()
-        .enumerate()
-        .map(|(index, track)| OpticalSubtitleTrack {
-            index: index as i64,
+        .map(|track| OpticalSubtitleTrack {
+            index: track.index,
             codec: track.codec.clone(),
             language: track.language.clone(),
             title: track.title.clone(),
-            default: selected.map_or(track.default, |selected| selected == index as i64),
+            default: selected.map_or(track.default, |selected| selected == track.index),
             forced: track.forced,
             // Optical subtitles currently travel through the admitted title
             // reader and encoder. Advertising a file sidecar or native HLS
@@ -857,7 +855,7 @@ async fn local_decision(
     )?;
     let title = state
         .store
-        .optical_title(&request.expected_disc_id, &title_id)
+        .optical_title(&request.expected_disc_id, title_id)
         .await?
         .ok_or(ApiError::NotFound("title"))?;
     if request.angle == 0 || request.angle > title.angles {
@@ -865,14 +863,23 @@ async fn local_decision(
             "angle is not available for this title".into(),
         ));
     }
-    if request
-        .audio
-        .is_some_and(|index| index < 0 || index as usize >= title.facts.audio_streams.len())
-    {
+    if request.audio.is_some_and(|index| {
+        !title
+            .facts
+            .audio_streams
+            .iter()
+            .any(|track| track.index == index)
+    }) {
         return Err(ApiError::BadRequest("unknown audio track".to_owned()));
     }
     if request.subtitle.is_some_and(|index| {
-        index < -1 || (index >= 0 && index as usize >= title.facts.subtitle_streams.len())
+        index < -1
+            || (index >= 0
+                && !title
+                    .facts
+                    .subtitle_streams
+                    .iter()
+                    .any(|track| track.index == index))
     }) {
         return Err(ApiError::BadRequest("unknown subtitle track".to_owned()));
     }
@@ -881,7 +888,8 @@ async fn local_decision(
             && title
                 .facts
                 .subtitle_streams
-                .get(index as usize)
+                .iter()
+                .find(|track| track.index == index)
                 .is_some_and(|track| !plurx_core::tracks::is_bitmap_subtitle(&track.codec))
     }) {
         return Err(optical_text_subtitle_unavailable());
@@ -897,7 +905,7 @@ async fn local_decision(
         ));
     }
     let profile = playback::DeviceProfile::from_caps_v2(&request.caps);
-    let node = super::stream::render_caps(&state).await;
+    let node = super::stream::render_caps(state).await;
     // The first optical producer is encoded VOD. Even a codec-compatible
     // title cannot use file direct-play or the progressive remux endpoint,
     // and claiming either would hand the client an executable plan that does
@@ -1047,7 +1055,7 @@ async fn local_start_session(
     )?;
     let title = state
         .store
-        .optical_title(&request.expected_disc_id, &title_id)
+        .optical_title(&request.expected_disc_id, title_id)
         .await?
         .ok_or(ApiError::NotFound("title"))?;
     if request.angle > title.angles {
@@ -1055,23 +1063,30 @@ async fn local_start_session(
             "angle is not available for this title".to_owned(),
         ));
     }
-    if request
-        .audio
-        .is_some_and(|index| index < 0 || index as usize >= title.facts.audio_streams.len())
-    {
+    if request.audio.is_some_and(|index| {
+        !title
+            .facts
+            .audio_streams
+            .iter()
+            .any(|track| track.index == index)
+    }) {
         return Err(ApiError::BadRequest("unknown audio track".to_owned()));
     }
-    if request
-        .subtitle_burn
-        .is_some_and(|index| index < 0 || index as usize >= title.facts.subtitle_streams.len())
-    {
+    if request.subtitle_burn.is_some_and(|index| {
+        !title
+            .facts
+            .subtitle_streams
+            .iter()
+            .any(|track| track.index == index)
+    }) {
         return Err(ApiError::BadRequest("unknown subtitle track".to_owned()));
     }
     if request.subtitle_burn.is_some_and(|index| {
         title
             .facts
             .subtitle_streams
-            .get(index as usize)
+            .iter()
+            .find(|track| track.index == index)
             .is_some_and(|track| !plurx_core::tracks::is_bitmap_subtitle(&track.codec))
     }) {
         return Err(optical_text_subtitle_unavailable());
@@ -1189,12 +1204,16 @@ async fn local_start_session(
                         .block_budget_secs
                         .filter(|seconds| seconds.is_finite() && *seconds > 0.0),
                 },
-                title.facts,
-                title.probe_json,
-                lease,
-                &user.username,
-                &supersession_user,
-                &item_title,
+                crate::vodserve::OpticalVodSource {
+                    facts: title.facts,
+                    probe_json: title.probe_json,
+                    lease: *lease,
+                },
+                crate::vodserve::VodAttribution {
+                    user_name: &user.username,
+                    item_title: &item_title,
+                    supersession_user: &supersession_user,
+                },
                 session_id,
             )
             .await
@@ -1335,6 +1354,72 @@ struct ProgressRequest {
     recorded_at_ms: Option<i64>,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ProgressAudioSelection {
+    Index(i64),
+    Detail(ProgressAudioSelectionDetail),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProgressAudioSelectionDetail {
+    index: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ProgressSubtitleSelection {
+    Index(i64),
+    Detail(ProgressSubtitleSelectionDetail),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProgressSubtitleSelectionDetail {
+    index: i64,
+    #[serde(default)]
+    burned: bool,
+}
+
+fn progress_audio_index(value: Option<&serde_json::Value>) -> Result<Option<i64>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let selection = serde_json::from_value::<ProgressAudioSelection>(value.clone())
+        .map_err(|_| ApiError::BadRequest("invalid optical audio selection".to_owned()))?;
+    let index = match selection {
+        ProgressAudioSelection::Index(index) => index,
+        ProgressAudioSelection::Detail(detail) => detail.index,
+    };
+    if index < 0 {
+        return Err(ApiError::BadRequest(
+            "invalid optical audio selection".to_owned(),
+        ));
+    }
+    Ok(Some(index))
+}
+
+fn progress_subtitle_selection(
+    value: Option<&serde_json::Value>,
+) -> Result<Option<(i64, bool)>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let selection = serde_json::from_value::<ProgressSubtitleSelection>(value.clone())
+        .map_err(|_| ApiError::BadRequest("invalid optical subtitle selection".to_owned()))?;
+    let (index, burned) = match selection {
+        ProgressSubtitleSelection::Index(index) => (index, false),
+        ProgressSubtitleSelection::Detail(detail) => (detail.index, detail.burned),
+    };
+    if index < 0 {
+        return Err(ApiError::BadRequest(
+            "invalid optical subtitle selection".to_owned(),
+        ));
+    }
+    Ok(Some((index, burned)))
+}
+
 async fn progress(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
@@ -1380,11 +1465,22 @@ async fn local_progress(
     request: ProgressRequest,
 ) -> Result<PublicOpticalProgress, ApiError> {
     authorize_play(state, user_id).await?;
-    if request.angle == 0 {
+    if request.angle == 0
+        || request.position_ms < 0
+        || request.duration_ms.is_some_and(|duration| duration < 0)
+        || request
+            .recorded_at_ms
+            .is_some_and(|recorded_at| recorded_at < 0)
+        || request
+            .duration_ms
+            .is_some_and(|duration| request.position_ms > duration)
+    {
         return Err(ApiError::BadRequest(
-            "angle must be at least one".to_owned(),
+            "invalid optical progress timeline".to_owned(),
         ));
     }
+    let audio_index = progress_audio_index(request.audio.as_ref())?;
+    let subtitle_selection = progress_subtitle_selection(request.subtitle.as_ref())?;
     state
         .optical
         .manager()
@@ -1446,6 +1542,32 @@ async fn local_progress(
         return Err(optical_conflict(
             "optical_media_changed",
             "the progress update does not match the active optical title",
+        ));
+    }
+    let title = state
+        .store
+        .optical_title(disc_id, title_id)
+        .await?
+        .ok_or(ApiError::NotFound("title"))?;
+    if audio_index.is_some_and(|index| {
+        !title
+            .facts
+            .audio_streams
+            .iter()
+            .any(|track| track.index == index)
+    }) {
+        return Err(ApiError::BadRequest(
+            "unknown optical audio selection".to_owned(),
+        ));
+    }
+    if subtitle_selection.is_some_and(|(index, burned)| {
+        !title.facts.subtitle_streams.iter().any(|track| {
+            track.index == index
+                && (!burned || plurx_core::tracks::is_bitmap_subtitle(&track.codec))
+        })
+    }) {
+        return Err(ApiError::BadRequest(
+            "unknown optical subtitle selection".to_owned(),
         ));
     }
     let progress = state
@@ -1930,8 +2052,13 @@ fn service_error(error: OpticalServiceError) -> ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::PublicOpticalDriveState;
+    use super::{
+        optical_audio_tracks, optical_subtitle_tracks, progress_audio_index,
+        progress_subtitle_selection, PublicOpticalDriveState,
+    };
+    use plurx_core::domain::{AudioStream, SubtitleStream};
     use plurx_core::optical::OpticalDriveState;
+    use plurx_core::playback::PlaybackMediaFacts;
 
     #[test]
     fn public_busy_state_never_serializes_the_playback_capability() {
@@ -1973,5 +2100,84 @@ mod tests {
         let admin_json = serde_json::to_value(admin).expect("serialize admin state");
         assert!(public_json.get("reason").is_none());
         assert_eq!(admin_json["reason"], "sensitive host diagnostic");
+    }
+
+    #[test]
+    fn optical_tracks_preserve_semantic_ffmpeg_indexes() {
+        let facts = PlaybackMediaFacts {
+            audio_streams: vec![
+                AudioStream {
+                    index: 2,
+                    codec: "aac".to_owned(),
+                    default: true,
+                    ..AudioStream::default()
+                },
+                AudioStream {
+                    index: 7,
+                    codec: "ac3".to_owned(),
+                    ..AudioStream::default()
+                },
+            ],
+            subtitle_streams: vec![SubtitleStream {
+                index: 5,
+                codec: "hdmv_pgs_subtitle".to_owned(),
+                default: true,
+                ..SubtitleStream::default()
+            }],
+            ..PlaybackMediaFacts::default()
+        };
+
+        let audio = optical_audio_tracks(&facts, Some(7));
+        let subtitles = optical_subtitle_tracks(&facts, Some(5));
+
+        assert_eq!(
+            audio.iter().map(|track| track.index).collect::<Vec<_>>(),
+            [2, 7]
+        );
+        assert!(!audio[0].default);
+        assert!(audio[1].default);
+        assert_eq!(subtitles[0].index, 5);
+        assert!(subtitles[0].default);
+    }
+
+    #[test]
+    fn progress_selections_accept_native_and_web_wire_shapes() {
+        assert_eq!(
+            progress_audio_index(Some(&serde_json::json!(7))).expect("native audio selection"),
+            Some(7)
+        );
+        assert_eq!(
+            progress_audio_index(Some(&serde_json::json!({ "index": 7 })))
+                .expect("web audio selection"),
+            Some(7)
+        );
+        assert_eq!(
+            progress_subtitle_selection(Some(&serde_json::json!(5)))
+                .expect("native subtitle selection"),
+            Some((5, false))
+        );
+        assert_eq!(
+            progress_subtitle_selection(Some(&serde_json::json!({
+                "index": 5,
+                "burned": true
+            })))
+            .expect("web subtitle selection"),
+            Some((5, true))
+        );
+    }
+
+    #[test]
+    fn progress_selections_reject_negative_or_ambiguous_shapes() {
+        assert!(progress_audio_index(Some(&serde_json::json!(-1))).is_err());
+        assert!(
+            progress_audio_index(Some(&serde_json::json!({ "index": 7, "extra": true }))).is_err()
+        );
+        assert!(progress_subtitle_selection(Some(&serde_json::json!(-1))).is_err());
+        assert!(progress_subtitle_selection(Some(&serde_json::json!({
+            "index": 5,
+            "burned": false,
+            "extra": true
+        })))
+        .is_err());
     }
 }

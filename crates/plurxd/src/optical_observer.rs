@@ -69,10 +69,10 @@ pub(crate) async fn observation_loop(
             for (drive_id, error) in state.optical.observe_once(now_ms).await {
                 tracing::debug!(%drive_id, %error, "optical observation did not complete");
             }
-        } else if was_enabled {
-            if !deactivate_and_drain(&state, "optical source revoked by runtime disable").await {
-                tracing::warn!("optical disable timed out waiting for physical readers");
-            }
+        } else if was_enabled
+            && !deactivate_and_drain(&state, "optical source revoked by runtime disable").await
+        {
+            tracing::warn!("optical disable timed out waiting for physical readers");
         }
         was_enabled = enabled;
 

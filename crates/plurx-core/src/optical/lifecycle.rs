@@ -74,6 +74,13 @@ struct ActiveReader {
     request_digest: Option<String>,
 }
 
+struct ReaderClaim {
+    kind: ReaderKind,
+    session_id: Option<String>,
+    request_id: Option<String>,
+    request_digest: Option<String>,
+}
+
 pub enum OpticalPlaybackClaim {
     Claimed(OpticalReadPermit),
     Replay { session_id: String },
@@ -237,10 +244,12 @@ impl OpticalDriveManager {
             slot,
             drive_id,
             &generation,
-            ReaderKind::Inspection,
-            None,
-            None,
-            None,
+            ReaderClaim {
+                kind: ReaderKind::Inspection,
+                session_id: None,
+                request_id: None,
+                request_digest: None,
+            },
         )
     }
 
@@ -326,10 +335,12 @@ impl OpticalDriveManager {
             slot,
             drive_id,
             &generation,
-            ReaderKind::Playback,
-            Some(session_id.to_owned()),
-            Some(request_id.to_owned()),
-            Some(request_digest.to_owned()),
+            ReaderClaim {
+                kind: ReaderKind::Playback,
+                session_id: Some(session_id.to_owned()),
+                request_id: Some(request_id.to_owned()),
+                request_digest: Some(request_digest.to_owned()),
+            },
         )?;
         slot.state = OpticalDriveState::Busy {
             media_generation: generation,
@@ -345,10 +356,7 @@ impl OpticalDriveManager {
         slot: &mut DriveSlot,
         drive_id: &str,
         generation: &str,
-        kind: ReaderKind,
-        session_id: Option<String>,
-        request_id: Option<String>,
-        request_digest: Option<String>,
+        claim: ReaderClaim,
     ) -> Result<OpticalReadPermit, OpticalLifecycleError> {
         if slot.active.is_some() {
             return Err(OpticalLifecycleError::Busy);
@@ -358,18 +366,18 @@ impl OpticalDriveManager {
         slot.active = Some(ActiveReader {
             lease_id,
             generation: generation.to_owned(),
-            kind,
+            kind: claim.kind,
             revoked: false,
-            session_id,
-            request_id,
-            request_digest,
+            session_id: claim.session_id,
+            request_id: claim.request_id,
+            request_digest: claim.request_digest,
         });
         Ok(OpticalReadPermit {
             inner: Arc::clone(inner),
             drive_id: drive_id.to_owned(),
             generation: generation.to_owned(),
             lease_id,
-            kind,
+            kind: claim.kind,
             released: false,
         })
     }

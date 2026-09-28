@@ -19023,10 +19023,12 @@ impl TranscodeManager {
                 "the optical title has no usable video dimensions",
             ));
         }
-        if request
-            .audio_index
-            .is_some_and(|index| index < 0 || index as usize >= facts.audio_streams.len())
-        {
+        if request.audio_index.is_some_and(|index| {
+            !facts
+                .audio_streams
+                .iter()
+                .any(|stream| stream.index == index)
+        }) {
             return Err(vod_refusal_error(
                 "vod_audio_track_missing",
                 "the requested optical audio track does not exist",
@@ -19035,9 +19037,10 @@ impl TranscodeManager {
         let subtitle_burn = request
             .subtitle_burn
             .map(|index| {
-                let stream = usize::try_from(index)
-                    .ok()
-                    .and_then(|index| facts.subtitle_streams.get(index))
+                let stream = facts
+                    .subtitle_streams
+                    .iter()
+                    .find(|stream| stream.index == index)
                     .ok_or_else(|| {
                         vod_refusal_error(
                             "vod_subtitle_track_missing",
@@ -19143,12 +19146,8 @@ impl TranscodeManager {
     pub(crate) async fn start_optical_vod(
         &self,
         request: OpticalSessionRequest,
-        mut facts: plurx_core::playback::PlaybackMediaFacts,
-        probe_json: String,
-        lease: plurx_core::optical::OpticalPlaybackLease,
-        user_name: &str,
-        supersession_user: &str,
-        item_title: &str,
+        mut source: crate::vodserve::OpticalVodSource,
+        attribution: crate::vodserve::VodAttribution<'_>,
         session_id: String,
     ) -> Result<StartInfo, String> {
         let Some(settings) = self.vod_settings(request.block_budget_secs).await? else {
@@ -19157,7 +19156,7 @@ impl TranscodeManager {
                 "VOD session creation is disabled on this server",
             ));
         };
-        facts.audio_offset_ms = if facts.audio_streams.is_empty() {
+        source.facts.audio_offset_ms = if source.facts.audio_streams.is_empty() {
             0
         } else {
             request.audio_offset_ms.clamp(-15_000, 15_000)
@@ -19165,13 +19164,13 @@ impl TranscodeManager {
         let encoding = self
             .prepare_optical_vod_encoding(
                 &request,
-                &lease.source,
-                &facts,
-                &lease.input,
-                &probe_json,
+                &source.lease.source,
+                &source.facts,
+                &source.lease.input,
+                &source.probe_json,
             )
             .await?;
-        self.reap_superseded_before(None, supersession_user, &request.playback_id)
+        self.reap_superseded_before(None, attribution.supersession_user, &request.playback_id)
             .await?;
         let target_height = encoding.options.target_height;
         let encoder = encoding.plan.encoder().label();
@@ -19184,15 +19183,9 @@ impl TranscodeManager {
                     audio_index: request.audio_index,
                     encoding,
                 },
-                facts,
-                probe_json,
-                lease,
+                source,
                 &settings,
-                crate::vodserve::VodAttribution {
-                    user_name,
-                    item_title,
-                    supersession_user,
-                },
+                attribution,
                 session_id,
             )
             .await?;

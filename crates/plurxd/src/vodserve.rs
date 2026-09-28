@@ -552,6 +552,12 @@ pub(crate) struct OpticalVodRecipeRequest<'a> {
     pub encoding: Arc<crate::vodencode::Encoding>,
 }
 
+pub(crate) struct OpticalVodSource {
+    pub facts: plurx_core::playback::PlaybackMediaFacts,
+    pub probe_json: String,
+    pub lease: plurx_core::optical::OpticalPlaybackLease,
+}
+
 impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
     fn from(request: &'a SessionRequest) -> Self {
         Self {
@@ -2857,15 +2863,14 @@ impl VodServe {
     pub(crate) async fn try_create_optical(
         &self,
         request: OpticalVodRecipeRequest<'_>,
-        facts: plurx_core::playback::PlaybackMediaFacts,
-        probe_json: String,
-        lease: plurx_core::optical::OpticalPlaybackLease,
+        source: OpticalVodSource,
         settings: &VodSettings,
         attribution: VodAttribution<'_>,
         session_id: String,
     ) -> Result<VodStart, String> {
         self.shared.pool.set_global_cap(settings.blocked_get_cap);
-        let duration_ms = facts
+        let duration_ms = source
+            .facts
             .duration_ms
             .filter(|duration| *duration > 0)
             .ok_or_else(|| {
@@ -2874,10 +2879,15 @@ impl VodServe {
                     "the optical title has no probed duration, so no immutable plan can be built",
                 )
             })?;
+        let OpticalVodSource {
+            facts,
+            probe_json,
+            lease,
+        } = source;
         let lease = Arc::new(lease);
-        let source = lease.source.clone();
+        let playback_source = lease.source.clone();
         let recipe_source = RecipeSource::ManagedOptical {
-            source: source.clone(),
+            source: playback_source.clone(),
             facts,
             input: lease.input.clone(),
             probe_json,
@@ -2961,7 +2971,7 @@ impl VodServe {
         tracing::info!(
             session = %session_log_id(&session_id),
             rendition = %rendition.key,
-            source = ?source,
+            source = ?playback_source,
             "optical VOD session attached (start entry {start_entry})"
         );
         Ok(VodStart {

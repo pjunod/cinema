@@ -54,7 +54,7 @@ impl OpticalPlaybackLease {
 }
 
 pub enum OpticalTitleClaim {
-    Claimed(OpticalPlaybackLease),
+    Claimed(Box<OpticalPlaybackLease>),
     Replay { session_id: String },
 }
 
@@ -273,7 +273,7 @@ where
             session_id,
             session_id,
         )? {
-            OpticalTitleClaim::Claimed(lease) => Ok(lease),
+            OpticalTitleClaim::Claimed(lease) => Ok(*lease),
             OpticalTitleClaim::Replay { .. } => Err(OpticalLifecycleError::Busy.into()),
         }
     }
@@ -315,11 +315,11 @@ where
         let source =
             permit.playback_source(expected_disc_id.to_owned(), title.title_id.clone(), angle)?;
         let input = self.host.resolve_input(drive, title.locator, angle)?;
-        Ok(OpticalTitleClaim::Claimed(OpticalPlaybackLease {
+        Ok(OpticalTitleClaim::Claimed(Box::new(OpticalPlaybackLease {
             source,
             input,
             permit,
-        }))
+        })))
     }
 
     /// Execute a previously authenticated/authorized eject against the exact
