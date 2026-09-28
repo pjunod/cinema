@@ -74,6 +74,7 @@ function lcDuration(ms){return fmtDur(Number(ms)||0);}
 function lcNowFor(channel){return channel&&channel.now||null;}
 
 async function viewLibraryChannels(generation=PAGE_RENDER_GENERATION){
+  LIBRARY_CHANNELS.selected=new Set();
   layoutChrome("library-channels",`<div class="empty">Loading Library channels…</div>`);
   setPagePhase("#/library-channels",generation,"shell");
   try{
@@ -120,7 +121,7 @@ function libraryChannelsPaint(){
   const deletable=channels.filter(channel=>channel.can_edit);
   if(LIBRARY_CHANNELS.selected)for(const id of [...LIBRARY_CHANNELS.selected])if(!deletable.some(channel=>channel.id===id))LIBRARY_CHANNELS.selected.delete(id);
   const pickedCount=LIBRARY_CHANNELS.selected?LIBRARY_CHANNELS.selected.size:0;
-  const bulk=deletable.length?`<div class="lc-bulk"><label><input type="checkbox" ${pickedCount&&pickedCount===deletable.length?'checked':''} onchange="selectAllLibraryChannels(this.checked)"> Select all${deletable.length<channels.length?' you can edit':''}</label>${pickedCount?`<span class="muted">${pickedCount} selected</span><button class="danger sm" onclick="deleteSelectedLibraryChannels()">Delete selected</button><button class="ghost sm" onclick="selectAllLibraryChannels(false)">Clear</button>`:''}</div>`:"";
+  const bulk=deletable.length?`<div class="lc-bulk"><label><input type="checkbox" ${pickedCount&&pickedCount===deletable.length?'checked':''} onchange="selectAllLibraryChannels(this.checked)"> Select all${deletable.length<channels.length?' you can edit':''}</label>${LIBRARY_CHANNELS.deleting?'<span class="muted">Deleting…</span>':pickedCount?`<span class="muted">${pickedCount} selected</span><button class="danger sm" onclick="deleteSelectedLibraryChannels()">Delete selected</button><button class="ghost sm" onclick="selectAllLibraryChannels(false)">Clear</button>`:''}</div>`:"";
   const cards=channels.map(channel=>{
     const now=lcNowFor(channel),next=channel.next;
     const picked=!!(LIBRARY_CHANNELS.selected&&LIBRARY_CHANNELS.selected.has(channel.id));
@@ -395,10 +396,11 @@ async function lcDeleteOne(channel){
 }
 async function lcDeleteChannels(channels){
   const deleted=[],failures=[];
-  for(const channel of channels){
+  LIBRARY_CHANNELS.deleting=true;
+  try{for(const channel of channels){
     const error=await lcDeleteOne(channel);
     if(error)failures.push({channel,error});else deleted.push(channel.id);
-  }
+  }}finally{LIBRARY_CHANNELS.deleting=false;}
   try{for(const id of deleted)sessionStorage.removeItem(libraryChannelDraftKey(id));}catch(e){}
   const selected=LIBRARY_CHANNELS.selected;if(selected)for(const id of deleted)selected.delete(id);
   return {deleted,failures};
@@ -409,21 +411,32 @@ function lcDeleteSummary({deleted,failures}){
   const who=failures.length===1?`${first.channel.name||"Channel"} was`:`${failures.length} channels were`;
   return `${deleted.length?`${deleted.length} deleted. `:""}${who} not deleted: ${first.error&&first.error.message||"request failed"}`;
 }
+// Finishing a delete repaints the list only if the viewer is still on the
+// page that started it; a long bulk delete must not draw over another route.
+function lcStillHere(generation){return generation===PAGE_RENDER_GENERATION&&location.hash==="#/library-channels";}
 async function deleteLibraryChannel(){
-  const draft=LIBRARY_CHANNELS.draft;if(!draft||!draft.id||!confirm(`Delete ${draft.name}? Media will not be deleted.`))return;
-  const result=await lcDeleteChannels([{id:draft.id,name:draft.name,revision:draft.expected_revision}]);
+  const draft=LIBRARY_CHANNELS.draft;if(LIBRARY_CHANNELS.deleting||!draft||!draft.id||!confirm(`Delete ${draft.name}? Media will not be deleted.`))return;
+  const generation=PAGE_RENDER_GENERATION;
+  // An unsaved draft restored from this browser keeps the revision it was
+  // opened at, so deleting with it would 409 forever. Delete what the server
+  // holds now; a channel already gone reads as deleted.
+  let revision=draft.expected_revision;
+  try{revision=(await api(`/library-channels/${encodeURIComponent(draft.id)}`)).revision;}catch(error){if(error&&error.status===404)revision=draft.expected_revision;}
+  const result=await lcDeleteChannels([{id:draft.id,name:draft.name,revision}]);
   if(result.failures.length){
     const message=lcDeleteSummary(result),node=document.getElementById("lc-error");
     if(node)node.textContent=message;toast(message);return;
   }
-  LIBRARY_CHANNELS.editor=false;LIBRARY_CHANNELS.draft=null;
-  toast(lcDeleteSummary(result));await viewLibraryChannels(PAGE_RENDER_GENERATION);
+  toast(lcDeleteSummary(result));
+  if(LIBRARY_CHANNELS.draft===draft){LIBRARY_CHANNELS.editor=false;LIBRARY_CHANNELS.draft=null;}
+  if(lcStillHere(generation))await viewLibraryChannels(generation);
 }
 async function deleteLibraryChannelFromList(id){
   const channel=(LIBRARY_CHANNELS.channels||[]).find(row=>row.id===id);
-  if(!channel||!channel.can_edit||!confirm(`Delete ${channel.name}? Media will not be deleted.`))return;
+  if(LIBRARY_CHANNELS.deleting||!channel||!channel.can_edit||!confirm(`Delete ${channel.name}? Media will not be deleted.`))return;
+  const generation=PAGE_RENDER_GENERATION;
   toast(lcDeleteSummary(await lcDeleteChannels([channel])));
-  await viewLibraryChannels(PAGE_RENDER_GENERATION);
+  if(lcStillHere(generation))await viewLibraryChannels(generation);
 }
 function lcDeletableChannels(){return (LIBRARY_CHANNELS.channels||[]).filter(channel=>channel.can_edit);}
 function lcSelectedChannels(){
@@ -440,11 +453,13 @@ function selectAllLibraryChannels(on){
   libraryChannelsPaint();
 }
 async function deleteSelectedLibraryChannels(){
-  const channels=lcSelectedChannels();if(!channels.length)return;
+  const channels=lcSelectedChannels();if(LIBRARY_CHANNELS.deleting||!channels.length)return;
   const names=channels.slice(0,5).map(channel=>channel.name).join(", ")+(channels.length>5?`, and ${channels.length-5} more`:"");
   if(!confirm(`Delete ${channels.length} channel${channels.length===1?"":"s"} (${names})? Media will not be deleted.`))return;
+  const generation=PAGE_RENDER_GENERATION;
+  LIBRARY_CHANNELS.deleting=true;libraryChannelsPaint();
   toast(lcDeleteSummary(await lcDeleteChannels(channels)));
-  await viewLibraryChannels(PAGE_RENDER_GENERATION);
+  if(lcStillHere(generation))await viewLibraryChannels(generation);
 }
 async function toggleLibraryChannelFavourite(id,favourite){
   try{await api(`/library-channels/${encodeURIComponent(id)}/favourite`,{method:"PUT",body:{favourite}});await refreshLibraryChannels(PAGE_RENDER_GENERATION);}
