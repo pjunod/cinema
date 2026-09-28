@@ -32,7 +32,7 @@ pub use lifecycle::{
 pub use service::{OpticalPlaybackLease, OpticalService, OpticalServiceError, OpticalTitleClaim};
 pub use session::{
     optical_output_identity, DurableOpticalSessionSource, OpticalSessionPayloadError,
-    OPTICAL_SESSION_PAYLOAD_V1,
+    OPTICAL_SESSION_PAYLOAD_V1, OPTICAL_SESSION_PAYLOAD_V2,
 };
 pub use store::{
     OpticalDisc, OpticalInspection, OpticalMatchKind, OpticalProgress, OpticalProgressWrite,

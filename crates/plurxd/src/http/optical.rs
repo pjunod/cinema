@@ -13,7 +13,7 @@ use plurx_core::optical::{
     optical_output_identity, DurableOpticalSessionSource, HostRequirement, HostRequirementStatus,
     OpticalDriveSnapshot, OpticalDriveState, OpticalLifecycleError, OpticalMatchKind,
     OpticalProgress, OpticalProgressWrite, OpticalServiceError, PlaybackSourceRef,
-    OPTICAL_SESSION_PAYLOAD_V1,
+    OPTICAL_SESSION_PAYLOAD_V2,
 };
 use plurx_core::playback::{self, Decision, DeviceCaps, Force, PlaybackMediaFacts};
 use plurx_core::store::{keys, stored_switch};
@@ -1272,10 +1272,12 @@ async fn local_start_session(
     )
     .map_err(|error| ApiError::Internal(error.to_string()))?;
     let recipe_json = DurableOpticalSessionSource {
-        version: OPTICAL_SESSION_PAYLOAD_V1,
+        version: OPTICAL_SESSION_PAYLOAD_V2,
         source,
         locator: title.locator,
         output_identity,
+        audio_selection: request.audio.filter(|index| *index >= 0),
+        subtitle_selection: request.subtitle_burn.filter(|index| *index >= 0),
     }
     .encode()
     .map_err(|error| ApiError::Internal(error.to_string()))?;
@@ -1517,6 +1519,16 @@ fn progress_subtitle_selection(
     Ok(Some((index, burned)))
 }
 
+fn progress_selections_match(
+    source: &DurableOpticalSessionSource,
+    audio: Option<i64>,
+    subtitle: Option<(i64, bool)>,
+) -> bool {
+    source.version < OPTICAL_SESSION_PAYLOAD_V2
+        || (audio == source.audio_selection
+            && subtitle == source.subtitle_selection.map(|index| (index, true)))
+}
+
 async fn progress(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
@@ -1614,6 +1626,11 @@ async fn local_progress(
             "the optical session source could not be verified",
         )
     })?;
+    if !progress_selections_match(&durable_source, audio_index, subtitle_selection) {
+        return Err(ApiError::BadRequest(
+            "optical progress selections do not match the active rendition".to_owned(),
+        ));
+    }
     let PlaybackSourceRef::Optical {
         owner_node_id,
         drive_id: source_drive_id,
@@ -2182,11 +2199,15 @@ fn service_error(error: OpticalServiceError) -> ApiError {
 mod tests {
     use super::{
         eject_target, optical_audio_tracks, optical_subtitle_tracks, owner_wire_error,
-        progress_audio_index, progress_subtitle_selection, EjectRequest, PublicOpticalDriveState,
+        progress_audio_index, progress_selections_match, progress_subtitle_selection, EjectRequest,
+        PublicOpticalDriveState,
     };
     use crate::http::error::ApiError;
     use plurx_core::domain::{AudioStream, SubtitleStream};
-    use plurx_core::optical::OpticalDriveState;
+    use plurx_core::optical::{
+        DurableOpticalSessionSource, OpticalDriveState, OpticalTitleLocator, PlaybackSourceRef,
+        OPTICAL_SESSION_PAYLOAD_V1, OPTICAL_SESSION_PAYLOAD_V2,
+    };
     use plurx_core::playback::PlaybackMediaFacts;
 
     #[test]
@@ -2391,5 +2412,44 @@ mod tests {
             "extra": true
         })))
         .is_err());
+    }
+
+    #[test]
+    fn progress_selections_are_bound_to_v2_rendition() {
+        let mut source = DurableOpticalSessionSource {
+            version: OPTICAL_SESSION_PAYLOAD_V2,
+            source: PlaybackSourceRef::Optical {
+                owner_node_id: "node-a".to_owned(),
+                drive_id: "drive-a".to_owned(),
+                media_generation: "generation-a".to_owned(),
+                disc_id: "disc-a".to_owned(),
+                title_id: "title-a".to_owned(),
+                angle: 1,
+            },
+            locator: OpticalTitleLocator::Dvd { title_number: 1 },
+            output_identity: format!("optical-output-v1:{}", "00".repeat(32)),
+            audio_selection: Some(2),
+            subtitle_selection: Some(5),
+        };
+        assert!(progress_selections_match(&source, Some(2), Some((5, true))));
+        assert!(!progress_selections_match(
+            &source,
+            Some(7),
+            Some((5, true))
+        ));
+        assert!(!progress_selections_match(
+            &source,
+            Some(2),
+            Some((5, false))
+        ));
+
+        source.version = OPTICAL_SESSION_PAYLOAD_V1;
+        source.audio_selection = None;
+        source.subtitle_selection = None;
+        assert!(progress_selections_match(
+            &source,
+            Some(7),
+            Some((5, false))
+        ));
     }
 }

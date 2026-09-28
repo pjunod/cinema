@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use super::{OpticalTitleLocator, PlaybackSourceRef, SourceRefError, MAX_OPTICAL_ID_BYTES};
 
 pub const OPTICAL_SESSION_PAYLOAD_V1: u16 = 1;
+pub const OPTICAL_SESSION_PAYLOAD_V2: u16 = 2;
 const MAX_OPTICAL_SESSION_PAYLOAD_BYTES: usize = 16 * 1024;
 
 /// Source extension stored beside, rather than inside, legacy file recipes.
@@ -18,6 +19,10 @@ pub struct DurableOpticalSessionSource {
     pub source: PlaybackSourceRef,
     pub locator: OpticalTitleLocator,
     pub output_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_selection: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle_selection: Option<i64>,
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
@@ -36,14 +41,29 @@ pub enum OpticalSessionPayloadError {
     Locator,
     #[error("invalid optical output identity")]
     OutputIdentity,
+    #[error("invalid optical track selection")]
+    TrackSelection,
     #[error("invalid optical session JSON: {0}")]
     Json(String),
 }
 
 impl DurableOpticalSessionSource {
     pub fn validate(&self) -> Result<(), OpticalSessionPayloadError> {
-        if self.version != OPTICAL_SESSION_PAYLOAD_V1 {
+        if !matches!(
+            self.version,
+            OPTICAL_SESSION_PAYLOAD_V1 | OPTICAL_SESSION_PAYLOAD_V2
+        ) {
             return Err(OpticalSessionPayloadError::Version(self.version));
+        }
+        if self.version == OPTICAL_SESSION_PAYLOAD_V1
+            && (self.audio_selection.is_some() || self.subtitle_selection.is_some())
+        {
+            return Err(OpticalSessionPayloadError::Version(self.version));
+        }
+        if self.audio_selection.is_some_and(|index| index < 0)
+            || self.subtitle_selection.is_some_and(|index| index < 0)
+        {
+            return Err(OpticalSessionPayloadError::TrackSelection);
         }
         self.source.validate()?;
         if !matches!(self.source, PlaybackSourceRef::Optical { .. }) {
@@ -169,6 +189,8 @@ mod tests {
             .expect("identity"),
             source,
             locator,
+            audio_selection: None,
+            subtitle_selection: None,
         };
         let encoded = payload.encode().expect("encode");
         assert!(!encoded.contains("path"));
@@ -198,5 +220,31 @@ mod tests {
         .expect("selected");
         assert_ne!(first, swapped);
         assert_ne!(first, selected);
+    }
+
+    #[test]
+    fn optical_session_v2_retains_admitted_track_selections() {
+        let source = source("generation-a");
+        let locator = OpticalTitleLocator::Bluray { playlist_number: 0 };
+        let payload = DurableOpticalSessionSource {
+            version: OPTICAL_SESSION_PAYLOAD_V2,
+            output_identity: optical_output_identity(
+                &source,
+                locator,
+                Some("2"),
+                Some("4"),
+                "plan-a",
+            )
+            .expect("identity"),
+            source,
+            locator,
+            audio_selection: Some(2),
+            subtitle_selection: Some(4),
+        };
+        assert_eq!(
+            DurableOpticalSessionSource::decode(&payload.encode().expect("encode"))
+                .expect("decode"),
+            payload
+        );
     }
 }
