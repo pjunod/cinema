@@ -122,9 +122,31 @@ impl PublicOpticalDriveState {
                 reason,
             } => Self::Failed {
                 media_generation,
-                reason: include_diagnostics.then_some(reason),
+                reason: include_diagnostics.then(|| public_drive_failure_reason(&reason)),
             },
         }
+    }
+}
+
+pub(crate) fn public_drive_failure_reason(reason: &str) -> String {
+    let normalized = reason.to_ascii_lowercase();
+    if normalized.contains("protection") || normalized.contains("decrypt") {
+        "The inserted disc uses protection this host cannot decrypt.".to_owned()
+    } else if normalized.contains("helper") && normalized.contains("unavailable") {
+        "The optical reader helper is unavailable.".to_owned()
+    } else if normalized.contains("timed out") || normalized.contains("cancelled") {
+        "Optical inspection did not complete.".to_owned()
+    } else if normalized.contains("byte limit")
+        || normalized.contains("invalid json")
+        || normalized.contains("invalid reply")
+    {
+        "The optical reader returned an invalid response.".to_owned()
+    } else if normalized.contains("canonical block device")
+        || normalized.contains("canonical read-only directory")
+    {
+        "The configured optical source is unavailable.".to_owned()
+    } else {
+        "The optical drive could not inspect this disc. Check server logs.".to_owned()
     }
 }
 
@@ -1994,10 +2016,11 @@ fn optical_start_error(error: String) -> ApiError {
         };
         return ApiError::typed(status, code, message.to_owned());
     }
+    tracing::warn!(%error, "optical VOD start failed");
     ApiError::typed(
         StatusCode::SERVICE_UNAVAILABLE,
         "optical_read_failed",
-        error,
+        "the optical drive could not start this title",
     )
 }
 
@@ -2049,11 +2072,14 @@ fn service_error(error: OpticalServiceError) -> ApiError {
                 "the inserted disc is protected and the configured reader cannot decrypt it",
             )
         }
-        OpticalServiceError::Host(_) | OpticalServiceError::Inspection(_) => ApiError::typed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "optical_read_failed",
-            error.to_string(),
-        ),
+        OpticalServiceError::Host(_) | OpticalServiceError::Inspection(_) => {
+            tracing::warn!(%error, "optical reader operation failed");
+            ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "optical_read_failed",
+                "the optical drive could not read this title",
+            )
+        }
         OpticalServiceError::Store(error) => ApiError::Internal(error.to_string()),
     }
 }
@@ -2107,7 +2133,11 @@ mod tests {
         let public_json = serde_json::to_value(public).expect("serialize public state");
         let admin_json = serde_json::to_value(admin).expect("serialize admin state");
         assert!(public_json.get("reason").is_none());
-        assert_eq!(admin_json["reason"], "sensitive host diagnostic");
+        assert_eq!(
+            admin_json["reason"],
+            "The optical drive could not inspect this disc. Check server logs."
+        );
+        assert!(!admin_json.to_string().contains("sensitive host diagnostic"));
     }
 
     #[test]

@@ -308,9 +308,10 @@ fn optical_media(state: &AppState, enabled: bool) -> DeveloperEnableItem {
                 RequirementStatus::Unmet,
                 format!("The configured FFmpeg does not report a usable {format_name}."),
             ),
-            Some(OpticalCapability::ProbeFailed { detail }) => (
+            Some(OpticalCapability::ProbeFailed { .. }) => (
                 RequirementStatus::Unobservable,
-                format!("The bounded capability probe did not produce positive evidence: {detail}"),
+                "The bounded capability probe did not report the required positive markers. Check server logs for its private diagnostic."
+                    .to_owned(),
             ),
             None => (
                 RequirementStatus::Unobservable,
@@ -368,7 +369,10 @@ fn optical_media(state: &AppState, enabled: bool) -> DeveloperEnableItem {
                     OpticalDriveState::Busy { .. } => "in use".to_owned(),
                     OpticalDriveState::Failed { reason, .. } => {
                         disc_status = RequirementStatus::Unmet;
-                        format!("failed: {reason}")
+                        format!(
+                            "failed: {}",
+                            super::optical::public_drive_failure_reason(reason)
+                        )
                     }
                 };
                 format!("{}: {state}.", snapshot.label)
