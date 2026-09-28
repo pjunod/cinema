@@ -26,6 +26,7 @@ final class AppModel: ObservableObject {
     @Published var opticalDrives: [OpticalDriveDTO] = []
     @Published var homeLoading = true
     @Published var homeError: String?
+    @Published private(set) var currentUser: User?
     @Published var libraryGrouping: LibraryGrouping
 
     @Published var audioLang: String
@@ -107,6 +108,7 @@ final class AppModel: ObservableObject {
         Session.shared.token = savedToken
         do {
             let me = try await requireAPI().me()
+            currentUser = me
             username = me.username
             userId = me.id
             settings.username = me.username
@@ -150,6 +152,7 @@ final class AppModel: ObservableObject {
         // server's credential attached to this address.
         Session.shared.origin = normalized
         Session.shared.token = nil
+        currentUser = nil
         let a = PlurxAPI(origin: normalized)
         do {
             let info = try await a.serverInfo()
@@ -176,6 +179,7 @@ final class AppModel: ObservableObject {
                 LoginRequest(username: user.trimmingCharacters(in: .whitespaces), password: pass)
             )
             Session.shared.token = resp.token
+            currentUser = resp.user
             username = resp.user.username
             userId = resp.user.id
             settings.token = resp.token
@@ -346,6 +350,7 @@ final class AppModel: ObservableObject {
     private func signOutLocally(message: String? = nil) {
         settings.clearToken()
         Session.shared.token = nil
+        currentUser = nil
         userId = nil
         settings.userId = nil
         AuthImageCache.shared.clear()
@@ -368,6 +373,7 @@ final class AppModel: ObservableObject {
         // credential, and both copies of the credential are gone.
         settings.clearServer()
         Session.shared.token = nil
+        currentUser = nil
         userId = nil
         // Artwork is cached per origin, but the bytes belong to the server that
         // served them; leaving them behind wastes memory the next server will
@@ -394,6 +400,7 @@ final class AppModel: ObservableObject {
 
         do {
             let me = try await requireAPI().me()
+            currentUser = me
             username = me.username
             userId = me.id
             settings.username = me.username

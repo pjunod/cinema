@@ -357,7 +357,7 @@ struct PlurxAPI {
     }
 
     func ejectOpticalDrive(driveId: String, body: OpticalEjectRequest) async throws {
-        let _: [String: Bool] = try await post("optical/drives/\(driveId)/eject", body: body)
+        try await postNoContent("optical/drives/\(driveId)/eject", body: body)
     }
 
     func readingState(itemId: Int, fileId: Int) async throws -> ReadingStateResponse {

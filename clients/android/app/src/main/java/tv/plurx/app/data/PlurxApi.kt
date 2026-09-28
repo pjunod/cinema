@@ -146,7 +146,7 @@ interface PlurxApi {
     suspend fun ejectOpticalDrive(
         @Path("drive") drive: String,
         @Body body: OpticalEjectRequest,
-    ): Map<String, Boolean>
+    )
 
     @GET("items/{id}/reading-state")
     suspend fun readingState(

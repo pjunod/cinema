@@ -31,6 +31,7 @@ import tv.plurx.app.data.OpticalDriveDto
 import tv.plurx.app.data.OpticalDecisionDto
 import tv.plurx.app.data.OpticalDecisionRequest
 import tv.plurx.app.data.OpticalDriveDiscDto
+import tv.plurx.app.data.OpticalEjectRequest
 import tv.plurx.app.data.OpticalProgressDto
 import tv.plurx.app.data.OpticalProgressRequest
 import tv.plurx.app.data.OpticalSessionRequest
@@ -846,6 +847,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         titleId: String,
         body: OpticalProgressRequest,
     ): OpticalProgressDto = typedRequest { api().opticalProgress(discId, titleId, body) }
+
+    suspend fun ejectOpticalDrive(
+        driveId: String,
+        body: OpticalEjectRequest,
+    ) = typedRequest { api().ejectOpticalDrive(driveId, body) }
 
     private suspend fun <T> typedRequest(request: suspend () -> T): T = try {
         request()

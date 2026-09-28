@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -26,10 +27,13 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
+import tv.plurx.app.data.OpticalEjectRequest
 import tv.plurx.app.data.OpticalTitleDetailDto
 import tv.plurx.app.data.OpticalTrackDto
 import tv.plurx.app.data.RefusalException
@@ -45,11 +49,57 @@ fun OpticalDiscScreen(
 ) {
     var content by remember(driveId) { mutableStateOf<tv.plurx.app.data.OpticalDriveDiscDto?>(null) }
     var error by remember(driveId) { mutableStateOf<String?>(null) }
+    var confirmEject by remember(driveId) { mutableStateOf(false) }
+    var ejecting by remember(driveId) { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     BackHandler(onBack = onBack)
     LaunchedEffect(driveId) {
         runCatching { vm.opticalDrive(driveId) }
             .onSuccess { content = it }
             .onFailure { error = opticalFailure(it) }
+    }
+    if (confirmEject) {
+        val drive = content?.drive
+        AlertDialog(
+            onDismissRequest = { if (!ejecting) confirmEject = false },
+            title = { Text("Eject ${drive?.disc?.title ?: "this disc"}?") },
+            text = { Text("The tray will open on ${drive?.name ?: "the optical drive"}.") },
+            confirmButton = {
+                Button(
+                    enabled = !ejecting,
+                    onClick = {
+                        val generation = drive?.disc?.media_generation ?: drive?.state?.media_generation
+                        if (drive == null || generation == null || drive.state.state == "busy") return@Button
+                        ejecting = true
+                        scope.launch {
+                            runCatching {
+                                vm.ejectOpticalDrive(
+                                    drive.id,
+                                    OpticalEjectRequest(
+                                        expected_disc_id = drive.disc?.id ?: "",
+                                        media_generation = generation,
+                                    ),
+                                )
+                                vm.opticalDrive(drive.id)
+                            }.onSuccess {
+                                content = it
+                                error = null
+                                confirmEject = false
+                            }.onFailure {
+                                error = opticalFailure(it)
+                                confirmEject = false
+                            }
+                            ejecting = false
+                        }
+                    },
+                ) { Text(if (ejecting) "Ejecting…" else "Eject") }
+            },
+            dismissButton = {
+                OutlinedButton(enabled = !ejecting, onClick = { confirmEject = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
     OpticalScaffold(title = "Disc", onBack = onBack) {
         when {
@@ -85,6 +135,17 @@ fun OpticalDiscScreen(
                             }
                             Text("Browse", color = Accent)
                         }
+                    }
+                }
+                if (vm.currentUser?.is_admin == true) {
+                    val canEject = loaded.drive.state.state != "busy" &&
+                        (loaded.drive.disc?.media_generation ?: loaded.drive.state.media_generation) != null
+                    OutlinedButton(
+                        enabled = canEject && !ejecting,
+                        onClick = { confirmEject = true },
+                        modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                    ) {
+                        Text(if (loaded.drive.state.state == "busy") "Drive in use" else "Eject")
                     }
                 }
             }

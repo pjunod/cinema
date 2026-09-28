@@ -74,16 +74,21 @@ struct OpticalDiscView: View {
     let driveId: String
     @State private var content: OpticalDriveDiscDTO?
     @State private var error: String?
+    @State private var confirmEject = false
+    @State private var ejecting = false
 
     var body: some View {
         Group {
             if let content {
                 if content.drive.disc == nil {
-                    ContentUnavailableView(
-                        "Disc unavailable",
-                        systemImage: "exclamationmark.opticaldisc",
-                        description: Text(opticalDriveStateMessage(content.drive))
-                    )
+                    VStack(spacing: 18) {
+                        ContentUnavailableView(
+                            "Disc unavailable",
+                            systemImage: "exclamationmark.opticaldisc",
+                            description: Text(opticalDriveStateMessage(content.drive))
+                        )
+                        ejectControl(content.drive)
+                    }
                 } else {
                     ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
@@ -92,6 +97,7 @@ struct OpticalDiscView: View {
                                 .font(.largeTitle.bold()).foregroundStyle(Palette.onBg)
                             Text("\((content.drive.disc?.format ?? "disc").uppercased()) · \(content.drive.name)")
                                 .foregroundStyle(Palette.muted)
+                            ejectControl(content.drive)
                         }
                         ForEach(content.titles) { title in
                             if let disc = content.drive.disc {
@@ -130,11 +136,62 @@ struct OpticalDiscView: View {
         .background(Palette.bg.ignoresSafeArea())
         .navigationTitle("Disc")
         .task { await load() }
+        .confirmationDialog(
+            "Eject \(content?.drive.disc?.title ?? "this disc")?",
+            isPresented: $confirmEject,
+            titleVisibility: .visible
+        ) {
+            Button("Eject", role: .destructive) { Task { await eject() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The tray will open on \(content?.drive.name ?? "the optical drive").")
+        }
+    }
+
+    @ViewBuilder
+    private func ejectControl(_ drive: OpticalDriveDTO) -> some View {
+        if model.currentUser?.isAdmin == true {
+            if drive.state.state == "busy" {
+                Label("Drive in use", systemImage: "person.crop.circle.badge.clock")
+                    .font(.caption).foregroundStyle(Palette.muted)
+            } else if drive.disc?.mediaGeneration != nil || drive.state.mediaGeneration != nil {
+                Button(role: .destructive) { confirmEject = true } label: {
+                    Label(ejecting ? "Ejecting…" : "Eject", systemImage: "eject.fill")
+                }
+                .disabled(ejecting)
+            }
+        }
     }
 
     private func load() async {
-        do { content = try await model.requireAPI().opticalDrive(driveId) }
+        do {
+            content = try await model.requireAPI().opticalDrive(driveId)
+            error = nil
+        }
         catch { self.error = opticalErrorMessage(error) }
+    }
+
+    private func eject() async {
+        guard !ejecting, let drive = content?.drive,
+              drive.state.state != "busy",
+              let generation = drive.disc?.mediaGeneration ?? drive.state.mediaGeneration
+        else { return }
+        ejecting = true
+        defer { ejecting = false }
+        do {
+            try await model.requireAPI().ejectOpticalDrive(
+                driveId: drive.id,
+                body: OpticalEjectRequest(
+                    expectedDiscId: drive.disc?.id ?? "",
+                    mediaGeneration: generation,
+                    sessionId: nil,
+                    stopActive: false
+                )
+            )
+            await load()
+        } catch {
+            self.error = opticalErrorMessage(error)
+        }
     }
 }
 
