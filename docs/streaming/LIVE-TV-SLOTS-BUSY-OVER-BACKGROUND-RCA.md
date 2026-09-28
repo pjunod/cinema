@@ -185,7 +185,7 @@ this from real tuner exhaustion.
   churn from the reorder, and tests that did not reach the arms they named.
   Rollout notes from it: an ingress older than this build folds
   `encoder_capacity` to its fallback code, and clients older than Android
-  134 / Apple 195 print the raw sentence; a healthy producer whose
+  134 / Apple 196 print the raw sentence; a healthy producer whose
   checkpoint-and-kill runs past five seconds counts as an overrun.
 - Live TV HTTP: `encoder_capacity` code, 503, `retry: later`, preserved
   through the ingress relay.

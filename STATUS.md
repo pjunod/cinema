@@ -27,7 +27,7 @@ takes the pool; a `Priority::Live` start is admitted over background
 ownership after the window (hardware within the cap, software forced, one
 WARN + `plurx_transcode_background_overrun_total{pool}`); and the refusal is
 `encoder_capacity` with its own copy on all three clients, pinned by the
-shared start-cases fixture (Android 134, Apple 195).
+shared start-cases fixture (Android 134, Apple 196).
 One adversarial review round (five findings, all taken): the take over a
 stuck permit is now bounded by live usage, the settled-trigger guard the
 review asked for is the one #588 shipped, the subtitle pre-check is the
