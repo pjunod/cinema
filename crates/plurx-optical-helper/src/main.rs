@@ -51,6 +51,7 @@ mod linux {
     const MAX_PROBE_BYTES: usize = 4 * 1024 * 1024;
     const MAX_PROBE_STDERR_BYTES: usize = 64 * 1024;
     const MAX_PROBE_TEXT_BYTES: usize = 512;
+    const MAX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
     const PROTECTION_ERROR_PREFIX: &str = "optical-protection-unsupported:";
 
     #[derive(Parser)]
@@ -240,24 +241,29 @@ mod linux {
         require_mount_matches_device(&args.paths.device, &mount)?;
         let mut paths = args.paths;
         paths.mount = Some(mount.clone());
-        let (format, navigation_root, locators) =
-            if let Some(root) = find_case_dir(&mount, "VIDEO_TS") {
-                reject_symlink(&root)?;
-                let ifo = find_case_file(&root, "VIDEO_TS.IFO")
+        let dvd_root = find_case_path(&mount, "VIDEO_TS", true)?;
+        let bluray_root = find_case_path(&mount, "BDMV", true)?;
+        let (format, navigation_root, locators) = match (dvd_root, bluray_root) {
+            (Some(root), None) => {
+                let ifo = find_case_path(&root, "VIDEO_TS.IFO", false)?
                     .ok_or_else(|| "DVD VIDEO_TS.IFO is missing".to_owned())?;
-                reject_symlink(&ifo)?;
                 let count = dvd_title_count(&ifo)?;
                 let locators = (1..=count.min(MAX_TITLES as u32))
                     .map(|title_number| OpticalTitleLocator::Dvd { title_number })
                     .collect();
                 (OpticalFormat::Dvd, root, locators)
-            } else if let Some(root) = find_case_dir(&mount, "BDMV") {
-                reject_symlink(&root)?;
+            }
+            (None, Some(root)) => {
                 let locators = bluray_playlists(&root)?;
                 (OpticalFormat::Bluray, root, locators)
-            } else {
+            }
+            (Some(_), Some(_)) => {
+                return Err("mounted media has ambiguous DVD and Blu-ray navigation roots".into());
+            }
+            (None, None) => {
                 return Err("mounted media is not DVD-Video or Blu-ray".into());
-            };
+            }
+        };
         if locators.is_empty() {
             return Err("no playable optical titles were found".into());
         }
@@ -304,7 +310,7 @@ mod linux {
                 fingerprint,
                 titles,
             },
-            diagnostics: diagnostics.join("; ").chars().take(16 * 1024).collect(),
+            diagnostics: bounded_text(&diagnostics.join("; "), MAX_DIAGNOSTIC_BYTES),
         })
     }
 
@@ -350,24 +356,43 @@ mod linux {
         Ok(())
     }
 
-    fn find_case_dir(root: &Path, wanted: &str) -> Option<PathBuf> {
-        fs::read_dir(root).ok()?.flatten().find_map(|entry| {
-            entry
+    fn find_case_path(
+        root: &Path,
+        wanted: &str,
+        directory: bool,
+    ) -> Result<Option<PathBuf>, String> {
+        let mut found = None;
+        for (index, entry) in fs::read_dir(root)
+            .map_err(|error| format!("cannot read optical directory: {error}"))?
+            .enumerate()
+        {
+            if index >= MAX_NAVIGATION_ENTRIES {
+                return Err("optical directory entry count exceeds its bound".into());
+            }
+            let entry = entry.map_err(|error| format!("cannot read optical entry: {error}"))?;
+            if !entry
                 .file_name()
                 .to_string_lossy()
                 .eq_ignore_ascii_case(wanted)
-                .then(|| entry.path())
-        })
-    }
-
-    fn find_case_file(root: &Path, wanted: &str) -> Option<PathBuf> {
-        fs::read_dir(root).ok()?.flatten().find_map(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .eq_ignore_ascii_case(wanted)
-                .then(|| entry.path())
-        })
+            {
+                continue;
+            }
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("cannot inspect optical path: {error}"))?;
+            if metadata.file_type().is_symlink() {
+                return Err("optical navigation paths must not contain symlinks".into());
+            }
+            if metadata.is_dir() != directory || (!directory && !metadata.is_file()) {
+                return Err(format!(
+                    "optical navigation entry {wanted} has the wrong type"
+                ));
+            }
+            if found.replace(path).is_some() {
+                return Err(format!("optical navigation entry {wanted} is ambiguous"));
+            }
+        }
+        Ok(found)
     }
 
     fn dvd_title_count(ifo: &Path) -> Result<u32, String> {
@@ -392,9 +417,8 @@ mod linux {
     }
 
     fn bluray_playlists(bdmv: &Path) -> Result<Vec<OpticalTitleLocator>, String> {
-        let playlist = find_case_dir(bdmv, "PLAYLIST")
+        let playlist = find_case_path(bdmv, "PLAYLIST", true)?
             .ok_or_else(|| "Blu-ray PLAYLIST directory is missing".to_owned())?;
-        reject_symlink(&playlist)?;
         let mut numbers = BTreeSet::new();
         for (entry_index, entry) in fs::read_dir(playlist)
             .map_err(|error| error.to_string())?
@@ -964,6 +988,14 @@ mod linux {
             }
 
             assert!(navigation_files(OpticalFormat::Bluray, &root).is_err());
+        }
+
+        #[test]
+        fn navigation_root_discovery_rejects_ambiguous_case_aliases() {
+            let directory = tempfile::tempdir().expect("tempdir");
+            fs::create_dir(directory.path().join("BDMV")).expect("first root");
+            fs::create_dir(directory.path().join("bdmv")).expect("case alias");
+            assert!(find_case_path(directory.path(), "BDMV", true).is_err());
         }
 
         #[test]
