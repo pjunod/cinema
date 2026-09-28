@@ -98,6 +98,8 @@ pub enum SourceRefError {
     Empty(&'static str),
     #[error("{0} exceeds {MAX_OPTICAL_ID_BYTES} bytes")]
     TooLong(&'static str),
+    #[error("{0} contains a control character")]
+    ControlCharacter(&'static str),
     #[error("angle must be at least one")]
     Angle,
 }
@@ -139,6 +141,9 @@ fn validate_id(name: &'static str, value: &str) -> Result<(), SourceRefError> {
     if value.len() > MAX_OPTICAL_ID_BYTES {
         return Err(SourceRefError::TooLong(name));
     }
+    if value.chars().any(char::is_control) {
+        return Err(SourceRefError::ControlCharacter(name));
+    }
     Ok(())
 }
 
@@ -161,11 +166,17 @@ mod tests {
         assert!(encoded.get("path").is_none());
 
         let mut invalid = source;
-        let PlaybackSourceRef::Optical { title_id, .. } = &mut invalid else {
-            unreachable!()
-        };
-        *title_id = "x".repeat(MAX_OPTICAL_ID_BYTES + 1);
+        if let PlaybackSourceRef::Optical { title_id, .. } = &mut invalid {
+            *title_id = "x".repeat(MAX_OPTICAL_ID_BYTES + 1);
+        }
         assert_eq!(invalid.validate(), Err(SourceRefError::TooLong("title id")));
+        if let PlaybackSourceRef::Optical { title_id, .. } = &mut invalid {
+            *title_id = "title\nforged".to_owned();
+        }
+        assert_eq!(
+            invalid.validate(),
+            Err(SourceRefError::ControlCharacter("title id"))
+        );
     }
 
     #[test]

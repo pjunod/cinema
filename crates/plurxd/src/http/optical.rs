@@ -1118,8 +1118,10 @@ async fn local_start_session(
     require_enabled(state).await?;
     if request.playback_id.is_empty()
         || request.playback_id.len() > 128
+        || request.playback_id.chars().any(char::is_control)
         || request.request_id.is_empty()
         || request.request_id.len() > 128
+        || request.request_id.chars().any(char::is_control)
         || !request.start.is_finite()
         || request.start < 0.0
         || request.angle == 0

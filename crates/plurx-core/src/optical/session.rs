@@ -115,7 +115,10 @@ pub fn optical_output_identity(
         .into_iter()
         .flatten()
     {
-        if value.is_empty() || value.len() > MAX_OPTICAL_ID_BYTES {
+        if value.is_empty()
+            || value.len() > MAX_OPTICAL_ID_BYTES
+            || value.chars().any(char::is_control)
+        {
             return Err(OpticalSessionPayloadError::OutputIdentity);
         }
     }

@@ -161,9 +161,10 @@ pub(crate) fn validate_document(name: &str, value: &str) -> Result<(), String> {
 }
 
 pub(crate) fn validate_optical_id(name: &str, value: &str) -> Result<(), String> {
-    if value.is_empty() || value.len() > MAX_OPTICAL_ID_BYTES {
+    if value.is_empty() || value.len() > MAX_OPTICAL_ID_BYTES || value.chars().any(char::is_control)
+    {
         return Err(format!(
-            "{name} must contain 1..={MAX_OPTICAL_ID_BYTES} bytes"
+            "{name} must contain 1..={MAX_OPTICAL_ID_BYTES} bytes without control characters"
         ));
     }
     Ok(())
