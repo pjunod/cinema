@@ -60,6 +60,10 @@ pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
         "hiqlite_library_channels.rs",
         include_str!("hiqlite_library_channels.rs"),
     ),
+    (
+        "hiqlite_live_tv_resource.rs",
+        include_str!("hiqlite_live_tv_resource.rs"),
+    ),
     ("hiqlite_media.rs", include_str!("hiqlite_media.rs")),
     (
         "hiqlite_pretranscode.rs",
@@ -112,6 +116,10 @@ const SQLITE_SOURCES: &[(&str, &str)] = &[
         "library_channels.rs",
         include_str!("sqlite/library_channels.rs"),
     ),
+    (
+        "live_tv_resource.rs",
+        include_str!("sqlite/live_tv_resource.rs"),
+    ),
     ("media.rs", include_str!("sqlite/media.rs")),
     ("mod.rs", include_str!("sqlite/mod.rs")),
     ("offline.rs", include_str!("sqlite/offline.rs")),
@@ -138,6 +146,10 @@ const SQLITE_SOURCES: &[(&str, &str)] = &[
 /// these, such a statement resolves to a neutral token, stops looking like a
 /// statement, and is never judged.
 const SHARED_CONSTANT_SOURCES: &[(&str, &str)] = &[
+    (
+        "../live_tv_resource.rs",
+        include_str!("../live_tv_resource.rs"),
+    ),
     (
         "downloaded_subtitles.rs",
         include_str!("downloaded_subtitles.rs"),
@@ -990,7 +1002,11 @@ fn every_replicated_placeholder_is_introduced_in_order() {
     let mut offenders = Vec::new();
     let mut fragments = Vec::new();
     let mut scanned = 0_usize;
-    for (name, source) in STORE_SOURCES {
+    for (name, source) in STORE_SOURCES.iter().chain(
+        SHARED_CONSTANT_SOURCES
+            .iter()
+            .filter(|(name, _)| *name == "../live_tv_resource.rs"),
+    ) {
         let (literals, is_code) = literals_and_code_mask(source);
         let test_ranges = test_item_ranges(source, &is_code);
         let constants = constants_for(name, source, &literals);
