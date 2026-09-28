@@ -117,16 +117,21 @@ function libraryChannelsPaint(){
     main.innerHTML=`${setHead("Library channels","Turn movies and episodes into a shared, always-on schedule.",tools)}<div class="empty">No Library channels yet.<br>Start with an idea, then preview what will play.</div><div class="lc-empty-start">${[["space","Space documentaries","Explore your documentary collection"],["standup","Stand-up comedy","Comedy specials, ready to tune into"],["all","Your whole library","A rotation of titles you choose"]].map(([id,title,detail])=>`<button class="ghost" onclick="openLibraryChannelEditor().then(()=>lcPreset('${id}'))"><strong>${title}</strong><span>${detail}</span></button>`).join("")}</div>`;
     return;
   }
+  const deletable=channels.filter(channel=>channel.can_edit);
+  if(LIBRARY_CHANNELS.selected)for(const id of [...LIBRARY_CHANNELS.selected])if(!deletable.some(channel=>channel.id===id))LIBRARY_CHANNELS.selected.delete(id);
+  const pickedCount=LIBRARY_CHANNELS.selected?LIBRARY_CHANNELS.selected.size:0;
+  const bulk=deletable.length?`<div class="lc-bulk"><label><input type="checkbox" ${pickedCount&&pickedCount===deletable.length?'checked':''} onchange="selectAllLibraryChannels(this.checked)"> Select all${deletable.length<channels.length?' you can edit':''}</label>${pickedCount?`<span class="muted">${pickedCount} selected</span><button class="danger sm" onclick="deleteSelectedLibraryChannels()">Delete selected</button><button class="ghost sm" onclick="selectAllLibraryChannels(false)">Clear</button>`:''}</div>`:"";
   const cards=channels.map(channel=>{
     const now=lcNowFor(channel),next=channel.next;
-    return `<article class="card lc-card"><div class="row"><span class="pill">LIBRARY</span>${channel.favourite?'<span title="Favourite">★</span>':''}<span class="spacer"></span><button class="ghost sm" onclick="toggleLibraryChannelFavourite('${esc(channel.id)}',${!channel.favourite})">${channel.favourite?'Unfavourite':'Favourite'}</button></div>
+    const picked=!!(LIBRARY_CHANNELS.selected&&LIBRARY_CHANNELS.selected.has(channel.id));
+    return `<article class="card lc-card${picked?' lc-picked':''}"><div class="row">${channel.can_edit?`<input type="checkbox" class="lc-select" ${picked?'checked':''} onchange="toggleLibraryChannelSelected('${esc(channel.id)}',this.checked)" aria-label="Select ${esc(channel.name)}">`:''}<span class="pill">LIBRARY</span>${channel.favourite?'<span title="Favourite">★</span>':''}<span class="spacer"></span><button class="ghost sm" onclick="toggleLibraryChannelFavourite('${esc(channel.id)}',${!channel.favourite})">${channel.favourite?'Unfavourite':'Favourite'}</button></div>
       <h2>${esc(channel.name)}</h2><div class="lc-now">${esc(now?now.title:"No schedule yet")}</div>
       <div class="lc-time">${now?`${lcTime(now.starts_at_ms)}–${lcTime(now.ends_at_ms)}`:"Preview or edit the selection"}</div>
       <div class="lc-next">${next?`Next: ${esc(next.title)} · ${lcTime(next.starts_at_ms)}`:""}</div>
-      <div class="lc-actions">${now&&channel.enabled?`<button class="primary" onclick="libraryChannelTune('${esc(channel.id)}')">Tune in</button><button class="ghost" onclick="libraryChannelWatchProgramme('${esc(channel.id)}',${now.file_id},${now.item_id})">Watch from start</button>`:""}${channel.can_edit?`<button class="ghost" onclick="openLibraryChannelEditor('${esc(channel.id)}')">Edit</button>${now?`<button class="ghost" onclick="rebuildLibraryChannel('${esc(channel.id)}',${channel.revision},'next_programme',false)">Apply after this programme</button><button class="ghost" onclick="rebuildLibraryChannel('${esc(channel.id)}',${channel.revision},'next_rotation',true)">Reshuffle next rotation</button>`:""}`:""}</div></article>`;
+      <div class="lc-actions">${now&&channel.enabled?`<button class="primary" onclick="libraryChannelTune('${esc(channel.id)}')">Tune in</button><button class="ghost" onclick="libraryChannelWatchProgramme('${esc(channel.id)}',${now.file_id},${now.item_id})">Watch from start</button>`:""}${channel.can_edit?`<button class="ghost" onclick="openLibraryChannelEditor('${esc(channel.id)}')">Edit</button>${now?`<button class="ghost" onclick="rebuildLibraryChannel('${esc(channel.id)}',${channel.revision},'next_programme',false)">Apply after this programme</button><button class="ghost" onclick="rebuildLibraryChannel('${esc(channel.id)}',${channel.revision},'next_rotation',true)">Reshuffle next rotation</button>`:""}<button class="ghost lc-delete" onclick="deleteLibraryChannelFromList('${esc(channel.id)}')">Delete</button>`:""}</div></article>`;
   }).join("");
   const guide=(LIBRARY_CHANNELS.guide||[]).map(programme=>`<div class="lc-programme"><time>${lcTime(programme.starts_at_ms)}</time><span><b>${esc(programme.title)}</b><small>${esc((channels.find(channel=>channel.id===programme.channel_id)||{}).name||"")}</small></span><button class="ghost sm" onclick="libraryChannelWatchProgramme('${esc(programme.channel_id)}',${programme.file_id},${programme.item_id})">Watch from start</button></div>`).join("");
-  main.innerHTML=`${setHead("Library channels","What is on now and what follows. Channel viewing does not change watch history.",tools)}<div class="lc-grid">${cards}</div><h2 class="section">Guide</h2><div class="card lc-guide">${guide||'<div class="empty">No scheduled programmes.</div>'}</div>`;
+  main.innerHTML=`${setHead("Library channels","What is on now and what follows. Channel viewing does not change watch history.",tools)}${bulk}<div class="lc-grid">${cards}</div><h2 class="section">Guide</h2><div class="card lc-guide">${guide||'<div class="empty">No scheduled programmes.</div>'}</div>`;
 }
 async function toggleLibraryChannelManagement(){LIBRARY_CHANNELS.management=!LIBRARY_CHANNELS.management;await viewLibraryChannels(PAGE_RENDER_GENERATION);}
 
@@ -375,10 +380,71 @@ async function saveLibraryChannel(){
     clearLibraryChannelDraft();LIBRARY_CHANNELS.editor=false;LIBRARY_CHANNELS.draft=null;toast(draft.id?"Channel saved":"Channel created");await viewLibraryChannels(PAGE_RENDER_GENERATION);
   }catch(error){const node=document.getElementById("lc-error");if(node)node.textContent=error.message;}
 }
+// One path for every delete — the editor's button, a card's button and the
+// bulk bar — so each one leaves the page on the list, says what happened, and
+// forgets any saved edit draft for a channel that no longer exists.
+async function lcDeleteOne(channel){
+  try{
+    await api(`/library-channels/${encodeURIComponent(channel.id)}?expected_revision=${channel.revision}&request_id=${encodeURIComponent(newRequestId())}`,{method:"DELETE"});
+    return null;
+  }catch(error){
+    // Already gone is the outcome that was asked for (another tab, or an
+    // earlier attempt whose reply was lost), not a failure to report.
+    return error&&error.status===404?null:error;
+  }
+}
+async function lcDeleteChannels(channels){
+  const deleted=[],failures=[];
+  for(const channel of channels){
+    const error=await lcDeleteOne(channel);
+    if(error)failures.push({channel,error});else deleted.push(channel.id);
+  }
+  try{for(const id of deleted)sessionStorage.removeItem(libraryChannelDraftKey(id));}catch(e){}
+  const selected=LIBRARY_CHANNELS.selected;if(selected)for(const id of deleted)selected.delete(id);
+  return {deleted,failures};
+}
+function lcDeleteSummary({deleted,failures}){
+  if(!failures.length)return deleted.length===1?"Channel deleted":`${deleted.length} channels deleted`;
+  const first=failures[0];
+  const who=failures.length===1?`${first.channel.name||"Channel"} was`:`${failures.length} channels were`;
+  return `${deleted.length?`${deleted.length} deleted. `:""}${who} not deleted: ${first.error&&first.error.message||"request failed"}`;
+}
 async function deleteLibraryChannel(){
   const draft=LIBRARY_CHANNELS.draft;if(!draft||!draft.id||!confirm(`Delete ${draft.name}? Media will not be deleted.`))return;
-  try{await api(`/library-channels/${encodeURIComponent(draft.id)}?expected_revision=${draft.expected_revision}&request_id=${encodeURIComponent(newRequestId())}`,{method:"DELETE"});clearLibraryChannelDraft();LIBRARY_CHANNELS.editor=false;LIBRARY_CHANNELS.draft=null;await viewLibraryChannels(PAGE_RENDER_GENERATION);}
-  catch(error){toast(error.message);}
+  const result=await lcDeleteChannels([{id:draft.id,name:draft.name,revision:draft.expected_revision}]);
+  if(result.failures.length){
+    const message=lcDeleteSummary(result),node=document.getElementById("lc-error");
+    if(node)node.textContent=message;toast(message);return;
+  }
+  LIBRARY_CHANNELS.editor=false;LIBRARY_CHANNELS.draft=null;
+  toast(lcDeleteSummary(result));await viewLibraryChannels(PAGE_RENDER_GENERATION);
+}
+async function deleteLibraryChannelFromList(id){
+  const channel=(LIBRARY_CHANNELS.channels||[]).find(row=>row.id===id);
+  if(!channel||!channel.can_edit||!confirm(`Delete ${channel.name}? Media will not be deleted.`))return;
+  toast(lcDeleteSummary(await lcDeleteChannels([channel])));
+  await viewLibraryChannels(PAGE_RENDER_GENERATION);
+}
+function lcDeletableChannels(){return (LIBRARY_CHANNELS.channels||[]).filter(channel=>channel.can_edit);}
+function lcSelectedChannels(){
+  const selected=LIBRARY_CHANNELS.selected||new Set();
+  return lcDeletableChannels().filter(channel=>selected.has(channel.id));
+}
+function toggleLibraryChannelSelected(id,on){
+  const selected=LIBRARY_CHANNELS.selected||(LIBRARY_CHANNELS.selected=new Set());
+  if(on)selected.add(id);else selected.delete(id);
+  libraryChannelsPaint();
+}
+function selectAllLibraryChannels(on){
+  LIBRARY_CHANNELS.selected=new Set(on?lcDeletableChannels().map(channel=>channel.id):[]);
+  libraryChannelsPaint();
+}
+async function deleteSelectedLibraryChannels(){
+  const channels=lcSelectedChannels();if(!channels.length)return;
+  const names=channels.slice(0,5).map(channel=>channel.name).join(", ")+(channels.length>5?`, and ${channels.length-5} more`:"");
+  if(!confirm(`Delete ${channels.length} channel${channels.length===1?"":"s"} (${names})? Media will not be deleted.`))return;
+  toast(lcDeleteSummary(await lcDeleteChannels(channels)));
+  await viewLibraryChannels(PAGE_RENDER_GENERATION);
 }
 async function toggleLibraryChannelFavourite(id,favourite){
   try{await api(`/library-channels/${encodeURIComponent(id)}/favourite`,{method:"PUT",body:{favourite}});await refreshLibraryChannels(PAGE_RENDER_GENERATION);}
