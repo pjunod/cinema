@@ -115,6 +115,7 @@ pub fn validate_inspection(response: &InspectionResponse) -> Result<(), Inspecti
     }
     if response.expected_generation.is_empty()
         || response.expected_generation.len() > MAX_OPTICAL_ID_BYTES
+        || response.expected_generation.chars().any(char::is_control)
     {
         return Err(InspectionError::Generation);
     }
@@ -137,7 +138,10 @@ pub fn validate_inspection(response: &InspectionResponse) -> Result<(), Inspecti
     }
     let mut title_ids = std::collections::BTreeSet::new();
     for title in &response.disc.titles {
-        if title.title_id.is_empty() || title.title_id.len() > MAX_OPTICAL_ID_BYTES {
+        if title.title_id.is_empty()
+            || title.title_id.len() > MAX_OPTICAL_ID_BYTES
+            || title.title_id.chars().any(char::is_control)
+        {
             return Err(InspectionError::TitleId);
         }
         if title.angles == 0 {

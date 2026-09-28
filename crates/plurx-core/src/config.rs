@@ -282,10 +282,13 @@ impl Config {
                     message: format!("duplicate drive id {:?}", drive.id),
                 });
             }
-            if drive.label.trim().is_empty() || drive.label.len() > 128 {
+            if drive.label.trim().is_empty()
+                || drive.label.len() > 128
+                || drive.label.chars().any(char::is_control)
+            {
                 return Err(ConfigError::Value {
                     key: "optical.drives.label".to_owned(),
-                    message: "must contain 1-128 bytes".to_owned(),
+                    message: "must contain 1-128 bytes without control characters".to_owned(),
                 });
             }
             if drive.device_path.as_os_str().is_empty()

@@ -50,6 +50,7 @@ mod linux {
     const MAX_TITLES: usize = 512;
     const MAX_PROBE_BYTES: usize = 4 * 1024 * 1024;
     const MAX_PROBE_STDERR_BYTES: usize = 64 * 1024;
+    const MAX_PROBE_TEXT_BYTES: usize = 512;
     const PROTECTION_ERROR_PREFIX: &str = "optical-protection-unsupported:";
 
     #[derive(Parser)]
@@ -611,7 +612,7 @@ mod linux {
                     "{PROTECTION_ERROR_PREFIX}the inserted disc is protected and the configured reader cannot decrypt it"
                 ));
             }
-            return Err(stderr.chars().take(512).collect());
+            return Err(bounded_text(&stderr, MAX_PROBE_TEXT_BYTES));
         }
         if stdout.len() > MAX_PROBE_BYTES {
             return Err("ffprobe title reply exceeded its byte bound".into());
@@ -677,7 +678,21 @@ mod linux {
     }
 
     fn string(value: &Value, key: &str) -> Option<String> {
-        value.get(key)?.as_str().map(ToOwned::to_owned)
+        value
+            .get(key)?
+            .as_str()
+            .map(|value| bounded_text(value, MAX_PROBE_TEXT_BYTES))
+    }
+
+    fn bounded_text(value: &str, max_bytes: usize) -> String {
+        let mut result = String::new();
+        for character in value.chars().filter(|character| !character.is_control()) {
+            if result.len().saturating_add(character.len_utf8()) > max_bytes {
+                break;
+            }
+            result.push(character);
+        }
+        result
     }
 
     fn integer(value: &Value, key: &str) -> Option<i64> {
@@ -885,6 +900,15 @@ mod linux {
             let retained =
                 read_bounded_and_drain(std::io::Cursor::new(input), 32).expect("bounded reader");
             assert_eq!(retained, vec![7_u8; 33]);
+        }
+
+        #[test]
+        fn probed_display_text_is_byte_bounded_and_control_free() {
+            let text = format!("English\n{}", "é".repeat(MAX_PROBE_TEXT_BYTES));
+            let bounded = bounded_text(&text, MAX_PROBE_TEXT_BYTES);
+            assert!(!bounded.chars().any(char::is_control));
+            assert!(bounded.len() <= MAX_PROBE_TEXT_BYTES);
+            assert!(bounded.starts_with("English"));
         }
 
         #[test]
