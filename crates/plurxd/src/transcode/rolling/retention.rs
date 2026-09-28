@@ -71,12 +71,10 @@ fn ensure_retention_cleanup(session: &Session) {
         return;
     }
 
-    #[cfg(test)]
-    let cleanup_pause = session
-        .retention_delete_pause
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
+    // Taken here, where the worker is started, so the detached worker holds
+    // no reference to the session.
+    let before_unlink = session.hooks.get().before_retention_unlink();
+    let after_batch = session.hooks.get().after_retention_batch();
     let queue = Arc::clone(&session.retention_cleanup_queue);
     let active = Arc::clone(&session.retention_cleanup_active);
     let garbage_bytes = Arc::clone(&session.retention_garbage_bytes);
@@ -88,11 +86,7 @@ fn ensure_retention_cleanup(session: &Session) {
         .as_ref()
         .map(|permit| (Arc::clone(permit.ledger()), permit.key()));
     tokio::spawn(async move {
-        #[cfg(test)]
-        if let Some(pause) = &cleanup_pause {
-            pause.wait().await;
-            pause.wait().await;
-        }
+        before_unlink.await;
         let pass_len = queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -156,10 +150,7 @@ fn ensure_retention_cleanup(session: &Session) {
             }
         }
         active.store(false, Release);
-        #[cfg(test)]
-        if let Some(pause) = &cleanup_pause {
-            pause.wait().await;
-        }
+        after_batch.await;
     });
 }
 

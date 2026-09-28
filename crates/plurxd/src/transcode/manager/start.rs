@@ -961,36 +961,9 @@ impl TranscodeManager {
             child: Mutex::new(None),
             child_transition: Mutex::new(()),
             replacing_child: AtomicBool::new(false),
-            #[cfg(test)]
-            replacement_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            activity_detail_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            control_applied_pause: std::sync::Mutex::new(None),
             terminal_response_pending: Arc::new(AtomicBool::new(false)),
             terminal_control: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            flow_completion_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            playlist_publication_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            producer_install_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            refresh_after_read_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            path_owner_sample_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            retention_delete_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            response_projection_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            first_media_owner_claim_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            retirement_started: AtomicBool::new(false),
-            #[cfg(test)]
-            retirement_cleanup_handoff_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            scratch_cleanup_pause: std::sync::Mutex::new(None),
+            hooks: crate::seam_hooks::HookSlot::new(&NoopSessionHooks),
             cached: false,
             _cache_reader: None,
             subtitle_handle,
@@ -1566,36 +1539,9 @@ impl TranscodeManager {
             child: Mutex::new(None),
             child_transition: Mutex::new(()),
             replacing_child: AtomicBool::new(false),
-            #[cfg(test)]
-            replacement_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            activity_detail_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            control_applied_pause: std::sync::Mutex::new(None),
             terminal_response_pending: Arc::new(AtomicBool::new(false)),
             terminal_control: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            flow_completion_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            playlist_publication_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            producer_install_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            refresh_after_read_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            path_owner_sample_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            retention_delete_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            response_projection_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            first_media_owner_claim_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            retirement_started: AtomicBool::new(false),
-            #[cfg(test)]
-            retirement_cleanup_handoff_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            scratch_cleanup_pause: std::sync::Mutex::new(None),
+            hooks: crate::seam_hooks::HookSlot::new(&NoopSessionHooks),
             cached: false,
             _cache_reader: None,
             subtitle_handle: None,

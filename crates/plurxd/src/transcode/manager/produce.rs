@@ -502,34 +502,19 @@ impl TranscodeManager {
                 // planning. A crash, cancellation, or store outage from this
                 // point can only resume pending recovery; it cannot run the
                 // failed primary again.
-                #[cfg(test)]
-                let recovery_begin = if self
-                    .fail_next_offline_recovery_begin
-                    .swap(false, std::sync::atomic::Ordering::SeqCst)
-                {
-                    Err(plurx_core::error::StoreError::Database(
-                        "injected offline recovery-begin failure".to_owned(),
-                    ))
-                } else {
-                    self.store
-                        .begin_offline_decode_recovery(
-                            &package.id,
-                            &package.node_id,
-                            package.claim_generation,
-                            &primary_hash,
-                        )
-                        .await
+                let recovery_begin = match self.hooks.get().offline_recovery_begin_fault() {
+                    Some(error) => Err(error),
+                    None => {
+                        self.store
+                            .begin_offline_decode_recovery(
+                                &package.id,
+                                &package.node_id,
+                                package.claim_generation,
+                                &primary_hash,
+                            )
+                            .await
+                    }
                 };
-                #[cfg(not(test))]
-                let recovery_begin = self
-                    .store
-                    .begin_offline_decode_recovery(
-                        &package.id,
-                        &package.node_id,
-                        package.claim_generation,
-                        &primary_hash,
-                    )
-                    .await;
                 let consumed = match recovery_begin {
                     Ok(consumed) => consumed,
                     Err(error) => {
@@ -696,20 +681,8 @@ impl TranscodeManager {
         deadline: Instant,
         cancelled: &tokio_util::sync::CancellationToken,
     ) -> Result<OfflineProduceOutcome, String> {
-        #[cfg(test)]
-        {
-            let scripted = self
-                .offline_produce_script
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .pop_front();
-            if let Some(outcome) = scripted {
-                self.offline_produced_recipes
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(hash.to_owned());
-                return Ok(outcome);
-            }
+        if let Some(outcome) = self.hooks.get().scripted_offline_outcome(hash) {
+            return Ok(outcome);
         }
         self.produce_normalized(
             PortableProduction {
@@ -1314,9 +1287,7 @@ impl TranscodeManager {
             let Some(manifest) = manifest else {
                 return Ok(OfflineProduceOutcome::Yielded);
             };
-            #[cfg(test)]
-            self.manifests_published
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.hooks.get().manifest_published();
             if let Some(expected) = expected_policy_generation.as_deref() {
                 if let Some(outcome) = self.pretranscode_policy_interruption(expected).await {
                     return Ok(outcome);

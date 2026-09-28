@@ -1513,21 +1513,25 @@
         .await
         .expect("predecessor response");
 
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        fixture.pause_response_projection(Arc::clone(&pause));
+        let pause = fixture.pause_response_projection();
         let body_len = body.len();
         let drain = tokio::spawn(async move {
             axum::body::to_bytes(response.into_body(), body_len + 1)
                 .await
                 .expect("predecessor body")
         });
-        pause.wait().await;
+        let held = pause.reached().await;
+        assert_eq!(
+            fixture.actor_delivery().await.fetched_segment,
+            Some(3),
+            "the actor commits the fetch before the point"
+        );
         assert_eq!(
             fixture.begin_producer_attempt().await,
             Ok(1),
             "successor admission resets the compatibility projection"
         );
-        pause.wait().await;
+        held.release();
         assert_eq!(drain.await.expect("body task").len(), body_len);
         assert_eq!(fixture.fetched_segment(), -1);
         assert_eq!(fixture.actor_delivery().await.fetched_segment, None);

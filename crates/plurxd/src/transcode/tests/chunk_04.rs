@@ -1380,11 +1380,7 @@
         let session = Arc::new(test_session(dir.path().to_path_buf()));
         session.publication_worker_started.store(true, Release);
         install_seeded_served_playlist_snapshot(&session, 0).await;
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .playlist_publication_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let pause = session.test_hooks().playlist_publication.arm("playlist_publication");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let mgr = Arc::new(TranscodeManager::new(
             store,
@@ -1402,7 +1398,7 @@
             let mgr = Arc::clone(&mgr);
             async move { mgr.playlist("publication-handoff").await }
         });
-        pause.wait().await;
+        let pause_held = pause.reached().await;
 
         session.replacing_child.store(true, Release);
         let successor = session
@@ -1411,7 +1407,7 @@
             .await
             .expect("prepublication successor");
         session.reset_compatibility_delivery(successor).await;
-        pause.wait().await;
+        pause_held.release();
         clear_session_dir(dir.path())
             .await
             .expect("clear predecessor");
@@ -1464,11 +1460,7 @@
         let session = Arc::new(test_session(dir.path().to_path_buf()));
         session.publication_worker_started.store(true, Release);
         install_seeded_served_playlist(&session, 0).await;
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .playlist_publication_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let pause = session.test_hooks().playlist_publication.arm("playlist_publication");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let mgr = Arc::new(TranscodeManager::new(
             store,
@@ -1485,11 +1477,11 @@
             let mgr = Arc::clone(&mgr);
             async move { mgr.playlist("exact-publication").await }
         });
-        pause.wait().await;
+        let pause_held = pause.reached().await;
         tokio::fs::remove_file(dir.path().join("index.m3u8"))
             .await
             .expect("force the later refresh read to fail");
-        pause.wait().await;
+        pause_held.release();
 
         let bytes = playlist
             .await
@@ -2085,11 +2077,7 @@
             .await
             .expect("predecessor segment");
         let session = watchdog_session(dir.path(), Some(long_running_child()), false);
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .replacement_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let pause = session.test_hooks().replacement.arm("replacement");
 
         let replacement = tokio::spawn({
             let session = Arc::clone(&session);
@@ -2097,7 +2085,7 @@
                 let _ = session.kill_child_for_replacement().await;
             }
         });
-        pause.wait().await;
+        let _held = pause.reached().await;
         tokio::task::yield_now().await;
         assert_eq!(session.control.current_producer_attempt(), 1);
         replacement.abort();
@@ -2133,19 +2121,15 @@
             .kill_child_for_replacement()
             .await
             .expect("admit replacement before retirement");
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .producer_install_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let pause = session.test_hooks().producer_install.arm("producer_install");
 
         let candidate = long_running_child();
         let candidate_pid = candidate.id();
         let install = session.install_replacement_child(producer_attempt, candidate);
         let retire = async {
-            pause.wait().await;
+            let pause_held = pause.reached().await;
             session.control.end().await.expect("end verdict");
-            pause.wait().await;
+            pause_held.release();
         };
         let (result, ()) = tokio::join!(install, retire);
 

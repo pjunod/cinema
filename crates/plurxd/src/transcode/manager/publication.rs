@@ -385,19 +385,8 @@ impl TranscodeManager {
         let MediaResponseOwnerKind::Vod(vod_owner) = &owner.0 else {
             unreachable!("rolling response owner returned above")
         };
-        #[cfg(test)]
-        let admission_pause = self
-            .vod_publication_admission_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        #[cfg(test)]
-        if let Some(admission_pause) = admission_pause {
-            require_publication_authority!();
-            admission_pause.wait().await;
-            admission_pause.wait().await;
-            require_publication_authority!();
-        }
+        require_publication_authority!();
+        self.hooks.get().after_vod_publication_admission().await;
         require_publication_authority!();
         let owner_is_current = match publication.binding {
             MediaResponsePublicationBinding::AttemptStatus => tokio::time::timeout_at(
@@ -828,24 +817,14 @@ impl TranscodeManager {
             {
                 return false;
             }
-            #[cfg(test)]
+            if tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                session.hooks.get().after_media_committed(),
+            )
+            .await
+            .is_err()
             {
-                let pause = session
-                    .response_projection_pause
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
-                if let Some(pause) = pause {
-                    if tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
-                        pause.wait().await;
-                        pause.wait().await;
-                    })
-                    .await
-                    .is_err()
-                    {
-                        return false;
-                    }
-                }
+                return false;
             }
             return true;
         }
@@ -1362,8 +1341,7 @@ impl TranscodeManager {
                             segs: parse_playlist(&String::from_utf8_lossy(&bytes)),
                             revision: 0,
                         };
-                        #[cfg(test)]
-                        session.pause_playlist_publication_for_test().await;
+                        session.hooks.get().before_playlist_publication().await;
                         if !session
                             .control
                             .observe_publication_before(
