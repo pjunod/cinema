@@ -2958,3 +2958,22 @@ source = "clients/apple/UITests/TVPhysicalInputTests.swift"
 source_anchor = "if current.elementType == .other && !target.identifier.isEmpty"
 test = "clients/apple/UITests/TVPhysicalInputTests.swift"
 test_anchor = "func testSettingsChoicesOpenAsMenusOnAppleTV() throws {"
+
+# Live TV exposes actual discovered text services and keeps stale menu rows
+# from changing the replacement player; Off retains the audio selection.
+[[fixes]]
+id = "android.live-tv-caption-selection"
+commits = ["7592def8587b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvCaptions.kt"
+source_anchor = "internal fun liveTvCaptionSelection("
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvCaptionsTest.kt"
+test_anchor = "fun selectionDisablesOnlyTextAndPinsTheObservedService()"
+
+# A selected track is not proof that captions reached the screen.
+[[fixes]]
+id = "android.live-tv-caption-cue-observation"
+commits = ["7592def8587b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvCaptions.kt"
+source_anchor = "internal fun liveTvCaptionSummary(tracks: Tracks, cuesPresent: Boolean): String {"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvCaptionsTest.kt"
+test_anchor = "fun captionSummarySeparatesSelectionFromCueDelivery()"
