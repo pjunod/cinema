@@ -11,6 +11,53 @@ Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md)
 This page records actual implementation and evidence. “Planned” means no
 implementation is claimed; “compiled” does not mean tests passed.
 
+## Activity and subtitle throughput follow-up
+
+**2026-09-27:** implemented on `codex/durable-activity-diagnostics`; final review addressed.
+The existing programme is merged; this follow-up addresses the production
+observation that one old job appears to run indefinitely.
+
+Read-only observations found four reachable workers (nynuc, m6, nuc4, nuc3),
+with successful subtitle attempts on m6, nuc4 and nuc3. Eight queued subtitle
+jobs referred to already-ready analysis requests. Their claim trigger rejected
+ownership, but the worker conservatively treated each database error as an
+uncertain commit and spent up to 30 seconds resolving it while holding local
+heavy-work admission. An older running row had an expired lease. The displayed
+age was time since enqueue, including waiting, rather than execution duration.
+
+The patch filters obsolete subtitle demand during candidate selection and
+rechecks it in the atomic claim. Ordinary refusal therefore does not enter the
+lost-reply wait. Bounded upkeep retires up to 128 obsolete queued or expired
+jobs per pass while preserving live leases, published results and terminal
+analysis history. SQLite migration 84 and replicated schema 62 preserve that
+history when the compatibility trigger settles obsolete work.
+
+Activity uses roster hostnames for owners, attempt history and repair targets.
+It labels total age **Since requested**, shows each attempt's duration, and
+labels an expired lease **awaiting recovery** with its previous owner.
+
+Concurrency remains one heavy background transform per node and two readers
+per storage domain. With no storage-domain mappings, the fallback source budget
+is shared cluster-wide. Foreground media admission can pause background work
+on a busy node; short jobs can finish between the queue's 15-second observations.
+This patch fixes obstructed workers and misleading observations; it does not
+increase storage or CPU admission limits. No production state was modified.
+
+Regression coverage includes a source change between selection and claim,
+obsolete request cleanup, preservation of live leases and terminal history,
+valid expired-job takeover eligibility, and rendered names/timing/expired leases.
+The final adversarial review found two issues: missing registration of the new
+replicated migration source, and stale open-detail observations. Both are
+addressed, including a running-to-terminal refresh regression. Current main
+was integrated before qualification; its Live TV migrations remain intact.
+Focused web rendering/refresh tests, the web type ratchet, documentation index,
+SQLite reconciliation/upgrade and the migration-selector regression passed.
+Subtitle source-change, orphan-demand and ownership/publication contracts passed
+against SQLite and real three-voter Hiqlite. The source-change fixture was
+corrected to respect existing automatic cancellation; historical ready-request
+orphans are independently reproduced through the replicated SQL log.
+The main-bound fast lane follows these focused checks.
+
 ## Delivery progress
 
 | Work | State | Evidence / next action |
