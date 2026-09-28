@@ -1047,8 +1047,8 @@ depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichm
 id = "android.client"
 title = "Native Android and Google TV clients"
 contract = "The Android clients preserve API models, TV focus, preferences, and Media3 playback policy."
-paths = ["clients/android/**"]
-checks = ["android-jvm", "android-device", "player-input-fence", "playback-surface-fence"]
+paths = ["clients/android/**", "scripts/android-profile-report", "tests/contracts/android-release-profile-evidence.schema.json"]
+checks = ["android-jvm", "android-device", "player-input-fence", "playback-surface-fence", "operations-contract"]
 depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichment", "playback.pipeline", "offline.viewing"]
 
 [[points]]

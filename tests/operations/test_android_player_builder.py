@@ -44,6 +44,19 @@ class AndroidPlayerBuilderContract(unittest.TestCase):
                 for required in contract:
                     self.assertIn(required, source)
 
+    def test_screen_on_binder_follows_the_owned_player_and_view_lifecycle(self):
+        source = (JAVA / "player/PlayerScreen.kt").read_text()
+        self.assertIn("PlayerScreenOn(view = { playerView }, player = { controller.player }, isVideo = !plan.isAudioOnly)", source)
+        self.assertEqual(source.count("controller.addPlayerListener(screenOn)"), 1)
+        self.assertEqual(source.count("controller.removePlayerListener(screenOn)"), 1)
+        self.assertIn("screenOn.sync(this)", source)
+        self.assertIn("screenOn.sync(view)", source)
+        self.assertNotIn("keepScreenOn =", source)
+        binder = (JAVA / "player/PlayerScreenOn.kt").read_text()
+        for callback in ("onIsPlayingChanged", "onPlaybackStateChanged", "onPlayWhenReadyChanged"):
+            self.assertIn("override fun " + callback, binder)
+        self.assertIn("current.isPlaying || (current.playWhenReady && current.playbackState == Player.STATE_BUFFERING)", binder)
+
 
 if __name__ == "__main__":
     unittest.main()

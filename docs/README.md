@@ -368,6 +368,7 @@ player obeys, subtitles and overlays, layouts and themes.
 | [330-calm-library-pages.md](apple-builds/330-calm-library-pages.md) | Apple build 162 quiet Home and open media details. | built |
 | [582-seek-observability.md](apple-builds/582-seek-observability.md) | Apple build194 seek terminal beacons and live viewing method. | open |
 | [590-acceptance-focus.md](apple-builds/590-acceptance-focus.md) | Apple build197 physical TV focus navigation correction and acceptance provenance. | open |
+| [465-adaptive-library-prefetch.md](apple-builds/465-adaptive-library-prefetch.md) | Apple199 and Android136 native two-row prefetch, diagnostics and profile tooling batch; qualification and physical evidence. | open |
 | [594-live-tv-caption-and-capacity.md](apple-builds/594-live-tv-caption-and-capacity.md) | Apple198 and Android135 Live TV caption choices and explicit capacity alternatives; qualification and physical acceptance. | open |
 | [359-apple-pause-resume.md](apple-builds/359-apple-pause-resume.md) | Apple return-to-picture owner, deadline, and advisory enablement. | built |
 | [playback-info-redesign.md](apple-builds/playback-info-redesign.md) | Apple build 161 playback-info changes. | open |

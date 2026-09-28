@@ -7,6 +7,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.kotlinx.serialization.asConverterFactory
+import tv.plurx.app.BuildConfig
 import java.util.concurrent.TimeUnit
 
 /**
@@ -23,6 +24,11 @@ object Net {
     val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
+        .apply {
+            // D-03 M5 measures contention before deciding whether Coil needs
+            // a separate dispatcher. Release networking remains uninstrumented.
+            if (BuildConfig.DEBUG) eventListenerFactory(NetCallDiagnostics.factory())
+        }
         .addInterceptor { chain ->
             val token = Session.token
             val req = chain.request()

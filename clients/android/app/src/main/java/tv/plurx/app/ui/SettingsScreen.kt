@@ -19,6 +19,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.LaunchedEffect
+import tv.plurx.app.diagnostics.readReleaseProfileStatus
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -76,6 +78,8 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDeveloper: () -> 
     var audio by remember { mutableStateOf(LANGS.firstOrNull { it.first == vm.audioLang } ?: LANGS.first()) }
     var sub by remember { mutableStateOf(SUB_LANGS.firstOrNull { it.first == vm.subLang } ?: SUB_LANGS.first()) }
     var confirmingSignOut by remember { mutableStateOf(false) }
+    var profileStatus by remember { mutableStateOf("Checking release profile status…") }
+    LaunchedEffect(Unit) { profileStatus = readReleaseProfileStatus() }
     val context = LocalContext.current
     val deviceSettings = remember(context) { SettingsStore(context) }
     val liveTvLayoutValue by deviceSettings.liveTvLayout.collectAsStateWithLifecycle(initialValue = null)
@@ -230,6 +234,9 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDeveloper: () -> 
 
             SettingsSection("Developer", "Runtime enablement with the requirements needed to use each feature safely.") {
                 PreferenceAction("HDHomeRun Live TV setup and enablement", onClick = onOpenDeveloper)
+                Text("Release startup profile", style = MaterialTheme.typography.titleMedium)
+                Text(profileStatus, style = MaterialTheme.typography.bodySmall, color = Muted)
+                Text("Profile capture needs a dedicated paired account, a controlled movie and physical release measurements. Profile readiness is advisory and changes no feature enablement.", style = MaterialTheme.typography.bodySmall, color = Muted)
                 PreparedReplacementEnable(
                     enabled = preferences.preparedReplacement,
                     isTelevision = isTelevision(LocalContext.current),
