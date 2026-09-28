@@ -138,7 +138,9 @@ test_anchor = "testTheRevealLayerIsNotFocusableWhileTheOverlayOrTheGuideIsVisibl
 id = "apple.live-tv-info-focus-review"
 commits = ["90c18453"]
 source = "clients/apple/Sources/LiveTvView.swift"
-source_anchor = "guard !visible, fullscreen, overlayVisible else { return }"
+# The Info dismissal's deferred write moved into returnFocusToCoverSheetOpener
+# (PR #589), which every cover sheet's onDismiss now calls.
+source_anchor = "let opener = coverSheetOpener ?? .pillPlay"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testFullscreenFocusDefaultsToPauseAndReturnsThereFromTheRevealLayer"
 
