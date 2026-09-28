@@ -477,21 +477,28 @@ mod linux {
                 .strip_prefix(mount)
                 .map_err(|_| "navigation path escaped mount")?;
             let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
-            hash.update(relative.as_os_str().as_encoded_bytes());
+            let relative = relative.as_os_str().as_encoded_bytes();
+            hash.update((relative.len() as u64).to_be_bytes());
+            hash.update(relative);
             hash.update(metadata.len().to_be_bytes());
             navigation_bytes = navigation_bytes.saturating_add(metadata.len());
-            if navigation_bytes > MAX_NAVIGATION_BYTES {
-                return Err("optical navigation bytes exceed their bound".into());
+            let remaining = MAX_NAVIGATION_BYTES.saturating_sub(sampled);
+            if remaining == 0 {
+                continue;
             }
             let mut file = File::open(&path).map_err(|error| error.to_string())?;
-            let take = metadata.len().min(SAMPLE_BYTES);
-            let mut prefix = vec![0_u8; take as usize];
+            let sample = metadata
+                .len()
+                .min(SAMPLE_BYTES.saturating_mul(2))
+                .min(remaining);
+            let prefix_len = sample.min(SAMPLE_BYTES);
+            let mut prefix = vec![0_u8; prefix_len as usize];
             file.read_exact(&mut prefix)
                 .map_err(|error| error.to_string())?;
             hash.update(&prefix);
-            sampled = sampled.saturating_add(take);
-            if metadata.len() > take {
-                let suffix_len = (metadata.len() - take).min(SAMPLE_BYTES);
+            sampled = sampled.saturating_add(prefix_len);
+            let suffix_len = sample.saturating_sub(prefix_len);
+            if suffix_len > 0 {
                 file.seek(SeekFrom::End(-(suffix_len as i64)))
                     .map_err(|error| error.to_string())?;
                 let mut suffix = vec![0_u8; suffix_len as usize];
@@ -722,7 +729,10 @@ mod linux {
             .map(|(index, chapter)| InspectedChapter {
                 index: u32::try_from(index).unwrap_or(u32::MAX),
                 start_ms: seconds_ms(chapter.get("start_time")),
-                accurate: true,
+                // FFprobe's navigation timestamp is useful for a chapter
+                // start, but this path has not built the physical title's
+                // cell/clip index. Do not promise frame-accurate markers.
+                accurate: false,
             })
             .collect();
         let locator_json = serde_json::to_vec(&locator).map_err(|error| error.to_string())?;
@@ -859,16 +869,17 @@ mod linux {
             let directory = tempfile::tempdir().expect("tempdir");
             let bdmv = directory.path().join("BDMV");
             fs::create_dir_all(bdmv.join("PLAYLIST")).expect("playlist directory");
-            fs::write(
-                bdmv.join("PLAYLIST/00001.mpls"),
-                vec![3_u8; (SAMPLE_BYTES * 2 + 1) as usize],
-            )
-            .expect("large playlist");
+            let playlist =
+                File::create(bdmv.join("PLAYLIST/00001.mpls")).expect("large sparse playlist");
+            playlist
+                .set_len(MAX_NAVIGATION_BYTES + 1)
+                .expect("sparse playlist length");
 
             let evidence =
                 fingerprint(OpticalFormat::Bluray, directory.path(), &bdmv).expect("fingerprint");
             assert!(!evidence.complete);
             assert!(evidence.bounded_sample_bytes < evidence.navigation_bytes);
+            assert!(evidence.bounded_sample_bytes <= MAX_NAVIGATION_BYTES);
         }
 
         #[test]
