@@ -34,7 +34,7 @@ mod linux {
     use plurx_core::optical::{
         FingerprintEvidence, InspectedChapter, InspectedDisc, InspectedStream, InspectedTitle,
         InspectionResponse, OpticalFormat, OpticalTitleLocator, ProtectionFacts, ResolvedInput,
-        INSPECTION_SCHEMA_V1, MAX_BLURAY_PLAYLIST_NUMBER,
+        INSPECTION_SCHEMA_V1, MAX_BLURAY_PLAYLIST_NUMBER, OPTICAL_FINGERPRINT_V1,
     };
     use plurx_core::playback::{PlaybackMediaFacts, SourceDelivery};
     use serde::Serialize;
@@ -527,7 +527,7 @@ mod linux {
             }
         }
         Ok(FingerprintEvidence {
-            version: 1,
+            version: OPTICAL_FINGERPRINT_V1,
             // A digest built from prefixes/suffixes is useful for bounded
             // diagnostics but cannot safely inherit durable progress or
             // matches across reinsertion. Only claim complete identity when

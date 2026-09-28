@@ -23,7 +23,7 @@ pub use input::{InputBuildError, OpticalTitleLocator, ResolvedInput, MAX_BLURAY_
 pub use inspector::{
     inspection_to_store, validate_inspection, FingerprintEvidence, InspectedChapter, InspectedDisc,
     InspectedStream, InspectedTitle, InspectionError, InspectionResponse, ProtectionFacts,
-    INSPECTION_SCHEMA_V1,
+    INSPECTION_SCHEMA_V1, OPTICAL_FINGERPRINT_V1,
 };
 pub use lifecycle::{
     OpticalDriveManager, OpticalDriveSnapshot, OpticalDriveState, OpticalLifecycleError,

@@ -7,6 +7,7 @@ use super::{
 use crate::playback::{PlaybackMediaFacts, SourceDelivery};
 
 pub const INSPECTION_SCHEMA_V1: u32 = 1;
+pub const OPTICAL_FINGERPRINT_V1: u32 = 1;
 const MAX_TITLES: usize = 512;
 const MAX_STREAMS_PER_TITLE: usize = 256;
 const MAX_CHAPTERS_PER_TITLE: usize = 4096;
@@ -153,7 +154,7 @@ pub fn validate_inspection(response: &InspectionResponse) -> Result<(), Inspecti
     {
         return Err(InspectionError::Text);
     }
-    if response.disc.fingerprint.version == 0
+    if response.disc.fingerprint.version != OPTICAL_FINGERPRINT_V1
         || response.disc.fingerprint.digest.len() != 64
         || !response
             .disc
@@ -161,6 +162,11 @@ pub fn validate_inspection(response: &InspectionResponse) -> Result<(), Inspecti
             .digest
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
+        || response.disc.fingerprint.bounded_sample_bytes
+            > response.disc.fingerprint.navigation_bytes
+        || response.disc.fingerprint.complete
+            != (response.disc.fingerprint.bounded_sample_bytes
+                == response.disc.fingerprint.navigation_bytes)
     {
         return Err(InspectionError::Fingerprint);
     }
@@ -187,12 +193,35 @@ pub fn validate_inspection(response: &InspectionResponse) -> Result<(), Inspecti
         {
             return Err(InspectionError::Locator);
         }
+        let duration_ms = title
+            .duration_ms
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| InspectionError::Facts)?;
         if title.facts.source_delivery != SourceDelivery::ManagedOpticalTitle
             || title.facts.learned_limit_identity.is_some()
+            || title.facts.duration_ms != duration_ms
+            || !title.facts.probed
+            || title.facts.audio_offset_ms != 0
+            || title.facts.width.is_some_and(|value| value <= 0)
+            || title.facts.height.is_some_and(|value| value <= 0)
+            || title.facts.bit_depth.is_some_and(|value| value <= 0)
+            || title.facts.bitrate.is_some_and(|value| value <= 0)
             || title
-                .duration_ms
-                .zip(title.facts.duration_ms)
-                .is_some_and(|(inspected, facts)| i64::try_from(inspected).ok() != Some(facts))
+                .facts
+                .dolby_vision
+                .profile
+                .is_some_and(|value| value < 0)
+            || title
+                .facts
+                .dolby_vision
+                .level
+                .is_some_and(|value| value < 0)
+            || title
+                .facts
+                .dolby_vision
+                .bl_compat_id
+                .is_some_and(|value| value < 0)
         {
             return Err(InspectionError::Facts);
         }
@@ -231,6 +260,7 @@ pub fn validate_inspection(response: &InspectionResponse) -> Result<(), Inspecti
             if stream.index < 0
                 || !audio_ids.insert(stream.index)
                 || !text(&stream.codec)
+                || stream.channels.is_some_and(|value| value <= 0)
                 || stream.language.as_deref().is_some_and(|value| !text(value))
                 || stream.title.as_deref().is_some_and(|value| !text(value))
             {
@@ -255,6 +285,7 @@ pub fn validate_inspection(response: &InspectionResponse) -> Result<(), Inspecti
                 || stream.kind.is_empty()
                 || !text(&stream.kind)
                 || stream.codec.as_deref().is_some_and(|value| !text(value))
+                || stream.channels == Some(0)
                 || stream.language.as_deref().is_some_and(|value| !text(value))
                 || stream.title.as_deref().is_some_and(|value| !text(value))
             {
@@ -372,7 +403,7 @@ mod tests {
                     complete: true,
                     digest: "00".repeat(32),
                     navigation_bytes: 12,
-                    bounded_sample_bytes: 4096,
+                    bounded_sample_bytes: 12,
                 },
                 titles: vec![InspectedTitle {
                     title_id: "title-a".into(),
@@ -453,6 +484,30 @@ mod tests {
         let mut invalid = response();
         invalid.disc.volume_label = Some("forged\nlabel".to_owned());
         assert_eq!(validate_inspection(&invalid), Err(InspectionError::Text));
+    }
+
+    #[test]
+    fn optical_helper_reply_rejects_inconsistent_fingerprint_evidence() {
+        let mut invalid = response();
+        invalid.disc.fingerprint.complete = false;
+        assert_eq!(
+            validate_inspection(&invalid),
+            Err(InspectionError::Fingerprint)
+        );
+
+        invalid.disc.fingerprint.bounded_sample_bytes = 11;
+        validate_inspection(&invalid).expect("incomplete bounded evidence");
+    }
+
+    #[test]
+    fn optical_helper_reply_rejects_inconsistent_media_facts() {
+        let mut invalid = response();
+        invalid.disc.titles[0].facts.duration_ms = None;
+        assert_eq!(validate_inspection(&invalid), Err(InspectionError::Facts));
+
+        invalid = response();
+        invalid.disc.titles[0].facts.height = Some(-1080);
+        assert_eq!(validate_inspection(&invalid), Err(InspectionError::Facts));
     }
 
     #[test]
