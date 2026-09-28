@@ -12,6 +12,7 @@ final class LiveTvPlayerController: ObservableObject {
     /// actually reached the server rather than assert a constant.
     static func testing(
         requests: LiveTvRequests,
+        channels: [LiveTvChannel] = [],
         activateAudioSession: @escaping () -> Void = {},
         deactivateAudioSession: @escaping () -> Void = {}
     ) -> LiveTvPlayerController {
@@ -22,10 +23,11 @@ final class LiveTvPlayerController: ObservableObject {
         // A real client only so `watch` gets past its own guard; it is never
         // asked for the network, because the stub lease answers first.
         controller.api = LiveTvAPI(origin: "http://127.0.0.1:1", token: nil)
-        controller.channels = []
+        controller.channels = channels
         return controller
     }
     @Published private(set) var channels: [LiveTvChannel] = []
+    @Published private(set) var capacityOffers: [LiveTvCapacityOffer] = []
     @Published private(set) var message = "Choose a channel to watch live."
     @Published private(set) var title: String?
     @Published private(set) var busy = false
@@ -110,6 +112,9 @@ final class LiveTvPlayerController: ObservableObject {
             channels = lineup.channels.map { channel in
                 watching?.id == channel.id ? (watching ?? channel) : channel
             }
+            capacityOffers = capacityOffers.filter { offer in
+                channels.contains { $0.id == offer.channel.id && $0.watchable }
+            }
             expireSourceFormats(now: Int(Date().timeIntervalSince1970))
             startGuideRefresh(loading)
             message = lineup.freshness == "stale"
@@ -162,10 +167,29 @@ final class LiveTvPlayerController: ObservableObject {
             message = error.localizedDescription
             // A URL/attachment failure after acquiring a capability must also
             // release it. The lease retains ownership if cleanup cannot finish.
-            do { try await lease.stop() } catch { message += " Cleanup is unconfirmed; use Stop to retry." }
+            do {
+                try await lease.stop()
+                guard serial == expected else { return }
+                if let failure = error as? LiveTvFailure {
+                    capacityOffers = LiveTvCapacityOffer.resolve(failure, lineup: channels, generation: expected)
+                }
+            } catch {
+                guard serial == expected else { return }
+                message += " Cleanup is unconfirmed; use Stop to retry."
+            }
             endAudioSession()
         }
         if serial == expected { busy = false }
+    }
+
+    /// Only a current, explicit offer can invoke the normal start path. The
+    /// lease releases this viewer's prior session; no shared stop or tuner
+    /// reclamation endpoint exists on this action.
+    func watchOffer(_ offer: LiveTvCapacityOffer) async {
+        guard !busy, offer.generation == serial, capacityOffers.contains(offer),
+              let channel = channels.first(where: { $0.id == offer.channel.id && $0.watchable })
+        else { return }
+        await watch(channel)
     }
 
     /// Everything a granted session does after the POST answers: the player
@@ -591,6 +615,7 @@ final class LiveTvPlayerController: ObservableObject {
     }
 
     private func detach() {
+        capacityOffers = []
         captions.detach()
         remoteCommands.stop()
         heartbeat?.cancel()
@@ -2434,6 +2459,9 @@ struct LiveTvView: View {
                 .padding(.horizontal, 12).padding(.vertical, 6)
                 .background(Palette.surface.opacity(0.94))
                 .accessibilityIdentifier("live-tv-status")
+        }
+        if !live.capacityOffers.isEmpty {
+            LiveTvCapacityOfferActions(live: live)
         }
     }
 

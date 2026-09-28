@@ -5,6 +5,79 @@ import XCTest
 
 @MainActor
 final class LiveTvTests: XCTestCase {
+    func testCapacityOffersResolveOnlyKnownPlayableChannels() {
+        let protected = LiveTvChannel(id: "protected", guideNumber: "10.1", guideName: "Protected",
+                                      favorite: false, drm: true, support: "drm_unsupported",
+                                      hd: nil, videoCodec: nil, audioCodec: nil)
+        func holder(_ id: String) -> LiveTvTunerHolder {
+            LiveTvTunerHolder(channelId: id, guideNumber: "999.1", channelName: "Stale name", sinks: [])
+        }
+        let failure = LiveTvFailure(code: "tuner_capacity", watchable: [
+            holder(channel.id), holder("missing"), holder(protected.id), holder(channel.id),
+        ])
+        let resolved = LiveTvCapacityOffer.resolve(failure, lineup: [channel, protected], generation: 4)
+        XCTAssertEqual(resolved.map(\.channel), [channel], "use the known identity and metadata, not guessed guide numbers")
+        XCTAssertEqual(resolved.first?.generation, 4)
+        XCTAssertTrue(LiveTvCapacityOffer.resolve(
+            LiveTvFailure(code: "owner_unavailable", watchable: failure.watchable),
+            lineup: [channel], generation: 4
+        ).isEmpty, "only an explicit capacity offer can supply actions")
+    }
+
+    func testLeasePreservesStructuredCapacityOffers() async throws {
+        let holder = LiveTvTunerHolder(channelId: channel.id, guideNumber: channel.guideNumber,
+                                      channelName: channel.guideName, sinks: [])
+        let requests = LiveTvMockRequests(result: started())
+        requests.startFailure = LiveTvFailure(code: "tuner_capacity", retry: "never",
+                                             ownerDecided: true, status: 409,
+                                             holders: [holder], watchable: [holder])
+        let lease = LiveTvLease(requests: requests, hints: LiveTvMemoryHintStore())
+        do {
+            _ = try await lease.start(channel.id)
+            XCTFail("capacity must remain a refusal until a user chooses an alternative")
+        } catch let failure as LiveTvFailure {
+            XCTAssertEqual(failure.watchable, [holder])
+            XCTAssertEqual(failure.holders, [holder])
+            XCTAssertTrue(failure.ownerDecided)
+            XCTAssertEqual(failure.status, 409)
+        }
+        XCTAssertEqual(requests.events, ["start:\(channel.id)"])
+        XCTAssertNil(lease.current)
+    }
+
+    func testWatchableCapacityOfferNeedsAnExplicitCurrentAction() async throws {
+        let offered = LiveTvChannel(id: "offered-id", guideNumber: "6.1", guideName: "Shared",
+                                    favorite: false, drm: false, support: "ready",
+                                    hd: nil, videoCodec: nil, audioCodec: nil)
+        let requests = LiveTvMockRequests(result: started())
+        requests.startFailure = LiveTvFailure(code: "tuner_capacity", ownerDecided: true, status: 409,
+                                             watchable: [LiveTvTunerHolder(channelId: offered.id,
+                                                 guideNumber: offered.guideNumber,
+                                                 channelName: offered.guideName, sinks: [])])
+        let controller = LiveTvPlayerController.testing(requests: requests, channels: [channel, offered])
+        await controller.watch(channel)
+        XCTAssertEqual(requests.events, ["start:\(channel.id)"], "publishing an offer cannot tune automatically")
+        let old = try XCTUnwrap(controller.capacityOffers.first)
+        await controller.stop()
+        await controller.watch(channel)
+        await controller.watchOffer(old)
+        XCTAssertEqual(requests.events, ["start:\(channel.id)", "start:\(channel.id)"],
+                       "an older capacity button cannot act on a newer refusal")
+        let current = try XCTUnwrap(controller.capacityOffers.first)
+        requests.startFailure = nil
+        requests.result = LiveTvStarted(sessionId: "own-shared-viewer",
+                                        playlistUrl: "/api/v1/live-tv/sessions/own-shared-viewer/master.m3u8",
+                                        channel: offered, live: true)
+        await controller.watchOffer(current)
+        XCTAssertEqual(requests.events, ["start:\(channel.id)", "start:\(channel.id)", "start:\(offered.id)"])
+        XCTAssertEqual(controller.watching?.id, offered.id)
+        await controller.watchOffer(current)
+        XCTAssertEqual(requests.events.count, 3, "an offer is consumed by the user's first tune")
+        await controller.stop()
+        XCTAssertEqual(requests.events.last, "release:own-shared-viewer", "cleanup names only this viewer's grant")
+        XCTAssertTrue(controller.capacityOffers.isEmpty)
+    }
+
     func testLiveCaptionsRejectSyntheticUnadvertisedCC() {
         XCTAssertFalse(LiveTvCaptions.isSelectable(mediaType: .closedCaption, captionsAdvertised: false))
         XCTAssertTrue(LiveTvCaptions.isSelectable(mediaType: .closedCaption, captionsAdvertised: true))
