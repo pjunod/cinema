@@ -7016,9 +7016,11 @@ final class PlayerController: ObservableObject {
             }
         }
         sampleSeekPresentationClocks()
+        let telemetryOwner = snapshotAttempt()
         seekPresentationTask = Task { [weak self, weak item] in
             defer {
-                if let self, self.seekState.generation != generation {
+                if let self,
+                   !self.attemptStillCurrent(telemetryOwner, fence: .seekTelemetrySupersession) {
                     self.abandonSeekMeasurement(generation: generation)
                 }
             }
