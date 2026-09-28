@@ -134,7 +134,7 @@ Usage:
                              [--browser chrome|safari|edge|firefox]
                              [--case TEXT] [--exclude-case TEXT] [--observe SECONDS]
                              [--network-profile NAME] [--json PATH] [--junit PATH]
-                             [--preparation-measurement]
+                             [--preparation-measurement] [--frame-diagnostics]
                              [--fixtures DIR] [--server PATH]
                              [--chrome PATH] [--edge PATH]
                              [--firefox PATH] [--geckodriver PATH]
@@ -2097,9 +2097,18 @@ async function prepareBrowser(driver, token) {
     native_hls:useNativeHls(document.getElementById('video')),mse:!!(window.MediaSource&&window.Hls&&Hls.isSupported())})`);
 }
 
-async function setCasePreferences(driver, quality) {
+function diagnosticSwitchCommit(commit, stageAtMs) {
+  return commit && Number.isFinite(stageAtMs) && Number.isFinite(commit.at)
+    && commit.at >= stageAtMs ? commit : null;
+}
+
+async function setCasePreferences(driver, quality, frameDiagnostics = false) {
   await driver.exec(`
     try{closePlayer()}catch(e){}
+    // Diagnostic only: keep this out of the ordinary snapshots and scorer.
+    // Existing callbacks append to bounded rings; no new timer/subscription.
+    globalThis.__plurxLabFrameDiagnostics=${frameDiagnostics ? `{windows:[],dropped_windows:0,max_windows:4,max_records:512}` : "null"};
+    globalThis.__plurxLabDiagnosticCommit=${diagnosticSwitchCommit.toString()};
     globalThis.__plurxLabMediaEvents=[];
     globalThis.__plurxLabMediaEventSeq=globalThis.__plurxLabMediaEventSeq||0;
     globalThis.__plurxLabInstallVideoProbe=(v)=>{
@@ -2123,6 +2132,49 @@ async function setCasePreferences(driver, quality) {
           globalThis.__plurxLabFrameProbe={supported:true,sequence:0,last_frame_at_ms:null,
             maximum_gap_ms:0,maximum_gap_detail:null,frames:0,last_frame:null,auto_presentations:[]};
         const frame=(now,metadata)=>{
+          const diagnostic=globalThis.__plurxLabFrameDiagnostics;
+          if(diagnostic){
+            const owner=(typeof PLAYER!=='undefined'&&PLAYER)||{};
+            const handoff=owner.prepared||owner.preparedCommitting||owner.preparedRetiring;
+            let window=diagnostic.windows[diagnostic.windows.length-1];
+            if(handoff&&(!window||window.action_id!==handoff.actionId)){
+              window={action_id:handoff.actionId,stage_at_ms:handoff.stageAtMs,
+                records:[],next:0,total_records:0,
+                expires_at_ms:now+1000};
+              if(diagnostic.windows.length===diagnostic.max_windows){
+                diagnostic.windows.shift();diagnostic.dropped_windows++;
+              }
+              diagnostic.windows.push(window);
+            }
+            if(handoff&&window) window.expires_at_ms=now+1000;
+            if(window&&now<=window.expires_at_ms){
+              const number=value=>Number.isFinite(value)?value:null;
+              const commit=globalThis.__plurxLabDiagnosticCommit(owner.switchCommit,window.stage_at_ms);
+              const visible=document.getElementById('video')===v;
+              const session=visible?owner.sessionId
+                :handoff?.predecessor?.element===v?handoff.predecessor.sessionId
+                :v===preparedVideoElement()?handoff?.sessionId:v.__plurxLabDiagnosticSessionId;
+              if(session) v.__plurxLabDiagnosticSessionId=session;
+              const record={callback_at_ms:now,element_id:v.__plurxLabElementId||null,
+                visible,session_id:session||null,
+                presentation_time_ms:number(metadata?.presentationTime),
+                expected_display_time_ms:number(metadata?.expectedDisplayTime),
+                media_time:number(metadata?.mediaTime),
+                presented_frames:number(metadata?.presentedFrames),
+                processing_duration_seconds:number(metadata?.processingDuration),
+                current_time:number(v.currentTime),seeking:!!v.seeking,paused:!!v.paused,
+                muted:!!v.muted,playback_rate:number(v.playbackRate),
+                phase:handoff?.overlapPhase||null,
+                stage_at_ms:number(handoff?.stageAtMs),
+                buffer_ready_at_ms:number(handoff?.bufferReadyAtMs),
+                proof_ready_at_ms:number(handoff?.overlapProofReadyAtMs),
+                switch_at_ms:number(commit?.at),first_frame_at_ms:number(commit?.firstFrameAt),
+                retirement_pending:!!owner.preparedRetiring};
+              if(window.records.length<diagnostic.max_records) window.records.push(record);
+              else{window.records[window.next]=record;window.next=(window.next+1)%diagnostic.max_records;}
+              window.total_records++;
+            }
+          }
           // A prepared successor already renders while hidden. Keep its callback
           // armed so the first visible frame after the id swap is measured,
           // even when the next WebDriver snapshot has not yet installed a probe.
@@ -3501,10 +3553,10 @@ function normalizeTrace(report) {
   };
 }
 
-async function runOneCase(driver, server, manifest, fixture, testCase, browserInfo, observeOverride, shaper) {
+async function runOneCase(driver, server, manifest, fixture, testCase, browserInfo, observeOverride, shaper, frameDiagnostics = false) {
   const file = server.files.get(fixture.filename);
   if (!file) throw new Error(`scanner did not return ${fixture.filename}`);
-  await setCasePreferences(driver, testCase.quality);
+  await setCasePreferences(driver, testCase.quality, frameDiagnostics);
   const decision = await api(server.baseUrl,
     `/files/${file.id}/decision?${browserInfo.caps_q}&force=${qualityForce(testCase.quality)}`,
     { token: server.token });
@@ -3942,6 +3994,7 @@ async function runSuite(manifest, options, dependencies = {}) {
       try {
         result = await (dependencies.runOneCase || runOneCase)(
           driver, server, manifest, fixture, testCase, browserInfo, options.observe, shaper,
+          enabledOption(options.frame_diagnostics),
         );
       } catch (error) {
         result = {
@@ -3949,6 +4002,24 @@ async function runSuite(manifest, options, dependencies = {}) {
           status: "failed", duration_ms: 0, errors: [error.message], warnings: [],
         };
       } finally {
+        // Read once after the verdict has been computed, never at the sampling
+        // cadence. Truncation and observer overhead are explicit diagnostics;
+        // these records do not participate in any score or threshold.
+        if(enabledOption(options.frame_diagnostics)&&result){
+          try{
+            result.frame_diagnostics=await driver.eval(`(()=>{
+              const d=globalThis.__plurxLabFrameDiagnostics;
+              if(!d) return null;
+              return {max_windows:d.max_windows,max_records_per_window:d.max_records,
+                dropped_windows:d.dropped_windows,
+                timing_scope:'Existing rVFC callbacks; opt-in allocation overhead; not scored',
+                unavailable:['Exact alignment seek start/end and retirement callback timestamp'],
+                windows:d.windows.map(w=>({action_id:w.action_id,total_records:w.total_records,
+                  dropped_records:Math.max(0,w.total_records-w.records.length),
+                  records:w.records.slice(w.next).concat(w.records.slice(0,w.next))}))};
+            })()`);
+          }catch(error){result.frame_diagnostics={capture_error:error.message};}
+        }
         // A timeout can leave native HLS or a transcode session attached to the
         // video element. Close it, then make a fresh page the case boundary so
         // WebKit media state cannot turn one real failure into a false cascade.
@@ -4407,6 +4478,7 @@ module.exports = {
   completedFragmentIndexPass,
   compactPreparationReport,
   diagnosticPath,
+  diagnosticSwitchCommit,
   deviceRunCommand,
   deviceProxyCommand,
   defaultServerBin,

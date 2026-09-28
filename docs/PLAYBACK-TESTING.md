@@ -289,6 +289,23 @@ scripts/playback-lab run --suite stall-recovery \
   --network-profile 8mbps-to-1.5mbps --json out/stall-recovery.json
 ```
 
+For a failed prepared handoff, add `--frame-diagnostics` to the same
+`playback-lab run` command. The result's `frame_diagnostics` retains callback,
+presentation and expected-display timestamps, media time, presented-frame
+counts and processing duration from the already armed video-frame callbacks.
+It also records read-only alignment, mute, rate and retirement state around
+each handoff. Storage is bounded to four handoff windows of512 records;
+`dropped_windows` and `dropped_records` disclose truncation.
+
+The diagnostic buffer is read once after scoring. It adds no callback or
+timer and changes no detector, score or threshold, but its allocations can
+affect callback timing. Compare presentation timestamps and frame counts
+with callback time; a callback gap alone cannot distinguish delayed
+presentation from delayed callback delivery. Exact alignment-seek and
+retirement callback timestamps are unavailable; state observations only
+bound those events. A diagnostic run retains its verdict and does not replace
+an earlier failed acceptance trace.
+
 ### Physical Apple acceptance is one unattended run
 
 Do not use Network Link Conditioner presets and a person with the Siri Remote
