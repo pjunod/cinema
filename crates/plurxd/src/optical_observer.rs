@@ -10,6 +10,37 @@ use plurx_core::store::{keys, stored_switch};
 
 use crate::state::AppState;
 
+const OPTICAL_READER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Close admission, durably terminate every active optical session, and wait
+/// until each exact physical-reader permit has completed cleanup. The saved
+/// runtime choice remains authoritative; this is the operational drain owed
+/// by a disable or process shutdown, not a readiness gate.
+pub(crate) async fn deactivate_and_drain(state: &AppState, reason: &'static str) -> bool {
+    let session_ids = state.optical.deactivate();
+    for session_id in session_ids {
+        let status = crate::http::hls::release_with_terminal(
+            state.clone(),
+            session_id.clone(),
+            crate::vodserve::Terminal::Revoked,
+            reason,
+        )
+        .await;
+        if !status.is_success() && status != axum::http::StatusCode::NOT_FOUND {
+            tracing::warn!(%status, "optical durable session drain was not confirmed");
+        }
+        let _ = state.transcode.stop_session(&session_id, reason).await;
+    }
+
+    tokio::time::timeout(OPTICAL_READER_DRAIN_TIMEOUT, async {
+        while state.optical.manager().active_reader_count() != 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
 pub(crate) async fn observation_loop(
     state: AppState,
     shutdown: tokio_util::sync::CancellationToken,
@@ -39,13 +70,17 @@ pub(crate) async fn observation_loop(
                 tracing::debug!(%drive_id, %error, "optical observation did not complete");
             }
         } else if was_enabled {
-            state.optical.deactivate();
+            if !deactivate_and_drain(&state, "optical source revoked by runtime disable").await {
+                tracing::warn!("optical disable timed out waiting for physical readers");
+            }
         }
         was_enabled = enabled;
 
         tokio::select! {
             () = shutdown.cancelled() => {
-                state.optical.deactivate();
+                if !deactivate_and_drain(&state, "optical source revoked by server shutdown").await {
+                    tracing::warn!("optical shutdown timed out waiting for physical readers");
+                }
                 return;
             }
             () = tokio::time::sleep(state.optical.poll_interval()) => {}

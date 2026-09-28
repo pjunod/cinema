@@ -4211,7 +4211,7 @@ pub async fn delete(State(state): State<AppState>, AxPath(session): AxPath<Strin
 /// Run an authenticated operator terminal through the same exact, durable
 /// release coordinator used by public capability DELETE. The first admitted
 /// terminal intent owns telemetry when concurrent callers join one settlement.
-pub(super) async fn release_with_terminal(
+pub(crate) async fn release_with_terminal(
     state: AppState,
     session: String,
     terminal: crate::vodserve::Terminal,

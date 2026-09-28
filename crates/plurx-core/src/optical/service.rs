@@ -222,10 +222,8 @@ where
     }
 
     /// Disabling observation immediately fences all insertion generations.
-    pub fn deactivate(&self) {
-        for drive_id in self.drives.keys() {
-            let _ = self.manager.observe_removal(drive_id);
-        }
+    pub fn deactivate(&self) -> Vec<String> {
+        self.manager.revoke_all()
     }
 
     pub fn claim_playback(

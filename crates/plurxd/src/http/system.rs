@@ -3394,9 +3394,21 @@ pub async fn update_settings(
             .await?;
         if !on {
             // The persisted choice never depends on readiness. Turning it off
-            // is still a lifecycle command and immediately revokes insertion
-            // generations so no new physical read can be admitted.
-            state.optical.deactivate();
+            // is still a lifecycle command: revoke insertion generations,
+            // durably stop their sessions, and do not acknowledge the change
+            // until every physical reader has released its handle.
+            if !crate::optical_observer::deactivate_and_drain(
+                &state,
+                "optical source revoked by operator disable",
+            )
+            .await
+            {
+                return Err(ApiError::typed(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "optical_drive_busy",
+                    "optical playback is disabled, but a physical reader did not drain in time",
+                ));
+            }
         }
     }
     if let Some(on) = req.dolby_vision_convert {

@@ -139,6 +139,36 @@ impl OpticalDriveManager {
             .collect()
     }
 
+    /// Fence every configured drive in one manager transition and return the
+    /// playback sessions whose physical readers must be stopped and joined.
+    /// Revoked readers remain in `active` until their exact permit drops, so
+    /// callers can distinguish "admission is closed" from "the OS handle is
+    /// confirmed closed".
+    pub fn revoke_all(&self) -> Vec<String> {
+        let mut drives = self.drives();
+        let mut sessions = Vec::new();
+        for slot in drives.values_mut() {
+            if let OpticalDriveState::Busy { session_id, .. } = &slot.state {
+                sessions.push(session_id.clone());
+            }
+            if let Some(active) = slot.active.as_mut() {
+                active.revoked = true;
+            }
+            slot.state = OpticalDriveState::Empty;
+        }
+        sessions.sort_unstable();
+        sessions.dedup();
+        sessions
+    }
+
+    /// Readers whose permits have not yet completed their physical cleanup.
+    pub fn active_reader_count(&self) -> usize {
+        self.drives()
+            .values()
+            .filter(|slot| slot.active.is_some())
+            .count()
+    }
+
     pub fn snapshot(&self, drive_id: &str) -> Option<OpticalDriveSnapshot> {
         self.drives()
             .get(drive_id)

@@ -1493,6 +1493,7 @@ async fn boot(
     let leave_shutdown = state.shutdown.clone();
     let live_tv_shutdown = Arc::clone(&state.live_tv);
     let serving_shutdown = state.serving.clone();
+    let optical_shutdown = state.clone();
     let app = http::router(state);
     tokio::task::spawn_blocking(http::web::warm_static_assets)
         .await
@@ -1522,6 +1523,14 @@ async fn boot(
         let _ = serving_shutdown
             .begin_restart_preparation_until(expires)
             .await;
+        if !crate::optical_observer::deactivate_and_drain(
+            &optical_shutdown,
+            "optical source revoked by server shutdown",
+        )
+        .await
+        {
+            tracing::warn!("optical shutdown could not confirm complete reader cleanup");
+        }
         if let Err(error) = live_tv_shutdown.shutdown().await {
             tracing::warn!(%error, "Live TV shutdown could not confirm complete cleanup");
         }
