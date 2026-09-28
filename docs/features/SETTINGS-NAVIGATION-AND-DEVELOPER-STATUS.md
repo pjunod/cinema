@@ -14,7 +14,7 @@ the settings navigation and Developer-page redesign.
 | Phase | State | Evidence |
 |---|---|---|
 | Isolated implementation branch | complete | `codex/settings-navigation-developer`, based on Forgejo `main` at `4cef0da7` |
-| Navigation and control ownership | complete | Live TV owns tuner and guide cards · Playback owns quality switching · Cluster owns transport guidance · Developer owns compatibility and experiments |
+| Navigation and control ownership | complete | Live TV owns tuner and guide cards · Playback owns quality switching · Cluster owns transport guidance · Developer owns compatibility and experiments (as delivered; since 2026-09-28 Developer holds only unfinished features — see decisions 5 and 6) |
 | Readiness layout and responsive treatment | complete | Shared nonshrinking rows · neutral static throughput support · closed native disclosures · deliberate stacking below 360 CSS px |
 | Interaction and stale-response correctness | complete | Independent save payloads · returned-value badges · Live TV route fencing · card-local repaint and sibling-draft preservation |
 | Portable UI structure golden | complete | 78 deterministic captures · 7,536 structural facts · settings and Developer drift accepted across all three layouts at desktop and mobile widths · no console or page errors |
@@ -109,7 +109,9 @@ requested.
 2. **Every control has one owner.** Live TV owns tuner, enablement, fencing,
    and guide configuration · Playback owns prepared quality switching ·
    Cluster owns automatic transport-recovery guidance · Developer owns
-   compatibility controls and decoder/delivery experiments.
+   compatibility controls and experiments that are not yet fully active or
+   tested. The decoder controls were Developer's until 2026-09-28; they now
+   belong to Playback → Advanced server delivery (decision 6).
 3. **The prototype is a reference, not a base.** The implementation starts
    from current Forgejo `main`; only relevant ideas are ported from the local
    prototype, and unrelated work in the original checkout is left untouched.
@@ -123,6 +125,27 @@ requested.
    settings section if a permanent enable/disable makes sense, otherwise the
    toggle comes out and the feature is simply on. See
    [the Developer lifecycle](#developer-lifecycle--every-card-graduates).
+6. **Chapter thumbnails and both decoder controls graduate as permanent
+   Playback settings (Paul approved graduating them, 2026-09-28; the
+   destination is this change's call and Paul can overturn it).**
+   - *Chapter thumbnails* → Settings → Playback, after the player defaults
+     and the browser-local card.
+     A permanent switch makes sense: every first open of a film costs an
+     ffmpeg seek per chapter, and off is how an operator stops that on a
+     CPU-poor node. Default unchanged (on).
+   - *Verified decode artifacts* → Playback → Advanced server delivery.
+     Turning it on or off renames cached transcodes on covered paths and
+     takes a restart; the decoder plan (§9) treats it as the operator's
+     fleet-wide upper bound. That is a lasting operator decision, so it
+     stays a switch rather than becoming "just on". Default unchanged (off).
+   - *Automatic decode recovery* → Playback → Advanced server delivery. Each
+     recovery spends CPU on a software decode, and an operator containing a
+     misbehaving GPU or driver needs to be able to say yes or no to that;
+     the plan again treats it as operator policy. Default unchanged (off),
+     so no settings migration is needed and no stored choice moves.
+   Making either decoder control default on is the alternative. It would
+   need a migration that keeps an explicit stored `0`, and it is Paul's to
+   choose.
 
 ## Developer lifecycle — every card graduates
 
@@ -173,13 +196,14 @@ graduates in this change; **(c)** unclear, stays and is listed for Paul.
 | Stored PGS tracks | `subtitle_stored_sources` | K-09 | merged: M0–M5 | fleet and device evidence | (a) stays → Settings → Maintenance |
 | Share stored subtitle tracks | `subtitle_cluster_sources` | K-09 | merged: M0–M5 | fleet evidence | (a) stays → Cluster, or removed (Paul's choice) |
 | Backfill subtitle tracks | `subtitle_backfill` | K-09 | merged: M0–M5 | fleet evidence | (a) stays → Settings → Analysis |
-| Chapter thumbnails | `chapter_thumbnails` | [WATCH-VIEW-LAYOUT](../clients/WATCH-VIEW-LAYOUT.md) | built; on by default; in the deployed main | no recorded fleet observation; the plan names no other acceptance | (c) Paul: graduate to Playback now, or wait for a fleet observation |
-| Verified decode artifacts | `decoder_health_qualified_artifacts` | [DECODER_SELECTION_RECOVERY_STATUS](../DECODER_SELECTION_RECOVERY_STATUS.md) | M0–M7 merged | retained contracts for the fleet's paths; the plan calls fleet qualification optional | (c) Paul: is optional fleet qualification enough to graduate |
-| Automatic decode recovery | `automatic_decoder_recovery` | same | M0–M7 merged; off by default | no matched hardware/software retained pair | (c) Paul: same question; graduation would also decide its default |
+| Chapter thumbnails | `chapter_thumbnails` | [WATCH-VIEW-LAYOUT](../clients/WATCH-VIEW-LAYOUT.md) | built; on by default; in the deployed main | none the plan names; the fleet observation its Developer line waited on was never recorded and was waived by Paul's approval | **(b) graduated to Settings → Playback** (Paul, 2026-09-28; decision 6) |
+| Verified decode artifacts | `decoder_health_qualified_artifacts` | [DECODER_SELECTION_RECOVERY_STATUS](../DECODER_SELECTION_RECOVERY_STATUS.md) | M0–M7 merged | fleet qualification, which the plan calls optional | **(b) graduated to Playback → Advanced server delivery**, default off (Paul, 2026-09-28; decision 6) |
+| Automatic decode recovery | `automatic_decoder_recovery` | same | M0–M7 merged; off by default | a matched hardware/software retained pair, which is advisory | **(b) graduated to Playback → Advanced server delivery**, default off (Paul, 2026-09-28; decision 6) |
 | Android: Match television refresh rate | display cadence | D-01 | merged: M1–M3 | M0 three-TV measurement, M4, M5 HDMI | (a) stays → Paul chooses: Settings → Playback, or removed |
 | Android: Prepared replacement | device-local | as prepared handoff | as above | as above | (a) stays → moves with prepared handoff to Settings → Playback |
 | Apple: Bounded pause/resume | device-local | M4 item 4 (hold/resume barriers) | built | matched physical Apple TV latency | (a) stays → Paul chooses: Settings → Playback, or removed |
 | Apple: Prepared quality handoff | device-local | as prepared handoff | as above | as above | (a) stays → moves with prepared handoff to Settings → Playback |
+| Android: Release startup profile | none (advisory status) | D-03 M10 ([ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD](../clients/ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD.md) §5.10) | tooling merged (build 136) | the Baseline Profile measured on the Lenovo release APK: five-run cold-start and first-frame medians with and without it (§6) | (a) stays → entry removed; the profile ships in every release build and has no switch |
 | Android and Apple: Library channels, Recording, HDHomeRun Live TV, Programme guide | server settings | web already moved these to Settings → Live TV | — | none: finished settings | **(b) moved in PR #602** (Paul: "fix it") to a native Settings → Live TV screen on Android, iOS and tvOS, in the web's order, reached like Developer; saves and readiness unchanged. The Live TV enable stays in native Developer, as on the web |
 
 Two graduated on 2026-09-28, after the PR's one adversarial review showed
@@ -188,12 +212,19 @@ cluster work card was removed (its switches already live permanently in
 Analysis and Maintenance) and the Shared storage budgets editor moved to
 Settings → Libraries. No other card's plan or board row records complete
 acceptance evidence. The server still reports the `durable_cluster_work`
-readiness item at `GET /api/v1/developer/readiness`; the web no longer renders it. Since PR #602 every native Developer row prints its
+readiness item at `GET /api/v1/developer/readiness`; the web no longer renders it.
+Three more graduated the same day at Paul's word: chapter thumbnails to
+Settings → Playback, and verified decode artifacts and automatic decode
+recovery to Playback → Advanced server delivery (decision 6). Their saves,
+defaults and advisory rows are unchanged; they no longer carry a
+graduation line because they are no longer in Developer.
+Since PR #602 every native Developer row prints its
 **Leaves Developer when … Then …** line too — Android: Enable Live TV, Match
-television refresh rate, Prepared replacement; Apple: Enable Live TV, Bounded
-pause/resume, Prepared quality handoff. `LiveTvSettingsPlacementTest`
-(Android) and `LiveTvTests` (Apple) pin which screen draws each server Live TV
-card and that every native Developer card carries its line.
+television refresh rate, Release startup profile, Prepared replacement; Apple:
+Enable Live TV, Bounded pause/resume, Prepared quality handoff.
+`LiveTvSettingsPlacementTest` (Android) and `LiveTvTests` (Apple) pin which
+screen draws each server Live TV card and that every native Developer entry
+carries its line.
 
 ## Remaining limits — evidence must name what it cannot prove
 

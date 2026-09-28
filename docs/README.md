@@ -354,7 +354,7 @@ player obeys, subtitles and overlays, layouts and themes.
 | [ANDROID-LIFECYCLE-PLAYER-BUILDER-AND-ERROR-CLASSIFICATION.md](clients/ANDROID-LIFECYCLE-PLAYER-BUILDER-AND-ERROR-CLASSIFICATION.md) | Implementation plan from the 2026-09-20 architecture review: background pause and audio foreground service as one contract, one player builder with role overrides, live-window recovery, audio-sink error classification, and status-gated node failover. | open |
 | [ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD.md](clients/ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD.md) | D-03 plan and 2026-09-25 approval ruling: the server grant exists, external book handoff remains open, and the mobile clients use in-app readers; also covers backup exclusions, dispatcher evidence, and signed release deployment. | open |
 | [WATCH-AND-BROWSE-IMPLEMENTATION.md](clients/WATCH-AND-BROWSE-IMPLEMENTATION.md) | Approved movie/episode watch browser, retained web host, task ownership, tests and pending native/real-media gates. | open |
-| [WATCH-VIEW-LAYOUT.md](clients/WATCH-VIEW-LAYOUT.md) | What the web watch view shows beside and below the picture: the collapsible chapter rail with on-request thumbnails, the media ledger whose chips pick tracks, one Close, and the Developer switch behind the thumbnails. | built |
+| [WATCH-VIEW-LAYOUT.md](clients/WATCH-VIEW-LAYOUT.md) | What the web watch view shows beside and below the picture: the collapsible chapter rail with on-request thumbnails, the media ledger whose chips pick tracks, one Close, and the Playback switch behind the thumbnails (Developer until 2026-09-28). | built |
 | [APPLE-CLIENT-PARITY.md](clients/APPLE-CLIENT-PARITY.md) | What the Apple client has, what it lacks, and which build proved it. | live |
 | [ANDROID-CLIENT-PARITY.md](clients/ANDROID-CLIENT-PARITY.md) | The same, for Android. | live |
 | [ANDROID-DOUBLE-BACK-RCA-AND-FIX.md](clients/ANDROID-DOUBLE-BACK-RCA-AND-FIX.md) | Why rapid Back taps can empty Android navigation, the proposed entry ownership guard, emulator regression evidence, and review and release acceptance. | open |
@@ -368,7 +368,8 @@ player obeys, subtitles and overlays, layouts and themes.
 | [330-calm-library-pages.md](apple-builds/330-calm-library-pages.md) | Apple build 162 quiet Home and open media details. | built |
 | [582-seek-observability.md](apple-builds/582-seek-observability.md) | Apple build194 seek terminal beacons and live viewing method. | open |
 | [590-acceptance-focus.md](apple-builds/590-acceptance-focus.md) | Apple build197 physical TV focus navigation correction and acceptance provenance. | open |
-| [602-native-live-tv-settings.md](apple-builds/602-native-live-tv-settings.md) | Apple199 and Android136 native Live TV server settings leave Developer for Settings → Live TV. | open |
+| [602-native-live-tv-settings.md](apple-builds/602-native-live-tv-settings.md) | Apple200 and Android137 native Live TV server settings leave Developer for Settings → Live TV. | open |
+| [465-adaptive-library-prefetch.md](apple-builds/465-adaptive-library-prefetch.md) | Apple199 and Android136 native two-row prefetch, diagnostics and profile tooling batch; qualification and physical evidence. | open |
 | [594-live-tv-caption-and-capacity.md](apple-builds/594-live-tv-caption-and-capacity.md) | Apple198 and Android135 Live TV caption choices and explicit capacity alternatives; qualification and physical acceptance. | open |
 | [359-apple-pause-resume.md](apple-builds/359-apple-pause-resume.md) | Apple return-to-picture owner, deadline, and advisory enablement. | built |
 | [playback-info-redesign.md](apple-builds/playback-info-redesign.md) | Apple build 161 playback-info changes. | open |

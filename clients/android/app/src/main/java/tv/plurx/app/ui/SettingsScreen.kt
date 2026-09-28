@@ -19,6 +19,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.LaunchedEffect
+import tv.plurx.app.diagnostics.readReleaseProfileStatus
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -81,6 +83,8 @@ fun SettingsScreen(
     var audio by remember { mutableStateOf(LANGS.firstOrNull { it.first == vm.audioLang } ?: LANGS.first()) }
     var sub by remember { mutableStateOf(SUB_LANGS.firstOrNull { it.first == vm.subLang } ?: SUB_LANGS.first()) }
     var confirmingSignOut by remember { mutableStateOf(false) }
+    var profileStatus by remember { mutableStateOf("Checking release profile status…") }
+    LaunchedEffect(Unit) { profileStatus = readReleaseProfileStatus() }
     val context = LocalContext.current
     val deviceSettings = remember(context) { SettingsStore(context) }
     val liveTvLayoutValue by deviceSettings.liveTvLayout.collectAsStateWithLifecycle(initialValue = null)
@@ -245,6 +249,10 @@ fun SettingsScreen(
 
             SettingsSection("Developer", "Runtime enablement with the requirements needed to use each feature safely.") {
                 PreferenceAction("Enable Live TV and match television refresh rate", onClick = onOpenDeveloper)
+                Text("Release startup profile", style = MaterialTheme.typography.titleMedium)
+                Text(profileStatus, style = MaterialTheme.typography.bodySmall, color = Muted)
+                Text("Profile capture needs a dedicated paired account, a controlled movie and physical release measurements. Profile readiness is advisory and changes no feature enablement.", style = MaterialTheme.typography.bodySmall, color = Muted)
+                Text(RELEASE_PROFILE_GRADUATION, style = MaterialTheme.typography.bodySmall, color = Muted)
                 PreparedReplacementEnable(
                     enabled = preferences.preparedReplacement,
                     isTelevision = isTelevision(LocalContext.current),
@@ -266,6 +274,22 @@ fun SettingsScreen(
     }
 }
 
+/** The web's line for the same device-local permission, adapted to a device. */
+internal const val PREPARED_REPLACEMENT_GRADUATION: String =
+    "Leaves Developer when: prepared quality handoff graduates (the quality-switch continuity " +
+        "build finishes M2-Android, M1-web and M3). Then: this device's switch moves with it to " +
+        "Settings → Playback."
+
+/**
+ * What the Release startup profile entry waits on: D-03's M10 (the Baseline
+ * Profile measured on the release APK, ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-
+ * BUILD §5.10). The entry has no switch, so it is removed when that lands.
+ */
+internal const val RELEASE_PROFILE_GRADUATION: String =
+    "Leaves Developer when: D-03's M10 Baseline Profile is measured on the Lenovo release APK " +
+        "(five-run cold-start and first-frame medians with and without the profile). " +
+        "Then: this entry is removed; the profile ships in every release build and has no switch."
+
 /**
  * Settings → Developer → "Prepared replacement".
  *
@@ -279,12 +303,6 @@ fun SettingsScreen(
  * Two of the four conditions belong to a session rather than to the device, so
  * this screen states them and says so rather than scoring them.
  */
-/** The web's line for the same device-local permission, adapted to a device. */
-internal const val PREPARED_REPLACEMENT_GRADUATION: String =
-    "Leaves Developer when: prepared quality handoff graduates (the quality-switch continuity " +
-        "build finishes M2-Android, M1-web and M3). Then: this device's switch moves with it to " +
-        "Settings → Playback."
-
 @Composable
 private fun PreparedReplacementEnable(
     enabled: Boolean,

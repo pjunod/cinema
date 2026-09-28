@@ -20,11 +20,14 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `136` — the tuner, programme guide, recording
+> Status: **v0.3.0**, build `137` — the tuner, programme guide, recording
 > and Library channel settings leave Developer for Settings → Live TV, as on
-> the web; physical acceptance pending.
-> Build 135 — actual Live TV caption choices and explicit watchable channel
-> actions.
+> the web; the Developer Enable Live TV card shows its live readiness rows;
+> physical acceptance pending.
+> Build 136 — measured library prefetch, bounded debug/Live diagnostics and
+> release profile tooling.
+> Build 135 adds actual Live TV caption choices and explicit watchable
+> channel actions; its eight focused regressions passed.
 > Build 134 names an encoder refusal as the encoder being busy.
 > Build 133 — cluster Live TV intents and advisory Developer enablement.
 > Build 131 adds in-app PDF/EPUB reading. Build 129 restores

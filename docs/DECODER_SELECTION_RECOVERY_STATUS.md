@@ -2986,8 +2986,8 @@ must advise rather than gate an operator's choice.
 
 PR #203 corrected the separation:
 
-- `playback.automatic_decoder_recovery` is a direct Settings → Developer
-  checkbox. It is off by default, persists in the Store, applies immediately,
+- `playback.automatic_decoder_recovery` is a direct checkbox, in Settings →
+  Developer until 2026-09-28 and in Playback → Advanced server delivery since. It is off by default, persists in the Store, applies immediately,
   and controls new producer attempts without changing any artifact identity.
 - A uniquely matching retained contract still supplies the exact grammar and
   provenance it supplied before. The checkbox decides whether a recognized
@@ -3612,7 +3612,8 @@ physically qualifies a two-player successor.
 | Android | `hold`, `retry_resource`, `terminal` | No; unit test expects terminal protocol error | No | No physical run | At most `prepublication` after server qualification |
 | Live TV Web | None; outside `playback-control` | No protocol participant | No; one owned media element | No physical run | Prepublication only after server qualification |
 
-The visible Settings → Developer values are operator-requested upper bounds,
+The visible settings values (Settings → Developer until 2026-09-28, Playback
+→ Advanced server delivery since) are operator-requested upper bounds,
 not a claim that every node or session can execute them. Each node computes an
 effective plan policy from its current local capability/grammar receipt. Each
 playback computes an effective recovery mode from that node result, owned
@@ -3766,6 +3767,7 @@ completion nor final Ready can publish after that durable boundary.
 | 2026-09-07 | No M0 contract names a fatal decode family | The only fatal in the retained evidence is `Decode error rate 1 exceeds maximum`, which is FFmpeg abandoning a corrupt input rather than a backend becoming unavailable. Labelling it `DecodeBackendUnavailable` would ask M3b to swap decoders for a fault a decoder swap cannot repair, so the family is contract-driven and absent until one is qualified against its own fixture |
 | 2026-09-08 | Replace the reviewed `recipe_hash`-only recovery with an explicit monotone budget and per-claim generations | `recipe_hash` is node-local and rehome clears it, so it cannot also be the owner-independent budget. Explicit pending state commits before fallible planning; rehome can clear and rebind an alternate without returning to primary; a generation distinguishes successive claims by the same node and fences every late mutation |
 | 2026-09-08 | Promote after M7 smoke and fast-lane evidence, then continue remaining tests on `main` | Paul explicitly resolved the documented policy conflict in favor of merging after the fast lane. M8, the remaining Main promotion jobs, and broader fleet/client evidence run post-merge; every code-related failure opens a new PR |
+| 2026-09-28 | Verified decode artifacts and automatic decoder recovery leave Developer for Playback → Advanced server delivery, both still off by default | Paul's Developer lifecycle: M0–M7 are merged and fleet qualification is optional, so they graduate; both remain lasting operator choices (cache-identity rotation, CPU spent containing a bad GPU/driver), so they keep their switches. See SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS decision 6 |
 
 ## Validation ledger
 

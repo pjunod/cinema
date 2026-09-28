@@ -9,6 +9,30 @@ import UIKit
 import XCTest
 @testable import plurx
 
+extension AppleClientTests {
+    func testLibraryPrefetchUsesMeasuredAdaptiveColumns() {
+        XCTAssertEqual(LibraryGridPrefetch.columns(width: 320, minimumWidth: 100, spacing: 10), 3)
+        XCTAssertEqual(LibraryGridPrefetch.columns(width: 768, minimumWidth: 160, spacing: 18), 4)
+        XCTAssertEqual(LibraryGridPrefetch.columns(width: 80, minimumWidth: 100, spacing: 18), 1)
+        XCTAssertEqual(LibraryGridPrefetch.columns(width: .nan, minimumWidth: 100, spacing: 18), 1)
+    }
+
+    func testLibraryPrefetchIncludesVisibleCardAndTwoRowsAtExclusiveBoundary() {
+        XCTAssertEqual(LibraryGridPrefetch.exclusiveCount(lastVisibleIndex: 0, columns: 3), 7)
+        XCTAssertEqual(LibraryGridPrefetch.exclusiveCount(lastVisibleIndex: 199, columns: 4), 208)
+        XCTAssertEqual(LibraryGridPrefetch.exclusiveCount(lastVisibleIndex: 197, columns: 1), 200)
+        XCTAssertEqual(LibraryGridPrefetch.exclusiveCount(lastVisibleIndex: 19, columns: 1), 22)
+        XCTAssertEqual(LibraryGridPrefetch.exclusiveCount(lastVisibleIndex: 19, columns: 8), 36)
+    }
+
+    func testLibraryPrefetchEmptyAndOverflowBoundariesStaySafe() {
+        XCTAssertEqual(LibraryGridPrefetch.exclusiveCount(lastVisibleIndex: -1, columns: 4), 0)
+        XCTAssertEqual(LibraryGridPrefetch.exclusiveCount(lastVisibleIndex: 19, columns: 0), 0)
+        XCTAssertEqual(LibraryGridPrefetch.exclusiveCount(lastVisibleIndex: .max, columns: 4), .max)
+        XCTAssertEqual(LibraryGridPrefetch.exclusiveCount(lastVisibleIndex: 0, columns: .max), .max)
+    }
+}
+
 #if os(iOS)
 private final class PDFReaderURLProtocol: URLProtocol {
     static var body = Data()

@@ -78,9 +78,8 @@ fun LibraryScreen(
     LaunchedEffect(pager) { pager.ensure(40) }
     LaunchedEffect(pager, gridState) {
         snapshotFlow {
-            val visible = gridState.layoutInfo.visibleItemsInfo
-            val last = visible.maxOfOrNull { it.index } ?: 0
-            last + maxOf(12, visible.size)
+            val layout = gridState.layoutInfo
+            libraryPrefetchExclusive(layout.visibleItemsInfo.maxOfOrNull { it.index } ?: -1, layout.maxSpan)
         }.distinctUntilChanged().collectLatest { pager.ensure(it) }
     }
     LaunchedEffect(pager, filter) {

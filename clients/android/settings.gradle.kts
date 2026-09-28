@@ -23,4 +23,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "plurx"
-include(":app")
+include(":app", ":baselineprofile")
