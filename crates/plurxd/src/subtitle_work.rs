@@ -88,10 +88,13 @@ impl JobManager {
         // every claim the store cannot answer — none of which looks at the
         // encoder pool. Holding the whole software budget across that walk
         // is how a Live TV start on this node was refused for "capacity"
-        // with every tuner idle. The cheap idleness check keeps this from
-        // claiming (and then yielding) a job on every tick while a viewer is
-        // active; the admission after the claim is the real reservation.
-        if !transcode.pretranscode_worker_idle() {
+        // with every tuner idle. The pre-check is the admission's own
+        // predicate, so a viewer or another heavy worker holding the box
+        // costs no claim (a claim charges the demand an attempt and two
+        // replicated writes); the admission after the claim is the real
+        // reservation, and the window between the two is the only case the
+        // Yield below exists for.
+        if !transcode.fragment_worker_may_start() {
             return false;
         }
         let Some((job, active)) = self.claim_subtitle_work(None).await else {

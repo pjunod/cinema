@@ -972,10 +972,12 @@ async fn a_subtitle_claim_the_demand_trigger_refuses_retires_the_zombie_job() {
         EnqueueOutcome::Accepted { job_id, .. } => job_id,
         other => panic!("subtitle admission: {other:?}"),
     };
-    // The demand is satisfied behind the queued job's back.
+    // The demand is satisfied behind the queued job's back — with the
+    // published attempt that satisfied it on record, exactly as the fleet had
+    // it (`attempts = 1`, one `published` row at the request's fence).
     QueueSql::queue_sql(
         &store,
-        "UPDATE analysis_requests SET state = 'ready', attempts = 1, owner_node_id = NULL,
+        "UPDATE analysis_requests SET state = 'ready', attempts = 1, fence = 1, owner_node_id = NULL,
             lease_expires_ms = NULL WHERE request_id = json_extract($1, '$.request_id')"
             .into(),
         serde_json::json!({"request_id": queued.request_id}).to_string(),
@@ -984,6 +986,35 @@ async fn a_subtitle_claim_the_demand_trigger_refuses_retires_the_zombie_job() {
     )
     .await
     .expect("finished demand");
+    QueueSql::queue_sql(
+        &store,
+        "INSERT INTO analysis_attempts(request_id, attempt, claim_node_id, claim_epoch, claim_expires_at_ms,
+            phase, started_at_ms, phase_updated_at_ms, terminal_code)
+         VALUES (json_extract($1, '$.request_id'), 1, 'node-z', 1, 6000, 'published', 5000, 5500, NULL)"
+            .into(),
+        serde_json::json!({"request_id": queued.request_id}).to_string(),
+        true,
+        true,
+    )
+    .await
+    .expect("published attempt");
+    let attempt_phase = || async {
+        QueueSql::queue_sql(
+            &store,
+            "SELECT json_object('phase', phase, 'terminal_code', terminal_code) AS result_json
+               FROM analysis_attempts WHERE request_id = json_extract($1, '$.request_id') AND claim_epoch = 1"
+                .into(),
+            serde_json::json!({"request_id": queued.request_id}).to_string(),
+            false,
+            true,
+        )
+        .await
+        .expect("attempt row")
+        .first()
+        .map(|row| serde_json::from_str::<serde_json::Value>(row).expect("json"))
+        .expect("the attempt row exists")
+    };
+    assert_eq!(attempt_phase().await["phase"], "published");
     let store = &store;
     let candidates = |now_ms: i64| async move {
         store
@@ -1040,11 +1071,16 @@ async fn a_subtitle_claim_the_demand_trigger_refuses_retires_the_zombie_job() {
         .await
         .expect("claim");
     assert!(matches!(again, ClaimOutcome::Cancelled), "{again:?}");
-    // The finished demand is untouched by the retirement.
+    // The finished demand — and the attempt that finished it — are untouched
+    // by the retirement: the settled trigger only rewrites the attempt of a
+    // demand that is still open.
     let request = store
         .analysis_request(&queued.request_id)
         .await
         .expect("request")
         .expect("request");
     assert_eq!(request.state, "ready");
+    let attempt = attempt_phase().await;
+    assert_eq!(attempt["phase"], "published", "{attempt}");
+    assert!(attempt["terminal_code"].is_null(), "{attempt}");
 }

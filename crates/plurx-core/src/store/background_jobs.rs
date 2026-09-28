@@ -2331,7 +2331,9 @@ impl<T: QueueSql> BackgroundJobStore for T {
                     format!(
                         "UPDATE background_jobs SET state = 'cancelled', revision = revision + 1,
                             last_error_code = '{}', updated_at_ms = json_extract($1, '$.now_ms')
-                          WHERE id = json_extract($1, '$.job_id') AND state = 'queued'
+                          WHERE id = json_extract($1, '$.job_id')
+                            AND (state = 'queued' OR (state = 'running'
+                                AND lease_expires_ms <= json_extract($1, '$.now_ms')))
                             AND revision = json_extract($1, '$.expected_revision')
                             AND revision < 9223372036854775807",
                         super::background_jobs_subtitle::DEMAND_GONE_CODE

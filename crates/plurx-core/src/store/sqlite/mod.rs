@@ -1171,6 +1171,12 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs_embeddings::SCHEMA,
     super::background_jobs_probe::SCHEMA,
     super::background_jobs_integrity::SCHEMA,
+    // v83: the subtitle adapter's settled trigger no longer rewrites the
+    // finished attempt of a demand that is already terminal (the zombie a
+    // refused claim retires). Every statement in the adapter schema is
+    // idempotent, and the trigger is dropped and recreated, so re-running
+    // the file is the migration.
+    super::background_jobs_subtitle::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2892,9 +2898,11 @@ mod tests {
         // v70 adds K-05 M5's catalogue read indexes; v71 adds the common queue.
         // v72–v76 add library work, domain leases, source-I/O reservations,
         // provider dispatch budgets and the subtitle adapter; v77 adds artwork holders,
-        // and v78 retains portable transcode source/manifest provenance.
+        // v78 retains portable transcode source/manifest provenance, v79–v82
+        // add predictions, embeddings, probe and integrity jobs, and v83
+        // guards the subtitle settled trigger against terminal demand.
         assert_eq!(
-            version, 82,
+            version, 83,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

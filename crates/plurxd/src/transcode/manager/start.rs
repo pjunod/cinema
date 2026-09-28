@@ -213,16 +213,30 @@ impl TranscodeManager {
             if self.admissions.background_is_active() && priority == Priority::Live {
                 // Same ruling as the hardware branch: the window is the
                 // background worker's chance to checkpoint, not the viewer's
-                // deadline. The take is forced because the stuck permit still
-                // reserves the budget; the overcommit is recorded, not hidden.
+                // deadline. The take discounts the stuck background
+                // reservation only; live usage still bounds it, so a pool
+                // spent by other viewers is refused exactly as it would be
+                // with no background worker in the picture.
                 let weight = work.software_threads();
-                let permit = self.admissions.software_pool().take_forced(weight);
-                self.note_background_overrun("software", weight, max_wait);
-                return Ok(LiveAdmission {
-                    encoder: Encoder::Software,
-                    hw_slot: None,
-                    sw_permit: Some(permit),
-                });
+                if let Some(permit) = self
+                    .admissions
+                    .software_pool()
+                    .take_over_background(sw_budget, weight)
+                {
+                    self.note_background_overrun("software", weight, max_wait);
+                    return Ok(LiveAdmission {
+                        encoder: Encoder::Software,
+                        hw_slot: None,
+                        sw_permit: Some(permit),
+                    });
+                }
+                let why = format!(
+                    "the software CPU pool is spent by live sessions ({} of {sw_budget} threads reserved) and no slot freed within {:.1}s; try again in a moment",
+                    self.admissions.software_in_use(),
+                    max_wait.as_secs_f64()
+                );
+                tracing::warn!(target: "plurxd::transcode", class = %work.software_class(), "{why}");
+                return Err(capacity_error(why));
             }
             let why = if self.admissions.background_is_active() {
                 format!(
@@ -244,10 +258,11 @@ impl TranscodeManager {
     /// The live admission a viewer gets when background ownership outlived
     /// the cooperative window. Hardware within the cap first (a background
     /// hardware hold still counts against `max`, so this never oversubscribes
-    /// the GPU); otherwise the ordinary software decision, taken forced
-    /// because the background permit still reserves the CPU it is not using.
-    /// A class software cannot carry is still refused, honestly — that
-    /// refusal is about the stream, not about the stuck worker.
+    /// the GPU); otherwise the ordinary software decision, with the CPU taken
+    /// over the background reservation and bounded by live usage. A class
+    /// software cannot carry is still refused, honestly — that refusal is
+    /// about the stream, not about the stuck worker — and so is a pool that
+    /// other viewers have spent.
     fn admit_over_background(
         &self,
         preferred: Encoder,
@@ -260,15 +275,34 @@ impl TranscodeManager {
         match self.admissions.admit_over_background(max, work) {
             Admission::Hardware(slot) => {
                 // A software decode into this hardware encoder still spends
-                // the cores the estimate names; reserve them the same forced
-                // way so the pool keeps telling the truth about its load.
-                let sw_permit = estimate
+                // the cores the estimate names; reserve them the same bounded
+                // way, or give the slot back — the ordinary path takes the
+                // bundle whole or not at all, and so does this one.
+                let cpu_threads = estimate
                     .filter(|estimate| estimate.hardware_slot && estimate.cpu_threads > 0)
-                    .map(|estimate| {
-                        self.admissions
-                            .software_pool()
-                            .take_forced(estimate.cpu_threads)
-                    });
+                    .map(|estimate| estimate.cpu_threads);
+                let sw_permit = match cpu_threads {
+                    None => None,
+                    Some(threads) => match self
+                        .admissions
+                        .software_pool()
+                        .take_over_background(sw_budget, threads)
+                    {
+                        Some(permit) => Some(permit),
+                        None => {
+                            drop(slot);
+                            let why = format!(
+                                "a hardware slot is free but this title decodes in software and the CPU pool is spent by live sessions ({} of {sw_budget} threads reserved); try again in a moment",
+                                self.admissions.software_in_use()
+                            );
+                            tracing::warn!(
+                                target: "plurxd::transcode",
+                                class = %work.software_class(), "{why}"
+                            );
+                            return Err(capacity_error(why));
+                        }
+                    },
+                };
                 self.note_background_overrun(
                     "hardware",
                     sw_permit
@@ -284,7 +318,21 @@ impl TranscodeManager {
             }
             Admission::Software => {
                 let weight = work.software_threads();
-                let permit = self.admissions.software_pool().take_forced(weight);
+                let Some(permit) = self
+                    .admissions
+                    .software_pool()
+                    .take_over_background(sw_budget, weight)
+                else {
+                    let why = format!(
+                        "all {max} hardware transcode slots are in use and the software CPU pool is spent by live sessions ({} of {sw_budget} threads reserved); try again in a moment",
+                        self.admissions.software_in_use()
+                    );
+                    tracing::warn!(
+                        target: "plurxd::transcode",
+                        class = %work.software_class(), "{why}"
+                    );
+                    return Err(capacity_error(why));
+                };
                 self.note_background_overrun("software", weight, waited);
                 tracing::info!(
                     target: "plurxd::transcode",

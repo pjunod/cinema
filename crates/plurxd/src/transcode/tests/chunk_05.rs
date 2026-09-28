@@ -1676,8 +1676,9 @@
         );
         let producer = mgr
             .admissions
-            .try_acquire(2, Priority::Background)
+            .try_acquire(3, Priority::Background)
             .expect("background permit");
+        let overruns_before = background_overruns("hardware");
         let wait = Duration::from_millis(25);
         let began = Instant::now();
         let admission = mgr
@@ -1711,15 +1712,189 @@
             !mgr.admissions.live_is_waiting(),
             "the admitted request kept its waiter registered"
         );
+        // Cap 3, two held: numerically a slot remains, so the refusal below
+        // can only be the live permit parking background work.
         assert!(
             mgr.admissions
-                .try_acquire(2, Priority::Background)
+                .try_acquire(3, Priority::Background)
                 .is_none(),
             "a live permit now parks every background start"
+        );
+        assert!(
+            background_overruns("hardware") > overruns_before,
+            "the overrun is counted on the hardware pool"
         );
         drop(producer);
         drop(admission);
         assert_eq!(mgr.admissions.in_use(), 0, "both guards returned");
+    }
+
+    /// The `plurx_transcode_background_overrun_total{pool}` sample from the
+    /// live exposition. The counter is node-wide, so tests compare before and
+    /// after rather than asserting an absolute value.
+    fn background_overruns(pool: &str) -> u64 {
+        let prefix = format!("plurx_transcode_background_overrun_total{{pool=\"{pool}\"}} ");
+        crate::telemetry::prometheus()
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()))
+            .and_then(|value| value.trim().parse().ok())
+            .expect("the overrun counter is exposed")
+    }
+
+    /// Hardware capped by the stuck background hold itself: the ordinary
+    /// software decision is taken over the background reservation — the
+    /// `Admission::Software` arm of `admit_over_background`, not the pure
+    /// software loop.
+    #[tokio::test]
+    async fn live_admission_over_background_falls_to_software_when_the_cap_is_held() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work_dir = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work_dir.path().to_path_buf(),
+            EncoderCaps {
+                nvenc: true,
+                ..Default::default()
+            },
+            Pipeline::Cpu,
+        );
+        // The manager admits against its configured cap (the default, 2),
+        // so the stuck worker has to hold every slot of it.
+        let producers = (0..DEFAULT_MAX_HW_SESSIONS)
+            .map(|_| {
+                mgr.admissions
+                    .try_acquire(DEFAULT_MAX_HW_SESSIONS, Priority::Background)
+                    .expect("background permit")
+            })
+            .collect::<Vec<_>>();
+        let overruns_before = background_overruns("software");
+        let admission = mgr
+            .admit_live(
+                Encoder::Nvenc,
+                None,
+                Workload {
+                    source_height: 1080,
+                    codec: "h264",
+                    hdr: None,
+                    target_height: 720,
+                },
+                Duration::from_millis(25),
+                Priority::Live,
+            )
+            .await
+            .expect("the cap is held by the stuck worker; software carries the viewer");
+        assert_eq!(admission.encoder, Encoder::Software);
+        assert_eq!(
+            mgr.admissions.in_use(),
+            DEFAULT_MAX_HW_SESSIONS,
+            "no hardware slot was taken past the cap"
+        );
+        assert!(mgr.admissions.software_in_use() > 0, "the take is recorded");
+        assert!(background_overruns("software") > overruns_before);
+        drop(producers);
+        drop(admission);
+        assert_eq!(mgr.admissions.software_in_use(), 0);
+    }
+
+    /// The take over a background hold discounts that hold and nothing else:
+    /// a pool other viewers have spent is refused, bounded, exactly as it is
+    /// with no background worker in the picture. Otherwise one stuck worker
+    /// would let forced permits pile up until every session ran below
+    /// realtime.
+    #[tokio::test]
+    async fn live_admission_over_background_is_still_bounded_by_live_usage() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work_dir = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work_dir.path().to_path_buf(),
+            EncoderCaps {
+                nvenc: true,
+                ..Default::default()
+            },
+            Pipeline::Cpu,
+        );
+        let budget = mgr.software_budget().await;
+        let producers = (0..DEFAULT_MAX_HW_SESSIONS)
+            .map(|_| {
+                mgr.admissions
+                    .try_acquire(DEFAULT_MAX_HW_SESSIONS, Priority::Background)
+                    .expect("background permit")
+            })
+            .collect::<Vec<_>>();
+        // Live sessions already own the whole CPU budget (forced, because the
+        // ordinary take would wait out the background hold in this fixture).
+        let viewers = mgr.admissions.software_pool().take_forced(budget.max(1));
+        let error = mgr
+            .admit_live(
+                Encoder::Nvenc,
+                None,
+                Workload {
+                    source_height: 1080,
+                    codec: "h264",
+                    hdr: None,
+                    target_height: 720,
+                },
+                Duration::from_millis(25),
+                Priority::Live,
+            )
+            .await
+            .err()
+            .expect("a pool spent by live sessions is refused, background hold or not");
+        assert!(is_retryable_capacity_error(&error), "{error}");
+        assert!(error.contains("spent by live sessions"), "{error}");
+        assert!(
+            !mgr.admissions.live_is_waiting(),
+            "the refused request released its waiter"
+        );
+        drop(viewers);
+        drop(producers);
+        assert_eq!(mgr.admissions.in_use(), 0);
+        assert_eq!(mgr.admissions.software_in_use(), 0);
+    }
+
+    /// The software route's guard: only a live viewer starts over a
+    /// background CPU hold; a speculative start keeps the bounded refusal.
+    #[tokio::test]
+    async fn speculative_software_admission_is_still_refused_while_background_holds() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work_dir = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work_dir.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let budget = mgr.software_budget().await;
+        let hog = mgr
+            .admissions
+            .try_admit_software(budget, budget.max(1), Priority::Background)
+            .expect("background CPU permit");
+        let error = mgr
+            .admit_live(
+                Encoder::Software,
+                None,
+                Workload {
+                    source_height: 1080,
+                    codec: "h264",
+                    hdr: None,
+                    target_height: 720,
+                },
+                Duration::from_millis(25),
+                Priority::Speculative,
+            )
+            .await
+            .err()
+            .expect("a speculative start does not cross a background CPU hold");
+        assert!(error.contains("background encoding did not yield"), "{error}");
+        drop(hog);
+        assert_eq!(mgr.admissions.software_in_use(), 0);
     }
 
     /// The same stuck permit with no hardware headroom left: the live start

@@ -344,6 +344,36 @@ impl SwPool {
         self.try_take(budget, weight, Priority::Live)
     }
 
+    /// Take `weight` threads for a live start whose cooperative window
+    /// expired with background work still holding the pool. The background
+    /// reservation is discounted — that permit is the thing being started
+    /// over — but every *live* reservation still counts: a viewer refused
+    /// because other viewers have the CPU is the ordinary bounded answer,
+    /// and a stuck background worker must not turn it into an unbounded pile
+    /// of forced permits dragging every session below realtime. The
+    /// empty-pool exception holds as it does in `try_take`: with no live
+    /// usage at all, one over-budget session is the best the box can do.
+    pub(crate) fn take_over_background(&self, budget: usize, weight: usize) -> Option<SwPermit> {
+        let mut permits = self
+            .permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let live_used = permits
+            .software_used()
+            .saturating_sub(permits.software_background_used);
+        if live_used > 0 && live_used + weight > budget {
+            return None;
+        }
+        permits.software_live_permits += 1;
+        permits.software_live_used += weight;
+        drop(permits);
+        Some(SwPermit {
+            permits: Arc::clone(&self.permits),
+            owner: PermitOwner::Live,
+            weight,
+        })
+    }
+
     /// Take `weight` threads unconditionally. For the hardware→software
     /// fallback mid-session: the viewer is already watching, and holding
     /// their film hostage to the budget would turn an accounting rule into a
@@ -824,8 +854,8 @@ impl Admissions {
     /// the cooperative window: the same hardware-or-software decision as
     /// [`Self::admit_with_priority`], with the background rule lifted. Never
     /// answers `WaitingForBackground`. Software here means the caller takes
-    /// the CPU forced (`SwPool::take_forced`), because the background permit
-    /// still reserves the budget it will not release.
+    /// the CPU through `SwPool::take_over_background`, which discounts the
+    /// stuck background reservation and nothing else.
     pub(crate) fn admit_over_background(&self, max: usize, work: Workload<'_>) -> Admission {
         if let Some(slot) = self.try_acquire_over_background(max) {
             return Admission::Hardware(slot);
