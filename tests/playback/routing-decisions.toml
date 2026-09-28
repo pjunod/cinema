@@ -85,6 +85,13 @@ test = "crates/plurxd/src/http/stream.rs"
 test_anchor = "every_verdict_has_one_server_owned_execution_plan"
 
 [[decisions]]
+id = "server.managed-optical-delivery"
+source = "crates/plurxd/src/http/optical.rs"
+source_anchor = "fn decide_managed_optical_delivery("
+test = "crates/plurxd/src/http/optical.rs"
+test_anchor = "managed_optical_delivery_stays_encoded_sdr_even_when_original_is_requested"
+
+[[decisions]]
 id = "server.hevc-sample-entry-admission"
 source = "crates/plurx-core/src/playback/mod.rs"
 source_anchor = "pub fn progressive_hevc_requires_normalization("

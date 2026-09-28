@@ -93,6 +93,7 @@ one.
 | `server.dolby-vision` | Preserve vs strip vs re-encode DV | A client-approved profile is preserved — and for the *dual-layer* profiles (7, and 4) "client-approved" means the client enumerated that number, because the legacy blanket "I do Dolby Vision" bit is a claim about the format and no consumer decoder outside Blu-ray hardware takes dual-layer. An unsupported profile with a compatible base and `dovi_rpu` becomes a strip remux. Without both, re-encode. Apple-supported DV profiles still request a normalized copy-HLS envelope. Profile 5 has no backward-compatible HDR base: its compatibility transcode software-decodes the RPU side data and applies Dolby Vision reshaping through `tonemapx` before any scale or SDR conversion. Boot proves the renderer mechanics, then the first request for each source must prove that enabling RPU application changes sampled pixels; unknown, non-compatible, or unproved routes are refused. | DV profile matrix in `playback/mod.rs`; Profile 5 graph/admission regressions in `transcode/mod.rs` and `plurxd/transcode.rs` |
 | `server.manual-quality` | Auto vs Original vs a rung | Auto uses the ordinary verdict. Original never re-encodes video; it may direct or remux and lets the client rescue a rejection. Any numbered rung forces transcode. Unknown force values degrade to Auto. | Force matrix in `playback/mod.rs` |
 | `server.execution-plan` | Verdict to API action | Direct owns `/direct`; remux owns `/stream.mp4` plus a copy-session URL and flags; transcode owns the HLS-session URL. A caller's `audio=` selection travels in the plan — applied to the remux URL and repeated as `audio` for the session body — and a selection the container's own default cannot deliver reports remux instead of an unexecutable direct plan. Clients execute this plan instead of rebuilding it from `method`. | Exhaustive `DeliveryPlan` Rust unit plus a follow-the-plan selection regression |
+| `server.managed-optical-delivery` | Physical title to the available producer | A managed DVD/Blu-ray title always uses encoded finite VOD and reports SDR, even when its codecs would ordinarily direct-play or the viewer asks for Original. Copy-video optical VOD is unavailable until a title-aware immutable fragment index exists; the answer says so instead of advertising an executable route that does not exist. | `managed_optical_delivery_stays_encoded_sdr_even_when_original_is_requested` in `http/optical.rs` |
 | `server.hevc-sample-entry-admission` | Progressive HEVC source packaging | For otherwise compatible HEVC in MP4/M4V/MOV, an explicit client list admits only the stored sample entry it names. Unknown or disallowed packaging selects a copy remux with a packaging reason; field absence preserves legacy behavior, and Original preserves the reason without permitting a video encode. | SDR, reference film K-shaped DV P8, Original, absent, empty, and permissive-list Rust matrix |
 | `server.hevc-delivery-transport` | Progressive copy output vs HLS requirement | The server computes the sample entry the progressive builder will actually emit. If the explicit list does not admit it, or the verdict selects Profile 7 → 8.1 conversion, the remux plan carries `requires_hls: true` when HLS is available. Explicit v2 requests without HLS disable conversion for that request and select the compatible fallback; legacy requests retain conversion eligibility because they made no exhaustive transport claim. A concrete progressive request independently disables conversion and re-decides before starting delivery. Minimal 23-byte `hvcC` promotion is `hev1`/`dvhe`; ordinary progressive copy keeps its current builder policy, while preserved native P5/P8 copies derive `dvh1`/`dvhe` from the same structured source facts used by admission and enable FFmpeg's unofficial DV muxing support. | `android_dv_delivery` request-scope and packaging regressions plus progressive-tag, serialized-plan, typed-refusal, and pre-allocation Rust regressions |
 | `server.dolby-vision-convert-transport` | Which producer may convert Profile 7 | Conversion is available only to HLS copy delivery. A converting remux advertises `requires_hls`; an explicit v2 request without HLS selects its compatible fallback, while a legacy request keeps conversion eligibility because it made no exhaustive transport claim. A stale progressive URL is re-decided with conversion unavailable and serves the compatible HDR10 base rather than unconverted dual-layer DV. This is producer selection, not a feature gate: the existing Developer conversion control remains authoritative and its requirement status remains advisory. | `android_dv_delivery_conversion_requires_an_available_hls_producer` and the decision/progressive diagnostics |
@@ -1444,6 +1445,55 @@ top of it, and falls back to overlapping only in a window too narrow to hold
 both side by side. On a touch screen the two still take turns, because a phone
 has room for one of them and no keyboard shortcut to escape whichever is
 covering the other.
+
+## Optical titles — managed finite VOD from one physical reader
+
+An optical title is finite media, but it is not a file. Its public identity is
+`owner node + drive + insertion generation + disc + title + angle`; the trusted
+drive owner resolves that identity to a DVD title number or Blu-ray playlist
+and a configured local input. No API or client receives the block-device path,
+mount path, probe document or fingerprint evidence, and no fake file/item id is
+created merely to enter the ordinary player.
+
+**Admission binds the insertion and the rendition.** Decision and start both
+repeat the expected disc id and media generation. A session's durable recipe
+then freezes that source, title locator, angle, output identity, audio track and
+burned bitmap subtitle. Progress is accepted only from the same user and live
+session and must repeat those exact choices. Removal, replacement, disable or
+eject revokes the lease and stops the producer before the drive becomes free.
+There is one admitted reader and it survives until both the controller and all
+child processes are terminal.
+
+**The current route is encoded VOD.** Even compatible disc video is reported
+as a transcode to SDR H.264/AAC because a file direct route cannot read a title,
+and copy VOD cannot promise immutable fragments without a complete title-aware
+keyframe index. Original therefore returns an explanatory reason and the same
+encoded plan. Inventing a frame grid or scanning the whole title before Play
+would violate both the segment contract and bounded startup; copy remains
+unavailable until DVD cell/VOB NAV and Blu-ray clip/CLPI joins can build the
+real logical timeline lazily.
+
+DVD subpicture and Blu-ray PGS can burn through the same admitted input. A text
+subtitle is refused today: the ordinary file-sidecar filter would reopen the
+physical title as a second reader. Native optical text delivery must first be
+made part of the owned source pipeline. This is a named unsupported selection,
+not a silent subtitle drop.
+
+**Cluster routing moves bytes, never the drive.** The owner advertises a fresh,
+path-free drive snapshot. Any ingress can relay discovery, decision, start,
+progress and the resulting HLS capability through signed internal RPCs. If the
+owner becomes unreachable the session fails `optical_owner_unavailable`; an
+unrelated node does not adopt a recipe it cannot resolve. One-reader ownership
+is therefore the same whether the viewer connects directly to the drive node
+or through another voter.
+
+The optical Developer switch is authoritative at runtime. Helper, mount,
+reader, cluster and physical-acceptance checks are diagnostics beside it, not
+feature gates. Per-user optical authorization is separate from the switch;
+match and eject remain administrator operations. See the
+[operations runbook](OPERATIONS.md#optical-discs--the-linux-drive-runbook) and
+[live qualification ledger](features/OPTICAL-MEDIA-STATUS.html) before enabling
+on a shared server.
 
 ## Live TV — the one stream with no file behind it
 

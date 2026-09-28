@@ -877,6 +877,38 @@ fn optical_subtitle_tracks(
         .collect()
 }
 
+fn decide_managed_optical_delivery(
+    facts: &PlaybackMediaFacts,
+    profile: &playback::DeviceProfile,
+    requested_force: Force,
+    node: &playback::RenderCaps,
+) -> Decision {
+    // The first optical producer is encoded VOD. Even a codec-compatible
+    // title cannot use file direct-play or the progressive remux endpoint,
+    // and claiming either would hand the client an executable plan that does
+    // not exist. Copy-video optical VOD can replace this forced verdict once
+    // its title-aware reader path is implemented.
+    let mut plan = playback::decide_media_facts_forced(facts, profile, Force::Transcode, node);
+    if plan.delivered_dynamic_range != "sdr" {
+        plan.reasons.insert(
+            0,
+            "managed optical VOD currently delivers SDR encoded output".to_owned(),
+        );
+        plan.delivered_dynamic_range = "sdr";
+        plan.delivered_dolby_vision_profile = None;
+        plan.preserve_dolby_vision = false;
+        plan.convert_dolby_vision = false;
+    }
+    if requested_force == Force::Original {
+        plan.reasons.insert(
+            0,
+            "Original is not yet available for managed optical titles; using encoded VOD"
+                .to_owned(),
+        );
+    }
+    plan
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpticalSessionRequest {
@@ -1001,35 +1033,12 @@ async fn local_decision(
     }
     let profile = playback::DeviceProfile::from_caps_v2(&request.caps);
     let node = super::stream::render_caps(state).await;
-    // The first optical producer is encoded VOD. Even a codec-compatible
-    // title cannot use file direct-play or the progressive remux endpoint,
-    // and claiming either would hand the client an executable plan that does
-    // not exist. Copy-video optical VOD can replace this forced verdict once
-    // its title-aware reader path is implemented.
     let requested_force = request
         .force
         .as_deref()
         .map(Force::parse)
         .unwrap_or(Force::Auto);
-    let mut plan =
-        playback::decide_media_facts_forced(&title.facts, &profile, Force::Transcode, &node);
-    if plan.delivered_dynamic_range != "sdr" {
-        plan.reasons.insert(
-            0,
-            "managed optical VOD currently delivers SDR encoded output".to_owned(),
-        );
-        plan.delivered_dynamic_range = "sdr";
-        plan.delivered_dolby_vision_profile = None;
-        plan.preserve_dolby_vision = false;
-        plan.convert_dolby_vision = false;
-    }
-    if requested_force == Force::Original {
-        plan.reasons.insert(
-            0,
-            "Original is not yet available for managed optical titles; using encoded VOD"
-                .to_owned(),
-        );
-    }
+    let plan = decide_managed_optical_delivery(&title.facts, &profile, requested_force, &node);
     let route_drive_id = format!("{}:{}", snapshot.owner_node_id, drive_id);
     let source = PlaybackSourceRef::Optical {
         owner_node_id: snapshot.owner_node_id,
@@ -2198,9 +2207,9 @@ fn service_error(error: OpticalServiceError) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        eject_target, optical_audio_tracks, optical_subtitle_tracks, owner_wire_error,
-        progress_audio_index, progress_selections_match, progress_subtitle_selection, EjectRequest,
-        PublicOpticalDriveState,
+        decide_managed_optical_delivery, eject_target, optical_audio_tracks,
+        optical_subtitle_tracks, owner_wire_error, progress_audio_index, progress_selections_match,
+        progress_subtitle_selection, EjectRequest, PublicOpticalDriveState,
     };
     use crate::http::error::ApiError;
     use plurx_core::domain::{AudioStream, SubtitleStream};
@@ -2208,7 +2217,7 @@ mod tests {
         DurableOpticalSessionSource, OpticalDriveState, OpticalTitleLocator, PlaybackSourceRef,
         OPTICAL_SESSION_PAYLOAD_V1, OPTICAL_SESSION_PAYLOAD_V2,
     };
-    use plurx_core::playback::PlaybackMediaFacts;
+    use plurx_core::playback::{self, Force, PlaybackMediaFacts, PlaybackMethod, RenderCaps};
 
     #[test]
     fn public_busy_state_never_serializes_the_playback_capability() {
@@ -2371,6 +2380,39 @@ mod tests {
         assert!(audio[1].default);
         assert_eq!(subtitles[0].index, 5);
         assert!(subtitles[0].default);
+    }
+
+    #[test]
+    fn managed_optical_delivery_stays_encoded_sdr_even_when_original_is_requested() {
+        let facts = PlaybackMediaFacts {
+            container: Some("mpegts".to_owned()),
+            video_codec: Some("hevc".to_owned()),
+            width: Some(3840),
+            height: Some(2160),
+            hdr: Some("hdr10".to_owned()),
+            hdr_format: Some("hdr10".to_owned()),
+            probed: true,
+            ..PlaybackMediaFacts::default()
+        };
+        let decision = decide_managed_optical_delivery(
+            &facts,
+            playback::default_profile(),
+            Force::Original,
+            &RenderCaps {
+                hdr10_passthrough: true,
+                hdr10_max_height: 2160,
+                ..RenderCaps::default()
+            },
+        );
+
+        assert_eq!(decision.method, PlaybackMethod::Transcode);
+        assert_eq!(decision.delivered_dynamic_range, "sdr");
+        assert!(!decision.preserve_dolby_vision);
+        assert!(!decision.convert_dolby_vision);
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("Original is not yet available")));
     }
 
     #[test]
