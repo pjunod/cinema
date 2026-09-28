@@ -329,6 +329,142 @@ profile **on the release APK**, five iterations each, and record the medians
 in §6 before crediting anything; a profile on the debug variant measures
 nothing that ships.
 
+
+**Source scaffold:** `clients/android/baselineprofile` targets two signed,
+non-debuggable app variants. `profileCapture` inherits release configuration
+but disables R8 and resource shrinking so captured rules retain source names;
+its version name ends in `-profile-capture` and it is never a shipping or
+performance artifact. The paired measurements target the optimized `release`
+APK. Capturing an obfuscated release and committing those names as input to
+another R8 build would bind the profile to the wrong program.
+
+The separate self-instrumenting `tv.plurx.profile` harness is debug-signed
+and can be debugged. It never replaces the measured `tv.plurx.app` durable
+release signer, and survives the measured app process being cold-killed.
+
+Capture requires three stable profile iterations within fifteen attempts
+and keeps actual `Ltv/plurx/app/` rules; library profiles remain supplied by
+their dependencies. Android documents [profile generation](https://developer.android.com/topic/performance/baselineprofiles/create-baselineprofile),
+[Macrobenchmark metrics](https://developer.android.com/topic/performance/benchmarking/macrobenchmark-metrics)
+and [ProfileVerifier](https://developer.android.com/reference/androidx/profileinstaller/ProfileVerifier).
+
+`ReleaseProfileCapture.coldHomeDetailPlayFirstFrame` cold-starts the app,
+waits for populated Home, opens one exact observed movie title, presses Play
+(or Start over after an iteration saved progress), and waits for the actual
+Media3 first-frame callback. It uses the existing paired account through UI;
+it never reads or supplies account credentials. An absent or ambiguous title,
+missing video action, APK/counter mismatch, debuggable target, or missing
+first frame fails the journey. The marker carries only callback duration,
+with no title, account, session identifier or playback URL.
+
+**Operator preparation:** use a dedicated already-paired physical Lenovo
+session with a controlled unwatched movie visible on Home. Bind the one
+explicit serial to a fresh independent idle-session proof before cold-killing
+the app; retain that proof with capture provenance. Preserve personal
+profiles and use the fixture account selected through normal app UI. Do not unlock,
+pair, clear data, replace the signer, or point the benchmark at another
+person's session. Capture requires API 33+ or an independently authorized
+rooted lab target; the module never roots a device. Local signing values
+stay in the existing signing environment. Explicitly authorize target
+installation and ART profile changes before running these device tasks.
+The instrumentation APK is debuggable; both target app variants are not.
+
+```bash
+# Compile the harness without executing it or contacting a device.
+./clients/android/gradlew -p clients/android \
+  :app:compileReleaseKotlin :app:compileProfileCaptureKotlin \
+  :baselineprofile:compileReleaseKotlin \
+  :baselineprofile:compileProfileCaptureKotlin
+
+# Only on the authorized dedicated physical capture target. Supply hashes
+# from retained independently signed artifact receipts, never credentials.
+ANDROID_SERIAL="$LENOVO_SERIAL" ./clients/android/gradlew -p clients/android \
+  :baselineprofile:connectedProfileCaptureAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=tv.plurx.profile.ReleaseProfileCapture \
+  -Pandroid.testInstrumentationRunnerArguments.plurxFixtureTitle="$OBSERVED_TITLE" \
+  -Pandroid.testInstrumentationRunnerArguments.plurxSourceSha="$CAPTURE_SOURCE_SHA" \
+  -Pandroid.testInstrumentationRunnerArguments.plurxVersionCode="$VERSION_CODE" \
+  -Pandroid.testInstrumentationRunnerArguments.plurxApkSha256="$CAPTURE_APK_SHA256" \
+  -Pandroid.testInstrumentationRunnerArguments.plurxDeviceAlias=Lenovo
+```
+
+Retain the generated profile from Gradle's reported additional-test-output
+path, its SHA-256, capture source/archive, non-debuggable signed capture APK
+receipt, device identity and the full successful journey output. Confirm
+it contains app rules (`Ltv/plurx/app/`), then commit that actual output at
+`clients/android/app/src/main/baseline-prof.txt`. No placeholder or hand-written
+profile belongs there. Build the optimized signed release with that file;
+retain its own source, APK, certificate and bundled-profile hashes. The
+source scaffold contains no generated app profile or measured gain.
+
+```bash
+# Five cold runs in each mode against that exact optimized release.
+# Macrobenchmark intentionally resets ART compilation/profile state. It
+# requires separate physical authorization; it never clears account data.
+ANDROID_SERIAL="$LENOVO_SERIAL" ./clients/android/gradlew -p clients/android \
+  :baselineprofile:connectedReleaseAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=tv.plurx.profile.ReleaseProfileMeasurement \
+  -Pandroid.testInstrumentationRunnerArguments.plurxFixtureTitle="$OBSERVED_TITLE" \
+  -Pandroid.testInstrumentationRunnerArguments.plurxSourceSha="$RELEASE_SOURCE_SHA" \
+  -Pandroid.testInstrumentationRunnerArguments.plurxVersionCode="$VERSION_CODE" \
+  -Pandroid.testInstrumentationRunnerArguments.plurxApkSha256="$RELEASE_APK_SHA256" \
+  -Pandroid.testInstrumentationRunnerArguments.plurxDeviceAlias=Lenovo
+
+# Retain the single completed invocation's run-named Macrobenchmark snapshot,
+# both run-named TTFF files, original AndroidX result and Perfetto traces from
+# the benchmark additional-output directory before producing this report.
+scripts/android-profile-report \
+  --without-ttff "$WITHOUT_TTFF_JSON" --required-ttff "$REQUIRED_TTFF_JSON" \
+  --macrobenchmark "$MACROBENCHMARK_JSON" \
+  --signed-artifact-receipt "$SIGNED_RELEASE_RECEIPT" --output "$NEW_REPORT_JSON"
+```
+
+Run the entire `ReleaseProfileMeasurement` class in one instrumentation
+invocation. Its parameterized tests generate one random run identifier and a
+SHA-256 binding of the full source, installed APK, counter and observed device
+identity (full 256 bits in compact base64url in the test parameter so trace
+filenames remain within AndroidX limits). AndroidX records those parameters in the original benchmark result
+names and `params`. After both methods and their owned-playback cleanup finish,
+the harness copies the original AndroidX JSON bytes to
+`plurx-<run>-macrobenchmark.json` and emits
+`plurx-<run>-none-ttff.json` and `plurx-<run>-required-ttff.json`. A missing mode
+or failed cleanup prevents a paired output. Filenames are unique to the run;
+keep the reported additional-output artifacts, not an older fixed-name file.
+
+The v2 TTFF records carry the actual snapshot SHA-256. The report checks that
+byte hash, generated run and full identity binding against both original
+AndroidX result names/parameters, and checks the result's real
+`context.build` model, hardware device, fingerprint and SDK. It requires five
+recorded iterations and zero warmups in each original result. Relabeling an
+arbitrary sidecar or supplying a prior startup JSON cannot associate it with a
+new TTFF pair. This binds recorded artifacts; it does not attest Lenovo
+ownership or create a startup-gain claim. Retain the original source and signed
+APK receipt, physical-device attestation and traces for acceptance. AndroidX's
+[result writer](https://github.com/androidx/androidx/blob/androidx-main/benchmark/benchmark-common/src/main/java/androidx/benchmark/ResultWriter.kt)
+and [result format](https://github.com/androidx/androidx/blob/androidx-main/benchmark/benchmark-common/src/main/java/androidx/benchmark/json/BenchmarkData.kt)
+define the original parameter and device-context fields.
+
+**How to read it:** `CompilationMode.None()` is the without-profile arm;
+`Partial(BaselineProfileMode.Require, warmupIterations = 0)` is the required
+profile arm. Each uses `StartupMode.COLD`, five iterations and the same
+source/APK/device/controlled movie. `StartupTimingMetric.timeToInitialDisplayMs`
+measures launch to the first app frame. The separate `media3_ttff_ms` values
+come from the existing PlayerScreen attempt-opened timestamp to Media3
+`onRenderedFirstFrame`; they include plan preparation but exclude Home and
+Detail navigation. UI polling only waits for that callback measurement; it
+is not the timing clock or proof of compositor presentation.
+
+The [measurement schema](../../tests/contracts/android-release-profile-evidence.schema.json)
+keeps all ten raw samples per metric, medians and input hashes. The report
+rejects missing runs, nonfinite/negative samples, mixed artifacts/devices or
+a debug/unverified release receipt; it does not invent missing startup data
+from TTFF. Record physical Lenovo attestation, profile provenance, traces
+and both medians in §6 before claiming M10. Runtime ProfileVerifier facts in
+Settings → Developer are advisory: bundled, queued, compiled and mismatched
+profiles are distinct, and none proves app-journey consumption or a gain.
+The focused report and advisory regressions remain source until the batch's
+single adversarial review and prescribed focused/fast lane execution.
+
 ---
 
 ## 4. Guardrails (non-goals)
@@ -559,3 +695,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-25 | gpt-6-astra | codex:/root/restore_d03 | M8 role half and device baseline | [draft Ansible PR #23](https://github.com/pjunod/ansible/pull/23) | The separate `plurx-agent` mobile role builds `app-release.apk`, requires release-signing inputs, verifies the signer is not Android Debug, and refuses an in-place replacement of a debug install. Python compilation and Ansible syntax check passed on `b77e5a5`; one adversarial review and fast lane await merge readiness. No release signing identity was found in the control environment, and no device was uninstalled or installed. At 2026-09-25 02:01:42 UTC, read-only `adb -t <transport_id> shell dumpsys package tv.plurx.app` showed Cinema 0.3.0 / versionCode 124 and `DEBUGGABLE` on 9445X, Pixel 10 Pro Fold, Pixel 11 Pro XL, and Motorola razr ultra 2025. The Xiaomi and Lenovo were absent. |
 | 2026-09-25 | gpt-6-astra | codex:/root/d03_finish_prep | D-03 internal-reader follow-up | [draft PR #534](http://192.168.4.7:3000/noirr/plurx/pulls/534) | Android PDF navigation now carries the selected file size, refuses unavailable or oversized files and rejects a download whose bytes differ from that selection. Apple PDF loading and progress saving remain bound to the profile that opened the document; PDFKit link actions stay internal. `ANDROID_HOME=/Users/pjunod/Library/Android/sdk ./clients/android/gradlew -p clients/android :app:compileDebugKotlin --offline --no-daemon` passed; `make apple-build` passed iOS and tvOS simulator compilation (log SHA-256 `f2b79010119392776490bceb10619b9dd190ad653b5ebb7984aba9da5498853a`). No tests or adversarial review have run on #534; physical PDF/EPUB reading and the original external-reader M3 acceptance remain open. |
 | 2026-09-26 | gpt-6-astra | codex:/root/d03_finish_prep | D-03 sole review disposition | [draft PR #534](http://192.168.4.7:3000/noirr/plurx/pulls/534) | The one adversarial review on published head `96a78edfc` found two P2 Android PDF issues: `PdfRenderer` could throw on an individual bad page and crash navigation, and vertical scroll position carried from one page to the next. The same PR now reports a render failure inside the reader, recycles an allocated bitmap on failure, offers a previous-page path, and keys scroll state by page. Android `:app:compileDebugKotlin --offline` passed after the fix (log SHA-256 `62243b91bd5876ec09fcf614c926989598771e11e011200790c81289fa4b6e11`). No second adversarial review will run; the fast lane runs after the reviewed fix is committed and the PR is marked ready. Physical PDF/EPUB acceptance remains open. |
+| 2026-09-28 | gpt-6-astra | 01a0d5b2-d294-70c2-a7e9-d884600c68e0 | D03M5/M10 source tooling | `codex/native-review-completion-0928` | Integrated07a78b030/cc4bcb9c1 and followup127c7f1fb. Debug-only bounded existing-dispatcher timings, signed nondebuggable capture target, independently signed self-instrumenting harness and strict paired five-cold-sample report. Compile/APK signature checks pass; no tests/profile generation/device measurements yet. Named Lenovo traces and profile consumption/gains remain open. |
