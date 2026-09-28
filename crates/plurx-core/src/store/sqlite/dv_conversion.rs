@@ -1509,6 +1509,9 @@ mod tests {
             // v85 replaces the enqueue and upkeep triggers under their own
             // names; remove_common_queue_schema drops every background_* object.
             "DROP TRIGGER IF EXISTS background_job_enqueue_command",
+            // v86 replaces the upkeep trigger again (receipt pressure); the
+            // same helper removes it.
+            "DROP TRIGGER IF EXISTS background_job_maintenance_command",
         ];
 
         assert!(

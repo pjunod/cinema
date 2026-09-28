@@ -4,6 +4,37 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Content analysis stopped: the queue's receipt bound is the next cliff after #608
+
+**Branch `fix/queue-receipt-pressure`, PR __PR__; the retained-row half is
+already on `main` as [#608](http://192.168.4.7:3000/noirr/plurx/pulls/608)
+(`29358ce5`), not yet deployed — the GPT deploy/verify prompt is in the
+project doc.** Paul reported 2026-09-28 that Content analysis was not
+advancing with `pipeline version unavailable` on every row. Two things, and
+the one on the page was the smaller. The stall: `background_jobs` held
+exactly 10,000 rows (8,890 finished, 6,219 from Saturday's embedding
+backfill), admission refuses at 10,000 regardless of state, finished rows
+retired only after seven days — every enqueue since 2026-09-27 ~09:00 UTC
+answered `queue_full`; fragment requests bounced as `queue_full_or_busy`
+(fences of 100–250 on the same rows, zero fragment jobs queued or running,
+last `ready` 2026-09-27 05:11 UTC). Two sessions diagnosed it in parallel;
+#608 landed first with enqueue-path eviction plus upkeep from 9,000
+(replicated v63 / SQLite v85), and this session's
+[#605](http://192.168.4.7:3000/noirr/plurx/pulls/605) was closed as
+superseded. What #608 leaves: `background_job_waiters` stood at 11,947 of
+16,384 with 10,775 succeeded receipts that only expire after seven days, so
+the same refusal was days away one table over. This branch compacts the
+oldest settled *internal* receipts a page per upkeep pass from 15,360
+(never user-scoped, identity-retaining — every fragment interest — or of an
+active job), as replicated **v64** / SQLite **v86**, generated from v63's
+upkeep trigger and pinned to it by test.
+The rows on the page: today's image builds flipped jellyfin-ffmpeg
+8.1.2 → 8.1.3 → 8.1.2 (the Dockerfile installs `jellyfin-ffmpeg8` unpinned),
+which changes the fragment-index engine digest, and each deploy under the
+other digest failed everything queued under the first — 278 rows, 228 of
+them tombstones on nynuc until **Retry this page** is pressed after the
+deploy. Filed as [#604](http://192.168.4.7:3000/noirr/plurx/issues/604).
+
 ## Android Live TV fullscreen on tablets: every box gets its own player view
 
 **[PR #606](http://192.168.4.7:3000/noirr/plurx/pulls/606), merged 2026-09-28 as `cfa61cb3e`; Android 138 installed on the Lenovo TB322FC, Google TV Streamer, Pixel 11 Pro XL, Pixel 10 Pro Fold and razr ultra 2025; VERIFIED on the TB322FC and the Streamer. Still owed: the TCL 9445X and the Xiaomi 25019PNF3C, which were not reachable over wireless adb.**
