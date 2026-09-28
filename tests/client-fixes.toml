@@ -2958,3 +2958,22 @@ source = "clients/apple/UITests/TVPhysicalInputTests.swift"
 source_anchor = "if current.elementType == .other && !target.identifier.isEmpty"
 test = "clients/apple/UITests/TVPhysicalInputTests.swift"
 test_anchor = "func testSettingsChoicesOpenAsMenusOnAppleTV() throws {"
+
+# Ordinary Release Live TV has a native selector independent of the finite
+# player's Debug acceptance launch route. Runtime caption text remains a
+# separate physical M4 acceptance check.
+[[fixes]]
+id = "apple.live-caption-menu-attachment-ownership"
+commits = ["18326122d"]
+source = "clients/apple/Sources/LiveTvCaptions.swift"
+source_anchor = "func makeSelectionAction(_ choice: Selection)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLiveCaptionChoicesCannotChangeTheNextChannel"
+
+[[fixes]]
+id = "apple.live-caption-advertised-options"
+commits = ["18326122d"]
+source = "clients/apple/Sources/LiveTvCaptions.swift"
+source_anchor = "static func isSelectable(mediaType: AVMediaType, captionsAdvertised: Bool)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLiveCaptionsRejectSyntheticUnadvertisedCC"
