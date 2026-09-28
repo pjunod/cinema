@@ -22,20 +22,30 @@ merge bases; that recipe is in the history of this file at ``f9c976132``
 and was retired here because the parents it reconstructed are now the base.
 The M3 remainder moves single items rather than regions, so a child's items
 need not have been contiguous and an item may join an existing child. Each
-row of ``ITEM_MOVES`` names a child, the marker it is declared under (none
-when the items are appended to an existing single-region child), its exact
-``pub(super)`` count and its items, each by its exact first line in BASE
-with its directly attached ``///``, ``//`` and ``#[...]`` lines. The proof
-has two halves. Every child is its base text unchanged (or, for a new
-child, the ``use super::*;`` header) followed by text that, once its
-``pub(super) `` additions are counted and removed and its tracing target
-pins are removed exactly as below, is rustfmt-identical to its items cut
-from BASE, joined by one blank line, in the row's order. And the current
-parent, less the new marker blocks, equals BASE less every item's lines,
-compared with runs of blank lines taken as one (rustfmt allows at most one
-blank line, so this ignores only where a seam's blank line fell). Together
-these show each moved item is byte-identical modulo visibility and target
-pins and that nothing else in the parent or an existing child changed.
+row of ``ITEM_MOVES`` names a child; for a new child, the marker it is
+declared under and its glob's visibility (none when the items are appended
+to an existing single-region child); its exact ``pub(super)`` count; and
+its items, each by its exact first line in BASE with its directly attached
+column-0 ``///``, ``//`` and ``#[...]`` lines. It checks three things.
+Every child is its base text unchanged (or, for a new child, the
+``use super::*;`` header) followed by text that, once its ``pub(super) ``
+additions are counted and removed and its tracing target pins are removed
+exactly as below, is rustfmt-identical to its items cut from BASE, joined
+by one blank line, in the row's order. Every new marker block in the
+parent holds exactly ``#[path = "<child>"]``, ``mod <name>;`` and
+``<visibility> use <name>::*;`` with the row's visibility, and nothing
+else. And the current parent, less those marker blocks, equals BASE less
+every item's lines, compared with runs of blank lines taken as one
+(rustfmt allows at most one blank line, so this ignores only where a
+seam's blank line fell). Together these show that each moved item is
+byte-identical modulo ``pub(super)`` and target pins, that the parent
+gained only the declared plumbing, and that nothing else in the parent or
+an existing child changed. Two things are outside it: rustfmt
+normalisation is taken as meaning-preserving (it can reflow, drop
+redundant parentheses and sort ``use`` lines), and an attached line is
+only one that starts at column 0, so a multi-line attribute or a
+``/* */`` comment above an item would not be carried (none is in this
+recipe).
 A child's tracing events carry an explicit ``target:`` naming the parent's
 module path, so a move does not relabel its log lines (a ``#[path]``
 child's default target is its own ``module_path!()``). Each was inserted
@@ -282,19 +292,21 @@ def rustfmt(text: str) -> str:
 # The M3 remainder (S-14-10): the items #511 left in `transcode.rs` move one
 # by one into child modules, so a child's items need not have been one
 # contiguous region of the parent. Each row names a child (relative to the
-# parent's directory), the parent marker a new child is declared under (None
-# when the items are appended to an existing single-region child, whose base
-# text must then be an exact prefix of its current text), the exact number of
-# `pub(super) ` the moved text gained, and the items in the child's order.
+# parent's directory); for a new child, the parent marker it is declared
+# under and the visibility of the glob that re-exports it ("" for a private
+# `use`), which together fix the block's exact text; None when the items are
+# appended to an existing single-region child, whose base text must then be
+# an exact prefix of its current text; the exact number of `pub(super) ` the
+# moved text gained; and the items in the child's order.
 # An item is named by its exact first code line in the base parent; the
 # `///`, `//` and `#[...]` lines directly above it move with it. A name that
 # starts with "=" leaves those lines in the parent (the one misplaced doc
 # comment, which documents the constant below the function it sat on).
 ITEM_PARENT = "crates/plurxd/src/transcode.rs"
-ITEM_MOVES: list[tuple[str, str | None, int, list[str]]] = [
+ITEM_MOVES: list[tuple[str, tuple[str, str] | None, int, list[str]]] = [
     (
         "transcode/errors.rs",
-        "errors",
+        ("errors", "pub(crate)"),
         5,
         [
             "fn capacity_error(message: impl AsRef<str>) -> String {",
@@ -316,7 +328,7 @@ ITEM_MOVES: list[tuple[str, str | None, int, list[str]]] = [
     ),
     (
         "transcode/session_log.rs",
-        "session-log",
+        ("session-log", "pub(crate)"),
         3,
         [
             "pub(crate) fn session_log_id(session_id: &str) -> String {",
@@ -327,7 +339,7 @@ ITEM_MOVES: list[tuple[str, str | None, int, list[str]]] = [
     ),
     (
         "transcode/planning.rs",
-        "planning",
+        ("planning", "pub(crate)"),
         6,
         [
             "fn retain_production_budget_after_planning(",
@@ -339,7 +351,7 @@ ITEM_MOVES: list[tuple[str, str | None, int, list[str]]] = [
     ),
     (
         "transcode/media_origin.rs",
-        "media-origin",
+        ("media-origin", "pub(crate)"),
         1,
         [
             "pub(crate) async fn probe_media_origin(source_path: &std::path::Path, start_seconds: f64) -> f64 {",
@@ -348,7 +360,7 @@ ITEM_MOVES: list[tuple[str, str | None, int, list[str]]] = [
     ),
     (
         "transcode/live_recovery.rs",
-        "live-recovery",
+        ("live-recovery", "pub(crate)"),
         4,
         [
             "pub(crate) enum LiveRecoveryReason {",
@@ -360,7 +372,7 @@ ITEM_MOVES: list[tuple[str, str | None, int, list[str]]] = [
     ),
     (
         "transcode/producer/progress.rs",
-        "progress",
+        ("progress", "pub"),
         17,
         [
             "pub struct Progress {",
@@ -370,7 +382,7 @@ ITEM_MOVES: list[tuple[str, str | None, int, list[str]]] = [
     ),
     (
         "transcode/rolling/http_wait.rs",
-        "http-wait",
+        ("http-wait", ""),
         18,
         [
             "struct HttpWaitLedger {",
@@ -386,7 +398,7 @@ ITEM_MOVES: list[tuple[str, str | None, int, list[str]]] = [
     ),
     (
         "transcode/metrics.rs",
-        "metrics",
+        ("metrics", "pub(crate)"),
         14,
         [
             "pub(crate) struct TranscodeMetrics {",
@@ -400,7 +412,7 @@ ITEM_MOVES: list[tuple[str, str | None, int, list[str]]] = [
     ),
     (
         "transcode/rolling/terminal_admission.rs",
-        "terminal-admission",
+        ("terminal-admission", ""),
         6,
         [
             "struct RollingTerminalAdmission {",
@@ -409,7 +421,7 @@ ITEM_MOVES: list[tuple[str, str | None, int, list[str]]] = [
     ),
     (
         "transcode/manager_hooks.rs",
-        "manager-hooks",
+        ("manager-hooks", "pub(crate)"),
         6,
         [
             "pub(crate) trait TranscodeManagerHooks: std::any::Any + Send + Sync {",
@@ -491,19 +503,37 @@ def parent_without_items(base_parent: str, spans: dict[str, tuple[int, int, bool
     return single_blank_lines([line for index, line in enumerate(lines) if index not in removed])
 
 
-def parent_without_new_markers(current: str, markers: dict[str, str]) -> list[str]:
+def new_marker_plumbing(child_rel: str, visibility: str) -> str:
+    """The only text a new child's marker block may hold."""
+
+    name = pathlib.PurePosixPath(child_rel).stem
+    glob = f"{visibility} use" if visibility else "use"
+    return f'#[path = "{child_rel}"]\nmod {name};\n{glob} {name}::*;\n'
+
+
+def parent_without_new_markers(
+    current: str, markers: dict[str, tuple[str, str]]
+) -> tuple[list[str], list[str]]:
     text = current
-    for marker, child_rel in markers.items():
+    wrong: list[str] = []
+    for marker, (child_rel, visibility) in markers.items():
         begin = f"// split: begin {marker}\n"
         end = f"// split: end {marker}\n"
         if text.count(begin) != 1 or text.count(end) != 1:
             raise SystemExit(f"expected exactly one {marker!r} marker pair")
         before, marked = text.split(begin, 1)
         plumbing, after = marked.split(end, 1)
-        if f'#[path = "{child_rel}"]\n' not in plumbing:
-            raise SystemExit(f"{marker!r} does not declare {child_rel}")
+        expected = new_marker_plumbing(child_rel, visibility)
+        if plumbing != expected:
+            wrong.append(f"{marker!r} marker block is not exactly its declaration:")
+            wrong.extend(
+                difflib.unified_diff(
+                    expected.splitlines(), plumbing.splitlines(),
+                    fromfile="declared", tofile=f"{ITEM_PARENT} {marker}", n=0, lineterm="",
+                )
+            )
         text = before + after
-    return single_blank_lines(text.splitlines(keepends=True))
+    return single_blank_lines(text.splitlines(keepends=True)), wrong
 
 
 def item_reconstructions(base: str) -> tuple[bool, list[str]]:
@@ -515,7 +545,7 @@ def item_reconstructions(base: str) -> tuple[bool, list[str]]:
     parent_dir = pathlib.Path(ITEM_PARENT).parent
     report: list[str] = []
     ok = True
-    markers: dict[str, str] = {}
+    markers: dict[str, tuple[str, str]] = {}
     for child_rel, marker, expected, names in ITEM_MOVES:
         child_path = str(parent_dir / child_rel)
         current = read(child_path)
@@ -527,7 +557,7 @@ def item_reconstructions(base: str) -> tuple[bool, list[str]]:
                 continue
             body = current[len(base_child) + 1 :]
         else:
-            markers[marker] = child_rel
+            markers[marker[0]] = (child_rel, marker[1])
             if not current.startswith(CHILD_HEADER):
                 raise SystemExit(f"{child_path}: lost its exact structural header")
             body = current[len(CHILD_HEADER) :]
@@ -554,14 +584,19 @@ def item_reconstructions(base: str) -> tuple[bool, list[str]]:
             f"{added} pub(super) additions, {targets} log targets"
         )
     expected_parent = parent_without_items(base_parent, spans)
-    current_parent = parent_without_new_markers(read(ITEM_PARENT), markers)
-    if current_parent == expected_parent:
+    current_parent, wrong = parent_without_new_markers(read(ITEM_PARENT), markers)
+    for line in wrong:
+        print(line)
+    ok &= not wrong
+    if current_parent == expected_parent and not wrong:
         moved_items = sum(len(row[3]) for row in ITEM_MOVES)
         print(
             f"{ITEM_PARENT}: OK against {base} ({moved_items} items moved into "
             f"{len(ITEM_MOVES)} children; {len(lines)} -> "
             f"{read(ITEM_PARENT).count(chr(10))} lines)"
         )
+    elif current_parent == expected_parent:
+        print(f"{ITEM_PARENT}: outside the marker blocks, identical to {base}")
     else:
         ok = False
         for line in difflib.unified_diff(
