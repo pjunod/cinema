@@ -43,6 +43,8 @@ function fixture({readyState = "complete", fetchImpl = null} = {}) {
     location: {reload() {}},
     performance: {now: () => now},
     setTimeout: (callback, delay) => { timers.push({callback, delay}); return timers.length; },
+    clearTimeout: (id) => { if (timers[id - 1]) timers[id - 1].cancelled = true; },
+    AbortController,
     fetch: (...args) => {
       requests.push(args);
       return fetchImpl ? fetchImpl(...args) : Promise.resolve({ok: true});
@@ -65,7 +67,11 @@ function fixture({readyState = "complete", fetchImpl = null} = {}) {
   };
 }
 
-test("early errors queue, redact, cap, deduplicate and drain on authentication", () => {
+async function drainMicrotasks() {
+  for (let index = 0; index < 50; index += 1) await Promise.resolve();
+}
+
+test("early errors queue, redact, cap, deduplicate and drain on authentication", async () => {
   const f = fixture();
   const error = new Error(`Bearer secret https://host/app.js?token=secret ${"x".repeat(3_000)}`);
   error.stack = `https://host/app.js?token=secret\n${"s".repeat(3_000)}`;
@@ -97,6 +103,7 @@ test("early errors queue, redact, cap, deduplicate and drain on authentication",
   for (let index = 0; index < 19; index += 1) {
     f.dispatch("error", {message: `unique-${index}`, filename: `/u${index}.js`, lineno: index + 1});
   }
+  await drainMicrotasks();
   assert.equal(f.requests.length, 20);
   f.dispatch("error", {message: "over-cap", filename: "/over.js", lineno: 99});
   assert.equal(f.requests.length, 20);
@@ -116,7 +123,7 @@ test("a logger failure cannot recursively report itself", () => {
   assert.equal(f.requests.length, 1, "the nested logger error is dropped by the guard");
 });
 
-test("the boot sentinel distinguishes slow, crashed and timed-out bootstrap", () => {
+test("the boot sentinel distinguishes slow, crashed and timed-out bootstrap", async () => {
   const slow = fixture({readyState: "loading"});
   assert.equal(slow.reporter.checkBoot(5_000), "slow");
   assert.equal(slow.document.getElementById("boot-sentinel"), null);
@@ -140,6 +147,7 @@ test("the boot sentinel distinguishes slow, crashed and timed-out bootstrap", ()
   crashed.reporter.setAuth("opaque-token", "Chrome");
   assert.equal(crashed.reporter.checkBoot(5_000), "crashed");
   assert.match(crashed.document.getElementById("boot-sentinel").textContent, /core\/cards\.js/);
+  await drainMicrotasks();
   const reports = crashed.requests.map(([, options]) => JSON.parse(options.body));
   assert.equal(reports[0].src, "/assets/core/cards.js");
   assert.equal(reports[0].message, "resource failed to load");
@@ -149,4 +157,55 @@ test("the boot sentinel distinguishes slow, crashed and timed-out bootstrap", ()
   crashed.reporter.markReady();
   assert.equal(crashed.document.documentElement.dataset.boot, "ready");
   assert.equal(crashed.document.getElementById("boot-sentinel"), null);
+});
+
+test("report delivery waits for completion so an early error precedes its boot sentinel", async () => {
+  const pending = [];
+  const f = fixture({fetchImpl: () => new Promise((resolve, reject) => pending.push({resolve, reject}))});
+  f.dispatch("error", {target: {src: "/assets/core/cards.js"}});
+  f.reporter.setAuth("opaque-token", "Chrome");
+  assert.equal(f.reporter.checkBoot(5_000), "crashed", "the banner does not wait for transport");
+  assert.equal(f.requests.length, 1, "the sentinel must not race the held first response");
+  const completedDeadline = f.timers.at(-1);
+  pending[0].resolve({ok: true});
+  await drainMicrotasks();
+  assert.equal(completedDeadline.cancelled, true, "completion removes the owned deadline");
+  completedDeadline.callback();
+  assert.equal(f.requests.length, 2, "a stale deadline cannot release the active sentinel request");
+  assert.deepEqual(f.requests.map(([, options]) => JSON.parse(options.body).event),
+    ["client_error", "boot_sentinel"]);
+  f.dispatch("error", {message: "later", filename: "/later.js"});
+  pending[1].reject(new Error("network unavailable"));
+  await drainMicrotasks();
+  assert.equal(f.requests.length, 3, "a rejected request must release the next report");
+});
+
+test("report deadlines release a stuck request and fence late completions and account changes", async () => {
+  const pending = [];
+  const f = fixture({fetchImpl: () => new Promise((resolve) => pending.push({resolve}))});
+  f.reporter.setAuth("account-one", "Chrome");
+  f.dispatch("error", {message: "first", filename: "/first.js"});
+  f.dispatch("error", {message: "second", filename: "/second.js"});
+  const firstSignal = f.requests[0][1].signal;
+  const firstDeadline = f.timers.at(-1);
+  assert.equal(firstDeadline.delay, 5_000);
+  firstDeadline.callback();
+  assert.equal(firstSignal.aborted, true);
+  assert.equal(f.requests.length, 2, "one deadline dispatches the next report");
+  f.dispatch("error", {message: "third", filename: "/third.js"});
+  pending[0].resolve({ok: true});
+  await drainMicrotasks();
+  assert.equal(f.requests.length, 2, "the timed-out completion cannot release the active second request");
+  const secondSignal = f.requests[1][1].signal;
+  const signedOutDeadline = f.timers.at(-1);
+  f.reporter.setAuth(null);
+  assert.equal(signedOutDeadline.cancelled, true, "sign-out removes the active deadline");
+  assert.equal(secondSignal.aborted, true, "sign-out cancels the active authenticated request");
+  f.reporter.setAuth("account-two", "Chrome");
+  pending[1].resolve({ok: true});
+  await drainMicrotasks();
+  assert.equal(f.requests.length, 2, "old account's queued report is discarded");
+  f.dispatch("error", {message: "new-account", filename: "/new.js"});
+  assert.equal(f.requests[2][1].headers.authorization, "Bearer account-two");
+  assert.equal(JSON.parse(f.requests[2][1].body).message, "new-account");
 });

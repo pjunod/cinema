@@ -6,14 +6,18 @@ const EARLY_ERROR_LIMIT = 20;
 const EARLY_ERROR_INTERVAL_MS = 10_000;
 const EARLY_ERROR_MESSAGE_MAX = 512;
 const EARLY_ERROR_STACK_MAX = 2_048;
+const EARLY_ERROR_SEND_TIMEOUT_MS = 5_000;
 
 function createEarlyErrorReporter({
   send = fetch,
   now = () => performance.now(),
   schedule = setTimeout,
+  cancel = clearTimeout,
 } = {}) {
   const queued = [];
   const seen = new Map();
+  const pendingReports = [];
+  let activeReport = null;
   let token = null;
   let ua = "browser";
   let reporting = false;
@@ -46,27 +50,65 @@ function createEarlyErrorReporter({
     return now() - lastOverflowSend >= EARLY_ERROR_INTERVAL_MS;
   }
 
-  function sendReport(body) {
-    if (!token) {
-      if (queued.length < EARLY_ERROR_LIMIT) queued.push(body);
-      return false;
-    }
-    if (!maySend()) return false;
-    sent += 1;
-    if (sent >= EARLY_ERROR_LIMIT) lastOverflowSend = now();
+  function stopDelivery() {
+    pendingReports.length = 0;
+    const active = activeReport;
+    activeReport = null;
+    if (!active) return;
+    cancel(active.timer);
+    if (active.controller) active.controller.abort();
+  }
+
+  function drainReports() {
+    if (activeReport || !pendingReports.length) return;
+    const report = pendingReports.shift();
+    const active = {controller: typeof AbortController === "function" ? new AbortController() : null,
+      timer: null};
+    activeReport = active;
+    const finish = () => {
+      if (activeReport !== active) return;
+      cancel(active.timer);
+      activeReport = null;
+      drainReports();
+    };
+    // Response completion orders accepted reports. A failed or stuck request
+    // must not hold every later breadcrumb indefinitely; its owned deadline
+    // aborts it before the next report is dispatched. Late completion is stale.
+    active.timer = schedule(() => {
+      if (activeReport !== active) return;
+      if (active.controller) active.controller.abort();
+      finish();
+    }, EARLY_ERROR_SEND_TIMEOUT_MS);
+    const wasReporting = reporting;
+    reporting = true;
     try {
       Promise.resolve(send("/api/v1/client-log", {
         method: "POST",
         keepalive: true,
         headers: {
           "content-type": "application/json",
-          "authorization": `Bearer ${token}`,
+          "authorization": `Bearer ${report.token}`,
         },
-        body: JSON.stringify(Object.assign({ua}, body)),
-      })).catch(() => {});
+        body: report.body,
+        ...(active.controller ? {signal: active.controller.signal} : {}),
+      })).then(finish, finish);
     } catch (error) {
-      void error;
+      finish();
+    } finally {
+      reporting = wasReporting;
     }
+  }
+
+  function sendReport(body) {
+    if (!token) {
+      if (queued.length < EARLY_ERROR_LIMIT) queued.push(body);
+      return false;
+    }
+    if (!maySend() || pendingReports.length >= EARLY_ERROR_LIMIT) return false;
+    sent += 1;
+    if (sent >= EARLY_ERROR_LIMIT) lastOverflowSend = now();
+    pendingReports.push({token, body: JSON.stringify(Object.assign({ua}, body))});
+    drainReports();
     return true;
   }
 
@@ -109,7 +151,11 @@ function createEarlyErrorReporter({
   }
 
   function setAuth(nextToken, label = null) {
-    token = typeof nextToken === "string" && nextToken ? nextToken : null;
+    const incoming = typeof nextToken === "string" && nextToken ? nextToken : null;
+    // Never replay an authenticated account's pending reports under another
+    // account, or keep its request alive after sign-out.
+    if (incoming !== token) stopDelivery();
+    token = incoming;
     ua = label || browserName();
     if (!token || reporting) return;
     reporting = true;
