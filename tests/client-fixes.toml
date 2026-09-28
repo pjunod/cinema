@@ -2855,11 +2855,33 @@ source_anchor = 'if(outgoing.controlSeek?.seekTelemetry!==incoming?.controlSeek?
 test = "tests/web/seek-telemetry.test.js"
 test_anchor = "another title abandons the outgoing dispatched seek when its decoder retires"
 
-# A cold seek retains its command clock until the attached delivery can be named.
+# The batched Apple late-delivery correction shares commit5733161de with the
+# title-retirement correction above; its named Swift regression is carried by
+# the commit and PR regression trailers rather than a duplicate prefix row.
+
+# Repairing the same destination retains its original seek clock and outcome.
 [[fixes]]
-id = "apple.cold-seek-binds-actual-delivery"
-commits = ["5733161de"]
+id = "android.same-intent-recovery-retains-seek"
+commits = ["714ee9e40"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
+source_anchor = "if (pendingSeekSequence != null && pendingSeekSequence == intentSequence) {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "fun sameIntentRecoveryKeepsTheOriginalSeekClockAndCannotBecomeStartupTtff()"
+
+# The serializer must emit initialized live delivery labels rather than treating them as defaults.
+[[fixes]]
+id = "android.live-progress-method-is-encoded"
+commits = ["c6127e068"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "@kotlinx.serialization.EncodeDefault"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "fun liveProgressNamesNormalizedDeliveryWhileRecordedReplayAlwaysOmitsMethod()"
+
+# Seek telemetry cleanup is fenced by its destination, independently of Pause.
+[[fixes]]
+id = "apple.seek-telemetry-cleanup-follows-destination"
+commits = ["f50e56ef7"]
 source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "seekMeasurement.bindDelivery(generation: seekState.generation, method: clientLogMethod)"
-test = "clients/apple/Tests/AppleClientTests.swift"
-test_anchor = "func testAppleSeekAwaitingItsDecisionBindsActualDeliveryWithoutRestartingItsClock() throws"
+source_anchor = "!self.attemptStillCurrent(telemetryOwner, fence: .seekTelemetrySupersession)"
+test = "clients/apple/Tests/AttemptScopesTests.swift"
+test_anchor = "func testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid()"
