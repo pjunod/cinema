@@ -795,6 +795,16 @@ async fn local_decision(
     }) {
         return Err(ApiError::BadRequest("unknown subtitle track".to_owned()));
     }
+    if request.subtitle.is_some_and(|index| {
+        index >= 0
+            && title
+                .facts
+                .subtitle_streams
+                .get(index as usize)
+                .is_some_and(|track| !plurx_core::tracks::is_bitmap_subtitle(&track.codec))
+    }) {
+        return Err(optical_text_subtitle_unavailable());
+    }
     if request.caps.v != DeviceCaps::VERSION {
         return Err(ApiError::typed(
             StatusCode::BAD_REQUEST,
@@ -974,6 +984,15 @@ async fn local_start_session(
         .is_some_and(|index| index < 0 || index as usize >= title.facts.subtitle_streams.len())
     {
         return Err(ApiError::BadRequest("unknown subtitle track".to_owned()));
+    }
+    if request.subtitle_burn.is_some_and(|index| {
+        title
+            .facts
+            .subtitle_streams
+            .get(index as usize)
+            .is_some_and(|track| !plurx_core::tracks::is_bitmap_subtitle(&track.codec))
+    }) {
+        return Err(optical_text_subtitle_unavailable());
     }
     if request
         .audio_offset_ms
@@ -1657,6 +1676,14 @@ fn optical_conflict(code: &'static str, message: &'static str) -> ApiError {
     ApiError::typed(StatusCode::CONFLICT, code, message)
 }
 
+fn optical_text_subtitle_unavailable() -> ApiError {
+    ApiError::typed(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "vod_subtitle_burn_unavailable",
+        "This optical subtitle format cannot be rendered without reopening the physical title. Choose a DVD subpicture or Blu-ray PGS track.",
+    )
+}
+
 fn optical_start_error(error: String) -> ApiError {
     if let Some((code, message)) = crate::transcode::vod_refusal(&error) {
         let (status, code) = match code {
@@ -1669,6 +1696,10 @@ fn optical_start_error(error: String) -> ApiError {
             | "vod_frame_cadence_unknown" => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "optical_format_unsupported",
+            ),
+            "vod_subtitle_burn_unavailable" => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "vod_subtitle_burn_unavailable",
             ),
             _ => (StatusCode::SERVICE_UNAVAILABLE, "optical_read_failed"),
         };

@@ -19044,9 +19044,16 @@ impl TranscodeManager {
                             "the requested optical subtitle track does not exist",
                         )
                     })?;
+                let bitmap = plurx_core::tracks::is_bitmap_subtitle(&stream.codec);
+                if !bitmap {
+                    return Err(vod_refusal_error(
+                        "vod_subtitle_burn_unavailable",
+                        "this optical subtitle format would require a second physical-title open",
+                    ));
+                }
                 Ok::<_, String>(plurx_core::transcode::SubtitleBurn {
                     subtitle_index: index,
-                    bitmap: plurx_core::tracks::is_bitmap_subtitle(&stream.codec),
+                    bitmap,
                 })
             })
             .transpose()?;
