@@ -3444,7 +3444,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Merge of main into #581, measured from the validation unittests' actual count: 1088 (main after #537) + 22 (S-14 M8 incl. its review round) = 1110.
 # Merge of main @ c7635af5e (#581; 1110) into `plan/S-14-9` (1090): 1112 measured by zeroing this row
 # (1110 + this branch's 1090 - 1088 = +2). Both reviews kept; the merge adds no new site.
-expected_occurrences = 1112
+# PR590 retains two awaited process-cancellation test readiness constructors:
+# one 20ms readiness poll and one 10s startup budget, owned by the test while
+# retaining its output future. The original 200ms cancellation begins only after
+# atomic PID readiness; the actual future is dropped before the death assertion.
+# Current main583 timer census1112 + these two unchanged constructors = 1114.
+expected_occurrences = 1114
 
 [[module_structures]]
 id = "bare-time-constructor"

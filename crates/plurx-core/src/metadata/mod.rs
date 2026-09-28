@@ -1870,7 +1870,7 @@ mod tests {
         assert_eq!(again.matched, 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_item_that_exceeds_its_deadline_is_retryable_and_the_loop_continues() {
         use axum::routing::get;
         use axum::Json;
@@ -1922,11 +1922,19 @@ mod tests {
                 .expect("seed provider id");
         }
 
+        let slow_entered = Arc::new(tokio::sync::Notify::new());
+        let mock_slow_entered = Arc::clone(&slow_entered);
         let base = serve(
             axum::Router::new()
                 .route(
                     "/movie/1",
-                    get(|| async { std::future::pending::<Json<serde_json::Value>>().await }),
+                    get(move || {
+                        let slow_entered = Arc::clone(&mock_slow_entered);
+                        async move {
+                            slow_entered.notify_one();
+                            std::future::pending::<Json<serde_json::Value>>().await
+                        }
+                    }),
                 )
                 .route(
                     "/movie/2",
@@ -1945,18 +1953,41 @@ mod tests {
         let artwork = canonical_tempdir();
         let publisher = PublicationStore::unfenced(&store);
 
-        let report = enrich_library_for_targets_inner(
-            &publisher,
-            &tmdb,
-            artwork.path(),
-            Some(lib.id),
-            false,
-            None,
-            None,
-            None,
-            Duration::from_millis(50),
-        )
-        .await;
+        // Real socket scheduling must not consume Quick's 50 ms item budget.
+        // Keep virtual time fixed while I/O progresses, and exceed Slow's
+        // unchanged deadline only after its pending mock request is observed.
+        // All three futures belong to this select and drop together on return
+        // or unwind: there is no detached clock task or producer owner.
+        let advance_slow = async {
+            slow_entered.notified().await;
+            tokio::time::advance(Duration::from_millis(51)).await;
+            std::future::pending::<()>().await;
+        };
+        let hold_clock = async {
+            let started = std::time::Instant::now();
+            loop {
+                assert!(
+                    started.elapsed() < Duration::from_secs(30),
+                    "mock socket I/O exceeded the test's wall-clock watchdog"
+                );
+                tokio::task::yield_now().await;
+            }
+        };
+        let report = tokio::select! {
+            report = enrich_library_for_targets_inner(
+                &publisher,
+                &tmdb,
+                artwork.path(),
+                Some(lib.id),
+                false,
+                None,
+                None,
+                None,
+                Duration::from_millis(50),
+            ) => report,
+            () = advance_slow => unreachable!("clock advance stays pending until enrichment ends"),
+            () = hold_clock => unreachable!("clock guard ends only by dropping with enrichment"),
+        };
 
         assert_eq!(report.errors, 1);
         assert_eq!(report.matched, 1, "the item after the timeout still runs");

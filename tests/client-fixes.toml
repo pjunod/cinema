@@ -2938,3 +2938,34 @@ source = "clients/apple/Sources/LiveTvView.swift"
 source_anchor = "private func returnGuideFocusAfterProgrammeSheet() {"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "func testAppleTvLiveNavigationIsReversibleAndReachesEverything() throws"
+
+# Prepared readiness must be re-observed when the incumbent clock enters a
+# successor range that was already appended. This combined commit also carries
+# physical focus navigation; its two Swift cases are in the landing trailers.
+[[fixes]]
+id = "web.prepared-readiness-follows-incumbent-clock"
+commits = ["b06b2b2d1"]
+source = "crates/plurxd/src/web/player/prepared-replacement.js"
+source_anchor = "if(state.overlapListeners!==readinessListeners) return;"
+test = "tests/playback/web-control.test.js"
+test_anchor = "prepared HLS buffer readiness follows incumbent clock and releases listener ownership"
+
+# The category fixture is established through observed UI and the original
+# saved grouping is restored by this physical paging regression's defer.
+[[fixes]]
+id = "apple.physical-paging-restores-grouping"
+commits = ["cb8985317"]
+source = "clients/apple/UITests/TVPhysicalInputTests.swift"
+source_anchor = "private func setLibraryGrouping(_ label: String, in app: XCUIApplication) -> Bool {"
+test = "clients/apple/UITests/TVPhysicalInputTests.swift"
+test_anchor = "func testLibraryPagingWithRemote() throws {"
+
+# Retained failed focused-owner attempts are covered by the final regression:
+# the physical menu opens only after its unique leaf Other proxy is observed.
+[[fixes]]
+id = "apple.physical-picker-observed-focus-owner"
+commits = ["3c1e8d9be", "a007eab51", "72d69a329"]
+source = "clients/apple/UITests/TVPhysicalInputTests.swift"
+source_anchor = "if current.elementType == .other && !target.identifier.isEmpty"
+test = "clients/apple/UITests/TVPhysicalInputTests.swift"
+test_anchor = "func testSettingsChoicesOpenAsMenusOnAppleTV() throws {"
