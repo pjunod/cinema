@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 04:45 UTC · **Audited main:** `40dae5ce1e680f0a41e38fe0e5ee5913be7ce54f`
+**Status:** open · **Updated:** 2026-09-28 05:06 UTC · **Audited main:** `f400c0ea2650823cee6832d214cab111bd3a18d3`
 
 [PR #582](http://192.168.4.7:3000/noirr/plurx/pulls/582) merged after its
 single adversarial review; all four findings were fixed. The exact candidate
@@ -12,22 +12,17 @@ in the landing commit. No second review was run.
 
 [Draft PR #590](http://192.168.4.7:3000/noirr/plurx/pulls/590) batches the
 HLS readiness clock observation repair, physical TV focus navigation repair,
-and this evidence. Apple source195 is reserved; actual devices remain194
-until signed qualification/install. Android133 is unchanged. The sole590 adversarial review found one P2 retained-grouping prerequisite; it is addressed by observed grouping selection and deferred restoration. Review receipt SHA256 `cba5a86abee8bef0a2e342479ef9b75565a41eb26c52cdf81699ab6a29dfb89f`. No second review. Signed195 production apps and physical runner compiled; focused and fast-lane qualification are next, and no590 unit tests have run.
+and this evidence. Apple source196 is reserved; actual devices remain194
+until signed qualification/install. Android133 is unchanged. The sole590 adversarial review found one P2 retained-grouping prerequisite; it is addressed by observed grouping selection and deferred restoration. Review receipt SHA256 `cba5a86abee8bef0a2e342479ef9b75565a41eb26c52cdf81699ab6a29dfb89f`. No second review. Historical195 production apps and runners compiled. Main #589 now changes native Live TV inputs and claims195, so final196 production apps require a fresh signed build. No590 fast unit gate has run.
 
-Focused web readiness passed; old-source negative control failed the intended
-no-new-append assertion (receipt `9d3e13f0dd2fe8466b4f723ddf761084d259fe8257442c418a7dec507621b44d`).
-Against canonical194, reviewed195 runner paging passed and restored Library grouping.
-Settings failed because the focused Form toggle was an accessibility Cell outside the
-Button query (retained receipt `19ae137042bc4ef3c703a75dd1ed3dad31021e9b82c952db4e8af1923ac04b24`).
-The focused-owner query is repaired; affected cases rerun before PR readiness.
-These are source-scoped regressions, not final195/current-main product acceptance.
+Focused web readiness passed; old-source negative control failed the intended no-new-append assertion (receipt `9d3e13f0dd2fe8466b4f723ddf761084d259fe8257442c418a7dec507621b44d`). Against canonical194, paging passed twice and restored Library grouping. Three Settings failures remain retained. A bounded diagnostic proved that Quality's actual focus owner is an anonymous leaf Other with exactly the identified Button frame, not a focused Cell. The helper now accepts only that unique leaf proxy with nonzero matching geometry. The diagnostic restored the first failed case's observed Autoplay Off to its original On, through an observed focused toggle and one ordinary Select. Receipt `8913c0eebbffad9a012102e0dc6adfad542ed233872f167a41d7d7dfe8917132`. Corrected focused cases and new-source compilation are pending; historical runner results are not final196 product acceptance.
+
+D-03 actual API36 local synthetic-data backup/restore passed on exact signed nondebuggable133. After metadata and app backup, clearing only the owned emulator app removed all three sentinels. Framework restore returned0; the nonexcluded positive-control file returned with identical hash while offline/datastore sentinels stayed absent. Receipt `4d809da05634861585d2bc379b414ed76d52502d6ae6044382b8ded16daf9380`. The earlier restore-1000 failure is retained. Own emulator, private ADB and disks are cleaned (receipt `030975bf9a9eb48ef3a98cff9453d31a99d6ba0242a29aa62d8839ce506e1450`). This proves API36 local file exclusions; API37, cloud, D2D, physical restore and functional offline/account/reader acceptance remain owed.
 
 The four-node strict uniform deployment passed on `dfef993b9`. Browser cases ran on that exact
 merged binary and unchanged scorers; failures are retained. Main subsequently moved through
 [PR #588](http://192.168.4.7:3000/noirr/plurx/pulls/588) to `40dae5ce1`, which is integrated
-into this candidate. Its queue/Activity changes require a fresh final server deployment;
-Apple and Android inputs did not change. Current-main physical UI actions paused at the guard.
+into this candidate. Main then moved through [PR #589](http://192.168.4.7:3000/noirr/plurx/pulls/589) to `f400c0ea`, also integrated. Queue/Activity and native Live TV changes require fresh final server and Apple deployment; Android inputs remain unchanged. Current-main physical UI actions paused at the guard.
 GoogleTV reached 459/459 Everything and 325 Unwatched in four filter cycles, restored
 Everything with Title(A–Z) unchanged; tail, fresh request counts and 6,000-item acceptance remain unproved.
 
@@ -38,7 +33,7 @@ Everything with Title(A–Z) unchanged; tail, fresh request counts and 6,000-ite
 | Duration | Historical exactdfef one30s/256MiB collector and existing quiet heartbeat are active from03:59:15UTC, Sep28 toOct5. Initial5m clean; historical windows preserved. |24h/7d and normal-use windows remain owed; a future source change interrupts exact-build continuity. |
 | Physical devices | Signed Apple194 installed/read back on six physical devices. Signed nondebuggable Android133 installed/read back on five, with APK/signer/firstInstall/UID/CE continuity. |16pro/TCL unavailable; Shield/Xiaomi absent. Locked devices cannot supply UI acceptance. |
 | D-02 | Actual133 APK/signature verified on GoogleTV,Lenovo,Pixel10ProFold,razrUltra2025 andPixel11ProXL. GoogleTV unlocked; other four currently locked. | Runtimecodec/frame, Home/notification, PiP/controller, lifecycle and named Shield/Lenovo prompts remain owed. |
-| D-03 | Signed133 packaged backup/cloud/D2D XML excludes offline/ and datastore/. Actual packaged baseline.prof/profm retained; ART consumption/startup timing unproved. | Packaged policy is not restore proof. Disposable exact-release synthetic-data backup/restore, physical PDF/EPUB/account/offline/startup acceptance remain owed; external chooser remains separately refused by its plan. |
+| D-03 | Signed133 packaged backup/cloud/D2D XML excludes offline/ and datastore/. Actual packaged baseline.prof/profm retained; ART consumption/startup timing unproved. | Packaged policy is not restore proof. API36 local synthetic-data exclusions now pass; API37/cloud/D2D/physical restore and PDF/EPUB/account/offline/startup acceptance remain owed; external chooser remains separately refused by its plan. |
 | A-02 / A-03 | Signed194 installed on17air,17promax,Bedroom,iPadMini,iPadPro,and paired device named iPhone. All six post-install data-path inventories now succeeded; the first iPadPro query disconnected, then one bounded reconnect succeeded. | Controller/notification/Now Playing, full ordering/request/frame and named Lenovo6000-title acceptance remain owed. Actual194 paging case failed14.46s in focus helper after Category→Library grouping removed its target. Draft590 repairs navigation; canonical194 restored in place. |
 | W-02 §5.4–5.5 | Both unchanged official HLS-startup and subtitle-readiness browser checks passed on exactdfef source/binary with deployed parity. | LGwebOS/FireTV remote prompts remain owed. |
 | L-03 M2/M4 | Confirmed real6.1 source contains439 caption packets, CC1 140 printable characters and SERVICE1 176; temporary capture removed and tuners idle afterward. | HLS advertisement/selector/rendered-text and named shared-capacity/ShieldHDMI prompts remain owed. Prior zero-frame-side-data observations are method limits, not caption-negative evidence. |

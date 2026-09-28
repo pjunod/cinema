@@ -293,18 +293,22 @@ final class TVPhysicalInputTests: XCTestCase {
                 attachScreen(app, name: "focus-owner-unavailable")
                 return false
             }
-            // Form pickers expose their identified Button inside the focused
-            // Cell. That cell owns the requested control's focus; steering by
-            // its much wider frame would move away from the already focused row.
-            if current.elementType == .cell && !target.identifier.isEmpty
-                && current.descendants(matching: .any).matching(
-                    NSPredicate(format: "identifier == %@ AND label == %@",
-                                target.identifier, target.label)
-                ).firstMatch.exists {
-                return true
-            }
             let targetFrame = target.frame
             let currentFrame = current.frame
+            // Physical SwiftUI menu pickers can give focus to an anonymous
+            // leaf Other with exactly the identified Button's frame. Accept
+            // only that observed proxy, never a larger ancestor or nearby row.
+            if current.elementType == .other && !target.identifier.isEmpty
+                && targetFrame.width > 0 && targetFrame.height > 0
+                && current.descendants(matching: .any).matching(focused).count == 0
+                && app.descendants(matching: .any).matching(
+                    identifier: target.identifier).count == 1
+                && abs(targetFrame.minX - currentFrame.minX) <= 1
+                && abs(targetFrame.minY - currentFrame.minY) <= 1
+                && abs(targetFrame.width - currentFrame.width) <= 1
+                && abs(targetFrame.height - currentFrame.height) <= 1 {
+                return true
+            }
             // Leave the Category/Library segmented row downwards before
             // seeking a shelf's See All button horizontally. Otherwise Right
             // changes grouping and removes library-open-category:*.
