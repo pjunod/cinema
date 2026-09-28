@@ -9,7 +9,6 @@ data class OpticalDriveStateDto(
     val media_generation: String? = null,
     val disc_id: String? = null,
     val title_id: String? = null,
-    val session_id: String? = null,
     val reason: String? = null,
 )
 

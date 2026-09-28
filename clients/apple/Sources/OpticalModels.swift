@@ -5,7 +5,6 @@ struct OpticalDriveStateDTO: Codable, Hashable {
     var mediaGeneration: String?
     var discId: String?
     var titleId: String?
-    var sessionId: String?
     var reason: String?
 }
 
