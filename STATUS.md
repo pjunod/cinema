@@ -4,6 +4,46 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The durable queue refused every job for a day: retention cap counted finished work
+
+**Branch `fix/durable-queue-retention-pressure`, PR __PR__; not yet deployed — the GPT deploy/verify prompt is in the project doc.**
+Paul reported 2026-09-28 that Content analysis was not advancing and the page
+showed `pipeline version unavailable`. Those rows are a side effect of today's
+image builds flipping jellyfin-ffmpeg 8.1.2 → 8.1.3 → 8.1.2 (the Dockerfile
+installs `jellyfin-ffmpeg8` unpinned; each deploy under the other digest fails
+the requests queued under the first). The stall itself was the new durable
+queue: `background_jobs` had exactly 10,000 rows, 8,890 of them terminal
+(6,219 from Saturday's embedding backfill), admission refuses at 10,000
+regardless of state, and terminal rows were only retired after seven days —
+so since 2026-09-27 ~09:00 UTC every enqueue answered `queue_full`. Fragment
+builds bounced as `queue_full_or_busy` (fence 100–250 on the same rows, zero
+fragment jobs queued or running, last `ready` 2026-09-27 05:11 UTC), library
+scans logged `QueueFull` 163× per library, subtitle extraction could not admit
+new demand. It would not have self-healed before 2026-10-04, and the receipt
+table (11,947 of 16,384) would have closed it again days later.
+Fix: the same family of rule the attempt table already had (that one fires one
+page under its cap; these fire eight), applied to retained rows and internal
+receipts — upkeep compacts the oldest terminal details once the table holds
+≥ 8,976 rows, and the oldest terminal *internal* receipts once the receipt
+table holds ≥ 15,360 (never user-scoped, identity-retaining — which is every
+fragment interest — or of an active job), a page per pass. Internal producers
+re-derive demand from their domain tables (embeddings from
+`background_embeddings`, subtitles from `analysis_requests`), so a compacted
+internal receipt does not re-run finished work. Shipped as replicated schema
+**v63** / SQLite **v85** (a drop-and-recreate of the maintenance trigger, same
+shape as v62). Two SQLite tests and one three-voter contract test drive each
+cap through refusal → one page → reopened admission → receipt survival →
+convergence (the replicated one from the exact v62 predecessor), and a fourth
+pins the SQL literals to the constants and the migration's trigger to the
+shared schema's.
+Evidence and the ffmpeg-flip analysis:
+[DURABLE-WORK-QUEUE-STATUS.md](docs/cluster/DURABLE-WORK-QUEUE-STATUS.md).
+**Operator follow-ups after deploy:** press **Retry this page** on the
+Attention filter for the 228 `pipeline version unavailable` rows that carry
+nynuc's current digest (they are tombstones until reopened); pin
+`jellyfin-ffmpeg8` in the Dockerfile so a rebuild cannot change the engine
+digest (separate issue).
+
 ## Live TV said "all slots are busy" with every tuner idle
 
 **[PR #585](http://192.168.4.7:3000/noirr/plurx/pulls/585), merged 2026-09-28 as `2694db665`; not yet deployed — the GPT deploy/verify prompt is in the project doc.**

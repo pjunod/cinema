@@ -142,7 +142,9 @@ const LIVE_TV_RESOURCE_SCHEMA_VERSION: i64 = 61;
 const LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE: i64 = INTEGRITY_JOBS_SCHEMA_VERSION;
 const SUBTITLE_RECONCILE_SCHEMA_VERSION: i64 = 62;
 const SUBTITLE_RECONCILE_SCHEMA_MIGRATION_SOURCE: i64 = LIVE_TV_RESOURCE_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = SUBTITLE_RECONCILE_SCHEMA_VERSION;
+const RETENTION_PRESSURE_SCHEMA_VERSION: i64 = 63;
+const RETENTION_PRESSURE_SCHEMA_MIGRATION_SOURCE: i64 = SUBTITLE_RECONCILE_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = RETENTION_PRESSURE_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -3013,6 +3015,22 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(RETENTION_PRESSURE_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs::RETENTION_PRESSURE_SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(RETENTION_PRESSURE_SCHEMA_VERSION, now, RETENTION_PRESSURE_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        RETENTION_PRESSURE_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -5053,7 +5071,8 @@ fn schema_migration_action(
         | PROBE_JOBS_SCHEMA_MIGRATION_SOURCE
         | INTEGRITY_JOBS_SCHEMA_MIGRATION_SOURCE
         | LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE
-        | SUBTITLE_RECONCILE_SCHEMA_MIGRATION_SOURCE => {
+        | SUBTITLE_RECONCILE_SCHEMA_MIGRATION_SOURCE
+        | RETENTION_PRESSURE_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -7085,9 +7104,14 @@ mod tests {
             "v60 advances to the Live TV resource schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 57,
+            SUBTITLE_RECONCILE_SCHEMA_VERSION + 1,
+            RETENTION_PRESSURE_SCHEMA_VERSION,
+            "v62 advances to the retention-pressure schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 58,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v62 step"
+            "this implementation contains every additive v5→v63 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

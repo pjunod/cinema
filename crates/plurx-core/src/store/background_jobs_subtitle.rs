@@ -12,6 +12,10 @@ use sha2::{Digest, Sha256};
 pub(crate) const RESET_LEGACY: &str = "UPDATE analysis_requests SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL, fence = fence + 1 WHERE component = 'subtitle_source' AND state IN ('running','submitted');";
 
 pub(crate) const RECONCILE_SCHEMA: &str = include_str!("background_jobs_subtitle_reconcile.sql");
+/// The SQLite migration that installs `RECONCILE_SCHEMA`; the upgrade test
+/// rewinds a database to just below it, whatever migrations follow.
+#[cfg(test)]
+pub(crate) const RECONCILE_SQLITE_SCHEMA_VERSION: i64 = 84;
 
 pub(crate) const SCHEMA: &str = include_str!("background_jobs_subtitle.sql");
 

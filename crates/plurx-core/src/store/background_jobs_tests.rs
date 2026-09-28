@@ -1005,7 +1005,7 @@ async fn background_subtitles_reconcile_historical_ready_demand_without_overwrit
             .pragma_update(
                 None,
                 "user_version",
-                super::sqlite::SQLITE_SCHEMA_VERSION - 1,
+                super::background_jobs_subtitle::RECONCILE_SQLITE_SCHEMA_VERSION - 1,
             )
             .expect("subtitle reconciliation fixture");
     }
@@ -1078,4 +1078,334 @@ fn claim_for_subtitle(id: &str, revision: i64, now: i64) -> ClaimJob {
     let mut request = claim(id, revision, now);
     request.kind = JobKind::SubtitleExtract;
     request
+}
+
+#[test]
+fn retention_pressure_literals_match_constants() {
+    // The admission statement, the upkeep trigger and the upkeep predicate
+    // carry the caps as SQL literals; keep them tied to the named constants.
+    let migration = super::background_jobs::RETENTION_PRESSURE_SCHEMA;
+    let needed = super::background_jobs_maintenance::MAINTENANCE_NEEDED;
+    for sql in [migration, needed] {
+        assert!(
+            sql.contains(&format!(
+                "(SELECT COUNT(*) FROM background_jobs) >= {RETAINED_JOBS_PRESSURE}"
+            )),
+            "retained-row pressure literal drifted from RETAINED_JOBS_PRESSURE"
+        );
+        assert!(
+            sql.contains(&format!(
+                "(SELECT COUNT(*) FROM background_job_waiters) >= {WAITERS_PRESSURE}"
+            )),
+            "waiter pressure literal drifted from WAITERS_PRESSURE"
+        );
+    }
+    assert!(ENQUEUE_SQL.contains(&format!(
+        "(SELECT COUNT(*) FROM background_jobs) >= {MAX_RETAINED_JOBS}"
+    )));
+    assert!(ENQUEUE_SQL.contains(&format!(
+        "(SELECT COUNT(*) FROM background_job_waiters) >= {MAX_WAITERS}"
+    )));
+    assert_eq!(RETAINED_JOBS_PRESSURE, 8_976);
+    assert_eq!(WAITERS_PRESSURE, 15_360);
+    // The migration replaces the shared schema's maintenance trigger, so it
+    // must carry every statement of that trigger: an edit to one copy that
+    // misses the other is the drift this pins.
+    let shared = super::background_jobs::SCHEMA;
+    let trigger = |source: &str| {
+        let start = source
+            .find("CREATE TRIGGER IF NOT EXISTS background_job_maintenance_command\n")
+            .expect("maintenance trigger");
+        let end = source[start..].find("\nEND;\n").expect("trigger end") + start;
+        source[start..end].to_owned()
+    };
+    let (shared_trigger, migrated_trigger) = (trigger(shared), trigger(migration));
+    for line in shared_trigger
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let carried = migrated_trigger.contains(line)
+            || line == "AND job.updated_at_ms <= json_extract(NEW.request_json, '$.now_ms') - 604800000"
+                && migrated_trigger.contains(
+                    "AND (job.updated_at_ms <= json_extract(NEW.request_json, '$.now_ms') - 604800000",
+                );
+        assert!(
+            carried,
+            "shared maintenance statement missing from the migration: {line}"
+        );
+    }
+    assert!(migration.starts_with("-- Retention pressure"));
+    assert!(migration.contains("DROP TRIGGER IF EXISTS background_job_maintenance_command;"));
+    // The migration was generated from the shared schema's copy, which is
+    // only right while no migration in between redefines the trigger. Pin
+    // that: exactly two migrations create it, the shared schema and this one,
+    // and this one comes last.
+    let creators: Vec<usize> = super::sqlite::MIGRATIONS
+        .iter()
+        .enumerate()
+        .filter(|(_, sql)| {
+            sql.contains("CREATE TRIGGER IF NOT EXISTS background_job_maintenance_command")
+        })
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        creators.len(),
+        2,
+        "another migration redefines the maintenance trigger"
+    );
+    assert!(std::ptr::eq(super::sqlite::MIGRATIONS[creators[0]], shared));
+    assert!(std::ptr::eq(
+        super::sqlite::MIGRATIONS[creators[1]],
+        migration
+    ));
+    assert_eq!(creators[1], super::sqlite::MIGRATIONS.len() - 1);
+}
+
+/// A day of finished work must not hold admission closed for the seven-day
+/// receipt window: at the retained-row cap, upkeep compacts the oldest
+/// terminal details a page at a time and admission reopens, while every
+/// receipt (the request's outcome) survives.
+#[tokio::test]
+async fn retained_row_pressure_compacts_terminal_details_and_reopens_admission() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("retained.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let template = enqueue(1_000);
+    store.enqueue_job(template.clone()).await.expect("template");
+    let connection = rusqlite::Connection::open(&path).expect("fixture connection");
+    let transaction = connection.unchecked_transaction().expect("transaction");
+    // 9,998 fresh terminal rows (well inside seven days), oldest first by
+    // updated_at_ms, each with a succeeded internal receipt; plus one
+    // terminal row that a live interest still references.
+    transaction
+        .execute(
+            "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<9998)
+        INSERT INTO background_jobs (id, kind, payload_version, payload_json, dedupe_key, priority,
+            state, fence, revision, not_before_ms, created_at_ms, updated_at_ms)
+        SELECT 'done-'||printf('%05d', i), kind, payload_version, payload_json, 'done-'||i, priority,
+            'succeeded', 1, 2, 1000, 1000, 1000 + i FROM n, background_jobs WHERE id=?1",
+            [&template.id],
+        )
+        .expect("terminal jobs");
+    transaction
+        .execute(
+            "INSERT INTO background_jobs (id, kind, payload_version, payload_json, dedupe_key, priority,
+            state, fence, revision, not_before_ms, created_at_ms, updated_at_ms)
+        SELECT 'held', kind, payload_version, payload_json, 'held', priority,
+            'succeeded', 1, 2, 1000, 1000, 1001 FROM background_jobs WHERE id=?1",
+            [&template.id],
+        )
+        .expect("held job");
+    transaction
+        .execute(
+            "INSERT INTO background_job_waiters
+        (request_scope, request_id, request_digest, job_id, consumer_kind, consumer_ref, priority,
+         state, receipt_expires_ms, created_at_ms, updated_at_ms)
+        SELECT 'semantic', id, ?2, id, 'semantic', id, 1, 'succeeded', updated_at_ms + 604800000,
+            updated_at_ms, updated_at_ms
+        FROM background_jobs WHERE id LIKE 'done-%'",
+            rusqlite::params![template.id, "b".repeat(64)],
+        )
+        .expect("receipts");
+    transaction
+        .execute(
+            "INSERT INTO background_job_waiters
+        (request_scope, request_id, request_digest, job_id, consumer_kind, consumer_ref, priority,
+         state, receipt_expires_ms, created_at_ms, updated_at_ms)
+        VALUES ('artifact-repair', 'held', ?1, 'held', 'artifact_hydrate', 'held', 1,
+            'awaiting_hydration', 604801000, 1001, 1001)",
+            [&"b".repeat(64)],
+        )
+        .expect("live interest");
+    transaction.commit().expect("commit fixture");
+    let count = |sql: &str| {
+        connection
+            .query_row(sql, [], |row| row.get::<_, i64>(0))
+            .expect("count")
+    };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM background_jobs"),
+        MAX_RETAINED_JOBS as i64
+    );
+
+    // Admission is closed, exactly as before this change …
+    let mut fresh = enqueue(5_000);
+    fresh.dedupe_key = "fragment:2".to_owned();
+    assert!(matches!(
+        store.enqueue_job(fresh.clone()).await.expect("closed"),
+        EnqueueOutcome::QueueFull
+    ));
+    // … and upkeep now reopens it: one bounded page of the OLDEST terminal
+    // details, none of them the row a live interest still references.
+    assert!(store.maintain_jobs(5_001).await.expect("pressure upkeep"));
+    assert_eq!(
+        count("SELECT COUNT(*) FROM background_jobs"),
+        MAX_RETAINED_JOBS as i64 - MAX_PAGE_SIZE as i64,
+        "one bounded page"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM background_jobs WHERE id = 'held'"),
+        1
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM background_jobs WHERE id LIKE 'done-%' AND id <= 'done-00128'"),
+        0,
+        "the oldest details went first"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM background_job_waiters WHERE request_scope = 'semantic'"),
+        9_998,
+        "receipts are untouched by retained-row pressure"
+    );
+    let now = 5_002;
+    fresh.now_ms = now;
+    fresh.not_before_ms = now;
+    assert!(matches!(
+        store.enqueue_job(fresh).await.expect("reopened"),
+        EnqueueOutcome::Accepted { .. }
+    ));
+    // The compacted rows' receipts still answer their request ids.
+    let mut replay = enqueue(now);
+    replay.request.scope = "semantic".to_owned();
+    replay.request.request_id = "done-00001".to_owned();
+    replay.request.request_digest = "b".repeat(64);
+    replay.dedupe_key = "fragment:3".to_owned();
+    assert!(matches!(
+        store.enqueue_job(replay).await.expect("receipt"),
+        EnqueueOutcome::Existing {
+            cancelled: false,
+            ..
+        }
+    ));
+    // Upkeep keeps paging while the table sits above the pressure mark, and
+    // goes quiet once it is back under it.
+    let mut remaining = count("SELECT COUNT(*) FROM background_jobs");
+    let mut ticks = 0;
+    while remaining >= RETAINED_JOBS_PRESSURE as i64 {
+        assert!(store.maintain_jobs(now + 10 + ticks).await.expect("paging"));
+        let next = count("SELECT COUNT(*) FROM background_jobs");
+        assert!(next < remaining);
+        remaining = next;
+        ticks += 1;
+        assert!(ticks < 16, "pressure paging must converge");
+    }
+    assert!(!store.maintain_jobs(now + 100).await.expect("settled"));
+}
+
+/// Internal terminal receipts compact under waiter pressure, oldest first;
+/// user-scoped receipts, identity-retaining receipts and receipts of jobs
+/// that are still active keep their full window.
+#[tokio::test]
+async fn waiter_pressure_compacts_internal_receipts_and_spares_protected_ones() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("waiters.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let template = enqueue(1_000);
+    store.enqueue_job(template.clone()).await.expect("template");
+    let connection = rusqlite::Connection::open(&path).expect("fixture connection");
+    let transaction = connection.unchecked_transaction().expect("transaction");
+    // One active job whose old cancelled receipt must survive, plus one
+    // terminal job carrying every other receipt.
+    transaction
+        .execute(
+            "INSERT INTO background_jobs (id, kind, payload_version, payload_json, dedupe_key, priority,
+            state, fence, revision, not_before_ms, created_at_ms, updated_at_ms)
+        SELECT 'terminal', kind, payload_version, payload_json, 'terminal', priority,
+            'succeeded', 1, 2, 1000, 1000, 1000 FROM background_jobs WHERE id=?1",
+            [&template.id],
+        )
+        .expect("terminal job");
+    let seed = |scope: &str,
+                prefix: &str,
+                job: &str,
+                state: &str,
+                retain: i64,
+                n: i64,
+                base: i64| {
+        transaction
+            .execute(
+                "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<?1)
+            INSERT INTO background_job_waiters
+            (request_scope, request_id, request_digest, job_id, consumer_kind, consumer_ref, priority,
+             state, retain_identity, receipt_expires_ms, created_at_ms, updated_at_ms)
+            SELECT ?2, ?3||printf('%05d', i), ?4, ?5, 'analysis', ?3||i, 1, ?6, ?7,
+                ?8 + i + 604800000, ?8 + i, ?8 + i FROM n",
+                rusqlite::params![n, scope, prefix, "b".repeat(64), job, state, retain, base],
+            )
+            .expect("receipts");
+    };
+    // Oldest of all: 8 user receipts, 8 identity-retaining receipts and 8
+    // receipts of the still-active template job — all protected.
+    seed("user:7", "user-", "terminal", "succeeded", 0, 8, 0);
+    seed("analysis", "keep-", "terminal", "succeeded", 1, 8, 100);
+    seed("subtitle", "live-", &template.id, "cancelled", 0, 8, 200);
+    // Then enough internal terminal receipts to reach the cap exactly.
+    let internal = MAX_WAITERS as i64 - 1 - 24;
+    seed(
+        "semantic",
+        "done-",
+        "terminal",
+        "succeeded",
+        0,
+        internal,
+        1_000,
+    );
+    transaction.commit().expect("commit fixture");
+    let count = |sql: &str| {
+        connection
+            .query_row(sql, [], |row| row.get::<_, i64>(0))
+            .expect("count")
+    };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM background_job_waiters"),
+        MAX_WAITERS as i64
+    );
+
+    let mut fresh = enqueue(5_000);
+    fresh.dedupe_key = "fragment:2".to_owned();
+    assert!(matches!(
+        store.enqueue_job(fresh.clone()).await.expect("closed"),
+        EnqueueOutcome::QueueFull
+    ));
+    assert!(store.maintain_jobs(5_001).await.expect("pressure upkeep"));
+    assert_eq!(
+        count("SELECT COUNT(*) FROM background_job_waiters"),
+        MAX_WAITERS as i64 - MAX_PAGE_SIZE as i64,
+        "one bounded page"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM background_job_waiters WHERE request_scope = 'user:7'"),
+        8
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM background_job_waiters WHERE request_id LIKE 'keep-%'"),
+        8
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM background_job_waiters WHERE request_id LIKE 'live-%'"),
+        8
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM background_job_waiters WHERE request_id LIKE 'done-%' AND request_id <= 'done-00128'"),
+        0,
+        "the oldest internal receipts went first"
+    );
+    fresh.now_ms = 5_002;
+    fresh.not_before_ms = 5_002;
+    assert!(matches!(
+        store.enqueue_job(fresh).await.expect("reopened"),
+        EnqueueOutcome::Accepted { .. }
+    ));
+    let mut remaining = count("SELECT COUNT(*) FROM background_job_waiters");
+    let mut ticks = 0;
+    while remaining >= WAITERS_PRESSURE as i64 {
+        assert!(store.maintain_jobs(5_010 + ticks).await.expect("paging"));
+        let next = count("SELECT COUNT(*) FROM background_job_waiters");
+        assert!(next < remaining);
+        remaining = next;
+        ticks += 1;
+        assert!(ticks < 16, "pressure paging must converge");
+    }
+    assert!(!store.maintain_jobs(5_100).await.expect("settled"));
 }

@@ -1,6 +1,6 @@
 # Durable cluster work — build status
 
-**Status:** M1–M3 and E0–E3 merged into main · **Updated:** 2026-09-27 ·
+**Status:** M1–M3 and E0–E3 merged into main · **Updated:** 2026-09-28 ·
 **Final implementation:** `82df7f59e` · **Production:** deployed in `55aa430fd` on all four nodes, 2026-09-27 (A-04 board row, exact-55aa fleet point) ·
 **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) ·
 **E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) ·
@@ -10,6 +10,75 @@
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
 implementation is claimed; “compiled” does not mean tests passed.
+
+## Retention pressure follow-up — the queue refused everything for a day
+
+**2026-09-28:** fixed in the branch `fix/durable-queue-retention-pressure`
+(PR link in [STATUS.md](../../STATUS.md)). Paul reported Content analysis not
+advancing, with the page showing `pipeline version unavailable` rows. Those
+rows were real but incidental (see below); the stall was admission.
+
+Read-only fleet evidence (nynuc's replicated `plurx.db` copy, 16:27 UTC):
+`background_jobs` held **exactly 10,000 rows** — 1,110 active (1,101 queued
+`subtitle_extract`, 6 running, 3 queued `transcode_prepare`) and 8,890
+terminal, 6,219 of them the `semantic_embedding` backfill that ran 07:35–09:03
+UTC on 2026-09-27. The admission statement refuses at `COUNT(*) >= 10000`
+whatever the state mix, and the maintenance trigger retired terminal rows only
+after seven days. Every enqueue since 2026-09-27 ~09:00 UTC therefore answered
+`queue_full`: the fragment worker's `submit_fragment_index_analysis` returned
+not-accepted so each claimed request was requeued as `queue_full_or_busy`
+uncharged (fences of 100–250 on the same queued rows, 1,587
+`retry/queue_full_or_busy` lifecycle counts, no `cluster_fragment_index_jobs`
+row queued or running, last fragment `ready` 2026-09-27 05:11 UTC); the library
+worker logged `library intent was not accepted … QueueFull` 163 times per
+library since the 13:44 UTC deploy; the 1,101 queued subtitle extractions could
+only drain at the rate the 6 running ones finished, since no new demand could be
+admitted either. `background_job_waiters` stood at 11,947 of 16,384 with 10,775
+succeeded, so the receipt cap would have closed the queue a second time within
+days even if the row cap had been raised.
+
+The fix is the pressure policy §4.1 already applied to attempt history (there
+at one page under the cap), extended to retained rows and internal receipts at
+eight pages under theirs (contract amendment in §4.1): a page of the oldest
+terminal details compacts per upkeep pass once the table is within eight pages
+of its cap, and a page of the oldest terminal internal receipts once the waiter
+table is. Protected records are unchanged: user-scoped receipts (`user:<id>`,
+the only user scope the code mints), identity-retaining receipts (every
+`analysis` fragment interest, so fragment retry budgets and refusals keep their
+full window), receipts of active jobs, live interests and pins. Internal
+producers re-derive demand from domain tables, so a compacted internal receipt
+cannot re-run finished work. Production's `background_job_legacy` holds three
+`materialized` rows and nothing `awaiting_import`, so the legacy guard the
+job rule carries costs nothing per pass.
+The trigger ships as replicated schema **v63** / SQLite **v85**
+(`background_jobs_retention_pressure.sql`, a drop-and-recreate of
+`background_job_maintenance_command`, the same shape as v62), so the first
+upkeep pass after deploy reopens admission and the table settles under 8,976
+rows over the following minutes (one page per voter per scheduler minute).
+
+Fresh installs receive the trigger last in `install_schema`, so a bootstrapped
+voter and a migrated one agree object for object. Tests:
+`retention_pressure_literals_match_constants` pins the SQL literals to the
+constants and pins the migration's trigger to the shared schema's statements;
+`retained_row_pressure_compacts_terminal_details_and_reopens_admission` and
+`waiter_pressure_compacts_internal_receipts_and_spares_protected_ones` drive
+a store at each cap through refusal, one bounded page, reopened admission,
+receipt survival and convergence.
+
+**Not this fix — the `pipeline version unavailable` rows.** 278 fragment
+requests failed terminally between 01:27 and 12:12 UTC on 2026-09-28. The
+engine digest nynuc stamps on requests is a hash of the ffmpeg executable and
+its dependency closure; today's image builds carried jellyfin-ffmpeg
+**8.1.3** (`plurx/plurxd:latest` 01:26 UTC, `agent-dfef993b…` 03:43 UTC,
+digest `85e6fa5e…`) while the 13:44 UTC image carries **8.1.2** (digest
+`953a7b12…`), because the Dockerfile installs `jellyfin-ffmpeg8` unpinned and
+each build takes whatever apt and the layer cache give it. Every request
+queued under one digest is failed as `pipeline_version_unavailable` by the
+next deploy under the other. The 228 rows with the digest nynuc now runs again
+are tombstones for their files until reopened from the Content analysis page
+(**Retry this page**); the 50 under `85e6fa5e…` are re-requested by discovery
+under the current digest on their own. Pinning the ffmpeg package in the
+Dockerfile is a separate change (Forgejo issue linked from STATUS.md).
 
 ## Activity and subtitle throughput follow-up
 

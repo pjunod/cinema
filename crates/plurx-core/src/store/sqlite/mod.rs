@@ -1177,6 +1177,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     crate::live_tv_resource::SCHEMA,
     // v84: preserve published subtitle history when obsolete common work retires.
     super::background_jobs_subtitle::RECONCILE_SCHEMA,
+    // v85: compact terminal queue details and internal receipts under
+    // retention pressure instead of refusing admission for a week.
+    super::background_jobs::RETENTION_PRESSURE_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2899,8 +2902,16 @@ mod tests {
         // v72–v76 add library work, domain leases, source-I/O reservations,
         // provider dispatch budgets and the subtitle adapter; v77 adds artwork holders,
         // and v78 retains portable transcode source/manifest provenance.
+        assert!(
+            std::ptr::eq(
+                MIGRATIONS[(crate::store::background_jobs_subtitle::RECONCILE_SQLITE_SCHEMA_VERSION - 1)
+                    as usize],
+                crate::store::background_jobs_subtitle::RECONCILE_SCHEMA
+            ),
+            "RECONCILE_SQLITE_SCHEMA_VERSION names the migration that installs the reconcile schema"
+        );
         assert_eq!(
-            version, 84,
+            version, 85,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

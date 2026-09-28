@@ -94,9 +94,19 @@ WHERE job.kind = 'transcode_prepare' AND job.state = 'succeeded' AND location.co
   OR EXISTS (SELECT 1 FROM background_job_waiters
     WHERE state IN ('succeeded','failed','cancelled') AND retain_identity = 0
       AND receipt_expires_ms <= json_extract($1, '$.now_ms'))
+  OR ((SELECT COUNT(*) FROM background_job_waiters) >= 15360
+    AND EXISTS (SELECT 1 FROM background_job_waiters waiter
+      WHERE waiter.state IN ('succeeded','failed','cancelled') AND waiter.retain_identity = 0
+        AND waiter.request_scope NOT LIKE 'user:%'
+        AND NOT EXISTS (SELECT 1 FROM background_jobs job WHERE job.id = waiter.job_id
+          AND job.state IN ('queued','running','cancelling'))))
   OR EXISTS (SELECT 1 FROM background_jobs job
     WHERE job.state IN ('succeeded','failed','cancelled')
-      AND job.updated_at_ms <= json_extract($1, '$.now_ms') - 604800000
+      AND (job.updated_at_ms <= json_extract($1, '$.now_ms') - 604800000
+        OR (SELECT COUNT(*) FROM background_jobs) >= 8976)
+      AND NOT EXISTS (SELECT 1 FROM background_job_legacy remaining WHERE remaining.state = 'awaiting_import'
+        AND remaining.kind = 'fragment_index_build'
+        AND json_extract(remaining.snapshot_json, '$.cache_key') = json_extract(job.payload_json, '$.cache_key'))
       AND NOT EXISTS (SELECT 1 FROM background_job_waiters
         WHERE job_id = job.id AND state IN ('pending','awaiting_hydration')))
 "#;

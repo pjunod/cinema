@@ -319,6 +319,37 @@ Terminal job details may be pruned after seven days once references have been
 compacted. Never prune active leases, live waiters or artifact pins to meet a
 limit. These are initial constants, not new Developer knobs or certifications.
 
+**Amended 2026-09-28 (retention pressure).** Production showed the two
+sentences above contradicting each other at this fleet's throughput: the
+retained-row cap counts terminal rows, retirement waited the full seven days,
+and one day of finished work (6,219 embedding rows plus 2,569 subtitle
+extractions on 2026-09-27) filled the 10,000-row table by 09:00 UTC. From then
+every admission answered `queue_full` — fragment builds bounced as
+`queue_full_or_busy`, library scans and subtitle extraction were refused — and
+nothing would have reopened it before 2026-10-04. The rule is now the one the
+attempt table already had: once `background_jobs` is within eight pages of
+`MAX_RETAINED_JOBS` (≥ 8,976 rows) upkeep compacts the oldest terminal *details*
+a page per pass, and once `background_job_waiters` is within eight pages of
+`MAX_WAITERS` (≥ 15,360) it compacts the oldest terminal *internal* receipts
+(`retain_identity = 0`, scope not `user:*`, job no longer active) a page per
+pass (the attempt rule fires one page under its cap; these fire eight, because
+upkeep pages once per voter per scheduler minute and admission must not touch
+the cap between passes). The seven-day promise is unchanged for what it was
+made for: user-scoped and identity-retaining receipts (every fragment interest
+retains identity), live interests, active jobs and artifact pins are never
+compacted to meet a limit, and a compacted *job's* receipt still answers its
+request id with the recorded outcome. A compacted *internal* receipt does not:
+that is acceptable because every internal producer re-derives demand from its
+domain table (embeddings from `background_embeddings`, subtitle extraction from
+`analysis_requests`, preparation from cache locations and predictions) and
+never re-presents an old request id, so the receipt was only ever a guard
+against a retry of the same enqueue call. Replicated schema v63 / SQLite v85
+carry the trigger; evidence is
+`retained_row_pressure_compacts_terminal_details_and_reopens_admission`,
+`waiter_pressure_compacts_internal_receipts_and_spares_protected_ones` and the
+three-voter
+`replicated_v62_queue_at_the_retained_row_cap_reopens_after_migration_upkeep`.
+
 Large jobs keep a cursor and enqueue bounded pages. A million-file library
 must not turn into a million replicated queue rows. Page size is at most 128;
 enqueue insertion/dedupe counts and cursor advancement are transactional so a

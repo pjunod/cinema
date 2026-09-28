@@ -4393,3 +4393,180 @@ async fn background_subtitles_replicated_ready_orphans_are_refused_and_retired()
         .is_empty());
     assert!(!store.maintain_jobs(1_003).await.expect("idle upkeep"));
 }
+
+/// The 2026-09-28 production shape: the retained-row table full of finished
+/// work well inside its seven-day window, so every admission answers
+/// `queue_full`. The exact v62 predecessor (only the maintenance trigger
+/// differs) migrates to v63 on daemon open, and one upkeep pass reopens
+/// admission without touching any receipt.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test]
+async fn replicated_v62_queue_at_the_retained_row_cap_reopens_after_migration_upkeep() {
+    use plurx_core::store::Store;
+    use std::sync::Arc;
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store: Arc<dyn Store> = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    let (_, file_id) = seed_file(&store, "retention-pressure").await;
+    let file = store.get_file(file_id).await.expect("file").expect("file");
+    let enqueue = |id: String, recipe: String, now_ms: i64| EnqueueJob {
+        id: id.clone(),
+        payload: JobPayload::TranscodePrepare {
+            file_id,
+            source_generation: format!("source:{file_id}"),
+            source_size: file.size,
+            source_mtime: file.mtime,
+            recipe_key: recipe.clone(),
+            target_height: 720,
+            policy_generation: "policy:1".to_owned(),
+            requirements: PretranscodeRequirements {
+                version: 1,
+                decoder: "h264".to_owned(),
+                acceptable_encoder_families: vec!["software".to_owned()],
+                output_contract: "hls-v1".to_owned(),
+                tone_map: false,
+                output_grade: "sdr".to_owned(),
+                scratch_bytes: 1_024,
+            },
+            reason: "recent".to_owned(),
+        },
+        dedupe_key: format!("transcode:{recipe}"),
+        priority: 1,
+        not_before_ms: now_ms,
+        now_ms,
+        request: JobRequest {
+            scope: "internal:pretranscode".to_owned(),
+            request_id: id.clone(),
+            request_digest: recipe,
+            consumer_kind: "pretranscode".to_owned(),
+            consumer_ref: id,
+            target_node_id: None,
+            deadline_ms: None,
+            retain_identity: false,
+        },
+    };
+    let template = uuid::Uuid::new_v4().to_string();
+    assert!(matches!(
+        store
+            .enqueue_job(enqueue(template.clone(), "a".repeat(64), 1_000))
+            .await
+            .expect("template"),
+        EnqueueOutcome::Accepted { .. }
+    ));
+    let client = hiqlite::Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        super::CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("fixture client");
+    // 9,999 finished rows updated one millisecond apart, each with its
+    // succeeded internal receipt: the table is at MAX_RETAINED_JOBS and
+    // nothing in it is anywhere near seven days old.
+    client.execute(
+        "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<9999)
+         INSERT INTO background_jobs (id, kind, payload_version, payload_json, dedupe_key, priority,
+             state, fence, revision, not_before_ms, created_at_ms, updated_at_ms)
+         SELECT 'done-'||printf('%05d', i), kind, payload_version, payload_json, 'done-'||i, priority,
+             'succeeded', 1, 2, 1000, 1000, 1000 + i FROM n, background_jobs WHERE id = $1",
+        hiqlite::params!(template.clone()),
+    )
+    .await
+    .expect("terminal rows");
+    client
+        .execute(
+            "INSERT INTO background_job_waiters
+         (request_scope, request_id, request_digest, job_id, consumer_kind, consumer_ref, priority,
+          state, receipt_expires_ms, created_at_ms, updated_at_ms)
+         SELECT 'semantic', id, $1, id, 'semantic', id, 1, 'succeeded', updated_at_ms + 604800000,
+             updated_at_ms, updated_at_ms
+         FROM background_jobs WHERE id LIKE 'done-%'",
+            hiqlite::params!("b".repeat(64)),
+        )
+        .await
+        .expect("receipts");
+    // v62 differs only in the maintenance trigger. Install the exact
+    // predecessor and let daemon open run the v63 step.
+    drop(store);
+    let predecessor = include_str!("../../src/store/background_jobs_schema.sql")
+        .split("-- next statement\n")
+        .find(|sql| sql.contains("CREATE TRIGGER IF NOT EXISTS background_job_maintenance_command"))
+        .expect("predecessor maintenance trigger");
+    for result in client
+        .txn(vec![
+            (
+                "DROP TRIGGER background_job_maintenance_command".to_owned(),
+                hiqlite::params!(),
+            ),
+            (predecessor.to_owned(), hiqlite::params!()),
+            (
+                "UPDATE cluster_meta SET schema_version=62 WHERE singleton=1".to_owned(),
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("install predecessor fixture")
+    {
+        result.expect("predecessor statement");
+    }
+    let store: Arc<dyn Store> = Arc::new(
+        plurx_core::store::HiqliteAuthStore::open_or_migrate(
+            client.clone(),
+            &cluster._root.path().join("retention-pressure-telemetry.db"),
+        )
+        .await
+        .expect("upgrade v62 to current schema"),
+    );
+    // Closed, exactly as production was …
+    let fresh = uuid::Uuid::new_v4().to_string();
+    assert!(matches!(
+        store
+            .enqueue_job(enqueue(fresh.clone(), "c".repeat(64), 2_000))
+            .await
+            .expect("closed admission"),
+        EnqueueOutcome::QueueFull
+    ));
+    // … one upkeep pass reopens it …
+    assert!(store.maintain_jobs(2_001).await.expect("pressure upkeep"));
+    assert!(matches!(
+        store
+            .enqueue_job(enqueue(fresh.clone(), "c".repeat(64), 2_002))
+            .await
+            .expect("reopened admission"),
+        EnqueueOutcome::Accepted { .. }
+    ));
+    // … the compacted rows' receipts still answer, the template's live row
+    // and receipt are untouched …
+    let replay = uuid::Uuid::new_v4().to_string();
+    let mut same_receipt = enqueue(replay, "d".repeat(64), 2_003);
+    same_receipt.request.scope = "semantic".to_owned();
+    same_receipt.request.request_id = "done-00001".to_owned();
+    same_receipt.request.request_digest = "b".repeat(64);
+    assert!(matches!(
+        store.enqueue_job(same_receipt).await.expect("receipt"),
+        EnqueueOutcome::Existing {
+            cancelled: false,
+            ..
+        }
+    ));
+    let kept = store
+        .background_job(&template)
+        .await
+        .expect("read")
+        .expect("template survives");
+    assert_eq!(kept.state, JobState::Queued);
+    // … and upkeep keeps paging until the table is back under the pressure
+    // mark, then goes quiet.
+    let mut ticks = 0;
+    while store.maintain_jobs(2_010 + ticks).await.expect("paging") {
+        ticks += 1;
+        assert!(ticks < 16, "pressure paging must converge");
+    }
+    // 9,873 rows after the accepted enqueue; 897 over the mark is exactly
+    // eight pages, the eighth landing on 8,849.
+    assert_eq!(ticks, 8, "one page per pass until the mark is passed");
+    assert!(!store.maintain_jobs(2_100).await.expect("settled"));
+}

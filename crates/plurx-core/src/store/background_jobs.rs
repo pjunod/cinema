@@ -47,11 +47,26 @@ pub const MAX_USER_WAITERS: usize = 128;
 pub const MAX_ATTEMPTS: usize = 40_000;
 pub const RESOLVED_ATTEMPT_HISTORY: usize = 16;
 pub const MAX_PAGE_SIZE: usize = 128;
+/// Retention pressure. Terminal job details and internal receipts are kept
+/// for the seven-day receipt window, but admission refuses at
+/// `MAX_RETAINED_JOBS` / `MAX_WAITERS` rows *including* those, so a busy day
+/// of finished work would otherwise hold the queue closed for a week. Once a
+/// table is within eight pages of its cap, upkeep compacts the oldest
+/// terminal rows a page at a time (oldest `updated_at_ms` first), never an
+/// active job, a live interest, an identity-retaining or user-scoped
+/// receipt, or a receipt whose job is still active. The SQL carries these as
+/// literals; `retention_pressure_literals_match_constants` pins them.
+pub const RETAINED_JOBS_PRESSURE: usize = MAX_RETAINED_JOBS - 8 * MAX_PAGE_SIZE;
+pub const WAITERS_PRESSURE: usize = MAX_WAITERS - 8 * MAX_PAGE_SIZE;
 pub const MAX_RENEW_BATCH: usize = 64;
 pub const MAX_PAYLOAD_BYTES: usize = 16 * 1_024;
 pub const MAX_CHECKPOINT_BYTES: usize = 4 * 1_024;
 
 pub(crate) const SCHEMA: &str = include_str!("background_jobs_schema.sql");
+/// Replicated v63 / SQLite v85: the maintenance trigger with retention
+/// pressure (see `RETAINED_JOBS_PRESSURE` and `WAITERS_PRESSURE`).
+pub(crate) const RETENTION_PRESSURE_SCHEMA: &str =
+    include_str!("background_jobs_retention_pressure.sql");
 
 // Both backends execute the same admission statement and schema trigger.
 // The returned snapshot is the verdict that authorized the mutation, not a
