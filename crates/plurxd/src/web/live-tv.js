@@ -18,6 +18,7 @@
     admin_required: ["Live TV needs an administrator", "This account cannot change Live TV on this server."],
     invalid_settings: ["Live TV settings are incomplete", "An administrator can finish the tuner setup in Settings → Developer."],
     tuner_capacity: ["All Live TV slots are busy", "Close another Live TV session or try this channel again shortly."],
+    encoder_capacity: ["The tuner owner's encoder is busy", "Every video encoder on the tuner owner is in use, so this channel cannot be converted right now. Try again in a moment."],
     tuner_unavailable: ["The tuner could not start this channel", "A tuner, signal, or channel authorization may be unavailable."],
     channel_not_found: ["Channel no longer available", "Reload the channel list and choose another channel."],
     drm_unsupported: ["Protected channel", "plurx does not play DRM-protected television."],
