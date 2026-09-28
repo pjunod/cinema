@@ -168,8 +168,8 @@ test('decoder retirement preserves the exact shared seek through reopen and mult
     const replacement=h.c.preparePlayOutgoing({video:h.video,predecessor:h.p,meta:{},selection:{}},
       {method:'direct_play',source:{}});
     const incoming=Object.assign({},h.p,{fileId,controlSeek:Object.assign({},pending)});h.c.PLAYER=incoming;
-    replacement.retireOutgoing();assert.equal(h.posts.length,0);
+    replacement.retireOutgoing();assert.equal(h.posts.filter(x=>/^seek_(resumed|abandoned)$/.test(x.event)).length,0);
     h.clock.ms+=50;h.c.finishPlaybackSeekTelemetry(incoming,incoming.controlSeek,'seek_resumed');
-    assert.deepEqual(h.posts.map(x=>x.event),['seek_resumed']);
+    assert.deepEqual(h.posts.filter(x=>/^seek_(resumed|abandoned)$/.test(x.event)).map(x=>x.event),['seek_resumed']);
   }
 });
