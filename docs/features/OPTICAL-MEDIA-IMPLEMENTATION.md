@@ -1058,7 +1058,10 @@ changes do not close the physical or copy-path acceptance rows. Commits
 `8a9715cf0`, `2a789da94` and `942f182cd` additionally reject control-bearing
 identities, sanitize bounded helper/configuration display strings, and
 validate inspected display, suggestion, stream and chapter metadata at the
-shared trust boundary.
+shared trust boundary. Commits `73b439eb0` and `e4e40b63c` bind the supported
+fingerprint/completeness and playback-fact invariants, then make media-root
+discovery bounded and deterministic instead of accepting the first
+case-insensitive directory entry.
 
 Before enabling release support, verify: accepted source/seek decision; both
 formats on actual hardware; all required lifecycle/authorization/concurrency
