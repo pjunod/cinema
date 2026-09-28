@@ -47,6 +47,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
@@ -159,6 +160,7 @@ fun LiveTvScreen(
     var overlayVisible by remember { mutableStateOf(true) }
     var temporaryGuide by remember { mutableStateOf(false) }
     var showingInfo by remember { mutableStateOf(false) }
+    var showingCaptions by remember { mutableStateOf(false) }
     var showingMore by remember { mutableStateOf(false) }
     var lastInteraction by remember { mutableIntStateOf(0) }
     var isInPip by remember { mutableStateOf(false) }
@@ -275,8 +277,8 @@ fun LiveTvScreen(
     }
     // The contract's four seconds. Without this the overlay never hid at all,
     // so `ten-foot · overlay · idle → hide` was a row nothing implemented.
-    LaunchedEffect(lastInteraction, overlayVisible, temporaryGuide, showingInfo, showingMore, state.playing, state.paused, isInPip) {
-        if (!overlayVisible || temporaryGuide || showingInfo || showingMore || !state.playing || state.paused || isInPip) return@LaunchedEffect
+    LaunchedEffect(lastInteraction, overlayVisible, temporaryGuide, showingInfo, showingMore, showingCaptions, state.playing, state.paused, isInPip) {
+        if (!overlayVisible || temporaryGuide || showingInfo || showingMore || showingCaptions || !state.playing || state.paused || isInPip) return@LaunchedEffect
         delay(LiveTvInputPolicy.HIDE_AFTER_MS)
         overlayVisible = false
     }
@@ -322,6 +324,7 @@ fun LiveTvScreen(
     BackHandler(fullscreen) {
         when {
             temporaryGuide -> temporaryGuide = false
+            showingCaptions -> showingCaptions = false
             showingInfo -> showingInfo = false
             showingMore -> showingMore = false
             overlayVisible -> overlayVisible = false
@@ -416,6 +419,7 @@ fun LiveTvScreen(
                 temporaryGuide = false
                 showingInfo = false
                 showingMore = false
+                showingCaptions = false
                 detail = null
             }
             LiveTvInputOutcome.Exit -> {
@@ -449,7 +453,7 @@ fun LiveTvScreen(
         !fullscreen -> LiveTvInputState.Browser
         temporaryGuide -> LiveTvInputState.TemporaryGuide
         showingInfo -> LiveTvInputState.StreamInfo
-        showingMore -> LiveTvInputState.Menu
+        showingCaptions || showingMore -> LiveTvInputState.Menu
         detail != null -> LiveTvInputState.ProgrammeDetails
         overlayVisible -> LiveTvInputState.FullscreenControls
         else -> LiveTvInputState.FullscreenHidden
@@ -556,6 +560,7 @@ fun LiveTvScreen(
                     guideAnchorTime = anchor
                     tvFocusedChannelId = target.channelId
                 },
+                onCaptions = { showingCaptions = true },
                 onReload = controller::refresh,
                 onClearFilters = {
                     search = ""
@@ -686,6 +691,7 @@ fun LiveTvScreen(
                         onChannels = { fullscreen = false },
                         onTogglePause = { controller.togglePause(); lastInteraction += 1 },
                         onInfo = { showingInfo = true; lastInteraction += 1 },
+                        onCaptions = { showingCaptions = true; lastInteraction += 1 },
                         onMore = { showingMore = true; lastInteraction += 1 },
                         onDismissMore = { showingMore = false; lastInteraction += 1 },
                         layout = tvLayout,
@@ -729,6 +735,7 @@ fun LiveTvScreen(
                     onTogglePause = controller::togglePause,
                     onToggleMute = controller::toggleMute,
                     onInfo = { showingInfo = true },
+                    onCaptions = { showingCaptions = true },
                     onStop = { controller.stop() },
                 )
             }
@@ -954,6 +961,16 @@ fun LiveTvScreen(
             )
         }
     }
+    if (showingCaptions && !isInPip) {
+        controller.player?.let { attached ->
+            LiveTvCaptionDialog(
+                player = attached,
+                isCurrentPlayer = { controller.player === attached },
+                onDismiss = { showingCaptions = false; lastInteraction += 1 },
+            )
+        }
+    }
+    LaunchedEffect(controller.player) { showingCaptions = false }
     if (showingInfo && !fullscreen) {
         ModalBottomSheet(onDismissRequest = { showingInfo = false }) {
             Column(Modifier.fillMaxWidth().padding(16.dp)) {
@@ -1029,6 +1046,7 @@ private fun LiveTvPhoneCaption(
     onTogglePause: () -> Unit,
     onToggleMute: () -> Unit,
     onInfo: () -> Unit,
+    onCaptions: () -> Unit,
     onStop: () -> Unit,
 ) {
     val detail = listOfNotNull(
@@ -1067,6 +1085,9 @@ private fun LiveTvPhoneCaption(
                 if (muted) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
                 contentDescription = if (muted) "Unmute" else "Mute",
             )
+        }
+        TvIconButton(onClick = onCaptions, modifier = Modifier.size(32.dp)) {
+            Icon(Icons.Filled.ClosedCaption, contentDescription = "Captions")
         }
         TvIconButton(onClick = onInfo, modifier = Modifier.size(32.dp)) {
             Icon(Icons.Filled.Info, contentDescription = "Stream info")
@@ -1243,6 +1264,7 @@ private fun WideLiveTvBrowser(
     guideAnchorTime: Long?,
     onFocusedChannel: (LiveTvChannel) -> Unit,
     onGuideNavigation: (LiveTvGuideFocusTarget, Long?) -> Unit,
+    onCaptions: () -> Unit,
     onReload: () -> Unit,
     onClearFilters: () -> Unit,
     onFullscreen: () -> Unit,
@@ -1388,6 +1410,12 @@ private fun WideLiveTvBrowser(
                 Text("More", style = type.primary)
             }
             DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
+                if (state.playing) {
+                    DropdownMenuItem(
+                        text = { Text("Captions") },
+                        onClick = { moreOpen = false; onCaptions() },
+                    )
+                }
                 DropdownMenuItem(
                     text = { Text("Refresh channels") },
                     enabled = !state.busy,
@@ -2058,6 +2086,7 @@ private fun LiveTvOverlay(
     onChannels: () -> Unit,
     onTogglePause: () -> Unit,
     onInfo: () -> Unit,
+    onCaptions: () -> Unit,
     onMore: () -> Unit,
     onDismissMore: () -> Unit,
     layout: TvLiveLayout,
@@ -2208,6 +2237,7 @@ private fun LiveTvOverlay(
                     Text(if (paused) "Play live" else "Pause", color = Color.White)
                 }
                 TextButton(onClick = onInfo) { Text("Info", color = Color.White) }
+                TextButton(onClick = onCaptions) { Text("Captions", color = Color.White) }
                 Box {
                     TextButton(onClick = onMore) { Text("More", color = Color.White) }
                     DropdownMenu(expanded = moreOpen, onDismissRequest = onDismissMore) {
@@ -2516,7 +2546,7 @@ private fun LiveTvPlaybackInformation(
             add(PlaybackInfoFact("device_audio", "Device audio output", "Not reported"))
             add(PlaybackInfoFact("method", "Method", method, group = "Server work"))
             add(PlaybackInfoFact("player_state", "Player state", player?.let(::playerStateLabel) ?: "Not reported"))
-            add(PlaybackInfoFact("subtitles", "Subtitles", player?.let { p -> if (p.currentTracks.groups.any { it.type == androidx.media3.common.C.TRACK_TYPE_TEXT && it.isSelected }) "Selected · rendered by player" else "Off" } ?: "Not reported"))
+            add(PlaybackInfoFact("subtitles", "Subtitles", player?.let { p -> liveTvCaptionSummary(p.currentTracks, p.currentCues.cues.isNotEmpty()) } ?: "Not reported"))
             add(PlaybackInfoFact("client_loaded", "Buffered on device", seconds(buffered), playbackInfoExplanation("client_loaded"), "Buffer & delivery"))
             add(PlaybackInfoFact("live_edge", "Behind stream live edge", seconds(edge), "Behind latest available media; not broadcast delay.", "Live stream & reception"))
             add(PlaybackInfoFact("reception", "Tuner reception", reception, group = "Live stream & reception"))
