@@ -1,6 +1,6 @@
 # Clients — status history
 
-**Status:** done · records moved verbatim from `STATUS.md` on 2026-09-24
+**Status:** done · records moved verbatim from `STATUS.md` on 2026-09-24 and 2026-09-28
 
 **Moved here from [STATUS.md](../../STATUS.md) on 2026-09-24**, verbatim, by
 [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](../ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
@@ -10,6 +10,98 @@ nothing else changed. Newest first. These are records: a section here
 describes the state on the day it was written, and
 `tests/operations/test_status_pr_claims.py` keeps holding it to the same
 merged-pull-request rule it held in `STATUS.md`.
+
+## 2026-09-23 · PGS subtitles stopped blocking the start path
+
+Three pieces, from one report: *Bad Boys: Ride or Die* would not play on the
+TCL tablet on 2026-09-21, and the overlay the viewer saw was the least
+interesting of three failures that night. Diagnosis, measurements and the plan:
+[docs/clients/PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md](PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md),
+reviewed by Fable (APPROVE WITH CHANGES, folded in).
+
+The measurement that explains all of it: file 5208 is a **79.5 GB** remux whose
+PGS subtitle packets are interleaved across 116 minutes, so extracting one
+track read the whole film — **402 s to produce 18,866 bytes**, which is just
+the array at 198 MB/s.
+
+- **#437** (`5c48ed5ab`, merged) — the cluster replacement gate is reclaimed on
+  evidence, not on a clock: a hold that declared itself abandoned, or one past
+  a 120 s ceiling, loses its player. Fixed the refusal the viewer quoted.
+- **#445** (`5c605768`, merged) — a session start no longer awaits a full-film
+  demux, and a pending sidecar is a named `startup_timeout` rather than a
+  codeless 503 no client retries. Bounded for the start path **only**: offline
+  restore, the VTT endpoint and package production keep their unbounded wait,
+  because for them a slow success must stay a success.
+- **#447** (`883cf4d42`, merged) — the PGS overlay is offered per caller rather
+  than per node. `/decision` narrows on the server switch **and** the caller's
+  own `subtitle_overlays` claim, so a client that cannot paint a bitmap is not
+  offered a PGS default and is told the truth that selecting one burns the
+  video. **This is what makes the gate safe to flip.** Before it, turning the
+  gate on would have burned web direct-plays: the server stamped the PGS track
+  `default`, and the web applies the server's default 400 ms after open, which
+  for a bitmap track means a burn — or, on HDR, a degraded notice instead of a
+  subtitle. Two deliberate limits, both from the adversarial review: **no caps
+  document at all** falls back to the switch alone, because the legacy query is
+  a mixed-fleet path both native clients reach on any 400/404/405 and reading
+  silence as a refusal would send a capable client off to re-encode a whole
+  film; and the `overlay` field on the track keeps the server's own answer,
+  because it describes what this process can deliver rather than what this
+  caller can paint. Item detail keeps answering `false`: it has no capabilities
+  document, and the web's detail surface does not narrow the default by a
+  renderer. `tests/validation/test_caps_wire_conformance.py` pins the field
+  name across all four ports, because `DeviceCaps` has no
+  `deny_unknown_fields`, so a misspelled claim is silently dropped rather than
+  refused — costing a needless burn and, on an HDR source, the grade with it.
+
+- **#453** (`1d21b184e`, merged) — overlay seeks and failures, on both native
+  clients against one shared fixture (`tests/playback/pgs-overlay-cases.json`).
+  Four bugs fixed: Apple's 1 s tick cancelled its own in-flight load, so any PNG
+  slower than a second never arrived; Apple re-raised a notice every second
+  after one failed window; Android left a finished cue on screen after a seek
+  into the refresh margin; Android read every refused manifest as "empty". The
+  server now answers a failed preparation with a typed
+  `pgs_overlay_prepare_failed` instead of a 503 both clients kept polling for
+  ten minutes; only capacity is a 503. Apple build 179, Android 119.
+- **Fix C — every PGS track rides the fragment-index pass**, which already reads
+  the whole file. Designed in #451 (§6 of the RCA, three adversarial rounds with
+  ffmpeg experiments, each overturning something load-bearing), built as three
+  PRs:
+  - **#456** (`8962c0c66`, merged) — the store at
+    `<cache>/runtime/subtitle-source-v1/` and its two readers. The overlay uses
+    a stored `.sup` instead of demuxing; the burn path derives its `.mks` from
+    it in a fraction of a second (with `-copyts` and **no** `-start_at_zero`,
+    which would have moved every cue early) and answers "nothing to burn"
+    without reading 79.5 GB for a track with no cues. MPEG-TS sources keep
+    today's extraction.
+  - **#466** (`cf5666876`, merged; first merged as #460, see below) — the
+    producer: one `tee` output after the index's `pipe:1` with a `sup` slave
+    and a `framecrc` companion per track, `onfail=ignore`, and a mandatory
+    `null` sentinel, so the worst case is no subtitles and never no index; the
+    index's argv, bytes, cache key and retry rules are unchanged, measured.
+    Per-track verdicts from byte arithmetic, a persistent latch, a behavioural
+    startup self-test, a local-disk and free-space gate, and one Developer
+    switch (`subtitles.stored_sources`) that turns off producer and readers.
+  - **#463** (`9236de83a`, merged) — attribution: the analysis row says the pass is also
+    keeping N PGS tracks, by title, with bytes and a link to the switch, on both
+    indexers; a Maintenance card shows the store, what is running and why.
+
+**Forge anomaly, 2026-09-23 13:48 UTC.** Forgejo reported #460 merged as
+`6a9a6a5a2`, but the server-side reflog shows `refs/heads/main` moved to it and
+was set back to `8962c0c66` one second later by an internal "update by push".
+Main never kept the merge. The same head was re-landed as #466. #460 had been
+retargeted from its stacked base to `main` just before merging, which is the one
+thing it did differently from every merge that stuck — worth avoiding
+(merge stacks bottom-up and open the upper PR against `main` fresh) until the
+cause is known.
+
+**Deployed to all four nodes 2026-09-23 19:28 UTC** (`v0.3.0-3626-gfad591a46`, each node's own build report; the ride-along self-test passed on ffmpeg 8.1.2-Jellyfin). The first `deploy.yml` run called nuc4 and m6 "already at" that build while their containers were a day old, because their checkouts had moved without a rebuild; `-e force=true` rebuilt them, and `pjunod/ansible#4` now rebuilds whenever the running image's revision label differs from the checkout. **The mobile apps and the overlay switch are not done**: devices need Apple 179 / Android 119, then
+the overlay's
+enablement check — two devices, one Android and one Apple, one playing a DV
+title and one an HDR10 title, a seek each way — before the gate
+(`subtitles.pgs_overlay`) is turned on, and the Developer and Maintenance page
+layout goldens, which need `scripts/ui-baseline --self-host --update` on a
+machine with Playwright (the golden is also stale on `main` for unrelated
+routes).
 
 ## 2026-09-19 · The web app is a tree, and the bytes are the same ones
 
