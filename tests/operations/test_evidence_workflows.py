@@ -497,7 +497,7 @@ class EvidenceWorkflowCase(unittest.TestCase):
         view = self.read("clients/apple/Sources/LiveTvDeveloperView.swift")
         section = view.split(
             'Section("Prepared quality handoff · advisory enablement")', 1
-        )[1].split('Section("HDHomeRun Live TV · runtime enablement")', 1)[0]
+        )[1].split('Section("Enable Live TV · advisory enablement")', 1)[0]
         self.assertIn('Toggle("Enable two-player prepared handoff"', section)
         self.assertIn("Not met", section)
         self.assertIn("Checked during playback", section)

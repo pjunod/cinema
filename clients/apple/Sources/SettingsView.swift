@@ -156,8 +156,12 @@ struct SettingsView: View {
                 Text("Theme and room brightness are independent. Home layout groups shelves by media category or by individual library.")
             }
 
-            #if os(tvOS)
+            // Server Live TV settings, as on the web's Settings → Live TV. The
+            // tuner, guide, recording and Library channel cards used to sit in
+            // Developer; they are finished settings, so they live here, reached
+            // the way Developer is: one focusable row that pushes the screen.
             Section {
+                #if os(tvOS)
                 Picker("Live TV layout", selection: Binding(
                     get: { TvLiveLayout(rawValue: liveTvLayoutRaw) ?? .guidePreview },
                     set: { liveTvLayoutRaw = $0.rawValue }
@@ -166,12 +170,17 @@ struct SettingsView: View {
                         Text(layout.label).tag(layout)
                     }
                 }
+                #endif
+                NavigationLink("Tuner, guide, recording and Library channels") { LiveTvSettingsView() }
             } header: {
                 Text("Live TV")
             } footer: {
-                Text("Layout changes presentation only; the current channel and tuner session continue playing.")
+                #if os(tvOS)
+                Text("Layout changes presentation only; the current channel and tuner session continue playing. Server settings require administrator access.")
+                #else
+                Text("Server settings require administrator access.")
+                #endif
             }
-            #endif
 
             Section("Account") {
                 LabeledContent("Signed in as", value: model.username ?? "—")
@@ -198,7 +207,7 @@ struct SettingsView: View {
             }
 
             Section("Developer") {
-                NavigationLink("Enable features and check requirements") { LiveTvDeveloperView() }
+                NavigationLink("Enable Live TV and other features awaiting evidence") { LiveTvDeveloperView() }
             }
 
             Section("About") {

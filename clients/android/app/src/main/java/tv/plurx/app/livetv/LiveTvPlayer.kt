@@ -141,7 +141,7 @@ class LiveTvPlayer private constructor(context: Context) {
                 val lineup = api!!.lineup()
                 if (mine != serial) return@launch
                 mutableState.value = LiveTvPlayerState(channels = lineup.channels,
-                    message = if (lineup.channels.isEmpty()) "No channels. Check the saved tuner and channel scan in Settings → Developer."
+                    message = if (lineup.channels.isEmpty()) "No channels. Check the saved tuner in Settings → Live TV and the device's channel scan."
                     else "Select a channel · lineup ${lineup.freshness}")
                 startGuideRefresh(origin, token)
                 resumeIfRecent(mine)
@@ -171,7 +171,7 @@ class LiveTvPlayer private constructor(context: Context) {
                     guide = guide ?: latest.guide,
                     busy = false,
                     message = if (lineup.channels.isEmpty()) {
-                        "No channels. Check the saved tuner and channel scan in Settings → Developer."
+                        "No channels. Check the saved tuner in Settings → Live TV and the device's channel scan."
                     } else {
                         "Channels refreshed · lineup ${lineup.freshness}"
                     },
