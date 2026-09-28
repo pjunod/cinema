@@ -504,12 +504,12 @@ class Controller internal constructor(
         },
         context = {
             PlaybackTelemetryContext(
-                method = if (deliveryMode == "direct") "direct_play" else deliveryMode,
+                method = normalizedPlaybackMethod(deliveryMode) ?: "unknown",
                 encoder = encoder,
                 sessionId = sessionId,
             )
         },
-        emit = { event -> postPlaybackClientLog(scope, event) },
+        emit = vm::postPlaybackDiagnostic,
     )
     private val stallWatchdogJob: Job
     private val targetPresentationWatchdogJob: Job
@@ -574,7 +574,10 @@ class Controller internal constructor(
                     // resulting `onPlayWhenReadyChanged` before this setter has
                     // returned, and that callback is where the owner's own stop
                     // has to be told apart from a viewer's pause.
-                    if (!value) viewerTransport.ownerStopping()
+                    if (!value) {
+                        playbackTelemetry.cancelPending()
+                        viewerTransport.ownerStopping()
+                    }
                     if (value && lifecyclePaused) applyEffectivePlayWhenReady()
                     else player.playWhenReady = value
                 }
@@ -1103,9 +1106,10 @@ class Controller internal constructor(
         // Audio-only destinations settle from two advancing player-clock
         // samples; they will never render a video frame.
         if (plan.videoCodec == null) return
+        val presentationAttempt = playbackTelemetry.presentationAttempt()
         val captured = object : Player.Listener {
             override fun onRenderedFirstFrame() {
-                if (!playbackIntent.isCurrent(sequence)) return
+                if (presentationListener !== this || !playbackIntent.isCurrent(sequence)) return
                 val position = realPosition()
                 firstVideoFrameForSeek = Triple(
                     sequence,
@@ -1119,7 +1123,10 @@ class Controller internal constructor(
                 }
                 val recipe = selectionRecipe ?: return
                 if (!recipeOwnership.canPresent(recipe)) return
-                if (!playbackIntent.presentedVideoFrame(position, sequence)) return
+                if (!playbackTelemetry.presentedVideoFrame(
+                        playbackIntent, position, sequence, monotonicNowMs(), presentationAttempt,
+                    )
+                ) return
                 playbackControl.playerChanged()
                 removePlayerListener(this)
                 if (presentationListener === this) presentationListener = null
@@ -1162,7 +1169,7 @@ class Controller internal constructor(
             playbackIntent.presentedInPlace(sequence)
         } else {
             recipePresentationFrame?.takeIf { it.first == sequence }
-                ?.let { playbackIntent.presentedVideoFrame(it.second, sequence) } == true
+                ?.let { playbackTelemetry.presentedVideoFrame(playbackIntent, it.second, sequence, monotonicNowMs()) } == true
         }
         if (presented) {
             playbackControl.playerChanged()
@@ -1308,7 +1315,7 @@ class Controller internal constructor(
     ): PlaybackAttempt {
         establishedPlayback = false
         openStallTracker.reset()
-        return playbackTelemetry.begin(reason, observedAtMs)
+        return playbackTelemetry.begin(reason, observedAtMs, playbackIntent.pendingSeek?.sequence)
     }
 
     fun seekTo(targetMs: Long) {
@@ -1369,6 +1376,7 @@ class Controller internal constructor(
         mediaMutationEpoch += 1
         attachSurfaceGeneration()
         if (planReplacement.route(playbackIntent)) return
+        val attempt = beginPlaybackAttempt("seek")
         val recipe = currentRecipe()
         if (recipeOwnership.needsMediaReplacement(recipe)) {
             restartAt(t, "selection")
@@ -1377,12 +1385,11 @@ class Controller internal constructor(
         armTrackSelections(recipe)
         when (recipe.recipe.desiredTransport) {
             PlaybackMediaTransport.Direct -> {
-                beginPlaybackAttempt("seek")
                 player.seekTo(t)
+                playbackTelemetry.prepared(attempt)
                 markIntentExecuted(sequence)
             }
             PlaybackMediaTransport.ProgressiveRemux -> {
-                val attempt = beginPlaybackAttempt("seek")
                 leaveSessionPlayback()
                 Session.resetMediaFailover()
                 baseMs = t
@@ -1401,11 +1408,10 @@ class Controller internal constructor(
             // session churn. A live one can't be range-sought, so it reopens.
             PlaybackMediaTransport.HlsCopy,
             PlaybackMediaTransport.HlsTranscode -> if (sessionIsVod) {
-                beginPlaybackAttempt("seek")
                 player.seekTo(t)
+                playbackTelemetry.prepared(attempt)
                 markIntentExecuted(sequence)
             } else {
-                val attempt = beginPlaybackAttempt("seek")
                 openSession(t, attempt, sequence)
             }
         }
@@ -1597,6 +1603,7 @@ class Controller internal constructor(
 
     fun release() {
         if (!playbackControlBootstrapFence.isActive()) return
+        playbackTelemetry.cancelPending()
         playbackControlBootstrapFence.release()
         displayModeOwner?.let { owner -> displayModeMatcher?.reset(owner) }
         seekJob?.cancel()
@@ -2806,8 +2813,11 @@ class Controller internal constructor(
     /** Audio-only playback has no video-frame callback; an advancing active clock is presentation. */
     private fun settleAudioPlaybackIntentIfPresented() {
         if (plan.videoCodec != null) return
-        if (playbackIntent.presentedAudio(
+        val sequence = playbackIntent.pendingSeek?.sequence ?: return
+        if (playbackTelemetry.presentedAudio(
+                playbackIntent,
                 realPosition(),
+                sequence,
                 observedAtMs = monotonicNowMs(),
                 playbackActive = player.isPlaying,
                 playbackRate = player.playbackParameters.speed.toDouble(),
@@ -2854,6 +2864,7 @@ class Controller internal constructor(
 
     private fun sampleTargetPresentationDeadline() {
         if (!playbackControlBootstrapFence.isActive()) return
+        playbackTelemetry.supersedeForIntent(playbackIntent.pendingSeek?.sequence)
         settleVideoPlaybackIntentIfPresented()
         val now = monotonicNowMs()
         val event = targetPresentationDeadline.sample(
@@ -2908,7 +2919,7 @@ class Controller internal constructor(
             selectionRecipe?.let(recipeOwnership::canPresent) != true ||
             (player.videoDecoderCounters?.renderedOutputBufferCount ?: 0) <= first.third
         ) return
-        if (playbackIntent.presentedVideoProgress(realPosition(), pending.sequence)) {
+        if (playbackTelemetry.presentedVideoProgress(playbackIntent, realPosition(), pending.sequence, monotonicNowMs())) {
             playbackControl.playerChanged()
             disarmVideoPresentation()
             firstVideoFrameForSeek = null
@@ -3196,6 +3207,7 @@ class Controller internal constructor(
      * Sign in. Anything else is the owner's `stopped` with today's sentence.
      */
     private fun stopAndRaisePlaybackFailure(refusal: MediaRefusal?, sentence: String) {
+        playbackTelemetry.cancelPending()
         val attached = mediaMutationEpoch
         if (refusal != null && refusal.source == SurfaceSources.MEDIA_OWNER_LOST_410) {
             surfaceOwner.recoveringMediaOwnerLost(

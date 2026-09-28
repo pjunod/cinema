@@ -5948,6 +5948,102 @@ final class AppleClientTests: XCTestCase {
         XCTAssertNotEqual(terminal.message, PlaybackStallKind.silent.terminalState.message)
     }
 
+    func testAppleSeekPresentationEndsTheDispatchedCommandOnce() throws {
+        var measurement = ApplePlaybackSeekMeasurement()
+        XCTAssertNil(measurement.dispatched(generation: 4, method: "remux", fileId: 42,
+                                            attempt: "play-1", observedAt: 10))
+        // An obsolete frame cannot settle this destination.
+        XCTAssertNil(measurement.presented(generation: 3, observedAt: 10.2))
+        let log = try XCTUnwrap(measurement.presented(generation: 4, observedAt: 10.684))
+        XCTAssertEqual(log.event, "seek_resumed")
+        XCTAssertEqual(log.ms, 684)
+        XCTAssertEqual(log.method, "remux")
+        XCTAssertEqual(log.fileId, 42)
+        XCTAssertNil(measurement.presented(generation: 4, observedAt: 11))
+        XCTAssertNil(measurement.abandoned())
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(log))
+                                  as? [String: Any])
+        XCTAssertEqual(object["file_id"] as? Int, 42)
+        XCTAssertEqual(object["attempt"] as? String, "play-1")
+        XCTAssertEqual(object["event"] as? String, "seek_resumed")
+    }
+
+    func testAppleSupersededSeekIsAbandonedBeforeTheSuccessorPresents() throws {
+        var measurement = ApplePlaybackSeekMeasurement()
+        XCTAssertNil(measurement.dispatched(generation: 1, method: "direct_play", fileId: 42,
+                                            attempt: "play-1", observedAt: 10))
+        let abandoned = try XCTUnwrap(measurement.dispatched(
+            generation: 2, method: "transcode", fileId: 42, attempt: "play-1", observedAt: 10.1))
+        XCTAssertEqual(abandoned.event, "seek_abandoned")
+        XCTAssertEqual(abandoned.method, "direct_play")
+        XCTAssertNil(abandoned.ms)
+        // The cancelled predecessor monitor cannot abandon its successor.
+        XCTAssertNil(measurement.abandoned(generation: 1))
+        XCTAssertNil(measurement.presented(generation: 1, observedAt: 10.2))
+        let resumed = try XCTUnwrap(measurement.presented(generation: 2, observedAt: 10.4))
+        XCTAssertEqual(resumed.event, "seek_resumed")
+        XCTAssertEqual(resumed.method, "transcode")
+        XCTAssertEqual(resumed.ms, 300)
+    }
+
+    func testAppleClosedSeekIsAbandonedOnceAndCarriesNoDuration() throws {
+        var measurement = ApplePlaybackSeekMeasurement()
+        XCTAssertNil(measurement.dispatched(generation: 1, method: "remux", fileId: 42,
+                                            attempt: "play-1", observedAt: 10))
+        let log = try XCTUnwrap(measurement.abandoned())
+        XCTAssertEqual(log.event, "seek_abandoned")
+        XCTAssertNil(measurement.abandoned())
+        XCTAssertNil(measurement.presented(generation: 1, observedAt: 12))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(log))
+                                  as? [String: Any])
+        XCTAssertNil(object["ms"])
+        XCTAssertEqual(object["file_id"] as? Int, 42)
+    }
+
+    func testAppleSameSeekRecoveryKeepsItsOriginalMonotonicClock() throws {
+        var measurement = ApplePlaybackSeekMeasurement()
+        XCTAssertNil(measurement.dispatched(generation: 1, method: "remux", fileId: 42,
+                                            attempt: "play-1", observedAt: 10))
+        XCTAssertNil(measurement.dispatched(generation: 1, method: "remux", fileId: 42,
+                                            attempt: "play-1", observedAt: 12))
+        XCTAssertEqual(try XCTUnwrap(measurement.presented(generation: 1, observedAt: 13)).ms, 3_000)
+    }
+
+    func testAppleSeekAwaitingItsDecisionBindsActualDeliveryWithoutRestartingItsClock() throws {
+        for method in ["direct_play", "remux"] {
+            var measurement = ApplePlaybackSeekMeasurement()
+            XCTAssertNil(measurement.dispatched(generation: 1, method: nil, fileId: 42,
+                                                attempt: "play-1", observedAt: 10))
+            XCTAssertNil(measurement.presented(generation: 1, observedAt: 11))
+            measurement.bindDelivery(generation: 2, method: "transcode")
+            XCTAssertNil(measurement.presented(generation: 1, observedAt: 11.5))
+            measurement.bindDelivery(generation: 1, method: method)
+            measurement.bindDelivery(generation: 1, method: "transcode")
+            let log = try XCTUnwrap(measurement.presented(generation: 1, observedAt: 13))
+            XCTAssertEqual(log.method, method)
+            XCTAssertEqual(log.ms, 3_000)
+            XCTAssertNil(measurement.abandoned())
+        }
+        var unsent = ApplePlaybackSeekMeasurement()
+        XCTAssertNil(unsent.dispatched(generation: 1, method: nil, fileId: 42,
+                                      attempt: "play-1", observedAt: 10))
+        XCTAssertNil(unsent.abandoned(), "a command closed before first attachment never reached a player")
+    }
+
+    func testAppleLiveProgressNamesItsMethodAndOfflineReplayOmitsIt() throws {
+        let live = ProgressRequest(positionMs: 12_000, durationMs: 90_000, method: "remux")
+        let liveObject = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(live))
+                                      as? [String: Any])
+        XCTAssertEqual(liveObject["method"] as? String, "remux")
+        XCTAssertNil(liveObject["recordedAt"])
+        let offline = ProgressRequest(positionMs: 12_000, durationMs: 90_000,
+                                      recordedAt: 1_000, method: "remux")
+        let offlineObject = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(offline))
+                                         as? [String: Any])
+        XCTAssertEqual(offlineObject["recordedAt"] as? Int, 1_000)
+        XCTAssertNil(offlineObject["method"])
+    }
+
     func testAppleTTFFWaitsForRealProgressAndReportsOnlyOnce() {
         var measurement = ApplePlaybackTTFFState()
         measurement.opened(at: 90_000, observedAt: 10)

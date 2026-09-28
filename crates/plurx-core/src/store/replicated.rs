@@ -166,6 +166,13 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         shape: TransactionShape::BatchWrite,
     },
     SqliteTransactionSite {
+        module: "live_tv_resource.rs",
+        method: "commit_ledger",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
         module: "dvr.rs",
         method: "put_dvr_rule",
         is_async: true,
@@ -986,6 +993,10 @@ mod tests {
             "library_channels.rs",
             include_str!("sqlite/library_channels.rs"),
         ),
+        (
+            "live_tv_resource.rs",
+            include_str!("sqlite/live_tv_resource.rs"),
+        ),
         ("media.rs", include_str!("sqlite/media.rs")),
         ("mod.rs", include_str!("sqlite/mod.rs")),
         ("offline.rs", include_str!("sqlite/offline.rs")),
@@ -1170,7 +1181,7 @@ mod tests {
         // transaction bridge: six claim/publication methods and submission.
         // Subtitle execution now uses the common queue transaction.
         // E2 retires the unfenced manifest-cursor transaction.
-        assert_eq!(methods.len(), 93);
+        assert_eq!(methods.len(), 94);
     }
 
     #[test]

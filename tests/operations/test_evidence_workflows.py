@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import unittest
+import shlex
+import subprocess
 from validation.rust_modules import module_source
 
 
@@ -11,6 +13,31 @@ ROOT = Path(__file__).resolve().parents[2]
 class EvidenceWorkflowCase(unittest.TestCase):
     def read(self, path: str) -> str:
         return (ROOT / path).read_text(encoding="utf-8")
+
+    def test_vod_restart_checks_reuse_workspace_features_and_stay_exact_serial(self) -> None:
+        # Selecting just plurxd changes Cargo's dependency feature union and
+        # recompiles the daemon after the workspace suite has already passed.
+        # Dry-run the real recipe without starting FFmpeg or any Rust tests.
+        result = subprocess.run(
+            ["make", "-n", "vodencode-restart-check", "CARGO=unit-proof"],
+            cwd=ROOT, check=True, capture_output=True, text=True,
+        )
+        commands = [
+            shlex.split(line) for line in result.stdout.replace("\\\n", " ").splitlines()
+            if line.startswith("unit-proof test ")
+        ]
+        selectors = [
+            "vodserve::tests::encoded_vod_vfr_input_is_sampled_on_the_declared_rational_grid",
+            "vodserve::tests::encoded_vod_bitmap_burn_restores_cues_that_predate_video_seek_landing",
+        ]
+        self.assertEqual(len(commands), len(selectors))
+        for command, selector in zip(commands, selectors):
+            self.assertIn("--locked", command)
+            self.assertIn("--workspace", command)
+            self.assertEqual(command[command.index("--exclude") + 1], "plurx-cluster-check")
+            self.assertNotIn("-p", command)
+            self.assertNotIn("--bin", command)
+            self.assertEqual(command[-5:], [selector, "--", "--exact", "--ignored", "--test-threads=1"])
 
     def test_runtime_sweeps_do_not_trigger_on_prs_or_main_pushes(self) -> None:
         for name in ("ci", "effort-ci", "lint", "cluster-store-backstop",

@@ -271,21 +271,40 @@ pub(crate) async fn collect_overview(
         .map(|rule| (rule.id, rule.owner_user_id))
         .collect::<HashMap<_, _>>();
 
-    let (runtime, runtime_supported) = if live_tv.owner_node_id == state.node_id {
-        (Some(state.live_tv.capture_observation_snapshot()), true)
-    } else {
-        let owner = peers.and_then(|outcomes| {
-            outcomes.iter().find_map(|(node_id, outcome)| {
-                (node_id == &live_tv.owner_node_id).then_some(outcome)
-            })
-        });
-        match owner {
-            Some(super::internal_activity::PeerActivityOutcome::Answered(snapshot)) => {
-                (snapshot.dvr.clone(), snapshot.dvr.is_some())
+    let mut combined = state.live_tv.capture_observation_snapshot();
+    let mut runtime_supported = true;
+    if let Some(peers) = peers {
+        for (node_id, outcome) in peers.iter() {
+            if node_id == &state.node_id {
+                continue;
             }
-            _ => (None, true),
+            match outcome {
+                super::internal_activity::PeerActivityOutcome::Answered(snapshot) => {
+                    if let Some(remote) = &snapshot.dvr {
+                        combined.observed_sink_count = combined
+                            .observed_sink_count
+                            .saturating_add(remote.observed_sink_count);
+                        combined.recording_transports = combined
+                            .recording_transports
+                            .saturating_add(remote.recording_transports);
+                        combined.truncated |= remote.truncated;
+                        combined.observations.extend(
+                            remote
+                                .observations
+                                .iter()
+                                .filter(|sample| sample.owner_node_id == *node_id)
+                                .cloned(),
+                        );
+                    } else {
+                        runtime_supported = false;
+                        combined.truncated = true;
+                    }
+                }
+                _ => combined.truncated = true,
+            }
         }
-    };
+    }
+    let runtime = Some(combined);
     let runtime_complete = runtime.as_ref().is_some_and(|snapshot| !snapshot.truncated);
     let mut observations = runtime
         .as_ref()
@@ -293,10 +312,7 @@ pub(crate) async fn collect_overview(
             snapshot
                 .observations
                 .iter()
-                .filter(|sample| {
-                    sample.owner_node_id == live_tv.owner_node_id
-                        && sample.config_generation == live_tv.generation
-                })
+                .filter(|sample| sample.config_generation == live_tv.generation)
                 .map(|sample| (sample.recording_id.as_str(), sample))
                 .collect::<HashMap<_, _>>()
         })
@@ -334,7 +350,8 @@ pub(crate) async fn collect_overview(
     let mut runtime_attention = 0usize;
     for row in &rows {
         let observation = observations.remove(row.id.as_str()).filter(|sample| {
-            sample.channel_id == row.channel_id
+            row.tuner_owner_node_id.as_deref() == Some(sample.owner_node_id.as_str())
+                && sample.channel_id == row.channel_id
                 && sample.airing_start == row.airing_start
                 && sample.attempt == row.attempt
                 && sample.observation_age_ms <= DVR_OBSERVATION_FRESH_MS
@@ -633,6 +650,13 @@ pub(crate) async fn status(
         .filter(|row| row.state == DvrState::Scheduled)
         .map(|row| row.capture_start)
         .min();
+    let resources = state
+        .live_tv
+        .resource_snapshot(0, "")
+        .await
+        .map_err(super::live_tv::api_error)?;
+    let recording_ingests = resources.records.iter().filter(|r| matches!(r,
+        plurx_core::live_tv_resource::Record::Ingest(i) if i.recording && i.expires_at_ms > crate::live_tv::resource_now_ms())).count();
     Ok(Json(DvrStatus {
         enabled: dvr.enabled,
         owner_node_id: live_tv.owner_node_id.clone(),
@@ -641,10 +665,7 @@ pub(crate) async fn status(
         slots: DvrSlots {
             max: live_tv.max_sessions,
             reserve: dvr.tuner_reserve,
-            recording: scheduled
-                .iter()
-                .filter(|row| row.state == DvrState::Recording)
-                .count(),
+            recording: recording_ingests,
         },
         root: dvr.root,
         next_start,

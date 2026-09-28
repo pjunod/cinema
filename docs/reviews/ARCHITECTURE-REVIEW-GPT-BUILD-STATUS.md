@@ -1,5 +1,59 @@
 # Architecture review GPT build — execution status
 
+**Status:** open · **Updated:** 2026-09-28 02:57 UTC · **Audited main:** `d2a9d8fb78f785f3daf0469937d7139f979d3b27`
+
+[PR #582](http://192.168.4.7:3000/noirr/plurx/pulls/582) remains open.
+Its sole adversarial review is complete and all four findings were addressed.
+PR #537 passed all nine checks and4693tests without failures, then merged as
+`d2a9d8fb78f785f3daf0469937d7139f979d3b27`. Its actual landing is integrated
+in #582. Apple194/Android133 signed Release builds run in parallel from
+byte-identical combined native inputs. Final exact-base promotion is next.
+No final deployment or device acceptance has occurred.
+
+The earlier gate #3419 completed4692 Rust tests without assertion failures,
+then timed out rebuilding dependency features for the serial VOD checks.
+Commit `2854047a5` keeps both exact serial checks on workspace feature selection
+and uses a bounded35-minute lane. Its focused regression passed and failed
+when the old selection was restored. All23PRregressionfields validate.
+Normal commits run pinned Clippy, formatting, catalog and JavaScript syntax.
+No second adversarial review is requested.
+
+| Work | Current evidence | Next action |
+|---|---|---|
+| C-08 client §7.9 | All three client follow-ups integrated in #582. Postreview focused checks passed23iOS/21tvOS,23Android and15web cases. | Qualify and merge the combined exact candidate, then collect actual5settled+2quick dispatched-seek and live method evidence on accessible clients. |
+| Fleet | At02:17 all four nodes healthy/ready, quorum/leader present, lag0/restarts0. m6/nynuc/nuc3 ran8227; nuc4historical86f. | Build four exact merged images in parallel, activate serially with existing guarded Ansible, independently verify one uniform point. |
+| Duration | One historical/source-mixed collector and heartbeat remain. | Retain the old window and retarget the existing heartbeat to one bounded collector after uniform final deployment;24h/7d and normal-use acceptance remain owed. |
+| Physical devices | Apple194/Android133 combined-source releases are reserved. Historical193 receipts remain, but its Build/Products directories are absent. Six Apple data-path baselines succeeded; contents/Keychain unproved. Pixel131 reachable, signed/nondebuggable and locked. | Retain newly signed apps outside DerivedData, verify final native-input parity, install in place and read back signer/build/data identifiers. |
+| D-02 | Pixel131 packaged media service and foreground/audio-service permissions verified; notification permission denied. VendorcodecXML has25entries/17distinctnames. | Actual runtimecodec/profile/decoded-frame, foreground/background audio, PiP/controller and notification behavior remain owed; XML is configuration evidence only. |
+| D-03 | Actual signedAPK132 backup/cloud/D2D policies exclude offline/ and datastore/. Pixel backup enabled with Google cloud transport. | Disposable exact-release installation with synthetic data and a positive control is required for restore acceptance; real excluded user data is not recoverable via APK rollback. Physical PDF/EPUB, account/offline and startup acceptance remain owed. |
+| A-02 / A-03 | Six Apple profile/lock prerequisites and data-path baselines recorded; ordinary Release tvOS paging/Settings runner prepared. | Run ordinary UI after final install; collect controller/notification/Now Playing, request/frame ordering and named Lenovo acceptance separately. |
+| W-02 §5.4–5.5 | Two official browser fixture checks prepared. Historical passes apply to their recorded source only. | Requalify final stamped merged binary/web inputs; LG/FireTV physical remote acceptance remains owed. |
+| L-03 M2/M4 | Historical graphs20/30/30/30 and four caption-negative samples recorded; tuners returned idle and clips deleted. | Final-source graph, caption-positive source/HLS/selector/rendering and named physical capacity offer remain owed. Shared Stop refusal is retained. |
+| A-04 | Four bounded Chrome/Firefox SDR runs prepared. Native iPad raw events lack complete D3 measurement oracles. | Run final source matrix after merged/deployed parity; Safari/HDR and named native/Android D3 prerequisites remain open. |
+| C-08 fleet §7.10 | Historical owned Chrome direct play/Close measured+1direct_play/ok onffe965. New owned tabs sign out; another session's signed-in tab is preserved. | Supported owned app sign-in is needed for blank-ID/refused/cancelled and real UI seeks; seven-minute native pause/resume and cluster/mobile attribution remain open. |
+| K-06 | Clock plan is explicitly design-only; runtime measurement release absent. | Retain prerequisite; NTP and absent metrics do not establish peer-uncertainty acceptance. |
+
+**Immutable preparation evidence.** These receipts record prerequisites and
+historical observations; they are not final-main deployment or device passes.
+
+| Receipt | SHA-256 | What it proves |
+|---|---|---|
+| `/private/tmp/codex-fleet-pre582-health-20260928T014820Z.json` | `7422562ac08c996994393318608e0482dc7f7dd887aa99b71041d93ba02e7a4c` | Mixed but healthy fleet point. |
+| `/private/tmp/codex-fleet-controller-point-20260928T015624Z.json` | `07258ca2f6e6e33e661b4d8ecc28dbab50a5416c5cb574df23b8e1878f8c13c8` | No deployment-checkout build at that point. |
+| `/private/tmp/codex-android132-final-lane-prepared-20260928.json` | `78305d6e248e6ff1f4c4b3ab7808736c013fc1d2e2da708ad57b08936a1e0ad9` | Retained signedAPK/hash and8f→6688 production/build/signing parity. |
+| `/private/tmp/codex-android132-final-lane-preflight-20260928.json` | `661eecd3d827b83de33ef28fae4f6791cad28a96b9c382cb372cb474337ce9ed` | Exact paired Pixel131 identity/data identifiers, locked; no media session. |
+| `/private/tmp/codex-android132-packaged-backup-policy-20260928/receipt.json` | `2bf7a7c6123392cd3ed16d1473c83906c8a9d377f92193cf14df82d1b7a95a2c` | Actual packaged backup exclusions; restore behavior unproved. |
+| `/private/tmp/codex-apple193-hardware-profile-coverage-20260928.json` | `fe58e0454e9921d647cf2af4ab3c287b8db87a496cdc9596207f35316be94753` | Six paired target UDIDs covered by candidate profiles. |
+| `/private/tmp/codex-apple193-lock-preflight-20260928/receipt.json` | `63534213e8a03508f466118c876c29e68c2e25c3bb7f7d4646a99d7078c28ba9` | Read-only passcode prerequisites; current UI access not inferred. |
+| `/private/tmp/codex-c08-browser-prerequisites-20260928.json` | `09033de23766f06f2cdb771858ce465ae8b55663d6e0c39281f1b6d7933688e4` | Browser runner/readiness prepared, owned tab closed; final execution pending. |
+| `/private/tmp/codex-l03-m4-final86f-source-graph-20260927.json` | `aad91c1643d6ba1c7d64af8a55bcffef673165240aebc614b36598222c577dd9` | Historical caption-negative source/boot-graph sample with cleanup. |
+
+Live lane updates remain in
+`/private/tmp/codex-fleet-final-status-20260927.md`. Exact merge, installed
+artifact and final trace receipts will replace pending actions when observed.
+
+**Historical records below.** These dated checkpoints describe the builds they name. Their pending-gate and locked-device statements are retained as history; the current queue is above.
+
 **Status:** open — [PR #569](http://192.168.4.7:3000/noirr/plurx/pulls/569) merged as `55aa430fdbbb04ede92948edb429c4adc38b8c1b` after its single adversarial review and green exact-head [Main promotion gate #3373](http://192.168.4.7:3000/noirr/plurx/actions/runs/3373). Its A-04 Chrome/Firefox and W-02 official browser checks passed on that served-web tree. Four nodes and five paired Apple devices reached exact `55aa` / signed build191. Forgejo main then moved to `b7f58f227381aada3c43cdc0a8e536e9653287e3` via C-08 [PR #559](http://192.168.4.7:3000/noirr/plurx/pulls/559), so `55aa` deployment is historical and the duration collector has stopped. Native/device acceptance remains open. · **Updated:** 2026-09-27 09:08 UTC · **Main:** `b7f58f227381aada3c43cdc0a8e536e9653287e3`
 
 **Last fully measured deployment checkpoint (`55aa`, now historical).** All four nodes reached exact `ab24bfff7` with healthy quorum, restarts 0, readyz/metrics 200 and lag/WAL 0 before #569 merged (uniform receipt SHA-256 `db1fc45cb70c8d9d0cf2516509fae2216d0653f112b9c1a14fa950020788f9fd`). Its bounded collector began at 08:03:44 UTC with no initial gaps or hygiene hits (start receipt SHA-256 `c86e0807e8417cc64984aafb4f37fa706982f84ac0d454bc1ad1c4ebd93a0d6b`); that interval is historical for the new main and cannot close exact-current-main duration rows. The merged #569 browser manifest SHA-256 `0942ee83b041f672ed8f19b96e791f5cfe3aa60e40137d22f76abec8617da2e8` and official W-02 receipt SHA-256 `2688b405fa05fd23be89c0d03790d0bc47a367d9f491f339684d735eb7e53a3b` passed. Fresh signed Apple Release191 was installed in place and read back on five paired devices (receipt SHA-256 `3c246a45ec1e176934533436e516ee2047dad06675915c0575ebeaa23de1bd6e`); all four exact-55aa nodes are deployed and healthy with a clean collector slot0; the sole connected Pixel remains signed Android code131 and locked (exact-55aa parity receipt SHA-256 `f48f3f21934505aa4869b1efc529f1eb57bbc03cefc74cde25f3bfba903edaba`). L-03 M4 source on the preceding `ab24` build was caption-negative across 2,946 frames (receipt SHA-256 `852d7b40a865497f9ecac2c0878c2504fd488f0e28376b6e19873e418daca864`). Physical A-02/A-03, L-03 M2/M4 and LG/Fire TV prompts remain open. Live rollout detail is in `/private/tmp/codex-fleet-final-status-20260927.md`.
@@ -15,8 +69,7 @@
 **Bedroom Apple TV build191 paging probe.** A single bounded XCTest reached the Libraries navigation but its focus helper moved into Live TV and then failed to find the prior library button before the paging assertion. The test was 0/1 due to harness navigation, not an observed product paging failure or pass (log SHA-256 `7bf4bf2c5c0f5db652d570d9a3ac7432e35d6c3de11226cc27bb6ea7642bdede`). The earlier copied-xctestrun invocation stopped before executing a test. The device still reports build191 and tuners remained idle; all 4,611 previously listed app-data paths also remained after XCTest despite a rotated bundle URL (supplement SHA-256 `00cf62848848bd3b8d0a41e568f28e37f57e99ab01dcae4454d376d00f73c88e`; contents and Keychain remain unproved). The combined exact-build191 UI receipt SHA-256 is `e5bb364aae16918846347be317a4e019ce00d2d94ef830e9803099086c0a14b0`. An iPhone 17 Pro Max build191 readback showed signed-in Cinema Home with Continue Watching, Next Up and Resume, without proving A-02 controller/notification/Now Playing agreement. Physical A-02/A-03 acceptance stays open.
 
 The [workboard](ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) remains the
-canonical plan ledger. The current checkpoint and queue below show the next
-action while implementation and fleet work run in parallel. A `done` entry requires a merged change and
+canonical plan ledger. The historical checkpoint and queue below record the actions pending at their dates. A `done` entry requires a merged change and
 the acceptance evidence named by its plan.
 
 | Last deployed queue at `55aa430fd` (historical after main moved to `b7f58f227`) | Verified on that tree | Still owed |

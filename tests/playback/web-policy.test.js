@@ -3517,19 +3517,23 @@ test("the two stall prompts offer Keep waiting, and the create one does not", ()
 // A blocking surface is only ever drawn over a player its owner has stopped.
 test("the stall-recovery prompt stops the player before it raises", () => {
   const order = [];
+  const beacons = [];
   let raised = null;
   const build = new Function(
     "PLAYER", "document", "pausePlaybackInternally", "stopPlayerTimers",
-    "retireHlsTerminalAttempt", "raisePlaybackSurface",
+    "retireHlsTerminalAttempt", "raisePlaybackSurface", "clientLog",
     [
       shippedSource("playbackStallActions"),
       shippedSource("playbackExhaustedActions"),
+      shippedSource("finishPlaybackSeekTelemetry"),
       shippedSource("stopPlayerForExhaustion"),
       shippedSource("showStallRecoveryFailure"),
       "return showStallRecoveryFailure;",
     ].join("\n"),
   );
-  const player = { method: "remux" };
+  const player = { method: "remux", controlSeek: { seekTelemetry: {
+    startedAt: 100, outcome: null, context: { method: "remux", playback_id: "seek-owner" },
+  } } };
   const video = {};
   build(
     player,
@@ -3538,10 +3542,14 @@ test("the stall-recovery prompt stops the player before it raises", () => {
     () => order.push("timers"),
     (owner) => { assert.equal(owner, player); order.push("retire"); },
     (source, fault) => { order.push("raise"); raised = { source, fault }; },
+    (event) => { order.push("seek-terminal"); beacons.push(event); },
   )("the reopen failed");
 
-  assert.deepEqual(order, ["retire", "pause", "timers", "raise"],
+  assert.deepEqual(order, ["seek-terminal", "retire", "pause", "timers", "raise"],
     "the owner stops the player, and only then raises (contract §3.4)");
+  assert.deepEqual(beacons, [{ method: "remux", playback_id: "seek-owner",
+    level: "info", event: "seek_abandoned" }],
+    "exhaustion finishes its dispatched seek before retiring the owner");
   assert.equal(raised.source, "owner_exhausted");
   assert.equal(raised.fault.player_stopped, true);
   // Ruled 2026-09-13: an `exhausted` prompt leads with Keep waiting, which is
@@ -5034,6 +5042,7 @@ function carryHarness(player) {
     "PLAY_OPEN_GATE",
     "cancelPendingSeek",
     "cancelHlsStartup",
+    "clientLog",
     // Closing hands the OS media keys back (F-web-13); the counter this
     // harness keeps is what proves the call is still there.
     "clearPlayerMediaSession",
@@ -5050,6 +5059,7 @@ function carryHarness(player) {
       shippedSource("playbackTransportEvents"),
       shippedSource("resetPlaybackTransportEvents"),shippedSource("resetMediaSource"),
       shippedSource("rememberPlaybackTransportIntent"),
+      shippedSource("finishPlaybackSeekTelemetry"),
       "let WATCH=null,WATCH_CLOSE_PROMISE=null,WATCH_GENERATION=0; function watchDetach(){return null;}",
       shippedSource("closePlayer"),
       shippedSource("beginPlaybackPreparation"),"function play(){}",
@@ -5077,6 +5087,7 @@ function carryHarness(player) {
     { invalidate() {} },
     () => { player._seekPending = null; player._seekPreview = null; },
     () => {},
+    (event) => { (player._terminalBeacons ||= []).push(event); },
     () => { cleared.count += 1; },
   );
   harness.mediaSessionCleared = () => cleared.count;

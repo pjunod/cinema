@@ -860,7 +860,15 @@ data class ProgressReq(
     val position_ms: Long,
     val duration_ms: Long? = null,
     val recorded_at: Long? = null,
-)
+    @kotlinx.serialization.Transient private val deliveryMethod: String? = null,
+) {
+    // Its initializer depends on another field; default-value elision would
+    // otherwise suppress every live method as equal to that same expression.
+    // JSON explicitNulls=false still omits the offline replay's null method.
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault
+    val method: String? = deliveryMethod.takeIf { recorded_at == null }
+}
 
 @Serializable
 data class OfflineQualityOption(

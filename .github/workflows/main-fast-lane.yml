@@ -126,6 +126,7 @@ jobs:
           node tests/playback/player-input-contract.test.js
           node tests/playback/web-policy.test.js
           node tests/playback/web-control.test.js
+          node --test tests/web/seek-telemetry.test.js
           node tests/web/player-dom.test.js
           node tests/web/read-after.test.js
           node tests/web/live-tv.test.js
@@ -142,7 +143,9 @@ jobs:
     # pinned ffmpeg 6 environment used by this lane, while the host label keeps
     # the job on the high-CPU pool.
     container: ubuntu:24.04
-    timeout-minutes: 30
+    # Cold builds plus the complete unit lane measured just over 30 minutes
+    # on the shared runner. Keep bounded headroom without dropping tests.
+    timeout-minutes: 35
     steps:
       - name: Install Rust gate prerequisites
         run: |
