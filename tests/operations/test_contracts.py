@@ -1229,6 +1229,12 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("cargo tree --locked -p plurxd -e features", dockerfile)
         self.assertIn("grep -q 'cluster-read-cost-validation'", dockerfile)
         self.assertIn("CARGO_TARGET_DIR=/src/target-plurxd", dockerfile)
+        # Cache-mounted target dirs must never serve a stale workspace crate.
+        self.assertIn(
+            "find crates vendor -type f -exec touch {} + \\\n"
+            "    && ! cargo tree --locked -p plurxd",
+            dockerfile,
+        )
         self.assertIn("CARGO_TARGET_DIR=/src/target-cluster-check", dockerfile)
         self.assertIn("id=plurx-cargo-registry,sharing=locked", dockerfile)
         self.assertIn("id=plurx-target-plurxd-${TARGETARCH},sharing=locked", dockerfile)
@@ -2561,6 +2567,11 @@ assert.equal(context.ACT_TIMER, null);
             dockerfile,
         )
         self.assertIn("--test store_contract --no-run", dockerfile)
+        self.assertIn(
+            "find crates vendor -type f -exec touch {} + \\\n"
+            "    && mkdir -p /src/target-store-contract/debug/deps",
+            dockerfile,
+        )
         self.assertIn('test "$#" -eq 1', dockerfile)
         self.assertIn("rustc -Vv > /rustc-vv.txt", dockerfile)
         self.assertIn("FROM scratch AS store-contract-binary", dockerfile)
