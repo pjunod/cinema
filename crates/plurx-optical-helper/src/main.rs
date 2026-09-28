@@ -48,7 +48,9 @@ mod linux {
     const MAX_NAVIGATION_BYTES: u64 = 16 * 1024 * 1024;
     const SAMPLE_BYTES: u64 = 64 * 1024;
     const MAX_TITLES: usize = 512;
-    const MAX_PROBE_BYTES: usize = 4 * 1024 * 1024;
+    const MAX_STREAMS_PER_TITLE: usize = 256;
+    const MAX_CHAPTERS_PER_TITLE: usize = 4096;
+    const MAX_PROBE_BYTES: usize = 1024 * 1024;
     const MAX_PROBE_STDERR_BYTES: usize = 64 * 1024;
     const MAX_PROBE_TEXT_BYTES: usize = 512;
     const MAX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
@@ -739,6 +741,17 @@ mod linux {
             .get("streams")
             .and_then(Value::as_array)
             .ok_or_else(|| "ffprobe title has no streams".to_owned())?;
+        if streams.len() > MAX_STREAMS_PER_TITLE {
+            return Err("ffprobe title contains too many streams".into());
+        }
+        let chapter_values = document
+            .get("chapters")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if chapter_values.len() > MAX_CHAPTERS_PER_TITLE {
+            return Err("ffprobe title contains too many chapters".into());
+        }
         let video = streams
             .iter()
             .find(|stream| stream.get("codec_type").and_then(Value::as_str) == Some("video"));
@@ -751,75 +764,91 @@ mod linux {
             .iter()
             .filter(|stream| stream.get("codec_type").and_then(Value::as_str) == Some("audio"))
             .enumerate()
-            .map(|(index, stream)| AudioStream {
-                index: i64::try_from(index).unwrap_or(i64::MAX),
-                codec: string(stream, "codec_name").unwrap_or_default(),
-                channels: integer(stream, "channels"),
-                language: stream.get("tags").and_then(|tags| string(tags, "language")),
-                title: stream.get("tags").and_then(|tags| string(tags, "title")),
-                default: stream
-                    .get("disposition")
-                    .and_then(|value| integer(value, "default"))
-                    == Some(1),
+            .map(|(index, stream)| {
+                Ok(AudioStream {
+                    index: i64::try_from(index)
+                        .map_err(|_| "audio stream index exceeds its bound")?,
+                    codec: string(stream, "codec_name")
+                        .filter(|value| !value.is_empty())
+                        .ok_or("audio stream codec is missing")?,
+                    channels: integer(stream, "channels"),
+                    language: stream.get("tags").and_then(|tags| string(tags, "language")),
+                    title: stream.get("tags").and_then(|tags| string(tags, "title")),
+                    default: stream
+                        .get("disposition")
+                        .and_then(|value| integer(value, "default"))
+                        == Some(1),
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, String>>()?;
         let subtitle_streams = streams
             .iter()
             .filter(|stream| stream.get("codec_type").and_then(Value::as_str) == Some("subtitle"))
             .enumerate()
-            .map(|(index, stream)| SubtitleStream {
-                index: i64::try_from(index).unwrap_or(i64::MAX),
-                codec: string(stream, "codec_name").unwrap_or_default(),
-                language: stream.get("tags").and_then(|tags| string(tags, "language")),
-                title: stream.get("tags").and_then(|tags| string(tags, "title")),
-                default: stream
-                    .get("disposition")
-                    .and_then(|value| integer(value, "default"))
-                    == Some(1),
-                forced: stream
-                    .get("disposition")
-                    .and_then(|value| integer(value, "forced"))
-                    == Some(1),
-                hearing_impaired: stream
-                    .get("disposition")
-                    .and_then(|value| integer(value, "hearing_impaired"))
-                    == Some(1),
+            .map(|(index, stream)| {
+                Ok(SubtitleStream {
+                    index: i64::try_from(index)
+                        .map_err(|_| "subtitle stream index exceeds its bound")?,
+                    codec: string(stream, "codec_name")
+                        .filter(|value| !value.is_empty())
+                        .ok_or("subtitle stream codec is missing")?,
+                    language: stream.get("tags").and_then(|tags| string(tags, "language")),
+                    title: stream.get("tags").and_then(|tags| string(tags, "title")),
+                    default: stream
+                        .get("disposition")
+                        .and_then(|value| integer(value, "default"))
+                        == Some(1),
+                    forced: stream
+                        .get("disposition")
+                        .and_then(|value| integer(value, "forced"))
+                        == Some(1),
+                    hearing_impaired: stream
+                        .get("disposition")
+                        .and_then(|value| integer(value, "hearing_impaired"))
+                        == Some(1),
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, String>>()?;
         let inspected_streams = streams
             .iter()
-            .map(|stream| InspectedStream {
-                index: integer(stream, "index").unwrap_or_default(),
-                kind: string(stream, "codec_type").unwrap_or_else(|| "unknown".into()),
-                codec: string(stream, "codec_name"),
-                language: stream.get("tags").and_then(|tags| string(tags, "language")),
-                title: stream.get("tags").and_then(|tags| string(tags, "title")),
-                channels: integer(stream, "channels").and_then(|value| u32::try_from(value).ok()),
-                default: stream
-                    .get("disposition")
-                    .and_then(|value| integer(value, "default"))
-                    == Some(1),
-                forced: stream
-                    .get("disposition")
-                    .and_then(|value| integer(value, "forced"))
-                    == Some(1),
+            .map(|stream| {
+                Ok(InspectedStream {
+                    index: integer(stream, "index").ok_or("stream index is missing")?,
+                    kind: string(stream, "codec_type")
+                        .filter(|value| !value.is_empty())
+                        .ok_or("stream kind is missing")?,
+                    codec: string(stream, "codec_name"),
+                    language: stream.get("tags").and_then(|tags| string(tags, "language")),
+                    title: stream.get("tags").and_then(|tags| string(tags, "title")),
+                    channels: integer(stream, "channels")
+                        .map(u32::try_from)
+                        .transpose()
+                        .map_err(|_| "stream channel count is invalid")?,
+                    default: stream
+                        .get("disposition")
+                        .and_then(|value| integer(value, "default"))
+                        == Some(1),
+                    forced: stream
+                        .get("disposition")
+                        .and_then(|value| integer(value, "forced"))
+                        == Some(1),
+                })
             })
-            .collect();
-        let chapters = document
-            .get("chapters")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
+            .collect::<Result<Vec<_>, String>>()?;
+        let chapters = chapter_values
+            .iter()
             .enumerate()
-            .map(|(index, chapter)| InspectedChapter {
-                index: u32::try_from(index).unwrap_or(u32::MAX),
-                start_ms: seconds_ms(chapter.get("start_time")),
-                // FFprobe's navigation timestamp is useful for a chapter
-                // start, but this path has not built the physical title's
-                // cell/clip index. Do not promise frame-accurate markers.
-                accurate: false,
+            .map(|(index, chapter)| {
+                Ok(InspectedChapter {
+                    index: u32::try_from(index).map_err(|_| "chapter index exceeds its bound")?,
+                    start_ms: seconds_ms(chapter.get("start_time")),
+                    // FFprobe's navigation timestamp is useful for a chapter
+                    // start, but this path has not built the physical title's
+                    // cell/clip index. Do not promise frame-accurate markers.
+                    accurate: false,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, String>>()?;
         let locator_json = serde_json::to_vec(&locator).map_err(|error| error.to_string())?;
         let title_id = format!("title-{}", &hex::encode(Sha256::digest(locator_json))[..20]);
         let container = document
@@ -933,6 +962,36 @@ mod linux {
             assert!(!bounded.chars().any(char::is_control));
             assert!(bounded.len() <= MAX_PROBE_TEXT_BYTES);
             assert!(bounded.starts_with("English"));
+        }
+
+        #[test]
+        fn title_probe_requires_explicit_bounded_stream_identities() {
+            let missing_index = serde_json::json!({
+                "streams": [{"codec_type": "video", "codec_name": "h264"}],
+                "format": {"duration": "60.0"}
+            });
+            assert!(title_from_probe(
+                OpticalFormat::Bluray,
+                OpticalTitleLocator::Bluray { playlist_number: 1 },
+                &missing_index,
+            )
+            .is_err());
+
+            let too_many = serde_json::json!({
+                "streams": (0..=MAX_STREAMS_PER_TITLE)
+                    .map(|index| serde_json::json!({
+                        "index": index,
+                        "codec_type": "audio",
+                        "codec_name": "aac"
+                    }))
+                    .collect::<Vec<_>>()
+            });
+            assert!(title_from_probe(
+                OpticalFormat::Bluray,
+                OpticalTitleLocator::Bluray { playlist_number: 1 },
+                &too_many,
+            )
+            .is_err());
         }
 
         #[test]
