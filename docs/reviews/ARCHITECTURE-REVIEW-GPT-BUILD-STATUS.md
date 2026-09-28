@@ -1,6 +1,6 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 04:14 UTC · **Audited main:** `dfef993b903e62a9dabc05ebdff98ff2a57ada21`
+**Status:** open · **Updated:** 2026-09-28 04:25 UTC · **Audited main:** `40dae5ce1e680f0a41e38fe0e5ee5913be7ce54f`
 
 [PR #582](http://192.168.4.7:3000/noirr/plurx/pulls/582) merged after its
 single adversarial review; all four findings were fixed. The exact candidate
@@ -17,15 +17,19 @@ until signed qualification/install. Android133 is unchanged. No590 adversarial
 review or unit tests have run; the complete candidate gets exactly one review
 before focused/fast-lane tests.
 
-The four-node strict uniform deployment passed. Browser cases ran on the exact
-merged binary and unchanged scorers; failures are retained. Actual GoogleTV
-UI and corrective source work proceed in parallel.
+The four-node strict uniform deployment passed on `dfef993b9`. Browser cases ran on that exact
+merged binary and unchanged scorers; failures are retained. Main subsequently moved through
+[PR #588](http://192.168.4.7:3000/noirr/plurx/pulls/588) to `40dae5ce1`, which is integrated
+into this candidate. Its queue/Activity changes require a fresh final server deployment;
+Apple and Android inputs did not change. Current-main physical UI actions paused at the guard.
+GoogleTV reached 459/459 Everything and 325 Unwatched in four filter cycles, restored
+Everything with Title(A–Z) unchanged; tail, fresh request counts and 6,000-item acceptance remain unproved.
 
 | Work | Current evidence | Next action |
 |---|---|---|
 | C-08 client §7.9 | Web, Apple and Android follow-ups merged in #582. Sole-review findings fixed; final compile gates green. | Actual5settled+2quick dispatched-seek/method evidence and seven-minute pause/resume remain owed. |
 | Fleet | All four exactdfef checkouts/OCI/running binaries verified healthy, readyz/metrics200, quorum/leader, lag0/restarts0. | Retain this point; next qualified source needs a new exact deployment. |
-| Duration | One30s/256MiB collector and existing quiet heartbeat are active from03:59:15UTC, Sep28 toOct5. Initial5m clean; historical windows preserved. |24h/7d and normal-use windows remain owed; a future source change interrupts exact-build continuity. |
+| Duration | Historical exactdfef one30s/256MiB collector and existing quiet heartbeat are active from03:59:15UTC, Sep28 toOct5. Initial5m clean; historical windows preserved. |24h/7d and normal-use windows remain owed; a future source change interrupts exact-build continuity. |
 | Physical devices | Signed Apple194 installed/read back on six physical devices. Signed nondebuggable Android133 installed/read back on five, with APK/signer/firstInstall/UID/CE continuity. |16pro/TCL unavailable; Shield/Xiaomi absent. Locked devices cannot supply UI acceptance. |
 | D-02 | Actual133 APK/signature verified on GoogleTV,Lenovo,Pixel10ProFold,razrUltra2025 andPixel11ProXL. GoogleTV unlocked; other four currently locked. | Runtimecodec/frame, Home/notification, PiP/controller, lifecycle and named Shield/Lenovo prompts remain owed. |
 | D-03 | Signed133 packaged backup/cloud/D2D XML excludes offline/ and datastore/. Actual packaged baseline.prof/profm retained; ART consumption/startup timing unproved. | Packaged policy is not restore proof. Disposable exact-release synthetic-data backup/restore, physical PDF/EPUB/account/offline/startup acceptance remain owed; external chooser remains separately refused by its plan. |
@@ -43,6 +47,8 @@ UI and corrective source work proceed in parallel.
 | `/private/tmp/codex-fleet-post582-prep-20260928/run-dfef993b903e-1c946919/uniform-health.json` | `ba628663997446da2242947ae51eb4a97d9b70dbd1754aab8fbdf34bc7fed4fe` | Strict all-four exact checkout/OCI/binary, health/quorum/leader/lag0/restarts0. First learner missing-gauge scrape retained separately. |
 | `/private/tmp/codex-fleet-post582-prep-20260928/run-dfef993b903e-1c946919/collector-start-receipt.json` | `b1c04bdcad3843ee7906014c98b9671c04e323bfe750ba6955ac18e4ebd511a7` | One bounded collector; slot0 clean. Future window not complete. |
 | `/private/tmp/codex-fleet-post582-prep-20260928/run-dfef993b903e-1c946919/five-minute-checkpoint.json` | `c9b45f5242734f85c60a30ac4b46251a8bee75b6f9a5770583e334997a73cd96` |11uniform rows/node,30smaximum gap; no reset/build/HTTP/quorum/lag errors. Passive5m only. |
+| `/private/tmp/codex-android133-ui-61171HFAG1GG00-20260928T041152986239Z/receipt.json` | `f23610e07c89751b08ce64f19b51ae5bbe85d66faea5e47da49f4a22598a7576` | Actual historicaldfef459/459 Everything,325 Unwatched stable over four cycles. Original filter/sort restored. Tail/full order/request counts/frame target unproved. |
+| `/private/tmp/codex-android133-main-move-ui-hold-20260928.json` | `fa117843d56c58d50c544eeff483e0390a0a0269db0b6e22693a9de526597e3b` | Next action refused before UI input because main moved. No new movie, seek or LiveTV stream started. |
 | `/private/tmp/codex-browser-final-evidence-binding-20260928/binding.json` | `31b357f1a413b3bc1bc5c6713ec903fe711f5d881e7dec85ee392e212225a0b3` | Exactdfef binary/source/scorers, four retained A04 attempts and two official W02 passes; deployed parity. FullD3 not met. |
 | `/private/tmp/codex-browser-final-evidence-binding-20260928/failure-diagnosis.json` | `3def6c7c547859f0c0617bc28db0157d888aeddd4508181b08d15f6be07646ba` | Chrome first preparation hit10s timeout without buffer/proof readiness. Later503s began75.078s after fallback, so did not cause it. Clock-observation gap is a source-level risk; trace-specific causation unproved. |
 | `/private/tmp/codex-apple194-tv-acceptance-default-iteration-20260928/receipt.json` | `2d505eb1ecd0f85d2b7f65dea01cc636be32aaccee24edc8d243da9f0d6d8eea` | One actual paging case failed14.46s in focus navigation; Settings not executed. Earlier CLI-iteration invocation executed0tests and is separately retained. |
