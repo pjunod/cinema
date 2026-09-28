@@ -1,20 +1,50 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 01:05 UTC · **Audited main:** `8227b9bc82f0d4f3911078a0b8a9ac2e74edd1de`
+**Status:** open · **Updated:** 2026-09-28 02:06 UTC · **Audited main:** `8227b9bc82f0d4f3911078a0b8a9ac2e74edd1de`
 
-[PR #575](http://192.168.4.7:3000/noirr/plurx/pulls/575) merged after its single adversarial review and green exact-head [Main promotion gate #3383](http://192.168.4.7:3000/noirr/plurx/actions/runs/3383). The following work remains active:
+[PR #582](http://192.168.4.7:3000/noirr/plurx/pulls/582) remains open.
+Its sole adversarial review is complete and all four findings were addressed.
+Candidate `6688fb54c` passed scope, version, preflight, Windows, web, Apple
+and Android checks. Fast lane API3440/UI3419 timed out during the redundant
+VOD-feature rebuild after4692 tests passed with no assertion failures. A
+narrow lane repair is being committed; the repaired candidate needs its exact
+current-base Main promotion result before merge or deployment.
+
+
+**Current client candidate:** PR #582 has completed its sole adversarial review and all four corrections. Combined Apple focused checks passed 23 iOS / 21 tvOS; Android telemetry passed 23; all 15 web seek telemetry cases passed gate preflight. Gate #3419 completed 4,692 Rust tests with zero failures, then hit its 30-minute deadline during a redundant VOD feature rebuild. Commit `2854047a5` reuses workspace package selection for both exact serial VOD checks and gives the Rust lane a bounded 35-minute deadline. Its focused dry-run regression passed and fails on restoring the old package selection. The normal hook passed pinned Clippy, formatting, catalog and JavaScript syntax. Final exact-candidate qualification and the merge remain pending; no second adversarial review. A payload-only restart was canceled before compiler allocation because the Python regression selector needed the method name alone; the next committed status update starts the corrected-payload gate. Signed native production/build/signing inputs remain unchanged.
 
 | Work | Current evidence | Next action |
 |---|---|---|
-| C-08 client §7.9 | Main still lacks the client follow-ups; draft #582 implements them on all three clients. | Parallel web, Apple and Android implementation in [draft PR #582](http://192.168.4.7:3000/noirr/plurx/pulls/582); Apple `9341151fc`/`f50e56ef7`, web `3dc5464a5`, Android `5fd2c0ce8` are integrated. The sole adversarial review of `b2ddda191` completed with four P2 findings. Web title retirement and Apple late delivery binding are fixed in `5733161de`; Android target-proof and same-intent recovery fixes are integrated as `714ee9e40`; the live-progress encoding correction is `c6127e068`. Apple focused17/17iOS and17/17tvOS passed. Web14/15 passed and the corrected remaining fixture passed alone; the fast lane executes all15. Android focused23/23 passed in5s (receiptSHA-256 `eb37eb4142d15cf4fd28e7073f50f06a97cf4a21b9c9f9cb9c9faa012ead2123`). Current main #473 (`8227b9bc8`) is integrated as `1ffc7b991`; combined iOS23/23 passed and tvOS focused replay follows its successful compile. Android/web source is unchanged by this integration. The final fast lane is next. Apple now claims193 because an independent #473 candidate192 was installed on Bedroom. Android dismissal-safe delivery and originating-profile authentication are integrated as `70df10111`; the compile-only build receipt is `ab275290abcc95b75d4f38c0559d7dcc557763b2fb21f4ffae25c5d45adf604d`. Claude retains server ownership. |
-| Fleet | Fresh four-node audit: all checkouts `ffe965`; m6/nynuc/nuc3 run `ffe965`, only nuc4 still runs `86f2e870a` (00:22 point). All were healthy, with quorum, lag0 and clean hygiene. | Resolve the independent rollout's ownership before another node transition; establish a uniform point and restart current-main duration evidence. |
-| Duration | Historical `86f` first hour: 121 ticks/node, no gaps, source changes, HTTP/quorum/restart or hygiene issues; nuc3 maximum lag1. Later source changes invalidate a uniform 24-hour/7-day claim. | Preserve the historical receipt; one collector/heartbeat remains active, explicitly marked source-mixed. |
-| Physical devices | Six paired Apple devices report Release191; Pixel remains signed Android131. iPad Pro and Pixel are now unlocked. | Deploy changed client releases after merge; collect named playback, seek, reader and controller evidence on reachable devices. |
-| C-08 fleet §7.10 | All four nodes expose exactly16 start-outcome and2 unpaired series. An owned direct-nynuc Chrome play/Close on exact `ffe965` measured +1 `direct_play,ok`; all other outcome/unpaired series unchanged. | Refused/cancelled/native pause/cluster attribution cases remain open. Row2 receipt SHA-256 `49eb669a324047a74313e8bdc9b835d9a7f0433835b38c9cf91c1321264c05e3`. |
-| K-06 | The clock plan explicitly says design-only; its measurement release does not exist. | Record the prerequisite. NTP and absent metrics cannot stand in for its future peer-uncertainty measurement. |
-| A-04 / W-02 / L-03 | Browser A-04/W-02 receipts remain valid for their unchanged served-web tree; S14 server changes require runtime requalification. Caption samples remain negative. | Native/HDR, physical remote, caption-positive and owned capacity-offer acceptance remain open. |
+| C-08 client §7.9 | All three client follow-ups are integrated in #582. Combined-source focused Apple checks passed23iOS/21tvOS and Android23; preflight passed all15web seek cases. Exactly one adversarial review. | Qualify the repaired exact candidate, merge, then collect actual5settled+2quick dispatched-seek and live viewing-method evidence on each accessible client. |
+| Fleet | At01:48UTC all four nodes were healthy/ready, quorum/leader present, lag0/restarts0. All checkouts8227; nynuc/nuc3 ran8227, m6ffe965 and nuc4historical86f. At01:56 no deployment-checkout build remained. | Recheck controller ownership, stage exact merged images, activate one node at a time and independently read back a uniform point. |
+| Duration | One historical/source-mixed collector and heartbeat remain. Earlier hour evidence cannot establish current-main24h/7d acceptance. | Close and retain the old window, then retarget the existing heartbeat to one bounded collector after uniform final deployment. |
+| Physical devices | Signed iOS/tvOS193 and Android132 candidate products are retained; final installs have not occurred in this lane. Six paired Apple hardware UDIDs are covered; four require passcodes. Pixel131 is reachable, signed/nondebuggable and keyguard-locked. | Verify actual merged native/build parity, install in place with signer/data-identity readback, then collect accessible UI evidence. Locked/unavailable devices remain owed. |
+| D-03 packaged backup policy | SignedAPK132 legacy backup, cloud-backup and device-transfer XML exclude both offline/ and datastore/. | Record packaged-policy proof; physical backup/restore, PDF/EPUB, account/offline content retention and release startup profile remain owed. |
+| A-02 / A-03 | Apple lock/profile prerequisites and the candidate193 physical tvOS runner are prepared. Release ignores the DEBUG-only file/origin launch fixture. | Run ordinary Release paging/Settings UI after final install; collect controller/notification/Now Playing, order/request/frame and named Lenovo acceptance separately. |
+| W-02 §5.4–5.5 | The two official browser checks are prepared. Historical worker/inline/local-seek/missing-resource and subtitle-readiness passes apply to their recorded web trees. | Requalify actual final merged web/binary inputs, then collect LG/FireTV physical remote evidence. |
+| L-03 M2/M4 | Exact86f historical graphs20/30/30/30 completed; four caption-negative samples had0A/53 across2851decoded frames, tuners returned idle and clips were deleted. | Final-source graph readback, caption-positive source/HLS/selector/rendered text and named physical capacity offer remain owed. No unsafe shared Stop retry. |
+| A-04 traces | Chrome/Firefox one-cliff and two-cliff runners are prepared; final-source execution awaits merged binary/deployed-node parity. iPad native raw events lack the complete D3 measurement oracles. | Run the bounded final browser matrix; retain native raw events without treating an empty normalized report as a pass. Safari/HDR and named native/Android D3 remain owed. |
+| C-08 fleet §7.10 | Historical owned direct-nynuc Chrome play/Close onffe965 measured+1direct_play/ok; other outcome/unpaired series were unchanged. No blank-ID refusal request was issued. | Refused/cancelled, seven-minute native pause/resume and cluster/mobile attribution remain open; use authorized app UI/API access. |
+| K-06 | The clock plan explicitly remains design-only; its runtime measurement release does not exist. | Retain the prerequisite; NTP and absent metrics cannot establish peer-uncertainty acceptance. |
 
-Live rollout detail and immutable receipt locations are maintained in `/private/tmp/codex-fleet-final-status-20260927.md`. Historical first-hour receipt SHA-256: `19a9db8f5d249cd3fc43ee9db8955162132b9b14ad6a04bb54188d217280210c`; mixed-fleet point SHA-256: `1ab06b0785ffc92978585b4f4d03548228fd4139f6714681a0acdd0640a1a9fa`.
+**Immutable preparation evidence.** These receipts record prerequisites and
+historical observations; they are not final-main deployment or device passes.
+
+| Receipt | SHA-256 | What it proves |
+|---|---|---|
+| `/private/tmp/codex-fleet-pre582-health-20260928T014820Z.json` | `7422562ac08c996994393318608e0482dc7f7dd887aa99b71041d93ba02e7a4c` | Mixed but healthy fleet point. |
+| `/private/tmp/codex-fleet-controller-point-20260928T015624Z.json` | `07258ca2f6e6e33e661b4d8ecc28dbab50a5416c5cb574df23b8e1878f8c13c8` | No deployment-checkout build at that point. |
+| `/private/tmp/codex-android132-final-lane-prepared-20260928.json` | `78305d6e248e6ff1f4c4b3ab7808736c013fc1d2e2da708ad57b08936a1e0ad9` | Retained signedAPK/hash and8f→6688 production/build/signing parity. |
+| `/private/tmp/codex-android132-final-lane-preflight-20260928.json` | `661eecd3d827b83de33ef28fae4f6791cad28a96b9c382cb372cb474337ce9ed` | Exact paired Pixel131 identity/data identifiers, locked; no media session. |
+| `/private/tmp/codex-android132-packaged-backup-policy-20260928/receipt.json` | `2bf7a7c6123392cd3ed16d1473c83906c8a9d377f92193cf14df82d1b7a95a2c` | Actual packaged backup exclusions; restore behavior unproved. |
+| `/private/tmp/codex-apple193-hardware-profile-coverage-20260928.json` | `fe58e0454e9921d647cf2af4ab3c287b8db87a496cdc9596207f35316be94753` | Six paired target UDIDs covered by candidate profiles. |
+| `/private/tmp/codex-apple193-lock-preflight-20260928/receipt.json` | `63534213e8a03508f466118c876c29e68c2e25c3bb7f7d4646a99d7078c28ba9` | Read-only passcode prerequisites; current UI access not inferred. |
+| `/private/tmp/codex-c08-browser-prerequisites-20260928.json` | `09033de23766f06f2cdb771858ce465ae8b55663d6e0c39281f1b6d7933688e4` | Browser runner/readiness prepared, owned tab closed; final execution pending. |
+| `/private/tmp/codex-l03-m4-final86f-source-graph-20260927.json` | `aad91c1643d6ba1c7d64af8a55bcffef673165240aebc614b36598222c577dd9` | Historical caption-negative source/boot-graph sample with cleanup. |
+
+Live lane updates remain in
+`/private/tmp/codex-fleet-final-status-20260927.md`. Exact merge, installed
+artifact and final trace receipts will replace pending actions when observed.
 
 **Historical records below.** These dated checkpoints describe the builds they name. Their pending-gate and locked-device statements are retained as history; the current queue is above.
 
