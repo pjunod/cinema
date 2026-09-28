@@ -2818,3 +2818,14 @@ source = "clients/apple/Sources/LiveTv.swift"
 source_anchor = "return value.addingPercentEncoding(withAllowedCharacters: unreserved)"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "func testRealCapabilityMasterIsAcceptedAfterStartAndResume() throws"
+
+# The shared start-cases fixture names `encoder_capacity`, so every client's
+# render-key test demands copy of its own for it; the Android table is the
+# anchor here, the Apple and web tables are held by the same fixture row.
+[[fixes]]
+id = "clients.live-tv-encoder-capacity-copy"
+commits = ["3e689e23"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvApi.kt"
+source_anchor = "\"encoder_capacity\" -> \"The tuner owner's video encoder is busy, so this channel cannot be converted right now. Try again in a moment.\""
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvStartCasesTest.kt"
+test_anchor = "fun everyRenderKeyTheFixtureNamesHasCopyOfItsOwn()"
