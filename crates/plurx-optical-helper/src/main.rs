@@ -23,6 +23,8 @@ mod linux {
     use std::io::{Read, Seek, SeekFrom};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
+    #[cfg(target_os = "linux")]
+    use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
 
@@ -554,11 +556,14 @@ mod linux {
             "-of".into(),
             "json".into(),
         ]);
-        let mut child = Command::new(ffprobe)
+        let mut command = Command::new(ffprobe);
+        command
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        bind_child_to_helper_lifetime(&mut command);
+        let mut child = command
             .spawn()
             .map_err(|error| format!("ffprobe is unavailable: {error}"))?;
         let stdout = child
@@ -614,6 +619,32 @@ mod linux {
             retained.extend_from_slice(&buffer[..count.min(remaining)]);
         }
         Ok(retained)
+    }
+
+    fn bind_child_to_helper_lifetime(command: &mut Command) {
+        #[cfg(target_os = "linux")]
+        {
+            let helper_pid = unsafe { libc::getpid() };
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    // The parent can die between fork and prctl. Refuse the
+                    // exec in that window rather than leaving an orphaned
+                    // reader holding the drive after the daemon's timeout.
+                    if libc::getppid() != helper_pid {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "optical helper exited before probe exec",
+                        ));
+                    }
+                    Ok(())
+                });
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = command;
     }
 
     fn probe_reports_unsupported_protection(stderr: &str) -> bool {
