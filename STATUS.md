@@ -42,8 +42,9 @@ first.
 
 ## Apple TV Live TV navigation: every press reversible, every control reachable
 
-**Branch `agent/appletv-live-nav`, draft pull request; not merged, nothing
-deployed.** Paul reported 2026-09-27 that Live TV navigation on the Apple TV
+**[PR #589](http://192.168.4.7:3000/noirr/plurx/pulls/589) merged to `main`
+2026-09-28 as `f400c0ea2`, Apple build 195; not yet installed on any device.**
+Paul reported 2026-09-27 that Live TV navigation on the Apple TV
 was close to broken: hard to reach anything, and a move often did not reverse.
 Two independent reads of `LiveTvView.swift` agreed on the causes, and one
 was worse than reported: Info and More on the fullscreen pills did nothing at
@@ -65,8 +66,9 @@ view instead of the task's stale copy, and no longer cancels on an
 engine-driven arrival.
 [LIVE-TV-APPLE-TV-NAVIGATION.md](docs/features/LIVE-TV-APPLE-TV-NAVIGATION.md)
 has the focus graph and the §1 table that doubles as the device checklist.
-Verified: tvOS simulator unit + source tests green. Not verified: anything
-with a remote in hand — the GPT prompt for the physical pass is in the PR.
+Verified: `make apple-test` (iOS 674 + tvOS 690, 0 failures) and the full
+fast lane, including the promotion gate. Not verified: anything with a remote
+in hand — the device pass is `~/Downloads/kit 2/APPLETV-LIVE-TV-NAVIGATION-PHYSICAL-VERIFICATION-PROMPT.md`.
 
 ## Silo comparison: two implementation plans and one device census, no code
 
@@ -310,34 +312,6 @@ layout goldens, which need `scripts/ui-baseline --self-host --update` on a
 machine with Playwright (the golden is also stale on `main` for unrelated
 routes).
 
-## The full Rust suite and the release build are clean again
-
-`PR #443`, branch `fix/red-suite-2026-09-22`. Nothing here changes runtime
-behaviour except one allocation at daemon startup; nothing to deploy for it.
-
-The fast lane (`make unit`) was green on `main`; the red was all in what only
-`make test-full` builds, which no CI lane runs any more.
-
-- **Release/Docker build warning.** `AvcCLocation.entry` and `.ancestors` in
-  `plurx-core/src/fmp4.rs` are read only by the `fixtures` builders, so every
-  release build warned they were never read. `expect(dead_code)` outside that
-  cfg.
-- **plurx-core lib aborted on a stack overflow** with `hiqlite-store` on, in two
-  join tests, taking every later test in the binary with it.
-  `select_daemon_store` awaited its join, reopen and activation branches
-  inline, so its future carried all of them (9,984 bytes; 496 boxed). Branches
-  are boxed now, and `select_daemon_store_future_stays_small` holds it under
-  2 KiB.
-- **14 hiqlite store contracts** failed in their fixtures: the downgrade
-  helpers stopped at schema v34, so replaying v40/v42/v43/v44 collided with
-  their own `ADD COLUMN`s, and v42's index over `video_identity` blocked the
-  v27 rewind. One shared reversal list now walks back v44..v40. Two stale
-  expectations were updated with it (the v42 index split; 46 to 52 import
-  tables).
-- **`live_tv_two_node`** (4 cases) needs to bind ports 80 and 5004, and fails
-  by design on a host that cannot. With `cap_net_bind_service` on nuc3 all
-  four pass. Not a code defect.
-
 ## Older efforts — where each one now lives
 
 Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26 and 2026-09-27
@@ -345,6 +319,7 @@ into the status history of their subject folder. One row per section, newest fir
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-09-22 | The full Rust suite and the release build are clean again | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-09-22 | Resume stopped working on every client — reproduced, half fixed | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-21 | An abandoned replacement held its player's key — reported, diagnosed, fixed | [docs/playback-control/STATUS-HISTORY.md](docs/playback-control/STATUS-HISTORY.md) |
 | 2026-09-20 | Architecture review, revision 3 — Astra's review merged | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
