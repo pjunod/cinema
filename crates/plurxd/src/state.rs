@@ -13914,6 +13914,10 @@ mod tests {
             .expect_err("overflow explicit");
         assert!(error.to_string().contains("QueueFull"));
         assert!(
+            matches!(error, TargetError::Refused(_)),
+            "a full queue is a refusal the caller retries, not a storage failure: {error}"
+        );
+        assert!(
             jobs.scan_request("bounded-overflow").await.is_none(),
             "rejection must not claim durable acceptance"
         );

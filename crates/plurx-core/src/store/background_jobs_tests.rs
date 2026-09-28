@@ -1001,12 +1001,11 @@ async fn background_subtitles_reconcile_historical_ready_demand_without_overwrit
         connection
             .execute_batch(super::background_jobs_subtitle::SCHEMA)
             .expect("subtitle reconciliation fixture");
+        // A literal, not `SQLITE_SCHEMA_VERSION - 1`: the fixture is the v83
+        // shape, and every later migration (v84's own trigger, v85's queue
+        // retention) must replay from there.
         connection
-            .pragma_update(
-                None,
-                "user_version",
-                super::sqlite::SQLITE_SCHEMA_VERSION - 1,
-            )
+            .pragma_update(None, "user_version", 83)
             .expect("subtitle reconciliation fixture");
     }
     let store = SqliteStore::open(&path).expect("subtitle reconciliation fixture");
@@ -1078,4 +1077,110 @@ fn claim_for_subtitle(id: &str, revision: i64, now: i64) -> ClaimJob {
     let mut request = claim(id, revision, now);
     request.kind = JobKind::SubtitleExtract;
     request
+}
+
+/// The seeded settled rows are UUID-shaped, as the job id validator requires.
+fn history_id(i: usize) -> String {
+    format!("00000000-0000-4000-8000-{i:012}")
+}
+
+#[tokio::test]
+async fn background_jobs_settled_history_yields_to_new_work_at_the_bound() {
+    // 2026-09-28: one day of embedding and subtitle work settled 10,000 jobs,
+    // and from then on every enqueue — library scans, Monarr's targeted
+    // scans — answered QueueFull for what would have been a week, with five
+    // jobs actually running. The bound is a table bound; history must yield.
+    let store = SqliteStore::open_in_memory().expect("store");
+    let template = enqueue(1_000);
+    store.enqueue_job(template.clone()).await.expect("enqueue");
+    store
+        .cancel_job(CancelJob {
+            job_id: template.id.clone(),
+            now_ms: 1_001,
+        })
+        .await
+        .expect("settle the template");
+    async fn count(store: &SqliteStore) -> usize {
+        QueueSql::queue_sql(
+            store,
+            "SELECT CAST(COUNT(*) AS TEXT) FROM background_jobs WHERE $1 IS NOT NULL".into(),
+            "{}".into(),
+            false,
+            false,
+        )
+        .await
+        .expect("count")[0]
+            .parse()
+            .expect("integer")
+    }
+    // Settled history up to the bound, oldest first: history-1 settled at
+    // 2,001 ms, history-9999 at 11,999 ms — all younger than the template.
+    QueueSql::queue_sql(
+        &store,
+        "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<9999)
+        INSERT INTO background_jobs (id, kind, payload_version, payload_json, dedupe_key, priority,
+            state, not_before_ms, created_at_ms, updated_at_ms)
+        SELECT '00000000-0000-4000-8000-'||printf('%012d', i), kind, payload_version, payload_json, 'history-'||i, priority,
+            'succeeded', 1000, 1000, 2000+i FROM n, background_jobs WHERE id = json_extract($1, '$.id')"
+            .into(),
+        serde_json::json!({"id": template.id}).to_string(),
+        true,
+        true,
+    )
+    .await
+    .expect("seed history");
+    assert_eq!(count(&store).await, MAX_RETAINED_JOBS);
+
+    let fresh = enqueue(20_000);
+    assert!(
+        matches!(
+            store.enqueue_job(fresh.clone()).await.expect("admit"),
+            EnqueueOutcome::Accepted { .. }
+        ),
+        "settled history must not refuse live work"
+    );
+    // The 128 oldest evictable rows went: the template and history-1..127.
+    assert_eq!(count(&store).await, MAX_RETAINED_JOBS - MAX_PAGE_SIZE + 1);
+    assert!(store
+        .background_job(&template.id)
+        .await
+        .expect("read")
+        .is_none());
+    assert!(store
+        .background_job(&history_id(127))
+        .await
+        .expect("read")
+        .is_none());
+    assert!(store
+        .background_job(&history_id(128))
+        .await
+        .expect("read")
+        .is_some());
+    assert!(store
+        .background_job(&fresh.id)
+        .await
+        .expect("read")
+        .is_some());
+
+    // Upkeep drains history from the 9,000 watermark, 128 per pass, then
+    // goes idle without a consensus write once it is below.
+    assert!(store.maintain_jobs(20_001).await.expect("pressure upkeep"));
+    assert_eq!(
+        count(&store).await,
+        MAX_RETAINED_JOBS - 2 * MAX_PAGE_SIZE + 1
+    );
+    let mut passes = 0;
+    while store.maintain_jobs(20_002 + passes).await.expect("upkeep") {
+        passes += 1;
+        assert!(passes < 16, "upkeep must converge below the watermark");
+    }
+    let settled_below_watermark = count(&store).await;
+    assert!(settled_below_watermark < 9_000);
+    assert!(settled_below_watermark >= 9_000 - MAX_PAGE_SIZE);
+    assert!(store
+        .background_job(&fresh.id)
+        .await
+        .expect("read")
+        .is_some());
+    assert!(!store.maintain_jobs(30_000).await.expect("idle"));
 }

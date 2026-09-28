@@ -96,7 +96,8 @@ WHERE job.kind = 'transcode_prepare' AND job.state = 'succeeded' AND location.co
       AND receipt_expires_ms <= json_extract($1, '$.now_ms'))
   OR EXISTS (SELECT 1 FROM background_jobs job
     WHERE job.state IN ('succeeded','failed','cancelled')
-      AND job.updated_at_ms <= json_extract($1, '$.now_ms') - 604800000
+      AND (job.updated_at_ms <= json_extract($1, '$.now_ms') - 604800000
+        OR (SELECT COUNT(*) FROM background_jobs) >= 9000)
       AND NOT EXISTS (SELECT 1 FROM background_job_waiters
         WHERE job_id = job.id AND state IN ('pending','awaiting_hydration')))
 "#;

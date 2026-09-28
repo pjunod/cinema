@@ -10,6 +10,23 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **A day of settled background work no longer stops every new job for a
+  week.** The durable queue keeps finished jobs for seven days as receipts,
+  and its 10,000-row bound counted them. On 2026-09-28 an embedding backfill
+  and a subtitle sweep settled 10,000 jobs in seven hours; from then on every
+  library scan, every targeted scan from Monarr and every artwork request was
+  refused as `QueueFull` on three of four nodes, with five jobs actually
+  running, and Monarr's health page showed every import as
+  `plurx returned 500: internal server error`. Settled history now yields:
+  admission evicts the oldest evictable settled rows when the table is at its
+  bound, upkeep drains history from 9,000 rows so admission rarely has to,
+  and the queue refuses for size only when nothing is evictable. Rows a
+  pending waiter or a legacy fragment import still needs are never evicted,
+  and waiters keep their receipts. SQLite migration 85 and replicated schema
+  63 replace the enqueue and upkeep triggers. A refused admission on
+  `POST /api/v1/scan` is now a 503 naming the refusal, so a caller retries
+  instead of reading a crash that never happened.
+
 - **The web watch view's menus and Playback info are no longer trapped in the
   picture, and the picture no longer scrolls over the header.** The player on
   the watch page outranked the sticky header and clipped everything to its

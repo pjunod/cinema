@@ -186,6 +186,12 @@ pub async fn scan(
                 "roots": roots,
             })))
         }
+        // Refused, not failed: the queue is full or the request is being
+        // cancelled. 503 tells a caller like Monarr to retry later, where a
+        // 500 would tell it plurx is broken.
+        Err(error @ TargetError::Refused(_)) => {
+            Err(ApiError::ServiceUnavailable(error.to_string()))
+        }
         Err(TargetError::Store(e)) => Err(ApiError::from(e)),
     }
 }

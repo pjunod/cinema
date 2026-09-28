@@ -72,7 +72,7 @@ impl JobManager {
         }
     }
 
-    async fn admit_library(&self, input: NewLibraryWork) -> Result<(), StoreError> {
+    async fn admit_library(&self, input: NewLibraryWork) -> Result<(), TargetError> {
         match self.store.enqueue_library_work(input).await? {
             EnqueueOutcome::Accepted { .. }
             | EnqueueOutcome::Existing {
@@ -81,7 +81,7 @@ impl JobManager {
                 self.library_wake.notify_one();
                 Ok(())
             }
-            outcome => Err(StoreError::Task(format!(
+            outcome => Err(TargetError::Refused(format!(
                 "library work was not accepted: {outcome:?}"
             ))),
         }
@@ -425,6 +425,9 @@ impl JobManager {
                         error: error.to_string(),
                     },
                     Err(TargetError::Store(error)) => return Err(error),
+                    Err(error @ TargetError::Refused(_)) => LibraryWorkResult::Failed {
+                        error: error.to_string(),
+                    },
                 };
                 for (id, _) in requests {
                     self.complete_library_request(publisher, fence, id, result.clone())

@@ -4393,3 +4393,144 @@ async fn background_subtitles_replicated_ready_orphans_are_refused_and_retired()
         .is_empty());
     assert!(!store.maintain_jobs(1_003).await.expect("idle upkeep"));
 }
+
+/// The seeded settled rows are UUID-shaped, as the job id validator requires.
+#[cfg(feature = "hiqlite-contract-tests")]
+fn history_id(i: usize) -> String {
+    format!("00000000-0000-4000-8000-{i:012}")
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+fn settled_history_fixture(now_ms: i64) -> EnqueueJob {
+    EnqueueJob {
+        id: uuid::Uuid::new_v4().to_string(),
+        payload: JobPayload::FragmentIndexBuild {
+            file_id: 1,
+            source_generation: "source:1".to_owned(),
+            source_size: 100,
+            source_mtime: 1,
+            source_sha256: "d".repeat(64),
+            cache_key: "c".repeat(64),
+            pipeline_digest: "a".repeat(64),
+        },
+        dedupe_key: "fragment:history".to_owned(),
+        priority: 1,
+        not_before_ms: now_ms,
+        now_ms,
+        request: JobRequest {
+            scope: "user:1".to_owned(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            request_digest: "b".repeat(64),
+            consumer_kind: "analysis".to_owned(),
+            consumer_ref: "analysis:1".to_owned(),
+            target_node_id: None,
+            deadline_ms: None,
+            retain_identity: false,
+        },
+    }
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test]
+async fn background_jobs_replicated_settled_history_yields_after_the_v63_upgrade() {
+    use plurx_core::store::Store;
+    use std::sync::Arc;
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store: Arc<dyn Store> = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    let template = settled_history_fixture(1_000);
+    store.enqueue_job(template.clone()).await.expect("enqueue");
+    store
+        .cancel_job(CancelJob {
+            job_id: template.id.clone(),
+            now_ms: 1_001,
+        })
+        .await
+        .expect("settle the template");
+    let client = hiqlite::Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        super::CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("fixture client");
+    // Put the v62 enqueue and upkeep triggers back and stamp v62, so the
+    // migration every deployed node takes is the one under test.
+    drop(store);
+    let base = include_str!("../../src/store/background_jobs_schema.sql");
+    let predecessor = |name: &str| {
+        base.split("-- next statement\n")
+            .find(|sql| sql.contains(&format!("CREATE TRIGGER IF NOT EXISTS {name}\n")))
+            .expect("predecessor trigger")
+            .to_owned()
+    };
+    for result in client
+        .txn(vec![
+            ("DROP TRIGGER background_job_enqueue_command".to_owned(), hiqlite::params!()),
+            (predecessor("background_job_enqueue_command"), hiqlite::params!()),
+            ("DROP TRIGGER background_job_maintenance_command".to_owned(), hiqlite::params!()),
+            (predecessor("background_job_maintenance_command"), hiqlite::params!()),
+            ("UPDATE cluster_meta SET schema_version=62 WHERE singleton=1".to_owned(), hiqlite::params!()),
+            ("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<9999)
+              INSERT INTO background_jobs (id, kind, payload_version, payload_json, dedupe_key, priority,
+                  state, not_before_ms, created_at_ms, updated_at_ms)
+              SELECT '00000000-0000-4000-8000-'||printf('%012d', i), kind, payload_version, payload_json, 'history-'||i, priority,
+                  'succeeded', 1000, 1000, 2000+i FROM n, background_jobs WHERE id = $1".to_owned(),
+             hiqlite::params!(template.id.clone())),
+        ])
+        .await
+        .expect("install predecessor fixture")
+    {
+        result.expect("predecessor statement");
+    }
+    let store: Arc<dyn Store> = Arc::new(
+        plurx_core::store::HiqliteAuthStore::open_or_migrate(
+            client.clone(),
+            &cluster._root.path().join("retention-upgrade-telemetry.db"),
+        )
+        .await
+        .expect("upgrade v62 to current schema"),
+    );
+    let fresh = settled_history_fixture(20_000);
+    assert!(
+        matches!(
+            store.enqueue_job(fresh.clone()).await.expect("admit"),
+            EnqueueOutcome::Accepted { .. }
+        ),
+        "settled history must not refuse live work on the replicated store"
+    );
+    assert!(store
+        .background_job(&template.id)
+        .await
+        .expect("read")
+        .is_none());
+    assert!(store
+        .background_job(&history_id(127))
+        .await
+        .expect("read")
+        .is_none());
+    assert!(store
+        .background_job(&history_id(128))
+        .await
+        .expect("read")
+        .is_some());
+    assert!(store
+        .background_job(&fresh.id)
+        .await
+        .expect("read")
+        .is_some());
+    assert!(store.maintain_jobs(20_001).await.expect("pressure upkeep"));
+    assert!(store
+        .background_job(&history_id(255))
+        .await
+        .expect("read")
+        .is_none());
+    assert!(store
+        .background_job(&history_id(256))
+        .await
+        .expect("read")
+        .is_some());
+}
