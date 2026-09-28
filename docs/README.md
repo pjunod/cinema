@@ -368,6 +368,7 @@ player obeys, subtitles and overlays, layouts and themes.
 | [330-calm-library-pages.md](apple-builds/330-calm-library-pages.md) | Apple build 162 quiet Home and open media details. | built |
 | [582-seek-observability.md](apple-builds/582-seek-observability.md) | Apple build194 seek terminal beacons and live viewing method. | open |
 | [590-acceptance-focus.md](apple-builds/590-acceptance-focus.md) | Apple build197 physical TV focus navigation correction and acceptance provenance. | open |
+| [594-live-tv-caption-and-capacity.md](apple-builds/594-live-tv-caption-and-capacity.md) | Apple198 and Android135 Live TV caption choices and explicit capacity alternatives; qualification and physical acceptance. | open |
 | [359-apple-pause-resume.md](apple-builds/359-apple-pause-resume.md) | Apple return-to-picture owner, deadline, and advisory enablement. | built |
 | [playback-info-redesign.md](apple-builds/playback-info-redesign.md) | Apple build 161 playback-info changes. | open |
 | [328-native-stall-parity.md](apple-builds/328-native-stall-parity.md) | Apple release note for recipe-preserving native stall recovery. | open |
@@ -540,6 +541,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | [ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md) | Checks all 82 consolidated entries and 128 appendix findings against the source, with corrections, per-finding verdicts and evidence limits; revision 2 of the review applies its dispositions. | done |
 | [ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md](reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) | The single shared status for every implementation plan from the review, across Claude, GPT and OpenRouter sessions — the claim protocol, the model/session identity rules, and one row per plan. | live |
 | [ARCHITECTURE-REVIEW-GPT-BUILD-STATUS.md](reviews/ARCHITECTURE-REVIEW-GPT-BUILD-STATUS.md) | Current queue, next action and evidence locations for the assigned GPT architecture-review build and fleet pass. | open |
+| [ARCHITECTURE-REVIEW-GPT-WORKBOARD-HISTORY-2026-09-28.md](reviews/ARCHITECTURE-REVIEW-GPT-WORKBOARD-HISTORY-2026-09-28.md) | Verbatim dated snapshots of the seven assigned rows before compacting current workboard notes; preserves original source and evidence scopes. | done |
 | [ARCHITECTURE-REVIEW-FLEET-EVIDENCE-2026-09-24.md](reviews/ARCHITECTURE-REVIEW-FLEET-EVIDENCE-2026-09-24.md) | The four-node `f600d2823` deployment receipt, preliminary fleet readings, failed Chrome D3 trace and remaining evidence for each architecture-review workboard row. | open |
 | [ARCHITECTURE-REVIEW-FLEET-CLIENT-BASELINES-2026-09-25.md](reviews/ARCHITECTURE-REVIEW-FLEET-CLIENT-BASELINES-2026-09-25.md) | Read-only L-01, L-02, C-03, S-04, S-05 and K-06 baselines on the deployed fleet, with the exact acceptance gaps. | open |
 | [ARCHITECTURE-REVIEW-FLEET-READOUT-2026-09-25.md](reviews/ARCHITECTURE-REVIEW-FLEET-READOUT-2026-09-25.md) | Dated read-only K-02, C-05, C-08, P-02 and S-11 fleet measurements, collector windows and exact acceptance limits on current main. | open |

@@ -1332,16 +1332,23 @@ final class LiveTvLease {
     /// ever comes back, this loop is the thing it breaks.
     private func dispatch(_ channel: String, requestId: String?) async throws -> LiveTvStarted {
         var verdict = LiveTvStartReducer.noAnswer
+        var capacityFailure: LiveTvFailure?
         for attempt in 0...LiveTvInputRouting.startReplayAttempts {
             do { return try await requests.start(channel, requestId: requestId) }
             catch {
                 verdict = LiveTvStartReducer.verdict(LiveTvStartAnswer(error: error))
+                let failure = error as? LiveTvFailure
+                capacityFailure = failure?.code == "tuner_capacity" ? failure : nil
                 // The replay carries the SAME request id: the owner joins it
                 // to the session the first POST may already have created.
                 if !verdict.replay || attempt == LiveTvInputRouting.startReplayAttempts { break }
             }
         }
         if !verdict.keepHint, let requestId { forget(requestId) }
+        // The reducer still owns retry and hint disposition. Preserve the
+        // capacity owner's structured alternatives when that same refusal is
+        // rendered; replacing it with a code-only error loses the actions.
+        if verdict.render == "tuner_capacity", let capacityFailure { throw capacityFailure }
         throw LiveTvFailure(code: verdict.render)
     }
 

@@ -12,6 +12,7 @@ final class LiveTvPlayerController: ObservableObject {
     /// actually reached the server rather than assert a constant.
     static func testing(
         requests: LiveTvRequests,
+        channels: [LiveTvChannel] = [],
         activateAudioSession: @escaping () -> Void = {},
         deactivateAudioSession: @escaping () -> Void = {}
     ) -> LiveTvPlayerController {
@@ -22,10 +23,11 @@ final class LiveTvPlayerController: ObservableObject {
         // A real client only so `watch` gets past its own guard; it is never
         // asked for the network, because the stub lease answers first.
         controller.api = LiveTvAPI(origin: "http://127.0.0.1:1", token: nil)
-        controller.channels = []
+        controller.channels = channels
         return controller
     }
     @Published private(set) var channels: [LiveTvChannel] = []
+    @Published private(set) var capacityOffers: [LiveTvCapacityOffer] = []
     @Published private(set) var message = "Choose a channel to watch live."
     @Published private(set) var title: String?
     @Published private(set) var busy = false
@@ -54,6 +56,7 @@ final class LiveTvPlayerController: ObservableObject {
     @Published private(set) var status: LiveTvStatus?
     @Published private(set) var delivery: LiveTvDelivery?
     let player = AVPlayer()
+    let captions = LiveTvCaptions()
     private var api: LiveTvAPI?
     private var lease: LiveTvLease?
     private var profileOrigin: String?
@@ -109,6 +112,9 @@ final class LiveTvPlayerController: ObservableObject {
             channels = lineup.channels.map { channel in
                 watching?.id == channel.id ? (watching ?? channel) : channel
             }
+            capacityOffers = capacityOffers.filter { offer in
+                channels.contains { $0.id == offer.channel.id && $0.watchable }
+            }
             expireSourceFormats(now: Int(Date().timeIntervalSince1970))
             startGuideRefresh(loading)
             message = lineup.freshness == "stale"
@@ -161,10 +167,29 @@ final class LiveTvPlayerController: ObservableObject {
             message = error.localizedDescription
             // A URL/attachment failure after acquiring a capability must also
             // release it. The lease retains ownership if cleanup cannot finish.
-            do { try await lease.stop() } catch { message += " Cleanup is unconfirmed; use Stop to retry." }
+            do {
+                try await lease.stop()
+                guard serial == expected else { return }
+                if let failure = error as? LiveTvFailure {
+                    capacityOffers = LiveTvCapacityOffer.resolve(failure, lineup: channels, generation: expected)
+                }
+            } catch {
+                guard serial == expected else { return }
+                message += " Cleanup is unconfirmed; use Stop to retry."
+            }
             endAudioSession()
         }
         if serial == expected { busy = false }
+    }
+
+    /// Only a current, explicit offer can invoke the normal start path. The
+    /// lease releases this viewer's prior session; no shared stop or tuner
+    /// reclamation endpoint exists on this action.
+    func watchOffer(_ offer: LiveTvCapacityOffer) async {
+        guard !busy, offer.generation == serial, capacityOffers.contains(offer),
+              let channel = channels.first(where: { $0.id == offer.channel.id && $0.watchable })
+        else { return }
+        await watch(channel)
     }
 
     /// Everything a granted session does after the POST answers: the player
@@ -193,6 +218,8 @@ final class LiveTvPlayerController: ObservableObject {
         title = channel.title
         watching = info.channel
         delivery = info.delivery
+        captions.attach(item: item, player: player,
+                        captionsAdvertised: info.delivery?.reasons?.contains { $0.code == "captions_advertised" } == true)
         attachedAt = Date()
         playing = true
         player.play()
@@ -222,6 +249,8 @@ final class LiveTvPlayerController: ObservableObject {
                 switch event {
                 case .timeControl(let status, let reason):
                     self.applyTimeControl(status: status, reason: reason)
+                case .status(.readyToPlay):
+                    self.captions.refresh()
                 case .status(.failed):
                     self.itemDidFail = true
                     self.itemFailure = item.error as NSError?
@@ -586,6 +615,8 @@ final class LiveTvPlayerController: ObservableObject {
     }
 
     private func detach() {
+        capacityOffers = []
+        captions.detach()
         remoteCommands.stop()
         heartbeat?.cancel()
         heartbeat = nil
@@ -772,6 +803,7 @@ struct LiveTvPlayerFacts: Equatable {
     let asOf: Date
     var resolution: String? = nil
     var playerState: String = "Not reported"
+    var captionStatus: String = "Not reported"
 
     static func capture(
         item: AVPlayerItem?,
@@ -779,7 +811,8 @@ struct LiveTvPlayerFacts: Equatable {
         bufferedSeconds: Double?,
         attachedAt: Date?,
         asOf: Date = Date(),
-        playerState: String = "Not reported"
+        playerState: String = "Not reported",
+        captionStatus: String = "Not reported"
     ) -> Self {
         let events = item?.accessLog()?.events.map {
             LiveTvAccessEventFacts(
@@ -799,6 +832,7 @@ struct LiveTvPlayerFacts: Equatable {
             facts.resolution = "\(Int(size.width))×\(Int(size.height))"
         }
         facts.playerState = playerState
+        facts.captionStatus = captionStatus
         return facts
     }
 
@@ -1056,7 +1090,7 @@ struct LiveTvStreamInfoPanel: View {
             PlaybackInfoFact(id: "status", label: "Server state", value: status?.state ?? "Not reported", note: playbackInfoExplanation("status"), group: "Server work"),
             PlaybackInfoFact(id: "device_audio", label: "Device audio output", value: "Not reported", note: "Track metadata does not confirm speaker or HDMI output."),
             PlaybackInfoFact(id: "decode_audio", label: "Stream audio track", value: plan?.audioDescription ?? "Not reported", note: playbackInfoExplanation("decode_audio")),
-            PlaybackInfoFact(id: "subtitles", label: "Subtitles", value: "Not reported"),
+            PlaybackInfoFact(id: "subtitles", label: "Subtitles", value: player.captionStatus, note: "Selected stream track; does not confirm rendered caption text."),
             PlaybackInfoFact(id: "player_state", label: "Player state", value: player.playerState),
             PlaybackInfoFact(id: "client_loaded", label: "Buffered on device", value: seconds(player.bufferedSeconds), note: playbackInfoExplanation("client_loaded"), group: "Buffer & delivery"),
             PlaybackInfoFact(id: "live_edge", label: "Behind stream live edge", value: seconds(player.behindEdgeSeconds), note: "Behind latest available media; not broadcast delay.", group: "Live stream & reception"),
@@ -2336,7 +2370,8 @@ struct LiveTvView: View {
                     item: live.player.currentItem,
                     behindEdgeSeconds: live.behindEdgeSeconds,
                     bufferedSeconds: live.bufferedSeconds,
-                    attachedAt: live.attachedAt, asOf: context.date, playerState: state
+                    attachedAt: live.attachedAt, asOf: context.date, playerState: state,
+                    captionStatus: live.captions.summary
                 )
                 LiveTvStreamInfoPanel(
                     programme: live.airing(channel, now: Int(context.date.timeIntervalSince1970)),
@@ -2425,6 +2460,9 @@ struct LiveTvView: View {
                 .background(Palette.surface.opacity(0.94))
                 .accessibilityIdentifier("live-tv-status")
         }
+        if !live.capacityOffers.isEmpty {
+            LiveTvCapacityOfferActions(live: live)
+        }
     }
 
     private var toolbarSummary: String {
@@ -2499,6 +2537,7 @@ struct LiveTvView: View {
             .focusEffectDisabled()
             #endif
             if live.playing {
+                LiveTvCaptionMenu(captions: live.captions)
                 Button(muted ? "Unmute" : "Mute") {
                     muted.toggle()
                     live.player.isMuted = muted
@@ -2785,6 +2824,7 @@ struct LiveTvView: View {
                 Text(detail).font(.system(size: 12)).foregroundStyle(Palette.muted).lineLimit(1)
             }
             Spacer(minLength: 4)
+            LiveTvCaptionMenu(captions: live.captions).labelStyle(.iconOnly)
             Button { muted.toggle(); live.player.isMuted = muted } label: {
                 Image(systemName: muted ? "speaker.slash" : "speaker.wave.2")
                     .frame(width: 32, height: 32)
@@ -3479,6 +3519,7 @@ struct LiveTvView: View {
                         )
                     }
                     .buttonStyle(LiveTvChannelButtonStyle())
+                    .accessibilityIdentifier("live-tv-channel-\(channel.guideNumber)")
                     .focusEffectDisabled()
                     .focused($focusedChannelId, equals: channel.id)
                     .disabled(!channel.watchable)

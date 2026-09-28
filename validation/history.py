@@ -125,6 +125,7 @@ class ClientFixEntry:
     source_anchor: str
     test: str
     test_anchor: str
+    supplements: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -366,10 +367,16 @@ def load_client_fixes(path: Path) -> ClientFixLedger:
             "test",
             "test_anchor",
         }
-        if set(item) != required:
+        if set(item) not in (required, required | {"supplements"}):
             raise HistoryError(
-                f"{where} must contain exactly {', '.join(sorted(required))}"
+                f"{where} must contain exactly {', '.join(sorted(required))} "
+                "and optionally supplements"
             )
+        supplements = item.get("supplements")
+        if "supplements" in item and (
+            not isinstance(supplements, str) or not supplements.strip()
+        ):
+            raise HistoryError(f"{where}.supplements must be a nonempty primary fix id")
         entries.append(
             ClientFixEntry(
                 id=str(item["id"]),
@@ -378,8 +385,26 @@ def load_client_fixes(path: Path) -> ClientFixLedger:
                 source_anchor=str(item["source_anchor"]),
                 test=str(item["test"]),
                 test_anchor=str(item["test_anchor"]),
+                supplements=supplements,
             )
         )
+    # A supplementary row adds live obligations to exactly one primary; it
+    # does not own a second copy of that primary's corrective commit.
+    for index, entry in enumerate(entries):
+        where = f"fixes[{index}]"
+        if entry.supplements is None:
+            if not entry.commits:
+                raise HistoryError(f"{where} primary fix has no commits")
+            continue
+        if entry.commits:
+            raise HistoryError(f"{where} supplementary fix cannot claim commits")
+        if entry.supplements == entry.id:
+            raise HistoryError(f"{where} supplementary fix cannot reference itself")
+        parents = [parent for parent in entries if parent.id == entry.supplements]
+        if len(parents) != 1:
+            raise HistoryError(f"{where} supplements must identify one existing primary fix")
+        if parents[0].supplements is not None:
+            raise HistoryError(f"{where} supplements must reference a primary, not a supplement")
     return ClientFixLedger(enforce_after=enforce_after, fixes=tuple(entries))
 
 

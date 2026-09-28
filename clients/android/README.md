@@ -20,8 +20,10 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `134` — names an encoder refusal on Live TV as
-> the encoder, not "all slots are busy".
+> Status: **v0.3.0**, build `135` — actual Live TV caption choices and
+> explicit watchable channel actions; eight focused regressions pass,
+> physical acceptance pending.
+> Build 134 names an encoder refusal as the encoder being busy.
 > Build 133 — cluster Live TV intents and advisory Developer enablement.
 > Build 131 adds in-app PDF/EPUB reading. Build 129 restores
 > the Live TV picture to the fullscreen box on tablets after a push-mirror
