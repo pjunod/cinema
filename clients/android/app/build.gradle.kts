@@ -37,7 +37,7 @@ val generateReaderAssets = tasks.register<GenerateReaderAssets>("generateReaderA
 }
 
 /**
- * True when this Gradle invocation asked for a release task.
+ * True when this invocation asked for release or signed profile capture.
  *
  * `signingConfigs { }` and `buildTypes { }` are both evaluated during
  * configuration, on every invocation — including `make android` and
@@ -49,12 +49,13 @@ val generateReaderAssets = tasks.register<GenerateReaderAssets>("generateReaderA
  * (`Makefile`: `:app:assembleDebug`, `testDebugUnitTest lintDebug`,
  * `assembleDebug assembleDebugAndroidTest`, `:app:assembleRelease`;
  * `scripts/ship-physical`: `:app:assembleRelease`), so no supported path
- * packages the release variant without a "Release" task name;
+ * packages the release variant without a "Release" task name; profile capture
+ * names "ProfileCapture" explicitly and requires the same signing material;
  * tests/operations/test_android_credential_exposure.py scans the Makefile and
  * scripts/ to keep that true.
  */
 val releaseTaskRequested: Boolean =
-    gradle.startParameter.taskNames.any { it.contains("Release") }
+    gradle.startParameter.taskNames.any { it.contains("Release") || it.contains("ProfileCapture") }
 
 /**
  * Resolve one piece of release signing material, or fail the build naming it.
@@ -135,6 +136,17 @@ android {
             // signer is a separate property and this is it.
             signingConfig = signingConfigs.getByName("release")
         }
+        create("profileCapture") {
+            initWith(getByName("release"))
+            // Source-name profiles must be captured before R8 rewrites names.
+            // Measurement and shipping still use the optimized release.
+            isDebuggable = false
+            isMinifyEnabled = false
+            isShrinkResources = false
+            versionNameSuffix = "-profile-capture"
+            signingConfig = signingConfigs.getByName("release")
+            matchingFallbacks += listOf("release")
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -163,6 +175,7 @@ androidComponents {
 
 dependencies {
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.profileinstaller)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)

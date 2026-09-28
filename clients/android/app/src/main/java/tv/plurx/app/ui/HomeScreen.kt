@@ -1,5 +1,9 @@
 package tv.plurx.app.ui
 
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -93,7 +97,8 @@ fun HomeScreen(
     val side = formFactor.horizontalPadding()
     val posterWidth = (preferences.posterSize.widthDp * formFactor.posterScale()).dp
 
-    Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+    Column(Modifier.fillMaxSize().navigationBarsPadding().semantics { testTagsAsResourceId = true }
+        .testTag(if (state.hasContent) "plurx-home-ready" else "plurx-home-loading")) {
         HomeTopBar(
             theme = preferences.theme,
             username = vm.username,

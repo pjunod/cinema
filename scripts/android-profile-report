@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Bind paired release Macrobenchmark/Media3 samples; never synthesize evidence."""
+import argparse
+import hashlib
+import json
+import math
+import pathlib
+import re
+import statistics
+
+
+def samples(values):
+    if not isinstance(values, list) or len(values) != 5:
+        raise ValueError("Require exactly five raw samples per metric/mode")
+    if any(isinstance(v, bool) or not isinstance(v, (float, int)) or
+           not math.isfinite(v) or v < 0 for v in values):
+        raise ValueError("Samples must be finite nonnegative milliseconds")
+    return values
+
+
+def build_report(without, required, macrobenchmark, signed):
+    identity = ("source_sha", "apk_sha256", "package", "version_code", "device_alias", "device_model", "sdk")
+    if any(without.get(k) != required.get(k) for k in identity):
+        raise ValueError("Pair must use identical source, APK, release counter and physical device")
+    if (without.get("schema") != "plurx_release_profile_ttff_v1" or
+            required.get("schema") != without.get("schema") or
+            without.get("compilation_mode") != "none" or required.get("compilation_mode") != "required" or
+            without.get("startup_mode") != "COLD" or required.get("startup_mode") != "COLD" or
+            without.get("iterations") != 5 or required.get("iterations") != 5):
+        raise ValueError("Require five cold iterations for None and Partial(Require,warmup=0)")
+    if (without.get("package") != "tv.plurx.app" or signed.get("package") != without["package"] or
+            signed.get("version_code") != without["version_code"] or
+            signed.get("artifact_sha256") != without["apk_sha256"] or
+            signed.get("source_candidate") != without["source_sha"] or
+            signed.get("signature_verified") is not True or signed.get("debuggable") is not False):
+        raise ValueError("Samples must bind the independently signed non-debuggable release receipt")
+    if not re.fullmatch(r"[0-9a-f]{40}", str(without.get("source_sha", ""))) or not re.fullmatch(r"[0-9a-f]{64}", str(without.get("apk_sha256", ""))):
+        raise ValueError("Require full source and APK identities")
+    for key in ("device_alias", "device_model", "first_frame_boundary"):
+        if not isinstance(without.get(key), str) or not without[key].strip():
+            raise ValueError(f"Require nonempty {key}")
+    if required.get("first_frame_boundary") != without["first_frame_boundary"]:
+        raise ValueError("Pair must use the same measured first-frame boundary")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", without["device_alias"]):
+        raise ValueError("Require a non-secret device alias")
+    for key, minimum in (("sdk", 28), ("version_code", 1)):
+        value = without.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ValueError(f"Require valid integer {key}")
+    modes = {}
+    for mode, ttff, name in (("none", without, "withoutProfileFiveColdIterations"),
+                            ("required", required, "requiredProfileFiveColdIterations")):
+        runs = [b for b in macrobenchmark.get("benchmarks", [])
+                if b.get("className", "").endswith("ReleaseProfileMeasurement") and b.get("name") == name]
+        if len(runs) != 1:
+            raise ValueError("Missing or ambiguous matching Macrobenchmark result")
+        startup = samples(runs[0]["metrics"]["timeToInitialDisplayMs"]["runs"])
+        first_frame = samples(ttff.get("media3_ttff_ms"))
+        modes[mode] = {"startup_initial_display_ms": startup, "startup_median_ms": statistics.median(startup),
+                       "media3_ttff_ms": first_frame, "media3_ttff_median_ms": statistics.median(first_frame)}
+    return {"schema": "plurx_release_profile_measurement_v1",
+            "identity": {k: without[k] for k in identity}, "iterations_per_mode": 5,
+            "modes": modes, "first_frame_boundary": without.get("first_frame_boundary"),
+            "acceptance": "requires physical Lenovo attestation, generated app profile provenance and retained traces",
+            "measured_gain_claimed": False}
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    for option in ("without_ttff", "required_ttff", "macrobenchmark", "signed_artifact_receipt", "output"):
+        p.add_argument("--" + option.replace("_", "-"), type=pathlib.Path, required=True)
+    a = p.parse_args()
+    inputs = [a.without_ttff, a.required_ttff, a.macrobenchmark, a.signed_artifact_receipt]
+    report = build_report(*(json.loads(f.read_text()) for f in inputs))
+    report["inputs"] = [{"path": str(f), "sha256": hashlib.sha256(f.read_bytes()).hexdigest()} for f in inputs]
+    with a.output.open("x") as f:
+        json.dump(report, f, indent=2, allow_nan=False)
+        f.write("\n")
+
+
+if __name__ == "__main__":
+    main()

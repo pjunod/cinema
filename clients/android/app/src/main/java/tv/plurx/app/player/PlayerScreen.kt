@@ -90,6 +90,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -1356,6 +1357,8 @@ private fun PlayerContent(
 
     Box(
         Modifier.fillMaxSize()
+            .semantics { testTagsAsResourceId = true }
+            .testTag(controller.lastTimeToFirstFrameMs?.let { "plurx-first-frame-$it" } ?: "plurx-first-frame-pending")
             .focusRequester(surfaceFocusRequester)
             .focusable()
             .playerInputAdapter(surface = playerSurface, state = ::inputState) { outcome, input, repeats ->

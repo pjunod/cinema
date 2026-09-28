@@ -329,6 +329,112 @@ profile **on the release APK**, five iterations each, and record the medians
 in §6 before crediting anything; a profile on the debug variant measures
 nothing that ships.
 
+
+**Source scaffold:** `clients/android/baselineprofile` targets two signed,
+non-debuggable app variants. `profileCapture` inherits release configuration
+but disables R8 and resource shrinking so captured rules retain source names;
+its version name ends in `-profile-capture` and it is never a shipping or
+performance artifact. The paired measurements target the optimized `release`
+APK. Capturing an obfuscated release and committing those names as input to
+another R8 build would bind the profile to the wrong program.
+
+Capture requires three stable profile iterations within fifteen attempts
+and keeps actual `Ltv/plurx/app/` rules; library profiles remain supplied by
+their dependencies. Android documents [profile generation](https://developer.android.com/topic/performance/baselineprofiles/create-baselineprofile),
+[Macrobenchmark metrics](https://developer.android.com/topic/performance/benchmarking/macrobenchmark-metrics)
+and [ProfileVerifier](https://developer.android.com/reference/androidx/profileinstaller/ProfileVerifier).
+
+`ReleaseProfileCapture.coldHomeDetailPlayFirstFrame` cold-starts the app,
+waits for populated Home, opens one exact observed movie title, presses Play
+(or Start over after an iteration saved progress), and waits for the actual
+Media3 first-frame callback. It uses the existing paired account through UI;
+it never reads or supplies account credentials. An absent or ambiguous title,
+missing video action, APK/counter mismatch, debuggable target, or missing
+first frame fails the journey. The marker carries only callback duration,
+with no title, account, session identifier or playback URL.
+
+**Operator preparation:** use a dedicated already-paired physical Lenovo
+session with a controlled unwatched movie visible on Home. Bind the one
+explicit serial to a fresh independent idle-session proof before cold-killing
+the app; retain that proof with capture provenance. Preserve personal
+profiles and use the fixture account selected through normal app UI. Do not unlock,
+pair, clear data, replace the signer, or point the benchmark at another
+person's session. Capture requires API 33+ or an independently authorized
+rooted lab target; the module never roots a device. Local signing values
+stay in the existing signing environment. Explicitly authorize target
+installation and ART profile changes before running these device tasks.
+The instrumentation APK is debuggable; both target app variants are not.
+
+```bash
+# Compile the harness without executing it or contacting a device.
+./clients/android/gradlew -p clients/android \
+  :app:compileReleaseKotlin :app:compileProfileCaptureKotlin \
+  :baselineprofile:compileReleaseKotlin \
+  :baselineprofile:compileProfileCaptureKotlin
+
+# Only on the authorized dedicated physical capture target. Supply hashes
+# from retained independently signed artifact receipts, never credentials.
+ANDROID_SERIAL="$LENOVO_SERIAL" ./clients/android/gradlew -p clients/android \
+  :baselineprofile:connectedProfileCaptureAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=tv.plurx.profile.ReleaseProfileCapture \
+  -Pandroid.testInstrumentationRunnerArguments.plurxFixtureTitle="$OBSERVED_TITLE" \
+  -Pandroid.testInstrumentationRunnerArguments.plurxSourceSha="$CAPTURE_SOURCE_SHA" \
+  -Pandroid.testInstrumentationRunnerArguments.plurxVersionCode="$VERSION_CODE" \
+  -Pandroid.testInstrumentationRunnerArguments.plurxApkSha256="$CAPTURE_APK_SHA256" \
+  -Pandroid.testInstrumentationRunnerArguments.plurxDeviceAlias=Lenovo
+```
+
+Retain the generated profile from Gradle's reported additional-test-output
+path, its SHA-256, capture source/archive, non-debuggable signed capture APK
+receipt, device identity and the full successful journey output. Confirm
+it contains app rules (`Ltv/plurx/app/`), then commit that actual output at
+`clients/android/app/src/main/baseline-prof.txt`. No placeholder or hand-written
+profile belongs there. Build the optimized signed release with that file;
+retain its own source, APK, certificate and bundled-profile hashes. The
+source scaffold contains no generated app profile or measured gain.
+
+```bash
+# Five cold runs in each mode against that exact optimized release.
+# Macrobenchmark intentionally resets ART compilation/profile state. It
+# requires separate physical authorization; it never clears account data.
+ANDROID_SERIAL="$LENOVO_SERIAL" ./clients/android/gradlew -p clients/android \
+  :baselineprofile:connectedReleaseAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=tv.plurx.profile.ReleaseProfileMeasurement \
+  -Pandroid.testInstrumentationRunnerArguments.plurxFixtureTitle="$OBSERVED_TITLE" \
+  -Pandroid.testInstrumentationRunnerArguments.plurxSourceSha="$RELEASE_SOURCE_SHA" \
+  -Pandroid.testInstrumentationRunnerArguments.plurxVersionCode="$VERSION_CODE" \
+  -Pandroid.testInstrumentationRunnerArguments.plurxApkSha256="$RELEASE_APK_SHA256" \
+  -Pandroid.testInstrumentationRunnerArguments.plurxDeviceAlias=Lenovo
+
+# Retain both harness TTFF JSON files from its external-files output and the
+# matching Macrobenchmark JSON/Perfetto traces before producing this report.
+scripts/android-profile-report \
+  --without-ttff "$WITHOUT_TTFF_JSON" --required-ttff "$REQUIRED_TTFF_JSON" \
+  --macrobenchmark "$MACROBENCHMARK_JSON" \
+  --signed-artifact-receipt "$SIGNED_RELEASE_RECEIPT" --output "$NEW_REPORT_JSON"
+```
+
+**How to read it:** `CompilationMode.None()` is the without-profile arm;
+`Partial(BaselineProfileMode.Require, warmupIterations = 0)` is the required
+profile arm. Each uses `StartupMode.COLD`, five iterations and the same
+source/APK/device/controlled movie. `StartupTimingMetric.timeToInitialDisplayMs`
+measures launch to the first app frame. The separate `media3_ttff_ms` values
+come from the existing PlayerScreen attempt-opened timestamp to Media3
+`onRenderedFirstFrame`; they include plan preparation but exclude Home and
+Detail navigation. UI polling only waits for that callback measurement; it
+is not the timing clock or proof of compositor presentation.
+
+The [measurement schema](../../tests/contracts/android-release-profile-evidence.schema.json)
+keeps all ten raw samples per metric, medians and input hashes. The report
+rejects missing runs, nonfinite/negative samples, mixed artifacts/devices or
+a debug/unverified release receipt; it does not invent missing startup data
+from TTFF. Record physical Lenovo attestation, profile provenance, traces
+and both medians in §6 before claiming M10. Runtime ProfileVerifier facts in
+Settings → Developer are advisory: bundled, queued, compiled and mismatched
+profiles are distinct, and none proves app-journey consumption or a gain.
+The focused report and advisory regressions remain source until the batch's
+single adversarial review and prescribed focused/fast lane execution.
+
 ---
 
 ## 4. Guardrails (non-goals)
