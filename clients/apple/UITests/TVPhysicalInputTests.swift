@@ -285,11 +285,23 @@ final class TVPhysicalInputTests: XCTestCase {
             // SwiftUI Form toggles focus an accessibility Cell, while the
             // picker/shelf controls focus Buttons. Observe that actual owner
             // rather than sending blind Up presses that bounce back to tabs.
+            let focusedCell = app.cells.matching(focused).firstMatch
             let current = focusedButton.exists ? focusedButton
+                : focusedCell.exists ? focusedCell
                 : app.descendants(matching: .any).matching(focused).firstMatch
             guard current.exists else {
                 attachScreen(app, name: "focus-owner-unavailable")
                 return false
+            }
+            // Form pickers expose their identified Button inside the focused
+            // Cell. That cell owns the requested control's focus; steering by
+            // its much wider frame would move away from the already focused row.
+            if current.elementType == .cell && !target.identifier.isEmpty
+                && current.descendants(matching: .any).matching(
+                    NSPredicate(format: "identifier == %@ AND label == %@",
+                                target.identifier, target.label)
+                ).firstMatch.exists {
+                return true
             }
             let targetFrame = target.frame
             let currentFrame = current.frame
