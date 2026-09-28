@@ -14,7 +14,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 ## Retention pressure follow-up — the queue refused everything for a day
 
 **2026-09-28:** fixed in the branch `fix/durable-queue-retention-pressure`
-(PR link in [STATUS.md](../../STATUS.md)). Paul reported Content analysis not
+([PR #605](http://192.168.4.7:3000/noirr/plurx/pulls/605)). Paul reported Content analysis not
 advancing, with the page showing `pipeline version unavailable` rows. Those
 rows were real but incidental (see below); the stall was admission.
 
@@ -78,7 +78,7 @@ next deploy under the other. The 228 rows with the digest nynuc now runs again
 are tombstones for their files until reopened from the Content analysis page
 (**Retry this page**); the 50 under `85e6fa5e…` are re-requested by discovery
 under the current digest on their own. Pinning the ffmpeg package in the
-Dockerfile is a separate change (Forgejo issue linked from STATUS.md).
+Dockerfile is a separate change ([#604](http://192.168.4.7:3000/noirr/plurx/issues/604)).
 
 ## Activity and subtitle throughput follow-up
 

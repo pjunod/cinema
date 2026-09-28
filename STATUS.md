@@ -6,7 +6,7 @@ first.
 
 ## The durable queue refused every job for a day: retention cap counted finished work
 
-**Branch `fix/durable-queue-retention-pressure`, PR __PR__; not yet deployed — the GPT deploy/verify prompt is in the project doc.**
+**Branch `fix/durable-queue-retention-pressure`, [PR #605](http://192.168.4.7:3000/noirr/plurx/pulls/605), open, CI running; not yet deployed — the GPT deploy/verify prompt is in the project doc.**
 Paul reported 2026-09-28 that Content analysis was not advancing and the page
 showed `pipeline version unavailable`. Those rows are a side effect of today's
 image builds flipping jellyfin-ffmpeg 8.1.2 → 8.1.3 → 8.1.2 (the Dockerfile
@@ -42,7 +42,7 @@ Evidence and the ffmpeg-flip analysis:
 Attention filter for the 228 `pipeline version unavailable` rows that carry
 nynuc's current digest (they are tombstones until reopened); pin
 `jellyfin-ffmpeg8` in the Dockerfile so a rebuild cannot change the engine
-digest (separate issue).
+digest ([#604](http://192.168.4.7:3000/noirr/plurx/issues/604)).
 
 ## Live TV said "all slots are busy" with every tuner idle
 
