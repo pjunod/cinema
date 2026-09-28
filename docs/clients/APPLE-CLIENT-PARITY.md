@@ -513,9 +513,12 @@ that matter:
   the durable ownership marker — and it is app-wide, so switching profiles does
   not step around it. The marker persists before the POST and during playback
   and survives an app restart until a release is confirmed.
-- **A runtime-only Developer card.** Device address, saved configuration,
-  readiness checks and the separate runtime enable live in a Developer card
-  that is present in every build. There is no compile-time switch that hides
+- **Runtime-only settings, split as on the web.** Settings → Live TV (both
+  iOS and tvOS, one `NavigationLink` row like Developer's) holds the device
+  address, saved configuration and its readiness check, programme guide
+  readiness, recording and Library channels. Settings → Developer holds only
+  the separate runtime enable, with the line saying what it waits on before it
+  moves to Settings → Live TV. Both are present in every build. There is no compile-time switch that hides
   Live TV from a shipped app, and every mutation requires server-enforced
   administrator access plus an exact settings generation.
 

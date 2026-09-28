@@ -155,7 +155,7 @@ graduates in this change; **(c)** unclear, stays and is listed for Paul.
 
 | Card (web Developer unless marked) | Switch | Owner row / plan | Owner status | Evidence still owed | Decision |
 |---|---|---|---|---|---|
-| Enable Live TV | `live_tv_enabled` | L-02, L-03 ([HDHOMERUN-LIVE-TV-PLAN](HDHOMERUN-LIVE-TV-PLAN.md)) | merged: code; acceptance open | L-02's leader-restart, cold/warm-start (L6) and scratch-fault (L9) fleet prompts; L-03 M2 capacity offer and caption-positive M4 | (a) stays → Settings → Live TV |
+| Enable Live TV (web, and native Developer on Android, iOS and tvOS) | `live_tv_enabled` | L-02, L-03 ([HDHOMERUN-LIVE-TV-PLAN](HDHOMERUN-LIVE-TV-PLAN.md)) | merged: code; acceptance open | L-02's leader-restart, cold/warm-start (L6) and scratch-fault (L9) fleet prompts; L-03 M2 capacity offer and caption-positive M4 | (a) stays → Settings → Live TV; the native cards print the web's line word for word |
 | Durable cluster work | `vod_index_cluster_cache`, `cache_produce_mins` | [DURABLE-WORK-QUEUE-STATUS](../cluster/DURABLE-WORK-QUEUE-STATUS.md) | merged M1–M3, E0–E3 (`82df7f59e`); deployed in `55aa430fd` to all four nodes on 2026-09-27 | none: the plan calls the queue infrastructure and OPERATIONS says there is no fleet receipt to obtain | **(b) graduated: card removed.** Its two switches were copies of the permanent ones in Analysis (`an-enabled`) and Maintenance (pre-transcoding cadence) |
 | Cluster media placement | `cluster_media_pool_enabled`, `cluster_session_takeover_enabled` | [CLUSTER-MEDIA-POOL-PLAN](../cluster/CLUSTER-MEDIA-POOL-PLAN.md) | built P0–P8 | physical-device corpus; ten-second takeover budget (§8.8–§8.9) | (a) stays → Settings → Cluster |
 | Local catalogue reads | `bounded_replica_reads` | K-04 | merged: M0–M3 server; web read-after echo and on-by-default preference shipped in `5ba02212f`, deployed | §5.1 lab readout, rolling-upgrade check | (a) stays → Cluster, or removed (Paul's choice) |
@@ -176,10 +176,11 @@ graduates in this change; **(c)** unclear, stays and is listed for Paul.
 | Chapter thumbnails | `chapter_thumbnails` | [WATCH-VIEW-LAYOUT](../clients/WATCH-VIEW-LAYOUT.md) | built; on by default; in the deployed main | no recorded fleet observation; the plan names no other acceptance | (c) Paul: graduate to Playback now, or wait for a fleet observation |
 | Verified decode artifacts | `decoder_health_qualified_artifacts` | [DECODER_SELECTION_RECOVERY_STATUS](../DECODER_SELECTION_RECOVERY_STATUS.md) | M0–M7 merged | retained contracts for the fleet's paths; the plan calls fleet qualification optional | (c) Paul: is optional fleet qualification enough to graduate |
 | Automatic decode recovery | `automatic_decoder_recovery` | same | M0–M7 merged; off by default | no matched hardware/software retained pair | (c) Paul: same question; graduation would also decide its default |
-| Android: Match television refresh rate | display cadence | D-01 | merged: M1–M3 | M0 three-TV measurement, M4, M5 HDMI | (a) stays |
-| Apple: Bounded pause/resume | device-local | M4 item 4 (hold/resume barriers) | built | matched physical Apple TV latency | (a) stays |
-| Apple: Prepared quality handoff | device-local | as prepared handoff | as above | as above | (a) stays |
-| Android and Apple: Library channels, Recording, HDHomeRun Live TV, Programme guide | server settings | web already moved these to Settings → Live TV | — | native screens still show them under Developer | (c) Paul: move them to each client's Live TV settings in a client change |
+| Android: Match television refresh rate | display cadence | D-01 | merged: M1–M3 | M0 three-TV measurement, M4, M5 HDMI | (a) stays → Paul chooses: Settings → Playback, or removed |
+| Android: Prepared replacement | device-local | as prepared handoff | as above | as above | (a) stays → moves with prepared handoff to Settings → Playback |
+| Apple: Bounded pause/resume | device-local | M4 item 4 (hold/resume barriers) | built | matched physical Apple TV latency | (a) stays → Paul chooses: Settings → Playback, or removed |
+| Apple: Prepared quality handoff | device-local | as prepared handoff | as above | as above | (a) stays → moves with prepared handoff to Settings → Playback |
+| Android and Apple: Library channels, Recording, HDHomeRun Live TV, Programme guide | server settings | web already moved these to Settings → Live TV | — | none: finished settings | **(b) moved in PR #602** (Paul: "fix it") to a native Settings → Live TV screen on Android, iOS and tvOS, in the web's order, reached like Developer; saves and readiness unchanged. The Live TV enable stays in native Developer, as on the web |
 
 Two graduated on 2026-09-28, after the PR's one adversarial review showed
 durable cluster work deployed with no fleet receipt to wait for: the Durable
@@ -187,8 +188,12 @@ cluster work card was removed (its switches already live permanently in
 Analysis and Maintenance) and the Shared storage budgets editor moved to
 Settings → Libraries. No other card's plan or board row records complete
 acceptance evidence. The server still reports the `durable_cluster_work`
-readiness item at `GET /api/v1/developer/readiness`; the web no longer renders it. Native Developer rows do not yet print their graduation
-condition; the table above is their record until a client change adds it.
+readiness item at `GET /api/v1/developer/readiness`; the web no longer renders it. Since PR #602 every native Developer row prints its
+**Leaves Developer when … Then …** line too — Android: Enable Live TV, Match
+television refresh rate, Prepared replacement; Apple: Enable Live TV, Bounded
+pause/resume, Prepared quality handoff. `LiveTvSettingsPlacementTest`
+(Android) and `LiveTvTests` (Apple) pin which screen draws each server Live TV
+card and that every native Developer card carries its line.
 
 ## Remaining limits — evidence must name what it cannot prove
 
