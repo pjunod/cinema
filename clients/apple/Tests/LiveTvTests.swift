@@ -1111,10 +1111,10 @@ final class LiveTvTests: XCTestCase {
             .components(separatedBy: "private var fullscreenSurface: some View {")[1]
             .components(separatedBy: "private func applyLiveOutcome")[0]
         XCTAssertTrue(fullscreen.contains(
-            ".onAppear { focusedControl = overlayVisible ? .play : .reveal }"
+            ".onAppear { focusedControl = overlayVisible ? .pillPlay : .reveal }"
         ))
         XCTAssertTrue(fullscreen.contains(
-            "target == .reveal { focusedControl = .play }"
+            "target == .reveal { focusedControl = .pillPlay }"
         ))
         for guardPart in [
             "guard fullscreen",
@@ -1127,15 +1127,175 @@ final class LiveTvTests: XCTestCase {
         ] {
             XCTAssertTrue(fullscreen.contains(guardPart), guardPart)
         }
+        // Info, More and Layout all return focus to the pill that opened them,
+        // through one deferred write from each sheet's `onDismiss` — not from
+        // the flag's `onChange`, which fires while the sheet still covers.
         let infoDismissal = fullscreen
             .components(separatedBy: ".onChange(of: showingInfo)")[1]
             .components(separatedBy: ".onChange(of: showingMore)")[0]
-        XCTAssertTrue(infoDismissal.contains(
-            "guard !visible, fullscreen, overlayVisible else { return }"
-        ))
-        XCTAssertTrue(infoDismissal.contains("focusedControl = nil"))
-        XCTAssertTrue(infoDismissal.contains("await Task.yield()"))
-        XCTAssertTrue(infoDismissal.contains("focusedControl = .play"))
+        XCTAssertFalse(infoDismissal.contains("focusedControl"))
+        let opener = source
+            .components(separatedBy: "private func returnFocusToCoverSheetOpener()")[1]
+            .components(separatedBy: "#endif")[0]
+        XCTAssertTrue(opener.contains("let opener = coverSheetOpener ?? .pillPlay"))
+        XCTAssertTrue(opener.contains("focusedControl = nil"))
+        XCTAssertTrue(opener.contains("await Task.yield()"))
+        XCTAssertTrue(opener.contains("focusedControl = opener"))
+        XCTAssertTrue(source.contains("Button { coverSheetOpener = .pillInfo; showStreamInfo() }"))
+        XCTAssertTrue(source.contains("Button { coverSheetOpener = .pillMore; showingMore = true }"))
+    }
+
+    /// The defects the 2026-09-27 report ("navigation is so bad it is almost
+    /// broken") came down to, each pinned to the line that fixes it. These
+    /// are source assertions because the behaviour lives in `@FocusState`
+    /// writes that no unit test can drive; the physical pass is in
+    /// docs/features/LIVE-TV-APPLE-TV-NAVIGATION.md.
+    func testAppleTvLiveNavigationIsReversibleAndReachesEverything() throws {
+        let source = try liveTvViewSource()
+
+        // 1. Info and More on the fullscreen pills did nothing: their sheets
+        //    hung off the root, which was already presenting the cover. Every
+        //    sheet the cover can open now hangs off the cover, and the root
+        //    copies are gated off while it is up.
+        let cover = source
+            .components(separatedBy: ".fullScreenCover(isPresented: $fullscreen, onDismiss: {")[1]
+            .components(separatedBy: "#if os(iOS)")[0]
+        for sheet in ["coverSheet($showingInfo)", "coverSheet($showingLayout)", "coverSheet($showingMore)"] {
+            XCTAssertTrue(cover.contains(".sheet(isPresented: \(sheet),\n                       onDismiss: { returnFocusToCoverSheetOpener() })"),
+                          "\(sheet) returns focus from onDismiss, after the sheet has gone")
+        }
+        XCTAssertEqual(cover.components(separatedBy: "onDismiss: { returnGuideFocusAfterProgrammeSheet() }").count - 1, 1)
+        XCTAssertTrue(source.contains(".sheet(item: rootProgrammeDetail, onDismiss: { returnGuideFocusAfterProgrammeSheet() })"))
+        // Closing the cover clears anything it was still showing.
+        let coverClosed = source
+            .components(separatedBy: ".onChange(of: fullscreen) { _, presented in")[1]
+            .components(separatedBy: ".onAppear {")[0]
+        for cleared in ["showingInfo = false", "showingMore = false", "showingLayout = false", "coverSheetOpener = nil"] {
+            XCTAssertTrue(coverClosed.contains(cleared), cleared)
+        }
+        for sheet in ["rootSheet($showingInfo)", "rootSheet($showingLayout)", "rootSheet($showingMore)"] {
+            XCTAssertTrue(source.contains(".sheet(isPresented: \(sheet))"), sheet)
+        }
+        XCTAssertTrue(source.contains("Binding(get: { !fullscreen && flag.wrappedValue }"))
+        XCTAssertTrue(source.contains("Binding(get: { fullscreen && flag.wrappedValue }"))
+
+        // 2. One key per focusable: the page toolbar and the cover's pills no
+        //    longer share `.guide` / `.channels` / `.more`.
+        for pill in [".pillPlay", ".pillGuide", ".pillChannels", ".pillInfo", ".pillMore", ".pillActivity"] {
+            XCTAssertEqual(source.components(separatedBy: ".focused($focusedControl, equals: \(pill))").count - 1,
+                           1, pill)
+        }
+        XCTAssertEqual(source.components(separatedBy: ".focused($focusedControl, equals: .guide)").count - 1, 1)
+        XCTAssertEqual(source.components(separatedBy: ".focused($focusedControl, equals: .channels)").count - 1, 1)
+        XCTAssertEqual(source.components(separatedBy: ".focused($focusedControl, equals: .more)").count - 1, 1)
+        XCTAssertTrue(source.contains("guard let target, !target.isOnCover else { return }"),
+                      "a pill taking focus is not the viewer leaving the page's list or grid")
+
+        // 3. Selecting a channel disabled every row while the tune ran and
+        //    threw focus onto the toolbar. `busy` is checked in the action.
+        XCTAssertTrue(source.contains("Button { if !live.busy { selectAiring(channel) } } label: {"))
+        let tvList = source
+            .components(separatedBy: "private var tvChannelList: some View {")[1]
+            .components(separatedBy: "private var channelFocusIdentity: String {")[0]
+        XCTAssertFalse(tvList.contains("live.busy)"), "the touch List may disable rows; the focused one may not")
+        XCTAssertTrue(source.contains("let candidates = visibleChannels.filter(\\.watchable)"),
+                      "a restore aimed at a disabled row is dropped")
+
+        // 4. The detail region (picture + Watch/Record/Record series/Remind
+        //    me) is moved by name, so Left from it returns to the row the
+        //    viewer came from, and every one of its focusables has a key.
+        for key in [".picture", ".watch", ".record", ".recordSeries", ".remind"] {
+            XCTAssertTrue(source.contains(".focused($focusedControl, equals: \(key))"), key)
+        }
+        XCTAssertTrue(source.contains("return moveDetailFocus(input, region: .onNow)"))
+        XCTAssertTrue(source.contains("return moveDetailFocus(input, region: .guideStage)"))
+        XCTAssertTrue(source.contains("programmeActions(channel, programme, keyed: true)"))
+        let region = source
+            .components(separatedBy: "private func moveDetailFocus(")[1]
+            .components(separatedBy: "private func returnToToolbar()")[0]
+        XCTAssertTrue(region.contains("case (.picture, .left):\n            if region == .onNow { requestChannelFocus() }"),
+                      "left from the picture returns to the channel row the viewer left")
+        XCTAssertTrue(region.contains("requestGuideFocus()"),
+                      "down from the stage returns to the cell the grid last held")
+
+        // 5. Up from the grid goes to what is directly above it — the stage's
+        //    Watch, the temporary guide's Close, the Over picture Close — not
+        //    always to the toolbar.
+        XCTAssertTrue(source.contains("onTopBoundary: { edge in"))
+        XCTAssertTrue(source.contains("focusedControl = .guideClose"))
+        XCTAssertTrue(source.contains("focusedControl = .overClose"))
+        XCTAssertTrue(source.contains("guidePageTopBoundary(edge)"))
+        XCTAssertTrue(source.contains(".focused($focusedControl, equals: .guideClose)"))
+        XCTAssertTrue(source.contains(".focused($focusedControl, equals: .overClose)"))
+        XCTAssertFalse(source.contains("onToolbarBoundary"))
+
+        // 6. The paging chips are never `.disabled` on television: a focused
+        //    chip that becomes disabled loses focus.
+        let chip = source
+            .components(separatedBy: "@ViewBuilder private func pagingChip(")[1]
+            .components(separatedBy: "@discardableResult")[0]
+        XCTAssertTrue(chip.contains("Button(action: { if enabled { action() } })"))
+        XCTAssertTrue(chip.contains("#else\n        .buttonStyle(.plain)\n        .disabled(!enabled)"),
+                      "only the touch grid may disable a chip")
+        XCTAssertTrue(source.contains("case .pageLater(let channelId):"))
+        XCTAssertTrue(source.contains("case .pageEarlier(let channelId):"))
+        XCTAssertTrue(source.contains("case .focusPagingChips:"))
+
+        // 7. The restore is applied from `onChange`, against the current view,
+        //    never from the task's stale copy.
+        XCTAssertTrue(source.contains("restoreTick &+= 1"))
+        XCTAssertTrue(source.contains(".onChange(of: restoreTick) { _, _ in restoreFocus() }"))
+        let task = source
+            .components(separatedBy: ".task(id: gridRestoreIdentity) {")[1]
+            .components(separatedBy: ".onChange(of: restoreTick)")[0]
+        XCTAssertFalse(task.contains("\n            restoreFocus()"), "the task bumps the tick; it does not restore")
+
+        // 8. Leaving the cover restores the page's focus from `onDismiss`,
+        //    after the cover has gone; the temporary guide restores the browse
+        //    view it switched away from; closing it returns to the Guide pill
+        //    through a deferred write.
+        XCTAssertTrue(source.contains("restoreBrowseFocusAfterCover()"))
+        XCTAssertTrue(source.contains("Button { browse = .list; fullscreen = false } label: {"))
+        XCTAssertFalse(source.contains("Button { requestChannelFocus(); fullscreen = false }"))
+        XCTAssertTrue(source.contains("if browseBeforeTemporaryGuide == nil { browseBeforeTemporaryGuide = browse }"))
+        XCTAssertTrue(source.contains("focusedControl = overlayVisible ? .pillGuide : .reveal"))
+        XCTAssertFalse(source.contains("focusedControl = .guide\n"),
+                       "no undeferred write to a segment that may be under the cover")
+        // Neither request resigns the toolbar's focus first — that handed the
+        // engine a moment to cancel the very restore just requested.
+        let requests = source
+            .components(separatedBy: "private func requestGuideFocus()")[1]
+            .components(separatedBy: "private func cancelBrowseFocusRestoration()")[0]
+        XCTAssertFalse(requests.contains("focusedControl = nil"))
+        // Toggling Favorites keeps focus on Favorites.
+        XCTAssertFalse(source.contains("favoritesOnly.toggle(); requestChannelFocus()"))
+        // Selecting the playing channel inside the temporary guide closes it.
+        XCTAssertTrue(source.contains("if fullscreen && temporaryGuide {\n                closeTemporaryGuide()"))
+        // A programme sheet opened from a cell hands focus back to that cell.
+        XCTAssertTrue(source.contains("guard browse == .guide, focusedGuideChannelId != nil else { return }"))
+        // The grid holds the requested position itself: an engine-driven
+        // arrival in between rewrites the parent's memory.
+        XCTAssertTrue(source.contains("@State private var requestedTarget: LiveTvGuideFocusPosition?"))
+        XCTAssertTrue(source.contains("if restoreRequest > lastRequestSeen {"))
+        XCTAssertTrue(source.contains("guard requestedTarget == nil else { return }"))
+        // The temporary guide opens on the current window, on what is playing.
+        let opening = source
+            .components(separatedBy: "private func openTemporaryGuide() {")[1]
+            .components(separatedBy: "private func closeTemporaryGuide()")[0]
+        XCTAssertTrue(opening.contains("returnGuideToNow()"))
+        XCTAssertTrue(opening.contains("focusedGuideChannelId = watching.id"))
+        // Recordings is not the list.
+        XCTAssertTrue(source.contains("case .recordings:\n            // A schedule page has no row to return to"))
+        // An arrival on a page key right after a request is the engine's.
+        XCTAssertTrue(source.contains("if let at = browseFocusRequestedAt, Date().timeIntervalSince(at) < 1 { return }"))
+        // The list still lets a press during its yield win; the grid does not.
+        let guideSource = try String(
+            contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+                .appendingPathComponent("../Sources/LiveTvGuide.swift").standardizedFileURL,
+            encoding: .utf8)
+        XCTAssertTrue(guideSource.contains("LiveTvFocusRestoreCoordinator(arrivalInvalidates: false)"))
+        XCTAssertTrue(source.contains("@State private var channelFocusCoordinator = LiveTvFocusRestoreCoordinator()"),
+                      "the list keeps arrival-invalidates: its arrivals are presses")
     }
 
     func testTheProgressRowSurvivesAMissingNextProgramme() {
@@ -1693,6 +1853,91 @@ final class LiveTvTests: XCTestCase {
         )
     }
 
+    /// Every edge of the grid answers a press. Before this, Right past the
+    /// last programme and Left from the channel header were dead, Up from the
+    /// header column skipped the paging chips that sit directly above it, and
+    /// the only way out of the grid was Up from a first-row cell.
+    func testGuideFocusEdgesPageTheWindowAndReachTheChips() throws {
+        func guideChannel(_ id: String) -> LiveTvChannel {
+            LiveTvChannel(id: id, guideNumber: id, guideName: "Channel \(id)",
+                          favorite: false, drm: false, support: "ready",
+                          hd: nil, videoCodec: nil, audioCodec: nil)
+        }
+        func cell(_ start: Int, _ end: Int, _ title: String) -> LiveTvGridCell {
+            let programme = LiveTvProgramme(start: start, end: end, title: title)
+            return LiveTvGridCell(programme: programme, left: Double(start),
+                                  width: Double(end - start), airing: false, clipped: false)
+        }
+        let layout = LiveTvGridLayout(rows: [
+            LiveTvGridRow(channel: guideChannel("1"), cells: [cell(0, 1_800, "A"), cell(1_800, 3_600, "B")]),
+            LiveTvGridRow(channel: guideChannel("2"), cells: []),
+        ], totalWidth: 3_600, nowX: nil)
+
+        let last = LiveTvGuideFocusPosition(
+            channelId: "1", programmeStart: 1_800, channelHeader: false, anchorTime: 2_700)
+        XCTAssertEqual(
+            LiveTvGuideFocusNavigator.move(layout: layout, current: last, direction: .right, fallbackAnchor: 0),
+            .pageLater, "right past the window's last programme asks for the later window")
+
+        let header = LiveTvGuideFocusPosition(
+            channelId: "1", programmeStart: nil, channelHeader: true, anchorTime: 900)
+        XCTAssertEqual(
+            LiveTvGuideFocusNavigator.move(layout: layout, current: header, direction: .left, fallbackAnchor: 0),
+            .pageEarlier, "left from the header asks for the earlier window")
+        XCTAssertEqual(
+            LiveTvGuideFocusNavigator.move(layout: layout, current: header, direction: .up, fallbackAnchor: 0),
+            .pagingChips, "the chips sit in the header column, directly above the first header")
+
+        // A row with no data has one placeholder cell; it is a cell for the
+        // window's edges too.
+        let emptyHeader = LiveTvGuideFocusPosition(
+            channelId: "2", programmeStart: nil, channelHeader: true, anchorTime: nil)
+        guard case .focus(let placeholder) = LiveTvGuideFocusNavigator.move(
+            layout: layout, current: emptyHeader, direction: .right, fallbackAnchor: 0)
+        else { return XCTFail("right from an empty row's header enters its placeholder") }
+        XCTAssertFalse(placeholder.channelHeader)
+        XCTAssertNil(placeholder.programmeStart)
+        XCTAssertEqual(
+            LiveTvGuideFocusNavigator.move(layout: layout, current: placeholder, direction: .right, fallbackAnchor: 0),
+            .pageLater)
+
+        // Where the paged window lands: the row's first cell after later,
+        // its last after earlier, a placeholder when it has none, and the
+        // first row if the channel is no longer in the layout.
+        XCTAssertEqual(
+            LiveTvGuideFocusNavigator.landing(layout: layout, channelId: "1", edge: .first)?.programmeStart, 0)
+        XCTAssertEqual(
+            LiveTvGuideFocusNavigator.landing(layout: layout, channelId: "1", edge: .last)?.programmeStart, 1_800)
+        let empty = try XCTUnwrap(LiveTvGuideFocusNavigator.landing(layout: layout, channelId: "2", edge: .first))
+        XCTAssertNil(empty.programmeStart)
+        XCTAssertFalse(empty.channelHeader)
+        XCTAssertEqual(
+            LiveTvGuideFocusNavigator.landing(layout: layout, channelId: "gone", edge: .first)?.channelId, "1")
+
+        // The coordinator keeps the grid as owner across a page so the restore
+        // that lands the new window is permitted, and hands the chips off
+        // without claiming a cell.
+        var coordinator = LiveTvGuideFocusCoordinator()
+        XCTAssertEqual(
+            coordinator.move(layout: layout, current: last, direction: .right, fallbackAnchor: 0),
+            [.pageLater(channelId: "1")])
+        XCTAssertEqual(
+            coordinator.move(layout: layout, current: header, direction: .left, fallbackAnchor: 0),
+            [.pageEarlier(channelId: "1")])
+        XCTAssertEqual(
+            coordinator.move(layout: layout, current: header, direction: .up, fallbackAnchor: 0),
+            [.focusPagingChips])
+        // Request 0: the viewer entered the grid through the engine (Down
+        // from the toolbar) and no explicit request was ever made. The page
+        // still lands, because the grid owns focus.
+        let ticket = try XCTUnwrap(coordinator.beginRestore(request: 0, ownerRequested: true))
+        XCTAssertTrue(coordinator.permits(ticket, ownerRequested: true),
+                      "the window change restores from the grid's own ownership")
+        var fresh = LiveTvGuideFocusCoordinator()
+        XCTAssertNil(fresh.beginRestore(request: 0, ownerRequested: true),
+                     "a grid that never had focus cannot take it from a data refresh")
+    }
+
     func testFocusCoordinatorRejectsStaleRestoresAndTransfersTheBoundaryAtomically() throws {
         func guideChannel(_ id: String) -> LiveTvChannel {
             LiveTvChannel(id: id, guideNumber: id, guideName: "Channel \(id)",
@@ -1714,10 +1959,24 @@ final class LiveTvTests: XCTestCase {
         let entry = try XCTUnwrap(guide.beginRestore(request: 1, ownerRequested: true))
         XCTAssertTrue(guide.permits(entry, ownerRequested: true))
 
-        // Applying focus changes the revision. A task that captured the entry
-        // ticket before a newer focus event can no longer write FocusState.
+        // Focus ARRIVING in the grid does not cancel a requested restore. It
+        // used to, and that is how a guide opened from fullscreen landed on an
+        // arbitrary cell: the engine dropped focus onto some cell when the
+        // pill went away, that arrival killed the ticket, and the requested
+        // cell was never focused. The restore is applied from `onChange`
+        // against the current view, so letting it run after an accidental
+        // arrival only moves focus to where it was asked to go.
         guide.focusChanged(active: true)
+        XCTAssertTrue(guide.permits(entry, ownerRequested: true),
+                      "an engine-driven arrival must not defeat the viewer's request")
+        // A remote press inside the grid is the viewer's own intent, and wins.
+        _ = guide.move(layout: layout, current: position, direction: .right, fallbackAnchor: 0)
         XCTAssertFalse(guide.permits(entry, ownerRequested: true))
+        // Focus LEAVING the grid still cancels.
+        let leaving = try XCTUnwrap(guide.beginRestore(request: 1, ownerRequested: true))
+        guide.focusChanged(active: false)
+        XCTAssertFalse(guide.permits(leaving, ownerRequested: true))
+        guide.focusChanged(active: true)
         let refresh = try XCTUnwrap(guide.beginRestore(request: 1, ownerRequested: true))
 
         // Up from the first row is one ordered adapter transition: clear the
