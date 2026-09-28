@@ -13,8 +13,6 @@ import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Rational
-import android.view.SurfaceView
-import android.view.View
 import android.view.ViewGroup
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -85,7 +83,6 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -93,11 +90,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -458,8 +453,9 @@ fun LiveTvScreen(
         overlayVisible -> LiveTvInputState.FullscreenControls
         else -> LiveTvInputState.FullscreenHidden
     }
-    val playerSurface = remember(controller) {
-        movableContentOf { LiveTvPlayerSurface(controller) }
+    // Each host builds its own PlayerView; see LiveTvPlayerSurface.
+    val playerSurface: @Composable () -> Unit = remember(controller) {
+        { LiveTvPlayerSurface(controller) }
     }
 
     val touchRecordingsPanel: @Composable (Modifier) -> Unit = { panelModifier ->
@@ -2281,38 +2277,37 @@ private fun LiveTvOverlay(
 }
 
 /**
- * One PlayerView for the inline box and the fullscreen box: the surface is
- * moved between them with `movableContentOf` so the decoder never loses its
- * output. Moving a View subtree that way keeps its last measured size — the
- * host layout node is re-placed, but the PlayerView, its
- * AspectRatioFrameLayout and the SurfaceView inside it are not re-measured
- * on their own, so on a tablet the fullscreen picture stayed the inline
- * 160–260 dp box in the top-left corner (Lenovo TB322FC, TCL 9445X). Every
- * host size change now forces a layout pass through the whole subtree, and
- * `forceLayout` on each descendant is what defeats the View measure cache
- * that a plain `requestLayout` on the root leaves in place.
+ * The Live TV picture for one host box. Every box that shows the picture —
+ * the phone's inline/fullscreen/PiP box, each wide-browser preview and the
+ * wide fullscreen box — composes its own PlayerView, and the shared ExoPlayer
+ * moves its video output to whichever view was bound last. Media3 swaps the
+ * codec output surface in place, so the tuner, the session and the decoder
+ * all carry on; the new box is black for the one frame between its surface
+ * being created and the first frame landing on it, and Media3 releases that
+ * frame whether or not playback is paused.
+ *
+ * This replaced moving one PlayerView between the boxes with
+ * `movableContentOf`. A SurfaceView's window surface is positioned and sized
+ * apart from its View bounds, and after a move into the fullscreen box
+ * tablets (Lenovo TB322FC, TCL 9445X) kept drawing the picture at the inline
+ * box's geometry in the corner of a black screen — including after a forced
+ * layout pass and a surface rebind (#509, #546). A view created in the box it
+ * draws in has no earlier geometry to keep.
+ *
+ * No two hosts are ever composed at once: the phone box, the empty-channels
+ * box, the Over picture, the Guide preview and the watch pane are separated
+ * by `return` or if/else, so the player never has two live views fighting
+ * over its output.
+ *
+ * The box that is resized in place — the phone box between inline,
+ * fullscreen and PiP, the Guide preview when its constraints change — still
+ * relies on the SurfaceView following its View bounds, which on API 34 is
+ * androidx/media#1237; PlayerView's opt-in `SurfaceSyncGroup` workaround
+ * covers that case and is a no-op on every other API level.
  */
 @Composable
 private fun LiveTvPlayerSurface(controller: LiveTvPlayer) {
     val state by controller.state.collectAsStateWithLifecycle()
-    var hostSize by remember { mutableStateOf(IntSize.Zero) }
-    var laidOutFor by remember { mutableStateOf(IntSize.Zero) }
-    var playerView by remember { mutableStateOf<PlayerView?>(null) }
-    LaunchedEffect(hostSize, playerView) {
-        val view = playerView ?: return@LaunchedEffect
-        if (hostSize == IntSize.Zero) return@LaunchedEffect
-        if (laidOutFor == IntSize.Zero) {
-            // The first placement is the box the View was measured in.
-            laidOutFor = hostSize
-            return@LaunchedEffect
-        }
-        val resized = LiveTvSurfaceRelayout.hostResized(
-            laidOutFor.width, laidOutFor.height, hostSize.width, hostSize.height,
-        )
-        if (!resized) return@LaunchedEffect
-        laidOutFor = hostSize
-        view.relayoutSubtree { view.rebindVideoSurface() }
-    }
     AndroidView(
         factory = { context ->
             PlayerView(context).apply {
@@ -2321,17 +2316,23 @@ private fun LiveTvPlayerSurface(controller: LiveTvPlayer) {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT,
                 )
+                // API 34 can draw a SurfaceView inside a Compose AndroidView at
+                // its old geometry after an in-place resize (androidx/media#1237);
+                // this keeps the surface and the View in one sync group.
+                setEnableComposeSurfaceSyncWorkaround(true)
                 player = controller.player
                 keepScreenOn = state.playing
-                playerView = this
             }
         },
         update = { view ->
             view.player = controller.player
             view.keepScreenOn = state.playing
         },
-        modifier = Modifier.fillMaxSize().background(Color.Black)
-            .onSizeChanged { hostSize = it },
+        // Unbinding clears this view's surface from the player only while it
+        // is still the player's output (ExoPlayer ignores a clear for any
+        // other holder), so it cannot blank the box that took over.
+        onRelease = { view -> view.player = null },
+        modifier = Modifier.fillMaxSize().background(Color.Black),
     )
 }
 
@@ -2466,46 +2467,6 @@ internal fun liveTvPictureInfo(
         reason = reasons.values.joinToString(" · ").ifEmpty { "The server did not provide a conversion reason." },
         streamFormat = listOfNotNull(plan?.output?.video_codec?.uppercase(), scan, cadence).joinToString(" · ").ifEmpty { "Not reported" },
     )
-}
-
-/**
- * `forceLayout` every View under this one, ask for the pass, and run
- * `afterPass` once the next frame has laid the subtree out at its new bounds.
- */
-internal fun View.relayoutSubtree(afterPass: () -> Unit = {}) {
-    forceLayoutTree(this)
-    requestLayout()
-    // A SurfaceView repositions its window surface from the next layout
-    // pass; post one more request so a pass that already ran this frame
-    // cannot leave the surface at the old bounds, then let the caller act
-    // on the laid-out bounds.
-    post {
-        forceLayoutTree(this)
-        requestLayout()
-        post(afterPass)
-    }
-}
-
-/**
- * Hand the decoder its SurfaceView again. A moved SurfaceView can keep its
- * window surface at the geometry it was created with on some tablet SoCs
- * even after its View bounds change; clearing and re-setting the output
- * makes the player and the compositor re-read the surface at the bounds
- * the layout pass just produced. Media3 swaps the codec output surface in
- * place, so there is no decoder restart.
- */
-internal fun PlayerView.rebindVideoSurface() {
-    val surface = videoSurfaceView as? SurfaceView ?: return
-    val output = player ?: return
-    output.clearVideoSurfaceView(surface)
-    output.setVideoSurfaceView(surface)
-}
-
-private fun forceLayoutTree(view: View) {
-    view.forceLayout()
-    if (view is ViewGroup) {
-        for (index in 0 until view.childCount) forceLayoutTree(view.getChildAt(index))
-    }
 }
 
 @Composable

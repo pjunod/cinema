@@ -4,6 +4,26 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Android Live TV fullscreen on tablets: every box gets its own player view
+
+**Branch `fix/android-live-tv-fullscreen-own-surface` (`726f1241` + ledger + review), Android 138 — 137 went to the native Live TV settings graduation first; the fix is not yet merged or installed.**
+Paul reported 2026-09-28 that fullscreen Live TV on the tablets still shows
+the small inline picture in a mostly black screen. #509's relayout + surface
+rebind *is* on `main` (re-landed by #546 after the push-mirror rewind, in
+every build since 129), so this was the fix not working, not a lost commit.
+The one PlayerView was moved between the wide browser's picture box and the
+fullscreen box with `movableContentOf`, and its SurfaceView kept its creation
+geometry. Each host box now composes its own PlayerView on the shared
+ExoPlayer and unbinds on release; phones are unchanged (same slot, just a
+resize). `LiveTvPlayerSurfaceTest` fails against `main` and passes here;
+`testDebugUnitTest` (799/0), `lintDebug` and `assembleDebug` green;
+`history-audit` ok. Open as [PR #606](http://192.168.4.7:3000/noirr/plurx/pulls/606).
+The adversarial review found no blocker and confirmed the release/bind order
+against Media3 1.10.1 and Compose's apply order; it added PlayerView's API 34
+SurfaceView sync workaround for the boxes that resize in place, an honest
+KDoc (one black frame per swap, no PiP host on the wide layout) and a
+tighter source pin. Not yet: CI, the merge, the tablets.
+
 ## Live TV said "all slots are busy" with every tuner idle
 
 **[PR #585](http://192.168.4.7:3000/noirr/plurx/pulls/585), merged 2026-09-28 as `2694db665`; not yet deployed — the GPT deploy/verify prompt is in the project doc.**
