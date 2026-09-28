@@ -261,8 +261,11 @@ private func opticalErrorMessage(_ error: Error) -> String {
     switch (error as? APIError)?.refusalCode {
     case "optical_media_changed": return "The disc changed. Return to the disc and choose the title again."
     case "optical_drive_busy": return "This drive is already in use."
+    case "optical_request_conflict": return "This playback request no longer matches the disc. Start again."
     case "optical_owner_unavailable": return "The drive host is offline."
     case "optical_reader_unavailable", "optical_read_failed": return "The drive could not read this title."
+    case "optical_format_unsupported": return "This disc format is not supported by the drive host."
+    case "optical_protection_unsupported": return "This disc's protection is not supported by the installed reader."
     default: return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
 }
