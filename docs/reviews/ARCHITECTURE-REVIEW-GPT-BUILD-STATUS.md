@@ -1,8 +1,24 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 13:56 UTC · **Audited main:** `86d5162193847d51590189050f01a6eaeb06904f`
+**Status:** open · **Updated:** 2026-09-28 14:35 UTC · **Audited main:** `569ed6e1616868f84604331af33b9a467799f1b2`
 
 ## Current work
+
+Peer C-07 PR #598 advanced main to569ed6e16. Its changes are integrated into
+`codex/native-review-completion-0928` before qualification. The four nodes still
+run86d516219 and collector95221 records that exact historical source; final
+rollout follows the new native batch. No current569 fleet acceptance is claimed.
+
+Five source changes are committed and integrated: D03M5 debug timing,
+D03M10 release profile/measurement tooling, bounded Live terminal diagnostics,
+A03 actual-column two-row prefetch on both native clients, and D02M3 production
+screen-on callback binding with a real ExoPlayer instrumentation source. Author
+compilation and normal hooks pass. The separate profile harness now has its own
+verified signer; the measured app remains durable signed/nondebuggable. Apple199
+and Android136 are reserved above actual main198/135. The finished candidate gets
+exactly one independent adversarial review, followed by focused regressions and
+mandatory selected qualification. No behavior tests or review have run yet.
+
 
 [PR #599](http://192.168.4.7:3000/noirr/plurx/pulls/599) merged as
 `86d5162193847d51590189050f01a6eaeb06904f`. Exactly one adversarial review
@@ -23,7 +39,7 @@ covers330seconds of identity samples and separate300–301second health/C08
 samples. This is passive evidence, not normal-use or24-hour/seven-day acceptance.
 Apple198 and Android135 inputs are unchanged through this merge.
 
-Three independent Android source tasks are now batched on
+Historical source dispatch at13:56: three independent Android tasks were batched on
 `codex/native-review-completion-0928`: mandatory M10 release-profile and benchmark
 tooling, M5 debug request-timing diagnostics, and sanitized native Live terminal
 diagnostics for the retained HLS playlist-stuck failure. Compilation precedes
@@ -34,9 +50,9 @@ startup gain, dispatcher split or physical success is invented.
 | Work | Verified now | Remaining |
 |---|---|---|
 | Fleet | All four exact86d516 source/binary/content/health/quorum checks pass, lag0/restarts0. One collector95221 is active; its330second identity checkpoint is clean. | Real elapsed current-build hour/24h/7d and active normal-use evidence. Historical75753 closed before the successor swap. |
-| Devices / D-02 | Six Apple198 and three Android135 installs retain exact native-input parity. Supplemental finite pause421.315s/85samples is stable; all nine server seek terminals are≤250ms. | Locked or absent hardware and lifecycle/controller/decoder/error matrix. Atomic remote pair370ms misses the250–350ms target; black captures do not prove advancing frames. |
-| D-03 | Signed133 synthetic API36/37 restore/exclusions retain positive-control scope. Current135 ART inspection verifies signed APK and bundled baseline assets; all three devices report verify/install. PR23 exact local workflow qualification passes52contracts, syntax/lint and Gitleaks8commits/0findings. | M5/M10 source tooling is in progress. Physical mobile PDF/EPUB/offline, cloud/D2D, profile consumption and Lenovo measurements remain owed. PR23 GitHub writes await explicit destination authorization after automatic approval review rejected both posting attempts. Original M3 external handoff awaits recipient authorization; internal readers remain implemented. |
-| A-02 / A-03 | Supplemental1000 to1 pause/resume and nine seek terminals retain their measured scope; own finite session is closed. Bedroom metadata/capture case passed1/0. | Both platforms exported black images, so visible rendering remains unproved. Night Tide search returned no results; named-title/controller and Lenovo6000 tail/order/request/frame matrix remain owed. |
+| Devices / D-02 | M3 production binder and real-player instrumentation source compile. Six Apple198 and three Android135 installs retain exact native-input parity. Supplemental finite pause421.315s/85samples is stable; all nine server seek terminals are≤250ms. | Locked or absent hardware and lifecycle/controller/decoder/error matrix. Atomic remote pair370ms misses the250–350ms target; black captures do not prove advancing frames. |
+| D-03 | Signed133 synthetic API36/37 restore/exclusions retain positive-control scope. Current135 ART inspection verifies signed APK and bundled baseline assets; all three devices report verify/install. PR23 exact local workflow qualification passes52contracts, syntax/lint and Gitleaks8commits/0findings. | M5/M10 source tooling is committed; final integrated qualification follows. Physical mobile PDF/EPUB/offline, cloud/D2D, profile consumption and Lenovo measurements remain owed. PR23 GitHub writes await explicit destination authorization after automatic approval review rejected both posting attempts. Original M3 external handoff awaits recipient authorization; internal readers remain implemented. |
+| A-02 / A-03 | Both native measured two-row prefetch repairs and regression sources compile. Supplemental1000 to1 pause/resume and nine seek terminals retain their measured scope; own finite session is closed. Bedroom metadata/capture case passed1/0. | Both platforms exported black images, so visible rendering remains unproved. Night Tide search returned no results; named-title/controller and Lenovo6000 tail/order/request/frame matrix remain owed. |
 | W-02 / A-04 | Exactd66 Chrome one/two cliffs and subtitle-readiness pass. Corrected832d official startup passes once. One instrumented Firefox diagnostic passes83.32/67.52ms gaps with zero hitches. | Original d66 Firefox116.68/133.34ms gaps and backward frame remain failures under unchanged oracles. The instrumented pass does not prove a presentation repair; Safari/HDR/native/LG/FireTV matrix remains owed. |
 | L-03 M2/M4 | Native135 real6.1 selector offers CC1/Service1. CC1 endpoint image shows programme and English glyphs after63.978s bounded observation. Both own sessions are closed; four tuners/nodes idle. | Same Live session failed before Service1 selection. HLSPlaylistStuckException is identified by exact R8 mapping; generic server cancellation and uncalibrated clocks do not establish initiator. No continuous frame trace, Service1/Off, source-to-HLS attribution, encoder-specific x264/QSV/VT, shared capacity/DVR or Shield HDMI pass. |
 
