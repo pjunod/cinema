@@ -11,7 +11,7 @@ The implementation history, deployment evidence, and resolved copied-Dolby-
 Vision investigation are recorded in
 [APPLE-NATIVE-SUBTITLES-HANDOFF.md](APPLE-NATIVE-SUBTITLES-HANDOFF.md).
 
-> Status (2026-09-26): source is v0.3.0, Apple build 199. Timer-only
+> Status (2026-09-26): source is v0.3.0, Apple build 200. Timer-only
 > presentation stalls stay explicitly unknown and use one bounded same-recipe
 > repair without a legacy quality-reduction ticket. The repair preserves the
 > selected quality, HDR, tracks, offset, film position and pause intent; actual
@@ -517,7 +517,8 @@ that matter:
   iOS and tvOS, one `NavigationLink` row like Developer's) holds the device
   address, saved configuration and its readiness check, programme guide
   readiness, recording and Library channels. Settings → Developer holds only
-  the separate runtime enable, with the line saying what it waits on before it
+  the separate runtime enable, its prerequisites' current Met / Not met rows
+  from `/live-tv/readiness` (advisory; none disables it), and the line saying what it waits on before it
   moves to Settings → Live TV. Both are present in every build. There is no compile-time switch that hides
   Live TV from a shipped app, and every mutation requires server-enforced
   administrator access plus an exact settings generation.
