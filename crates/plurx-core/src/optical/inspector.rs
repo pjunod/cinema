@@ -11,6 +11,8 @@ const MAX_TITLES: usize = 512;
 const MAX_STREAMS_PER_TITLE: usize = 256;
 const MAX_CHAPTERS_PER_TITLE: usize = 4096;
 const MAX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
+const MAX_TEXT_BYTES: usize = 512;
+const MAX_SUGGESTION_REASONS: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtectionFacts {
@@ -105,11 +107,21 @@ pub enum InspectionError {
     Locator,
     #[error("inspection title media facts are invalid")]
     Facts,
+    #[error("inspection contains invalid or unbounded display text")]
+    Text,
+    #[error("inspection contains invalid or duplicate stream identities")]
+    StreamIdentity,
+    #[error("inspection chapter timeline is invalid")]
+    ChapterTimeline,
     #[error("inspection timestamp is invalid")]
     Timestamp,
 }
 
 pub fn validate_inspection(response: &InspectionResponse) -> Result<(), InspectionError> {
+    fn text(value: &str) -> bool {
+        value.len() <= MAX_TEXT_BYTES && !value.chars().any(char::is_control)
+    }
+
     if response.schema_version != INSPECTION_SCHEMA_V1 {
         return Err(InspectionError::Schema);
     }
@@ -122,8 +134,24 @@ pub fn validate_inspection(response: &InspectionResponse) -> Result<(), Inspecti
     if response.disc.titles.len() > MAX_TITLES {
         return Err(InspectionError::Titles);
     }
-    if response.diagnostics.len() > MAX_DIAGNOSTIC_BYTES {
+    if response.diagnostics.len() > MAX_DIAGNOSTIC_BYTES
+        || response.diagnostics.chars().any(char::is_control)
+    {
         return Err(InspectionError::Diagnostics);
+    }
+    if response
+        .disc
+        .volume_label
+        .as_deref()
+        .is_some_and(|value| !text(value))
+        || response
+            .disc
+            .protection
+            .scheme
+            .as_deref()
+            .is_some_and(|value| !text(value))
+    {
+        return Err(InspectionError::Text);
     }
     if response.disc.fingerprint.version == 0
         || response.disc.fingerprint.digest.len() != 64
@@ -168,16 +196,85 @@ pub fn validate_inspection(response: &InspectionResponse) -> Result<(), Inspecti
         {
             return Err(InspectionError::Facts);
         }
+        if [
+            title.facts.container.as_deref(),
+            title.facts.video_codec.as_deref(),
+            title.facts.video_codec_tag.as_deref(),
+            title.facts.video_profile.as_deref(),
+            title.facts.hdr.as_deref(),
+            title.facts.hdr_format.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| !text(value))
+            || title.suggestion_reasons.len() > MAX_SUGGESTION_REASONS
+            || title.suggestion_reasons.iter().any(|value| !text(value))
+        {
+            return Err(InspectionError::Text);
+        }
         if title.probe_json.len() > 1024 * 1024
             || serde_json::from_str::<serde_json::Value>(&title.probe_json).is_err()
         {
             return Err(InspectionError::Facts);
         }
-        if title.streams.len() > MAX_STREAMS_PER_TITLE {
+        if title.streams.len() > MAX_STREAMS_PER_TITLE
+            || title.facts.audio_streams.len() + title.facts.subtitle_streams.len()
+                > MAX_STREAMS_PER_TITLE
+        {
             return Err(InspectionError::Streams);
         }
         if title.chapters.len() > MAX_CHAPTERS_PER_TITLE {
             return Err(InspectionError::Chapters);
+        }
+        let mut audio_ids = std::collections::BTreeSet::new();
+        for stream in &title.facts.audio_streams {
+            if stream.index < 0
+                || !audio_ids.insert(stream.index)
+                || !text(&stream.codec)
+                || stream.language.as_deref().is_some_and(|value| !text(value))
+                || stream.title.as_deref().is_some_and(|value| !text(value))
+            {
+                return Err(InspectionError::StreamIdentity);
+            }
+        }
+        let mut subtitle_ids = std::collections::BTreeSet::new();
+        for stream in &title.facts.subtitle_streams {
+            if stream.index < 0
+                || !subtitle_ids.insert(stream.index)
+                || !text(&stream.codec)
+                || stream.language.as_deref().is_some_and(|value| !text(value))
+                || stream.title.as_deref().is_some_and(|value| !text(value))
+            {
+                return Err(InspectionError::StreamIdentity);
+            }
+        }
+        let mut inspected_ids = std::collections::BTreeSet::new();
+        for stream in &title.streams {
+            if stream.index < 0
+                || !inspected_ids.insert(stream.index)
+                || stream.kind.is_empty()
+                || !text(&stream.kind)
+                || stream.codec.as_deref().is_some_and(|value| !text(value))
+                || stream.language.as_deref().is_some_and(|value| !text(value))
+                || stream.title.as_deref().is_some_and(|value| !text(value))
+            {
+                return Err(InspectionError::StreamIdentity);
+            }
+        }
+        let mut chapter_ids = std::collections::BTreeSet::new();
+        let mut previous_start: Option<u64> = None;
+        for chapter in &title.chapters {
+            if !chapter_ids.insert(chapter.index)
+                || chapter.start_ms.is_some_and(|start| {
+                    title.duration_ms.is_some_and(|duration| start > duration)
+                        || previous_start.is_some_and(|previous| start < previous)
+                })
+            {
+                return Err(InspectionError::ChapterTimeline);
+            }
+            if let Some(start) = chapter.start_ms {
+                previous_start = Some(start);
+            }
         }
     }
     Ok(())
@@ -310,6 +407,52 @@ mod tests {
             validate_inspection(&oversized),
             Err(InspectionError::Diagnostics)
         );
+    }
+
+    #[test]
+    fn optical_helper_reply_rejects_ambiguous_tracks_and_chapters() {
+        let mut duplicate_tracks = response();
+        duplicate_tracks.disc.titles[0].facts.audio_streams = vec![
+            crate::domain::AudioStream {
+                index: 0,
+                codec: "aac".to_owned(),
+                ..crate::domain::AudioStream::default()
+            },
+            crate::domain::AudioStream {
+                index: 0,
+                codec: "ac3".to_owned(),
+                ..crate::domain::AudioStream::default()
+            },
+        ];
+        assert_eq!(
+            validate_inspection(&duplicate_tracks),
+            Err(InspectionError::StreamIdentity)
+        );
+
+        let mut descending_chapters = response();
+        descending_chapters.disc.titles[0].chapters = vec![
+            InspectedChapter {
+                index: 0,
+                start_ms: Some(20_000),
+                accurate: false,
+            },
+            InspectedChapter {
+                index: 1,
+                start_ms: Some(10_000),
+                accurate: false,
+            },
+        ];
+        assert_eq!(
+            validate_inspection(&descending_chapters),
+            Err(InspectionError::ChapterTimeline)
+        );
+    }
+
+    #[test]
+    fn optical_helper_reply_rejects_control_characters_in_display_text() {
+        let mut invalid = response();
+        invalid.disc.volume_label = Some("forged\nlabel".to_owned());
+        assert_eq!(validate_inspection(&invalid), Err(InspectionError::Text));
     }
 
     #[test]
