@@ -815,6 +815,66 @@ fn seam_census_skips_files_reached_only_through_test_modules() {
 
 /// The §7 Q3 census of the workspace, printed for the plan. It pins only what
 /// M8 has migrated: an owner whose seams became a hook trait keeps none.
+/// Whether a census file belongs to the HLS route group (D-M8-J): the
+/// parent `http/hls.rs` or any file under `http/hls/`.
+fn http_hls_route_file(file: &str) -> bool {
+    file.ends_with("/http/hls.rs") || file.contains("/http/hls/")
+}
+
+/// The one route-group site left to `TranscodeManager`'s migration (#581):
+/// `complete_subtitle_playlist_response`'s awaited manager pause, which this
+/// census files as a record. Exempt by file, owner and seam together, so any
+/// other site in that file, or in that function, still counts. Whichever of
+/// #581 and #583 merges second deletes this.
+fn awaiting_transcode_manager_migration(site: &Site) -> bool {
+    site.file.ends_with("/http/hls/subtitle_playlist.rs")
+        && site.owner == "complete_subtitle_playlist_response"
+        && site.seam == Seam::Record
+}
+
+#[test]
+fn http_hls_route_sites_are_recognised_in_the_parent_and_every_child() {
+    // The workspace assertion that the route group keeps no site is only as
+    // good as these two predicates: a new gated site in `http/hls.rs` or in
+    // any file under `http/hls/` must count, and the exception must cover
+    // only the one manager pause. Spelled `cfg(TEST)` and swapped before
+    // parsing, as above.
+    let source = r#"
+        async fn complete_subtitle_playlist_response(state: &AppState) {
+            #[cfg(TEST)]
+            state
+                .transcode
+                .pause_subtitle_playlist_commit_for_test()
+                .await;
+        }
+        async fn new_route(state: &AppState) {
+            #[cfg(TEST)]
+            state.transcode.pause_new_route_for_test().await;
+        }
+        "#
+    .replace("cfg(TEST)", "cfg(test)");
+    let syntax = syn::parse_file(&source).expect("census fixture is valid Rust");
+    let counted = |file: &str| -> Vec<String> {
+        census_of(file, &syntax)
+            .into_iter()
+            .filter(|site| {
+                http_hls_route_file(&site.file) && !awaiting_transcode_manager_migration(site)
+            })
+            .map(|site| site.owner)
+            .collect()
+    };
+    let both = ["complete_subtitle_playlist_response", "new_route"];
+    assert_eq!(counted("crates/plurxd/src/http/hls.rs"), both);
+    assert_eq!(counted("crates/plurxd/src/http/hls/new_file.rs"), both);
+    assert_eq!(
+        counted("crates/plurxd/src/http/hls/subtitle_playlist.rs"),
+        ["new_route"],
+        "only the manager pause is exempt, not the file"
+    );
+    assert!(counted("crates/plurxd/src/http/hlsx.rs").is_empty());
+    assert!(counted("crates/plurxd/src/http/other.rs").is_empty());
+}
+
 #[test]
 fn seam_census_of_the_workspace() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -859,15 +919,26 @@ fn seam_census_of_the_workspace() {
                 .iter()
                 .any(|owner| site.owner == *owner || site.owner.starts_with(&format!("{owner}::")))
                 || (site.owner.starts_with("RollingControlActor") && site.seam != Seam::Arm)
-                // The HLS route group (D-M8-J). `subtitle_playlist.rs` holds a
-                // `TranscodeManager` pause, which that owner's migration takes.
-                || (site.file.contains("/http/hls/")
-                    && !site.file.ends_with("/http/hls/subtitle_playlist.rs"))
         })
         .collect();
     assert!(
         migrated.is_empty(),
         "M8-migrated owners keep no test-only seams: {migrated:?}"
+    );
+    // The HLS route group (D-M8-J) keeps no test-only site, in the parent
+    // `http/hls.rs` or under `http/hls/`, except the one `TranscodeManager`
+    // pause that owner's migration (#581) takes.
+    let (awaiting, routes): (Vec<&Site>, Vec<&Site>) = sites
+        .iter()
+        .filter(|site| http_hls_route_file(&site.file))
+        .partition(|site| awaiting_transcode_manager_migration(site));
+    assert!(
+        routes.is_empty(),
+        "the HLS route group keeps no test-only site: {routes:?}"
+    );
+    assert!(
+        awaiting.len() <= 1,
+        "the TranscodeManager exception covers one site: {awaiting:?}"
     );
     // The control actor keeps only the arms that apply the six test-driver
     // commands (`RollingControlCommand`'s test-only variants), which no
