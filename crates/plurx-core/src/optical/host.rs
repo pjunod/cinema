@@ -79,6 +79,8 @@ pub enum OpticalHostError {
     InvalidReply(String),
     #[error("the optical helper answered for a stale insertion")]
     StaleGeneration,
+    #[error("the configured optical device is not a canonical block device")]
+    InvalidDevice,
     #[error("the configured optical mount is not a canonical read-only directory")]
     InvalidMount,
 }
@@ -99,9 +101,10 @@ pub trait OpticalHostAdapter: Send + Sync + 'static {
         expected_generation: &str,
     ) -> Result<InspectionResponse, OpticalHostError>;
 
-    /// Resolve a trusted configured mount plus inspected locator into one
-    /// execution input. This is repeated at playback admission so replacing a
-    /// mount after inspection cannot redirect an already-authorized title.
+    /// Resolve the format's trusted configured device or mount plus inspected
+    /// locator into one execution input. This is repeated at playback
+    /// admission so replacing a source after inspection cannot redirect an
+    /// already-authorized title.
     fn resolve_input(
         &self,
         drive: &OpticalDriveConfig,
@@ -197,10 +200,13 @@ impl OpticalHostAdapter for SystemOpticalHost {
     fn requirements(&self, drive: &OpticalDriveConfig) -> Vec<HostRequirement> {
         #[cfg(target_os = "linux")]
         {
+            use std::os::unix::fs::FileTypeExt;
+
             let helper = executable_exists(&self.helper_path);
-            let device = std::fs::metadata(&drive.device_path).is_ok();
-            let mount = drive.mount_path.as_os_str().is_empty()
-                || std::fs::metadata(&drive.mount_path).is_ok_and(|metadata| metadata.is_dir());
+            let device = std::fs::metadata(&drive.device_path)
+                .is_ok_and(|metadata| metadata.file_type().is_block_device());
+            let mount = !drive.mount_path.as_os_str().is_empty()
+                && std::fs::metadata(&drive.mount_path).is_ok_and(|metadata| metadata.is_dir());
             vec![
                 HostRequirement {
                     id: "linux_host",
@@ -328,35 +334,47 @@ impl OpticalHostAdapter for SystemOpticalHost {
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::ffi::OsStrExt;
+            use std::os::unix::fs::FileTypeExt;
 
-            if drive.mount_path.as_os_str().is_empty() || angle == 0 {
-                return Err(OpticalHostError::InvalidMount);
-            }
-            let mount = std::fs::canonicalize(&drive.mount_path)
-                .map_err(|_| OpticalHostError::InvalidMount)?;
-            if !mount.is_dir() {
-                return Err(OpticalHostError::InvalidMount);
-            }
-            let bytes = mount.as_os_str().as_bytes();
-            let path = std::ffi::CString::new(bytes).map_err(|_| OpticalHostError::InvalidMount)?;
-            let mut facts = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-            let result = unsafe { libc::statvfs(path.as_ptr(), facts.as_mut_ptr()) };
-            if result != 0 {
-                return Err(OpticalHostError::InvalidMount);
-            }
-            let facts = unsafe { facts.assume_init() };
-            if facts.f_flag & libc::ST_RDONLY == 0 {
+            if angle == 0 {
                 return Err(OpticalHostError::InvalidMount);
             }
             Ok(match locator {
                 OpticalTitleLocator::Dvd { title_number } if title_number > 0 => {
+                    let device = std::fs::canonicalize(&drive.device_path)
+                        .map_err(|_| OpticalHostError::InvalidDevice)?;
+                    let metadata =
+                        std::fs::metadata(&device).map_err(|_| OpticalHostError::InvalidDevice)?;
+                    if !metadata.file_type().is_block_device() {
+                        return Err(OpticalHostError::InvalidDevice);
+                    }
                     ResolvedInput::Dvd {
-                        path: mount,
+                        path: device,
                         title_number,
                         angle,
                     }
                 }
                 OpticalTitleLocator::Bluray { playlist_number } if playlist_number > 0 => {
+                    if drive.mount_path.as_os_str().is_empty() {
+                        return Err(OpticalHostError::InvalidMount);
+                    }
+                    let mount = std::fs::canonicalize(&drive.mount_path)
+                        .map_err(|_| OpticalHostError::InvalidMount)?;
+                    if !mount.is_dir() {
+                        return Err(OpticalHostError::InvalidMount);
+                    }
+                    let bytes = mount.as_os_str().as_bytes();
+                    let path = std::ffi::CString::new(bytes)
+                        .map_err(|_| OpticalHostError::InvalidMount)?;
+                    let mut facts = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+                    let result = unsafe { libc::statvfs(path.as_ptr(), facts.as_mut_ptr()) };
+                    if result != 0 {
+                        return Err(OpticalHostError::InvalidMount);
+                    }
+                    let facts = unsafe { facts.assume_init() };
+                    if facts.f_flag & libc::ST_RDONLY == 0 {
+                        return Err(OpticalHostError::InvalidMount);
+                    }
                     ResolvedInput::Bluray {
                         path: mount,
                         playlist_number,
@@ -390,13 +408,19 @@ impl OpticalHostAdapter for SystemOpticalHost {
 
 #[cfg(target_os = "linux")]
 fn executable_exists(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    let executable = |candidate: &Path| {
+        std::fs::metadata(candidate)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    };
     if path.components().count() > 1 {
-        return std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file());
+        return executable(path);
     }
     std::env::var_os("PATH").is_some_and(|paths| {
         std::env::split_paths(&paths)
             .map(|directory| directory.join(path))
-            .any(|candidate| std::fs::metadata(candidate).is_ok_and(|metadata| metadata.is_file()))
+            .any(|candidate| executable(&candidate))
     })
 }
 
