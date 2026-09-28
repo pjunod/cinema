@@ -1,8 +1,15 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 06:55 UTC · **Audited main:** `2694db665eedcb8c00c4caee15e72a897cd7f4c2`
+**Status:** open · **Updated:** 2026-09-28 07:02 UTC · **Audited main:** `862372aa4ac8663b560e507a084f554f7084501a`
 
-Draft #594 integrates current PR590 source2585 and peer585 encoder advice while preserving native caption and explicit alternative ownership. Apple198/Android135 are reserved above197/134. Production and test-source compilation, one independent batch review, focused regressions, current-base fast qualification and physical caption/capacity acceptance remain pending. No second590 review or pre-review594 behavior test runs.
+**Current native batch:** Apple198/Android135 production and regression-source compilation/signing are complete. The Apple source-only fixture repair has corrected identity fb1954f; its original a9e artifacts retain their true provenance through whole-tree identity proof. Corrected root590 source dd26 is integrated; its fast qualification and all final rollouts remain pending. Exactly one590 review; no594 review or behavior tests yet. The seven current workboard notes are compacted with their dated snapshots preserved verbatim in [history](ARCHITECTURE-REVIEW-GPT-WORKBOARD-HISTORY-2026-09-28.md).
+
+Main595 changes STATUS.md only and is integrated as c6b7ced949729143f9d5c69aebdc94a632ea5207. Exact2585 pinned compiler/Clippy and focused web, ownership census and process cancellation all pass (combined receipt863d38f07dbd6d0bd228ea035f775e08006c00381f3105f2e95487b16709f774). Signed Apple197 production and physical runner are sealed; exact current-source Android134 signing and regression-source compilation pass. These products are not yet installed.
+
+Actual old-base fast3489 failed only metadata::tests::an_item_that_exceeds_its_deadline_is_retryable_and_the_loop_continues:1365 core passes,1failure,1ignored. The loaded runner expired both real-socket50ms budgets. Test-only38b19ec9d19121578dd073f6b27a80f782e5d46d controls the virtual clock after observed slow-handler entry while preserving production deadlines and every continuation/retry assertion. Its one focused case is running; final integrated compilation and fast qualification follow. No second590 review. All timer/spawn census shapes remain unchanged.
+
+Draft594 current source7a5e929d3d396a8b6c5953c5589a59b9e7379801 reserves Apple198/Android135. Correct native134 source2585 and the unqualified historical feature134 APK are separate. One594 review, affected qualification, final deployment and rendered-caption/capacity evidence remain owed.
+
 
 Main #585 merged independently as `2694db665eedcb8c00c4caee15e72a897cd7f4c2` during590 qualification. Its actual server admission changes and native encoder-capacity message are integrated. It claims Apple196/Android134, so590 now reserves Apple197 and requires fresh197 apps/runner plus exact134 Android compilation and installation. The prior196/133 artifacts and physical observations keep their historical/source scope. No second590review. Its old-base gate3489 cannot qualify this new main; current combined compilation/focused checks and a new exact-base fast lane are required.
 

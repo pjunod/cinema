@@ -6,7 +6,7 @@ first.
 
 ## Live TV said "all slots are busy" with every tuner idle
 
-**Branch `fix/live-tv-background-admission`, [PR #585](http://192.168.4.7:3000/noirr/plurx/pulls/585), draft; not merged, nothing deployed.**
+**[PR #585](http://192.168.4.7:3000/noirr/plurx/pulls/585), merged 2026-09-28 as `2694db665`; not yet deployed — the GPT deploy/verify prompt is in the project doc.**
 Paul reported 2026-09-27 (web and iOS) that channels intermittently refuse
 with *All Live TV slots are busy*; the FLEX 4K had four idle tuners each
 time. The owner's own log named the cause — `tuner_capacity` with
@@ -35,8 +35,10 @@ admission's own predicate, and the tests reach the arms they name.
 **Decision for Paul to look over:** admitting a viewer over a stuck
 background permit reverses the ruling OPERATIONS.md carried ("absence after
 five seconds means that worker is stuck rather than permission to start
-beside it"); the RCA §3 argues why. Next: fast lane, merge, then GPT
-deploys the nodes and installs the two client builds.
+beside it"); the RCA §3 argues why. Next (GPT): deploy the three voters then nuc3,
+confirm the eight zombie rows retire on the first upkeep pass, tune 6.1
+under backfill load twenty times from web and iPhone, screenshot the
+`encoder_capacity` copy, and install Android 134 / Apple 196.
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 

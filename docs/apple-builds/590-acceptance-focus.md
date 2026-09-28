@@ -18,3 +18,10 @@ Main moved through #589 to f400c0ea with native Live TV changes and claimed195. 
 Fresh signed196 iOS/tvOS and physical runner compilation passed on72d69a32/mainf400. The corrected runner passed paging and Settings once each against canonical194, zero failures/skips; original grouping restored and Auto/Original menu observed. Receipt545c1f86dda7c1ee9628d494aba892c12cf4eb0975f58c288dc82f3fd2940c20. Final196 installed/current-main acceptance follows qualified deployment.
 
 Current main #585 lands at2694db66 with admission/encoder advice and native Apple196/Android134 claims. This branch integrates it and reserves Apple197. The earlier signed196 artifacts remain historical; new signed197 apps/runner and current-source Android134 must compile before final qualification. The sole review and finding disposition remain immutable.
+
+Current-source197 iOS/tvOS and physical runner compile/signature receipts are
+sealed from2585; correct Android134 is separately signed from that source.
+Main595 subsequently changes STATUS.md only. Old-base fast3489 reported one
+metadata deadline test failure; the test-only virtual-clock repair preserves
+production deadlines and recovery assertions. Final current-base qualification
+and in-place197/134 installation remain pending.
