@@ -755,6 +755,48 @@ class ShipPhysicalReleaseVariantCase(unittest.TestCase):
         self.assertNotIn(" uninstall ", message)
 
 
+class AndroidEffectiveSignerCase(unittest.TestCase):
+    """cert_digest reads both apksigner report shapes."""
+
+    def _digest(self, report: str) -> str:
+        helper = runpy.run_path(str(ROOT / "scripts/sign-android-release"))
+        cert_digest = helper["cert_digest"]
+        cert_digest.__globals__["run"] = lambda *args, **kwargs: report.encode()
+        return cert_digest("apksigner", Path("app.apk"), 28)
+
+    def test_build_tools_36_single_signer_line(self) -> None:
+        new = "A" * 64
+        report = (
+            "Verifies\n"
+            "Number of signers: 1\n"
+            f"Signer #1 certificate SHA-256 digest: {new}\n"
+            "Signer #1 certificate SHA-1 digest: " + "b" * 40 + "\n"
+        )
+        self.assertEqual(self._digest(report), new.lower())
+
+    def test_build_tools_37_per_scheme_lines_are_one_signer(self) -> None:
+        new = "c" * 64
+        report = (
+            "Verifies\n"
+            "Number of signers: 1\n"
+            "V2 Signer: certificate DN: CN=Plurx Android Release, O=Plurx\n"
+            f"V2 Signer: certificate SHA-256 digest: {new}\n"
+            "V3 Signer: certificate DN: CN=Plurx Android Release, O=Plurx\n"
+            f"V3 Signer: certificate SHA-256 digest: {new}\n"
+            "V3.1 Signer: certificate DN: CN=Plurx Android Release, O=Plurx\n"
+            f"V3.1 Signer: certificate SHA-256 digest: {new}\n"
+        )
+        self.assertEqual(self._digest(report), new)
+
+    def test_two_distinct_certificates_are_refused(self) -> None:
+        report = (
+            "V2 Signer: certificate SHA-256 digest: " + "d" * 64 + "\n"
+            "V3 Signer: certificate SHA-256 digest: " + "e" * 64 + "\n"
+        )
+        with self.assertRaisesRegex(SystemExit, "expected one effective signer at API 28; got 2"):
+            self._digest(report)
+
+
 class AndroidLineageCapabilityCase(unittest.TestCase):
     """A rotated APK must keep the installed app's data capability."""
 
