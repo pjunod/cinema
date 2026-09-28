@@ -3109,7 +3109,7 @@ test_anchor = "terminalWireKeepsActualMedia3CodeButNeverExceptionPayloadOrDynami
 
 [[fixes]]
 id = "android.release-profile-capture-signing"
-commits = ["cc4bcb9c1"]
+commits = ["cc4bcb9c1", "127c7f1fb"]
 source = "clients/android/app/build.gradle.kts"
 source_anchor = "create(\"profileCapture\") {"
 test = "tests/operations/test_android_profile_report.py"
