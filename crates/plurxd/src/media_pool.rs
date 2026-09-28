@@ -1356,7 +1356,6 @@ fn snapshot_is_bounded(snapshot: &MediaNodeSnapshot, expected_node_id: &str) -> 
             .optical_drives
             .iter()
             .all(|drive| optical_drive_advertisement_is_bounded(drive, expected_node_id))
-        && snapshot_remaining_ttl(snapshot.observed_at_unix_ms).is_some()
         && snapshot.encoders.len() <= MAX_CAPABILITIES
         && snapshot.tone_map.len() <= MAX_CAPABILITIES
         && snapshot.encoders.iter().all(|capability| {
@@ -1414,17 +1413,12 @@ fn accepted_snapshot(
     if !snapshot_is_bounded(&snapshot, expected_node_id) {
         return None;
     }
-    let remaining = snapshot_remaining_ttl(snapshot.observed_at_unix_ms)?;
     Some(CachedSnapshot {
         snapshot,
-        expires_at: tokio::time::Instant::now() + remaining,
+        // Availability expires from this node's monotonic receipt time.
+        // Cross-host wall clocks are diagnostic facts, not lease clocks.
+        expires_at: tokio::time::Instant::now() + SNAPSHOT_EXPIRY,
     })
-}
-
-fn snapshot_remaining_ttl(observed_at_unix_ms: i64) -> Option<Duration> {
-    let budget_ms = u64::try_from(SNAPSHOT_EXPIRY.as_millis()).unwrap_or(u64::MAX);
-    let age_ms = unix_ms().abs_diff(observed_at_unix_ms);
-    budget_ms.checked_sub(age_ms).map(Duration::from_millis)
 }
 
 fn offer_is_bounded(
@@ -2137,17 +2131,20 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn receipt_cannot_restart_an_old_snapshots_full_ttl() {
+    async fn snapshot_expiry_uses_local_monotonic_receipt_time() {
         let pool = MediaPool::new(MembershipManager::unavailable());
         let mut old = snapshot("peer", &["h264"], 1080);
-        old.observed_at_unix_ms = unix_ms() - 10_000;
-        let cached = accepted_snapshot(old, "peer").expect("ten-second-old snapshot remains fresh");
+        old.observed_at_unix_ms = 1;
+        let cached = accepted_snapshot(old, "peer").expect("signed snapshot is accepted");
         pool.snapshots
             .write()
             .await
             .insert("peer".to_owned(), cached);
 
-        tokio::time::advance(Duration::from_millis(5_100)).await;
+        tokio::time::advance(SNAPSHOT_EXPIRY - Duration::from_millis(1)).await;
+        pool.expire().await;
+        assert!(!pool.snapshots.read().await.is_empty());
+        tokio::time::advance(Duration::from_millis(2)).await;
         pool.expire().await;
         assert!(pool.snapshots.read().await.is_empty());
     }
