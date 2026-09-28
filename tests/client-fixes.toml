@@ -3070,3 +3070,13 @@ source = "clients/android/app/src/test/java/android/text/TextUtils.java"
 source_anchor = "public static boolean isEmpty(CharSequence value)"
 test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvCaptionsTest.kt"
 test_anchor = "fun captionOptionsNameOnlyActualTextTracksAndServices()"
+
+# Successful early reports complete in order; one failed request cannot hold
+# later diagnostics forever or survive an authenticated account change.
+[[fixes]]
+id = "web.early-error-report-delivery-order"
+commits = ["06cd95adad128"]
+source = "crates/plurxd/src/web/core/errors.js"
+source_anchor = "function drainReports()"
+test = "tests/web/error-reporter.test.js"
+test_anchor = "report delivery waits for completion so an early error precedes its boot sentinel"
