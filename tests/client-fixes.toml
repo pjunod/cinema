@@ -2718,13 +2718,14 @@ source_anchor = "internal class LiveEdgeRecovery"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/BehindLiveWindowRecoveryTest.kt"
 test_anchor = "theSecondOneOnTheSameAttachDoesNothingAtAll"
 
+# M3 moved the guarded flag assignment into the owned PlayerScreenOn listener.
 # Lifecycle tests establish video versus audio background behavior, not the
 # new view's keepScreenOn flag on a physical device.
 [[fixes]]
 id = "android.video-screen-awake-ownership"
 commits = ["bfb24591"]
-source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
-source_anchor = "playerView?.keepScreenOn = !plan.isAudioOnly &&"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreenOn.kt"
+source_anchor = "target?.keepScreenOn = isVideo &&"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackLifecycleTest.kt"
 test_anchor = "audioOnlyContinuesWhenActivityStops"
 
