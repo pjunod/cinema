@@ -3,6 +3,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Highest playlist number accepted by FFmpeg's Blu-ray demuxer.
+pub const MAX_BLURAY_PLAYLIST_NUMBER: u32 = 99_999;
+
 /// Backend locator retained only on the trusted drive owner. Public title IDs
 /// resolve to one of these after generation and authorization checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -10,6 +13,15 @@ use serde::{Deserialize, Serialize};
 pub enum OpticalTitleLocator {
     Dvd { title_number: u32 },
     Bluray { playlist_number: u32 },
+}
+
+impl OpticalTitleLocator {
+    pub fn has_valid_selection(self) -> bool {
+        match self {
+            Self::Dvd { title_number } => title_number > 0,
+            Self::Bluray { playlist_number } => playlist_number <= MAX_BLURAY_PLAYLIST_NUMBER,
+        }
+    }
 }
 
 /// A checked local input ready to be lowered into one process invocation.
@@ -34,7 +46,7 @@ pub enum ResolvedInput {
 pub enum InputBuildError {
     #[error("input path is empty")]
     EmptyPath,
-    #[error("optical title or playlist number must be at least one")]
+    #[error("optical title or playlist number is outside its supported range")]
     Selection,
     #[error("optical angle must be at least one")]
     Angle,
@@ -54,7 +66,7 @@ impl ResolvedInput {
     }
 
     pub fn validate(&self) -> Result<(), InputBuildError> {
-        let (path, selection, angle) = match self {
+        let (path, selection_valid, angle) = match self {
             Self::File { path } => {
                 if path.as_os_str().is_empty() {
                     return Err(InputBuildError::EmptyPath);
@@ -65,17 +77,17 @@ impl ResolvedInput {
                 path,
                 title_number,
                 angle,
-            } => (path, *title_number, *angle),
+            } => (path, *title_number > 0, *angle),
             Self::Bluray {
                 path,
                 playlist_number,
                 angle,
-            } => (path, *playlist_number, *angle),
+            } => (path, *playlist_number <= MAX_BLURAY_PLAYLIST_NUMBER, *angle),
         };
         if path.as_os_str().is_empty() {
             return Err(InputBuildError::EmptyPath);
         }
-        if selection == 0 {
+        if !selection_valid {
             return Err(InputBuildError::Selection);
         }
         if angle == 0 {
@@ -187,10 +199,24 @@ mod tests {
     }
 
     #[test]
-    fn optical_zero_selection_and_angle_are_not_backend_defaults() {
+    fn optical_selection_ranges_and_angles_are_explicit() {
         let invalid = ResolvedInput::Dvd {
             path: "/dev/sr0".into(),
             title_number: 0,
+            angle: 1,
+        };
+        assert_eq!(invalid.validate(), Err(InputBuildError::Selection));
+
+        let valid = ResolvedInput::Bluray {
+            path: "/mnt/disc".into(),
+            playlist_number: 0,
+            angle: 1,
+        };
+        assert_eq!(valid.validate(), Ok(()));
+
+        let invalid = ResolvedInput::Bluray {
+            path: "/mnt/disc".into(),
+            playlist_number: MAX_BLURAY_PLAYLIST_NUMBER + 1,
             angle: 1,
         };
         assert_eq!(invalid.validate(), Err(InputBuildError::Selection));

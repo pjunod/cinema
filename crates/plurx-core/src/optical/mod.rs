@@ -19,7 +19,7 @@ pub use host::{
     HostRequirement, HostRequirementStatus, OpticalHostAdapter, OpticalHostError,
     OpticalMediaPresence, SystemOpticalHost,
 };
-pub use input::{InputBuildError, OpticalTitleLocator, ResolvedInput};
+pub use input::{InputBuildError, OpticalTitleLocator, ResolvedInput, MAX_BLURAY_PLAYLIST_NUMBER};
 pub use inspector::{
     inspection_to_store, validate_inspection, FingerprintEvidence, InspectedChapter, InspectedDisc,
     InspectedStream, InspectedTitle, InspectionError, InspectionResponse, ProtectionFacts,

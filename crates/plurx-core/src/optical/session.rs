@@ -32,7 +32,7 @@ pub enum OpticalSessionPayloadError {
     FileSource,
     #[error("invalid optical source: {0}")]
     Source(#[from] SourceRefError),
-    #[error("optical title locator selection must be at least one")]
+    #[error("optical title locator selection is outside its supported range")]
     Locator,
     #[error("invalid optical output identity")]
     OutputIdentity,
@@ -49,11 +49,7 @@ impl DurableOpticalSessionSource {
         if !matches!(self.source, PlaybackSourceRef::Optical { .. }) {
             return Err(OpticalSessionPayloadError::FileSource);
         }
-        let selection = match self.locator {
-            OpticalTitleLocator::Dvd { title_number } => title_number,
-            OpticalTitleLocator::Bluray { playlist_number } => playlist_number,
-        };
-        if selection == 0 {
+        if !self.locator.has_valid_selection() {
             return Err(OpticalSessionPayloadError::Locator);
         }
         let Some(digest) = self.output_identity.strip_prefix("optical-output-v1:") else {
@@ -111,6 +107,9 @@ pub fn optical_output_identity(
     source.validate()?;
     if !matches!(source, PlaybackSourceRef::Optical { .. }) {
         return Err(OpticalSessionPayloadError::FileSource);
+    }
+    if !locator.has_valid_selection() {
+        return Err(OpticalSessionPayloadError::Locator);
     }
     for value in [audio_selection, subtitle_selection, Some(plan_digest)]
         .into_iter()

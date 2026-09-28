@@ -358,7 +358,9 @@ impl OpticalHostAdapter for SystemOpticalHost {
                         angle,
                     }
                 }
-                OpticalTitleLocator::Bluray { playlist_number } if playlist_number > 0 => {
+                OpticalTitleLocator::Bluray { playlist_number }
+                    if locator.has_valid_selection() =>
+                {
                     if drive.mount_path.as_os_str().is_empty() {
                         return Err(OpticalHostError::InvalidMount);
                     }

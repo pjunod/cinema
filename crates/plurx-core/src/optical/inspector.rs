@@ -146,18 +146,13 @@ pub fn validate_inspection(response: &InspectionResponse) -> Result<(), Inspecti
         if !title_ids.insert(title.title_id.as_str()) {
             return Err(InspectionError::DuplicateTitle);
         }
-        if !matches!(
-            (response.disc.format, title.locator),
-            (
-                OpticalFormat::Dvd,
-                OpticalTitleLocator::Dvd { title_number: 1.. }
-            ) | (
-                OpticalFormat::Bluray,
-                OpticalTitleLocator::Bluray {
-                    playlist_number: 1..
-                }
+        if !title.locator.has_valid_selection()
+            || !matches!(
+                (response.disc.format, title.locator),
+                (OpticalFormat::Dvd, OpticalTitleLocator::Dvd { .. })
+                    | (OpticalFormat::Bluray, OpticalTitleLocator::Bluray { .. })
             )
-        ) {
+        {
             return Err(InspectionError::Locator);
         }
         if title.facts.source_delivery != SourceDelivery::ManagedOpticalTitle

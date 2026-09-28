@@ -31,7 +31,7 @@ mod linux {
     use plurx_core::optical::{
         FingerprintEvidence, InspectedChapter, InspectedDisc, InspectedStream, InspectedTitle,
         InspectionResponse, OpticalFormat, OpticalTitleLocator, ProtectionFacts, ResolvedInput,
-        INSPECTION_SCHEMA_V1,
+        INSPECTION_SCHEMA_V1, MAX_BLURAY_PLAYLIST_NUMBER,
     };
     use plurx_core::playback::{PlaybackMediaFacts, SourceDelivery};
     use serde::Serialize;
@@ -405,7 +405,7 @@ mod linux {
                 .file_stem()
                 .and_then(|stem| stem.to_str())
                 .and_then(|stem| stem.parse::<u32>().ok())
-                .filter(|number| *number > 0)
+                .filter(|number| *number <= MAX_BLURAY_PLAYLIST_NUMBER)
             {
                 numbers.insert(number);
             }
@@ -793,12 +793,15 @@ mod linux {
             let bdmv = directory.path().join("BDMV");
             let playlist = bdmv.join("PLAYLIST");
             fs::create_dir_all(&playlist).expect("playlist directory");
+            fs::write(playlist.join("00000.mpls"), []).expect("playlist");
             fs::write(playlist.join("00800.mpls"), []).expect("playlist");
             fs::write(playlist.join("00001.MPLS"), []).expect("playlist");
             fs::write(playlist.join("00002.m2ts"), []).expect("clip decoy");
+            fs::write(playlist.join("100000.mpls"), []).expect("out-of-range playlist");
             assert_eq!(
                 bluray_playlists(&bdmv).expect("playlists"),
                 vec![
+                    OpticalTitleLocator::Bluray { playlist_number: 0 },
                     OpticalTitleLocator::Bluray { playlist_number: 1 },
                     OpticalTitleLocator::Bluray {
                         playlist_number: 800
