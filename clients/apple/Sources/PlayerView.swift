@@ -1767,6 +1767,7 @@ struct PlayerView: View {
             if controller.knownDurationMs > 0 {
                 HStack(spacing: 12) {
                     playbackTimeLabel(pendingMs ?? controller.currentMs)
+                        .accessibilityIdentifier("player-position")
                     tvTimeline
                         .layoutPriority(1)
                     playbackTimeLabel(controller.knownDurationMs)
@@ -2276,6 +2277,7 @@ struct PlayerView: View {
             Image(systemName: "gobackward.10")
         }
         .accessibilityLabel("Back 10 seconds")
+        .accessibilityIdentifier("player-skip-back")
         #if os(tvOS)
         .buttonStyle(TVPlayerControlButtonStyle())
         .focusEffectDisabled()
