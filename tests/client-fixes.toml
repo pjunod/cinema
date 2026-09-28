@@ -2849,3 +2849,12 @@ source = "clients/apple/Sources/LiveTvView.swift"
 source_anchor = "@State private var requestedTarget: LiveTvGuideFocusPosition?"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "func testFocusCoordinatorRejectsStaleRestoresAndTransfersTheBoundaryAtomically() throws"
+
+# The sheet onDismiss handlers are shared code with tvOS-only bodies.
+[[fixes]]
+id = "apple.live-tv-sheet-focus-returns-ios"
+commits = ["1b48c0091"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "private func returnGuideFocusAfterProgrammeSheet() {"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testAppleTvLiveNavigationIsReversibleAndReachesEverything() throws"
