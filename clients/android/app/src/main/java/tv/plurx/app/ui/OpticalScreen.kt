@@ -236,10 +236,15 @@ private fun OpticalTrackChoices(
                 Text(if (selected == null) "✓ Off" else "Off")
             }
         }
-        tracks.forEachIndexed { index, track ->
-            val streamIndex = track.index.takeIf { it >= 0 } ?: index
-            OutlinedButton(onClick = { onSelect(streamIndex) }, modifier = Modifier.fillMaxWidth()) {
-                Text((if (selected == streamIndex) "✓ " else "") + opticalTrackLabel(track))
+        tracks.forEach { track ->
+            val streamIndex = track.index.takeIf { it >= 0 }
+            OutlinedButton(
+                onClick = { streamIndex?.let(onSelect) },
+                enabled = streamIndex != null,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                val unavailable = if (streamIndex == null) " · unavailable" else ""
+                Text((if (selected == streamIndex) "✓ " else "") + opticalTrackLabel(track) + unavailable)
             }
         }
     }

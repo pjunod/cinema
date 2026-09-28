@@ -180,8 +180,8 @@ async function viewOpticalTitle(data,titleId,generation,route){
   const trail=[{href:"#/discs",label:"Discs"},{href:opticalDriveHref(drive),label:opticalDiscName(drive)},{href:null,label:name}];
   const sourceArgs=`${esc(JSON.stringify(drive.id))},${esc(JSON.stringify(title.id))}`;
   const actions=`<div class="optical-actions">${resume>3000?`<button onclick="opticalPlayAt(${sourceArgs},${resume})">Resume at ${clockFromSec(resume/1000)}</button>`:""}<button class="${resume>3000?"ghost":""}" onclick="opticalPlayAt(${sourceArgs},0)">Play from start</button></div>`;
-  const audio=(facts.audio_streams||[]).map((track,index)=>`<li>${esc(opticalTrackLabel(Object.assign({index},track)))}</li>`).join("");
-  const subs=(facts.subtitle_streams||[]).map((track,index)=>`<li>${esc(opticalTrackLabel(Object.assign({index},track)))}</li>`).join("");
+  const audio=(facts.audio_streams||[]).map(track=>`<li>${esc(opticalTrackLabel(track))}</li>`).join("");
+  const subs=(facts.subtitle_streams||[]).map(track=>`<li>${esc(opticalTrackLabel(track))}</li>`).join("");
   const body=pageHead(trail,name)+`<section class="optical-detail">
     <div class="optical-mark large">${disc.format==="bluray"?"BD":"DVD"}</div><div><div class="vbadges"><span>${esc(opticalFormatLabel(disc.format))}</span><span>${esc(opticalDuration(title.duration_ms))}</span>${facts.height?`<span>${facts.height}p source</span>`:""}</div>
     <h1>${esc(name)}</h1>${actions}</div></section>
