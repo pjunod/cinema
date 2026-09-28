@@ -83,10 +83,35 @@ impl JobManager {
                 Err(error) => tracing::warn!(%error, "reading subtitle outbox"),
             }
         }
-        let Some(admission) = transcode.admit_fragment().await else {
+        // Claim first, then take the pool. The claim walks a candidate page
+        // — store reads, a file open per row, and a 30 s ambiguity wait for
+        // every claim the store cannot answer — none of which looks at the
+        // encoder pool. Holding the whole software budget across that walk
+        // is how a Live TV start on this node was refused for "capacity"
+        // with every tuner idle. The cheap idleness check keeps this from
+        // claiming (and then yielding) a job on every tick while a viewer is
+        // active; the admission after the claim is the real reservation.
+        if !transcode.pretranscode_worker_idle() {
+            return false;
+        }
+        let Some((job, active)) = self.claim_subtitle_work(None).await else {
             return false;
         };
-        let Some((job, active)) = self.claim_subtitle_work(None).await else {
+        let Some(admission) = transcode.admit_fragment().await else {
+            // A viewer arrived between the claim and the admission. Hand the
+            // job back for the next quiet moment rather than running it
+            // beside the viewer or leaving it leased to nobody.
+            if let Err(error) = active
+                .fence()
+                .settle(JobSettlement::Yield {
+                    checkpoint: None,
+                    not_before_ms: clock_ms().saturating_add(5_000),
+                })
+                .await
+            {
+                tracing::warn!(%error, "yielding an unadmitted subtitle claim");
+            }
+            active.finish().await;
             return false;
         };
         self.run_subtitle_work(
