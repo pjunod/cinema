@@ -2845,3 +2845,21 @@ source = "clients/android/app/src/main/java/tv/plurx/app/ui/AppViewModel.kt"
 source_anchor = "postPlaybackClientLog(viewModelScope, event)"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
 test_anchor = "fun dismissalCannotCancelQueuedAbandonmentOrRebindItToTheNextProfile() = runTest {"
+
+# A title replacement retires the outgoing seek unless its exact command continues.
+[[fixes]]
+id = "web.title-replacement-abandons-outgoing-seek"
+commits = ["5733161de"]
+source = "crates/plurxd/src/web/player/decode-tiers.js"
+source_anchor = 'if(outgoing.controlSeek?.seekTelemetry!==incoming?.controlSeek?.seekTelemetry)'
+test = "tests/web/seek-telemetry.test.js"
+test_anchor = "another title abandons the outgoing dispatched seek when its decoder retires"
+
+# A cold seek retains its command clock until the attached delivery can be named.
+[[fixes]]
+id = "apple.cold-seek-binds-actual-delivery"
+commits = ["5733161de"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "seekMeasurement.bindDelivery(generation: seekState.generation, method: clientLogMethod)"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testAppleSeekAwaitingItsDecisionBindsActualDeliveryWithoutRestartingItsClock() throws"
