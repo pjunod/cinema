@@ -21,6 +21,10 @@ internal class ReleaseJourney(capture: Boolean = false) {
     private val title = requireNotNull(args.getString("plurxFixtureTitle")) {
         "Supply the exact observed controlled movie title, already visible on Home"
     }.also { require(it.isNotBlank()) }
+    private val playerSelector = By.pkg(PACKAGE).res(java.util.regex.Pattern.compile("plurx-first-frame-(pending|[0-9]+)"))
+    private val titleSelector = By.pkg(PACKAGE).text(title)
+    private val playSelector = By.pkg(PACKAGE).text(java.util.regex.Pattern.compile("\\s*(Play|Resume.*)"))
+    private var ownsPlayback = false
     val sourceSha = requireNotNull(args.getString("plurxSourceSha")).also {
         require(it.matches(Regex("[0-9a-f]{40}"))) { "Expected full source SHA" }
     }
@@ -55,19 +59,21 @@ internal class ReleaseJourney(capture: Boolean = false) {
 
     /** Returns the production Media3 callback TTFF, not a UI polling estimate. */
     fun homeDetailPlayFirstFrame(): Long {
+        check(!ownsPlayback && !device.hasObject(playerSelector)) { "Previous or unowned player is still mounted" }
         check(device.wait(Until.hasObject(By.res("plurx-home-ready")), TIMEOUT_MS)) {
             "No authenticated populated Home; pair the dedicated fixture account through normal UI first"
         }
-        val matches = device.findObjects(By.text(title))
+        val matches = device.findObjects(titleSelector)
         check(matches.size == 1) { "Controlled Home title absent or ambiguous" }
         clickAncestor(matches.single())
-        val play = device.wait(Until.findObject(By.text(java.util.regex.Pattern.compile("\\s*(Play|Resume.*)"))), TIMEOUT_MS)
+        val play = device.wait(Until.findObject(playSelector), TIMEOUT_MS)
             ?: error("Observed title Detail has no video Play action")
-        check(device.hasObject(By.text(title))) { "Detail title differs from controlled fixture" }
+        check(isOwnedDetail()) { "Detail differs from the controlled fixture destination" }
         // Prior iterations can save progress. The same movie must start at zero.
         val startOver = device.findObject(By.text("  Start over"))
             ?: device.findObject(By.text("Start over"))
         clickAncestor(startOver ?: play)
+        ownsPlayback = true
         val frame = device.wait(Until.findObject(By.res(java.util.regex.Pattern.compile("plurx-first-frame-[0-9]+"))), TIMEOUT_MS)
             ?: error("No actual Media3 first-frame callback; loading/ready/clock movement is insufficient")
         return requireNotNull(frame.resourceName).substringAfterLast("plurx-first-frame-").toLong()
@@ -83,10 +89,30 @@ internal class ReleaseJourney(capture: Boolean = false) {
     }
 
     fun closeOwnedPlayback() {
-        // Back releases the normal controller; Home avoids leaving a test stream.
-        if (device.currentPackageName == PACKAGE) {
-            device.pressBack()
-            device.pressHome()
+        if (!ownsPlayback) return
+        // A first Back can dismiss transport chrome. Stay in this owned app and
+        // repeat only while its production player marker remains mounted.
+        repeat(4) {
+            check(device.currentPackageName == PACKAGE) { "Owned cleanup left the target app" }
+            if (device.hasObject(playerSelector)) {
+                check(device.pressBack()) { "Owned normal Back was not dispatched" }
+                device.wait(Until.gone(playerSelector), 1_500L)
+            }
         }
+        check(device.wait(Until.gone(playerSelector), 5_000L)) { "Owned player did not exit within the cleanup bound" }
+        // Player absence alone (or the launcher) is insufficient. Confirm the
+        // exact fixture's known Detail title/action with no Home marker first.
+        check(device.wait(Until.hasObject(titleSelector), 5_000L) && isOwnedDetail()) {
+            "Owned player exit did not return to the controlled fixture Detail"
+        }
+        check(device.pressHome()) { "Home was not dispatched after confirmed owned exit" }
+        ownsPlayback = false
     }
+
+    private fun isOwnedDetail(): Boolean =
+        device.currentPackageName == PACKAGE &&
+            !device.hasObject(playerSelector) &&
+            !device.hasObject(By.res("plurx-home-ready")) &&
+            !device.hasObject(By.res("plurx-home-loading")) &&
+            device.findObjects(titleSelector).size == 1 && device.hasObject(playSelector)
 }
