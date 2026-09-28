@@ -123,6 +123,26 @@ requested.
    settings section if a permanent enable/disable makes sense, otherwise the
    toggle comes out and the feature is simply on. See
    [the Developer lifecycle](#developer-lifecycle--every-card-graduates).
+6. **Chapter thumbnails and both decoder controls graduate as permanent
+   Playback settings (Paul approved graduating them, 2026-09-28; the
+   destination is this change's call and Paul can overturn it).**
+   - *Chapter thumbnails* → Settings → Playback, beside the player defaults.
+     A permanent switch makes sense: every first open of a film costs an
+     ffmpeg seek per chapter, and off is how an operator stops that on a
+     CPU-poor node. Default unchanged (on).
+   - *Verified decode artifacts* → Playback → Advanced server delivery.
+     Turning it on or off renames cached transcodes on covered paths and
+     takes a restart; the decoder plan (§9) treats it as the operator's
+     fleet-wide upper bound. That is a lasting operator decision, so it
+     stays a switch rather than becoming "just on". Default unchanged (off).
+   - *Automatic decode recovery* → Playback → Advanced server delivery. Each
+     recovery spends CPU on a software decode, and an operator containing a
+     misbehaving GPU or driver needs to be able to say yes or no to that;
+     the plan again treats it as operator policy. Default unchanged (off),
+     so no settings migration is needed and no stored choice moves.
+   Making either decoder control default on is the alternative. It would
+   need a migration that keeps an explicit stored `0`, and it is Paul's to
+   choose.
 
 ## Developer lifecycle — every card graduates
 
@@ -173,9 +193,9 @@ graduates in this change; **(c)** unclear, stays and is listed for Paul.
 | Stored PGS tracks | `subtitle_stored_sources` | K-09 | merged: M0–M5 | fleet and device evidence | (a) stays → Settings → Maintenance |
 | Share stored subtitle tracks | `subtitle_cluster_sources` | K-09 | merged: M0–M5 | fleet evidence | (a) stays → Cluster, or removed (Paul's choice) |
 | Backfill subtitle tracks | `subtitle_backfill` | K-09 | merged: M0–M5 | fleet evidence | (a) stays → Settings → Analysis |
-| Chapter thumbnails | `chapter_thumbnails` | [WATCH-VIEW-LAYOUT](../clients/WATCH-VIEW-LAYOUT.md) | built; on by default; in the deployed main | no recorded fleet observation; the plan names no other acceptance | (c) Paul: graduate to Playback now, or wait for a fleet observation |
-| Verified decode artifacts | `decoder_health_qualified_artifacts` | [DECODER_SELECTION_RECOVERY_STATUS](../DECODER_SELECTION_RECOVERY_STATUS.md) | M0–M7 merged | retained contracts for the fleet's paths; the plan calls fleet qualification optional | (c) Paul: is optional fleet qualification enough to graduate |
-| Automatic decode recovery | `automatic_decoder_recovery` | same | M0–M7 merged; off by default | no matched hardware/software retained pair | (c) Paul: same question; graduation would also decide its default |
+| Chapter thumbnails | `chapter_thumbnails` | [WATCH-VIEW-LAYOUT](../clients/WATCH-VIEW-LAYOUT.md) | built; on by default; in the deployed main | none the plan names | **(b) graduated to Settings → Playback** (Paul, 2026-09-28; decision 6) |
+| Verified decode artifacts | `decoder_health_qualified_artifacts` | [DECODER_SELECTION_RECOVERY_STATUS](../DECODER_SELECTION_RECOVERY_STATUS.md) | M0–M7 merged | fleet qualification, which the plan calls optional | **(b) graduated to Playback → Advanced server delivery**, default off (Paul, 2026-09-28; decision 6) |
+| Automatic decode recovery | `automatic_decoder_recovery` | same | M0–M7 merged; off by default | a matched hardware/software retained pair, which is advisory | **(b) graduated to Playback → Advanced server delivery**, default off (Paul, 2026-09-28; decision 6) |
 | Android: Match television refresh rate | display cadence | D-01 | merged: M1–M3 | M0 three-TV measurement, M4, M5 HDMI | (a) stays |
 | Apple: Bounded pause/resume | device-local | M4 item 4 (hold/resume barriers) | built | matched physical Apple TV latency | (a) stays |
 | Apple: Prepared quality handoff | device-local | as prepared handoff | as above | as above | (a) stays |
@@ -187,7 +207,12 @@ cluster work card was removed (its switches already live permanently in
 Analysis and Maintenance) and the Shared storage budgets editor moved to
 Settings → Libraries. No other card's plan or board row records complete
 acceptance evidence. The server still reports the `durable_cluster_work`
-readiness item at `GET /api/v1/developer/readiness`; the web no longer renders it. Native Developer rows do not yet print their graduation
+readiness item at `GET /api/v1/developer/readiness`; the web no longer renders it.
+Three more graduated the same day at Paul's word: chapter thumbnails to
+Settings → Playback, and verified decode artifacts and automatic decode
+recovery to Playback → Advanced server delivery (decision 6). Their saves,
+defaults and advisory rows are unchanged; they no longer carry a
+graduation line because they are no longer in Developer. Native Developer rows do not yet print their graduation
 condition; the table above is their record until a client change adds it.
 
 ## Remaining limits — evidence must name what it cannot prove
