@@ -61,20 +61,9 @@ impl TranscodeManager {
             measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders::default(
             ),
             automatic_decoder_recovery: AtomicBool::new(false),
-            #[cfg(test)]
-            manifests_published: std::sync::atomic::AtomicUsize::new(0),
-            #[cfg(test)]
-            force_artifact_qualification: std::sync::atomic::AtomicBool::new(false),
-            #[cfg(test)]
-            offline_produce_script: std::sync::Mutex::new(std::collections::VecDeque::new()),
-            #[cfg(test)]
-            offline_produced_recipes: std::sync::Mutex::new(Vec::new()),
-            #[cfg(test)]
-            fail_next_offline_recovery_begin: std::sync::atomic::AtomicBool::new(false),
+            hooks: crate::seam_hooks::HookSlot::new(&NoopTranscodeManagerHooks),
             decode_facts: crate::decode_facts::DecodeFactCache::new(),
             decode_probe_identity: None,
-            #[cfg(test)]
-            decode_source_final_identity_delay: Duration::ZERO,
             pipeline,
             admissions: Admissions::new(),
             cache: None,
@@ -116,10 +105,6 @@ impl TranscodeManager {
             dovi_proofs: std::sync::Mutex::new(HashMap::new()),
             cached_limits: std::sync::RwLock::new(None),
             playlist_wait_override_ms: std::sync::atomic::AtomicU64::new(0),
-            #[cfg(test)]
-            subtitle_playlist_commit_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            vod_publication_admission_pause: std::sync::Mutex::new(None),
         }
     }
 
@@ -226,8 +211,12 @@ impl TranscodeManager {
     }
 
     #[cfg(test)]
-    pub(super) fn with_decode_source_final_identity_delay(mut self, delay: Duration) -> Self {
-        self.decode_source_final_identity_delay = delay;
+    pub(super) fn with_decode_source_final_identity_delay(self, delay: Duration) -> Self {
+        *self
+            .test_hooks()
+            .decode_source_final_identity_delay
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(delay);
         self
     }
 
@@ -962,6 +951,15 @@ impl TranscodeManager {
             && !self
                 .offline_waiting
                 .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Whether [`Self::admit_fragment`] would answer right now, evaluated
+    /// without taking anything: the pool idle and the shared heavy-worker
+    /// gate free. For a worker that has to claim durable work before it can
+    /// hold the pool, so it does not claim (and then yield) a job on every
+    /// tick while another heavy worker or a viewer has the box.
+    pub(crate) fn fragment_worker_may_start(&self) -> bool {
+        self.pretranscode_worker_idle() && self.background_heavy.available_permits() > 0
     }
 
     pub fn pretranscode_worker_idle(&self) -> bool {

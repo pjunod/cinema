@@ -36,6 +36,12 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     for result in timeout_store(client.batch(super::background_jobs_subtitle::SCHEMA)).await? {
         result.map_err(database_error)?;
     }
+    validate_sql(super::background_jobs_subtitle::RECONCILE_SCHEMA)?;
+    for result in
+        timeout_store(client.batch(super::background_jobs_subtitle::RECONCILE_SCHEMA)).await?
+    {
+        result.map_err(database_error)?;
+    }
     validate_sql(super::background_jobs_provider::SCHEMA)?;
     for result in timeout_store(client.batch(super::background_jobs_provider::SCHEMA)).await? {
         result.map_err(database_error)?;

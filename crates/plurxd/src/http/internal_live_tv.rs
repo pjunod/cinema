@@ -381,6 +381,7 @@ fn error_status(error: crate::live_tv::LiveTvError) -> StatusCode {
         LiveTvError::StartupTimeout(_) => StatusCode::REQUEST_TIMEOUT,
         LiveTvError::Disabled(_)
         | LiveTvError::Capacity(_)
+        | LiveTvError::EncoderCapacity(_)
         | LiveTvError::TunerUnavailable(_)
         | LiveTvError::CodecUnsupported(_)
         | LiveTvError::StreamFailed(_)

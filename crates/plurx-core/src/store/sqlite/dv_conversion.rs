@@ -1434,7 +1434,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 39] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 40] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1503,6 +1503,9 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS background_artifact_repairs",
             // v83 adds the claim ledger and DVR revision triggers; both fixtures drop all four.
             "CREATE TABLE IF NOT EXISTS live_tv_resource_records",
+            // v84 replaces a background-prefixed trigger. Both fixtures call
+            // remove_common_queue_schema before dropping older domain columns.
+            "DROP TRIGGER IF EXISTS background_subtitle_settled",
         ];
 
         assert!(

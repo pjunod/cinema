@@ -104,6 +104,10 @@ function localSeekHarness({buffered, published, vod=false}) {
     "function completeHlsStartup(){}function clearStall(){}function finishStallRecovery(){}",
     "function bufferRunway(){return 0;}function persistentWait(){throw Error('unexpected persistent wait');}",
     "function notifyPlaybackControl(){}",
+    // The shipped seek-telemetry edges seekTo() now calls (see web-control.test.js).
+    "function playbackContext(){return {};}",
+    source("dispatchPlaybackSeekTelemetry"),source("finishPlaybackSeekTelemetry"),
+    source("watchPlaybackSeekTelemetry"),
     source("playbackSeekBufferedRangesMs"),source("playbackSeekPublishedRangeMs"),
     source("playbackSeekBufferCovers"),source("settlePlaybackControlSeek"),
     source("playbackProgressTick"),source("seekTo"),

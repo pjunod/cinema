@@ -22,40 +22,53 @@ async function viewActivity(generation=++PAGE_RENDER_GENERATION){
 
 // Durable status is separate from node-local progress and has its own bounded
 // refresh. A slow queue read never holds up the live Activity overview.
-const DURABLE_ACTIVITY={state:"queued",cursor:null,next:null,rows:[],counts:[],repairs:[],observed:0,error:null,busy:false,epoch:0,detail:null,retries:new Map()};
-function durableQueueHtml(){
+const DURABLE_ACTIVITY={state:"queued",cursor:null,next:null,rows:[],counts:[],repairs:[],observed:0,error:null,busy:false,epoch:0,detail:null,detailError:null,retries:new Map()};
+function durableDuration(ms){
+  const minutes=Math.floor(Math.max(0,Number(ms)||0)/60000);
+  if(minutes<1)return "<1 min";
+  if(minutes<60)return `${minutes} min`;
+  return `${Math.floor(minutes/60)}h ${minutes%60}m`;
+}
+function durableLeaseExpired(job){
+  return ["running","cancelling"].includes(job.state)&&job.lease_expires_ms!=null&&job.lease_expires_ms<=job.observed_at_ms;
+}
+function durableStateLabel(job){
+  return durableLeaseExpired(job)?"Lease expired · awaiting recovery":job.state;
+}
+function durableQueueHtml(nodeNames={}){
   if(!ME||!ME.is_admin)return "";
   const q=DURABLE_ACTIVITY;
   const states=["queued","running","cancelling","failed","cancelled","succeeded"];
   const count=state=>(q.counts||[]).filter(row=>row.state===state).reduce((n,row)=>n+Number(row.count||0),0);
   const rows=q.rows.map(job=>`<tr><td><button class="ghost sm" data-durable-focus="${esc(job.id)}" onclick="showDurableJob(${esc(JSON.stringify(job.id))})">${esc(job.kind.replace(/_/g," "))}</button>${job.title?`<div>${esc(job.title)}${job.library?` · ${esc(job.library)}`:""}</div>`:job.file_id?`<small class="muted"> · file ${esc(job.file_id)}</small>`:""}</td>
-    <td>${esc(job.state)}${job.not_before_ms>q.observed?`<small> · retry ${esc(new Date(job.not_before_ms).toLocaleString())}</small>`:""}</td>
-    <td>${esc(job.owner_node_id||"Awaiting worker")}</td><td>${esc(job.priority)}</td>
-    <td>${esc(Math.floor(job.age_ms/60000))} min</td><td>${esc(job.error_code||(!job.supported?"Requires a worker that understands this payload":""))}</td>
+    <td>${esc(durableStateLabel(job))}${job.not_before_ms>q.observed?`<small> · retry ${esc(new Date(job.not_before_ms).toLocaleString())}</small>`:""}</td>
+    <td>${job.owner_node_id?`<span title="${esc(job.owner_node_id)}">${esc(nodeLabel(nodeNames,job.owner_node_id))}</span>${durableLeaseExpired(job)?'<small> · previous owner</small>':""}`:"Awaiting worker"}</td><td>${esc(job.priority)}</td>
+    <td>${esc(durableDuration(job.age_ms))}</td><td>${esc(job.error_code||(!job.supported?"Requires a worker that understands this payload":""))}</td>
     <td>${["queued","running"].includes(job.state)?`<button class="ghost sm" data-durable-focus="cancel-${esc(job.id)}" onclick="cancelDurableJob(${esc(JSON.stringify(job.id))},this)">Cancel</button>`:job.retry_supported?`<button class="ghost sm" data-durable-focus="retry-${esc(job.id)}" onclick="retryDurableJob(${esc(JSON.stringify(job.id))},this)">Retry</button>`:""}</td></tr>`).join("");
   return `<h2 class="section">Durable cluster work</h2><div class="card">
     <div class="row"><label>State <select aria-label="Durable job state" onchange="filterDurableJobs(this.value)">${states.map(state=>`<option value="${state}"${q.state===state?" selected":""}>${state} (${count(state)})</option>`).join("")}</select></label>
     <button class="ghost sm" onclick="refreshDurableActivity(true)">Refresh</button></div>
-    <p class="hint">${q.observed?`Durable state observed ${esc(new Date(q.observed).toLocaleTimeString())}. Live worker progress is shown separately above.`:"Loading durable work…"}</p>
+    <p class="hint">${q.observed?`Durable state observed ${esc(new Date(q.observed).toLocaleTimeString())}. Since requested includes waiting and retries; it is not execution time. Live worker progress is shown separately above.`:"Loading durable work…"}</p>
     ${q.migration&&q.migration.accepted?`<p class="hint">Legacy cutover: ${esc(q.migration.awaiting_import)} awaiting import · ${esc(q.migration.materialized)} mapped · ${esc(q.migration.failed)} failed · ${esc(q.migration.cancelled)} cancelled. Accepted work remains in the sealed backlog while queue capacity is full.</p>`:""}
     ${q.error?`<p class="err" role="status">${esc(q.error)}${q.observed?" Showing the last observation.":""}</p>`:""}
-    ${rows?`<div class="tbl"><table><thead><tr><th>Work</th><th>State</th><th>Owner</th><th>Priority</th><th>Age</th><th>Reason</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`:q.observed?'<p class="muted">No jobs on this page.</p>':""}
+    ${rows?`<div class="tbl"><table><thead><tr><th>Work</th><th>State</th><th>Owner</th><th>Priority</th><th>Since requested</th><th>Reason</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`:q.observed?'<p class="muted">No jobs on this page.</p>':""}
     <div class="row">${q.cursor?'<button class="ghost sm" onclick="pageDurableJobs(null)">First page</button>':""}${q.next?`<button class="ghost sm" onclick="pageDurableJobs(${esc(JSON.stringify(q.next))})">Next 100</button>`:""}</div>
-    ${(q.repairs||[]).length?`<details><summary>Artifact repairs · ${(q.repairs||[]).length} recent plans</summary><p class="hint">Copy first, then one rebuild and delivery if needed. Failed plans stop automatically; inspect the work for its reason and retry controls.</p><div class="tbl"><table><thead><tr><th>Artifact</th><th>Destination</th><th>Phase</th><th>Age</th><th></th></tr></thead><tbody>${q.repairs.map(repair=>`<tr><td>${esc(repair.kind)}</td><td>${esc(repair.target_node_id)}</td><td>${esc(repair.phase)}</td><td>${esc(Math.floor(repair.age_ms/60000))} min</td><td>${repair.job_id?`<button class="ghost sm" onclick="showDurableJob(${esc(JSON.stringify(repair.job_id))})">Inspect work</button>`:""}</td></tr>`).join("")}</tbody></table></div></details>`:""}
-    ${q.detail?`<div class="hint"><b>${esc(q.detail.job.kind.replace(/_/g," "))} · ${esc(q.detail.job.state)}</b><p>${esc(q.detail.job.failed_attempts)} charged failures · ${esc(q.detail.job.yield_count)} yields · ${esc(q.detail.waiters.length)} interests shown${q.detail.more_waiters?" (more retained)":""}</p>
-      ${q.detail.attempts.map(attempt=>`<div>${esc(attempt.node_id)} · ${esc(attempt.outcome||"running")} · ${esc(attempt.error_code||"")} · started ${esc(new Date(attempt.started_at_ms).toLocaleString())}</div>`).join("")}
-      <button class="ghost sm" onclick="DURABLE_ACTIVITY.detail=null;paintDurableActivity()">Close details</button></div>`:""}</div>`;
+    ${(q.repairs||[]).length?`<details><summary>Artifact repairs · ${(q.repairs||[]).length} recent plans</summary><p class="hint">Copy first, then one rebuild and delivery if needed. Failed plans stop automatically; inspect the work for its reason and retry controls.</p><div class="tbl"><table><thead><tr><th>Artifact</th><th>Destination</th><th>Phase</th><th>Age</th><th></th></tr></thead><tbody>${q.repairs.map(repair=>`<tr><td>${esc(repair.kind)}</td><td>${esc(nodeLabel(nodeNames,repair.target_node_id))}</td><td>${esc(repair.phase)}</td><td>${esc(Math.floor(repair.age_ms/60000))} min</td><td>${repair.job_id?`<button class="ghost sm" onclick="showDurableJob(${esc(JSON.stringify(repair.job_id))})">Inspect work</button>`:""}</td></tr>`).join("")}</tbody></table></div></details>`:""}
+    ${q.detail?`<div class="hint"><b>${esc(q.detail.job.kind.replace(/_/g," "))} · ${esc(durableStateLabel(q.detail.job))}</b><p>${esc(q.detail.job.failed_attempts)} charged failures · ${esc(q.detail.job.yield_count)} yields · ${esc(q.detail.waiters.length)} interests shown${q.detail.more_waiters?" (more retained)":""}</p>
+      <p>Details observed ${esc(new Date(q.detail.job.observed_at_ms).toLocaleTimeString())}.${q.detailError?` Refresh failed: ${esc(q.detailError)}`:""}</p>
+      ${q.detail.attempts.map(attempt=>`<div>${esc(nodeLabel(nodeNames,attempt.node_id))} · ${esc(attempt.outcome||(durableLeaseExpired(q.detail.job)?"lease expired":"running"))} · ${esc(attempt.error_code||"")} · ${esc(durableDuration((attempt.finished_at_ms??(durableLeaseExpired(q.detail.job)?q.detail.job.lease_expires_ms:q.detail.job.observed_at_ms))-attempt.started_at_ms))} ${attempt.finished_at_ms?"elapsed":durableLeaseExpired(q.detail.job)?"until lease expired":"this attempt"} · started ${esc(new Date(attempt.started_at_ms).toLocaleString())}</div>`).join("")}
+      <button class="ghost sm" onclick="DURABLE_ACTIVITY.detail=null;DURABLE_ACTIVITY.selectedId=null;paintDurableActivity()">Close details</button></div>`:""}</div>`;
 }
 function paintDurableActivity(){
   if(location.hash!=="#/activity")return;
   const host=document.getElementById("durable-activity");if(!host)return;
   const focus=(/** @type {HTMLElement} */ (document.activeElement))?.dataset?.durableFocus;
-  host.innerHTML=durableQueueHtml();
+  host.innerHTML=durableQueueHtml(ACTIVITY_SNAPSHOT?.node_hostnames||{});
   const buttons=/** @type {NodeListOf<HTMLButtonElement>} */ (host.querySelectorAll("[data-durable-focus]"));
   if(focus)[...buttons].find(el=>el.dataset.durableFocus===focus)?.focus({preventScroll:true});
 }
 async function refreshDurableActivity(force=false){
-  const q=DURABLE_ACTIVITY,generation=PAGE_RENDER_GENERATION,epoch=q.epoch;
+  const q=DURABLE_ACTIVITY,generation=PAGE_RENDER_GENERATION,epoch=q.epoch,detailId=q.detail?.job.id;
   if(!ME||!ME.is_admin||location.hash!=="#/activity"||q.busy||(!force&&Date.now()-q.observed<15000))return;
   q.busy=true;
   try{
@@ -63,6 +76,13 @@ async function refreshDurableActivity(force=false){
     const page=await api(`/cluster/jobs?${query}`);
     if(epoch!==q.epoch||generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity")return;
     q.rows=page.jobs;q.repairs=page.repairs||[];q.counts=page.counts;q.migration=page.migration;q.next=page.next_cursor;q.observed=page.observed_at_ms;q.error=null;
+    paintDurableActivity();
+    if(detailId&&q.detail?.job.id===detailId&&q.selectedId===detailId){
+      try{
+        const detail=await api(`/cluster/jobs/${encodeURIComponent(detailId)}`);
+        if(epoch===q.epoch&&generation===PAGE_RENDER_GENERATION&&location.hash==="#/activity"&&q.detail?.job.id===detailId&&q.selectedId===detailId){q.detail=detail;q.detailError=null;}
+      }catch(error){if(epoch===q.epoch&&generation===PAGE_RENDER_GENERATION&&q.detail?.job.id===detailId&&q.selectedId===detailId)q.detailError=error.message||String(error);}
+    }
   }catch(error){if(epoch===q.epoch&&generation===PAGE_RENDER_GENERATION)q.error=error.message||String(error);}
   finally{q.busy=false;paintDurableActivity();if(epoch!==q.epoch)refreshDurableActivity(true);}
 }
@@ -71,7 +91,7 @@ function pageDurableJobs(cursor){const q=DURABLE_ACTIVITY;q.cursor=cursor;q.next
 async function showDurableJob(id){
   DURABLE_ACTIVITY.selectedId=id;
   const epoch=DURABLE_ACTIVITY.epoch,generation=PAGE_RENDER_GENERATION;
-  try{const detail=await api(`/cluster/jobs/${encodeURIComponent(id)}`);if(epoch!==DURABLE_ACTIVITY.epoch||generation!==PAGE_RENDER_GENERATION||DURABLE_ACTIVITY.selectedId!==id)return;DURABLE_ACTIVITY.detail=detail;paintDurableActivity();}
+  try{const detail=await api(`/cluster/jobs/${encodeURIComponent(id)}`);if(epoch!==DURABLE_ACTIVITY.epoch||generation!==PAGE_RENDER_GENERATION||DURABLE_ACTIVITY.selectedId!==id)return;DURABLE_ACTIVITY.detail=detail;DURABLE_ACTIVITY.detailError=null;paintDurableActivity();}
   catch(error){toast(error.message||String(error));}
 }
 async function cancelDurableJob(id,button){

@@ -2125,15 +2125,14 @@
             .expect("ack after unpolled control")
             .is_none());
 
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        fixture.pause_control_after_acceptance(Arc::clone(&pause));
+        let pause = fixture.pause_control_after_acceptance();
         let control = tokio::spawn({
             let state = fixture.state.clone();
             let route = route.clone();
             let request = request.clone();
             async move { control_local(&state, &route, request, i64::MAX).await }
         });
-        pause.wait().await;
+        let held = pause.reached().await;
 
         let retry_a = tokio::spawn({
             let state = fixture.state.clone();
@@ -2157,7 +2156,7 @@
         assert!(fixture.worker_is_registered(&session_id).await);
         control.abort();
         assert!(matches!(control.await, Err(error) if error.is_cancelled()));
-        pause.wait().await;
+        held.release();
 
         let retry_a = retry_a.await.expect("first retry task");
         let retry_b = retry_b.await.expect("second retry task");

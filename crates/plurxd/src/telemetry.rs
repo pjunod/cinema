@@ -1291,6 +1291,36 @@ pub(crate) fn record_start_unpaired(outcome: &str) {
     }
 }
 
+/// The pools a live start has been admitted over, in index order.
+pub(crate) const BACKGROUND_OVERRUN_POOLS: [&str; 2] = ["hardware", "software"];
+
+static BACKGROUND_OVERRUNS: [AtomicU64; BACKGROUND_OVERRUN_POOLS.len()] =
+    [const { AtomicU64::new(0) }; BACKGROUND_OVERRUN_POOLS.len()];
+
+/// Count one live start admitted over background ownership that did not yield
+/// inside the cooperative admission window. Zero is the design working; a
+/// rising count names a background worker holding a permit through a phase
+/// that never checks the pool.
+pub(crate) fn record_background_overrun(pool: &str) {
+    if let Some(index) = BACKGROUND_OVERRUN_POOLS
+        .iter()
+        .position(|label| *label == pool)
+    {
+        BACKGROUND_OVERRUNS[index].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn render_background_overruns(out: &mut String) {
+    render_counters(
+        out,
+        "plurx_transcode_background_overrun_total",
+        "Live starts admitted over a background encoder permit that did not yield within the cooperative admission window, by the pool taken.",
+        "pool",
+        &BACKGROUND_OVERRUN_POOLS,
+        &BACKGROUND_OVERRUNS,
+    );
+}
+
 #[cfg(test)]
 fn render_start_outcomes_for_test(record: impl FnOnce(&StartOutcomeCounters)) -> String {
     let counters = StartOutcomeCounters::new();
@@ -2011,6 +2041,7 @@ pub fn prometheus() -> String {
     metrics.push_str(&QUEUE_METRICS.render());
     metrics.push_str(&SUBTITLE_SOURCE_METRICS.render());
     metrics.push_str(&START_OUTCOME_COUNTERS.render());
+    render_background_overruns(&mut metrics);
     metrics
 }
 

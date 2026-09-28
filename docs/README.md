@@ -204,6 +204,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [ATSC3-AUDIO-STARTUP-RCA-AND-FIX.md](streaming/ATSC3-AUDIO-STARTUP-RCA-AND-FIX.md) | Why immersive AC-4 and delayed AC-3 broke live starts, what the fixes preserve, and why the 103.1 capture cannot initialize its decoder. | open |
 | [Live TV startup and captions repair status](clients/LIVE-TV-START-FEEDBACK-STATUS.html) | Review findings, final checks, merge and live acceptance for web startup feedback and captions controls. | open |
 | [ATSC 3.0 live audio repair status](streaming/ATSC3-AUDIO-STARTUP-STATUS.html) | Implementation, single adversarial review, final fast lane, merge and outstanding live acceptance. | open |
+| [LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md](streaming/LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md) | 2026-09-28: why Live TV said "all slots are busy" with every tuner idle — the subtitle backfill held the software pool while waiting out zombie claims, a live start refused after waiting for background work, and an encoder refusal labelled as a tuner one; the fix at each layer and the one reversed design ruling. | built |
 | [LIVE-TV-DIRECT-PLAY-AND-SURROUND.md](streaming/LIVE-TV-DIRECT-PLAY-AND-SURROUND.md) | 2026-09-24: why every ATSC 1.0 channel was encoded and every encode was stereo, the copy-first audio track selection, the sink-derived AAC channel claim, Android hardware MPEG-2, and the aspect-ratio report the server could not reproduce. | built |
 | [RESUME-ROLLING-PUBLICATION-RCA.md](streaming/RESUME-ROLLING-PUBLICATION-RCA.md) | Why resume stopped working on every client while starting from the beginning still did: which files fall back to the rolling engine, the web client whose MediaSource never opens, and the progress beat that erases a resume point once a startup fails. | open |
 | [SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md](streaming/SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md) | Why repeated seeks refuse playback and then reap the incumbent: retired streams retain a producer's whole reservation, and a refused destination poisons the incumbent's control snapshot. | open |
@@ -287,7 +288,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 ## cluster/ — replication, membership, and recovery
 
 Durable cluster work: [implementation](cluster/DURABLE-WORK-QUEUE-IMPLEMENTATION.md) ·
-[build status](cluster/DURABLE-WORK-QUEUE-STATUS.md) — **done**.
+[build status](cluster/DURABLE-WORK-QUEUE-STATUS.md) — **built**; [Activity and subtitle-throughput follow-up](http://192.168.4.7:3000/noirr/plurx/pulls/588).
 
 Phase 4 and everything under it: the clustering transition, the performance
 and media-pool work built on top, and the diagnoses of specific replicated
@@ -510,6 +511,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | [LIBRARY-CHANNELS-STATUS.md](features/LIBRARY-CHANNELS-STATUS.md) | Where Library channels is, what is proved, and what remains before promotion. | open |
 | [LIBRARY-CHANNELS-PLAYBACK-REPAIR.md](features/LIBRARY-CHANNELS-PLAYBACK-REPAIR.md) | Repair progress, native-muxer diagnostic, and deployed channel acceptance evidence. | open |
 | [WEEKLY-REVIEW-REMEDIATION-STATUS.md](features/WEEKLY-REVIEW-REMEDIATION-STATUS.md) | Which September 3–9 security, recovery, and playback findings were fixed, and which remain separately scoped capabilities. | done |
+| [LIVE-TV-APPLE-TV-NAVIGATION.md](features/LIVE-TV-APPLE-TV-NAVIGATION.md) | 2026-09-27: the Apple TV Live TV focus graph — why Info/More did nothing in fullscreen, why Up from the guide skipped the stage and Left from the picture lost the row, the five rules the page now keeps, what is deliberately dead, and the physical checklist. | built |
 | [LIVE-TV-NATIVE-LAYOUTS-STATUS.md](features/LIVE-TV-NATIVE-LAYOUTS-STATUS.md) | Three native TV presentations, compact mobile browsing, and the exact implementation evidence. | open |
 | [LIVE-TV-NATIVE-LAYOUTS-IMPLEMENTATION.md](features/LIVE-TV-NATIVE-LAYOUTS-IMPLEMENTATION.md) | Build contract for three selectable TV presentations and the compact iOS and Android Live TV layout. | open |
 | [LIVE-TV-NATIVE-LAYOUTS-PROPORTIONS-REVIEW.md](features/LIVE-TV-NATIVE-LAYOUTS-PROPORTIONS-REVIEW.md) | Why the Apple TV, Google TV and phone Live TV screens have the wrong proportions — five causes with line anchors, the numbers that fix them, and the renders. | open |

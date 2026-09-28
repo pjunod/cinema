@@ -1,8 +1,76 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-26 · Kept current by the working agent in the same
+**Updated:** 2026-09-28 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## Live TV said "all slots are busy" with every tuner idle
+
+**[PR #585](http://192.168.4.7:3000/noirr/plurx/pulls/585), merged 2026-09-28 as `2694db665`; not yet deployed — the GPT deploy/verify prompt is in the project doc.**
+Paul reported 2026-09-27 (web and iOS) that channels intermittently refuse
+with *All Live TV slots are busy*; the FLEX 4K had four idle tuners each
+time. The owner's own log named the cause — `tuner_capacity` with
+`cause=transcode capacity is temporarily unavailable: background encoding
+did not yield within 5.0s` — and the RCA
+([LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md](docs/streaming/LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md))
+found four layers: the subtitle backfill held the whole software encoder
+pool while walking candidate jobs; eight zombie `subtitle_extract` rows each
+cost that walk a full 30 s ambiguity wait because the claim trigger's
+definite `no longer claimable` abort was surfaced as an error and nothing
+retired the row; a live start that waited out the 5 s window with only
+background work in the way was **refused, by design**; and the Live TV layer
+labelled an encoder refusal a tuner one. Fixed at each layer: the store
+side landed first on `main` as #588 (claim/candidate precondition, bounded
+reconcile, guarded settled trigger, SQLite v84 / cluster v62) and this
+branch dropped its own copy at the merge; the backfill claims before it
+takes the pool; a `Priority::Live` start is admitted over background
+ownership after the window (hardware within the cap, software forced, one
+WARN + `plurx_transcode_background_overrun_total{pool}`); and the refusal is
+`encoder_capacity` with its own copy on all three clients, pinned by the
+shared start-cases fixture (Android 134, Apple 196).
+One adversarial review round (five findings, all taken): the take over a
+stuck permit is now bounded by live usage, the settled-trigger guard the
+review asked for is the one #588 shipped, the subtitle pre-check is the
+admission's own predicate, and the tests reach the arms they name.
+**Decision for Paul to look over:** admitting a viewer over a stuck
+background permit reverses the ruling OPERATIONS.md carried ("absence after
+five seconds means that worker is stuck rather than permission to start
+beside it"); the RCA §3 argues why. Next (GPT): deploy the three voters then nuc3,
+confirm the eight zombie rows retire on the first upkeep pass, tune 6.1
+under backfill load twenty times from web and iPhone, screenshot the
+`encoder_capacity` copy, and install Android 134 / Apple 196.
+commit as the work it describes; a stale entry here is a bug. Newest effort
+first.
+
+## Apple TV Live TV navigation: every press reversible, every control reachable
+
+**[PR #589](http://192.168.4.7:3000/noirr/plurx/pulls/589) merged to `main`
+2026-09-28 as `f400c0ea2`, Apple build 195; not yet installed on any device.**
+Paul reported 2026-09-27 that Live TV navigation on the Apple TV
+was close to broken: hard to reach anything, and a move often did not reverse.
+Two independent reads of `LiveTvView.swift` agreed on the causes, and one
+was worse than reported: Info and More on the fullscreen pills did nothing at
+all, because their sheets hung off a root that was already presenting the
+cover. Fixed in one Apple PR: the cover owns every sheet it can open; one
+`FocusTarget` key per view (the toolbar and the pills no longer share
+`.guide`/`.channels`/`.more`); Up from the guide's first row goes to the
+stage's Watch / the temporary guide's Close / Over picture's Close, and Down
+from those returns to the cell the grid held; Right past the last programme
+and Left from the header page the window and land on the same row; Up from
+the header column reaches the paging chips, which are never `.disabled`;
+channel rows are not disabled during a tune (focus used to jump to the
+toolbar); the detail region beside the list is moved by name so Left from
+the picture returns to the row you came from; the Guide pill opens on the
+channel playing and closing it restores the browse view and the pill; leaving
+the cover restores page focus from `onDismiss`; a programme sheet returns to
+its cell. The restore coordinator applies from `onChange` against the current
+view instead of the task's stale copy, and no longer cancels on an
+engine-driven arrival.
+[LIVE-TV-APPLE-TV-NAVIGATION.md](docs/features/LIVE-TV-APPLE-TV-NAVIGATION.md)
+has the focus graph and the §1 table that doubles as the device checklist.
+Verified: `make apple-test` (iOS 674 + tvOS 690, 0 failures) and the full
+fast lane, including the promotion gate. Not verified: anything with a remote
+in hand — the device pass is `~/Downloads/kit 2/APPLETV-LIVE-TV-NAVIGATION-PHYSICAL-VERIFICATION-PROMPT.md`.
 
 ## Silo comparison: two implementation plans and one device census, no code
 
@@ -246,85 +314,15 @@ layout goldens, which need `scripts/ui-baseline --self-host --update` on a
 machine with Playwright (the golden is also stale on `main` for unrelated
 routes).
 
-## The full Rust suite and the release build are clean again
-
-`PR #443`, branch `fix/red-suite-2026-09-22`. Nothing here changes runtime
-behaviour except one allocation at daemon startup; nothing to deploy for it.
-
-The fast lane (`make unit`) was green on `main`; the red was all in what only
-`make test-full` builds, which no CI lane runs any more.
-
-- **Release/Docker build warning.** `AvcCLocation.entry` and `.ancestors` in
-  `plurx-core/src/fmp4.rs` are read only by the `fixtures` builders, so every
-  release build warned they were never read. `expect(dead_code)` outside that
-  cfg.
-- **plurx-core lib aborted on a stack overflow** with `hiqlite-store` on, in two
-  join tests, taking every later test in the binary with it.
-  `select_daemon_store` awaited its join, reopen and activation branches
-  inline, so its future carried all of them (9,984 bytes; 496 boxed). Branches
-  are boxed now, and `select_daemon_store_future_stays_small` holds it under
-  2 KiB.
-- **14 hiqlite store contracts** failed in their fixtures: the downgrade
-  helpers stopped at schema v34, so replaying v40/v42/v43/v44 collided with
-  their own `ADD COLUMN`s, and v42's index over `video_identity` blocked the
-  v27 rewind. One shared reversal list now walks back v44..v40. Two stale
-  expectations were updated with it (the v42 index split; 46 to 52 import
-  tables).
-- **`live_tv_two_node`** (4 cases) needs to bind ports 80 and 5004, and fails
-  by design on a host that cannot. With `cap_net_bind_service` on nuc3 all
-  four pass. Not a code defect.
-
-## Resume stopped working on every client — reproduced, half fixed
-
-`PR #438`, branch `fix/resume-progress-zero-clobber`, **merged, NOT deployed**.
-RCA: [docs/streaming/RESUME-ROLLING-PUBLICATION-RCA.md](docs/streaming/RESUME-ROLLING-PUBLICATION-RCA.md).
-
-Reported 2026-09-22: "resume doesn't work for anything. it all just starts at
-the beginning now. It's been that way at least a day or two." Apple TV, iOS and
-web; the item page offers "Resume 13:04" and playback begins at zero.
-
-The watch state and the clients are innocent. The position is stored, the API
-returns it, the Resume affordance is drawn from it, the play request carries it
-and ffmpeg is given the seek. What breaks is the **rolling live-HLS recovery
-path**, taken whenever a file's cluster fragment index is still pending
-(`vod_index_pending`); a file with a complete index is served the whole title
-and resumes correctly. 4151 of 6201 files are indexed, and the backfill that
-`637ec781` unblocked on 09-19 keeps moving files across that boundary — which
-is why this arrived everywhere at once on the reported date.
-
-Localised from the shipped web client with the node instrumented. The server
-publishes a valid, growing playlist; the client fetches it and **never requests
-`init.mp4` or a single segment**, because hls.js's MediaSource is created,
-assigned to the element, and never reaches `open` — no SourceBuffer, stream
-controller IDLE, then the startup deadline and a server-side retirement. The
-`retired while waiting for scratch capacity` line that this chases is a fence
-raised after the session is already dead, not a budget refusal; the reservation
-is 315.8 MiB against an 8 GiB ledger and the subsystem is offset-blind.
-
-What #438 fixes is the ratchet, not the startup: while the player waits,
-`reportProgress` posts position 0 every five seconds over the saved resume
-point — eight of them in one reproduction — so a single failed startup destroys
-the resume position permanently. A zero beat now needs a witness, the current
-attachment having reached a timeline; a positioned beat needs none, which keeps
-a predecessor's close-time save intact.
-
-Still open: why the MediaSource never opens (the evidence points at
-`attachHls`'s internal pause reaching `handlePlaybackTransportEvent` as a
-viewer pause and stopping hls startup, and wants one reproduction with a real
-click); the inverted grant-wait deadline at `copyseg.rs:348`, which applies the
-bound to the session that *has* published; retirement fencing the writers it
-then waits for, which loses the final segment and `ENDLIST` of every killed
-copy session and misreports every retirement as a capacity problem; and 30
-titles carrying `watched = 1` below the threshold, which suppresses their
-resume outright.
-
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24, 2026-09-25 and 2026-09-26
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26 and 2026-09-27
 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-09-22 | The full Rust suite and the release build are clean again | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
+| 2026-09-22 | Resume stopped working on every client — reproduced, half fixed | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-21 | An abandoned replacement held its player's key — reported, diagnosed, fixed | [docs/playback-control/STATUS-HISTORY.md](docs/playback-control/STATUS-HISTORY.md) |
 | 2026-09-20 | Architecture review, revision 3 — Astra's review merged | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-20 | Implementation plans for the architecture review, and one work board for every vendor | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
