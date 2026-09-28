@@ -17,7 +17,9 @@ const { spawn, spawnSync } = require("node:child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const REPORT_NAME = "optical-source-acceptance.json";
-const MAX_CAPTURE_BYTES = 16 * 1024 * 1024;
+// Match the daemon's helper-ingestion ceiling so a lab pass cannot depend on
+// an inspection document production would refuse.
+const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 const MAX_FAILURE_BYTES = 2048;
 const ALLOWED_CASES = new Set(["first-frame", "seek-forward"]);
 
