@@ -21,6 +21,7 @@ mod fragment_index_cluster;
 mod housekeeping;
 mod library;
 mod library_channels;
+mod live_tv_resource;
 mod media;
 mod offline;
 mod outbox;
@@ -1171,7 +1172,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs_embeddings::SCHEMA,
     super::background_jobs_probe::SCHEMA,
     super::background_jobs_integrity::SCHEMA,
-    // v83: the subtitle adapter's settled trigger no longer rewrites the
+    // Distributed Live TV intents, ingest claims, and capture authority.
+    // v83: durable cluster tuner admission, capture claims and fenced output.
+    crate::live_tv_resource::SCHEMA,
+    // v84: the subtitle adapter's settled trigger no longer rewrites the
     // finished attempt of a demand that is already terminal (the zombie a
     // refused claim retires). Every statement in the adapter schema is
     // idempotent, and the trigger is dropped and recreated, so re-running
@@ -2899,10 +2903,11 @@ mod tests {
         // v72–v76 add library work, domain leases, source-I/O reservations,
         // provider dispatch budgets and the subtitle adapter; v77 adds artwork holders,
         // v78 retains portable transcode source/manifest provenance, v79–v82
-        // add predictions, embeddings, probe and integrity jobs, and v83
-        // guards the subtitle settled trigger against terminal demand.
+        // add predictions, embeddings, probe and integrity jobs, v83 the cluster
+        // Live TV resource ledger, and v84 guards the subtitle settled trigger
+        // against terminal demand.
         assert_eq!(
-            version, 83,
+            version, 84,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

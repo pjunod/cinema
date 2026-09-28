@@ -989,7 +989,9 @@ pattern = "ServingAuthority"
 # delegates to. It carries the same authority into the same struct field; no
 # new projection reader.
 # E3: one shared-ingest body carries the existing serving authority; it owns no task.
-expected_occurrences = 36
+# PR #537 current-main integration: measured after replacing the temporary
+# owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
+expected_occurrences = 35
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -2253,7 +2255,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 670 measured by zeroing this
 # row. Both sets retained unchanged (main's and this branch's, reviewed above); the merge
 # adds no new site.
-expected_occurrences = 670
+# PR #537 current-main integration: measured after replacing the temporary
+# owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
+expected_occurrences = 669
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -2279,6 +2283,9 @@ expected_occurrences = 670
 # stayed. 653 -> 654: `rolling_control_group_shipped_shape` builds one handle
 # through the production `RollingControlHandle::spawn`; the handle is dropped
 # and its actor exits through the exit fence before the test returns.
+# PR #537: +1 guide_replica_loop spawn in main. It belongs to the existing
+# background shutdown token, copies sanitized guide state, and starts no
+# media process or tuner transport. Reviewed with the cluster resource change.
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -3318,7 +3325,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 1082 measured by zeroing this
 # row. Both sets retained unchanged (main's and this branch's, reviewed above); the merge
 # adds no new site.
-expected_occurrences = 1082
+# PR #537 current-main integration: measured after replacing the temporary
+# owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
+expected_occurrences = 1088
+# PR #537: +13 bounded transport/finalizer lease waits, guide replica polling
+# and release, worker readiness/snapshot bounds. Transport/finalizer futures
+# belong to the operation's cancellation scope; replica polling ends on the
+# daemon shutdown token. None independently selects or starts a producer.
+# The slow-sink regression switches two existing observations from std to
+# Tokio time; the inventory counts both, so no constructor is added.
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -4073,10 +4088,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 406 measured by zeroing this
 # row. Both sets retained unchanged (main's and this branch's, reviewed above); the merge
 # adds no new site.
+# PR #537 current-main integration: measured after replacing the temporary
+# owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
 # +1 (406 -> 407) with the Live TV encoder_capacity code: one `Response::status()`
 # assertion in the error-advice test, on an in-process typed ApiError. It
 # launches nothing and owns nothing; #585 adds no command construction.
-expected_occurrences = 407
+expected_occurrences = 404
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

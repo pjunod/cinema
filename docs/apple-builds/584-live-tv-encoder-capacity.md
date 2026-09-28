@@ -2,7 +2,7 @@
 
 **Status:** built · 2026-09-28
 
-Build: 193
+Build: 194
 Issue: #584
 
 A Live TV start the tuner owner refuses for video-encoder capacity now says
