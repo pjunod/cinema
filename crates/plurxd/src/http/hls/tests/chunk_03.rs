@@ -1179,6 +1179,11 @@
         )
         .await;
         assert_eq!(
+            untaken_preparation_settlement_faults(&fixture.state, &route.incarnation_id),
+            0,
+            "the settlement on this state took the armed transient failure and retried"
+        );
+        assert_eq!(
             fixture
                 .state
                 .store

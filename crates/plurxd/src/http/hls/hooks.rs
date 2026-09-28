@@ -409,6 +409,19 @@ pub(super) fn fail_next_preparation_settlements(
         .insert(incarnation_id.to_owned(), count);
 }
 
+/// How many of the transient settlement failures armed for
+/// `incarnation_id` have not yet been taken by a settlement attempt.
+#[cfg(test)]
+pub(super) fn untaken_preparation_settlement_faults(
+    state: &AppState,
+    incarnation_id: &str,
+) -> usize {
+    locked(&hls_route_test_hooks(state).preparation_settlement_faults)
+        .get(incarnation_id)
+        .copied()
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 pub(super) fn take_preparation_candidate_completion(
     state: &AppState,
