@@ -815,6 +815,63 @@ fn seam_census_skips_files_reached_only_through_test_modules() {
 
 /// The §7 Q3 census of the workspace, printed for the plan. It pins only what
 /// M8 has migrated: an owner whose seams became a hook trait keeps none.
+/// Whether a census owner is `TranscodeManager` itself: the struct, one of
+/// its methods, or its hooks trait.
+fn transcode_manager_site(owner: &str) -> bool {
+    owner.starts_with("TranscodeManager")
+}
+
+#[test]
+fn transcode_manager_sites_are_recognised_wherever_the_manager_gates() {
+    // The workspace assertion that `TranscodeManager` keeps no site is only
+    // as good as this predicate: a gated field, a gated statement in a
+    // method and a gated default in the hooks trait must each count. Spelled
+    // `cfg(TEST)` and swapped before parsing, as above.
+    let sites = fixture_census(
+        &r#"
+        struct TranscodeManager {
+            live: u32,
+            #[cfg(TEST)]
+            pause: u32,
+        }
+        impl TranscodeManager {
+            fn resolve_movie_plan_with_qualification(&self) {
+                #[cfg(TEST)]
+                if self.live == 0 {
+                    self.fallback();
+                }
+            }
+        }
+        trait TranscodeManagerHooks {
+            fn point(&self) {
+                #[cfg(TEST)]
+                PAUSE.wait();
+            }
+        }
+        struct Other {
+            #[cfg(TEST)]
+            pause: u32,
+        }
+        "#
+        .replace("cfg(TEST)", "cfg(test)"),
+    );
+    let manager: Vec<&str> = sites
+        .iter()
+        .filter(|(owner, _)| transcode_manager_site(owner))
+        .map(|(owner, _)| owner.as_str())
+        .collect();
+    assert_eq!(
+        manager,
+        [
+            "TranscodeManager",
+            "TranscodeManager::resolve_movie_plan_with_qualification",
+            "TranscodeManagerHooks::point",
+        ],
+        "every gated manager site is recognised: {sites:?}"
+    );
+    assert!(sites.iter().any(|(owner, _)| owner == "Other"));
+}
+
 #[test]
 fn seam_census_of_the_workspace() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -885,19 +942,18 @@ fn seam_census_of_the_workspace() {
         migrated.is_empty(),
         "M8-migrated owners keep no test-only seams: {migrated:?}"
     );
-    // `TranscodeManager` itself keeps no gated field or initialiser; its one
-    // remaining site is the test-build decoder fallback in
-    // `resolve_movie_plan_with_qualification`, which every test-built manager
-    // relies on rather than one a test arms (the plan's execution log).
+    // `TranscodeManager` keeps no test-only site at all (§5.9's zero-count
+    // acceptance): no gated field, no initialiser, no gated statement in any
+    // of its methods or its hooks trait. The manager's test-build decoder
+    // fallback was deleted; the one test that needed a decoder names it
+    // through `with_decoders`.
     let manager: Vec<&Site> = sites
         .iter()
-        .filter(|site| site.owner.starts_with("TranscodeManager"))
+        .filter(|site| transcode_manager_site(&site.owner))
         .collect();
     assert!(
-        manager
-            .iter()
-            .all(|site| site.owner == "TranscodeManager::resolve_movie_plan_with_qualification"),
-        "TranscodeManager keeps only its test-build decoder fallback: {manager:?}"
+        manager.is_empty(),
+        "TranscodeManager keeps no test-only site: {manager:?}"
     );
     // The control actor keeps only the arms that apply the six test-driver
     // commands (`RollingControlCommand`'s test-only variants), which no

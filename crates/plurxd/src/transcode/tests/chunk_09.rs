@@ -227,7 +227,9 @@
         )]);
         let build = |qualification| {
             let (mgr, work, cache) = cached_manager(&store);
-            let mgr = mgr.with_measured_decoders(measured.clone());
+            let mgr = mgr
+                .with_decoders(vec!["hevc".to_owned()])
+                .with_measured_decoders(measured.clone());
             mgr.test_publish_artifact_qualification(qualification);
             (mgr, work, cache)
         };

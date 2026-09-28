@@ -244,14 +244,7 @@ impl TranscodeManager {
         )
         .map_err(|error| error.to_string())?;
         let qualifying = qualification.enforces_receipt();
-        #[allow(unused_mut)]
-        let mut decoders = self.decoders.clone();
-        #[cfg(test)]
-        if decoders.is_empty() {
-            if let Some(codec) = facts.codec() {
-                decoders.push(codec.to_owned());
-            }
-        }
+        let decoders = self.decoders.clone();
         let capabilities = DecodeCapabilities::new(
             identity,
             Vec::new(),
