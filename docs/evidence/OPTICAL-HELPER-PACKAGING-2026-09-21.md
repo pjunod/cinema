@@ -30,8 +30,9 @@ privileged mode.
 
 The helper's focused fixture suite passed 3/3 before the packaging edits. The
 final helper source then formatted and the Linux implementation type-checked
-with the pinned compiler through the `linux-host-check` feature on the
-available Unix host. The installer passed `bash -n`; both release-validation
+with the pinned compiler directly on the available Unix host. Runtime entry
+remains selected only by the operating-system target and has no Cargo feature
+gate. The installer passed `bash -n`; both release-validation
 modules compiled as Python. The Rust check emitted only the existing
 `plurx-core` dead-code warnings caused by compiling that dependency without
 the daemon's normal feature union.

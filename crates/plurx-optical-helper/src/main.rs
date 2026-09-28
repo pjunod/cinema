@@ -4,18 +4,19 @@
 //! filesystem parsing and device ioctls outside the long-lived server and
 //! emits one versioned JSON reply on standard output.
 
-#[cfg(any(target_os = "linux", feature = "linux-host-check"))]
+#[cfg(target_os = "linux")]
 fn main() {
     linux::run_main();
 }
 
-#[cfg(all(not(target_os = "linux"), not(feature = "linux-host-check")))]
+#[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("plurx-optical-helper is supported on Linux only");
     std::process::exit(1);
 }
 
-#[cfg(any(target_os = "linux", feature = "linux-host-check"))]
+#[cfg(unix)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod linux {
 
     use std::collections::BTreeSet;
