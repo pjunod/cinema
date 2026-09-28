@@ -6,7 +6,7 @@
 
 | Work | Current evidence | Next action |
 |---|---|---|
-| C-08 client §7.9 | The merged server contract exists; current web/Apple/Android clients lack seek terminal beacons and native progress method. | Parallel web, Apple and Android implementation on `codex/c08-client-telemetry-0927`; one batched PR, one final adversarial review, then fast lane. Claude retains server ownership. |
+| C-08 client §7.9 | The merged server contract exists; current web/Apple/Android clients lack seek terminal beacons and native progress method. | Parallel web, Apple and Android implementation in [draft PR #582](http://192.168.4.7:3000/noirr/plurx/pulls/582); Apple commit `9341151fc` compiles on iOS/tvOS, including test sources (unexecuted); one batched PR, one final adversarial review, then fast lane. Claude retains server ownership. |
 | Fleet | Fresh four-node audit: all checkouts `ffe965`; nynuc/nuc3 run `ffe965`, m6/nuc4 run `86f2e870a`. All were healthy, with quorum, lag0 and clean hygiene. | Resolve the independent rollout's ownership before another node transition; establish a uniform point and restart current-main duration evidence. |
 | Duration | Historical `86f` first hour: 121 ticks/node, no gaps, source changes, HTTP/quorum/restart or hygiene issues; nuc3 maximum lag1. Later source changes invalidate a uniform 24-hour/7-day claim. | Preserve the historical receipt; one collector/heartbeat remains active, explicitly marked source-mixed. |
 | Physical devices | Release191 Apple and signed Android131 remain installed; iPad Pro and Pixel are now unlocked. | Deploy changed client releases after merge; collect named playback, seek, reader and controller evidence on reachable devices. |
