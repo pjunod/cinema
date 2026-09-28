@@ -2777,18 +2777,22 @@ test("late cluster work can repaint only a live Settings route", () => {
   }
 });
 
-test("this panel calls only the eleven cluster endpoints the node API ships", () => {
+test("the web app calls only the cluster endpoints the node API ships", () => {
   const called = new Set();
   const CALL = /api\(\s*([`"'])(\/cluster[^`"']*)\1/g;
   for (const [, , route] of SHIPPED_UI.matchAll(CALL)) {
-    // A template hole is a node id, and a node id is a fact about one cluster
-    // rather than about the routes this panel speaks to.
-    called.add(route.replace(/\$\{[^}]*\}/g, "<id>"));
+    // Query filters do not change the route; template holes in the path are
+    // node or durable-job IDs rather than additional API endpoints.
+    called.add(route.split("?")[0].replace(/\$\{[^}]*\}/g, "<id>"));
   }
   assert.deepEqual(
     [...called].sort(),
     [
       "/cluster/election",
+      "/cluster/jobs",
+      "/cluster/jobs/<id>",
+      "/cluster/jobs/<id>/cancel",
+      "/cluster/jobs/<id>/retry",
       "/cluster/join-tokens",
       "/cluster/learner-join-tokens",
       "/cluster/leave",
@@ -2799,6 +2803,7 @@ test("this panel calls only the eleven cluster endpoints the node API ships", ()
       "/cluster/nodes/<id>/restart-preparation",
       "/cluster/status",
       "/cluster/support-bundle",
+      "/cluster/work/storage-domains",
     ],
   );
 });
