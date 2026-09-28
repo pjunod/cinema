@@ -34,6 +34,7 @@ mod live_tv;
 mod network;
 mod offline;
 mod optical;
+pub(crate) use optical::public_drive_failure_reason;
 pub(crate) mod peer_transport;
 mod pgs_overlay;
 mod photos;

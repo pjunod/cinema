@@ -27,7 +27,7 @@ pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
 /// path-free optical ownership in node snapshots. Exact-version filtering is
 /// the activation fence: a mixed cluster refuses placement instead of losing
 /// source semantics.
-pub(crate) const PROTOCOL_VERSION: i64 = 7;
+pub(crate) const PROTOCOL_VERSION: i64 = 8;
 pub(crate) const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const SNAPSHOT_EXPIRY: Duration = Duration::from_secs(15);
@@ -82,6 +82,39 @@ pub(crate) struct ToneMapOfferCapability {
     pub pipeline: String,
 }
 
+/// The cluster directory needs enough optical state to render availability
+/// and route work to the owner, but it must not replicate owner-local bearer
+/// capabilities or private helper diagnostics.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct OpticalDriveAdvertisement {
+    pub id: String,
+    pub label: String,
+    pub owner_node_id: String,
+    pub state: OpticalDriveAdvertisementState,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum OpticalDriveAdvertisementState {
+    Empty,
+    Inspecting {
+        media_generation: String,
+    },
+    Ready {
+        media_generation: String,
+        disc_id: String,
+    },
+    Busy {
+        media_generation: String,
+        disc_id: String,
+        title_id: String,
+    },
+    Failed {
+        media_generation: Option<String>,
+        reason: String,
+    },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct MediaNodeSnapshot {
     pub node_id: String,
@@ -96,7 +129,7 @@ pub(crate) struct MediaNodeSnapshot {
     /// Path-free, insertion-fenced ownership advertisements. Device and mount
     /// paths remain node-local configuration and never enter this directory.
     #[serde(default)]
-    pub optical_drives: Vec<plurx_core::optical::OpticalDriveSnapshot>,
+    pub optical_drives: Vec<OpticalDriveAdvertisement>,
     pub encoders: Vec<EncoderOfferCapability>,
     pub tone_map: Vec<ToneMapOfferCapability>,
     pub hardware_slots_used: u32,
@@ -651,6 +684,7 @@ impl MediaPool {
             .values()
             .filter(|cached| cached.snapshot.optical_v1)
             .flat_map(|cached| cached.snapshot.optical_drives.clone())
+            .map(plurx_core::optical::OpticalDriveSnapshot::from)
             .collect::<Vec<_>>();
         drives.sort_by(|left, right| {
             left.owner_node_id
@@ -991,7 +1025,7 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
         protocol_version: PROTOCOL_VERSION,
         optical_v1: cfg!(target_os = "linux"),
         optical_drives: if cfg!(target_os = "linux") {
-            state.optical.manager().snapshots()
+            advertised_optical_drives(state)
         } else {
             Vec::new()
         },
@@ -1019,6 +1053,106 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
         egress_pressure: workload_pressure,
         live_waiting: runtime.live_waiting,
         background_active: runtime.background_active,
+    }
+}
+
+/// Cluster availability is deliberately weaker than the owner-local drive
+/// state.  In particular, a busy manager state contains the HLS session id
+/// (a bearer capability) and a failed state contains the private host/helper
+/// diagnostic.  Neither value is needed to route an optical request, so do
+/// not replicate it to every peer in the media-pool heartbeat.
+fn advertised_optical_drives(state: &AppState) -> Vec<OpticalDriveAdvertisement> {
+    state
+        .optical
+        .manager()
+        .snapshots()
+        .into_iter()
+        .map(OpticalDriveAdvertisement::from)
+        .collect()
+}
+
+impl From<plurx_core::optical::OpticalDriveSnapshot> for OpticalDriveAdvertisement {
+    fn from(drive: plurx_core::optical::OpticalDriveSnapshot) -> Self {
+        let state = match drive.state {
+            plurx_core::optical::OpticalDriveState::Busy {
+                media_generation,
+                disc_id,
+                title_id,
+                session_id: _,
+            } => OpticalDriveAdvertisementState::Busy {
+                media_generation,
+                disc_id,
+                title_id,
+            },
+            plurx_core::optical::OpticalDriveState::Failed {
+                media_generation,
+                reason,
+            } => OpticalDriveAdvertisementState::Failed {
+                media_generation,
+                reason: crate::http::public_drive_failure_reason(&reason),
+            },
+            plurx_core::optical::OpticalDriveState::Empty => OpticalDriveAdvertisementState::Empty,
+            plurx_core::optical::OpticalDriveState::Inspecting { media_generation } => {
+                OpticalDriveAdvertisementState::Inspecting { media_generation }
+            }
+            plurx_core::optical::OpticalDriveState::Ready {
+                media_generation,
+                disc_id,
+            } => OpticalDriveAdvertisementState::Ready {
+                media_generation,
+                disc_id,
+            },
+        };
+        Self {
+            id: drive.id,
+            label: drive.label,
+            owner_node_id: drive.owner_node_id,
+            state,
+        }
+    }
+}
+
+impl From<OpticalDriveAdvertisement> for plurx_core::optical::OpticalDriveSnapshot {
+    fn from(drive: OpticalDriveAdvertisement) -> Self {
+        let state = match drive.state {
+            OpticalDriveAdvertisementState::Empty => plurx_core::optical::OpticalDriveState::Empty,
+            OpticalDriveAdvertisementState::Inspecting { media_generation } => {
+                plurx_core::optical::OpticalDriveState::Inspecting { media_generation }
+            }
+            OpticalDriveAdvertisementState::Ready {
+                media_generation,
+                disc_id,
+            } => plurx_core::optical::OpticalDriveState::Ready {
+                media_generation,
+                disc_id,
+            },
+            OpticalDriveAdvertisementState::Busy {
+                media_generation,
+                disc_id,
+                title_id,
+            } => plurx_core::optical::OpticalDriveState::Busy {
+                media_generation,
+                disc_id,
+                title_id,
+                // Remote callers never receive or act on the owner's session
+                // capability.  This marker exists only for the local display
+                // enum reused by the HTTP layer.
+                session_id: "private-on-owner".to_owned(),
+            },
+            OpticalDriveAdvertisementState::Failed {
+                media_generation,
+                reason,
+            } => plurx_core::optical::OpticalDriveState::Failed {
+                media_generation,
+                reason,
+            },
+        };
+        Self {
+            id: drive.id,
+            label: drive.label,
+            owner_node_id: drive.owner_node_id,
+            state,
+        }
     }
 }
 
@@ -1241,7 +1375,7 @@ fn snapshot_is_bounded(snapshot: &MediaNodeSnapshot, expected_node_id: &str) -> 
 }
 
 fn optical_drive_advertisement_is_bounded(
-    drive: &plurx_core::optical::OpticalDriveSnapshot,
+    drive: &OpticalDriveAdvertisement,
     expected_node_id: &str,
 ) -> bool {
     fn bounded(value: &str) -> bool {
@@ -1249,26 +1383,20 @@ fn optical_drive_advertisement_is_bounded(
     }
 
     let state_is_bounded = match &drive.state {
-        plurx_core::optical::OpticalDriveState::Empty => true,
-        plurx_core::optical::OpticalDriveState::Inspecting { media_generation } => {
+        OpticalDriveAdvertisementState::Empty => true,
+        OpticalDriveAdvertisementState::Inspecting { media_generation } => {
             bounded(media_generation)
         }
-        plurx_core::optical::OpticalDriveState::Ready {
+        OpticalDriveAdvertisementState::Ready {
             media_generation,
             disc_id,
         } => bounded(media_generation) && bounded(disc_id),
-        plurx_core::optical::OpticalDriveState::Busy {
+        OpticalDriveAdvertisementState::Busy {
             media_generation,
             disc_id,
             title_id,
-            session_id,
-        } => {
-            bounded(media_generation)
-                && bounded(disc_id)
-                && bounded(title_id)
-                && bounded(session_id)
-        }
-        plurx_core::optical::OpticalDriveState::Failed {
+        } => bounded(media_generation) && bounded(disc_id) && bounded(title_id),
+        OpticalDriveAdvertisementState::Failed {
             media_generation,
             reason,
         } => media_generation.as_deref().is_none_or(bounded) && bounded(reason),
@@ -1515,12 +1643,12 @@ mod tests {
         }
     }
 
-    fn advertised_drive(node: &str, id: &str) -> plurx_core::optical::OpticalDriveSnapshot {
-        plurx_core::optical::OpticalDriveSnapshot {
+    fn advertised_drive(node: &str, id: &str) -> OpticalDriveAdvertisement {
+        OpticalDriveAdvertisement {
             id: id.to_owned(),
             label: "Media room".to_owned(),
             owner_node_id: node.to_owned(),
-            state: plurx_core::optical::OpticalDriveState::Ready {
+            state: OpticalDriveAdvertisementState::Ready {
                 media_generation: "generation-1".to_owned(),
                 disc_id: "optical-v1:dvd:digest".to_owned(),
             },
@@ -1551,6 +1679,38 @@ mod tests {
         let mut old_protocol_shape = current;
         old_protocol_shape.optical_v1 = false;
         assert!(!snapshot_is_bounded(&old_protocol_shape, "node-a"));
+    }
+
+    #[test]
+    fn optical_advertisements_keep_owner_secrets_local() {
+        let busy = OpticalDriveAdvertisement::from(plurx_core::optical::OpticalDriveSnapshot {
+            id: "drive-a".to_owned(),
+            label: "Media room".to_owned(),
+            owner_node_id: "node-a".to_owned(),
+            state: plurx_core::optical::OpticalDriveState::Busy {
+                media_generation: "generation-1".to_owned(),
+                disc_id: "disc-1".to_owned(),
+                title_id: "title-1".to_owned(),
+                session_id: "secret-session-capability".to_owned(),
+            },
+        });
+        let busy_wire = serde_json::to_string(&busy).expect("serialize busy advertisement");
+        assert!(!busy_wire.contains("secret-session-capability"));
+        assert!(!busy_wire.contains("session_id"));
+
+        let failed = OpticalDriveAdvertisement::from(plurx_core::optical::OpticalDriveSnapshot {
+            id: "drive-a".to_owned(),
+            label: "Media room".to_owned(),
+            owner_node_id: "node-a".to_owned(),
+            state: plurx_core::optical::OpticalDriveState::Failed {
+                media_generation: Some("generation-1".to_owned()),
+                reason: "helper failed at /mnt/private/disc with secret-key".to_owned(),
+            },
+        });
+        let failed_wire = serde_json::to_string(&failed).expect("serialize failed advertisement");
+        assert!(!failed_wire.contains("/mnt/private"));
+        assert!(!failed_wire.contains("secret-key"));
+        assert!(failed_wire.contains("Check server logs"));
     }
 
     #[tokio::test]
