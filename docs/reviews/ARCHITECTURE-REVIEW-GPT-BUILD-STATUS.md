@@ -1,6 +1,10 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 06:15 UTC · **Audited main:** `c983989813d0819ed54dc1b1e115c08b60a059e8`
+**Status:** open · **Updated:** 2026-09-28 06:37 UTC · **Audited main:** `2694db665eedcb8c00c4caee15e72a897cd7f4c2`
+
+Main #585 merged independently as `2694db665eedcb8c00c4caee15e72a897cd7f4c2` during590 qualification. Its actual server admission changes and native encoder-capacity message are integrated. It claims Apple196/Android134, so590 now reserves Apple197 and requires fresh197 apps/runner plus exact134 Android compilation and installation. The prior196/133 artifacts and physical observations keep their historical/source scope. No second590review. Its old-base gate3489 cannot qualify this new main; current combined compilation/focused checks and a new exact-base fast lane are required.
+
+Parallel draft594 will integrate this current source and reserve Apple198/Android135 for caption selectors and explicit watchable actions. Any feature134 APK from its previous e51 source is sealed unqualified and must not be installed. Actual API37 synthetic local backup/restore passed on historical signed133 (receipt b4059fc12eac56421264142580403a74d24114e1b5a672dfef321b87402924c5); owned emulator/privateADB/temporary image storage cleaned (d3b8efd21467aa005a9092d235ccb72d0d66e18d1a590fc5ad49353b4fd20f03). Cloud/D2D/physical/final134 acceptance remains owed.
 
 [PR #582](http://192.168.4.7:3000/noirr/plurx/pulls/582) merged after its
 single adversarial review; all four findings were fixed. The exact candidate
