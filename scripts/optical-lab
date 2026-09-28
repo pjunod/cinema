@@ -1,0 +1,373 @@
+#!/usr/bin/env node
+/*
+ * Bounded, opt-in optical source-reader acceptance for Linux hosts.
+ *
+ * This tool never ejects media and never exports decoded frames. It proves
+ * only helper inspection and FFmpeg's ability to decode explicitly selected
+ * title positions; end-to-end plurxd/VOD and client acceptance are separate.
+ */
+"use strict";
+
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const fsp = fs.promises;
+const os = require("node:os");
+const path = require("node:path");
+const { spawn, spawnSync } = require("node:child_process");
+
+const ROOT = path.resolve(__dirname, "..");
+const REPORT_NAME = "optical-source-acceptance.json";
+const MAX_CAPTURE_BYTES = 16 * 1024 * 1024;
+const MAX_FAILURE_BYTES = 2048;
+const ALLOWED_CASES = new Set(["first-frame", "seek-forward"]);
+
+function usage() {
+  process.stdout.write(`plurx optical source-reader lab
+
+Usage:
+  scripts/optical-lab source-run \\
+    --helper PATH --ffmpeg PATH --ffprobe PATH \\
+    --device PATH --mount PATH --drive-id ID \\
+    --format dvd|bluray --title TITLE_ID --fixture-id ID \\
+    --cases first-frame,seek-forward --output DIR \\
+    [--angle N] [--seek-seconds N] [--timeout-seconds N]
+
+The output directory is required and must not already contain
+${REPORT_NAME}. The runner never calls the helper's eject command, never writes
+disc content, and records only bounded diagnostics. A passing report proves
+the helper/source-reader layer, not plurxd VOD or client playback.
+`);
+}
+
+function parseArgs(argv) {
+  const command = argv[0];
+  const options = {};
+  for (let index = 1; index < argv.length; index += 1) {
+    const raw = argv[index];
+    if (!raw.startsWith("--")) throw new Error(`unexpected argument: ${raw}`);
+    const separator = raw.indexOf("=");
+    if (separator > 0) {
+      options[raw.slice(2, separator).replaceAll("-", "_")] = raw.slice(separator + 1);
+      continue;
+    }
+    const key = raw.slice(2).replaceAll("-", "_");
+    const value = argv[index + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error(`--${key.replaceAll("_", "-")} needs a value`);
+    }
+    options[key] = value;
+    index += 1;
+  }
+  return { command, options };
+}
+
+function required(options, key) {
+  const value = options[key];
+  if (!value) throw new Error(`--${key.replaceAll("_", "-")} is required`);
+  return value;
+}
+
+function positiveInteger(value, label, fallback) {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${label} must be a positive integer`);
+  return parsed;
+}
+
+function positiveNumber(value, label, fallback) {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`${label} must be positive`);
+  return parsed;
+}
+
+function absoluteExisting(value, label) {
+  const resolved = path.resolve(value);
+  if (!path.isAbsolute(value)) throw new Error(`${label} must be absolute`);
+  if (!fs.existsSync(resolved)) throw new Error(`${label} does not exist`);
+  return resolved;
+}
+
+function cleanText(value, secrets = [], limit = MAX_FAILURE_BYTES) {
+  let text = String(value || "");
+  for (const secret of secrets.filter(Boolean).sort((a, b) => b.length - a.length)) {
+    text = text.split(secret).join("<redacted-path>");
+  }
+  text = text.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  return Buffer.from(text).subarray(0, limit).toString("utf8");
+}
+
+function appendBounded(chunks, state, chunk, limit) {
+  if (state.bytes >= limit) {
+    if (chunk.length > 0) state.truncated = true;
+    return;
+  }
+  const remaining = limit - state.bytes;
+  const retained = chunk.subarray(0, remaining);
+  chunks.push(retained);
+  state.bytes += retained.length;
+  if (retained.length < chunk.length) state.truncated = true;
+}
+
+function runBounded(program, args, { timeoutMs, env, captureBytes = MAX_CAPTURE_BYTES }) {
+  return new Promise((resolve) => {
+    const started = process.hrtime.bigint();
+    const stdout = [];
+    const stderr = [];
+    const stdoutState = { bytes: 0, truncated: false };
+    const stderrState = { bytes: 0, truncated: false };
+    let timedOut = false;
+    let spawnError = null;
+    const child = spawn(program, args, {
+      env,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    child.stdout.on("data", (chunk) => appendBounded(stdout, stdoutState, chunk, captureBytes));
+    child.stderr.on("data", (chunk) => appendBounded(stderr, stderrState, chunk, captureBytes));
+    child.on("error", (error) => { spawnError = error; });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (child.pid) {
+        try { process.kill(-child.pid, "SIGKILL"); } catch (_) { /* already gone */ }
+      }
+    }, timeoutMs);
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      const durationMs = Number((process.hrtime.bigint() - started) / 1_000_000n);
+      resolve({
+        code,
+        signal,
+        timedOut,
+        spawnError,
+        durationMs,
+        stdout: Buffer.concat(stdout),
+        stderr: Buffer.concat(stderr),
+        stdoutTruncated: stdoutState.truncated,
+        stderrTruncated: stderrState.truncated,
+      });
+    });
+  });
+}
+
+function commandVersion(program, args, secrets) {
+  const result = spawnSync(program, args, { encoding: "utf8", timeout: 10_000 });
+  const line = `${result.stdout || ""}\n${result.stderr || ""}`.split(/\r?\n/).find(Boolean);
+  return cleanText(line || `unavailable (exit ${result.status ?? "spawn"})`, secrets, 512);
+}
+
+function sha256File(file) {
+  const hash = crypto.createHash("sha256");
+  hash.update(fs.readFileSync(file));
+  return hash.digest("hex");
+}
+
+function gitIdentity() {
+  const sha = spawnSync("git", ["-C", ROOT, "rev-parse", "HEAD"], { encoding: "utf8" });
+  const dirty = spawnSync("git", ["-C", ROOT, "status", "--porcelain"], { encoding: "utf8" });
+  if (sha.status !== 0 || dirty.status !== 0) throw new Error("cannot determine source identity");
+  return { sha: sha.stdout.trim(), dirty: dirty.stdout.trim().length > 0 };
+}
+
+function driveIdentity(device) {
+  const block = path.basename(fs.realpathSync(device));
+  const root = path.join("/sys/class/block", block, "device");
+  const read = (name) => {
+    try { return cleanText(fs.readFileSync(path.join(root, name), "utf8"), [], 128); } catch (_) { return null; }
+  };
+  return { block, vendor: read("vendor"), model: read("model"), firmware: read("rev") };
+}
+
+function selectedTitle(inspection, expectedFormat, titleId, angle) {
+  if (!inspection || inspection.schema_version !== 1 || !inspection.disc) {
+    throw new Error("helper returned an unsupported inspection document");
+  }
+  if (inspection.disc.format !== expectedFormat) {
+    throw new Error(`inserted media is ${inspection.disc.format}, expected ${expectedFormat}`);
+  }
+  const title = inspection.disc.titles?.find((candidate) => candidate.title_id === titleId);
+  if (!title) throw new Error(`title ${titleId} is not present in the inspection`);
+  if (angle > Number(title.angles || 0)) throw new Error(`angle ${angle} exceeds title angle count`);
+  return title;
+}
+
+function inputArgs(format, title, angle, device, mount) {
+  if (format === "dvd") {
+    const number = title.locator?.title_number;
+    if (!Number.isSafeInteger(number) || number < 1) throw new Error("DVD title locator is invalid");
+    return ["-f", "dvdvideo", "-title", String(number), "-angle", String(angle), "-i", device];
+  }
+  const number = title.locator?.playlist_number;
+  if (!Number.isSafeInteger(number) || number < 0 || number > 99_999) {
+    throw new Error("Blu-ray playlist locator is invalid");
+  }
+  return ["-playlist", String(number), "-angle", String(angle), "-i", `bluray:${mount}`];
+}
+
+async function runCase(name, context) {
+  const args = ["-nostdin", "-hide_banner", "-v", "error"];
+  if (name === "seek-forward") args.push("-ss", context.seekSeconds.toFixed(3));
+  args.push(...inputArgs(context.format, context.title, context.angle, context.device, context.mount));
+  args.push("-map", "0:v:0", "-frames:v", "1", "-an", "-sn", "-dn", "-f", "null", "-");
+  const result = await runBounded(context.ffmpeg, args, {
+    timeoutMs: context.timeoutMs,
+    env: process.env,
+    captureBytes: 64 * 1024,
+  });
+  const passed = result.code === 0 && !result.timedOut && !result.spawnError
+    && !result.stdoutTruncated && !result.stderrTruncated;
+  const rawFailure = result.spawnError?.message || result.stderr.toString("utf8")
+    || (result.timedOut ? "case timed out" : `ffmpeg exited ${result.code ?? result.signal}`);
+  return {
+    id: name,
+    outcome: passed ? "passed" : "failed",
+    duration_ms: result.durationMs,
+    failure: passed ? null : cleanText(rawFailure, context.redactions),
+    process: {
+      exit_code: result.code,
+      signal: result.signal,
+      timed_out: result.timedOut,
+      output_truncated: result.stdoutTruncated || result.stderrTruncated,
+    },
+  };
+}
+
+async function writeReport(output, report) {
+  await fsp.mkdir(output, { recursive: true, mode: 0o700 });
+  const finalPath = path.join(output, REPORT_NAME);
+  if (fs.existsSync(finalPath)) throw new Error(`${finalPath} already exists`);
+  const temporary = path.join(output, `.${REPORT_NAME}.${process.pid}.tmp`);
+  await fsp.writeFile(temporary, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+  await fsp.rename(temporary, finalPath);
+  return finalPath;
+}
+
+async function sourceRun(options) {
+  if (process.platform !== "linux") throw new Error("source-run is supported on Linux only");
+  const helper = absoluteExisting(required(options, "helper"), "--helper");
+  const ffmpeg = absoluteExisting(required(options, "ffmpeg"), "--ffmpeg");
+  const ffprobe = absoluteExisting(required(options, "ffprobe"), "--ffprobe");
+  const device = absoluteExisting(required(options, "device"), "--device");
+  const mount = absoluteExisting(required(options, "mount"), "--mount");
+  const output = path.resolve(required(options, "output"));
+  const driveId = required(options, "drive_id");
+  const fixtureId = required(options, "fixture_id");
+  const format = required(options, "format");
+  const titleId = required(options, "title");
+  if (!["dvd", "bluray"].includes(format)) throw new Error("--format must be dvd or bluray");
+  const cases = required(options, "cases").split(",").map((value) => value.trim()).filter(Boolean);
+  if (cases.length === 0 || new Set(cases).size !== cases.length || cases.some((name) => !ALLOWED_CASES.has(name))) {
+    throw new Error("--cases must be a unique comma-separated subset of first-frame,seek-forward");
+  }
+  const angle = positiveInteger(options.angle, "--angle", 1);
+  const seekSeconds = positiveNumber(options.seek_seconds, "--seek-seconds", 120);
+  const timeoutSeconds = positiveInteger(options.timeout_seconds, "--timeout-seconds", 90);
+  const timeoutMs = timeoutSeconds * 1000;
+  const redactions = [helper, ffmpeg, ffprobe, device, mount, output];
+  const generation = `optical-lab-${crypto.randomBytes(12).toString("hex")}`;
+  const startedAt = new Date().toISOString();
+  const source = gitIdentity();
+  const report = {
+    schema: "plurx-optical-source-acceptance-v1",
+    scope: "source-reader",
+    qualification_claim: "helper inspection and bounded FFmpeg title decode only",
+    started_at: startedAt,
+    finished_at: new Date().toISOString(),
+    source,
+    toolchain: {
+      node: process.version,
+      rustc: commandVersion("rustc", ["--version"], redactions),
+      ffmpeg: commandVersion(ffmpeg, ["-version"], redactions),
+      ffprobe: commandVersion(ffprobe, ["-version"], redactions),
+      helper_sha256: sha256File(helper),
+    },
+    host: { hostname: os.hostname(), platform: os.platform(), release: os.release(), arch: os.arch() },
+    drive: { id: driveId, ...driveIdentity(device) },
+    fixture: { id: fixtureId, format, title_id: titleId, angle, duration_ms: null },
+    invocation: { cases, seek_seconds: seekSeconds, timeout_seconds: timeoutSeconds },
+    inspection: { outcome: "not_run", duration_ms: null, presence: null, title_count: null, diagnostics: "" },
+    cases: [],
+    cleanup: {
+      outcome: "passed",
+      surviving_child_processes: 0,
+      note: "Each case was awaited; timeout kills its detached process group. The runner never ejects.",
+    },
+    outcome: "failed",
+    failures: [],
+  };
+  let stage = "presence";
+  try {
+    const presence = await runBounded(helper, ["presence", "--device", device, "--mount", mount], {
+      timeoutMs,
+      env: process.env,
+      captureBytes: 64 * 1024,
+    });
+    if (presence.code !== 0 || presence.timedOut || presence.spawnError || presence.stdoutTruncated) {
+      throw new Error(cleanText(presence.spawnError?.message || presence.stderr, redactions) || "presence check failed");
+    }
+    const presenceDocument = JSON.parse(presence.stdout.toString("utf8"));
+    report.inspection.presence = presenceDocument.presence || null;
+    if (!["present", "changed"].includes(presenceDocument.presence)) {
+      throw new Error(`optical media is ${presenceDocument.presence || "unknown"}`);
+    }
+    stage = "inspection";
+    const inspect = await runBounded(helper, [
+      "inspect", "--device", device, "--mount", mount, "--schema", "1",
+      "--expected-generation", generation,
+    ], {
+      timeoutMs,
+      env: { ...process.env, PLURX_FFPROBE: ffprobe },
+    });
+    report.inspection.duration_ms = inspect.durationMs;
+    if (inspect.code !== 0 || inspect.timedOut || inspect.spawnError || inspect.stdoutTruncated) {
+      const helperFailure = inspect.stdout.length > 0 ? inspect.stdout : inspect.stderr;
+      throw new Error(cleanText(helperFailure, redactions) || "optical inspection failed");
+    }
+    const inspection = JSON.parse(inspect.stdout.toString("utf8"));
+    if (inspection.expected_generation !== generation) throw new Error("helper inspection generation mismatch");
+    const title = selectedTitle(inspection, format, titleId, angle);
+    if (title.duration_ms && cases.includes("seek-forward") && seekSeconds * 1000 >= title.duration_ms) {
+      throw new Error("--seek-seconds must be before the selected title duration");
+    }
+    report.fixture.duration_ms = title.duration_ms ?? null;
+    report.inspection = {
+      outcome: "passed",
+      duration_ms: inspect.durationMs,
+      presence: presenceDocument.presence,
+      title_count: inspection.disc.titles.length,
+      diagnostics: cleanText(inspection.diagnostics, redactions),
+    };
+    stage = "selection";
+    const context = {
+      helper, ffmpeg, ffprobe, device, mount, output, format, title, angle,
+      seekSeconds, timeoutMs, redactions,
+    };
+    for (const name of cases) {
+      stage = name;
+      report.cases.push(await runCase(name, context));
+    }
+    report.failures = report.cases
+      .filter((entry) => entry.failure)
+      .map((entry) => ({ stage: entry.id, reason: entry.failure }));
+    report.outcome = report.failures.length === 0 ? "passed" : "failed";
+  } catch (error) {
+    if (report.inspection.outcome !== "passed") report.inspection.outcome = "failed";
+    report.failures.push({ stage, reason: cleanText(error.message, redactions) });
+  }
+  report.finished_at = new Date().toISOString();
+  const reportPath = await writeReport(output, report);
+  process.stdout.write(`${reportPath}\n`);
+  if (report.outcome !== "passed") process.exitCode = 1;
+}
+
+async function main() {
+  const { command, options } = parseArgs(process.argv.slice(2));
+  if (command === "source-run") return sourceRun(options);
+  usage();
+  if (command && !["help", "--help", "-h"].includes(command)) process.exitCode = 2;
+}
+
+main().catch((error) => {
+  process.stderr.write(`optical-lab: ${cleanText(error.message)}\n`);
+  process.exitCode = 1;
+});

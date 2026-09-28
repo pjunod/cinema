@@ -2886,6 +2886,9 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_CACHE_DIR` | `storage.cache_dir` | empty | Optional node-local artwork, transcode, subtitle, rendition, and ffmpeg-runtime root; everything except `runtime/` is persistent. Empty preserves the legacy layout under `data_dir`. Setting it on an existing install moves no bytes — copy the persistent legacy trees and discard the old runtime tree, per the path table above |
 | `PLURX_TRANSCODE_DIR` | `storage.transcode_dir` | empty | Optional disposable live-session scratch directory, emptied on startup. Must be owned by the daemon uid and outside `data_dir`; naming `<data_dir>/transcode` or any other path below `data_dir` is refused |
 | `PLURX_SCAN_PRUNE_PERCENT` | `storage.scan_prune_percent` | `10` | Maximum percentage of known files one complete scan may remove; `0` disables automatic removal |
+| — | `optical.helper_path` | `plurx-optical-helper` | Linux helper executable used for bounded presence, inspection and eject operations. Configuration makes it discoverable; it does not enable optical playback |
+| — | `optical.poll_interval_secs` | `5` | Fallback observation cadence, 1–300 seconds, when the host has no drive event source |
+| — | `optical.drives[]` | empty | Node-local `id`, label, stable block-device path and read-only mount path for each trusted drive. An empty list performs no optical probe work |
 | `PLURX_CREDENTIAL_KEY_FILE` | `cluster.credential_key_file` | `<data_dir>/credentials.key` | Node-local key that encrypts the stored Trakt bearer credential. Minted mode-`0600` on first boot, and required to stay owner-only. **Back it up with the database** — plurx refuses to start if the sealed rows outlive it, or if the key present is not the one that sealed them ([SECURITY.md](SECURITY.md)) |
 | `PLURX_SHARED_CACHE_DIR` | `cluster.shared_cache_dir` | empty | Optional node-local path to a writable cache filesystem mounted on every participating voter. Requires `PLURX_SHARED_CACHE_ID`; a path alone is never trusted as proof of shared storage |
 | `PLURX_SHARED_CACHE_ID` | `cluster.shared_cache_id` | empty | Stable operator name for that shared filesystem: 1–64 ASCII letters, digits, dots, dashes, or underscores. Every voter mounting the same filesystem must use the same value |
@@ -4166,6 +4169,76 @@ An item can also arrive with an id *before* it has any metadata, and that is
 normal: the id says what it is, and enrichment then fills in title, overview
 and artwork on the same pass. An item that keeps its filename as its title
 means enrichment has no TMDB key configured — the scan itself succeeded.
+
+## Optical discs — the Linux drive runbook
+
+Optical playback has two independent controls. `plurx.toml` declares trusted
+node-local paths and causes the daemon to observe them. Settings → Developer →
+**Enable optical media** is the authoritative replicated runtime choice. The
+readiness rows beside that switch are advice: helper, device, mount, reader or
+physical-acceptance failures remain visible but never move or refuse the
+switch. Disabling stops observation, fences new starts and drains active
+sessions; enabling applies without a restart.
+
+Use a stable by-id device path and a dedicated read-only mount:
+
+```toml
+[optical]
+helper_path = "plurx-optical-helper"
+poll_interval_secs = 5
+
+[[optical.drives]]
+id = "media-room"
+label = "Media room drive"
+device_path = "/dev/disk/by-id/replace-with-actual-optical-drive"
+mount_path = "/mnt/optical/media-room"
+```
+
+The daemon identity needs read access to the block device and the narrow eject
+ioctl, plus traversal/read access to the mount. Keep the filesystem mounted
+read-only. In Compose, pass only the selected device and bind only that mount
+with `:ro`; do not grant privileged mode. The exact native, systemd and
+container examples are in [deploy/README.md](../deploy/README.md#optical-drives-on-linux).
+
+**Before enabling, read the page rather than guessing.** A usable host shows
+the configured drive, installed helper, block-device access, a matching
+read-only mount, FFmpeg's `dvdvideo` demuxer and `bluray` protocol, compatible
+cluster protocol, and retained physical acceptance. Red rows predict what may
+fail; they do not gate the operator's decision. Grant optical playback only to
+the users who should see physical discs. Matching and eject remain admin-only.
+
+**Failure diagnosis is intentionally typed.** `optical_protection_unsupported`
+means the installed reader stack cannot lawfully decrypt this disc; plurx does
+not download a key database or alter region state. `optical_media_changed`
+means a request was fenced by removal or replacement. `optical_drive_busy`
+means the one physical reader already has an owner. `optical_owner_unavailable`
+means cluster ingress cannot reach that owner and must not fail over the source.
+An inspection failure shown to a non-admin is sanitized; the bounded host
+diagnostic remains in server logs and the admin drive card.
+
+**Collect source-reader evidence only on a quiesced drive.** Stop plurxd or
+disable optical and wait for the active session to drain first. Identify one
+exact title id from a successful inspection, then run the opt-in lab as the
+same service identity. The tool never ejects and never writes frames:
+
+```bash
+scripts/optical-lab source-run \
+  --helper /usr/local/bin/plurx-optical-helper \
+  --ffmpeg /usr/bin/ffmpeg --ffprobe /usr/bin/ffprobe \
+  --device /dev/disk/by-id/replace-with-actual-optical-drive \
+  --mount /mnt/optical/media-room --drive-id media-room \
+  --format bluray --title title-REPLACE --fixture-id authored-bd-01 \
+  --cases first-frame,seek-forward --seek-seconds 120 \
+  --output /var/tmp/plurx-optical-acceptance
+```
+
+The required output directory receives
+`optical-source-acceptance.json`: source SHA/dirty state, tool versions and
+helper hash, host/drive/fixture identity, explicit cases, per-case latency,
+bounded failures and cleanup. A green report proves only helper inspection and
+bounded FFmpeg title reads. It does not prove plurxd VOD, client playback,
+cluster owner loss, or a release candidate. Never publish raw paths, disc
+content, credentials or decryption material with an acceptance receipt.
 
 ## Library channels — the runbook
 
