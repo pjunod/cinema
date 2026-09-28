@@ -138,9 +138,27 @@ struct LiveTvGuideFocusPosition: Equatable, Sendable {
     let anchorTime: Int?
 }
 
+enum LiveTvGuidePageLanding: Equatable, Sendable {
+    case first
+    case last
+}
+
 enum LiveTvGuideFocusMove: Equatable, Sendable {
     case focus(LiveTvGuideFocusPosition)
+    /// Up from a programme cell in the first row. The grid relinquishes
+    /// focus and whatever sits directly above the cells takes it — the stage's
+    /// actions on the guide page, the panel's Close button over fullscreen.
+    /// Named for where it used to go; the view decides where it goes now.
     case toolbar
+    /// Up from the channel header in the first row: the paging chips sit in
+    /// the header column directly above it, so that is where Up goes.
+    case pagingChips
+    /// Right past the last programme in the window. Nothing is drawn further
+    /// right, so the press means "show me later" rather than nothing at all.
+    case pageLater
+    /// Left from the channel header. The header is the window's left edge, so
+    /// the press means "show me earlier".
+    case pageEarlier
     case unchanged
 }
 
@@ -157,7 +175,14 @@ struct LiveTvFocusRestoreTicket: Equatable, Sendable {
 enum LiveTvGuideFocusEffect: Equatable, Sendable {
     case focus(LiveTvGuideFocusPosition)
     case clearGrid
+    /// Hand focus to whatever the view has directly above the cells.
     case focusToolbar
+    /// Focus the middle paging chip (Now), inside the grid's own header.
+    case focusPagingChips
+    /// Page the window and, once the new layout arrives, land on the first
+    /// (later) or last (earlier) cell of the same channel row.
+    case pageLater(channelId: String)
+    case pageEarlier(channelId: String)
 }
 
 struct LiveTvFocusRestoreCoordinator: Equatable, Sendable {
@@ -172,7 +197,10 @@ struct LiveTvFocusRestoreCoordinator: Equatable, Sendable {
     /// abandoned request.
     mutating func beginRestore(request newRequest: Int,
                                ownerRequested: Bool) -> LiveTvFocusRestoreTicket? {
-        guard ownerRequested, newRequest > 0 else { return nil }
+        // A grid that owns focus may reconcile even if no explicit request was
+        // ever made — the viewer can enter it through the engine, Down from
+        // the toolbar, and then page the window from inside it.
+        guard ownerRequested, newRequest > 0 || owner == .grid else { return nil }
         if newRequest > request {
             request = newRequest
             owner = .requested
@@ -187,8 +215,24 @@ struct LiveTvFocusRestoreCoordinator: Equatable, Sendable {
             && ticket.request == request && ticket.revision == revision
     }
 
+    /// Focus arriving on a member of this region does NOT invalidate a pending
+    /// restore; focus leaving it does.
+    ///
+    /// It used to invalidate both ways, and that is why a guide opened from
+    /// fullscreen landed on an arbitrary cell: removing the focused pill made
+    /// the engine drop focus onto whatever cell it liked, that arrival killed
+    /// the ticket, and the requested restore never ran. The restore writes the
+    /// position the view *currently* remembers — it is applied through
+    /// `onChange`, not from the task's stale copy of the view — so letting it
+    /// run after an engine-driven arrival can only move focus from an
+    /// accidental cell to the intended one. A remote press is different: it
+    /// goes through `invalidateForNavigation`, and still wins.
     mutating func focusChanged(active: Bool) {
-        owner = active ? .grid : .outside
+        if active {
+            owner = .grid
+            return
+        }
+        owner = .outside
         advanceRevision()
     }
 
@@ -243,6 +287,18 @@ struct LiveTvGuideFocusCoordinator: Equatable, Sendable {
         case .toolbar:
             restoration.leave()
             return [.clearGrid, .focusToolbar]
+        case .pagingChips:
+            // The chips are inside the grid but are not the grid owning a
+            // cell; the view's focus observer records that on arrival.
+            return [.focusPagingChips]
+        case .pageLater:
+            // The grid keeps focus (on the channel header, which survives the
+            // window change) and lands once the new layout is in.
+            restoration.focusChanged(active: true)
+            return [.pageLater(channelId: current.channelId)]
+        case .pageEarlier:
+            restoration.focusChanged(active: true)
+            return [.pageEarlier(channelId: current.channelId)]
         case .unchanged:
             return []
         }
@@ -265,10 +321,24 @@ enum LiveTvGuideFocusNavigator {
         switch direction {
         case .left, .right:
             guard let start = current.programmeStart else {
-                if current.channelHeader, direction == .right, let first = sorted.first {
-                    return .focus(position(row.channel.id, first.programme, header: false))
+                if current.channelHeader {
+                    // The header is the window's left edge; right enters the
+                    // row, left asks for the earlier window.
+                    if direction == .left { return .pageEarlier }
+                    if let first = sorted.first {
+                        return .focus(position(row.channel.id, first.programme, header: false))
+                    }
+                    // A row with no guide data has one placeholder cell.
+                    return .focus(LiveTvGuideFocusPosition(
+                        channelId: row.channel.id,
+                        programmeStart: nil,
+                        channelHeader: false,
+                        anchorTime: current.anchorTime
+                    ))
                 }
-                if !current.channelHeader, direction == .left {
+                // The "No programme information" placeholder: left is the
+                // header, right is the window's right edge.
+                if direction == .left {
                     return .focus(LiveTvGuideFocusPosition(
                         channelId: row.channel.id,
                         programmeStart: nil,
@@ -276,7 +346,7 @@ enum LiveTvGuideFocusNavigator {
                         anchorTime: current.anchorTime
                     ))
                 }
-                return .unchanged
+                return .pageLater
             }
             guard let index = sorted.firstIndex(where: { $0.programme.start == start }) else {
                 return .unchanged
@@ -290,12 +360,12 @@ enum LiveTvGuideFocusNavigator {
                     anchorTime: current.anchorTime
                 ))
             }
-            guard sorted.indices.contains(next) else { return .unchanged }
+            guard sorted.indices.contains(next) else { return .pageLater }
             return .focus(position(row.channel.id, sorted[next].programme, header: false))
 
         case .up, .down:
             let nextRow = rowIndex + (direction == .down ? 1 : -1)
-            if nextRow < 0 { return .toolbar }
+            if nextRow < 0 { return current.channelHeader ? .pagingChips : .toolbar }
             guard layout.rows.indices.contains(nextRow) else { return .unchanged }
             let targetRow = layout.rows[nextRow]
             if current.channelHeader {
@@ -323,6 +393,28 @@ enum LiveTvGuideFocusNavigator {
         default:
             return .unchanged
         }
+    }
+
+    /// Where a paged window puts focus: the first cell of the row after
+    /// paging later, the last after paging earlier. A row that lost its
+    /// channel lands on the first row instead; a row with no data lands on its
+    /// placeholder.
+    static func landing(
+        layout: LiveTvGridLayout,
+        channelId: String,
+        edge: LiveTvGuidePageLanding
+    ) -> LiveTvGuideFocusPosition? {
+        guard let row = layout.rows.first(where: { $0.channel.id == channelId })
+            ?? layout.rows.first
+        else { return nil }
+        let sorted = row.cells.sorted { $0.programme.start < $1.programme.start }
+        let cell = edge == .first ? sorted.first : sorted.last
+        guard let cell else {
+            return LiveTvGuideFocusPosition(
+                channelId: row.channel.id, programmeStart: nil,
+                channelHeader: false, anchorTime: nil)
+        }
+        return position(row.channel.id, cell.programme, header: false)
     }
 
     private static func position(
