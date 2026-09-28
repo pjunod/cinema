@@ -418,36 +418,109 @@ fn owner_unavailable() -> ApiError {
 #[derive(Deserialize)]
 struct OwnerWireError {
     code: String,
-    message: String,
+    #[serde(rename = "message")]
+    _message: String,
+}
+
+#[derive(Deserialize)]
+struct OwnerLegacyWireError {
+    #[serde(rename = "error")]
+    _error: String,
 }
 
 fn owner_wire_error(status: reqwest::StatusCode, body: &[u8]) -> ApiError {
-    let Ok(error) = serde_json::from_slice::<OwnerWireError>(body) else {
+    if let Ok(error) = serde_json::from_slice::<OwnerWireError>(body) {
+        let (status, code, message) = match error.code.as_str() {
+            "optical_media_changed" => (
+                StatusCode::CONFLICT,
+                "optical_media_changed",
+                "the requested optical insertion is no longer present",
+            ),
+            "optical_drive_busy" => (
+                StatusCode::CONFLICT,
+                "optical_drive_busy",
+                "the optical drive is in use",
+            ),
+            "optical_request_conflict" => (
+                StatusCode::CONFLICT,
+                "optical_request_conflict",
+                "the optical request id was reused with a different payload",
+            ),
+            "optical_eject_conflict" => (
+                StatusCode::CONFLICT,
+                "optical_eject_conflict",
+                "the optical eject confirmation is stale",
+            ),
+            "optical_selection_invalid" => (
+                StatusCode::BAD_REQUEST,
+                "optical_selection_invalid",
+                "the requested optical track or output selection is invalid",
+            ),
+            "optical_format_unsupported" => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "optical_format_unsupported",
+                "this optical title cannot use the available delivery path",
+            ),
+            "optical_protection_unsupported" => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "optical_protection_unsupported",
+                "the inserted disc is protected and the configured reader cannot decrypt it",
+            ),
+            "vod_subtitle_burn_unavailable" => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "vod_subtitle_burn_unavailable",
+                "this optical subtitle cannot be rendered by the admitted title reader",
+            ),
+            "optical_reader_unavailable" => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "optical_reader_unavailable",
+                "the optical title reader is unavailable",
+            ),
+            "optical_read_failed" => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "optical_read_failed",
+                "the optical drive could not read this title",
+            ),
+            "optical_owner_unavailable" => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "optical_owner_unavailable",
+                "the advertised optical drive owner is unavailable",
+            ),
+            "optical_play_forbidden" => (
+                StatusCode::FORBIDDEN,
+                "optical_play_forbidden",
+                "this user is not granted optical playback",
+            ),
+            "optical_disabled" => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "optical_disabled",
+                "optical playback is disabled by the saved operator setting",
+            ),
+            "invalid_capabilities" => (
+                StatusCode::BAD_REQUEST,
+                "invalid_capabilities",
+                "the playback capabilities document is not supported",
+            ),
+            _ => return owner_unavailable(),
+        };
+        return ApiError::typed(status, code, message);
+    }
+    if serde_json::from_slice::<OwnerLegacyWireError>(body).is_err() {
         return owner_unavailable();
-    };
-    let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
-    let code = match error.code.as_str() {
-        "optical_media_changed" => "optical_media_changed",
-        "optical_drive_busy" => "optical_drive_busy",
-        "optical_request_conflict" => "optical_request_conflict",
-        "optical_eject_conflict" => "optical_eject_conflict",
-        "optical_selection_invalid" => "optical_selection_invalid",
-        "optical_format_unsupported" => "optical_format_unsupported",
-        "optical_protection_unsupported" => "optical_protection_unsupported",
-        "optical_reader_unavailable" => "optical_reader_unavailable",
-        "optical_read_failed" => "optical_read_failed",
-        "optical_play_forbidden" => "optical_play_forbidden",
-        "optical_disabled" => "optical_disabled",
-        "invalid_capabilities" => "invalid_capabilities",
-        _ => return owner_unavailable(),
-    };
-    let message: String = error
-        .message
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(512)
-        .collect();
-    ApiError::typed(status, code, message)
+    }
+    match status.as_u16() {
+        400 => ApiError::typed(
+            StatusCode::BAD_REQUEST,
+            "optical_request_invalid",
+            "the optical request is invalid",
+        ),
+        404 => ApiError::typed(
+            StatusCode::NOT_FOUND,
+            "optical_not_found",
+            "the requested optical resource was not found",
+        ),
+        _ => owner_unavailable(),
+    }
 }
 
 fn relayed_json(response: super::peer_transport::PeerResponse) -> Result<Response, ApiError> {
@@ -2106,9 +2179,10 @@ fn service_error(error: OpticalServiceError) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        eject_target, optical_audio_tracks, optical_subtitle_tracks, progress_audio_index,
-        progress_subtitle_selection, EjectRequest, PublicOpticalDriveState,
+        eject_target, optical_audio_tracks, optical_subtitle_tracks, owner_wire_error,
+        progress_audio_index, progress_subtitle_selection, EjectRequest, PublicOpticalDriveState,
     };
+    use crate::http::error::ApiError;
     use plurx_core::domain::{AudioStream, SubtitleStream};
     use plurx_core::optical::OpticalDriveState;
     use plurx_core::playback::PlaybackMediaFacts;
@@ -2198,6 +2272,44 @@ mod tests {
             session_id: None,
         };
         assert!(eject_target(&state, &request).is_err());
+    }
+
+    #[test]
+    fn owner_legacy_validation_error_is_fixed_and_preserves_bad_request() {
+        let error = owner_wire_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            br#"{"error":"private path /mnt/secret"}"#,
+        );
+        let ApiError::Typed {
+            status,
+            code,
+            message,
+        } = error
+        else {
+            panic!("expected typed owner error");
+        };
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(code, "optical_request_invalid");
+        assert_eq!(message, "the optical request is invalid");
+    }
+
+    #[test]
+    fn owner_subtitle_refusal_is_allowlisted_without_forwarding_detail() {
+        let error = owner_wire_error(
+            reqwest::StatusCode::IM_A_TEAPOT,
+            br#"{"code":"vod_subtitle_burn_unavailable","message":"/mnt/secret"}"#,
+        );
+        let ApiError::Typed {
+            status,
+            code,
+            message,
+        } = error
+        else {
+            panic!("expected typed owner error");
+        };
+        assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(code, "vod_subtitle_burn_unavailable");
+        assert!(!message.contains("/mnt/secret"));
     }
 
     #[test]
