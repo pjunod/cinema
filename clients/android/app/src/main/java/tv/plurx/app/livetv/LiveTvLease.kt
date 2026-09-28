@@ -197,6 +197,7 @@ internal sealed interface LiveTvStartAnswer {
         val retry: String? = null,
         val ownerDecided: Boolean? = null,
         val status: Int? = null,
+        val watchable: List<LiveTvWatchable> = emptyList(),
     ) : LiveTvStartAnswer
 }
 
@@ -208,7 +209,7 @@ internal sealed interface LiveTvStartAnswer {
 internal fun liveTvStartAnswerOf(error: Exception): LiveTvStartAnswer = when {
     error !is LiveTvFailure -> LiveTvStartAnswer.NoAnswer
     error.code == "no_answer" -> LiveTvStartAnswer.NoAnswer
-    else -> LiveTvStartAnswer.Typed(error.code, error.retry, error.ownerDecided, error.status)
+    else -> LiveTvStartAnswer.Typed(error.code, error.retry, error.ownerDecided, error.status, error.watchable)
 }
 
 /** What the lease and the screen do with one start answer. */
@@ -436,7 +437,11 @@ internal class LiveTvLease(
                 continue
             }
             if (!decision.keepHint) hints.forget()
-            throw LiveTvFailure(decision.render)
+            val typed = answer as? LiveTvStartAnswer.Typed
+            throw LiveTvFailure(
+                decision.render, typed?.retry, typed?.ownerDecided, typed?.status,
+                watchable = if (decision.render == "tuner_capacity") typed?.watchable.orEmpty() else emptyList(),
+            )
         }
     }
 

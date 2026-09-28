@@ -2958,3 +2958,40 @@ source = "clients/apple/UITests/TVPhysicalInputTests.swift"
 source_anchor = "if current.elementType == .other && !target.identifier.isEmpty"
 test = "clients/apple/UITests/TVPhysicalInputTests.swift"
 test_anchor = "func testSettingsChoicesOpenAsMenusOnAppleTV() throws {"
+
+# Live TV exposes actual discovered text services and keeps stale menu rows
+# from changing the replacement player; Off retains the audio selection.
+[[fixes]]
+id = "android.live-tv-caption-selection"
+commits = ["7592def8587b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvCaptions.kt"
+source_anchor = "internal fun liveTvCaptionSelection("
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvCaptionsTest.kt"
+test_anchor = "fun selectionDisablesOnlyTextAndPinsTheObservedService()"
+
+# A selected track is not proof that captions reached the screen.
+[[fixes]]
+id = "android.live-tv-caption-cue-observation"
+commits = ["7592def8587b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvCaptions.kt"
+source_anchor = "internal fun liveTvCaptionSummary(tracks: Tracks, cuesPresent: Boolean): String {"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvCaptionsTest.kt"
+test_anchor = "fun captionSummarySeparatesSelectionFromCueDelivery()"
+
+# Owner-decided watchable rows survive the reducer without issuing a tune.
+[[fixes]]
+id = "android.live-tv-capacity-offer-payload"
+commits = ["367f65f2df89"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvLease.kt"
+source_anchor = "watchable = if (decision.render == \"tuner_capacity\") typed?.watchable.orEmpty() else emptyList()"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvStartCasesTest.kt"
+test_anchor = "fun capacityOffersSurviveTheActualLeaseWithoutStartingUntilChosen()"
+
+# Only the explicit current refusal can choose a known playable channel.
+[[fixes]]
+id = "android.live-tv-capacity-offer-explicit-choice"
+commits = ["367f65f2df89"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt"
+source_anchor = "internal fun liveTvCapacityChoice("
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvCapacityOffersTest.kt"
+test_anchor = "fun capacityChoiceRequiresSameRefusalGenerationAndIdleState()"
