@@ -247,3 +247,37 @@ pub(crate) fn validate_progress_write(value: &OpticalProgressWrite) -> Result<()
     }
     Ok(())
 }
+
+pub(crate) fn progress_duration_and_watched(
+    known_duration_ms: Option<i64>,
+    position_ms: i64,
+) -> Result<(Option<i64>, bool), String> {
+    if known_duration_ms.is_some_and(|duration| position_ms > duration) {
+        return Err("optical progress position exceeds the known title duration".into());
+    }
+    let watched = known_duration_ms
+        .is_some_and(|duration| duration > 0 && position_ms as f64 / duration as f64 >= 0.95);
+    Ok((known_duration_ms, watched))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::progress_duration_and_watched;
+
+    #[test]
+    fn unknown_title_duration_cannot_become_watched() {
+        assert_eq!(
+            progress_duration_and_watched(None, 10_000).expect("unknown duration"),
+            (None, false)
+        );
+    }
+
+    #[test]
+    fn inspected_title_duration_is_the_watched_authority() {
+        assert_eq!(
+            progress_duration_and_watched(Some(10_000), 9_500).expect("known duration"),
+            (Some(10_000), true)
+        );
+        assert!(progress_duration_and_watched(Some(10_000), 10_001).is_err());
+    }
+}

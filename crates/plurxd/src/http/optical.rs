@@ -1549,6 +1549,14 @@ async fn local_progress(
         .optical_title(disc_id, title_id)
         .await?
         .ok_or(ApiError::NotFound("title"))?;
+    if title
+        .duration_ms
+        .is_some_and(|duration| request.position_ms > duration)
+    {
+        return Err(ApiError::BadRequest(
+            "optical progress exceeds the title timeline".to_owned(),
+        ));
+    }
     if audio_index.is_some_and(|index| {
         !title
             .facts

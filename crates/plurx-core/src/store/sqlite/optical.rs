@@ -289,15 +289,11 @@ impl OpticalStore for SqliteStore {
                 )
                 .optional()?
                 .flatten();
-            let duration = known_duration.or(progress.duration_ms);
-            if duration.is_some_and(|duration| progress.position_ms > duration) {
-                return Err(StoreError::Database(
-                    "optical progress position exceeds the known title duration".into(),
-                ));
-            }
-            let watched = duration.is_some_and(|duration| {
-                duration > 0 && progress.position_ms as f64 / duration as f64 >= 0.95
-            });
+            let (duration, watched) = crate::optical::store::progress_duration_and_watched(
+                known_duration,
+                progress.position_ms,
+            )
+            .map_err(StoreError::Database)?;
             let now_ms = conn.query_row("SELECT unixepoch() * 1000", [], |row| row.get(0))?;
             let at = progress.recorded_at_ms.unwrap_or(now_ms).clamp(0, now_ms);
             let returned = conn

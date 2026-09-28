@@ -393,15 +393,11 @@ impl OpticalStore for HiqliteAuthStore {
             .optical_title(&progress.disc_id, &progress.title_id)
             .await?
             .ok_or_else(|| StoreError::Database("unknown optical title".into()))?;
-        let duration = title.duration_ms.or(progress.duration_ms);
-        if duration.is_some_and(|duration| progress.position_ms > duration) {
-            return Err(StoreError::Database(
-                "optical progress position exceeds the known title duration".into(),
-            ));
-        }
-        let watched = duration.is_some_and(|duration| {
-            duration > 0 && progress.position_ms as f64 / duration as f64 >= 0.95
-        });
+        let (duration, watched) = crate::optical::store::progress_duration_and_watched(
+            title.duration_ms,
+            progress.position_ms,
+        )
+        .map_err(StoreError::Database)?;
         let now_ms = self
             .now()?
             .checked_mul(1000)
