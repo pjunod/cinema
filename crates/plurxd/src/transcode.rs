@@ -10839,6 +10839,29 @@ pub(crate) struct OpticalSessionRequest {
     pub block_budget_secs: Option<f64>,
 }
 
+fn optical_probe_requires_deinterlace(probe_json: &str) -> bool {
+    let Ok(probe) = serde_json::from_str::<serde_json::Value>(probe_json) else {
+        return false;
+    };
+    let Some(field_order) = probe
+        .get("streams")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|stream| {
+            stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
+        })
+        .and_then(|stream| stream.get("field_order"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    matches!(
+        field_order.trim().to_ascii_lowercase().as_str(),
+        "tt" | "bb" | "tb" | "bt" | "interlaced"
+    )
+}
+
 /// How long a retired presentation is kept readable after the exact viewer
 /// releases it.
 ///
@@ -19038,6 +19061,7 @@ impl TranscodeManager {
                 "the optical title probe has no usable video cadence",
             )
         })?;
+        let deinterlace = optical_probe_requires_deinterlace(probe_json);
         let encoder = self.encoder().await;
         let workload = Workload::of_playback_facts(facts, target_height);
         let software_threads = workload
@@ -19056,6 +19080,7 @@ impl TranscodeManager {
             subtitle_burn,
             subtitle_file: None,
             force_idr: self.caps.forced_idr.wanted_by(encoder),
+            deinterlace,
             ..TranscodeOptions::default()
         };
         let source_identity = serde_json::to_string(source).map_err(|error| {

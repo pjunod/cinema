@@ -307,6 +307,7 @@ fn execution_options() -> TranscodeOptions {
         subtitle_burn: None,
         subtitle_file: None,
         force_idr: false,
+        deinterlace: false,
         software_threads: None,
     }
 }

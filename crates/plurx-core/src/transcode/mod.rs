@@ -747,6 +747,10 @@ pub struct TranscodeOptions {
     /// begin, not what any frame looks like, and an entry produced before this
     /// existed decodes to the same picture.
     pub force_idr: bool,
+    /// Deinterlace only frames the decoder marks interlaced. Optical DVD
+    /// inspection enables this from explicit probe evidence; progressive and
+    /// unknown sources retain the historical pipeline unchanged.
+    pub deinterlace: bool,
     /// Explicit thread budget for the software encoder, from the admission
     /// pool's permit (plurxd's `Workload::software_threads`). `None` lets
     /// x264 pick — which is cores x 1.5, a fine answer for exactly one
@@ -781,6 +785,7 @@ pub struct TranscodeExecution {
     pub start_number: i64,
     pub subtitle_file: Option<PathBuf>,
     pub force_idr: bool,
+    pub deinterlace: bool,
     pub software_threads: Option<u32>,
     pub pacing: Pacing,
     pub out_dir: String,
@@ -886,6 +891,7 @@ impl TranscodeExecution {
             start_number: options.start_number,
             subtitle_file: options.subtitle_file.clone(),
             force_idr: options.force_idr,
+            deinterlace: options.deinterlace,
             software_threads: options.software_threads,
             pacing,
             out_dir: out_dir.to_owned(),
@@ -946,6 +952,7 @@ impl Default for TranscodeOptions {
             subtitle_burn: None,
             subtitle_file: None,
             force_idr: false,
+            deinterlace: false,
             software_threads: None,
         }
     }
@@ -1033,6 +1040,10 @@ fn video_filters_for_contract(
     source_path: &str,
 ) -> String {
     let mut chain: Vec<String> = Vec::new();
+
+    if opts.deinterlace {
+        chain.push("bwdif=mode=send_frame:parity=auto:deint=interlaced".to_owned());
+    }
 
     // A GPU pipeline owns scale and tone-map together: they are one pass on
     // the video-processing block, and splitting them would put the download
@@ -1407,6 +1418,7 @@ pub fn hls_args_for_plan(plan: &ResolvedTranscode, execution: &TranscodeExecutio
         subtitle_burn: media.subtitle_burn.clone(),
         subtitle_file: execution.subtitle_file.clone(),
         force_idr: execution.force_idr,
+        deinterlace: execution.deinterlace,
         software_threads: execution.software_threads,
     };
     hls_args_inner(
@@ -2858,6 +2870,30 @@ mod tests {
         let joined = args.join(" ");
         assert!(joined.contains("tonemap=tonemap=hable"));
         assert!(joined.contains("zscale"));
+    }
+
+    #[test]
+    fn explicit_interlace_evidence_adds_frame_preserving_deinterlace() {
+        let opts = TranscodeOptions {
+            deinterlace: true,
+            ..Default::default()
+        };
+        let args = hls_args(
+            &file(None),
+            Encoder::Software,
+            &opts,
+            Pacing::unpaced(),
+            "/tmp/s",
+        );
+        let filters = args
+            .windows(2)
+            .find(|pair| pair[0] == "-vf")
+            .map(|pair| pair[1].as_str())
+            .expect("video filters");
+        assert!(
+            filters.starts_with("bwdif=mode=send_frame:parity=auto:deint=interlaced,"),
+            "{filters}"
+        );
     }
 
     #[test]
