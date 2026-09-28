@@ -56,6 +56,10 @@ Subtitle source-change, orphan-demand and ownership/publication contracts passed
 against SQLite and real three-voter Hiqlite. The source-change fixture was
 corrected to respect existing automatic cancellation; historical ready-request
 orphans are independently reproduced through the replicated SQL log.
+The first fast-lane run caught the maintained downgrade-fixture census still
+counting 39 post-baseline migrations. It now accounts for v84; the existing
+queue-schema removal helper already removes the replacement trigger in both
+fixtures. The census and the actual v43 downgrade/reopen test passed locally.
 The current PR and its checks are the promotion record. A broader historical
 v10 migration test failed while constructing its old fixture: it drops
 `cluster_fragment_index_jobs.index_diagnostic_json` while a later queue trigger
