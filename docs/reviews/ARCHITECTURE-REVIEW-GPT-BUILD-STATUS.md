@@ -1,12 +1,12 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 11:35 UTC · **Audited main:** `b5b8d5d521e451369d1e672d3b62d6c41e7cfcd1`
+**Status:** open · **Updated:** 2026-09-28 11:39 UTC · **Audited main:** `b5b8d5d521e451369d1e672d3b62d6c41e7cfcd1`
 
 ## Current work
 
 [PR #590](http://192.168.4.7:3000/noirr/plurx/pulls/590) and [PR #594](http://192.168.4.7:3000/noirr/plurx/pulls/594) are merged green. Each received exactly one adversarial review. Final #594 candidate `3a36f3497170ce4dbf3b58ad0890b05cce2c5a9a` passed all eight mandatory selected jobs against actual #590 main; unchanged web syntax was independently unselected. Its landing preserves20 regression fields. The final selected Rust lane recorded4721 passes, zero failures and16 ignored cases. Actual focused Apple7 and Android8 results and earlier failed attempts retain their original source identity.
 
-The final server image is built once on m6 for exact merged main `9c5a28983`; all four nodes passed strict exact source/content/health/quorum proof. A six-minute checkpoint passed13 rows per node with30-second maximum gap and zero targeted errors. Main then advanced through qualified peer596 to `b5b8d5d52`; this9c5 runtime evidence remains historical. Final browser compilation passed in123.023s with the exact merged source and original scorers. The distinct browser cases are running once against measured9c5; physical inputs stopped when main moved. Consolidate596 and this evidence batch597 before one successor current-main rollout. Native198/135 inputs are unchanged; no repeated device install is required.
+The final server image is built once on m6 for exact merged main `9c5a28983`; all four nodes passed strict exact source/content/health/quorum proof. A six-minute checkpoint passed13 rows per node with30-second maximum gap and zero targeted errors. Main then advanced through qualified peer596 to `b5b8d5d52`; this9c5 runtime evidence remains historical. Final browser compilation passed in123.023s with the exact merged source and original scorers. All six distinct browser cases passed once against measured9c5; physical inputs stopped when main moved. Consolidate596 and this evidence batch597 before one successor current-main rollout. Native198/135 inputs are unchanged; no repeated device install is required.
 
 | Work | Verified now | Remaining |
 |---|---|---|
@@ -14,13 +14,16 @@ The final server image is built once on m6 for exact merged main `9c5a28983`; al
 | Devices / D-02 | Apple198 installed/read back in place on all six reachable paired Apple devices. Signed Android135 installed/read back on GoogleTV and both Pixels; checked UID/firstInstall/data identity retained. | Apple16pro is unavailable; reachable Apple phones/tablets and both Pixels are locked (iPadPro lock query unavailable). Physical lifecycle/controller/decoder/error matrix remains owed. |
 | D-03 | Signed133 synthetic local restore/exclusions passed on actual API36 and37 with positive controls and owned-emulator cleanup. | Actual mobile PDF/EPUB/offline, cloud/D2D/physical restore and ART consumption/performance. GoogleTV cannot supply the mobile reader matrix. |
 | A-02 / A-03 | Historical TV paging/Settings and GoogleTV459/325 counts remain scoped to their original builds. Ordinary Release Bedroom diagnostic compiled. | Bedroom diagnostics failed on asleep then absent screenshot screen0; production198 retained and own runner removed. GoogleTVHome recovered after one Refresh, then source guard stopped before playback. Controller/lifecycle/remote and named Lenovo6000-item matrix remain owed. |
-| W-02 / A-04 | Final merged browser binary compiled; original scorers and prior failures retained. | Actual Chrome one/two and Firefox one cliff pass on9c5; remaining cases run once. Current-main association, LG/FireTV, Safari/HDR and native matrix remain owed. |
+| W-02 / A-04 | Final merged browser binary compiled; original scorers and prior failures retained. | Actual Chrome/Firefox one/two cliffs and both official W02 fixtures pass once on9c5. Current-main association, LG/FireTV, Safari/HDR and native matrix remain owed. |
 | L-03 M2/M4 | Native captions and known-channel capacity actions merged through594;15 focused native cases pass. Real6.1 source contains439 caption packets. | Final installed HLS advertisement, actual selector and rendered text; shared-capacity/DVR and Shield HDMI matrix. Source packets do not prove rendering. |
 
 ## Current immutable evidence
 
 | Receipt | SHA-256 | Scope |
 |---|---|---|
+| `/private/tmp/codex-pr594-browser-evidence-20260928/qualification-receipt.json` | `54a95dd86f54fcfb4f083b825c94fd811a9c6ef0d01a1baf049717ce6588ade2` | Four actual A04 cases plus two official W02 cases pass once on9c5; original scorers/thresholds unchanged, runtimes cleaned. |
+| `/private/tmp/codex-pr594-browser-evidence-20260928/evidence-summary.json` | `9e0570feba432e8b1d0346d8df5bcde390b5fa02da8d0aec0c91d2921cf35566` | Raw/normalized hashes and per-cliff gaps/downshifts; no b5/current-main, native, audio, HDR, Safari or fleet-playback acceptance claim. |
+| `/private/tmp/codex-peer596-main-qualification-readonly-20260928.json` | `286ddb495e843758be1288d0a89392736518c22078b2ae06db16d6b43d908e82` | Actual596/a71/API3523 selected jobs green; single review6083 and addressed disposition;63item transcode move, no native/reader input changes. |
 | `/private/tmp/codex-pr594-final-qualification-20260928.json` | `1ffeab56406c16379d6883eecab931a3bd8d959016e9b4978ab700f8a46082c2` | Actual final candidate/base, eight selected jobs green, one review and20 landing regression fields. |
 | `/private/tmp/codex-fleet-post594-prep-20260928/resume-9c5a28983c3d-77811a78/strict-uniform-health.json` | `34896551ddd64e765054d3fda4d6ba3bda5fc5d1f03517c5228aebfaa61454dc` | All-four9c5 strict source/content/health/quorum proof; historical after peer596 main movement. |
 | `/private/tmp/codex-fleet-post594-prep-20260928/resume-9c5a28983c3d-77811a78/five-minute-checkpoint.json` | `fa9b222bbeeec20c4e3431c5b8fea2a229c8126cd302b8a533bd00dda9093fce` |13 rows/node over six minutes, maxgap30s, zero targeted health/quorum/lag/restart/hygiene errors; historical passive scope. |
