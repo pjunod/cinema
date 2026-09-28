@@ -62,9 +62,70 @@ struct DriveDto {
     name: String,
     owner_node_id: String,
     enabled: bool,
-    state: OpticalDriveState,
+    state: PublicOpticalDriveState,
     requirements: Vec<plurx_core::optical::HostRequirement>,
     disc: Option<DiscSummary>,
+}
+
+/// Client-visible drive state is an explicit allow-list. In particular, the
+/// manager's busy state carries the exact HLS session id, which is itself a
+/// bearer capability and must never be disclosed by drive discovery.
+#[derive(Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum PublicOpticalDriveState {
+    Empty,
+    Inspecting {
+        media_generation: String,
+    },
+    Ready {
+        media_generation: String,
+        disc_id: String,
+    },
+    Busy {
+        media_generation: String,
+        disc_id: String,
+        title_id: String,
+    },
+    Failed {
+        media_generation: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+}
+
+impl PublicOpticalDriveState {
+    fn from_manager(state: OpticalDriveState, include_diagnostics: bool) -> Self {
+        match state {
+            OpticalDriveState::Empty => Self::Empty,
+            OpticalDriveState::Inspecting { media_generation } => {
+                Self::Inspecting { media_generation }
+            }
+            OpticalDriveState::Ready {
+                media_generation,
+                disc_id,
+            } => Self::Ready {
+                media_generation,
+                disc_id,
+            },
+            OpticalDriveState::Busy {
+                media_generation,
+                disc_id,
+                title_id,
+                session_id: _,
+            } => Self::Busy {
+                media_generation,
+                disc_id,
+                title_id,
+            },
+            OpticalDriveState::Failed {
+                media_generation,
+                reason,
+            } => Self::Failed {
+                media_generation,
+                reason: include_diagnostics.then_some(reason),
+            },
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -383,6 +444,7 @@ async fn drive_dto(
     state: &AppState,
     snapshot: OpticalDriveSnapshot,
     enabled: bool,
+    include_diagnostics: bool,
 ) -> Result<DriveDto, ApiError> {
     let (generation, disc_id) = match &snapshot.state {
         OpticalDriveState::Ready {
@@ -426,7 +488,7 @@ async fn drive_dto(
         name: snapshot.label,
         owner_node_id: snapshot.owner_node_id,
         enabled,
-        state: snapshot.state,
+        state: PublicOpticalDriveState::from_manager(snapshot.state, include_diagnostics),
         requirements,
         disc,
     })
@@ -447,7 +509,7 @@ async fn drives(
     });
     let mut result = Vec::with_capacity(snapshots.len());
     for snapshot in snapshots {
-        result.push(drive_dto(&state, snapshot, enabled).await?);
+        result.push(drive_dto(&state, snapshot, enabled, user.is_admin).await?);
     }
     Ok(Json(result))
 }
@@ -487,6 +549,11 @@ async fn local_drive_disc(
     drive_id: &str,
 ) -> Result<DriveDiscDto, ApiError> {
     authorize_play(state, user_id).await?;
+    let include_diagnostics = state
+        .store
+        .get_user(user_id)
+        .await?
+        .is_some_and(|user| user.is_admin);
     let enabled = optical_enabled(state).await?;
     let snapshot = state
         .optical
@@ -517,7 +584,7 @@ async fn local_drive_disc(
         Vec::new()
     };
     Ok(DriveDiscDto {
-        drive: drive_dto(state, snapshot, enabled).await?,
+        drive: drive_dto(state, snapshot, enabled, include_diagnostics).await?,
         titles,
     })
 }
@@ -1858,5 +1925,53 @@ fn service_error(error: OpticalServiceError) -> ApiError {
             error.to_string(),
         ),
         OpticalServiceError::Store(error) => ApiError::Internal(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PublicOpticalDriveState;
+    use plurx_core::optical::OpticalDriveState;
+
+    #[test]
+    fn public_busy_state_never_serializes_the_playback_capability() {
+        let state = PublicOpticalDriveState::from_manager(
+            OpticalDriveState::Busy {
+                media_generation: "generation-a".to_owned(),
+                disc_id: "disc-a".to_owned(),
+                title_id: "title-a".to_owned(),
+                session_id: "secret-session-capability".to_owned(),
+            },
+            true,
+        );
+
+        let json = serde_json::to_value(state).expect("serialize public drive state");
+        assert_eq!(json["state"], "busy");
+        assert_eq!(json["title_id"], "title-a");
+        assert!(json.get("session_id").is_none());
+        assert!(!json.to_string().contains("secret-session-capability"));
+    }
+
+    #[test]
+    fn failed_drive_diagnostics_are_admin_only() {
+        let public = PublicOpticalDriveState::from_manager(
+            OpticalDriveState::Failed {
+                media_generation: Some("generation-a".to_owned()),
+                reason: "sensitive host diagnostic".to_owned(),
+            },
+            false,
+        );
+        let admin = PublicOpticalDriveState::from_manager(
+            OpticalDriveState::Failed {
+                media_generation: Some("generation-a".to_owned()),
+                reason: "sensitive host diagnostic".to_owned(),
+            },
+            true,
+        );
+
+        let public_json = serde_json::to_value(public).expect("serialize public state");
+        let admin_json = serde_json::to_value(admin).expect("serialize admin state");
+        assert!(public_json.get("reason").is_none());
+        assert_eq!(admin_json["reason"], "sensitive host diagnostic");
     }
 }

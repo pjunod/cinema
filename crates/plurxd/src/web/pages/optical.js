@@ -63,6 +63,24 @@ function opticalRequirementSummary(drive){
   const missing=(drive.requirements||[]).filter(row=>row.status!=="met");
   return missing.length?missing.map(row=>row.detail).join(" · "):"Reader requirements met";
 }
+function opticalOwnedBusySession(drive){
+  if(drive?.state?.state!=="busy"||!PLAYER?.sessionId)return null;
+  const source=playbackInputForPlayer(PLAYER);
+  if(!playbackInputIsOptical(source)
+    ||opticalRouteDrive(source)!==drive.id
+    ||source.media_generation!==drive.state.media_generation
+    ||source.disc_id!==drive.state.disc_id)return null;
+  return PLAYER.sessionId;
+}
+function opticalEjectControl(drive){
+  if(!ME.is_admin)return "";
+  if(drive?.state?.state==="busy"){
+    return opticalOwnedBusySession(drive)
+      ?`<button class="ghost sm" onclick="opticalEject(${esc(JSON.stringify(drive.id))})">Stop &amp; eject</button>`
+      :`<button class="ghost sm" disabled title="Another playback owns this drive">Drive in use</button>`;
+  }
+  return `<button class="ghost sm" onclick="opticalEject(${esc(JSON.stringify(drive.id))})">Eject</button>`;
+}
 function opticalDriveRow(drive){
   const state=opticalStateName(drive);
   const title=drive.disc?opticalDiscName(drive):drive.name;
@@ -138,7 +156,7 @@ async function viewDisc(driveId,titleId=null,generation=++PAGE_RENDER_GENERATION
     body+=`<section class="optical-hero"><div class="optical-mark large">${disc.format==="bluray"?"BD":"DVD"}</div><div>
       <div class="vbadges"><span>${esc(opticalFormatLabel(disc.format))}</span><span>${esc(drive.name)}</span><span>${esc(opticalStateName(drive))}</span></div>
       <h1>${esc(opticalDiscName(drive))}</h1><p class="muted">Choose a title. Generic title identifiers are retained when no verified metadata match exists.</p>
-      ${ME.is_admin?`<button class="ghost sm" onclick="opticalEject(${esc(JSON.stringify(drive.id))})">Eject</button>`:""}</div></section>
+      ${opticalEjectControl(drive)}</div></section>
       <h2 class="section">Titles &amp; extras</h2><div class="optical-title-list">${data.titles.length?data.titles.map(title=>opticalTitleCard(drive,title)).join(""):`<div class="empty">No playable titles were reported.</div>`}</div>`;
   }
   layoutChrome("discs",body);
@@ -232,11 +250,15 @@ async function opticalEject(driveId){
   const data=await opticalLoadDrive(driveId), drive=data.drive, disc=drive.disc;
   const failedGeneration=drive.state?.state==="failed"?drive.state.media_generation:null;
   if(!disc&&!failedGeneration) return toast("No disc is available to eject");
+  const busySession=opticalOwnedBusySession(drive);
+  if(drive.state?.state==="busy"&&!busySession)
+    return toast("The drive is in use by another playback");
   const label=disc?opticalDiscName(drive):"the unreadable disc";
-  if(!confirm(`Eject ${label} from ${drive.name}?`)) return;
+  const action=busySession?"Stop playback and eject":"Eject";
+  if(!confirm(`${action} ${label} from ${drive.name}?`)) return;
   await api(`/optical/drives/${encodeURIComponent(drive.id)}/eject`,{method:"POST",body:{
     expected_disc_id:disc?disc.id:"",media_generation:disc?disc.media_generation:failedGeneration,
-    stop_active:false,session_id:null
+    stop_active:!!busySession,session_id:busySession
   }});
   toast("Disc ejected");
   if(location.hash.startsWith("#/discs/")) location.hash="#/discs";
