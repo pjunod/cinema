@@ -1743,31 +1743,284 @@
         await_scratch_removed(&dir).await;
     }
 
-    /// M8's shipped-shape test for the transcode manager: the production
-    /// constructor leaves its hook slot on [`NoopTranscodeManagerHooks`]; both
-    /// pause points are ready at their first poll, nothing is overridden or
-    /// injected, and the real artifact-qualification publisher runs through
-    /// its record point without filling the slot.
-    #[tokio::test]
-    async fn transcode_manager_shipped_shape() {
-        use plurx_core::store::SqliteStore;
-
-        let root = crate::test_tempdir().expect("manager root");
-        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let manager = TranscodeManager::new(
-            store,
-            root.path().join("manager"),
-            EncoderCaps::default(),
-            Pipeline::Cpu,
-        );
-        let hooks = manager.hooks();
-        let installed: &dyn std::any::Any = hooks;
+    /// The production hook slot of `manager`, which must still hold
+    /// [`NoopTranscodeManagerHooks`] `when`.
+    fn assert_manager_on_noop_hooks(manager: &TranscodeManager, when: &str) {
+        let installed: &dyn std::any::Any = manager.hooks();
         assert!(
             installed.is::<NoopTranscodeManagerHooks>(),
-            "the production constructor leaves the manager on the no-op hooks"
+            "the manager's slot holds the no-op hooks {when}"
         );
+    }
+
+    /// M8's shipped-shape test for the transcode manager (§3.9, §5.9): the
+    /// production constructor leaves its hook slot on
+    /// [`NoopTranscodeManagerHooks`], and the migrated manager paths run
+    /// through that no-op to their production answers:
+    ///
+    /// - the real artifact-qualification publisher (the record point);
+    /// - plan resolution under an enabled, partially covered policy (the
+    ///   `forces_artifact_qualification` override): the one covered hardware
+    ///   path is qualified and the uncovered software path is not, which a
+    ///   plan forced onto the published identity would not produce;
+    /// - a held-source plan through `decode_fact_source` (the plumbing
+    ///   point), bound to the held descriptor;
+    /// - an offline production with nothing scripted (the
+    ///   `scripted_offline_outcome` override), which really enters
+    ///   `produce_normalized` and pins its recipe;
+    /// - a VOD publication through the serving admission and its point.
+    ///
+    /// The subtitle playlist, an HTTP path, is driven by the companion
+    /// `transcode_manager_shipped_shape_subtitle_playlist` in `http::hls`,
+    /// which the same test filter selects. No path fills the slot.
+    #[tokio::test]
+    async fn transcode_manager_shipped_shape() {
+        use plurx_core::domain::{NewOfflinePackage, OfflineCreateOutcome};
+        use plurx_core::store::keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS;
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+        use plurx_core::transcode::DecodeBackend;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let mut contract = decode_contract_fixture(DecodeBackend::VideoToolbox);
+        contract.input_codec = "hevc".to_owned();
+        contract.decoder = "hevc".to_owned();
+        let policy = crate::decoder_health::DiagnosticPolicy::new(
+            Some(crate::decoder_health::MeasuredBuild {
+                ffmpeg_version: contract.ffmpeg_version.clone(),
+                binary_sha256: contract.binary_sha256.clone(),
+                buildconf_sha256: contract.buildconf_sha256.clone(),
+            }),
+            vec![contract],
+        );
+        let (manager, _work, _cache) = cached_manager(&store);
+        let manager = Arc::new(
+            manager
+                .with_measured_decoders(MeasuredDecoders::from_measured(&[
+                    ("hevc", DecodeBackend::Software, "hevc"),
+                    ("hevc", DecodeBackend::VideoToolbox, "hevc"),
+                ]))
+                .with_diagnostic_policy(Arc::new(policy)),
+        );
+        assert_manager_on_noop_hooks(&manager, "after the production constructor");
+
+        // The record point: the real publisher, with the policy requested.
+        store
+            .put_setting(DECODER_HEALTH_QUALIFIED_ARTIFACTS, "1")
+            .await
+            .expect("request the policy");
+        let readiness = tokio::time::timeout(
+            Duration::from_secs(5),
+            manager.publish_artifact_qualification(),
+        )
+        .await
+        .expect("the publisher answers");
+        assert!(readiness.requested);
+        assert_eq!(
+            readiness.effective,
+            plurx_core::transcode::ArtifactQualification::Unqualified,
+            "one hardware contract does not qualify the whole node"
+        );
+
+        // The override point: per-path selection, never the forced identity.
+        let options = manager.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+        let hardware = manager
+            .resolve_movie_plan(&file, &options, Encoder::VideoToolbox)
+            .await
+            .expect("hardware plan");
+        assert_eq!(hardware.decode().backend(), DecodeBackend::VideoToolbox);
+        assert!(
+            hardware.enforces_receipt(),
+            "the covered hardware path resolves under the qualified identity"
+        );
+        let software = manager
+            .resolve_movie_plan(&file, &options, Encoder::Software)
+            .await
+            .expect("software plan");
+        assert_eq!(software.decode().backend(), DecodeBackend::Software);
+        assert!(
+            !software.enforces_receipt(),
+            "the uncovered software path keeps the unqualified identity"
+        );
+        assert_manager_on_noop_hooks(&manager, "after plan resolution");
+
+        // The two override/fault points of an offline production: nothing is
+        // scripted, so the recipe is really produced (and, at an expired
+        // deadline, yields after pinning its recipe).
+        let user = store.create_user("paul", "hash", true).await.expect("user");
+        let package_id = "offline-shipped-shape";
+        let requested = NewOfflinePackage {
+            id: package_id.to_owned(),
+            request_id: "offline-shipped-shape-request".to_owned(),
+            user_id: user.id,
+            file_id,
+            node_id: NODE.to_owned(),
+            source_path: file.path.to_string_lossy().into_owned(),
+            source_size: file.size,
+            source_mtime: file.mtime,
+            effective_rate_control: "vbr".to_owned(),
+            target_height: 720,
+            output_width: Some(1280),
+            output_height: Some(720),
+            audio_index: None,
+            audio_offset_ms: 0,
+            subtitle_index: None,
+            subtitle_language: None,
+            subtitle_mode: "none".to_owned(),
+            estimated_bytes: 1_000_000,
+            reserved_bytes: 1_100_000,
+            expires_at: i64::MAX,
+        };
+        assert!(matches!(
+            store
+                .create_offline_package(&requested, 10, 10_000_000, 20_000_000)
+                .await
+                .expect("create package"),
+            OfflineCreateOutcome::Created(_)
+        ));
+        let claimed = store
+            .claim_next_offline_package(NODE)
+            .await
+            .expect("claim")
+            .expect("queued package");
+        let spec = OfflineSpec {
+            target_height: 720,
+            audio_index: None,
+            subtitle: OfflineSubtitle::None,
+            effective_rate_control: EffectiveRateControl::Vbr,
+        };
+        let produced = tokio::time::timeout(
+            Duration::from_secs(30),
+            manager.ensure_offline(
+                &claimed,
+                &file,
+                &spec,
+                Instant::now(),
+                &tokio_util::sync::CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("the offline pass answers")
+        .expect("offline pass");
+        assert!(
+            matches!(produced, OfflineProduceOutcome::Yielded),
+            "an unscripted production reaches the real producer and yields at its deadline"
+        );
+        assert!(
+            store
+                .offline_package_for_user(package_id, user.id)
+                .await
+                .expect("read package")
+                .expect("package")
+                .recipe_hash
+                .is_some(),
+            "the real production pinned its recipe"
+        );
+        assert_manager_on_noop_hooks(&manager, "after an offline production");
+
+        // The VOD publication point, behind the serving admission.
+        let root = crate::test_tempdir().expect("VOD root");
+        manager
+            .install_vod_http_test_session("vod-shipped-shape", file_id, root.path())
+            .await;
+        let publication = manager
+            .vod_playlist("vod-shipped-shape")
+            .await
+            .expect("VOD publication fixture");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                manager.authorize_response_publication(
+                    "vod-shipped-shape",
+                    &publication.owner,
+                    MediaResponsePublication::attempt_media("playlist", Some("index.m3u8")),
+                    Instant::now() + Duration::from_secs(1),
+                ),
+            )
+            .await
+            .expect("the VOD publication answers")
+            .is_ok(),
+            "the VOD publication is admitted through the no-op point"
+        );
+        assert_manager_on_noop_hooks(&manager, "after a VOD publication");
+
+        // The plumbing point: a held-source plan probes through the source
+        // it was handed.
+        #[cfg(unix)]
+        {
+            let media = crate::test_tempdir().expect("media");
+            let source_path = media.path().join("shipped-shape.mkv");
+            std::fs::write(&source_path, b"held source").expect("source fixture");
+            // Its own store: the held file is seeded into a library of its own.
+            let held_store: Arc<dyn Store> =
+                Arc::new(SqliteStore::open_in_memory().expect("held store"));
+            let held_id = seed_real_file(&held_store, &source_path).await;
+            let held_file = held_store
+                .get_file(held_id)
+                .await
+                .expect("get held file")
+                .expect("held file");
+            let probe_path = media.path().join("ffprobe-shipped-shape");
+            crate::write_test_executable(
+                &probe_path,
+                "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then printf '%s\\n' 'ffprobe version shipped-shape'; exit 0; fi\nprintf '%s\\n' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"h264\",\"profile\":\"High\",\"pix_fmt\":\"yuv420p\",\"width\":160,\"height\":120,\"avg_frame_rate\":\"24/1\",\"r_frame_rate\":\"24/1\",\"color_transfer\":\"bt709\",\"disposition\":{\"attached_pic\":0}}]}'\n",
+                0o755,
+            );
+            let probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(
+                probe_path.to_str().expect("probe path"),
+            )
+            .await
+            .expect("probe identity");
+            let (held_manager, _held_work, _held_cache) = cached_manager(&held_store);
+            let held_manager = held_manager.with_decode_probe(Some(probe));
+            let held_options = held_manager.options_for_tone_map(
+                Encoder::Software,
+                &held_file,
+                120,
+                0.0,
+                None,
+                None,
+                Some(1),
+                ToneMap::None,
+                OutputGrade::Sdr,
+            );
+            let held = held_manager
+                .resolve_held_movie_plan(
+                    &held_file,
+                    &held_options,
+                    Encoder::Software,
+                    BoundPlanCaller::Vod.decode_fact_source(
+                        Arc::new(std::fs::File::open(&source_path).expect("open held source")),
+                        Arc::new(tokio::sync::Semaphore::new(1)),
+                    ),
+                    Instant::now() + Duration::from_secs(5),
+                    None,
+                )
+                .await
+                .expect("held plan");
+            assert_eq!(
+                held.source_binding(),
+                plurx_core::transcode::PlanSourceBinding::DescriptorBound,
+                "the plan's facts were read through the held source"
+            );
+            assert_manager_on_noop_hooks(&held_manager, "after a held-source plan");
+        }
+
         let waker = futures_util::task::noop_waker();
         let mut context = std::task::Context::from_waker(&waker);
+        let hooks = manager.hooks();
         for (point, mut hook) in [
             (
                 "before_subtitle_playlist_commit",
@@ -1783,20 +2036,4 @@
                 "the production {point} point is ready at its first poll"
             );
         }
-        assert!(!hooks.forces_artifact_qualification());
-        assert!(hooks.scripted_offline_outcome("any-recipe").is_none());
-        assert!(hooks.offline_recovery_begin_fault().is_none());
-
-        let readiness = tokio::time::timeout(
-            Duration::from_secs(5),
-            manager.publish_artifact_qualification(),
-        )
-        .await
-        .expect("the publisher answers");
-        assert!(!readiness.requested, "nothing requested verified artifacts");
-        let installed: &dyn std::any::Any = manager.hooks();
-        assert!(
-            installed.is::<NoopTranscodeManagerHooks>(),
-            "no production path fills the slot"
-        );
     }

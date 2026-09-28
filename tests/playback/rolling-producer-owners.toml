@@ -3377,7 +3377,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # before and still is: it moved from `cfg(test)` into every build, where it bounds the no-op
 # hook, which is ready at its first poll, so the deadline timer is never registered. No
 # production timer was added.
-expected_occurrences = 1101
+# 1101 -> 1104 with #581's review round, measured from the validation unittests' actual count
+# (+3): `transcode_manager_shipped_shape` now drives the manager's migrated paths through the
+# production no-op hooks and bounds two of them, the unscripted offline production (30 s) and
+# the VOD publication (5 s); its HTTP half, `transcode_manager_shipped_shape_subtitle_playlist`
+# in `http/hls/tests/chunk_02.rs`, bounds the subtitle playlist (10 s). Each is a
+# `tokio::time::timeout` in a `#[cfg(test)]` test that asserts rather than hangs; none owns a
+# producer, process or timer. No production timer was added.
+expected_occurrences = 1104
 
 [[module_structures]]
 id = "bare-time-constructor"

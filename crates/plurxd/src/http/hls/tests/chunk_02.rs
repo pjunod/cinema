@@ -2074,6 +2074,44 @@
         );
     }
 
+    /// M8's shipped-shape test for the transcode manager, its HTTP half
+    /// (`transcode_manager_shipped_shape` drives the manager's own paths): a
+    /// real VOD subtitle playlist commits through the production
+    /// `before_subtitle_playlist_commit` point, and nothing fills the slot.
+    #[tokio::test]
+    async fn transcode_manager_shipped_shape_subtitle_playlist() {
+        fn assert_noop(state: &crate::state::AppState, when: &str) {
+            let installed: &dyn std::any::Any = state.transcode.hooks();
+            assert!(
+                installed.is::<crate::transcode::NoopTranscodeManagerHooks>(),
+                "the manager's slot holds the no-op hooks {when}"
+            );
+        }
+
+        let dir = crate::test_tempdir().expect("VOD subtitle directory");
+        let mut fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;
+        add_http_text_subtitle(&mut fixture, "rolling-unused").await;
+        let session_id = "vod-subtitle-shipped-shape";
+        let _owner = install_vod_http_session(&fixture, dir.path(), session_id).await;
+        assert_noop(&fixture.state, "before the subtitle playlist");
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            subtitle_playlist_local(&fixture.state, session_id, 0),
+        )
+        .await
+        .expect("the subtitle playlist answers")
+        .expect("the subtitle playlist commits through the no-op point");
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("subtitle playlist body");
+        let text = String::from_utf8(body.to_vec()).expect("subtitle playlist text");
+        assert!(
+            text.lines().any(|line| line.ends_with(".vtt")),
+            "the committed playlist names subtitle segments: {text}"
+        );
+        assert_noop(&fixture.state, "after the subtitle playlist");
+    }
+
     #[tokio::test]
     async fn real_subtitle_playlist_cannot_commit_after_vod_same_id_reattachment() {
         let dir = crate::test_tempdir().expect("VOD subtitle directory");
