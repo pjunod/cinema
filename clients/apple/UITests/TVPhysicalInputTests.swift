@@ -53,6 +53,53 @@ final class TVPhysicalInputTests: XCTestCase {
         attachScreen(app, name: "playback-remote")
     }
 
+    func testRapidBackwardSeeksResumeAdvancingPlayback() throws {
+        let app = try playbackApp(startMs: 5_100_000)
+        let position = app.staticTexts["player-position"]
+        let back = app.buttons["player-skip-back"]
+        remote.press(.select)
+        XCTAssertTrue(position.waitForExistence(timeout: 45), app.debugDescription)
+        XCTAssertTrue(back.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitForPosition(position, timeout: 40) { $0 >= 5_103 },
+                      "Initial playback clock never advanced from the requested position")
+        if !back.exists { remote.press(.up) }
+        XCTAssertTrue(focus(back, in: app), "Could not focus backward seek")
+        let before = try timeSeconds(position.label)
+        XCTAssertGreaterThanOrEqual(before, 5_100)
+        remote.press(.select)
+        remote.press(.select)
+        XCTAssertTrue(waitForPosition(position, timeout: 15) { $0 <= before - 15 },
+                      "Two backward seeks did not move the timeline")
+        let landed = try timeSeconds(position.label)
+        attachScreen(app, name: "two-backward-seeks-landed")
+        XCTAssertTrue(waitForPosition(position, timeout: 25) { $0 >= landed + 3 },
+                      "Playback clock did not resume after backward seeks")
+        XCTAssertEqual(app.buttons["player-play-pause"].label, "Pause")
+        attachScreen(app, name: "two-backward-seeks-playing")
+    }
+
+    private func waitForPosition(
+        _ element: XCUIElement, timeout: TimeInterval, accepts: (Int) -> Bool
+    ) -> Bool {
+        let end = Date().addingTimeInterval(timeout)
+        while Date() < end {
+            if element.exists, let seconds = try? timeSeconds(element.label), accepts(seconds) {
+                return true
+            }
+            // Up reveals idle chrome without committing another seek. The
+            // frame clock, not the optimistic seek target, must then advance.
+            if !element.exists { remote.press(.up) }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        return false
+    }
+
+    private func timeSeconds(_ value: String) throws -> Int {
+        let parts = value.split(separator: ":").compactMap { Int($0) }
+        XCTAssertTrue(parts.count == 2 || parts.count == 3, "Unexpected timeline: \(value)")
+        return parts.reduce(0) { $0 * 60 + $1 }
+    }
+
     func testCaptionSelectionWithRemote() throws {
         let trackLabel = try requiredEnvironment("PLURX_TVOS_CAPTION_LABEL")
         let app = try playbackApp()
@@ -138,7 +185,7 @@ final class TVPhysicalInputTests: XCTestCase {
         attachScreen(app, name: "library-paging")
     }
 
-    private func playbackApp() throws -> XCUIApplication {
+    private func playbackApp(startMs: Int = 0) throws -> XCUIApplication {
         let fileID = try requiredEnvironment("PLURX_TVOS_FILE_ID")
         let itemID = try requiredEnvironment("PLURX_TVOS_ITEM_ID")
         let app = XCUIApplication()
@@ -146,6 +193,13 @@ final class TVPhysicalInputTests: XCTestCase {
             "-plurx.acceptance.itemId", itemID,
             "-plurx.acceptance.fileId", fileID,
             "-plurx.acceptance.title", "Physical remote acceptance",
+        ]
+        if let origin = ProcessInfo.processInfo.environment["PLURX_TVOS_ORIGIN"] {
+            app.launchArguments += ["-plurx.origin", origin]
+        }
+        app.launchArguments += [
+            "-plurx.acceptance.startMs", String(startMs),
+            "-plurx.acceptance.probe", "YES",
         ]
         wakeDevice()
         app.launch()

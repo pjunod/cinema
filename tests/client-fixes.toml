@@ -2885,3 +2885,12 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "!self.attemptStillCurrent(telemetryOwner, fence: .seekTelemetrySupersession)"
 test = "clients/apple/Tests/AttemptScopesTests.swift"
 test_anchor = "func testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid()"
+
+# Missing AVPlayer callbacks must not keep a viewer seek pending forever.
+[[fixes]]
+id = "apple.native-seek-completion-deadline"
+commits = ["abd6dbbbd"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "case .finished(false), .timedOut:"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "func testNativeSeekDeadlineRecoversASeekThatNeverCompletes()"

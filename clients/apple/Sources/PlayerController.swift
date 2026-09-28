@@ -1790,6 +1790,8 @@ final class PlayerController: ObservableObject {
     private let reportPlaybackIntent: @MainActor (PlaybackControlSession) async -> UInt64?
     private let mediaSelectionPreparation: MediaSelectionPreparation
     private let itemPreparation: ItemPreparation
+    private let nativeSeek: @MainActor (AVPlayer, Int) async -> Bool
+    private let waitNativeSeekDeadline: @MainActor () async throws -> Void
     private let canPlayOffline: (AVURLAsset) -> Bool
     private let waitInitialDecisionDeadline: @MainActor () async throws -> Void
     /// M5's only clock. It is both the backoff between rungs and the absolute
@@ -1811,6 +1813,15 @@ final class PlayerController: ObservableObject {
         },
         mediaSelectionPreparation: MediaSelectionPreparation = MediaSelectionPreparation(),
         itemPreparation: ItemPreparation = ItemPreparation(),
+        nativeSeek: @escaping @MainActor (AVPlayer, Int) async -> Bool = { player, ms in
+            await player.seek(
+                to: CMTime(seconds: Double(ms) / 1000.0, preferredTimescale: 600),
+                toleranceBefore: .zero, toleranceAfter: .zero
+            )
+        },
+        waitNativeSeekDeadline: @escaping @MainActor () async throws -> Void = {
+            try await Task.sleep(for: .seconds(PlayerController.seekPresentationDeadlineSeconds))
+        },
         canPlayOffline: @escaping (AVURLAsset) -> Bool = { $0.assetCache?.isPlayableOffline == true },
         waitInitialDecisionDeadline: @escaping @MainActor () async throws -> Void = {
             try await Task.sleep(for: .seconds(20))
@@ -1841,6 +1852,8 @@ final class PlayerController: ObservableObject {
         self.requestPlaybackDecision = requestPlaybackDecision
         self.mediaSelectionPreparation = mediaSelectionPreparation
         self.itemPreparation = itemPreparation
+        self.nativeSeek = nativeSeek
+        self.waitNativeSeekDeadline = waitNativeSeekDeadline
         self.canPlayOffline = canPlayOffline
         self.waitInitialDecisionDeadline = waitInitialDecisionDeadline
         self.waitCreateRetry = waitCreateRetry
@@ -3614,7 +3627,7 @@ final class PlayerController: ObservableObject {
         deliveryStarvation.reset()
         interactiveSeekTask?.cancel()
         let seekAttempt = snapshotAttempt()
-        interactiveSeekTask = Task {
+        interactiveSeekTask = Task { [self] in
             // Coalesce native and replacement seeks alike. Executing every
             // scrub event makes AVPlayer and the server race old destinations.
             if !intentAlreadyPublished {
@@ -3659,16 +3672,45 @@ final class PlayerController: ObservableObject {
             case .native(let itemMs):
                 let item = player.currentItem
                 let nativeAttempt = snapshotAttempt()
-                _ = await player.seek(
-                    to: CMTime(seconds: Double(itemMs) / 1000.0, preferredTimescale: 600),
-                    toleranceBefore: .zero,
-                    toleranceAfter: .zero
+                let outcome = await PlayerSeekCompletion.run(
+                    operation: { [player, nativeSeek] in await nativeSeek(player, itemMs) },
+                    waitForDeadline: waitNativeSeekDeadline
                 )
                 // Only the newest seek may publish or escalate; an older
                 // completion arriving after AVPlayer cancelled it must not.
                 guard attemptStillCurrent(nativeAttempt, fence: .nativeSeekCompletion),
                       player.currentItem === item
                 else { return }
+                guard !Task.isCancelled else { return }
+                switch outcome {
+                case .cancelled:
+                    return
+                case .finished(true):
+                    break
+                case .finished(false), .timedOut:
+                    // Cancel only while this attempt still owns the item;
+                    // a stale timeout must never cancel a newer seek on it.
+                    if outcome == .timedOut { item?.cancelPendingSeeks() }
+                    guard wantsPlayback, !isPlaybackBlocked, !finished,
+                          seekState.markExecuted(generation: generation, targetMs: target)
+                    else { return }
+                    if UIApplication.shared.applicationState == .background,
+                       decision?.source?.videoCodec != nil {
+                        // Retain the presentation obligation across background
+                        // suspension; its active-demand clock resumes in front.
+                        beginSeekPresentationMonitor(generation: generation, targetMs: target)
+                        return
+                    }
+                    await retrySameDeliveryAfterStall(
+                        PlaybackStallEvent(
+                            kind: .buffering, action: .reopen, positionMs: target,
+                            durationMs: outcome == .timedOut
+                                ? Int(Self.seekPresentationDeadlineSeconds * 1_000) : 0
+                        ),
+                        consultControl: false
+                    )
+                    return
+                }
                 // A seek or Pause may have invalidated an awaited native
                 // subtitle choice. Reconcile that retained choice on the
                 // same item before acknowledging the new destination.
@@ -8490,7 +8532,23 @@ final class PlayerController: ObservableObject {
         // The check must precede the mutation, not merely guard the caller's
         // eventual completion: `player` may now contain an unrelated item.
         guard ownsSeek() else { return }
-        await itemPreparation.seek(player, ms)
+        let outcome = await PlayerSeekCompletion.run(
+            operation: { [player, prepare = itemPreparation.seek] in
+                await prepare(player, ms)
+                return true
+            },
+            waitForDeadline: waitNativeSeekDeadline
+        )
+        guard ownsSeek() else { return }
+        switch outcome {
+        case .finished(true), .cancelled:
+            return
+        case .finished(false):
+            throw PlaybackPreparationError.failed
+        case .timedOut:
+            item.cancelPendingSeeks()
+            throw PlaybackPreparationError.timedOut
+        }
     }
 
     /// Position in the HLS master rendition order. The server advertises only
