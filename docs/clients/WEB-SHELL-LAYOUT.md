@@ -175,13 +175,13 @@ had to be edited.
 | 43 | [`pages/analysis.js`](../../crates/plurxd/src/web/pages/analysis.js) | Analysis status: the queue, its failures, and what to do about them. | 15448–16149 |
 | 44 | [`pages/activity-stream.js`](../../crates/plurxd/src/web/pages/activity-stream.js) | Now playing: the Stream cell — state pill, meter strip, details disclosure. | 16150–16560 |
 | 45 | [`pages/settings.js`](../../crates/plurxd/src/web/pages/settings.js) | The Settings frame: `SETTINGS_MANIFEST`, `SETTINGS_ENDPOINTS`, tab routing. | 16561–16838 |
-| 46 | [`pages/settings-panels.js`](../../crates/plurxd/src/web/pages/settings-panels.js) | Shared panel machinery, Metadata/search, Maintenance/Windows, Analysis and Playback. | 16839–17349 |
+| 46 | [`pages/settings-panels.js`](../../crates/plurxd/src/web/pages/settings-panels.js) | Shared panel machinery, Libraries (including the shared storage budget editor), Metadata/search, Maintenance/Windows, Analysis and Playback. | 16839–17349 |
 | 47 | [`pages/live-tv.js`](../../crates/plurxd/src/web/pages/live-tv.js) | `LIVE_TV`, `viewLiveTv`, the guide, the grid, the popover, and the `live-tv-input-adapter` region. | 17350–18465 |
 | 48 | [`pages/live-tv-dvr.js`](../../crates/plurxd/src/web/pages/live-tv-dvr.js) | Recording from the Live TV page. | 18466–18751 |
 | 49 | [`pages/recordings.js`](../../crates/plurxd/src/web/pages/recordings.js) | The Recordings page: what is scheduled, what recorded, and what failed. | 18752–18983 |
 | 50 | [`pages/dvr-reminders.js`](../../crates/plurxd/src/web/pages/dvr-reminders.js) | The due-reminder overlay and its polling. | 18984–19064 |
 | 51 | [`pages/live-tv-controls.js`](../../crates/plurxd/src/web/pages/live-tv-controls.js) | Tuning, stopping, pause/mute/fullscreen, and the visibilitychange stop. | 19065–19342 |
-| 52 | [`pages/settings-developer.js`](../../crates/plurxd/src/web/pages/settings-developer.js) | Experimental Developer cards, adaptive Auto enablement, `developerPanel`, and shared advisory readiness helpers. | 19343–19799 |
+| 52 | [`pages/settings-developer.js`](../../crates/plurxd/src/web/pages/settings-developer.js) | Experimental Developer cards, adaptive Auto enablement, `developerPanel`, the `devGraduation` line each card prints, and shared advisory readiness helpers. | 19343–19799 |
 | 53 | [`pages/settings-live-tv.js`](../../crates/plurxd/src/web/pages/settings-live-tv.js) | `LIVE_TV_GUIDE_DRAFT`, guide, tuner, recording and library-channel cards, `liveTvPanel`. | 19800–20020 |
 | 54 | [`pages/settings-system.js`](../../crates/plurxd/src/web/pages/settings-system.js) | The users panel, build/storage/replication facts, `systemPanel`. | 20021–20238 |
 | 55 | [`pages/cluster.js`](../../crates/plurxd/src/web/pages/cluster.js) | Cluster membership: the node cards and what each one is claiming. | 20239–20557 |

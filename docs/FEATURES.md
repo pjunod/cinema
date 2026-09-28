@@ -872,11 +872,13 @@ Metadata owns search and classification settings. Maintenance owns Windows
 conversion and runtime readiness alongside Dolby Vision disk conversion.
 Cluster owns automatic transport-recovery guidance.
 
-Developer contains only experiments awaiting device qualification: prepared
-quality handoff (including the browser's second-player permission), subtitle
-failure refusal, verified decode artifacts and automatic decoder recovery.
-The recently shipped seek-scratch diagnostic card remains while native-device
-evidence is incomplete. Always-on startup recovery, HEVC admission, source verification and the playback
+Developer holds only features that are not yet fully active or fully
+tested, and every card there says what it is waiting on before it leaves:
+to its proper settings section when a permanent on/off makes sense,
+otherwise by losing its toggle once the feature is simply on. The current
+cards and what each waits on are audited in
+[SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md](features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md#developer-lifecycle--every-card-graduates).
+Always-on startup recovery, HEVC admission, source verification and the playback
 surface contract need no rollout cards or enable switches. Each server card
 saves only its own settings; the browser override saves locally. Readiness is
 expandable and advisory: missing or failed evidence never disables a toggle,
