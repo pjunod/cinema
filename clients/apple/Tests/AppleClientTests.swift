@@ -6131,6 +6131,7 @@ final class AppleClientTests: XCTestCase {
         XCTAssertNil(object["token"])
     }
 
+    #if DEBUG
     func testPhysicalDeviceAcceptanceLaunchReadsOnlyExplicitDebugDefaults() throws {
         let suite = "tv.plurx.acceptance-tests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -6182,6 +6183,7 @@ final class AppleClientTests: XCTestCase {
             session: "http://192.168.4.7:32400"
         ))
     }
+    #endif
 
     func testApplePlaybackProbeCarriesRunwayAndNoCredentialSurface() throws {
         var snapshot = ApplePlaybackDiagnosticSnapshot()
