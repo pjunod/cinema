@@ -3102,7 +3102,7 @@ test_anchor = "test_debug_timing_is_installed_without_a_dispatcher_split"
 # Exact native Live diagnostics retain static cause/state within wire limits.
 [[fixes]]
 id = "android.live-terminal-observation-wire-boundary"
-commits = ["afd07b31a"]
+commits = ["afd07b31a", "e1f1c14faaa047e058afa064acdc5554149efb74"]
 source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvTerminalDiagnostics.kt"
 source_anchor = "internal class LiveTvTerminalDiagnostics"
 test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvTerminalDiagnosticsTest.kt"
