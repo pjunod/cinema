@@ -1,6 +1,8 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 06:37 UTC · **Audited main:** `2694db665eedcb8c00c4caee15e72a897cd7f4c2`
+**Status:** open · **Updated:** 2026-09-28 06:55 UTC · **Audited main:** `2694db665eedcb8c00c4caee15e72a897cd7f4c2`
+
+Draft #594 integrates current PR590 source2585 and peer585 encoder advice while preserving native caption and explicit alternative ownership. Apple198/Android135 are reserved above197/134. Production and test-source compilation, one independent batch review, focused regressions, current-base fast qualification and physical caption/capacity acceptance remain pending. No second590 review or pre-review594 behavior test runs.
 
 Main #585 merged independently as `2694db665eedcb8c00c4caee15e72a897cd7f4c2` during590 qualification. Its actual server admission changes and native encoder-capacity message are integrated. It claims Apple196/Android134, so590 now reserves Apple197 and requires fresh197 apps/runner plus exact134 Android compilation and installation. The prior196/133 artifacts and physical observations keep their historical/source scope. No second590review. Its old-base gate3489 cannot qualify this new main; current combined compilation/focused checks and a new exact-base fast lane are required.
 

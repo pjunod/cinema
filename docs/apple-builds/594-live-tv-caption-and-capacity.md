@@ -3,7 +3,7 @@
 **Status:** open — source committed and compiled; the batch review, focused tests,
 fast qualification, deployment and physical acceptance remain pending.
 
-Build: 197
+Build: 198
 Issue: #594
 
 Ordinary Release Live TV exposes caption choices from the attached player's
@@ -24,9 +24,11 @@ through both client leases. The viewer can choose a known playable lineup
 channel explicitly. Old refusal actions lose their request-generation ownership;
 the selected alternative follows the normal owned start and release path.
 
-This batch reserves Apple197 and Android versionCode134. It depends on #590
-landing first, after which the current main is integrated and qualified. Existing
-signed196/133 products remain separate and retain their original evidence.
+This batch reserves Apple198 and Android versionCode135 above the integrated
+#590 Apple197 and current main Android134. It depends on #590 landing first,
+after which the current main is integrated and qualified. Prior signed products
+retain their original source-specific evidence. The earlier feature134 APK from
+this draft is sealed as unqualified history and must not be installed.
 
 Seven Apple regression sources and Android caption, offer-identity and actual
 lease regressions are prepared. Their compilation is source evidence; they have
