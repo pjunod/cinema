@@ -927,7 +927,14 @@ pub(crate) enum LiveTvError {
     InvalidResponse(String),
     OwnerUnavailable(String),
     Disabled(String),
+    /// Every tuner plurx may use is held. The one refusal that names what is
+    /// in the way (holders, watchable) — see `http::live_tv::capacity_error`.
     Capacity(String),
+    /// The owner's video encoder pool refused the transcode this route needs.
+    /// Not a tuner: a copy route on the same channel would have started. Kept
+    /// apart from `Capacity` because the copy a viewer sees must not say
+    /// "slots are busy" while every tuner sits idle.
+    EncoderCapacity(String),
     TunerUnavailable(String),
     ChannelNotFound(String),
     DrmUnsupported(String),
@@ -948,6 +955,7 @@ impl std::fmt::Display for LiveTvError {
             | Self::OwnerUnavailable(message)
             | Self::Disabled(message)
             | Self::Capacity(message)
+            | Self::EncoderCapacity(message)
             | Self::TunerUnavailable(message)
             | Self::ChannelNotFound(message)
             | Self::DrmUnsupported(message)
@@ -970,6 +978,7 @@ impl LiveTvError {
             Self::OwnerUnavailable(_) => "owner_unavailable",
             Self::Disabled(_) => "live_tv_disabled",
             Self::Capacity(_) => "tuner_capacity",
+            Self::EncoderCapacity(_) => "encoder_capacity",
             Self::TunerUnavailable(_) => "tuner_unavailable",
             Self::ChannelNotFound(_) => "channel_not_found",
             Self::DrmUnsupported(_) => "drm_unsupported",
@@ -6761,7 +6770,11 @@ async fn run_live_session_inner(
                     source.hdr.as_deref(),
                     delivery.output.height,
                     ADMISSION_WAIT,
-                ) => admission.map_err(LiveTvError::Capacity)?,
+                ) => admission.map_err(|why| {
+                    LiveTvError::EncoderCapacity(format!(
+                        "the tuner owner's video encoder could not take this channel: {why}"
+                    ))
+                })?,
             })
         } else {
             None

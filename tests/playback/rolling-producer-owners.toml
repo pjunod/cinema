@@ -4096,7 +4096,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # adds no new site.
 # PR #537 current-main integration: measured after replacing the temporary
 # owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
-expected_occurrences = 403
+# +1 (406 -> 407) with the Live TV encoder_capacity code: one `Response::status()`
+# assertion in the error-advice test, on an in-process typed ApiError. It
+# launches nothing and owns nothing; #585 adds no command construction.
+expected_occurrences = 404
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
