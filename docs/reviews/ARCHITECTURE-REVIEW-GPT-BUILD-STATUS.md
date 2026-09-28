@@ -1,10 +1,10 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 08:40 UTC · **Audited main:** `8841794aa8077e929b50cb10a811a8dfb2d5eaf4`
+**Status:** open · **Updated:** 2026-09-28 09:07 UTC · **Audited main:** `cbda012dc2515a60bc41a5d27700745506873ca2`
 
 ## Current work
 
-[PR #590](http://192.168.4.7:3000/noirr/plurx/pulls/590) has exactly one completed adversarial review; its finding and observed gate failures are fixed. Current candidate `57bc9b647d3753f6e970e66b2b771889e8c96187` integrates main `8841794aa8077e929b50cb10a811a8dfb2d5eaf4`, including peer591 Developer lifecycle changes. Exact pinned Rust1.97.1 check10.385s and Clippy18.963s pass. [Current fast lane3488](http://192.168.4.7:3000/noirr/plurx/actions/runs/3488) is running; old3504 Rust succeeded, but promotion refused after main moved. Historical focused results retain their actual source scopes, with exact blob parity. Merge and rollout require current green jobs and a sealed qualification receipt.
+[PR #590](http://192.168.4.7:3000/noirr/plurx/pulls/590) has exactly one completed adversarial review; its finding and observed failures are fixed. Current candidate `5ab3f9b8ea3d0dd945bcc4dd169b3b55016291bf` integrates main `cbda012dc2515a60bc41a5d27700745506873ca2`, including peer583 HLS route hooks and peer591 Developer lifecycle. The exact combined ownership1114 case passes. Pinned current-source compiler checks and a new selected fast lane qualify this tree. Obsolete3509 was cancelled when peer583 changed main, after its core1366/0/1 result and other selected phases passed; these keep their actual historical scope. Both reviews and unchanged native focused results are retained. Merge and rollout require current green jobs and a sealed qualification receipt.
 
 [Draft #594](http://192.168.4.7:3000/noirr/plurx/pulls/594) contains ordinary native caption controls and explicit known-channel capacity actions. Its single independent review approved frozen `7fd2bb42abed4d95a2f3b41b2f1d01ae07d5768d` with no findings. All seven Apple and eight Android focused cases pass with zero failures/skips. The initial four Android caption failures were host-framework stubs before assertions; committed677d adds faithful test-only TextUtils semantics, with original assertions unchanged and failures retained. Apple198/Android135 production inputs remain byte-identical to sealed products. Integrate actual590 main, run the selected native fast lane, then merge green. No second review.
 
@@ -22,7 +22,7 @@
 
 | Receipt | SHA-256 | Scope |
 |---|---|---|
-| `/private/tmp/codex-pr590-final-compiler-v10-20260928/receipt.json` | `ecd89d7b52a11e8fb327108a698cb6654009dbebad43719c927214f7664029ae` | Exact57bc/main884 compiler checks; no tests. |
+| `/private/tmp/codex-pr590-final-compiler-v10-20260928/receipt.json` | `ecd89d7b52a11e8fb327108a698cb6654009dbebad43719c927214f7664029ae` | Historical exact57bc/main884 compiler checks; no tests. |
 | `/private/tmp/codex-pr594-single-adversarial-review-20260928.json` | `bb72f3921129442e5ed82016a128b9b3cbd9fd23f3f7c855103cce42d97803e6` | Sole594 review of7fd: approve, no findings, no tests. |
 | `/private/tmp/codex-pr594-apple-seven-focused-prep-20260928/run-7fd2bb42abed-027881e5/receipt.json` | `343e43a4936e37f92e4e05708046b4b8d339fe30cc655d11322ac2728c2db815` | Actual7fd Apple7/0/0 on owned iOS26.5 simulator; SDK27 products, simulator deleted. |
 | `/private/tmp/codex-pr594-android-eight-focused-20260928T083811Z/receipt.json` | `7b22a917912d18f045723d035d3637290c567cc0d1ccb5f7465c355dfb579247` | Actual committedcc5 Android8/0/0; production135 inputs unchanged, prior four failures retained. |

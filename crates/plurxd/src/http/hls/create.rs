@@ -143,29 +143,6 @@ pub struct CreateSession {
     pub transport: Option<String>,
 }
 
-/// Test-only seam that freezes one create after it has recorded its viewer's
-/// ask and before its activation runs.
-///
-/// The property it exists to prove cannot be observed any other way. `create`
-/// carries the revision it *recorded* into the activation rather than one read
-/// at activation time, and those two values are identical except in the window
-/// between them — so a test that cannot stop inside that window cannot tell the
-/// correct implementation from the broken one. Modelled on the replicated
-/// store's `ACTIVATION_POINTER_READ_PAUSE`, which exists for the same reason.
-///
-/// One waiter at a time, taken rather than cloned, so a test that forgets to
-/// arm it cannot accidentally inherit another test's pause.
-#[cfg(test)]
-type CreateAskRecordedPause = (
-    tokio::sync::oneshot::Sender<()>,
-    tokio::sync::oneshot::Receiver<()>,
-);
-
-#[cfg(test)]
-pub(super) static CREATE_ASK_RECORDED_PAUSE: std::sync::LazyLock<
-    std::sync::Mutex<Option<CreateAskRecordedPause>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
-
 impl CreateSession {
     /// `height` is initially resolved by the caller — Auto answered, explicit
     /// rungs snapped, the source-height promise honored. A bound stall reopen
@@ -1315,19 +1292,11 @@ async fn create_with_purpose(
                 })?
                 .revision,
         );
-        #[cfg(test)]
-        {
-            let pause = {
-                let mut slot = CREATE_ASK_RECORDED_PAUSE
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                slot.take()
-            };
-            if let Some((reached, release)) = pause {
-                let _ = reached.send(());
-                let _ = release.await;
-            }
-        }
+        state
+            .hls_route_hooks
+            .get()
+            .after_create_ask_recorded()
+            .await;
     }
     let ingress_serving_authority = state.serving.authority();
     let ingress_serving_generation = ingress_serving_authority.admit().ok_or_else(|| {
