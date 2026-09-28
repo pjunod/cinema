@@ -11493,6 +11493,32 @@ final class AppleClientTests: XCTestCase {
         XCTAssertNil(try decoder.decode(Decision.self, from: Data(plain.utf8)).selection)
     }
 
+    func testOpticalProgressEncodesTheExactBurnedRendition() throws {
+        let progress = OpticalProgressRequest(
+            driveId: "node-a:drive-a",
+            mediaGeneration: "generation-a",
+            sessionId: "session-a",
+            angle: 1,
+            positionMs: 12_345,
+            durationMs: 90_000,
+            audio: 7,
+            subtitle: OpticalProgressSubtitleSelection(index: 5, burned: true),
+            recordedAtMs: 1_800_000_000_000
+        )
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoder.encode(progress)) as? [String: Any]
+        )
+
+        XCTAssertEqual(object["drive_id"] as? String, "node-a:drive-a")
+        XCTAssertEqual(object["media_generation"] as? String, "generation-a")
+        XCTAssertEqual(object["audio"] as? Int, 7)
+        let subtitle = try XCTUnwrap(object["subtitle"] as? [String: Any])
+        XCTAssertEqual(subtitle["index"] as? Int, 5)
+        XCTAssertEqual(subtitle["burned"] as? Bool, true)
+    }
+
     private static func trackFactsFile(
         audio: [AudioTrack] = [
             AudioTrack(index: 0, codec: "eac3", channels: 6, language: "eng", title: nil, default: true)
