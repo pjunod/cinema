@@ -1243,3 +1243,54 @@ pub(super) async fn own_supersession_convergence(
     }
     Ok(removed)
 }
+
+#[derive(Debug, Default)]
+pub(super) struct RecentMarkerAmbiguityLedger {
+    pub(super) entries: HashMap<(String, i64, &'static str), Instant>,
+    /// Saturation cannot discard a live retirement identity: doing so could
+    /// let its delayed placeholder steal a VOD ledger. A single bounded
+    /// global tombstone fails closed until every unrepresented retirement
+    /// admitted during saturation has aged out.
+    pub(super) overflow_ambiguous_until: Option<Instant>,
+}
+
+/// Remove the (empty/partial) HLS output so a restarted ffmpeg starts clean.
+pub(super) async fn clear_session_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    let mut entries = tokio::fs::read_dir(dir).await.map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("could not enumerate {}: {error}", dir.display()),
+        )
+    })?;
+    while let Some(entry) = entries.next_entry().await.map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("could not enumerate {}: {error}", dir.display()),
+        )
+    })? {
+        let path = entry.path();
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(std::io::Error::new(
+                    error.kind(),
+                    format!("could not remove {}: {error}", path.display()),
+                ));
+            }
+        }
+    }
+    drop(entries);
+
+    // The child/path transition excludes a successor writer, but detached
+    // retention cleanup can race this scan. Verify the directory is actually
+    // empty before ownership is allowed to reopen under the next attempt.
+    let mut remaining = tokio::fs::read_dir(dir).await?;
+    if let Some(entry) = remaining.next_entry().await? {
+        return Err(std::io::Error::other(format!(
+            "{} remained after predecessor cleanup",
+            entry.path().display()
+        )));
+    }
+    Ok(())
+}

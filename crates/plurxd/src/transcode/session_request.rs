@@ -844,3 +844,42 @@ impl SessionRequest {
         hex::encode(Sha256::digest(durable.to_string().as_bytes()))
     }
 }
+
+pub struct StartInfo {
+    pub session_id: String,
+    pub playlist_url: String,
+    pub duration_ms: Option<i64>,
+    pub start_seconds: f64,
+    /// The source timestamp represented by player-local time zero.
+    ///
+    /// Copy sessions may begin at the keyframe before `start_seconds`; an
+    /// accurate transcode begins at the requested position, and a cached VOD
+    /// begins at zero. Clients use this value for progress and timed overlays.
+    pub media_origin_seconds: f64,
+    /// The resolved output height. This is the server's persisted answer for
+    /// an Auto request and is repeated unchanged on an idempotent recovery.
+    pub target_height: i64,
+    /// The normalized route that actually created the session. A stall reopen
+    /// may turn an Auto copy session into a lower transcode rung, so callers
+    /// must report this answer rather than the pre-normalization request.
+    pub kind: SessionKind,
+    pub encoder: &'static str,
+    /// The dynamic range this session's bytes carry. `StartResponse` turns it
+    /// into `delivered_dynamic_range`, overriding whatever `/decision` said —
+    /// a burn, a forced rung, or a refused HDR10 grade all produce a session
+    /// the decision never promised.
+    pub grade: OutputGrade,
+    /// Served from the cache: every segment already exists, so this is a VOD
+    /// asset rather than a stream being written.
+    ///
+    /// The player needs to know, because the difference is visible. A live
+    /// session seeks by restarting the encoder somewhere else; a finished one
+    /// seeks by moving `currentTime`, like direct play, in well under a second.
+    /// No rolling producer recovery applies here — a segment that is late was
+    /// never going to be produced faster.
+    pub vod: bool,
+    /// Legacy activity lifetime enforced by the registry that owns this
+    /// session. A finished transcode-cache hit is seekable VOD to the client
+    /// but still belongs to the 60-second rolling registry.
+    pub control_lease_timeout_ms: u32,
+}

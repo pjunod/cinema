@@ -757,3 +757,33 @@ fn test_session_with_control(
         first_slide_logged: AtomicBool::new(false),
     }
 }
+
+/// Fail in terms of the dependency that is actually missing.
+///
+/// Several tests here and in [`crate::http`] drive the real spawn path. They
+/// don't need ffmpeg to *succeed* — the fixtures are placeholder bytes, so it
+/// always exits with an error — they need it to *start*, because what they
+/// assert on is the session bookkeeping that only exists once there is a child
+/// process to track. Absent ffmpeg that arrives as `No such file or directory
+/// (os error 2)` under twenty frames of tokio, or, having been through the HTTP
+/// layer first, as nothing more informative than `left: 500, right: 200`.
+///
+/// plurxd shells out to ffmpeg at runtime, so this is a dependency to install
+/// rather than a test to skip: skipping would let CI report green on the
+/// transcode paths without having run any of them.
+#[cfg(test)]
+pub(crate) fn require_ffmpeg() {
+    let bin = ffmpeg_bin();
+    if let Err(err) = std::process::Command::new(&bin)
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        panic!(
+            "this test needs ffmpeg, and running `{bin}` failed: {err}\n\
+             install it (`apt-get install ffmpeg`, `brew install ffmpeg`) or point \
+             PLURX_FFMPEG at a build — plurxd requires it at runtime too"
+        );
+    }
+}

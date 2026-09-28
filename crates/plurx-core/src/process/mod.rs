@@ -418,7 +418,7 @@ mod tests {
             ("pipeprobe.rs".to_owned(), 2),
             ("subtitle_ride_along.rs".to_owned(), 1),
             ("subtitles.rs".to_owned(), 1),
-            ("transcode.rs".to_owned(), 1),
+            ("transcode/media_origin.rs".to_owned(), 1),
         ]);
         let mut actual = BTreeMap::new();
         let source_root = Path::new(env!("CARGO_MANIFEST_DIR"))
