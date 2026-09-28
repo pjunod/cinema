@@ -2548,11 +2548,7 @@
             None,
         ));
 
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .activity_detail_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let pause = session.test_hooks().activity_detail.arm("activity_detail");
         let reader = {
             let session = Arc::clone(&session);
             tokio::spawn(async move {
@@ -2570,7 +2566,7 @@
                 .await
             })
         };
-        pause.wait().await;
+        let pause_held = pause.reached().await;
 
         let successor = session
             .control
@@ -2614,7 +2610,7 @@
         })
         .await
         .expect("successor terminal observation");
-        pause.wait().await;
+        pause_held.release();
 
         let status = reader.await.expect("status reader");
         assert_eq!(status.producer_attempt, Some(predecessor));

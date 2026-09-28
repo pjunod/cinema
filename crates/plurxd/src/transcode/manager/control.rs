@@ -545,12 +545,6 @@ impl TranscodeManager {
         // the request future is cancelled after mailbox admission, the actor
         // can still publish a ticket that this session-owned worker applies.
         self.ensure_flow_worker(&session_id, Arc::clone(&session));
-        #[cfg(test)]
-        let control_pause = session
-            .control_applied_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
         let terminal_admission =
             (control.snapshot.demand == crate::playback_control::PlaybackDemand::End).then(|| {
                 Arc::new(RollingTerminalAdmission {
@@ -559,8 +553,6 @@ impl TranscodeManager {
                     session: Arc::clone(&session),
                     identity: RollingTerminalIdentity::from_request(&control),
                     terminal_committer: terminal_committer.clone(),
-                    #[cfg(test)]
-                    control_pause: control_pause.clone(),
                 }) as Arc<dyn crate::playback_control::RollingTerminalAdmission>
             });
         let (
@@ -634,8 +626,6 @@ impl TranscodeManager {
                     false,
                     None,
                     None,
-                    #[cfg(test)]
-                    control_pause,
                 )
                 .await,
         )
@@ -660,18 +650,13 @@ impl TranscodeManager {
         acknowledged_end: bool,
         terminal_handoff: Option<crate::playback_control::TerminalResponseHandoff>,
         terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
-        #[cfg(test)] control_pause: Option<Arc<tokio::sync::Barrier>>,
     ) -> Result<
         crate::playback_control::LocalControlResult,
         crate::playback_control::ControlStateError,
     > {
         let rescue = terminal_handoff.clone();
         let outcome = async {
-            #[cfg(test)]
-            if let Some(pause) = control_pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
+            session.hooks.get().after_control_applied().await;
             // The actor also tickets replayed sequences. A caller whose first
             // response was lost can therefore wait for physical convergence.
             session.control.wait_for_flow(flow_ticket).await;

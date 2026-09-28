@@ -320,17 +320,7 @@ pub(super) async fn begin_first_media_publication_handoff_before(
                 Err(_) => session.control.settle_first_media_at_deadline(&waiter),
             };
         if accepted {
-            #[cfg(test)]
-            let pause = session
-                .first_media_owner_claim_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            #[cfg(test)]
-            if let Some(pause) = pause {
-                pause.reached.notify_one();
-                pause.release.notified().await;
-            }
+            session.hooks.get().before_first_media_owner_claim().await;
             // Attempt-media authorization is the exact linearization point at
             // which the rolling actor becomes the sole transcode lifetime
             // owner. The decision executor remains registered across this
