@@ -19,14 +19,19 @@
   <p><strong>Updated:</strong> 2026-09-28 · <strong>Task branch:</strong>
     <code>codex/optical-m0-foundations</code> · <strong>PR:</strong>
     <code>#403 → effort/optical-media</code> · <strong>Implementation head:</strong>
-    <code>bd5280be0</code></p>
+    <code>bf6c00cde</code></p>
   <p>This page is the live execution ledger for DVD and Blu-ray playback.
     A green implementation row means code and focused evidence exist; it does
     not stand in for physical-media acceptance.</p>
   <p><strong>Latest hardening:</strong> <code>bd5280be0</code> turns every
     unsupported managed-copy recipe and missing immutable copy index into a
     typed refusal rather than a daemon panic, and advances the optical cache
-    key namespace for the field-wise source identity.</p>
+    key namespace for the field-wise source identity. Commit
+    <code>657b31ba5</code> bounds total navigation entries, directory depth and
+    playlist enumeration. Commit <code>d3633ecd0</code> preserves safe owner
+    400/404/subtitle refusals without forwarding peer diagnostics, and
+    <code>bf6c00cde</code> expires owner advertisements from local monotonic
+    receipt time rather than comparing host clocks.</p>
 
   <h2>Current position</h2>
   <table>

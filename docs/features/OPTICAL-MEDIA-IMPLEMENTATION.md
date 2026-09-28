@@ -1050,7 +1050,10 @@ timelines server-authoritative; `45d9c3310` bounds client-visible failure text;
 advertisement that contains no session-capability field or private diagnostic;
 and `5a2f65351` validates the insertion generation before eject can stop a
 reader. Commit `bd5280be0` makes an unindexed managed-copy recipe a typed VOD
-refusal instead of a panic and versions its field-wise cache identity. These
+refusal instead of a panic and versions its field-wise cache identity. Commit
+`657b31ba5` bounds the helper's complete navigation walk, `d3633ecd0` maps
+remote validation and subtitle refusals without relaying peer diagnostics,
+and `bf6c00cde` uses local monotonic receipt time for owner expiry. These
 changes do not close the physical or copy-path acceptance rows.
 
 Before enabling release support, verify: accepted source/seek decision; both
