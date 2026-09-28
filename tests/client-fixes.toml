@@ -138,7 +138,9 @@ test_anchor = "testTheRevealLayerIsNotFocusableWhileTheOverlayOrTheGuideIsVisibl
 id = "apple.live-tv-info-focus-review"
 commits = ["90c18453"]
 source = "clients/apple/Sources/LiveTvView.swift"
-source_anchor = "guard !visible, fullscreen, overlayVisible else { return }"
+# The Info dismissal's deferred write moved into returnFocusToCoverSheetOpener
+# (PR #589), which every cover sheet's onDismiss now calls.
+source_anchor = "let opener = coverSheetOpener ?? .pillPlay"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testFullscreenFocusDefaultsToPauseAndReturnsThereFromTheRevealLayer"
 
@@ -2894,3 +2896,34 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "case .finished(false), .timedOut:"
 test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
 test_anchor = "func testNativeSeekDeadlineRecoversASeekThatNeverCompletes()"
+
+# The Apple TV Live TV page moves focus by name in three regions and defers
+# every write aimed at a view being inserted; Info and More sheets hang off
+# the fullscreen cover. The test pins each of the report's defects to the
+# line that fixes it.
+[[fixes]]
+id = "apple.live-tv-appletv-navigation"
+commits = ["17ab5f50e"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "private func moveDetailFocus(_ input: LiveTvContractInput, region: DetailRegion) -> Bool {"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testAppleTvLiveNavigationIsReversibleAndReachesEverything() throws"
+
+# The grid restores a requested position from its own copy; the parent's
+# memory is rewritten by whatever the engine landed on in between.
+[[fixes]]
+id = "apple.live-tv-guide-requested-target"
+commits = ["3ca76b929"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "@State private var requestedTarget: LiveTvGuideFocusPosition?"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testFocusCoordinatorRejectsStaleRestoresAndTransfersTheBoundaryAtomically() throws"
+
+# The sheet onDismiss handlers are shared code with tvOS-only bodies.
+[[fixes]]
+id = "apple.live-tv-sheet-focus-returns-ios"
+commits = ["1b48c0091"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "private func returnGuideFocusAfterProgrammeSheet() {"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testAppleTvLiveNavigationIsReversibleAndReachesEverything() throws"
