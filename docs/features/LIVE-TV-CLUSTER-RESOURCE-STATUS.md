@@ -38,6 +38,19 @@ compilation, web regressions, TypeScript, documentation and source inventories
 pass. The required fast lane records the final result on PR #537. The replacement
 Apple runner is available.
 
+### Final integration evidence
+
+Pinned Rust 1.97.1 workspace/all-target Clippy, formatting and served JavaScript
+syntax passed after the merge. The focused integration checks passed: 19 schema
+checks, 10 ledger/migration inventory checks and five Live TV checks (protocol
+negotiation, incompatible-peer placement, removed relay routes, warm restart
+seat retention and two-segment startup). The removed-route assertion now checks
+the intentional HTML app-shell fallback and absence of admitted tuner work.
+Web Live TV, 34 settings checks, API/document/mobile contracts and TypeScript
+passed. The review is closed; PR #537 is ready for its blocking fast lane and
+merge. This status update also triggers the ready PR's synchronize event on
+Forgejo, whose title-based draft change did not enqueue a ready-for-review run.
+
 ## Delivery decisions
 
 - 2026-09-25: User requests proper batched commits and one larger PR, with
