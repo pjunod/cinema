@@ -40,12 +40,17 @@ function opticalDiscName(drive){
 function opticalDriveHref(drive){ return `#/discs/${encodeURIComponent(drive.id)}`; }
 function opticalHomeHtml(page){
   const drives=(page&&page.optical)||[];
-  const shown=drives.filter(drive=>drive.disc||drive.state?.state==="inspecting");
+  const shown=drives.filter(drive=>drive.disc||["inspecting","failed"].includes(drive.state?.state));
   let body="";
   if(shown.length){
     body=`<h2 class="section">Inserted disc${shown.length===1?"":"s"} <a class="muted optical-all" href="#/discs">· all drives</a></h2>`+
       `<div class="optical-shelf">${shown.map(drive=>{
-        if(!drive.disc) return `<a class="optical-card reading" href="${opticalDriveHref(drive)}"><span class="optical-mark">◉</span><span><strong>${esc(drive.name)}</strong><small>Reading disc…</small></span></a>`;
+        if(!drive.disc){
+          const message=drive.state?.state==="failed"
+            ?(drive.state.reason||"The disc could not be read.")
+            :"Reading disc…";
+          return `<a class="optical-card reading" href="${opticalDriveHref(drive)}"><span class="optical-mark">◉</span><span><strong>${esc(drive.name)}</strong><small>${esc(message)}</small></span></a>`;
+        }
         return `<a class="optical-card" href="${opticalDriveHref(drive)}">
           <span class="optical-mark">${drive.disc.format==="bluray"?"BD":"DVD"}</span>
           <span class="optical-copy"><small>${esc(opticalFormatLabel(drive.disc.format))} · ${esc(drive.name)}</small>
