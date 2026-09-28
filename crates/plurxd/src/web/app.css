@@ -3175,6 +3175,9 @@
   /* Library channels reuse the guide card language, not the tuner controller. */
   .lc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
   .lc-card{display:flex;flex-direction:column;gap:10px;min-height:190px}
+  .lc-card.lc-picked{border-color:var(--bad)}.lc-card .lc-select{width:18px;height:18px;margin:0 4px 0 0;flex:none}
+  .lc-card .lc-delete{color:var(--bad)}
+  .lc-bulk{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 14px;min-height:40px}.lc-bulk label{display:flex;align-items:center;gap:8px}
   .lc-programme>span{min-width:0;overflow-wrap:anywhere}
   .lc-now{font-size:18px;font-weight:700}.lc-next,.lc-time{color:var(--muted);font-size:13px}
   .lc-guide{display:grid;gap:8px}.lc-programme{display:grid;grid-template-columns:100px minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px;border-top:1px solid var(--line)}
