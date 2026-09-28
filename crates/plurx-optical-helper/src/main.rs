@@ -258,15 +258,15 @@ mod linux {
                 diagnostics.join("; ")
             ));
         }
-        let volume_label = mount
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned());
         Ok(InspectionResponse {
             schema_version: INSPECTION_SCHEMA_V1,
             expected_generation: args.expected_generation,
             disc: InspectedDisc {
                 format,
-                volume_label,
+                // A mountpoint name is node-local configuration, not disc
+                // metadata. Preserve unknown until a bounded format parser
+                // obtains a label from the media itself.
+                volume_label: None,
                 protection: ProtectionFacts {
                     detected: None,
                     implementation_available: None,
