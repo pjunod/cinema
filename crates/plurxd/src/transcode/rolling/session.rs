@@ -369,7 +369,9 @@ pub(crate) trait SessionHooks: std::any::Any + Send + Sync {
     fn after_retirement_cleanup_handoff(&self) -> crate::seam_hooks::HookFuture<'static>;
     /// The scratch cleanup owner is detached, before it touches the directory.
     fn before_scratch_cleanup(&self) -> crate::seam_hooks::HookFuture<'static>;
-    /// The detached retention worker took its batch, before any unlink.
+    /// The detached retention worker started, before it reads its pass and
+    /// unlinks anything: an entry queued while this point is held is part of
+    /// that pass.
     fn before_retention_unlink(&self) -> crate::seam_hooks::HookFuture<'static>;
     /// The detached retention worker finished its batch and cleared its
     /// active flag.
