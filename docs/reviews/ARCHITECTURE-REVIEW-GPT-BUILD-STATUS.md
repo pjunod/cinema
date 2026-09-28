@@ -1,15 +1,16 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 00:05 UTC · **Audited main:** `ffe9657644e88af2e38d58a5a4c013e2ead08aea`
+**Status:** open · **Updated:** 2026-09-28 00:33 UTC · **Audited main:** `ffe9657644e88af2e38d58a5a4c013e2ead08aea`
 
 [PR #575](http://192.168.4.7:3000/noirr/plurx/pulls/575) merged after its single adversarial review and green exact-head [Main promotion gate #3383](http://192.168.4.7:3000/noirr/plurx/actions/runs/3383). The following work remains active:
 
 | Work | Current evidence | Next action |
 |---|---|---|
-| C-08 client §7.9 | The merged server contract exists; current web/Apple/Android clients lack seek terminal beacons and native progress method. | Parallel web, Apple and Android implementation in [draft PR #582](http://192.168.4.7:3000/noirr/plurx/pulls/582); Apple commit `9341151fc` compiles on iOS/tvOS, including test sources (unexecuted); one batched PR, one final adversarial review, then fast lane. Claude retains server ownership. |
-| Fleet | Fresh four-node audit: all checkouts `ffe965`; nynuc/nuc3 run `ffe965`, m6/nuc4 run `86f2e870a`. All were healthy, with quorum, lag0 and clean hygiene. | Resolve the independent rollout's ownership before another node transition; establish a uniform point and restart current-main duration evidence. |
+| C-08 client §7.9 | Main still lacks the client follow-ups; draft #582 implements them on all three clients. | Parallel web, Apple and Android implementation in [draft PR #582](http://192.168.4.7:3000/noirr/plurx/pulls/582); Apple `9341151fc`/`f50e56ef7`, web `3dc5464a5`, Android `5fd2c0ce8` are integrated. App and regression-source compilation passed without execution; one final adversarial review precedes the fast lane. Android dismissal-safe delivery and originating-profile authentication are integrated as `70df10111`; the compile-only build receipt is `ab275290abcc95b75d4f38c0559d7dcc557763b2fb21f4ffae25c5d45adf604d`. Claude retains server ownership. |
+| Fleet | Fresh four-node audit: all checkouts `ffe965`; m6/nynuc/nuc3 run `ffe965`, only nuc4 still runs `86f2e870a` (00:22 point). All were healthy, with quorum, lag0 and clean hygiene. | Resolve the independent rollout's ownership before another node transition; establish a uniform point and restart current-main duration evidence. |
 | Duration | Historical `86f` first hour: 121 ticks/node, no gaps, source changes, HTTP/quorum/restart or hygiene issues; nuc3 maximum lag1. Later source changes invalidate a uniform 24-hour/7-day claim. | Preserve the historical receipt; one collector/heartbeat remains active, explicitly marked source-mixed. |
-| Physical devices | Release191 Apple and signed Android131 remain installed; iPad Pro and Pixel are now unlocked. | Deploy changed client releases after merge; collect named playback, seek, reader and controller evidence on reachable devices. |
+| Physical devices | Six paired Apple devices report Release191; Pixel remains signed Android131. iPad Pro and Pixel are now unlocked. | Deploy changed client releases after merge; collect named playback, seek, reader and controller evidence on reachable devices. |
+| C-08 fleet §7.10 | All four nodes expose exactly16 start-outcome and2 unpaired series. An owned direct-nynuc Chrome play/Close on exact `ffe965` measured +1 `direct_play,ok`; all other outcome/unpaired series unchanged. | Refused/cancelled/native pause/cluster attribution cases remain open. Row2 receipt SHA-256 `49eb669a324047a74313e8bdc9b835d9a7f0433835b38c9cf91c1321264c05e3`. |
 | K-06 | The clock plan explicitly says design-only; its measurement release does not exist. | Record the prerequisite. NTP and absent metrics cannot stand in for its future peer-uncertainty measurement. |
 | A-04 / W-02 / L-03 | Browser A-04/W-02 receipts remain valid for their unchanged served-web tree; S14 server changes require runtime requalification. Caption samples remain negative. | Native/HDR, physical remote, caption-positive and owned capacity-offer acceptance remain open. |
 

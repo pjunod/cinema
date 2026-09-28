@@ -2827,3 +2827,21 @@ source = "crates/plurxd/src/web/player/measurements.js"
 source_anchor = 'if(p.attemptReason==="seek"||p.controlSeek?.seekTelemetry){'
 test = "tests/web/seek-telemetry.test.js"
 test_anchor = "seek attachment startup cannot inflate TTFF before or after its target frame"
+
+# Seek first-frame measurements must not enter startup TTFF histograms.
+[[fixes]]
+id = "android.seek-picture-does-not-inflate-ttff"
+commits = ["5fd2c0ce8"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
+source_anchor = 'event = if (measurement.attempt.reason == "seek") "seek_resumed" else "ttff",'
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "fun seekReportsPresentedPictureOnceWithoutInflatingTtff()"
+
+# A player dismissal cannot cancel the terminal seek beacon or rebind its identity.
+[[fixes]]
+id = "android.seek-abandonment-survives-dismissal"
+commits = ["70df10111"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/AppViewModel.kt"
+source_anchor = "postPlaybackClientLog(viewModelScope, event)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "fun dismissalCannotCancelQueuedAbandonmentOrRebindItToTheNextProfile() = runTest {"
