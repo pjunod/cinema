@@ -6,7 +6,7 @@ first.
 
 ## Android Live TV fullscreen on tablets: every box gets its own player view
 
-**Branch `fix/android-live-tv-fullscreen-own-surface` (`726f1241` + ledger + review), Android 138 — 137 went to the native Live TV settings graduation first; the fix is not yet merged or installed.**
+**[PR #606](http://192.168.4.7:3000/noirr/plurx/pulls/606), merged 2026-09-28 as `cfa61cb3e`; Android 138 installed on the Lenovo TB322FC, Google TV Streamer, Pixel 11 Pro XL, Pixel 10 Pro Fold and razr ultra 2025; VERIFIED on the TB322FC and the Streamer. Still owed: the TCL 9445X and the Xiaomi 25019PNF3C, which were not reachable over wireless adb.**
 Paul reported 2026-09-28 that fullscreen Live TV on the tablets still shows
 the small inline picture in a mostly black screen. #509's relayout + surface
 rebind *is* on `main` (re-landed by #546 after the push-mirror rewind, in
@@ -22,7 +22,19 @@ The adversarial review found no blocker and confirmed the release/bind order
 against Media3 1.10.1 and Compose's apply order; it added PlayerView's API 34
 SurfaceView sync workaround for the boxes that resize in place, an honest
 KDoc (one black frame per swap, no PiP host on the wide layout) and a
-tighter source pin. Not yet: CI, the merge, the tablets.
+tighter source pin. The fast lane went green (Rust gate included) and the
+merge carries the `Regression-Test:` trailer. Hardware, driven over wireless
+adb from nuc3 with screenshots and `uiautomator` bounds: on the TB322FC the
+fullscreen SurfaceView is `[0,97][3040,1807]` and the picture fills it at
+16:9; exit returns it to the inline box `[44,492][1753,1453]`; five
+fullscreen/exit toggles from the watch pane and three from the Guide preview
+kept the tuner (`1 tuner in use`, no stop message); the swap while paused
+shows the held frame in both boxes. The Streamer (API 34) plays, fills and
+returns the same way. The release build also exposed that
+`scripts/sign-android-release` could not read apksigner 37's per-scheme
+signer lines (the pinned image has build-tools 37); that landed in the same
+PR with three unit tests. Android 138 is a release-signed build; 137 was
+never installed anywhere.
 
 ## Live TV said "all slots are busy" with every tuner idle
 

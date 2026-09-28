@@ -22,7 +22,8 @@ recomputed on every decision, because unplugging HDMI changes the answer.
 
 > Status: **v0.3.0**, build `138` — every Live TV box builds its own player
 > view, so fullscreen fills the screen on tablets instead of keeping the
-> inline picture in a corner; physical acceptance pending.
+> inline picture in a corner; accepted on the Lenovo TB322FC and the Google
+> TV Streamer 2026-09-28, TCL 9445X still owed.
 > Build 137 — the tuner, programme guide, recording and Library channel
 > settings leave Developer for Settings → Live TV, as on the web; the
 > Developer Enable Live TV card shows its live readiness rows.
