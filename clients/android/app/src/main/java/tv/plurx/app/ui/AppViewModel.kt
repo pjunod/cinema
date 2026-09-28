@@ -43,6 +43,8 @@ import tv.plurx.app.data.LoginReq
 import tv.plurx.app.data.Net
 import tv.plurx.app.data.PlurxApi
 import tv.plurx.app.data.parseRefusal
+import tv.plurx.app.player.PlaybackClientLog
+import tv.plurx.app.player.postPlaybackClientLog
 import tv.plurx.app.player.normalizedPlaybackMethod
 import tv.plurx.app.data.ProgressReq
 import tv.plurx.app.data.Session
@@ -897,6 +899,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 // The reaper remains the backstop.
             }
         }
+    }
+
+    /** Diagnostic delivery survives player-screen dismissal, like final progress. */
+    internal fun postPlaybackDiagnostic(event: PlaybackClientLog) {
+        postPlaybackClientLog(viewModelScope, event)
     }
 
     suspend fun reportProgress(itemId: Long, positionMs: Long, durationMs: Long?, method: String? = null) {

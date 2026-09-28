@@ -1,5 +1,6 @@
 package tv.plurx.app.player
 
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -59,17 +60,27 @@ internal fun clientLogRequest(origin: String, event: PlaybackClientLog): Request
  * Fire-and-forget diagnostics through the app's shared authenticated client.
  * Missing connection state means offline playback, where no beacon is sent.
  */
-internal fun postPlaybackClientLog(scope: CoroutineScope, event: PlaybackClientLog) {
+internal fun postPlaybackClientLog(
+    scope: CoroutineScope,
+    event: PlaybackClientLog,
+    dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    send: suspend (Request) -> Unit = { request ->
+        Net.capabilityClient.newCall(request).execute().use { }
+    },
+) {
     val origin = Session.origin
-    if (origin.isBlank() || Session.token.isNullOrBlank()) return
+    val token = Session.token?.takeIf { it.isNotBlank() } ?: return
+    if (origin.isBlank()) return
     val request = try {
-        clientLogRequest(origin, event)
+        clientLogRequest(origin, event).newBuilder()
+            .header("Authorization", "Bearer $token")
+            .build()
     } catch (_: Exception) {
         return
     }
-    scope.launch(Dispatchers.IO) {
+    scope.launch(dispatcher) {
         try {
-            Net.client.newCall(request).execute().use { }
+            send(request)
         } catch (_: Exception) {
             // Telemetry is best effort and must never become a playback error.
         }

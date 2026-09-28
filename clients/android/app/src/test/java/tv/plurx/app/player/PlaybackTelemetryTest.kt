@@ -1,5 +1,12 @@
 package tv.plurx.app.player
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -12,6 +19,7 @@ import org.junit.Test
 import tv.plurx.app.data.Net
 import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.ProgressReq
+import tv.plurx.app.data.Session
 
 class PlaybackTelemetryTest {
 
@@ -179,6 +187,53 @@ class PlaybackTelemetryTest {
             assertFalse(offline.containsKey("deliveryMethod"))
         }
         assertNull(normalizedPlaybackMethod("unknown"))
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun dismissalCannotCancelQueuedAbandonmentOrRebindItToTheNextProfile() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val appScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val screenScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val transportReady = CompletableDeferred<Unit>()
+        val delivered = mutableListOf<okhttp3.Request>()
+        val origin = Session.origin
+        val token = Session.token
+        try {
+            Session.origin = "http://original.test:32400"
+            Session.token = "original-test-profile"
+            val bridge = ControllerPlaybackTelemetry(fakePlan, StubTelemetryPlayer(),
+                { PlaybackTelemetryContext("remux", null, null) },
+                { event ->
+                    postPlaybackClientLog(appScope, event, dispatcher) { request ->
+                        transportReady.await()
+                        delivered.add(request)
+                    }
+                },
+            )
+            val seek = bridge.begin("seek", 100)
+            bridge.prepared(seek)
+            bridge.cancelPending()
+            runCurrent() // The real diagnostic coroutine has reached its transport.
+            screenScope.cancel() // Composition's scope ends before HTTP delivery.
+            Session.origin = "http://next.test:32400"
+            Session.token = "next-test-profile"
+            transportReady.complete(Unit)
+            runCurrent()
+            bridge.cancelPending()
+            runCurrent()
+            val request = delivered.single()
+            assertEquals("http://original.test:32400/api/v1/client-log", request.url.toString())
+            assertEquals("Bearer original-test-profile", request.header("Authorization"))
+            val body = Buffer().also { request.body!!.writeTo(it) }.readUtf8()
+            assertEquals("seek_abandoned", Net.json.parseToJsonElement(body).jsonObject.getValue("event").jsonPrimitive.content)
+            assertFalse(body.contains("test-profile"))
+        } finally {
+            Session.origin = origin
+            Session.token = token
+            screenScope.cancel()
+            appScope.cancel()
+        }
     }
 
     @Test

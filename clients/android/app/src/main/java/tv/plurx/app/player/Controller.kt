@@ -509,7 +509,7 @@ class Controller internal constructor(
                 sessionId = sessionId,
             )
         },
-        emit = { event -> postPlaybackClientLog(scope, event) },
+        emit = vm::postPlaybackDiagnostic,
     )
     private val stallWatchdogJob: Job
     private val targetPresentationWatchdogJob: Job
