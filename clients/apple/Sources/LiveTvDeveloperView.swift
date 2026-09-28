@@ -1,5 +1,8 @@
 import SwiftUI
 
+/// Settings → Developer: only what is still waiting on evidence, each with the
+/// line that says what it waits on. The tuner, guide, recording and Library
+/// channel cards graduated to Settings → Live TV (`LiveTvSettingsView`).
 /// Always present. The server enforces administrator access and the saved
 /// generation; enabling is a separate runtime mutation, never a build switch.
 struct LiveTvDeveloperView: View {
@@ -7,24 +10,7 @@ struct LiveTvDeveloperView: View {
     @AppStorage("plurx.preparedHandoff") private var preparedHandoffEnabled = true
     @AppStorage("plurx.boundedResume") private var boundedResumeEnabled = true
     @ObservedObject private var handoff = Caps.PreparedHandoffTelemetry.shared
-    @State private var api: LiveTvAPI?
-    @State private var saved: LiveTvSettings?
-    @State private var readiness: LiveTvReadiness?
-    @State private var guideReadiness: LiveTvGuideReadiness?
-    @State private var developerReadiness: DeveloperReadiness?
-    @State private var ipv4 = ""
-    @State private var owner = ""
-    @State private var sessions = 2
-    @State private var height = 0
-    @State private var busy = false
-    @State private var message = "Administrator access is required."
-    @State private var revision = UUID()
-
-    private var dirty: Bool {
-        guard let saved else { return false }
-        return ipv4 != saved.liveTvDeviceIpv4
-            || sessions != saved.liveTvMaxSessions || height != saved.liveTvMaxOutputHeight
-    }
+    @StateObject private var admin = LiveTvAdminModel(readsGuide: false)
 
     var body: some View {
         Form {
@@ -38,6 +24,7 @@ struct LiveTvDeveloperView: View {
                     .font(.caption)
                 Text("Live TV, cold startup, AirPlay, and Picture in Picture keep their existing owners and budgets. A missing local video sample is not treated as a failed picture on an external display.")
                     .font(.caption)
+                Text(LiveTvSettingsPlacement.boundedResumeGraduation).font(.caption)
             }
             Section("Prepared quality handoff · advisory enablement") {
                 Toggle("Enable two-player prepared handoff", isOn: $preparedHandoffEnabled)
@@ -76,105 +63,25 @@ struct LiveTvDeveloperView: View {
                     )
                     Text(requirement.detail).font(.caption)
                 }
+                Text(LiveTvSettingsPlacement.preparedHandoffGraduation).font(.caption)
             }
-            if let saved {
-                Section("Library channels · advisory enablement") {
-                    Toggle("Enable Library channels", isOn: Binding(
-                        get: { saved.libraryChannelsEnabled },
-                        set: { write(.libraryChannelsEnabled($0)) }
-                    ))
-                    Text("Schedules use already-probed local movies and episodes. The checks explain whether this server looks ready; they do not disable or override the switch.")
-                    if let item = developerReadiness?.items.first(where: { $0.id == "library_channels" }) {
-                        ForEach(item.requirements) { requirement in
-                            Label(requirement.title, systemImage: requirement.status == "met" ? "checkmark.circle" : (requirement.status == "unmet" ? "exclamationmark.triangle" : "questionmark.circle"))
-                            Text(requirement.evidence).font(.caption)
-                        }
-                    }
-                    Button("Refresh Library channel readiness") { Task { await loadDeveloperReadiness() } }
-                }
-                Section("Recording · advisory enablement") {
-                    Toggle("Enable recording", isOn: Binding(
-                        get: { saved.dvrEnabled },
-                        set: { write(.dvrEnabled($0)) }
-                    ))
-                    Text("This switch is always yours to operate. The checks explain what is needed for safe capture; unmet or unobservable checks never disable or override it.")
-                    LabeledContent("Recording root", value: saved.dvrRoot.isEmpty ? "Not set" : saved.dvrRoot)
-                    LabeledContent("Reserved tuner slots", value: String(saved.dvrTunerReserve))
-                    if let item = developerReadiness?.items.first(where: { $0.id == "dvr" }) {
-                        ForEach(item.requirements) { requirement in
-                            Label(requirement.title, systemImage: requirement.status == "met" ? "checkmark.circle" : (requirement.status == "unmet" ? "exclamationmark.triangle" : "questionmark.circle"))
-                            Text(requirement.evidence).font(.caption)
-                        }
-                    } else {
-                        Text("Readiness is unavailable. That does not gate the enable switch.").font(.caption)
-                    }
-                    Button("Refresh recording readiness") { Task { await loadDeveloperReadiness() } }
-                }
-            }
-            Section("HDHomeRun Live TV · runtime enablement") {
+            Section("Enable Live TV · advisory enablement") {
                 Text("Watch unprotected antenna channels from one network tuner. No special build is needed.")
                 Text("Before enabling: finish the HDHomeRun channel scan and reserve a stable private IPv4 address. Keep cluster servers upgraded and their clocks synchronized.")
                 Text("At least one eligible server needs network access to the tuner and writable scratch space. Viewers and recordings share channel transports. Compatible broadcasts are copied without an encoder; conversion routes additionally need a working FFmpeg encoder and tone mapping when HDR must become SDR.")
                 Text("ATSC 3.0 can require HEVC and AC-4 decoders your FFmpeg lacks. DRM, rewind, and captions are not supported. Unprotected channels can be scheduled or recorded manually. Readiness tests the output graph, not every broadcast codec, and never gates either switch.")
-            }
-            if let saved {
-                Section(saved.liveTvEnabled ? "Live TV is enabled" : "Live TV is disabled") {
-                    TextField("Tuner private IPv4", text: $ipv4)
-                        .disabled(busy)
-                    Picker("Maximum channel streams", selection: $sessions) {
-                        ForEach(1...4, id: \.self) { Text(String($0)).tag($0) }
-                    }.disabled(busy)
-                    Picker("Maximum quality", selection: $height) {
-                        Text("Original / Auto").tag(0)
-                        Text("480p ceiling").tag(480)
-                        Text("720p ceiling").tag(720)
-                        Text("1080p ceiling").tag(1080)
-                        Text("2160p ceiling").tag(2160)
-                    }.disabled(busy)
-                    Button("Save configuration") {
-                        write(.configure(ipv4: ipv4.trimmingCharacters(in: .whitespacesAndNewlines),
-                                         owner: owner.trimmingCharacters(in: .whitespacesAndNewlines),
-                                         sessions: sessions, height: 720, maxHeight: height))
-                    }.disabled(busy || !dirty)
-                    Button("Check saved configuration") { checkReadiness() }.disabled(busy || dirty)
+                if let saved = admin.saved {
+                    Label(saved.liveTvEnabled ? "Live TV is enabled" : "Live TV is disabled", systemImage: "info.circle")
                     Button(saved.liveTvEnabled ? "Disable Live TV and drain sessions" : "Enable Live TV") {
-                        write(.enabled(!saved.liveTvEnabled))
-                    }.disabled(busy)
-                    Text("Saving preserves enablement and ends streams using the previous configuration. Readiness is advisory; unmet checks do not prevent enabling.").font(.caption)
+                        admin.write(.enabled(!saved.liveTvEnabled))
+                    }.disabled(admin.busy)
+                    Text("Readiness is advisory; unmet checks do not prevent enabling. Configure the tuner and check the saved configuration in Settings → Live TV.").font(.caption)
                 }
-
-            }
-            if let readiness {
-                // Every row the server sends, drawn the same way — including
-                // rows this build has never heard of. `start_recovery` arrives
-                // here without a line of its own, which is the point: an
-                // advisory card that has to be extended for each new check is
-                // one that silently drops the check nobody remembered.
-                Section(readiness.ready ? "Saved configuration is ready" : "Readiness needs attention") {
-                    ForEach(readiness.checks) { check in
-                        Label(check.message, systemImage: check.ready ? "checkmark.circle" : "exclamationmark.triangle")
-                    }
-                }
-            }
-            Section("Programme guide · advisory readiness") {
-                Text("What the guide needs to fill in, and whether it is true right now. Nothing here refuses a save, a toggle, or a start — a guide that will not load leaves a working page with number and callsign rows.")
-                if let guideReadiness {
-                    ForEach(guideReadiness.checks) { check in
-                        Label(check.message, systemImage: check.ready ? "checkmark.circle" : "exclamationmark.triangle")
-                    }
-                    Text(guideReadiness.allMet
-                         ? "Source \(guideReadiness.source) · \(guideReadiness.freshness) · \(guideReadiness.programmes) programmes across \(guideReadiness.matchedChannels) of \(guideReadiness.lineupChannels) lineup channels."
-                         : "Source \(guideReadiness.source) · \(guideReadiness.freshness). Unmet rows explain what is missing; the guide is still served, and Live TV still starts.")
-                        .font(.caption)
-                        .accessibilityIdentifier("live-tv-guide-readiness-summary")
-                } else {
-                    Text("The guide card has not been read yet, or this node is not the tuner owner.").font(.caption)
-                }
-                Button("Check the guide") { Task { await loadGuideReadiness() } }.disabled(busy)
+                Text(LiveTvSettingsPlacement.enableLiveTvGraduation).font(.caption)
             }
             Section {
-                Text(message).accessibilityIdentifier("live-tv-developer-status")
-                Button("Reload server settings") { Task { await load() } }.disabled(busy)
+                Text(admin.message).accessibilityIdentifier("live-tv-developer-status")
+                Button("Reload server settings") { Task { await admin.load(app: model) } }.disabled(admin.busy)
             }
         }
         #if os(tvOS)
@@ -183,103 +90,7 @@ struct LiveTvDeveloperView: View {
         .pickerStyle(.menu)
         #endif
         .navigationTitle("Developer")
-        .task { await load() }
-        .onDisappear { revision = UUID() }
-    }
-
-    private func apply(_ settings: LiveTvSettings) {
-        saved = settings
-        ipv4 = settings.liveTvDeviceIpv4
-        owner = settings.liveTvOwnerNodeId
-        sessions = settings.liveTvMaxSessions
-        height = settings.liveTvMaxOutputHeight
-        readiness = nil
-        // A save can change the guide source, so the card that described the
-        // previous one is cleared rather than left to look current.
-        guideReadiness = nil
-    }
-
-    @MainActor private func load() async {
-        let expected = UUID()
-        revision = expected
-        busy = true
-        let client = LiveTvAPI(origin: model.origin, token: Session.shared.credentials.token)
-        api = client
-        do {
-            let settings = try await client.settings()
-            guard revision == expected else { return }
-            apply(settings)
-            await loadDeveloperReadiness()
-            await loadGuideReadiness()
-            message = "Settings loaded. Save, check readiness, then enable."
-        } catch {
-            guard revision == expected else { return }
-            saved = nil
-            message = error.localizedDescription
-        }
-        busy = false
-    }
-
-    private func write(_ change: LiveTvSettingsChange) {
-        guard !busy, let saved, let api else { return }
-        busy = true
-        let expected = revision
-        Task { @MainActor in
-            do {
-                let settings = try await api.update(change, generation: saved.liveTvConfigGeneration)
-                guard revision == expected else { return }
-                apply(settings)
-                await loadGuideReadiness()
-                message = "Saved. Recording is \(settings.dvrEnabled ? "enabled" : "disabled"); Library channels are \(settings.libraryChannelsEnabled ? "enabled" : "disabled"); Live TV is \(settings.liveTvEnabled ? "enabled" : "disabled")."
-            } catch {
-                guard revision == expected else { return }
-                // No automatic retry of an uncertain mutation: reload its
-                // authoritative generation before another operator action.
-                self.saved = nil
-                readiness = nil
-                message = error.localizedDescription + " Reload settings before trying again."
-            }
-            busy = false
-        }
-    }
-
-    private func checkReadiness() {
-        guard !busy, !dirty, let api, let saved else { return }
-        busy = true
-        let expected = revision
-        Task { @MainActor in
-            do {
-                let result = try await api.readiness()
-                guard revision == expected else { return }
-                guard result.generation == saved.liveTvConfigGeneration else {
-                    throw LiveTvFailure(code: "settings_conflict")
-                }
-                readiness = result
-                message = result.ready ? "Ready. Enable is a separate action." : "Resolve the failed checks before enabling."
-            } catch {
-                guard revision == expected else { return }
-                readiness = nil
-                message = error.localizedDescription
-            }
-            busy = false
-        }
-    }
-
-    /// Advisory in the strongest sense: a card that cannot be read is an empty
-    /// card, never an error banner and never a reason to stop the operator
-    /// saving or enabling. A non-owner node answers `owner_unavailable` here
-    /// and that is a normal, expected answer.
-    @MainActor private func loadGuideReadiness() async {
-        guard let api else { return }
-        guideReadiness = try? await api.guideReadiness()
-    }
-
-    @MainActor private func loadDeveloperReadiness() async {
-        do {
-            developerReadiness = try await model.requireAPI().developerReadiness()
-        } catch {
-            developerReadiness = nil
-            message = error.localizedDescription
-        }
+        .task { await admin.load(app: model) }
+        .onDisappear { admin.invalidate() }
     }
 }

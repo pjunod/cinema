@@ -643,11 +643,11 @@ final class LiveTvTests: XCTestCase {
     /// tab says what is needed and whether each part is met, and never refuses
     /// the enable. These two tests are that rule, pinned.
     func testTheDeveloperCardDrawsEveryReadinessRowTheServerSendsAndGatesNothing() throws {
-        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        let source = try String(
-            contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvDeveloperView.swift")
-                .standardizedFileURL,
-            encoding: .utf8)
+        // The readiness cards moved to Settings → Live TV with their owner
+        // model; the enable stayed in Developer. The rule is the same on both.
+        let source = try Self.appleSource("LiveTvSettingsView.swift")
+        let model = try Self.appleSource("LiveTvAdminModel.swift")
+        let developer = try Self.appleSource("LiveTvDeveloperView.swift")
         // Both cards iterate the server's array rather than naming rows. That
         // is what makes `start_recovery` — and the next row nobody has written
         // yet — appear without a client change.
@@ -669,10 +669,101 @@ final class LiveTvTests: XCTestCase {
         }
         // The enable and save controls gate on exactly what they always did:
         // an in-flight request and unsaved edits. Never on a check.
-        XCTAssertTrue(source.contains("Button(saved.liveTvEnabled ? \"Disable Live TV and drain sessions\" : \"Enable Live TV\")"))
-        XCTAssertTrue(source.contains("}.disabled(busy || dirty)"))
+        XCTAssertTrue(developer.contains("Button(saved.liveTvEnabled ? \"Disable Live TV and drain sessions\" : \"Enable Live TV\")"))
+        XCTAssertTrue(developer.contains("}.disabled(admin.busy)"))
+        XCTAssertTrue(source.contains("}.disabled(admin.busy || admin.dirty)"))
+        for file in [developer, model] {
+            for gate in ["disabled(!readiness", "disabled(readiness", "readiness.ready ||", "!readiness.ready"] {
+                XCTAssertFalse(file.contains(gate), "\(gate) would let an advisory check block an operator")
+            }
+        }
         // And a guide card that cannot be read is an empty card.
-        XCTAssertTrue(source.contains("guideReadiness = try? await api.guideReadiness()"))
+        XCTAssertTrue(model.contains("guideReadiness = try? await api.guideReadiness()"))
+    }
+
+    private static func appleSource(_ name: String) throws -> String {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        return try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/\(name)").standardizedFileURL,
+            encoding: .utf8)
+    }
+
+    // ---- where the server Live TV settings are drawn --------------------
+
+    /// The web moved the tuner, guide, recording and Library channel cards
+    /// from Developer to Settings → Live TV, and Paul's Developer rule says a
+    /// finished setting does not wait in Developer. Settings → Live TV draws
+    /// the four cards and their saves; Developer draws none of them.
+    func testLiveTvSettingsOwnTheFourCardsTheWebMovedAndDeveloperListsNoneOfThem() throws {
+        XCTAssertEqual(LiveTvSettingsPlacement.liveTvSettings,
+                       ["HDHomeRun Live TV", "Programme guide", "Recording", "Library channels"])
+        let settings = try Self.appleSource("LiveTvSettingsView.swift")
+        let developer = try Self.appleSource("LiveTvDeveloperView.swift")
+        let moved: [String: [String]] = [
+            "HDHomeRun Live TV": ["write(.configure(", "admin.checkReadiness()", "ForEach(readiness.checks)"],
+            "Programme guide": ["admin.loadGuideReadiness()", "ForEach(guideReadiness.checks)"],
+            "Recording": ["Toggle(\"Enable recording\"", "write(.dvrEnabled("],
+            "Library channels": ["Toggle(\"Enable Library channels\"", "write(.libraryChannelsEnabled("],
+        ]
+        var previous = settings.startIndex
+        for title in LiveTvSettingsPlacement.liveTvSettings {
+            // In the web's order, each exactly once.
+            let header = "Section(\"\(title)\")"
+            XCTAssertEqual(settings.components(separatedBy: header).count - 1, 1, title)
+            let at = try XCTUnwrap(settings.range(of: header), title)
+            XCTAssertGreaterThanOrEqual(at.lowerBound, previous, "\(title) is out of the web's order")
+            previous = at.lowerBound
+            XCTAssertFalse(developer.contains(header), "Developer still lists \(title)")
+            for call in moved[title] ?? [] {
+                XCTAssertTrue(settings.contains(call), "Settings → Live TV must draw \(title) (\(call))")
+                XCTAssertFalse(developer.contains(call), "Developer must not draw \(title) (\(call))")
+            }
+        }
+        // The Developer view no longer reads the guide it no longer draws.
+        XCTAssertTrue(developer.contains("LiveTvAdminModel(readsGuide: false)"))
+        XCTAssertTrue(settings.contains("LiveTvAdminModel(readsGuide: true)"))
+    }
+
+    /// Every Developer card that stays says what it is waiting on — the web's
+    /// `devGraduation` line — and the Live TV enable is one of them.
+    func testEveryDeveloperCardThatStaysSaysWhatItWaitsOn() throws {
+        let developer = try Self.appleSource("LiveTvDeveloperView.swift")
+        XCTAssertEqual(LiveTvSettingsPlacement.developer.count, 3)
+        for title in LiveTvSettingsPlacement.developer {
+            XCTAssertTrue(developer.contains("Section(\"\(title)\")"), title)
+        }
+        XCTAssertEqual(developer.components(separatedBy: "Section(\"").count - 1,
+                       LiveTvSettingsPlacement.developer.count,
+                       "a Developer card must be listed in LiveTvSettingsPlacement.developer")
+        for line in [LiveTvSettingsPlacement.enableLiveTvGraduation,
+                     LiveTvSettingsPlacement.boundedResumeGraduation,
+                     LiveTvSettingsPlacement.preparedHandoffGraduation] {
+            XCTAssertTrue(line.hasPrefix("Leaves Developer when: "))
+            XCTAssertTrue(line.contains(" Then: "))
+        }
+        XCTAssertTrue(LiveTvSettingsPlacement.enableLiveTvGraduation
+            .hasSuffix("Then: the switch moves to Settings → Live TV as a permanent on/off."))
+        for name in ["enableLiveTvGraduation", "boundedResumeGraduation", "preparedHandoffGraduation"] {
+            XCTAssertTrue(developer.contains("Text(LiveTvSettingsPlacement.\(name))"), name)
+        }
+    }
+
+    /// Settings reaches Live TV the way it reaches Developer: one focusable
+    /// row that pushes the screen, on iOS and tvOS alike.
+    func testSettingsReachesLiveTvSettingsLikeDeveloper() throws {
+        let settings = try Self.appleSource("SettingsView.swift")
+        let link = "NavigationLink(\"Tuner, guide, recording and Library channels\") { LiveTvSettingsView() }"
+        XCTAssertEqual(settings.components(separatedBy: link).count - 1, 1)
+        let section = try XCTUnwrap(settings.range(of: link))
+        let before = settings[..<section.lowerBound]
+        let lastCondition = before.range(of: "#if os(", options: .backwards)
+        let lastEnd = before.range(of: "#endif", options: .backwards)
+        if let lastCondition {
+            XCTAssertNotNil(lastEnd)
+            XCTAssertGreaterThan(lastEnd!.lowerBound, lastCondition.lowerBound,
+                                 "the Live TV settings row must not be platform-conditional")
+        }
+        XCTAssertTrue(settings.contains("NavigationLink(\"Enable Live TV and other features awaiting evidence\") { LiveTvDeveloperView() }"))
     }
 
     func testTheGuideReadinessCardSurvivesAServerThatSendsMoreThanThisBuildKnows() throws {
