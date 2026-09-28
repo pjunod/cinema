@@ -2839,3 +2839,13 @@ source = "clients/apple/Sources/LiveTvView.swift"
 source_anchor = "private func moveDetailFocus(_ input: LiveTvContractInput, region: DetailRegion) -> Bool {"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "func testAppleTvLiveNavigationIsReversibleAndReachesEverything() throws"
+
+# The grid restores a requested position from its own copy; the parent's
+# memory is rewritten by whatever the engine landed on in between.
+[[fixes]]
+id = "apple.live-tv-guide-requested-target"
+commits = ["3ca76b929"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "@State private var requestedTarget: LiveTvGuideFocusPosition?"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testFocusCoordinatorRejectsStaleRestoresAndTransfersTheBoundaryAtomically() throws"
