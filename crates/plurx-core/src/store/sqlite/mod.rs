@@ -21,6 +21,7 @@ mod fragment_index_cluster;
 mod housekeeping;
 mod library;
 mod library_channels;
+mod live_tv_resource;
 mod media;
 mod offline;
 mod outbox;
@@ -1171,6 +1172,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs_embeddings::SCHEMA,
     super::background_jobs_probe::SCHEMA,
     super::background_jobs_integrity::SCHEMA,
+    // Distributed Live TV intents, ingest claims, and capture authority.
+    // v83: durable cluster tuner admission, capture claims and fenced output.
+    crate::live_tv_resource::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2894,7 +2898,7 @@ mod tests {
         // provider dispatch budgets and the subtitle adapter; v77 adds artwork holders,
         // and v78 retains portable transcode source/manifest provenance.
         assert_eq!(
-            version, 82,
+            version, 83,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
