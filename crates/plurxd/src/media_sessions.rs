@@ -876,6 +876,185 @@ pub(crate) fn prometheus() -> String {
     out
 }
 
+/// Upper bounds of `plurx_media_session_route_lock_seconds`, as nanoseconds
+/// and as the `le` label they render as (C-07 M5, PLEX-FACADE-PAGING §3.5
+/// item 2). One array so a bound and its label cannot drift apart.
+const ROUTE_LOCK_BUCKETS: [(u64, &str); 5] = [
+    (10_000, "0.00001"),
+    (100_000, "0.0001"),
+    (1_000_000, "0.001"),
+    (10_000_000, "0.01"),
+    (100_000_000, "0.1"),
+];
+/// Upper bounds of `plurx_media_session_route_prune_entries`: how many
+/// entries one expired-entry sweep walks, up to the cache's own ceiling.
+const ROUTE_PRUNE_BUCKETS: [u64; 7] =
+    [0, 16, 64, 256, 1_024, 2_048, MAX_ROUTE_CACHE_ENTRIES as u64];
+const ROUTE_LOOKUP_RESULTS: [&str; 3] = ["cache_hit", "single_flight_hit", "store"];
+const ROUTE_LOCK_SITES: [&str; 4] = ["lookup", "insert", "queried_insert", "generation_insert"];
+
+/// How `raw_route_before` answered one cached route lookup (an HLS media or
+/// status GET, or a session DELETE, routed through `relay_if_remote`).
+#[derive(Clone, Copy, Debug)]
+enum RouteLookup {
+    /// The first `cached_route`, before any single-flight shard is taken.
+    CacheHit = 0,
+    /// The second `cached_route`, after waiting on the lookup's
+    /// `route_queries` shard: another lookup of the same capability did the
+    /// Store read this one would otherwise have repeated.
+    SingleFlightHit = 1,
+    /// A `store.media_session_route` read.
+    Store = 2,
+}
+
+/// The four places the route-cache map mutex is taken in shipping code.
+#[derive(Clone, Copy, Debug)]
+enum RouteLockSite {
+    /// `cached_route`.
+    Lookup = 0,
+    /// `cache_route_result` (activation and terminal publication).
+    Insert = 1,
+    /// `cache_queried_route_result` (a Store lookup's answer).
+    QueriedInsert = 2,
+    /// `cache_route_if_generation` (generation-checked activation).
+    GenerationInsert = 3,
+}
+
+/// Route-cache instrumentation (C-07 M5, PLEX-FACADE-PAGING §3.5). It is
+/// measure-only: it records around the existing lock and sweep sites and
+/// changes no constant, no lock ordering and no answer.
+///
+/// Held per coordinator rather than in a static, so a test's exact counts
+/// are moved only by the coordinator it drives (PR #462's census lesson), and
+/// rendered from atomics, so a `/metrics` scrape takes no lock a segment GET
+/// can hold and reads no Store.
+#[derive(Debug, Default)]
+pub(crate) struct RouteCacheMetrics {
+    lookups: [AtomicU64; ROUTE_LOOKUP_RESULTS.len()],
+    lock_buckets: [[AtomicU64; ROUTE_LOCK_BUCKETS.len() + 1]; ROUTE_LOCK_SITES.len()],
+    lock_sum_nanos: [AtomicU64; ROUTE_LOCK_SITES.len()],
+    prune_buckets: [AtomicU64; ROUTE_PRUNE_BUCKETS.len() + 1],
+    prune_sum: AtomicU64,
+    entries: AtomicU64,
+}
+
+impl RouteCacheMetrics {
+    fn lookup(&self, result: RouteLookup) {
+        self.lookups[result as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn lock_waited(&self, site: RouteLockSite, waited: Duration) {
+        let nanos = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
+        let bucket = ROUTE_LOCK_BUCKETS
+            .iter()
+            .position(|(bound, _)| nanos <= *bound)
+            .unwrap_or(ROUTE_LOCK_BUCKETS.len());
+        self.lock_buckets[site as usize][bucket].fetch_add(1, Ordering::Relaxed);
+        self.lock_sum_nanos[site as usize].fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    fn pruned(&self, walked: usize) {
+        let walked = u64::try_from(walked).unwrap_or(u64::MAX);
+        let bucket = ROUTE_PRUNE_BUCKETS
+            .iter()
+            .position(|bound| walked <= *bound)
+            .unwrap_or(ROUTE_PRUNE_BUCKETS.len());
+        self.prune_buckets[bucket].fetch_add(1, Ordering::Relaxed);
+        self.prune_sum.fetch_add(walked, Ordering::Relaxed);
+    }
+
+    fn cache_entries(&self, entries: usize) {
+        self.entries.store(
+            u64::try_from(entries).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
+    #[cfg(test)]
+    fn lookups(&self, result: RouteLookup) -> u64 {
+        self.lookups[result as usize].load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn prometheus(&self) -> String {
+        let mut out = String::from(
+            "# HELP plurx_media_session_route_lookups_total Media-session route lookups through the route cache (HLS media and status GETs, session DELETEs) by how they were answered: the one-second route cache, the cache re-read after waiting on the lookup's single-flight shard, or a Store read. Control and final-status reads bypass the cache and are not counted here.\n\
+             # TYPE plurx_media_session_route_lookups_total counter\n",
+        );
+        for (index, result) in ROUTE_LOOKUP_RESULTS.iter().enumerate() {
+            out.push_str(&format!(
+                "plurx_media_session_route_lookups_total{{result=\"{result}\"}} {}\n",
+                self.lookups[index].load(Ordering::Relaxed)
+            ));
+        }
+        out.push_str(
+            "# HELP plurx_media_session_route_lock_seconds Wait to acquire the route-cache map lock, by call site.\n\
+             # TYPE plurx_media_session_route_lock_seconds histogram\n",
+        );
+        for (site_index, site) in ROUTE_LOCK_SITES.iter().enumerate() {
+            let mut cumulative = 0_u64;
+            for (bucket_index, (_, label)) in ROUTE_LOCK_BUCKETS.iter().enumerate() {
+                cumulative = cumulative.saturating_add(
+                    self.lock_buckets[site_index][bucket_index].load(Ordering::Relaxed),
+                );
+                out.push_str(&format!(
+                    "plurx_media_session_route_lock_seconds_bucket{{site=\"{site}\",le=\"{label}\"}} {cumulative}\n"
+                ));
+            }
+            cumulative = cumulative.saturating_add(
+                self.lock_buckets[site_index][ROUTE_LOCK_BUCKETS.len()].load(Ordering::Relaxed),
+            );
+            let sum_nanos = self.lock_sum_nanos[site_index].load(Ordering::Relaxed);
+            out.push_str(&format!(
+                "plurx_media_session_route_lock_seconds_bucket{{site=\"{site}\",le=\"+Inf\"}} {cumulative}\n\
+                 plurx_media_session_route_lock_seconds_sum{{site=\"{site}\"}} {}.{:09}\n\
+                 plurx_media_session_route_lock_seconds_count{{site=\"{site}\"}} {cumulative}\n",
+                sum_nanos / 1_000_000_000,
+                sum_nanos % 1_000_000_000,
+            ));
+        }
+        out.push_str(
+            "# HELP plurx_media_session_route_prune_entries Entries walked by one expired-entry sweep of the route cache; the sweep runs under the map lock on every insert.\n\
+             # TYPE plurx_media_session_route_prune_entries histogram\n",
+        );
+        let mut cumulative = 0_u64;
+        for (bucket_index, bound) in ROUTE_PRUNE_BUCKETS.iter().enumerate() {
+            cumulative =
+                cumulative.saturating_add(self.prune_buckets[bucket_index].load(Ordering::Relaxed));
+            out.push_str(&format!(
+                "plurx_media_session_route_prune_entries_bucket{{le=\"{bound}\"}} {cumulative}\n"
+            ));
+        }
+        cumulative = cumulative
+            .saturating_add(self.prune_buckets[ROUTE_PRUNE_BUCKETS.len()].load(Ordering::Relaxed));
+        out.push_str(&format!(
+            "plurx_media_session_route_prune_entries_bucket{{le=\"+Inf\"}} {cumulative}\n\
+             plurx_media_session_route_prune_entries_sum {}\n\
+             plurx_media_session_route_prune_entries_count {cumulative}\n\
+             # HELP plurx_media_session_route_cache_entries Entries in the route cache after its last change; the cache holds at most {MAX_ROUTE_CACHE_ENTRIES}.\n\
+             # TYPE plurx_media_session_route_cache_entries gauge\n\
+             plurx_media_session_route_cache_entries {}\n",
+            self.prune_sum.load(Ordering::Relaxed),
+            self.entries.load(Ordering::Relaxed),
+        ));
+        out
+    }
+}
+
+/// Times one wait for the route-cache map lock. Recorded on drop, so a wait
+/// cut short by a caller's `timeout_at` is counted too, up to the moment it
+/// was abandoned.
+struct RouteLockWait<'a> {
+    metrics: &'a RouteCacheMetrics,
+    site: RouteLockSite,
+    started: Instant,
+}
+
+impl Drop for RouteLockWait<'_> {
+    fn drop(&mut self) {
+        self.metrics.lock_waited(self.site, self.started.elapsed());
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct StaleSettlementBackoff {
     failures: u32,
@@ -1541,8 +1720,12 @@ pub(crate) struct MediaSessionCoordinator {
     route_generations: Arc<Vec<std::sync::atomic::AtomicU64>>,
     lease_seeds: Arc<tokio::sync::Mutex<HashMap<String, LeaseSeed>>>,
     control_admission: Arc<StdMutex<ControlAdmission>>,
+    route_cache_metrics: Arc<RouteCacheMetrics>,
+    /// Test-only: while set, a lookup that reaches the Store read waits here
+    /// until the semaphore is closed, so a test can hold one read open and
+    /// observe what concurrent lookups of the same capability do meanwhile.
     #[cfg(test)]
-    route_store_queries: Arc<std::sync::atomic::AtomicUsize>,
+    route_store_gate: Arc<StdMutex<Option<Arc<tokio::sync::Semaphore>>>>,
 }
 
 #[derive(Clone)]
@@ -1664,9 +1847,43 @@ impl MediaSessionCoordinator {
             ),
             lease_seeds: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             control_admission: Arc::new(StdMutex::new(ControlAdmission::default())),
+            route_cache_metrics: Arc::new(RouteCacheMetrics::default()),
             #[cfg(test)]
-            route_store_queries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            route_store_gate: Arc::new(StdMutex::new(None)),
         })
+    }
+
+    /// The route-cache instrumentation `/metrics` renders (C-07 M5).
+    pub(crate) fn route_cache_metrics(&self) -> Arc<RouteCacheMetrics> {
+        Arc::clone(&self.route_cache_metrics)
+    }
+
+    /// Take the route-cache map lock, recording how long it took to get.
+    /// The lock taken, and where, is exactly what the caller took before.
+    async fn lock_routes(
+        &self,
+        site: RouteLockSite,
+    ) -> tokio::sync::MutexGuard<'_, HashMap<String, CachedRoute>> {
+        let wait = RouteLockWait {
+            metrics: &self.route_cache_metrics,
+            site,
+            started: Instant::now(),
+        };
+        let routes = self.routes.lock().await;
+        drop(wait);
+        routes
+    }
+
+    #[cfg(test)]
+    async fn wait_route_store_gate(&self) {
+        let gate = self
+            .route_store_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate {
+            let _ = gate.acquire().await;
+        }
     }
 
     /// Fixed-window admission before any durable lookup. The session budget
@@ -1854,6 +2071,7 @@ impl MediaSessionCoordinator {
                 StoreError::Database("media-session route admission timed out".to_owned())
             })?
         {
+            self.route_cache_metrics.lookup(RouteLookup::CacheHit);
             self.reject_pending_release(session_id).await?;
             return Ok(cached);
         }
@@ -1871,14 +2089,16 @@ impl MediaSessionCoordinator {
                 StoreError::Database("media-session route admission timed out".to_owned())
             })?
         {
+            self.route_cache_metrics
+                .lookup(RouteLookup::SingleFlightHit);
             self.reject_pending_release(session_id).await?;
             return Ok(cached);
         }
         let observed_generation =
             self.route_generations[generation_shard].load(std::sync::atomic::Ordering::Acquire);
+        self.route_cache_metrics.lookup(RouteLookup::Store);
         #[cfg(test)]
-        self.route_store_queries
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.wait_route_store_gate().await;
         let route = tokio::time::timeout_at(deadline, self.store.media_session_route(session_id))
             .await
             .map_err(|_| {
@@ -2250,8 +2470,11 @@ impl MediaSessionCoordinator {
     ) -> bool {
         let session_id = route.session_id.clone();
         let now = tokio::time::Instant::now();
-        let mut routes = self.routes.lock().await;
+        let mut routes = self.lock_routes(RouteLockSite::GenerationInsert).await;
+        let walked = routes.len();
         routes.retain(|_, cached| cached.expires_at > now);
+        self.route_cache_metrics.pruned(walked);
+        self.route_cache_metrics.cache_entries(routes.len());
         let shard = route_hash(&session_id) % self.route_generations.len();
         if self.route_generations[shard].load(std::sync::atomic::Ordering::Acquire)
             != observed_generation
@@ -2260,6 +2483,7 @@ impl MediaSessionCoordinator {
         }
         self.route_generations[shard].fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         insert_cached_route(&mut routes, &session_id, Some(route), now);
+        self.route_cache_metrics.cache_entries(routes.len());
         true
     }
 
@@ -2280,22 +2504,26 @@ impl MediaSessionCoordinator {
 
     async fn cached_route(&self, session_id: &str) -> Option<Option<MediaSessionRoute>> {
         let now = tokio::time::Instant::now();
-        let mut routes = self.routes.lock().await;
+        let mut routes = self.lock_routes(RouteLockSite::Lookup).await;
         let cached = routes.get(session_id)?;
         if cached.expires_at > now {
             return Some(cached.route.clone());
         }
         routes.remove(session_id);
+        self.route_cache_metrics.cache_entries(routes.len());
         None
     }
 
     async fn cache_route_result(&self, session_id: &str, route: Option<MediaSessionRoute>) {
         let now = tokio::time::Instant::now();
-        let mut routes = self.routes.lock().await;
+        let mut routes = self.lock_routes(RouteLockSite::Insert).await;
+        let walked = routes.len();
         routes.retain(|_, cached| cached.expires_at > now);
+        self.route_cache_metrics.pruned(walked);
         let generation_shard = route_hash(session_id) % self.route_generations.len();
         self.route_generations[generation_shard].fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         insert_cached_route(&mut routes, session_id, route, now);
+        self.route_cache_metrics.cache_entries(routes.len());
     }
 
     /// Publish a Store lookup only if no activation or terminal transition
@@ -2309,8 +2537,11 @@ impl MediaSessionCoordinator {
         observed_generation: u64,
     ) -> Option<MediaSessionRoute> {
         let now = tokio::time::Instant::now();
-        let mut routes = self.routes.lock().await;
+        let mut routes = self.lock_routes(RouteLockSite::QueriedInsert).await;
+        let walked = routes.len();
         routes.retain(|_, cached| cached.expires_at > now);
+        self.route_cache_metrics.pruned(walked);
+        self.route_cache_metrics.cache_entries(routes.len());
         let generation_shard = route_hash(session_id) % self.route_generations.len();
         if self.route_generations[generation_shard].load(std::sync::atomic::Ordering::Acquire)
             != observed_generation
@@ -2323,6 +2554,7 @@ impl MediaSessionCoordinator {
             return cached.route.clone();
         }
         insert_cached_route(&mut routes, session_id, route.clone(), now);
+        self.route_cache_metrics.cache_entries(routes.len());
         route
     }
 
@@ -7916,6 +8148,277 @@ mod tests {
         assert!(settling.is_empty());
     }
 
+    /// C-07 M5 (PLEX-FACADE-PAGING §5.4). The three ways a cached route
+    /// lookup is answered are three separate series, and every map-lock and
+    /// sweep site the lookups pass through is recorded exactly once per pass.
+    #[tokio::test]
+    async fn a_cache_hit_and_a_store_read_are_counted_separately() {
+        use plurx_core::cluster::membership::MembershipManager;
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let coordinator = MediaSessionCoordinator::new(MembershipManager::unavailable(), store);
+        let metrics = coordinator.route_cache_metrics();
+        let session_id = "00000000-0000-4000-8000-0000000000d1";
+        let other_id = "00000000-0000-4000-8000-0000000000d2";
+
+        assert!(coordinator.route(session_id).await.expect("miss").is_none());
+        assert_eq!(
+            metrics.lookups(RouteLookup::Store),
+            1,
+            "a cold lookup reads the Store"
+        );
+        assert_eq!(
+            metrics.lookups(RouteLookup::CacheHit),
+            0,
+            "a cold lookup is not a hit"
+        );
+        for _ in 0..3 {
+            assert!(coordinator.route(session_id).await.expect("hit").is_none());
+        }
+        assert_eq!(
+            metrics.lookups(RouteLookup::CacheHit),
+            3,
+            "each cached answer is one hit"
+        );
+        assert_eq!(
+            metrics.lookups(RouteLookup::Store),
+            1,
+            "a cached answer must not also count as a Store read"
+        );
+        assert!(coordinator.route(other_id).await.expect("miss").is_none());
+        assert_eq!(metrics.lookups(RouteLookup::Store), 2);
+        assert_eq!(metrics.lookups(RouteLookup::SingleFlightHit), 0);
+
+        let exposition = metrics.prometheus();
+        for line in [
+            "plurx_media_session_route_lookups_total{result=\"cache_hit\"} 3\n",
+            "plurx_media_session_route_lookups_total{result=\"single_flight_hit\"} 0\n",
+            "plurx_media_session_route_lookups_total{result=\"store\"} 2\n",
+            // Two misses take the lookup lock twice each (before and after
+            // the single-flight shard), three hits once each.
+            "plurx_media_session_route_lock_seconds_count{site=\"lookup\"} 7\n",
+            // Each Store answer is published once.
+            "plurx_media_session_route_lock_seconds_count{site=\"queried_insert\"} 2\n",
+            "plurx_media_session_route_lock_seconds_count{site=\"insert\"} 0\n",
+            "plurx_media_session_route_lock_seconds_count{site=\"generation_insert\"} 0\n",
+            // Two sweeps, over an empty map and then over the first answer.
+            "plurx_media_session_route_prune_entries_count 2\n",
+            "plurx_media_session_route_prune_entries_sum 1\n",
+            "plurx_media_session_route_cache_entries 2\n",
+        ] {
+            assert!(
+                exposition.contains(line),
+                "missing {line:?} in\n{exposition}"
+            );
+        }
+
+        let route = media_route("00000000-0000-4000-8000-0000000000d3");
+        coordinator.cache_route(route).await;
+        let exposition = metrics.prometheus();
+        for line in [
+            "plurx_media_session_route_lock_seconds_count{site=\"insert\"} 1\n",
+            "plurx_media_session_route_prune_entries_count 3\n",
+            "plurx_media_session_route_prune_entries_sum 3\n",
+            "plurx_media_session_route_cache_entries 3\n",
+        ] {
+            assert!(
+                exposition.contains(line),
+                "missing {line:?} in\n{exposition}"
+            );
+        }
+    }
+
+    /// C-07 M5 (PLEX-FACADE-PAGING §3.5 item 2). The prune histogram counts
+    /// the entries each sweep WALKS, which is the O(n) cost under the map
+    /// lock, not the entries it leaves (the gauge already says that). Time is
+    /// paused so entries expire on demand, and each of the three sweep sites
+    /// runs over expired entries: counting after `retain` would record 0
+    /// there. It also covers the gauge update when a lookup removes an
+    /// expired entry. No Store call is made, so paused time cannot fire a
+    /// lookup deadline.
+    #[tokio::test(start_paused = true)]
+    async fn each_route_sweep_counts_the_entries_it_walked_and_an_expired_lookup_lowers_the_gauge()
+    {
+        use plurx_core::cluster::membership::MembershipManager;
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let coordinator = MediaSessionCoordinator::new(MembershipManager::unavailable(), store);
+        let metrics = coordinator.route_cache_metrics();
+        let value = |name: &str| -> u64 {
+            let exposition = metrics.prometheus();
+            let prefix = format!("{name} ");
+            exposition
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix.as_str()))
+                .unwrap_or_else(|| panic!("{name} missing in\n{exposition}"))
+                .parse()
+                .expect("integer sample")
+        };
+        let sum = "plurx_media_session_route_prune_entries_sum";
+        let entries = "plurx_media_session_route_cache_entries";
+        let generation = |session_id: &str| {
+            coordinator.route_generations
+                [route_hash(session_id) % coordinator.route_generations.len()]
+            .load(std::sync::atomic::Ordering::Acquire)
+        };
+        let id = |n: u8| format!("00000000-0000-4000-8000-0000000000f{n}");
+
+        coordinator.cache_route(media_route(&id(1))).await;
+        coordinator.cache_route(media_route(&id(2))).await;
+        assert_eq!(value(entries), 2);
+        tokio::time::advance(ROUTE_CACHE_TTL).await;
+
+        // A lookup that finds its entry expired removes it and lowers the gauge.
+        assert!(coordinator.cached_route(&id(1)).await.is_none());
+        assert_eq!(value(entries), 1, "an expired lookup must lower the gauge");
+
+        // `cache_route_result` sweeps one expired entry and keeps none of it.
+        let before = value(sum);
+        coordinator.cache_route(media_route(&id(3))).await;
+        assert_eq!(
+            value(sum) - before,
+            1,
+            "insert sweep walked one expired entry"
+        );
+        assert_eq!(value(entries), 1);
+
+        // `cache_queried_route_result` sweeps two expired entries.
+        coordinator.cache_route(media_route(&id(4))).await;
+        assert_eq!(value(entries), 2);
+        tokio::time::advance(ROUTE_CACHE_TTL).await;
+        let before = value(sum);
+        assert!(coordinator
+            .cache_queried_route_result(&id(5), None, generation(&id(5)))
+            .await
+            .is_none());
+        assert_eq!(
+            value(sum) - before,
+            2,
+            "queried-insert sweep walked two expired entries"
+        );
+        assert_eq!(value(entries), 1);
+
+        // `cache_route_if_generation` sweeps two expired entries.
+        coordinator.cache_route(media_route(&id(6))).await;
+        assert_eq!(value(entries), 2);
+        tokio::time::advance(ROUTE_CACHE_TTL).await;
+        let before = value(sum);
+        assert!(
+            coordinator
+                .cache_route_if_generation(media_route(&id(7)), generation(&id(7)))
+                .await
+        );
+        assert_eq!(
+            value(sum) - before,
+            2,
+            "generation-insert sweep walked two expired entries"
+        );
+        assert_eq!(value(entries), 1);
+    }
+
+    /// C-07 M5 (PLEX-FACADE-PAGING §2.4, §5.4). The measurement's reading of
+    /// "store reads per session" depends on this: while one Store read for a
+    /// capability is outstanding, every other lookup of that capability
+    /// waits on its `route_queries` shard and is then answered by the cache
+    /// the first read filled. The gate holds the first read open until every
+    /// lookup has run as far as it can, so this does not pass by timing.
+    #[tokio::test]
+    async fn concurrent_lookups_of_one_session_produce_one_store_read() {
+        use plurx_core::cluster::membership::MembershipManager;
+        use plurx_core::store::SqliteStore;
+
+        const LOOKUPS: u64 = 8;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let coordinator = MediaSessionCoordinator::new(MembershipManager::unavailable(), store);
+        let metrics = coordinator.route_cache_metrics();
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *coordinator
+            .route_store_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&gate));
+        let session_id = "00000000-0000-4000-8000-0000000000d4";
+        let lookups = (0..LOOKUPS)
+            .map(|_| {
+                let coordinator = Arc::clone(&coordinator);
+                tokio::spawn(async move { coordinator.route(session_id).await })
+            })
+            .collect::<Vec<_>>();
+        // A current-thread runtime: yielding lets every spawned lookup run
+        // until it parks, either at the gate or behind its query shard.
+        for _ in 0..256 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            metrics.lookups(RouteLookup::Store),
+            1,
+            "while one Store read is outstanding, the other lookups of the same capability must wait behind its single-flight shard instead of reading the Store"
+        );
+        gate.close();
+        for lookup in lookups {
+            assert!(lookup
+                .await
+                .expect("lookup task")
+                .expect("lookup")
+                .is_none());
+        }
+        assert_eq!(metrics.lookups(RouteLookup::Store), 1);
+        assert_eq!(
+            metrics.lookups(RouteLookup::SingleFlightHit),
+            LOOKUPS - 1,
+            "every waiter is answered by the cache the one read filled"
+        );
+        assert_eq!(metrics.lookups(RouteLookup::CacheHit), 0);
+    }
+
+    /// The route-cache exposition has a fixed series count whatever traffic
+    /// it has seen (no id, no path, no node in a label), and each lock
+    /// bucket's `le` label is the bound it is counted against.
+    #[test]
+    fn route_cache_exposition_is_bounded_and_its_labels_match_their_bounds() {
+        for (bound_nanos, label) in ROUTE_LOCK_BUCKETS {
+            let seconds = label.parse::<f64>().expect("numeric le label");
+            assert_eq!((seconds * 1e9).round() as u64, bound_nanos, "{label}");
+        }
+        assert_eq!(
+            ROUTE_PRUNE_BUCKETS.last().copied(),
+            Some(MAX_ROUTE_CACHE_ENTRIES as u64),
+            "the top prune bucket is the cache's ceiling"
+        );
+        let metrics = RouteCacheMetrics::default();
+        let empty = metrics.prometheus();
+        metrics.lock_waited(RouteLockSite::Insert, Duration::from_micros(50));
+        metrics.lock_waited(RouteLockSite::Insert, Duration::from_secs(1));
+        metrics.pruned(MAX_ROUTE_CACHE_ENTRIES);
+        metrics.lookup(RouteLookup::SingleFlightHit);
+        metrics.cache_entries(17);
+        let exposition = metrics.prometheus();
+        let series = |text: &str| text.lines().filter(|line| !line.starts_with('#')).count();
+        // 3 lookup results; 4 sites x (5 bounds + Inf + sum + count); 7 prune
+        // bounds + Inf + sum + count; 1 gauge.
+        assert_eq!(series(&empty), 3 + 4 * 8 + 10 + 1);
+        assert_eq!(series(&exposition), series(&empty));
+        for line in [
+            "plurx_media_session_route_lock_seconds_bucket{site=\"insert\",le=\"0.00001\"} 0\n",
+            "plurx_media_session_route_lock_seconds_bucket{site=\"insert\",le=\"0.0001\"} 1\n",
+            "plurx_media_session_route_lock_seconds_bucket{site=\"insert\",le=\"0.1\"} 1\n",
+            "plurx_media_session_route_lock_seconds_bucket{site=\"insert\",le=\"+Inf\"} 2\n",
+            "plurx_media_session_route_lock_seconds_sum{site=\"insert\"} 1.000050000\n",
+            "plurx_media_session_route_lock_seconds_count{site=\"lookup\"} 0\n",
+            "plurx_media_session_route_prune_entries_bucket{le=\"2048\"} 0\n",
+            "plurx_media_session_route_prune_entries_bucket{le=\"4096\"} 1\n",
+            "plurx_media_session_route_prune_entries_sum 4096\n",
+            "plurx_media_session_route_lookups_total{result=\"single_flight_hit\"} 1\n",
+            "plurx_media_session_route_cache_entries 17\n",
+        ] {
+            assert!(
+                exposition.contains(line),
+                "missing {line:?} in\n{exposition}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn route_misses_are_single_flight_and_activation_supersedes_them() {
         use plurx_core::cluster::membership::MembershipManager;
@@ -7935,9 +8438,7 @@ mod tests {
             .expect("negative-cache hit")
             .is_none());
         assert_eq!(
-            coordinator
-                .route_store_queries
-                .load(std::sync::atomic::Ordering::Relaxed),
+            coordinator.route_cache_metrics.lookups(RouteLookup::Store),
             1,
             "a repeated random capability must cause only one Store read"
         );

@@ -2746,6 +2746,44 @@ mod tests {
         );
     }
 
+    /// C-07 M5 (PLEX-FACADE-PAGING §5.4 acceptance): `/metrics` carries the
+    /// four route-cache families, rendered from the coordinator serving this
+    /// router, so the counts are exactly this test's lookups.
+    #[tokio::test]
+    async fn metrics_render_the_media_session_route_cache_families() {
+        let (app, state) = test_app_with_state();
+        let session_id = "00000000-0000-4000-8000-0000000000e1";
+        assert!(state
+            .media_sessions
+            .route(session_id)
+            .await
+            .expect("miss")
+            .is_none());
+        assert!(state
+            .media_sessions
+            .route(session_id)
+            .await
+            .expect("hit")
+            .is_none());
+        let metrics = app.oneshot(get("/metrics", None)).await.expect("response");
+        assert_eq!(metrics.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(metrics.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let exposition = String::from_utf8(body.to_vec()).expect("utf-8");
+        for line in [
+            "# TYPE plurx_media_session_route_lookups_total counter\n",
+            "# TYPE plurx_media_session_route_lock_seconds histogram\n",
+            "# TYPE plurx_media_session_route_prune_entries histogram\n",
+            "# TYPE plurx_media_session_route_cache_entries gauge\n",
+            "plurx_media_session_route_lookups_total{result=\"store\"} 1\n",
+            "plurx_media_session_route_lookups_total{result=\"cache_hit\"} 1\n",
+            "plurx_media_session_route_lookups_total{result=\"single_flight_hit\"} 0\n",
+        ] {
+            assert!(exposition.contains(line), "/metrics is missing {line:?}");
+        }
+    }
+
     // -- observability baseline (C-08 M1/M2/M3) -----------------------------
 
     use crate::logbuf::testwriter::CapturedWriter;

@@ -4848,6 +4848,7 @@ pub(crate) struct MetricsState {
     backup: Arc<crate::backup::BackupMetrics>,
     plex_census: Arc<super::PlexCensus>,
     start_attempts: Arc<crate::playstart::StartAttempts>,
+    route_cache: Arc<crate::media_sessions::RouteCacheMetrics>,
 }
 
 impl FromRef<AppState> for MetricsState {
@@ -4870,6 +4871,7 @@ impl FromRef<AppState> for MetricsState {
             backup: state.backup.metrics(),
             plex_census: Arc::clone(&state.plex_census),
             start_attempts: Arc::clone(&state.start_attempts),
+            route_cache: state.media_sessions.route_cache_metrics(),
         }
     }
 }
@@ -5369,7 +5371,9 @@ pub(crate) async fn metrics(
         {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{codec_qualification_metrics}{decode_fact_metrics}{auth_revocation_metrics}{login_metrics}{live_tv_metrics}{backup_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}{interlace_metrics}{artwork_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
-        takeover_metrics = crate::media_sessions::prometheus(),
+        // The takeover statics, then this node's route-cache instrumentation
+        // (C-07 M5): atomics on the coordinator, so no lock and no Store read.
+        takeover_metrics = crate::media_sessions::prometheus() + &state.route_cache.prometheus(),
         control_metrics = crate::playback_control::prometheus(),
         playback_metrics = crate::telemetry::prometheus(),
         // The retained live-HLS engine spends real encode time. Zero on a node

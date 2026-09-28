@@ -610,7 +610,8 @@ On `media1`, on the build carrying M5, with nothing else playing:
 3. Let them run ten minutes. Seek twice on each. Stop one and start a
    fifth, so a release and a fresh activation are both in the window.
 4. Record the three families again, and compute: store reads per active
-   session per second; the lock-wait p50/p95/p99; the prune-sweep size
+   HLS session per second (direct plays never reach the route cache, so
+   they are not in the denominator); the lock-wait p50/p95/p99; the prune-sweep size
    p50/p95; and cache entries against the 4,096 ceiling.
 5. Put that table in M6's PR body. The claim M6 may make is the one the
    table supports — including "no claim", which closes the appendix.
@@ -820,6 +821,12 @@ instrumentation nobody is scheduled to read, and §3.5's own framing is that the
 measurement, not the metric, is the deliverable. The appendix is unclaimed and
 unblocked.
 
+**2026-09-28:** M5 was then built (branch `plan/C-07-m5`), with the missing
+half supplied: §6.4 is written out as a ready-to-paste prompt for the session
+that has fleet access, at the end of the Execution log, so the instrumentation
+lands with the reading that gives it a purpose. M6 still waits on that
+reading.
+
 ---
 
 ## Execution log
@@ -838,3 +845,151 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5, M6 (C9 appendix) | — | **Not opened.** Unclaimed and unblocked; reason in §8.6. |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M0 — review of PR #462 | [PR #462](http://192.168.4.7:3000/noirr/plurx/pulls/462) | Two findings, both fixed. (1) The census counter was a process-wide `static`, so three census tests asserting exact deltas raced every other test sending façade traffic (the reviewer measured 34 failing runs in 400). It is now a `PlexCensus` held on `AppState`, so each router counts only its own requests; `each_router_counts_only_its_own_facade_requests` pins it. (2) §8.5's closing rule read one node once after a week, which a restart or an unread node silently turns into a false "no caller". It now requires every node, with `plurx_uptime_seconds` on every read, seven gap-free days, and treats a restart between reads, maintenance, fencing and learner time as gaps; the layer comment that claimed refused requests are counted now names the refusals it cannot see. Merged main (`99d4abf8c`); `process-capable-launch-method` re-measured on the merged tree. |
 | | | | | | `needs:` seven gap-free days of `plurx_plex_requests_total` read from every node with its uptime, then §8.5. |
+| 2026-09-28 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 — premises re-verified | [PR #598](http://192.168.4.7:3000/noirr/plurx/pulls/598) | §2.4/§3.5 re-read against `main` @ `b5b8d5d52` (`crates/plurxd/src/media_sessions.rs`). **Held:** `ROUTE_CACHE_TTL` = 1 s and `MAX_ROUTE_CACHE_ENTRIES` = 4,096 (`:138-139`, were `:107-108`); `CachedRoute` still `{route: Option<_>, expires_at}` (`:1549-1552`); `raw_route_before` (`:1845-1895`) is still cache → `route_queries[hash % 32]` shard (`ROUTE_QUERY_SHARDS` `:159`, lock `:1863`) → cache again (`:1868`, the `single_flight_hit`) → Store (`:1882`, outside every map-lock scope) → generation-checked insert; the control path still bypasses the positive cache (`control_route`, comment `:1898`); the test-only counter was `:1545/:1880`; `cache_terminal_route` is `:2270`. **Drift, none of it changing the design:** (1) there are **four** shipping `routes.lock()` sites, not three — `cache_route_if_generation` (`:2246-2264`, generation-checked activation) is new since `0f02b7ea`, beside `cached_route` (`:2283`), `cache_route_result` (`:2294`) and `cache_queried_route_result` (`:2312`); (2) the O(n) `retain` sweep therefore runs at **three** sites (`:2254`, `:2295`, `:2313`), not two; (3) `authoritative_route_resolution_before` (`:1744-1775`) is a second cache-bypassing Store read beside `control_route`, sharing the same query shards; neither is a cache lookup, so neither is in the lookup family (its HELP says so); (4) §5.4 says "three metric families" while §3.5 names four metrics (its item 2 has two); all four are built. |
+| 2026-09-28 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 — route-cache instrumentation | [PR #598](http://192.168.4.7:3000/noirr/plurx/pulls/598) | Measure-only, on a per-coordinator `RouteCacheMetrics` (atomics, rendered into `/metrics` beside the takeover families; no scrape-time lock or Store read). `plurx_media_session_route_lookups_total{result="cache_hit"\|"single_flight_hit"\|"store"}` replaces the test-only counter; `plurx_media_session_route_lock_seconds{site="lookup"\|"insert"\|"queried_insert"\|"generation_insert"}` (buckets 10 µs, 100 µs, 1 ms, 10 ms, 100 ms, +Inf) times the wait at each of the four lock sites, recorded on drop so a wait abandoned by a caller's `timeout_at` still counts; `plurx_media_session_route_prune_entries` (buckets 0, 16, 64, 256, 1,024, 2,048, 4,096, +Inf) records the entries each sweep walks; `plurx_media_session_route_cache_entries` is the map size after its last change. 46 fixed series; no id, path or node in any label. `ROUTE_CACHE_TTL`, `MAX_ROUTE_CACHE_ENTRIES`, every `lock()` site and its order are unchanged: each site calls one `lock_routes(site)` that takes the same mutex at the same point. Tests: `a_cache_hit_and_a_store_read_are_counted_separately`, `concurrent_lookups_of_one_session_produce_one_store_read` (a test-only gate holds the first Store read open while eight lookups run; mutation results in the PR body), `route_cache_exposition_is_bounded_and_its_labels_match_their_bounds`, and `metrics_render_the_media_session_route_cache_families` through the router's `/metrics`. **M6 not built.** |
+| 2026-09-28 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 — review of PR #598 | [PR #598](http://192.168.4.7:3000/noirr/plurx/pulls/598) | The single adversarial review ([comment 6123](http://192.168.4.7:3000/noirr/plurx/pulls/598#issuecomment-6123)) raised two P2 findings, both answered. (1) The prompt below divided store reads by all four playbacks, but a direct play (`/direct`, `stream.mp4`) never reaches the route cache; only `http/hls/` requests do, through `relay_if_remote`. That could halve the rate §3.5 asks for (per active **HLS** session) and bias M6 toward "nothing to fix". The prompt now requires every playback to be HLS (rolling or encoded VOD), records each playback's mode and start and end times in `playbacks.csv`, and has the script divide by HLS session-seconds clipped to the window, leaving out anything recorded as direct. §6.4 step 4 says the same. The script was dry-run on synthetic scrapes with a direct play and a mid-window stop. (2) No test separated entries *walked* from entries *left*, so counting after `retain` survived. `each_route_sweep_counts_the_entries_it_walked_and_an_expired_lookup_lowers_the_gauge` (paused time) runs all three sweep sites over expired entries and covers the gauge falling when `cached_route` removes an expired entry. The reviewer's mutation (count after `retain` at all three sites) fails it; the result is in the PR thread. The lookups HELP text and OPERATIONS.md now name every cached caller: HLS media and status GETs, and session DELETEs. |
+| | | | | | `needs:` the §6.4 measurement on `media1` with the M5 build deployed — the prompt below — then M6 (§5.5) decides from its table. |
+
+### M5 → M6: the §6.4 measurement — GPT prompt
+
+Paste this whole block to the session that has fleet and device access. It
+needs the build carrying M5 deployed on the ingress node; everything it does is
+read-only on the server.
+
+```text
+C-07 §6.4 route-cache measurement on media1 (the node clients connect to).
+Read-only on the server: do not restart anything, change no setting.
+
+0. Preconditions.
+   HOST=http://media1:32400
+   curl -s $HOST/api/v1/server        -> record version and build.
+   curl -s $HOST/metrics | grep -c '^plurx_media_session_route_'
+     must print 46. If it prints 0 the M5 build is not deployed: stop and
+     say so.
+   curl -s $HOST/metrics | grep -E '^plurx_(uptime_seconds|transcode_sessions_active) '
+     transcode_sessions_active must be 0 and nothing may be playing
+     anywhere. If something is, wait for it to end or report it.
+
+1. Baseline, then start the per-minute recorder in the background:
+   mkdir -p ~/c07 && cd ~/c07
+   (date -u +%s; curl -s $HOST/metrics) > t0.prom
+   (for i in $(seq 1 14); do echo "== $(date -u +%s)"; \
+     curl -s $HOST/metrics | grep -E '^plurx_(media_session_route_|uptime_seconds |transcode_sessions_active )'; \
+     sleep 60; done) > window.prom 2>&1 &
+
+2. Within one minute, start FOUR concurrent playbacks of four DIFFERENT
+   titles: two in web browsers, one on the Apple TV, one on Android. Every
+   one must be delivered as HLS: rolling HLS (a transcode) or an encoded
+   VOD rendition, both served under /hls/. A direct play (/direct or
+   stream.mp4) never touches the route cache being measured, so if a
+   client direct-plays a title, stop it and pick another title. At least
+   TWO must be rolling HLS; confirm the mode on each client's
+   playback-info panel and rolling by plurx_transcode_sessions_active >= 2
+   in window.prom. Write one line per playback to ~/c07/playbacks.csv as
+   it starts (epoch seconds from `date -u +%s`):
+     client,file_id,mode,start,end
+   where mode is rolling_hls, vod_hls or direct (record a direct play
+   honestly if one happened; the script leaves it out), and end is empty
+   while the playback is still running.
+
+3. Let all four run ten minutes. During that time seek twice on each
+   (record the UTC times). At about minute seven, stop one playback (fill
+   in its end in playbacks.csv) and, within 30 s, start a fifth (a fifth
+   title, any client, also HLS, with its own line), so a release and a
+   fresh activation both fall inside the window.
+
+4. At minute ten, before stopping anything:
+   (date -u +%s; curl -s $HOST/metrics) > t1.prom
+   Check plurx_uptime_seconds in t1 exceeds t0 by the elapsed time; if
+   not, the node restarted and the window is void: say so and stop.
+   Then stop all playbacks.
+
+5. Compute with this script (python3, no dependencies):
+
+cat > c07.py <<'PY'
+import re, sys
+def load(path):
+    lines = open(path).read().splitlines()
+    t, series = int(lines[0]), {}
+    for line in lines[1:]:
+        if line.startswith('plurx_media_session_route_'):
+            name, value = line.rsplit(' ', 1)
+            series[name] = float(value)
+    return t, series
+t0, a = load('t0.prom'); t1, b = load('t1.prom')
+d = {k: b[k] - a.get(k, 0) for k in b}
+secs = t1 - t0
+print('window_s', secs)
+for r in ('cache_hit', 'single_flight_hit', 'store'):
+    print('lookups', r, d[f'plurx_media_session_route_lookups_total{{result="{r}"}}'])
+# HLS session-seconds inside [t0, t1]: only HLS playbacks reach the cache.
+hls_seconds, skipped = 0, []
+for row in open('playbacks.csv').read().splitlines():
+    if not row.strip() or row.startswith('client,'):
+        continue
+    client, file_id, mode, start, end = [f.strip() for f in row.split(',')]
+    if mode not in ('rolling_hls', 'vod_hls'):
+        skipped.append(f'{client}:{file_id}:{mode}')
+        continue
+    stop = int(end) if end else t1
+    hls_seconds += max(0, min(stop, t1) - max(int(start), t0))
+store = d['plurx_media_session_route_lookups_total{result="store"}']
+print('hls_session_seconds', hls_seconds, 'mean_hls_sessions', hls_seconds / secs)
+print('store_reads_per_hls_session_per_s', store / hls_seconds if hls_seconds else None)
+print('not_hls_left_out', skipped)
+def quantiles(prefix, labels, qs):
+    rows = [(k, v) for k, v in d.items() if k.startswith(prefix + '_bucket{' + labels)]
+    le = lambda k: float('inf') if '+Inf' in k else float(re.search(r'le="([^"]+)"', k).group(1))
+    rows.sort(key=lambda kv: le(kv[0]))
+    total = rows[-1][1]
+    out = []
+    for q in qs:
+        out.append(next((le(k) for k, v in rows if total and v >= q * total), None))
+    return total, out
+for site in ('lookup', 'insert', 'queried_insert', 'generation_insert'):
+    n, qv = quantiles('plurx_media_session_route_lock_seconds', f'site="{site}"', (0.5, 0.95, 0.99))
+    s = d[f'plurx_media_session_route_lock_seconds_sum{{site="{site}"}}']
+    print('lock', site, 'count', n, 'p50<=', qv[0], 'p95<=', qv[1], 'p99<=', qv[2], 'mean_s', s / n if n else None)
+n, qv = quantiles('plurx_media_session_route_prune_entries', '', (0.5, 0.95))
+s = d['plurx_media_session_route_prune_entries_sum']
+print('prune count', n, 'p50<=', qv[0], 'p95<=', qv[1], 'mean', s / n if n else None)
+PY
+   python3 c07.py
+   grep -h '^plurx_media_session_route_cache_entries ' window.prom t1.prom | sort -k2 -n | tail -1
+   grep -h '^plurx_transcode_sessions_active ' window.prom
+
+   Quantiles are bucket upper bounds ("<="), which is all a histogram can
+   say; report them that way, not as interpolated values.
+
+6. Report this table, filled in, plus the raw t0.prom and t1.prom lines
+   that start with plurx_media_session_route_, and window.prom:
+
+   | Quantity                                        | Value |
+   |-------------------------------------------------|-------|
+   | Node, version/build, window start-end (UTC), s  |       |
+   | Uptime at t0 and t1 (no restart)                |       |
+   | Playbacks: client, file id, delivery mode       |       |
+   | Active transcode sessions: min / max in window  |       |
+   | Lookups: cache_hit / single_flight_hit / store  |       |
+   | Store reads per second (store / window_s)       |       |
+   | HLS session-seconds, mean HLS sessions          |       |
+   | Store reads per HLS session per second          |       |
+   |   (store / HLS session-seconds, from the script;|       |
+   |    direct plays are left out: they never reach  |       |
+   |    the route cache)                             |       |
+   | single_flight_hit / (single_flight_hit + store) |       |
+   | Lock wait p50 / p95 / p99 / mean, per site      |       |
+   | Prune sweeps: count, size p50 / p95 / mean      |       |
+   | Cache entries: max seen, against 4096           |       |
+   | Seek, release and fresh-activation times (UTC)  |       |
+
+   Also paste playbacks.csv. Then one sentence: is "store reads per HLS
+   session per second" well below 1, and is any site's p99 lock wait
+   above 1 ms?
+Report exact values; say plainly anything you could not do.
+```
+
+M6 (§5.5) is written from that table and nothing else: "nothing to fix" if
+store reads per HLS session per second are well below 1 and lock waits
+are microseconds; sharding only if a lock-wait tail is the cost; a TTL change
+never without the three authority-change tests.
