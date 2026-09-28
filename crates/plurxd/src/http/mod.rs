@@ -7,6 +7,7 @@
 
 mod analysis;
 mod auth;
+mod background_jobs;
 pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
 mod chapter_thumbs;
@@ -48,6 +49,7 @@ pub(crate) mod stream;
 pub(crate) mod subtitle_downloads;
 pub(crate) mod system;
 mod trakt;
+pub(crate) mod transcode_copies;
 
 /// Unmodified User-Agent strings as the shipping clients actually send them.
 /// Shared with the HTTP wire tests so the write-then-read proof and the
@@ -429,6 +431,11 @@ fn http_route_group(path: &str) -> usize {
         // Cluster administration and authenticated internal transport.
         "/api/v1/cluster/nodes"
         | "/api/v1/cluster/status"
+        | "/api/v1/cluster/work/storage-domains"
+        | "/api/v1/cluster/jobs"
+        | "/api/v1/cluster/jobs/{id}"
+        | "/api/v1/cluster/jobs/{id}/cancel"
+        | "/api/v1/cluster/jobs/{id}/retry"
         | "/api/v1/cluster/backups"
         | "/api/v1/cluster/ingress"
         | "/api/v1/cluster/media"
@@ -449,6 +456,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/cluster/join/finalize"
         | "/api/v1/cluster/learner/join/redeem"
         | "/api/v1/cluster/learner/join/finalize"
+        | "/internal/media/cache-copy/{recipe}/{digest}/{object}"
         | "/internal/media/fragment-index/{cache_key}"
         | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
         internal_activity::PATH
@@ -1344,6 +1352,12 @@ pub fn router(state: AppState) -> Router {
         .route("/system/playback-events", get(system::playback_events))
         .route("/cluster/nodes", get(cluster::nodes))
         .route("/cluster/status", get(cluster_operations::aggregate))
+        .route("/cluster/jobs", get(background_jobs::list))
+        .route(
+            "/cluster/work/storage-domains",
+            get(background_jobs::storage_domains),
+        )
+        .route("/cluster/jobs/{id}", get(background_jobs::detail))
         .route("/cluster/ingress", get(cluster::ingress))
         .route("/cluster/media", get(internal_media::directory))
         // Any signed-in user can post a client-side playback error here so it
@@ -1498,6 +1512,12 @@ pub fn router(state: AppState) -> Router {
             post(cluster::enter_maintenance).delete(cluster::exit_maintenance),
         )
         .route("/cluster/election", post(cluster::force_election))
+        .route(
+            "/cluster/work/storage-domains",
+            put(background_jobs::replace_storage_domains),
+        )
+        .route("/cluster/jobs/{id}/cancel", post(background_jobs::cancel))
+        .route("/cluster/jobs/{id}/retry", post(background_jobs::retry))
         .route("/cluster/backups", post(crate::backup::create))
         .route("/cluster/leave", post(cluster::leave))
         .route(
@@ -1862,6 +1882,10 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            "/internal/media/cache-copy/{recipe}/{digest}/{object}",
+            get(transcode_copies::serve),
+        )
+        .route(
             "/internal/media/fragment-index/{cache_key}",
             get(internal_media::fragment_index),
         )
@@ -2022,7 +2046,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
             crate::media_sessions::ABORT_PATH
                 | crate::media_sessions::RELAY_PATH
                 | crate::media_sessions::CONTROL_PATH
-                | crate::live_tv::RESOURCE_PATH
+        | crate::live_tv::RESOURCE_PATH
                 | crate::live_tv::STOP_PATH
                 // A retire is a stop plus a fence. Refusing it during
                 // maintenance refuses it precisely when a client needs it.
@@ -2127,7 +2151,8 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                     if file_id.parse::<i64>().is_ok_and(|value| value > 0)
                     && ordinal.parse::<i64>().is_ok_and(|value| value >= 0))
             });
-    if fragment_index_read
+    if (method == Method::GET && transcode_copies::route_eligible(path))
+        || fragment_index_read
         || subtitle_source_read
         || (method == Method::GET && path == crate::media_pool::SNAPSHOT_PATH)
         || (method == Method::POST
@@ -3541,7 +3566,11 @@ mod tests {
         .await
     }
 
-    #[tokio::test]
+    // Paused time: the 10 ms deadline and the handler's 40 ms sleep are both
+    // Tokio timers, so the clock reaches the deadline first by construction.
+    // On the wall clock a loaded runner could park this thread past both, and
+    // `timeout` polls the finished handler before its own expired timer.
+    #[tokio::test(start_paused = true)]
     async fn json_short_handler_deadline_answers_503() {
         let app = Router::new()
             .route("/short", axum::routing::get(slow_test_handler))
@@ -4437,6 +4466,10 @@ mod tests {
                 // derivatives, so a stale answer costs disk until the next
                 // pass and can never delete a live grid cache.
                 "sweep_derived_orphans:store.items_with_artwork",
+                // Retention authority for durable artwork: keep advertised
+                // holders and in-flight attempt directories during cache GC.
+                "sweep_derived_orphans:store.artwork_locations",
+                "sweep_derived_orphans:store.background_job",
                 "materialize_once:store.items_with_artwork_page",
             ],
         );
@@ -4667,6 +4700,24 @@ mod tests {
             Arc::new(crate::logbuf::LogBuffer::new(64)),
         );
         (router(state.clone()), state)
+    }
+
+    // HTTP scan fixtures run the production durable consumer independently.
+    // Aborting the owner at fixture teardown prevents a leaked polling loop.
+    struct ScanWorker(tokio::task::JoinHandle<()>);
+    impl Drop for ScanWorker {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    fn scan_worker(state: &AppState) -> ScanWorker {
+        ScanWorker(tokio::spawn(
+            state
+                .jobs
+                .clone()
+                .background_work_loop(state.transcode.clone()),
+        ))
     }
 
     async fn call(app: &Router, req: Request<Body>) -> (StatusCode, Value) {
@@ -5845,7 +5896,8 @@ mod tests {
     /// of the season unindexed with nothing anywhere saying so.
     #[tokio::test]
     async fn a_request_during_a_running_scan_is_queued_and_still_answered() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -5881,7 +5933,8 @@ mod tests {
     /// the answer in the response rather than a promise to look later.
     #[tokio::test]
     async fn a_scan_returns_the_report_and_what_it_placed() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -5959,7 +6012,8 @@ mod tests {
     /// the only evidence Cinema uses to relate text and audio editions.
     #[tokio::test]
     async fn a_curator_book_import_reaches_the_books_library() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -6716,6 +6770,7 @@ mod tests {
     #[tokio::test]
     async fn scans_and_notifications_are_counted_by_what_asked_for_them() {
         let (app, state) = test_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -6799,6 +6854,7 @@ mod tests {
     #[tokio::test]
     async fn an_item_that_arrives_with_an_id_is_still_queued_for_enrichment() {
         let (app, state) = test_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -6848,6 +6904,7 @@ mod tests {
     #[tokio::test]
     async fn a_series_only_id_reaches_the_show_row() {
         let (app, state) = test_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -6927,7 +6984,8 @@ mod tests {
     /// the core, because it is the one that would destroy data.
     #[tokio::test]
     async fn a_targeted_scan_leaves_the_rest_of_the_library_alone() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -7914,6 +7972,27 @@ mod tests {
         assert_eq!(saved["live_tv_enabled"], true);
         assert_eq!(saved["live_tv_config_generation"], 10);
         assert_eq!(saved["live_tv_transition_from_owner_node_id"], "");
+    }
+
+    #[tokio::test]
+    async fn live_tv_placement_and_ingest_refuse_household_bearers_before_admission() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        // Protocol 4's permanent-owner relay is superseded by protocol 5's
+        // replicated claim. Its removed routes must never admit tuner work.
+        for path in [
+            "/_internal/v1/live-tv/placement",
+            "/_internal/v1/live-tv/process",
+            "/_internal/v1/live-tv/ingest",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(post(path, Some(&admin), json!({})))
+                .await
+                .expect("response");
+            assert!(!response.status().is_success(), "{path}");
+        }
+        assert!(state.live_tv.activities().is_empty());
     }
 
     #[tokio::test]
@@ -9011,6 +9090,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_job_api_is_admin_only_redacts_ownership_and_cancels_idempotently() {
+        use plurx_core::store::background_jobs::{
+            ClaimJob, EnqueueJob, JobKind, JobPayload, JobRequest,
+        };
+        let (app, state) = test_app_with_state();
+        let (status, _) = call(&app, get("/api/v1/cluster/jobs", None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let admin = setup_admin(&app).await;
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({"username":"viewer", "password":"longenough"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({"username":"viewer", "password":"longenough"}),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("viewer session");
+        let id = uuid::Uuid::new_v4().to_string();
+        let detail = format!("/api/v1/cluster/jobs/{id}");
+        let cancel = format!("{detail}/cancel");
+        let retry = format!("{detail}/retry");
+        for path in ["/api/v1/cluster/jobs", &detail] {
+            let (status, _) = call(&app, get(path, Some(viewer))).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+        let (status, _) = call(&app, post(&cancel, Some(viewer), json!({}))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = call(
+            &app,
+            post(
+                &retry,
+                Some(viewer),
+                json!({"request_id":uuid::Uuid::new_v4().to_string()}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let now_ms = crate::state::clock_ms();
+        state
+            .store
+            .enqueue_job(EnqueueJob {
+                id: id.clone(),
+                payload: JobPayload::LibraryScan {
+                    library_id: 1,
+                    generation: "private-source-marker".into(),
+                },
+                dedupe_key: "api-job".into(),
+                priority: 1,
+                not_before_ms: now_ms,
+                now_ms,
+                request: JobRequest {
+                    scope: "internal:api-test".into(),
+                    request_id: id.clone(),
+                    request_digest: "a".repeat(64),
+                    consumer_kind: "scan".into(),
+                    consumer_ref: "private-consumer-marker".into(),
+                    target_node_id: None,
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .expect("enqueue");
+        let boot = uuid::Uuid::new_v4().to_string();
+        let claim = uuid::Uuid::new_v4().to_string();
+        state
+            .store
+            .claim_job(ClaimJob {
+                job_id: id.clone(),
+                expected_revision: 0,
+                node_id: "node-a".into(),
+                boot_id: boot.clone(),
+                claim_id: claim.clone(),
+                kind: JobKind::LibraryScan,
+                payload_version: 1,
+                now_ms,
+                dispatched_at_ms: now_ms,
+            })
+            .await
+            .expect("claim");
+        for path in ["/api/v1/cluster/jobs?state=running", &detail] {
+            let (status, body) = call(&app, get(path, Some(&admin))).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let encoded = body.to_string();
+            for secret in [
+                &boot,
+                &claim,
+                "private-source-marker",
+                "private-consumer-marker",
+            ] {
+                assert!(
+                    !encoded.contains(secret),
+                    "operator projection leaked {secret}"
+                );
+            }
+        }
+        let (status, _) = call(
+            &app,
+            post(
+                &retry,
+                Some(&admin),
+                json!({"request_id":uuid::Uuid::new_v4().to_string()}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        for _ in 0..2 {
+            let (status, body) = call(&app, post(&cancel, Some(&admin), json!({}))).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["state"], "cancelling");
+        }
+        let (status, _) = call(
+            &app,
+            get("/api/v1/cluster/jobs?cursor=invalid", Some(&admin)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn user_management_lifecycle_and_lockout_guards() {
         let app = test_app();
         let admin = setup_admin(&app).await;
@@ -9137,6 +9347,8 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "durable_cluster_work",
+                "bounded_catalogue_reads",
                 "cluster_backup",
                 "windows_server",
                 // D-01 adds the Android TV display-mode card. Its one row is
@@ -9170,7 +9382,10 @@ mod tests {
                 let id = requirement["id"].as_str().expect("requirement id");
                 let status = requirement["status"].as_str().expect("requirement status");
                 assert!(
-                    matches!(status, "met" | "unmet" | "unobservable"),
+                    matches!(
+                        status,
+                        "met" | "unmet" | "unobservable" | "unknown" | "unavailable"
+                    ),
                     "{id} reported an unbounded status {status}"
                 );
                 let evidence = requirement["evidence"].as_str().expect("evidence");
@@ -9205,7 +9420,11 @@ mod tests {
             .filter(|id| {
                 !matches!(
                     *id,
-                    "probe_reporter_named"
+                    "durable_store"
+                        | "durable_tools"
+                        | "durable_capacity"
+                        | "durable_scratch"
+                        | "probe_reporter_named"
                         | "stored_source_self_test"
                         | "stored_source_local_cache"
                         | "stored_source_free_space"
@@ -9259,13 +9478,15 @@ mod tests {
                 // probed a build.
                 "chapter_thumbs_work",
                 "durable_queue",
+                "durable_role",
                 "rolling_contract_built",
                 "runtime",
                 "server_preparation_is_real",
                 "source_fencing",
                 "sources_match_their_scan_whole",
                 "stored_source_producer",
-                "tuner_reserve"
+                "tuner_reserve",
+                "watch_floor"
             ]
         );
         // Order-independent because no row reachable here has a `met` branch a
@@ -9951,12 +10172,11 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert!(
-            body["error"]
-                .as_str()
-                .is_some_and(|message| message.contains("every committed voter")),
-            "legacy settings errors retain their {{error}} response contract: {body}"
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cluster_media_pool_enabled"], true);
+        assert_eq!(
+            body["cluster_media_pool_ready"], false,
+            "standalone observation stays advisory"
         );
         let (status, body) = call(
             &app,
@@ -9991,13 +10211,8 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert!(
-            body["error"]
-                .as_str()
-                .is_some_and(|message| message.contains("remote placement")),
-            "one endpoint answers refusals one way: settings keep {{error}}: {body}"
-        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cluster_session_takeover_enabled"], true);
         let (status, body) = call(
             &app,
             put(
@@ -10654,6 +10869,210 @@ mod tests {
         assert!(read() > before, "the ttff never reached client=\"firefox\"");
     }
 
+    /// C-08 M5 row 4 end to end: a real direct-play GET opens the start
+    /// attempt, and the viewer's `ttff` beacon through `/client-log` settles
+    /// it `ok`; a failure report for a pending attempt settles it `failed`.
+    #[tokio::test]
+    async fn a_first_frame_beacon_settles_the_start_its_direct_play_opened() {
+        use crate::playstart::StartPhase;
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let user = state
+            .store
+            .get_user_by_username("paul")
+            .await
+            .expect("user")
+            .expect("paul")
+            .id;
+        let s = seed_content(&state).await;
+        let ledger = std::sync::Arc::clone(&state.start_attempts);
+        let response = app
+            .clone()
+            .oneshot(ranged(
+                &format!("/api/v1/files/{}/direct?token={admin}", s.file),
+                0,
+                9,
+            ))
+            .await
+            .expect("r");
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        // Opened on `note_playback_started`'s detached task.
+        for _ in 0..200 {
+            if ledger.phase(user, s.file).is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            matches!(ledger.phase(user, s.file), Some(StartPhase::Pending { .. })),
+            "the direct-play GET opened no attempt: {:?}",
+            ledger.phase(user, s.file)
+        );
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/client-log",
+                Some(&admin),
+                json!({ "event": "ttff", "method": "direct_play", "ms": 900, "file_id": s.file }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(ledger.count("direct_play", "ok"), 1);
+        assert_eq!(ledger.phase(user, s.file), Some(StartPhase::Playing));
+
+        let other_file = s.file + 1_000;
+        ledger.opened(
+            user,
+            other_file,
+            None,
+            "transcode",
+            std::time::Instant::now(),
+        );
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/client-log",
+                Some(&admin),
+                json!({ "level": "error", "event": "playback_error", "file_id": other_file }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(ledger.count("transcode", "failed"), 1);
+    }
+
+    /// C-08 M5 row 4: a start request the server answers with an error is a
+    /// refused start, on each of the three routes that begin one; a HEAD is
+    /// not a start.
+    #[tokio::test]
+    async fn a_start_request_the_server_refuses_is_a_refused_start() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let s = seed_content(&state).await;
+        let ledger = std::sync::Arc::clone(&state.start_attempts);
+
+        let (status, _) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/hls/sessions", s.file),
+                Some(&admin),
+                json!({ "playback_id": "   " }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(ledger.count("unknown", "refused"), 1, "HLS create");
+
+        let missing = s.file + 1_000;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/files/{missing}/stream.mp4?token={admin}"))
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("r");
+        assert!(response.status().is_client_error(), "{}", response.status());
+        assert_eq!(ledger.count("remux", "refused"), 1, "stream.mp4");
+
+        for method in ["HEAD", "GET"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(format!("/api/v1/files/{missing}/direct?token={admin}"))
+                        .body(Body::empty())
+                        .expect("req"),
+                )
+                .await
+                .expect("r");
+            assert!(response.status().is_client_error(), "{}", response.status());
+        }
+        assert_eq!(ledger.count("direct_play", "refused"), 1, "direct GET only");
+
+        // A catalogued file whose bytes are gone: the open fails.
+        let path = state
+            .store
+            .get_file(s.file)
+            .await
+            .expect("file")
+            .expect("seeded")
+            .path;
+        std::fs::remove_file(&path).expect("remove seeded media");
+        let response = app
+            .clone()
+            .oneshot(ranged(
+                &format!("/api/v1/files/{}/direct?token={admin}", s.file),
+                0,
+                9,
+            ))
+            .await
+            .expect("r");
+        assert!(!response.status().is_success(), "{}", response.status());
+        assert_eq!(
+            ledger.count("direct_play", "refused"),
+            2,
+            "direct open failure"
+        );
+    }
+
+    /// C-08 M5 row 4: a scrape settles an attempt past its deadline, so an
+    /// idle node still reports the last start that was abandoned.
+    #[tokio::test]
+    async fn a_scrape_settles_a_start_past_its_deadline_as_cancelled() {
+        let (app, state) = test_state();
+        let ledger = std::sync::Arc::clone(&state.start_attempts);
+        let long_ago = std::time::Instant::now()
+            .checked_sub(crate::playstart::START_DEADLINE + std::time::Duration::from_secs(1))
+            .expect("the monotonic clock is older than the start deadline");
+        ledger.opened(7, 70, None, "remux", long_ago);
+        assert_eq!(ledger.count("remux", "cancelled"), 0);
+        let (status, _) = call_text(&app, get("/metrics", None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ledger.count("remux", "cancelled"), 1);
+        assert_eq!(ledger.phase(7, 70), None);
+    }
+
+    /// C-08 M5 row 4: a live progress beat keeps the viewer's play alive, so
+    /// a request after a long pause joins it instead of opening a start.
+    #[tokio::test]
+    async fn a_progress_beat_keeps_a_started_play_alive() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let user = state
+            .store
+            .get_user_by_username("paul")
+            .await
+            .expect("user")
+            .expect("paul")
+            .id;
+        let s = seed_content(&state).await;
+        let ledger = std::sync::Arc::clone(&state.start_attempts);
+        let opened = std::time::Instant::now();
+        ledger.opened(user, s.file, Some(s.movie), "direct_play", opened);
+        ledger.client_event(user, s.file, "ttff", None, None, opened);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let (status, body) = call(
+            &app,
+            post(
+                &format!("/api/v1/items/{}/progress", s.movie),
+                Some(&admin),
+                json!({ "position_ms": 60_000, "duration_ms": 600_000 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let seen = ledger.last_seen(user, s.file).expect("play tracked");
+        assert!(
+            seen >= opened + std::time::Duration::from_millis(20),
+            "the progress beat did not refresh the play"
+        );
+    }
+
     /// C-08 M5 row 3's denominator end to end: two live progress beats a
     /// second apart credit the advance to the method the player names; an
     /// offline replay (`recorded_at`) credits nothing.
@@ -10994,14 +11413,15 @@ mod tests {
 
     #[tokio::test]
     async fn scan_status_requires_auth_and_reports_problems() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
+        let _worker = scan_worker(&state);
         // Unauthenticated → 401.
         let (status, _) = call(&app, get("/api/v1/scan/status", None)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
         let admin = setup_admin(&app).await;
         // Create a library pointing at a path that does not exist — the auto
-        // scan must finish with a visible problem, not a silent all-zero.
+        // work must stay available to another node and show this node's problem.
         let (status, lib) = call(
             &app,
             post(
@@ -11014,29 +11434,45 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let lib_id = lib["id"].as_i64().expect("lib id").to_string();
 
-        // Poll until the background scan finishes (missing path → instant).
+        // Eligibility does not consume an attempt or claim successful completion.
         let mut last = Value::Null;
         for _ in 0..100 {
             let (status, body) = call(&app, get("/api/v1/scan/status", Some(&admin))).await;
             assert_eq!(status, StatusCode::OK);
             last = body[&lib_id].clone();
-            if !last["running"].as_bool().unwrap_or(true) && !last.is_null() {
+            if last["error"].as_str().is_some() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        assert_eq!(last["running"], false, "scan never finished: {last}");
-        let problems = last["last_scan"]["problems"]
-            .as_array()
-            .expect("problems array")
-            .clone();
+        assert_eq!(last["running"], true, "accepted work stays pending: {last}");
+        assert_eq!(last["phase"], "queued");
+        assert!(last["last_scan"].is_null(), "no scan has executed: {last}");
         assert!(
-            problems
-                .iter()
-                .any(|p| p.as_str().unwrap_or("").contains("does not exist")),
-            "expected a missing-path problem, got: {problems:?}"
+            last["error"].as_str().is_some_and(|error| error
+                .contains("could not read library root /definitely/not/here")
+                && error.contains("Waiting for a compatible worker")),
+            "{last}"
         );
-        assert_eq!(last["last_scan"]["errors"], 1);
+        let page = state
+            .store
+            .list_jobs(plurx_core::store::background_jobs::JobQuery {
+                state: None,
+                kind: Some(plurx_core::store::background_jobs::JobKind::LibraryScan),
+                after_id: None,
+                limit: 10,
+            })
+            .await
+            .expect("durable job");
+        assert_eq!(page.jobs.len(), 1);
+        assert_eq!(
+            page.jobs[0].failed_attempts, 0,
+            "missing local mounts are not failed executions"
+        );
+        assert!(
+            page.jobs[0].token.is_none(),
+            "an unreadable node must not claim"
+        );
     }
 
     #[tokio::test]
@@ -14350,7 +14786,7 @@ mod tests {
             .collect();
         assert_eq!(
             heights,
-            vec![720, 480, 360],
+            vec![720, 480, 360, 240, 144],
             "source-filtered, top first: {body}"
         );
         assert_eq!(body["ladder"][0]["total_kbps"], 4_160, "{body}");

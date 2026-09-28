@@ -190,6 +190,8 @@
  * Prepared replacement (a staged successor for a quality or track change)
  * @property {any} [prepared]              the successor being prepared, until it settles
  * @property {any} [preparedCommitting]    the prepared successor being committed
+ * @property {any} [preparedRetiring]      a proven switch's hidden predecessor awaiting idle teardown
+ * @property {any} [preparedControlPending] the committed successor awaiting its control acknowledgement
  * @property {any[]} [preparedSettled]     action ids already settled, so a late commit is refused
  * @property {any} [switchCommit]          the last prepared switch's commit timing
  * @property {any[]} [switchFrames]        frame samples taken around a prepared switch
@@ -200,6 +202,7 @@
  *
  * Timers (DOM timer ids)
  * @property {number|null} timer           the 5 s sampling / progress tick
+ * @property {number|null} [autoTimer]     the 1 s Auto quality decision tick
  * @property {number|null} idleTimer       control auto-hide
  * @property {number|null} [stallTimer]
  * @property {number|null} waitTimer
@@ -626,15 +629,63 @@ function resumeHlsStartup(video,player){
   armHlsStartupRetry(video,player,episode);
   return true;
 }
+function noteCompletedAutoTransfer(p,bytes,loading,now){
+  if(!p||!p.abr) return;
+  const elapsed=Number(loading&&loading.end)-Number(loading&&loading.start);
+  if(!(Number(bytes)>0)||!(elapsed>0)) return;
+  const age=PlaybackPolicy.AUTO_DEFAULTS.recentSampleMaxAgeMs;
+  const recent=(p.abr.completedTransfers||[]).filter(row=>
+    row.atMs<=now&&now-row.atMs<=age).slice(-31);
+  recent.push({bytes:Number(bytes),startedAtMs:now-elapsed,endedAtMs:now,atMs:now});
+  p.abr.completedTransfers=recent;
+}
 function createHlsStartupLoader(StockLoader,episode){
   return class PlurxStartupLoader extends StockLoader{
     constructor(config){ super(config); episode.loaders.add(this); this.plurxRequestOrdinal=0; }
     load(context,config,callbacks){
       this.plurxContext=context;
       this.plurxIntentGeneration=episode.player.controlIntentGeneration||0;
+      this.plurxMediaProgress=null;
       return super.load(context,config,callbacks);
     }
     openAndSendXhr(xhr,context,config){
+      // The bundled hls.js reports a fragment's throughput only after its
+      // final byte. At a cliff, that can outlast the remaining buffer. Its
+      // XHR loader still exposes progress byte counts: measure a full 1.5 s
+      // delta within one main-video fragment, leaving the stock onprogress
+      // handler and completed-fragment sample intact. Never use the time to
+      // first byte as bandwidth evidence; a slow producer would look like a
+      // slow link.
+      if(context&&context.frag&&context.frag.type==='main'
+        &&context.frag.duration>0&&typeof xhr.addEventListener==='function'){
+        xhr.addEventListener('progress',event=>{
+          const player=episode.player;
+          if(!hlsStartupCurrent(player,episode)
+            ||this.plurxIntentGeneration!==(player.controlIntentGeneration||0)) return;
+          // Error bodies can also arrive in several progress chunks. A 503
+          // must never become the bandwidth evidence for an Auto downshift.
+          if(!(xhr.status>=200&&xhr.status<300)) return;
+          const loaded=Number(event&&event.loaded),now=performance.now();
+          if(!(loaded>0)) return;
+          const previous=this.plurxMediaProgress;
+          if(!previous||previous.xhr!==xhr||loaded<previous.bytes){
+            this.plurxMediaProgress={xhr,bytes:loaded,at:now};
+            return;
+          }
+          const elapsed=now-previous.at,bytes=loaded-previous.bytes;
+          if(elapsed<1500||bytes<16*1024) return;
+          this.plurxMediaProgress={xhr,bytes:loaded,at:now};
+          const kbps=PlaybackPolicy.transferSampleKbps({loadedBytes:bytes,
+            loadingStartMs:previous.at,loadingEndMs:now});
+          if(kbps&&player.abr){
+            player.abr.recentEstimateKbps=kbps;
+            player.abr.recentEstimateAtMs=now;
+            player.abr.recentEstimateSource='progress';
+            player.abr.recentEstimateUrl=String(context.url||'');
+            scheduleUrgentAutoControllerTick(player,kbps,now);
+          }
+        });
+      }
       if(hlsStartupManifestRequest(context)){
         const current=hlsStartupCurrent(episode.player,episode)
           &&this.plurxIntentGeneration===(episode.player.controlIntentGeneration||0)
@@ -951,8 +1002,21 @@ function wireHlsObservers(hls,startup,video,observesCurrent){
         })
       : null;
     if(sampleKbps&&p.abr){
-      p.abr.recentEstimateKbps=sampleKbps;
-      p.abr.recentEstimateAtMs=performance.now();
+      const now=performance.now();
+      if(d.frag.type==='main') noteCompletedAutoTransfer(p,stats.loaded||b,loading,now);
+      // The completed fragment's full-load average can include fast bytes
+      // from before a cliff. Preserve a fresher within-fragment byte delta
+      // until the next request supplies its own measurement.
+      const recentProgress=p.abr.recentEstimateSource==='progress'
+        &&p.abr.recentEstimateUrl===String(d.frag&&d.frag.url||'')
+        &&now-p.abr.recentEstimateAtMs<=3000;
+      if(!recentProgress){
+        p.abr.recentEstimateKbps=sampleKbps;
+        p.abr.recentEstimateAtMs=now;
+        p.abr.recentEstimateSource='complete';
+        p.abr.recentEstimateUrl=String(d.frag&&d.frag.url||'');
+        if(d.frag.type==='main') scheduleUrgentAutoControllerTick(p,sampleKbps,now);
+      }
     }
     if(b<=(p.segBytes|0)) return;
     p.segBytes=b;

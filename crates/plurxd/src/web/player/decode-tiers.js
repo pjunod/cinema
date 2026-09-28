@@ -933,6 +933,8 @@ function buildPlayer(attempt,decided,prepared){
     abr:{lastSwitchAtMs:clickedAt,lastStallAtMs:null,mildSamples:0,
       upgradeSinceMs:null,previousRunway:null,stallEvents:{supply:[],decode:[]},
       recentEstimateKbps:null,recentEstimateAtMs:null,
+      recentEstimateSource:null,recentEstimateUrl:null,
+      completedTransfers:[],lastCliffAtMs:null,
       switches:[],switching:false,stableSinceMs:clickedAt,supplyRescued:false,
       // Rungs this playback has already failed to open. Per playback, not
       // persisted: a transient server failure must not cap quality forever.
@@ -1655,7 +1657,7 @@ function armHitchDetector(v){
   if(!p.controlHasFrameCallbacks) return;
   p.hitches={back:0, held:0, late:0, gap:0, drop:0, slow:0, worst:0, last:null, at:[], fps:null,
              n:0, near:{}, flushEdge:null, skewMax:0, skewAt:null, decodeMs:null, frames:0,
-             rate:null, renderedFps:null};
+             rate:null, renderedFps:null, faults:[]};
   // When the detector armed, so "zero faults" can be told apart from "zero
   // callbacks". Safari has shipped rVFC for years and still declines to fire
   // it on some pipelines — a session that stutters visibly while this
@@ -1721,8 +1723,10 @@ function armHitchDetector(v){
   };
   const step=(now, meta, epoch)=>{
     // Bail the moment this playback is replaced, or the callback outlives its
-    // PLAYER and starts recording another stream's frames as this one's.
-    if(PLAYER!==p) return;
+    // PLAYER and starts recording another stream's frames as this one's. A
+    // prepared switch keeps the same PLAYER while changing the video element;
+    // only the element that now owns the picture may report a hitch.
+    if(PLAYER!==p||document.getElementById("video")!==v) return;
     if(!playbackOwnsAttachedMedia(p)){
       prev=null;rateWin.length=0;
       queuePlaybackFrame(v,p,step);return;
@@ -1778,9 +1782,20 @@ function armHitchDetector(v){
       if(skew!=null && nom && Math.abs(skew)>Math.abs(h.skewMax)) h.skewMax=+skew.toFixed(3);
       // What the player was doing when this frame went wrong. Called on every
       // fault, before the counters, so the attribution covers all of them.
-      const blame=()=>{
+      const blame=(kind)=>{
         h.n++;
         PLAYBACK_LIFETIME_HITCHES++;
+        // A bounded callback-level receipt distinguishes a backward frame
+        // from a late compositor presentation at a prepared handoff. It is
+        // diagnostic only; the counters and fault thresholds are unchanged.
+        h.faults.push({kind,at_ms:now,media_time:meta.mediaTime,
+          prior_media_time:prev.mediaTime,element_id:v.dataset.plurxLabElementId||null,
+          session_id:p.sessionId||null,
+          expected_display_time_ms:meta.expectedDisplayTime??null,
+          prior_expected_display_time_ms:prev.expectedDisplayTime??null,
+          presented_frames:meta.presentedFrames??null,
+          prior_presented_frames:prev.presentedFrames??null});
+        if(h.faults.length>16) h.faults.shift();
         if(skew!=null) h.skewAt=+skew.toFixed(3);
         const m=p.marks||{};
         for(const k of ["flush","frag","append"]){
@@ -1803,15 +1818,15 @@ function armHitchDetector(v){
           ? ` · decode ${(pd*1000).toFixed(0)}ms (typ ${(typ*1000).toFixed(0)})` : '';
       };
       if(dt<-0.001){
-        blame();
+        blame("back");
         h.back++; h.last=`stepped back ${(-dt*1000).toFixed(0)}ms at ${meta.mediaTime.toFixed(1)}s${fx()}`;
         h.at.push(+meta.mediaTime.toFixed(2));
       } else if(nom && dt<nom*0.5){
-        blame();
+        blame("held");
         h.held++; h.last=`held a frame at ${meta.mediaTime.toFixed(1)}s${fx()}`;
         h.at.push(+meta.mediaTime.toFixed(2));
       } else if(nom && dt/nom-dn>HITCH_GAP_FRAMES){
-        blame();
+        blame("gap");
         // Frames the stream moved past that never reached the screen. Counted
         // against `dn` on purpose: the callback can coalesce and report three
         // frames at once, and three frames PRESENTED in one callback is the
@@ -1828,7 +1843,7 @@ function armHitchDetector(v){
         // instrument refused to count (17 in droppedVideoFrames, zero on this
         // row). dn===1 keeps the coalescing exemption: several frames
         // PRESENTED in one callback is batching, not a drop.
-        blame();
+        blame("drop");
         h.drop=(h.drop||0)+1;
         h.last=`dropped a frame at ${meta.mediaTime.toFixed(1)}s${fx()}`;
         h.at.push(+meta.mediaTime.toFixed(2));
@@ -1844,7 +1859,7 @@ function armHitchDetector(v){
         const lateMs=(eDt!=null && dt>0)? eDt-(dt*1000)/rate : null;
         if(nom && lateMs!=null && dt<nom*2.5
            && lateMs>Math.max(HITCH_LATE_FLOOR_MS, nom*1000*HITCH_LATE_FRACTION)){
-          blame();
+          blame("late");
           h.late++; h.worst=Math.max(h.worst, lateMs);
           h.last=`${lateMs.toFixed(0)}ms late at ${meta.mediaTime.toFixed(1)}s${fx()}`;
           h.at.push(+meta.mediaTime.toFixed(2));

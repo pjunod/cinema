@@ -156,7 +156,7 @@ pub fn start_key(user: i64, id: &str) -> String {
 }
 
 pub fn valid_request_id(id: &str) -> bool {
-    let raw = id.strip_prefix("v4_").unwrap_or(id);
+    let raw = id.strip_prefix("v5_").unwrap_or(id);
     raw.len() == 32
         && raw.bytes().all(|c| c.is_ascii_hexdigit())
         && raw.bytes().all(|c| !c.is_ascii_uppercase())
@@ -165,7 +165,7 @@ pub fn valid_request_id(id: &str) -> bool {
 /// Only the server mints prefixed IDs. Missing-ticket fallback must never
 /// reinterpret this namespace as a legacy start.
 pub fn ticketed(id: &str) -> bool {
-    id.starts_with("v4_")
+    id.starts_with("v5_")
 }
 
 #[derive(Clone, Debug)]

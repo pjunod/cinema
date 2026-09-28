@@ -96,7 +96,7 @@ pub struct AnalysisRequestJobResponse {
     error: Option<String>,
 }
 
-fn kick_analysis_queue(state: &AppState) {
+pub(crate) fn kick_analysis_queue(state: &AppState) {
     let jobs = state.jobs.clone();
     let transcode = state.transcode.clone();
     tokio::spawn(async move {

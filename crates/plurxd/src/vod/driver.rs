@@ -21,17 +21,15 @@ pub(super) fn spawn_driver(
                 let poll = if encoded_waiting {
                     Duration::from_millis(250)
                 } else {
-                    #[cfg(test)]
-                    rendition.stopped_poll_armed.notify_one();
+                    rendition.hooks.stopped_poll_armed();
                     STOPPED_ENCODER_POLL
                 };
                 tokio::select! {
                     _ = rendition.wake.notified() => {},
                     _ = tokio::time::sleep(poll) => {},
                 }
-                #[cfg(test)]
                 if stopped_encoder && !encoded_waiting {
-                    rendition.stopped_poll_fired.notify_one();
+                    rendition.hooks.stopped_poll_fired();
                 }
             } else {
                 rendition.wake.notified().await;

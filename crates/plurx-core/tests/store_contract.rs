@@ -7,6 +7,16 @@
 // A test, never a daemon child: the launcher rule in clippy.toml is for
 // production code.
 #![allow(clippy::disallowed_methods)]
+#[path = "support/queue_fixture.rs"]
+mod queue_fixture;
+#[path = "support/subtitle_jobs.rs"]
+mod subtitle_jobs_fixture;
+use subtitle_jobs_fixture::SubtitleFixture;
+
+use queue_fixture::QueueFixture;
+
+#[path = "store_contract/background_jobs.rs"]
+mod background_jobs;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;
@@ -39,15 +49,15 @@ use plurx_core::cluster::migration::{
 use plurx_core::config::Config;
 use plurx_core::domain::{
     scopes, ArtworkAttempt, BookMetadataPatch, BookMetadataSource, CacheConsumerKind,
-    CacheConsumerPin, CacheManifestCheck, CacheStorageMember, CredentialGeneration,
-    DolbyVisionFacts, ItemEdit, ItemKind, ItemSort, LibraryKind, MediaSessionActivation,
-    MediaSessionActivationSettlement, MediaSessionEnd, MediaSessionProjectionCompletion,
-    MediaSessionRenewal, MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover,
-    MediaSessionTakeoverCursor, MediaSessionTerminalAck, MetadataPatch, NetworkPriorObservation,
-    NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome,
-    OfflineLeaseOutcome, PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements,
-    PretranscodeWorkerCapabilities, ProbeResult, ReadingStateWrite, TraktAuth,
-    MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS, MEDIA_SESSION_PUBLICATION_BLOCKED,
+    CacheConsumerPin, CacheStorageMember, CredentialGeneration, DolbyVisionFacts, ItemEdit,
+    ItemKind, ItemSort, LibraryKind, MediaSessionActivation, MediaSessionActivationSettlement,
+    MediaSessionEnd, MediaSessionProjectionCompletion, MediaSessionRenewal,
+    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaSessionTakeoverCursor,
+    MediaSessionTerminalAck, MetadataPatch, NetworkPriorObservation, NewItem, NewLibrary,
+    NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome, OfflineLeaseOutcome,
+    PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements, PretranscodeWorkerCapabilities,
+    ProbeResult, ReadingStateWrite, TraktAuth, MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
+    MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
 use plurx_core::dvr::{
     DvrInsertOutcome, DvrOrigin, DvrRecording, DvrReminder, DvrReminderState, DvrState,
@@ -77,9 +87,9 @@ use plurx_core::store::{
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::store::{
     ApiKeyStore, CoordinationStore, DvConversionStore, FencedPublicationStore, HiqliteAuthStore,
-    MediaSessionStore, OfflinePackageStore, PlaybackTelemetryStore, PretranscodeJobStore,
-    ReadingStore, SettingsStore, TimelineAnnotationStore, TraktStore, TranscodeCacheStore,
-    UserStore, WatchStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
+    MediaSessionStore, OfflinePackageStore, PlaybackTelemetryStore, ReadingStore, SettingsStore,
+    TimelineAnnotationStore, TraktStore, TranscodeCacheStore, UserStore, WatchStore,
+    AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "cluster-read-cost-validation")]
 use plurx_core::store::{CatalogueReader, MetricsStore};
@@ -211,6 +221,7 @@ const SETTINGS_METHODS: &[&str] = &[
     "get_setting",
     "get_or_init_setting",
     "get_setting_pair",
+    "get_settings",
     "settings_snapshot",
     "put_setting",
     "put_setting_if_absent",
@@ -472,8 +483,6 @@ const CACHE_METHODS: &[&str] = &[
     "complete_cache_entry",
     "touch_cache_entry",
     "cache_by_age",
-    "cache_manifest_candidates",
-    "mark_cache_manifests_checked",
     "stale_cache_claims",
     "all_cache_rows",
     "cache_ownership_inventory",
@@ -501,18 +510,67 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "retire_shared_cache_generation",
     "finalize_retired_shared_cache_generation",
 ];
-const PRETRANSCODE_METHODS: &[&str] = &[
-    "pretranscode_job",
-    "enqueue_pretranscode_job",
-    "claim_pretranscode_job",
-    "pretranscode_staging_jobs",
-    "active_pretranscode_job_ids",
-    "renew_pretranscode_job",
-    "yield_pretranscode_job",
-    "fail_pretranscode_job",
-    "cancel_pretranscode_job",
-    "complete_pretranscode_job",
+const BACKGROUND_JOB_METHODS: &[&str] = &[
+    "sync_predictions",
+    "embedding_for",
+    "publish_embedding_job",
+    "publish_probe_job",
+    "apply_probe_job",
+    "transcode_verification_candidates",
+    "verify_transcode_job",
+    "artwork_verification_candidates",
+    "verify_artwork_job",
+    "artifact_repairs",
+    "enqueue_artifact_repair",
+    "pending_predictions",
+    "preparation_demands",
+    "hot_artifacts",
+    "bind_library_job",
+    "update_provider_budget",
+    "subtitle_job_intents",
+    "enqueue_subtitle_job",
+    "write_subtitle_job",
+    "artwork_locations",
+    "transcode_copy_sources",
+    "artwork_variant",
+    "enqueue_artwork_demand",
+    "publish_artwork_job",
+    "storage_domains",
+    "replace_storage_domains",
+    "enqueue_library_work",
+    "library_work_requests",
+    "complete_library_work",
+    "bind_transcode_job_recipe",
+    "join_offline_job",
+    "import_legacy_jobs",
+    "job_migration_status",
+    "enqueue_fragment_job",
+    "job_waiters",
+    "delivery_intents",
+    "enqueue_delivery",
+    "background_job",
+    "background_staging_jobs",
+    "enqueue_job",
+    "enqueue_job_fenced",
+    "retry_background_job",
+    "claim_job",
+    "claim_artifact_job",
+    "resolve_claim",
+    "job_labels",
+    "job_counts",
+    "job_attempts",
+    "list_jobs",
+    "job_candidates",
+    "renew_jobs",
+    "settle_job",
+    "fail_fragment_job",
+    "cancel_job",
+    "cancel_waiter",
+    "maintain_jobs",
+    "publish_transcode_job",
+    "publish_fragment_job",
 ];
+const PRETRANSCODE_METHODS: &[&str] = &["pretranscode_job", "pretranscode_staging_jobs"];
 const OFFLINE_METHODS: &[&str] = &[
     "create_offline_package",
     "offline_package_for_user",
@@ -8111,7 +8169,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             .expect("contract clock after epoch")
             .as_millis()
             .min(i64::MAX as u128) as i64;
-        let queue_time = |tick: i64| queue_clock.saturating_add(tick.saturating_mul(1_000));
+        let queue_time = |tick: i64| queue_clock.saturating_add(tick.saturating_mul(100));
         let first_candidate_lease = acquired(
             store
                 .acquire_lease(
@@ -8155,7 +8213,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         let stale_candidate_replacement = publication_successor(&first_candidate_lease);
         assert!(matches!(
             store
-                .enqueue_pretranscode_job(
+                .fixture_enqueue_pretranscode_job(
                     &jobs[0],
                     &first_candidate_lease,
                     &stale_candidate_replacement,
@@ -8178,7 +8236,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             "{backend}: an active dedupe key must be unique"
         );
         let mut active_ids = store
-            .active_pretranscode_job_ids()
+            .fixture_active_pretranscode_job_ids()
             .await
             .unwrap_or_else(|error| panic!("{backend}: active job inventory: {error}"));
         active_ids.sort_unstable();
@@ -8189,7 +8247,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
         assert!(
             store
-                .claim_pretranscode_job(
+                .fixture_claim_pretranscode_job(
                     "node-x",
                     &incompatible,
                     &[],
@@ -8204,7 +8262,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         assert!(
             matches!(
                 store
-                    .claim_pretranscode_job(
+                    .fixture_claim_pretranscode_job(
                         "node-newer",
                         &newer_protocol,
                         &[],
@@ -8218,20 +8276,36 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
 
         let (claim_a, claim_b, claim_c) = tokio::join!(
-            store.claim_pretranscode_job("node-a", &capable, &[], queue_time(200), queue_time(500)),
-            store.claim_pretranscode_job("node-b", &capable, &[], queue_time(200), queue_time(500)),
-            store.claim_pretranscode_job("node-c", &capable, &[], queue_time(200), queue_time(500)),
+            store.fixture_claim_pretranscode_job(
+                "node-a",
+                &capable,
+                &[],
+                queue_time(200),
+                queue_time(500)
+            ),
+            store.fixture_claim_pretranscode_job(
+                "node-b",
+                &capable,
+                &[],
+                queue_time(200),
+                queue_time(500)
+            ),
+            store.fixture_claim_pretranscode_job(
+                "node-c",
+                &capable,
+                &[],
+                queue_time(200),
+                queue_time(500)
+            ),
         );
-        let claimed = [
+        let mut claimed = [
             ("node-a", claim_a),
             ("node-b", claim_b),
             ("node-c", claim_c),
         ]
         .into_iter()
-        .map(|(node, result)| {
-            result
-                .unwrap_or_else(|error| panic!("{backend}: claim for {node}: {error}"))
-                .unwrap_or_else(|| panic!("{backend}: no job for {node}"))
+        .filter_map(|(node, result)| {
+            result.unwrap_or_else(|error| panic!("{backend}: claim for {node}: {error}"))
         })
         .collect::<Vec<_>>();
         assert_eq!(
@@ -8240,8 +8314,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 .map(|job| job.id.as_str())
                 .collect::<BTreeSet<_>>()
                 .len(),
-            3,
-            "{backend}: workers must claim distinct rows"
+            2,
+            "{backend}: distinct claims must respect the two shared source-I/O slots"
         );
         for job in &claimed {
             let staging = store
@@ -8255,7 +8329,10 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         }
         assert!(
             store
-                .cache_hit("contract-recipe-a", "node-a")
+                .cache_hit(
+                    "359cf2152e3ccdf96d41a0e108bdcf728469888ed79b7de4075a65b180a8568f",
+                    "node-a"
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: pre-publication cache lookup: {error}"))
                 .is_none(),
@@ -8263,14 +8340,14 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
 
         let renewed_a = store
-            .renew_pretranscode_job(&claimed[0], queue_time(250), queue_time(700))
+            .fixture_renew_pretranscode_job(&claimed[0], queue_time(250), queue_time(700))
             .await
             .unwrap_or_else(|error| panic!("{backend}: renew worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: worker claim did not renew"));
         assert!(store
-            .complete_pretranscode_job(
+            .fixture_complete_pretranscode_job(
                 &claimed[1],
-                "contract-recipe-b",
+                "e881e043708591eb06d15977455356b7f060fbc35b1f988ec4f816753fb635a2",
                 1,
                 "contract/pretranscode/b",
                 4_096,
@@ -8282,9 +8359,9 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: complete second job: {error}")));
         assert!(
             !store
-                .complete_pretranscode_job(
+                .fixture_complete_pretranscode_job(
                     &claimed[1],
-                    "contract-recipe-b",
+                    "e881e043708591eb06d15977455356b7f060fbc35b1f988ec4f816753fb635a2",
                     1,
                     "contract/pretranscode/b",
                     4_096,
@@ -8296,6 +8373,27 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: replay completion: {error}")),
             "{backend}: a terminal queue token replayed successfully"
         );
+        claimed.push(
+            store
+                .fixture_claim_pretranscode_job(
+                    "node-third",
+                    &capable,
+                    &[],
+                    queue_time(262),
+                    queue_time(562),
+                )
+                .await
+                .expect("claim after one producer completes")
+                .expect("released source-I/O slot"),
+        );
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|job| &job.id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            3
+        );
         assert_eq!(
             store
                 .delete_files(&[claimed[2].file_id])
@@ -8306,9 +8404,9 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
         assert!(
             !store
-                .complete_pretranscode_job(
+                .fixture_complete_pretranscode_job(
                     &claimed[2],
-                    "contract-recipe-c",
+                    "f26b73dec7d37c4bd8099a2db575c5a0991a9e3557d9680d62146d1bfc144179",
                     1,
                     "contract/pretranscode/c",
                     4_096,
@@ -8322,7 +8420,13 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
 
         let successor = store
-            .claim_pretranscode_job("node-d", &capable, &[], queue_time(701), queue_time(1_000))
+            .fixture_claim_pretranscode_job(
+                "node-d",
+                &capable,
+                &[],
+                queue_time(701),
+                queue_time(1_000),
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: expired takeover: {error}"))
             .unwrap_or_else(|| panic!("{backend}: expired job was not restarted"));
@@ -8346,9 +8450,9 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
         assert!(
             !store
-                .complete_pretranscode_job(
+                .fixture_complete_pretranscode_job(
                     &renewed_a,
-                    "contract-recipe-a",
+                    "359cf2152e3ccdf96d41a0e108bdcf728469888ed79b7de4075a65b180a8568f",
                     1,
                     "contract/pretranscode/stale-a",
                     8_192,
@@ -8362,7 +8466,10 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
         assert!(
             store
-                .cache_hit("contract-recipe-a", "node-a")
+                .cache_hit(
+                    "359cf2152e3ccdf96d41a0e108bdcf728469888ed79b7de4075a65b180a8568f",
+                    "node-a"
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: stale cache lookup: {error}"))
                 .is_none(),
@@ -8370,9 +8477,9 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
         assert!(
             store
-                .complete_pretranscode_job(
+                .fixture_complete_pretranscode_job(
                     &successor,
-                    "contract-recipe-a",
+                    "359cf2152e3ccdf96d41a0e108bdcf728469888ed79b7de4075a65b180a8568f",
                     1,
                     "contract/pretranscode/d",
                     8_192,
@@ -8385,7 +8492,10 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             "{backend}: current worker could not publish"
         );
         let ready = store
-            .cache_hit("contract-recipe-a", "node-d")
+            .cache_hit(
+                "359cf2152e3ccdf96d41a0e108bdcf728469888ed79b7de4075a65b180a8568f",
+                "node-d",
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: atomic cache lookup: {error}"))
             .unwrap_or_else(|| panic!("{backend}: ready job has no cache location"));
@@ -8398,7 +8508,11 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
 
         store
-            .forget_cache_entry("contract-recipe-a", "node-d", "local")
+            .forget_cache_entry(
+                "359cf2152e3ccdf96d41a0e108bdcf728469888ed79b7de4075a65b180a8568f",
+                "node-d",
+                "local",
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: evict ready cache: {error}"));
         let retry = NewPretranscodeJob {
@@ -8422,18 +8536,24 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             "{backend}: eviction must make the generation eligible again"
         );
         let refused = store
-            .claim_pretranscode_job("node-e", &capable, &[], queue_time(705), queue_time(1_005))
+            .fixture_claim_pretranscode_job(
+                "node-e",
+                &capable,
+                &[],
+                queue_time(705),
+                queue_time(1_005),
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim re-enqueued job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: re-enqueued job was not claimable"));
         assert_eq!(refused.dedupe_key, retry.dedupe_key, "{backend}");
         assert!(store
-            .yield_pretranscode_job(&refused, queue_time(706), queue_time(706))
+            .fixture_yield_pretranscode_job(&refused, queue_time(706), queue_time(706))
             .await
             .unwrap_or_else(|error| panic!("{backend}: unreadable-node yield: {error}")));
         assert!(
             store
-                .claim_pretranscode_job(
+                .fixture_claim_pretranscode_job(
                     "node-e",
                     &capable,
                     std::slice::from_ref(&refused.id),
@@ -8446,7 +8566,13 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             "{backend}: a node immediately reclaimed the source it had refused"
         );
         let reclaimed = store
-            .claim_pretranscode_job("node-f", &capable, &[], queue_time(706), queue_time(1_006))
+            .fixture_claim_pretranscode_job(
+                "node-f",
+                &capable,
+                &[],
+                queue_time(706),
+                queue_time(1_006),
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: mounted peer claim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: local refusal blocked a mounted peer"));
@@ -8461,14 +8587,19 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             let failed_at = queue_time(710 + attempt * 2);
             assert!(
                 store
-                    .fail_pretranscode_job(&failing, "contract_failure", failed_at, failed_at)
+                    .fixture_fail_pretranscode_job(
+                        &failing,
+                        "contract_failure",
+                        failed_at,
+                        failed_at
+                    )
                     .await
                     .unwrap_or_else(|error| panic!("{backend}: fail attempt {attempt}: {error}")),
                 "{backend}: current failure settlement was rejected"
             );
             if attempt < 5 {
                 failing = store
-                    .claim_pretranscode_job(
+                    .fixture_claim_pretranscode_job(
                         "node-e",
                         &capable,
                         &[],
@@ -8530,7 +8661,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             );
         }
         let paged_claim = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 "node-pagination",
                 &capable,
                 &[],
@@ -8545,7 +8676,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             "{backend}: claim did not preserve highest-compatible ordering across pages"
         );
 
-        let legacy_recipe = "contract-legacy-cache-reuse";
+        let legacy_recipe = "1bd16d960c43953936740e772bc422612303862b77966f2e0a884bc581064078";
         assert!(store
             .claim_cache_entry(
                 legacy_recipe,
@@ -8589,7 +8720,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: enqueue legacy reuse: {error}"))
         );
         let legacy_claim = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 "node-legacy",
                 &capable,
                 &[],
@@ -8601,7 +8732,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             .unwrap_or_else(|| panic!("{backend}: legacy reuse was not claimable"));
         let adopted_digest = "e".repeat(64);
         assert!(store
-            .complete_pretranscode_job(
+            .fixture_complete_pretranscode_job(
                 &legacy_claim,
                 legacy_recipe,
                 1,
@@ -8635,37 +8766,61 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         assert_eq!(compact_ready.state, "ready", "{backend}");
         assert!(compact_ready.owner_node_id.is_empty(), "{backend}");
         assert_eq!(compact_ready.lease_expires_ms, 0, "{backend}");
-        assert!(compact_ready.policy_generation.is_empty(), "{backend}");
-        assert_eq!(compact_ready.requirements_json, "{}", "{backend}");
+        assert_eq!(
+            compact_ready.policy_generation, "legacy-upgrade-v1",
+            "{backend}"
+        );
+        assert_eq!(
+            compact_ready.requirements_json, requirements,
+            "{backend}: terminal payload remains available for audited retry"
+        );
 
         let wrong_digest = "f".repeat(64);
-        let wrong_check = CacheManifestCheck {
+        let verification_now = queue_time(963);
+        let location = store
+            .transcode_verification_candidates("node-legacy", None)
+            .await
+            .expect("verification candidates")
+            .into_iter()
+            .find(|location| location.recipe_hash == legacy_recipe)
+            .expect("legacy candidate");
+        let token = background_jobs::integrity_verify_claim_on(
+            &store,
+            &format!("transcode:{legacy_recipe}:{adopted_digest}"),
+            verification_now,
+            "node-legacy",
+        )
+        .await;
+        let exact_check = plurx_core::store::background_jobs_integrity::VerifyTranscode {
+            token,
             recipe_hash: legacy_recipe.to_owned(),
-            node_id: "node-legacy".to_owned(),
-            storage_class: "local".to_owned(),
-            relative_dir: "contract/pretranscode/legacy".to_owned(),
-            manifest_digest: wrong_digest.clone(),
-            next_object_index: 8,
-            observed_at: 123,
-        };
-        assert_eq!(
-            store
-                .mark_cache_manifests_checked(std::slice::from_ref(&wrong_check))
-                .await
-                .unwrap_or_else(|error| panic!("{backend}: stale scrub cursor: {error}")),
-            0,
-            "{backend}: stale manifest identity advanced a replacement cursor"
-        );
-        let exact_check = CacheManifestCheck {
+            relative_dir: location.relative_dir,
             manifest_digest: adopted_digest.clone(),
-            ..wrong_check
+            publication_generation: location.publication_generation,
+            valid: true,
+            next_object_index: 8,
+            now_ms: verification_now + 1,
         };
-        assert_eq!(
-            store
-                .mark_cache_manifests_checked(std::slice::from_ref(&exact_check))
-                .await
-                .unwrap_or_else(|error| panic!("{backend}: exact scrub cursor: {error}")),
-            1,
+        let mut wrong_check = exact_check.clone();
+        wrong_check.manifest_digest = wrong_digest.clone();
+        assert!(
+            matches!(
+                store
+                    .verify_transcode_job(wrong_check)
+                    .await
+                    .expect("stale scrub cursor"),
+                plurx_core::store::background_jobs::JobPublishOutcome::LostOwnership
+            ),
+            "{backend}: stale manifest advanced a replacement cursor"
+        );
+        assert!(
+            matches!(
+                store
+                    .verify_transcode_job(exact_check)
+                    .await
+                    .expect("exact scrub cursor"),
+                plurx_core::store::background_jobs::JobPublishOutcome::Published { .. }
+            ),
             "{backend}: exact manifest cursor did not advance"
         );
         assert_eq!(
@@ -8718,7 +8873,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: invalidated cache lookup: {error}"))
             .is_none());
 
-        let conflicting_recipe = "contract-recipe-identity-collision";
+        let conflicting_recipe = "8492b189aab437a50afc38df0390ed3211702f18794b2fcfa9f7dbb0bc239823";
         assert!(store
             .claim_cache_entry(
                 conflicting_recipe,
@@ -8736,7 +8891,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: enqueue collision job: {error}"))
         );
         let collision_claim = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 "node-collision",
                 &capable,
                 &[],
@@ -8749,7 +8904,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         assert_eq!(collision_claim.id, collision_job.id, "{backend}");
         assert!(
             !store
-                .complete_pretranscode_job(
+                .fixture_complete_pretranscode_job(
                     &collision_claim,
                     conflicting_recipe,
                     1,
@@ -8919,7 +9074,7 @@ async fn enqueue_with_successor(
 ) -> Result<bool, StoreError> {
     let replacement = publication_successor(lease);
     let result = store
-        .enqueue_pretranscode_job(job, lease, &replacement)
+        .fixture_enqueue_pretranscode_job(job, lease, &replacement)
         .await;
     if result.is_ok() {
         *lease = replacement;
@@ -9027,7 +9182,13 @@ async fn assert_distinct_pretranscode_claims_from_separate_handles(
             async move {
                 start.wait().await;
                 store
-                    .claim_pretranscode_job(&node, &capabilities, &[], 200 + round, 500 + round)
+                    .fixture_claim_pretranscode_job(
+                        &node,
+                        &capabilities,
+                        &[],
+                        200 + round,
+                        500 + round,
+                    )
                     .await
             }
         };
@@ -9044,20 +9205,31 @@ async fn assert_distinct_pretranscode_claims_from_separate_handles(
             ),
             claim(Arc::clone(&stores[2]), format!("separate-c-{round}"), start),
         );
-        for result in [a, b, c] {
-            let id = result
-                .unwrap_or_else(|error| panic!("{backend}: separate claim: {error}"))
-                .unwrap_or_else(|| panic!("{backend}: separate claimant found no work"))
-                .id;
+        let claims = [a, b, c]
+            .into_iter()
+            .filter_map(|result| {
+                result.unwrap_or_else(|error| panic!("{backend}: separate claim: {error}"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            claims.len(),
+            2,
+            "{backend}: shared I/O cap across independent handles"
+        );
+        for job in claims {
             assert!(
-                ids.insert(id),
+                ids.insert(job.id.clone()),
                 "{backend}: separate clients duplicated a claim"
             );
+            assert!(seed
+                .fixture_cancel_pretranscode_job(&job, "fixture_done", 201 + round)
+                .await
+                .expect("release fixture source-I/O reservation"));
         }
     }
     assert_eq!(
         ids.len(),
-        (ROUNDS * 3) as usize,
+        (ROUNDS * 2) as usize,
         "{backend}: separate clients duplicated a claim"
     );
 }
@@ -9213,7 +9385,7 @@ async fn contract_cache_touch_times(
 
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
+async fn manifest_verification_publication_costs_one_consensus_entry() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let store = open_contract_hiqlite_store(&cluster).await;
@@ -9292,13 +9464,13 @@ async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
     let fixtures = [
         (
             "00000000-0000-4000-8000-000000000501",
-            "manifest-cursor-a",
+            "57df5e2c8acdaaf2af123892af4313ae46f5def616aa10db950abb9176f2d32f",
             "ma/manifest-cursor-a",
             "a".repeat(64),
         ),
         (
             "00000000-0000-4000-8000-000000000502",
-            "manifest-cursor-b",
+            "7371917bda373a76b04d82d9a7be032f925c7b8c1259d86e2b00493a8946e2ff",
             "mb/manifest-cursor-b",
             "b".repeat(64),
         ),
@@ -9322,28 +9494,18 @@ async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
             .await
             .expect("enqueue manifest cursor job"));
         let claimed = store
-            .claim_pretranscode_job("manifest-node", &capabilities, &[], 120, 1_000)
+            .fixture_claim_pretranscode_job("manifest-node", &capabilities, &[], 120, 1_000)
             .await
             .expect("claim manifest cursor job")
             .expect("manifest cursor job");
         assert_eq!(claimed.id, *job_id);
         assert!(store
-            .complete_pretranscode_job(&claimed, recipe, 1, relative, 100, None, digest, 130)
+            .fixture_complete_pretranscode_job(
+                &claimed, recipe, 1, relative, 100, None, digest, 130
+            )
             .await
             .expect("complete manifest cursor job"));
     }
-    let checks = fixtures
-        .iter()
-        .map(|(_, recipe, relative, digest)| CacheManifestCheck {
-            recipe_hash: (*recipe).to_owned(),
-            node_id: "manifest-node".to_owned(),
-            storage_class: "local".to_owned(),
-            relative_dir: (*relative).to_owned(),
-            manifest_digest: digest.clone(),
-            next_object_index: 8,
-            observed_at: 123,
-        })
-        .collect::<Vec<_>>();
     let observer = Client::remote(
         cluster.addresses.clone(),
         true,
@@ -9354,19 +9516,48 @@ async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
     )
     .await
     .expect("connect manifest cursor observer");
-    let before = contract_leader_point(&observer).await;
-    assert_eq!(
-        store
-            .mark_cache_manifests_checked(&checks)
+    let store: Arc<dyn Store> = Arc::new(store);
+    for (_, recipe, _, digest) in &fixtures {
+        let location = store
+            .transcode_verification_candidates("manifest-node", None)
             .await
-            .expect("advance manifest cursors"),
-        2
-    );
-    assert_eq!(
-        contract_stable_leader_delta(before, contract_leader_point(&observer).await),
-        1,
-        "one scrub page must be one consensus transaction"
-    );
+            .expect("candidates")
+            .into_iter()
+            .find(|location| location.recipe_hash == *recipe)
+            .expect("candidate");
+        let token = background_jobs::integrity_verify_claim_on(
+            &store,
+            &format!("transcode:{recipe}:{digest}"),
+            queue_clock,
+            "manifest-node",
+        )
+        .await;
+        let before = contract_leader_point(&observer).await;
+        let result = store
+            .verify_transcode_job(
+                plurx_core::store::background_jobs_integrity::VerifyTranscode {
+                    token,
+                    recipe_hash: (*recipe).to_owned(),
+                    manifest_digest: digest.clone(),
+                    relative_dir: location.relative_dir,
+                    publication_generation: location.publication_generation,
+                    valid: true,
+                    next_object_index: 8,
+                    now_ms: queue_clock + 1,
+                },
+            )
+            .await
+            .expect("publish verification");
+        assert!(matches!(
+            result,
+            plurx_core::store::background_jobs::JobPublishOutcome::Published { .. }
+        ));
+        assert_eq!(
+            contract_stable_leader_delta(before, contract_leader_point(&observer).await),
+            1,
+            "one verification publication must be one consensus transaction"
+        );
+    }
     for (_, recipe, _, _) in fixtures {
         assert_eq!(
             store
@@ -9851,7 +10042,7 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
     let replacement = publication_successor(&lease);
     assert!(store
         .claim_cache_entry_fenced(
-            "fenced-cache-clock-recipe",
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
             file_id,
             1,
             "clock-node",
@@ -9866,7 +10057,11 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
         .execute(
             "UPDATE transcode_cache_locations SET last_used_at = $1, last_seen_at = $1 \
              WHERE recipe_hash = $2 AND node_id = $3",
-            hiqlite::params!(9_000_i64, "fenced-cache-clock-recipe", "clock-node"),
+            hiqlite::params!(
+                9_000_i64,
+                "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
+                "clock-node"
+            ),
         )
         .await
         .expect("advance cache timestamps ahead of the store clock");
@@ -9874,7 +10069,7 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
     let replacement = publication_successor(&lease);
     assert!(store
         .claim_cache_entry_fenced(
-            "fenced-cache-clock-recipe",
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
             file_id,
             1,
             "clock-node",
@@ -9886,7 +10081,12 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
         .expect("repeat fenced cache claim after clock rollback"));
     lease = replacement;
     assert_eq!(
-        contract_cache_touch_times(&client, "fenced-cache-clock-recipe", "clock-node").await,
+        contract_cache_touch_times(
+            &client,
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
+            "clock-node"
+        )
+        .await,
         CacheTouchTimes {
             last_used_at: 9_000,
             last_seen_at: 9_000,
@@ -9897,7 +10097,7 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
     let replacement = publication_successor(&lease);
     store
         .touch_cache_claim_fenced(
-            "fenced-cache-clock-recipe",
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
             "clock-node",
             &lease,
             &replacement,
@@ -9908,7 +10108,7 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
     let replacement = publication_successor(&lease);
     store
         .complete_cache_entry_fenced(
-            "fenced-cache-clock-recipe",
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
             "clock-node",
             "fc/fenced-cache-clock-recipe",
             4_096,
@@ -9920,7 +10120,12 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
         .expect("complete fenced cache entry after clock rollback");
     lease = replacement;
     assert_eq!(
-        contract_cache_touch_times(&client, "fenced-cache-clock-recipe", "clock-node").await,
+        contract_cache_touch_times(
+            &client,
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
+            "clock-node"
+        )
+        .await,
         CacheTouchTimes {
             last_used_at: 9_000,
             last_seen_at: 9_000,
@@ -9966,14 +10171,14 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
         scratch_bytes: 2,
     };
     let claimed = store
-        .claim_pretranscode_job("clock-node", &capabilities, &[], 1_000, 10_000)
+        .fixture_claim_pretranscode_job("clock-node", &capabilities, &[], 1_000, 10_000)
         .await
         .expect("claim fixed-clock pretranscode publication")
         .expect("fixed-clock pretranscode job");
     assert!(store
-        .complete_pretranscode_job(
+        .fixture_complete_pretranscode_job(
             &claimed,
-            "fenced-cache-clock-recipe",
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
             1,
             "fc/fenced-cache-clock-recipe",
             4_096,
@@ -9984,7 +10189,12 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
         .await
         .expect("complete fixed-clock pretranscode publication"));
     assert_eq!(
-        contract_cache_touch_times(&client, "fenced-cache-clock-recipe", "clock-node").await,
+        contract_cache_touch_times(
+            &client,
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
+            "clock-node"
+        )
+        .await,
         CacheTouchTimes {
             last_used_at: 9_000,
             last_seen_at: 9_000,
@@ -15047,6 +15257,10 @@ fn populated_current_import_fixture(data_dir: &std::path::Path) -> PathBuf {
                   refresh_interval_mins, last_scan_at, last_refresh_at)
                  VALUES (9, 'Imported Shows', 'shows', '[\"/fixture/shows\"]', 0,
                          108, 30, 60, 109, 110);
+             INSERT INTO background_storage_domains (library_id, root_path, domain_id)
+                 VALUES (9, '/fixture/shows', 'fixture-nas');
+             INSERT INTO background_provider_budgets (provider, next_dispatch_ms, interval_ms)
+                 VALUES ('tmdb', 42000, 100), ('ani_list', 63000, 2100);
              INSERT INTO items
                  (id, library_id, kind, parent_id, title, sort_title, year, overview,
                   added_at, updated_at, tags, genres)
@@ -15393,6 +15607,7 @@ fn make_trakt_fixture_row_cleartext(path: &std::path::Path) {
 fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     let path = populated_current_import_fixture(data_dir);
     let connection = rusqlite::Connection::open(&path).expect("open current SQLite fixture");
+    queue_fixture::remove_common_queue_schema(&connection);
     // Recreate the exact post-v14 schema differences so this is also a valid
     // input to ordinary SQLite startup migration, not merely a current-schema
     // database carrying an older user_version. The activation coordinator now
@@ -15734,6 +15949,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
+    use plurx_core::store::background_jobs::BackgroundJobStore;
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let store = open_contract_hiqlite_store(&cluster).await;
@@ -15743,7 +15959,36 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
         .expect("reset replicated current-schema import target");
 
     let source = tempfile::tempdir().expect("current SQLite import fixture directory");
-    populated_current_import_fixture(source.path());
+    let source_path = populated_current_import_fixture(source.path());
+    // This shared fixture seeds the old domain rows with SQL. Run the actual
+    // v71 upgrade before calling it a current backup, so live work has the
+    // same sealed mapping and common queue rows a real upgraded daemon has.
+    let connection = rusqlite::Connection::open(&source_path).expect("open upgrade fixture");
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row
+                .get::<_, i64>(0))
+            .expect("empty common queue fixture"),
+        0
+    );
+    connection
+        .execute_batch("DELETE FROM background_job_migration; PRAGMA user_version = 70;")
+        .expect("stage pre-queue fixture");
+    drop(connection);
+    let upgraded = SqliteStore::open(&source_path).expect("apply common queue migration");
+    assert!(upgraded
+        .import_legacy_jobs(1_000)
+        .await
+        .expect("materialize upgraded work"));
+    assert_eq!(
+        upgraded
+            .job_migration_status()
+            .await
+            .expect("source migration status")
+            .materialized,
+        2
+    );
+    drop(upgraded);
     let prepared = prepare_sqlite_import(source.path()).expect("prepare current import backup");
     assert_eq!(
         prepared.schema_version,
@@ -15769,6 +16014,41 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
         .await
         .expect("import populated current backup");
     assert_eq!(report.search_rows, 2);
+    assert_eq!(
+        store
+            .storage_domains()
+            .await
+            .expect("imported storage domains")[0]
+            .domain_id,
+        "fixture-nas"
+    );
+    assert_eq!(
+        report
+            .tables
+            .iter()
+            .find(|table| table.table == "background_provider_budgets")
+            .expect("provider budget parity")
+            .row_count,
+        2
+    );
+
+    for table in [
+        "background_jobs",
+        "background_job_waiters",
+        "background_job_legacy",
+    ] {
+        assert_eq!(
+            report
+                .tables
+                .iter()
+                .find(|digest| digest.table == table)
+                .expect("common queue import digest")
+                .row_count,
+            2,
+            "{table} must survive the current backup with exact parity"
+        );
+    }
+
     assert_eq!(
         report
             .tables
@@ -15852,7 +16132,13 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
         scratch_bytes: 2_048,
     };
     let imported_claim = store
-        .claim_pretranscode_job("import-worker", &imported_capabilities, &[], 1_000, 2_000)
+        .fixture_claim_pretranscode_job(
+            "import-worker",
+            &imported_capabilities,
+            &[],
+            32_000,
+            62_000,
+        )
         .await
         .expect("claim imported queue work")
         .expect("an imported due job must remain runnable");
@@ -17209,6 +17495,16 @@ fn contract_inventory_matches_every_store_method() {
         .lines()
         .chain(include_str!("../src/store/dv_conversion.rs").lines())
         .chain(include_str!("../src/store/classification.rs").lines())
+        .chain(
+            include_str!("../src/store/background_jobs.rs")
+                .split_once("pub trait BackgroundJobStore:")
+                .expect("queue trait")
+                .1
+                .split_once("\n}")
+                .expect("queue trait end")
+                .0
+                .lines(),
+        )
         .filter_map(|line| line.strip_prefix("    async fn "))
         .filter_map(|line| line.split_once('(').map(|(name, _)| name))
         .collect::<BTreeSet<_>>();
@@ -17229,6 +17525,7 @@ fn contract_inventory_matches_every_store_method() {
         CACHE_METHODS,
         SHARED_CACHE_METHODS,
         PRETRANSCODE_METHODS,
+        BACKGROUND_JOB_METHODS,
         OFFLINE_METHODS,
         TELEMETRY_METHODS,
         NETWORK_PRIOR_METHODS,
@@ -17320,7 +17617,13 @@ fn contract_inventory_matches_every_store_method() {
     // predicate that decides only whether to run the replicated sweep;
     // `offline_expiry_hint_matches_the_sweep_and_nothing_expires_early_or_late`
     // covers it on both backends. No new trait or supertrait of `Store`.
-    assert_eq!(declared.len(), 396, "review the Store method count");
+    // Shared queue replaces legacy execution and adds 20 net Store methods.
+    // E0 adds the catalogue/queue dual-owner binding.
+    // Three library admission/query/completion operations preserve each caller.
+    // +2: replicated root-domain observation and atomic replacement.
+    // E1 adds a bounded named-settings snapshot for playback preferences.
+    // E2 removes two unfenced legacy scrub methods.
+    assert_eq!(declared.len(), 445, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -18166,13 +18469,13 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
             code: &'static str,
         ) {
             let claimed = store
-                .claim_cluster_fragment_index("history-node", &[], at, at + 1_000)
+                .fixture_claim_cluster_fragment_index("history-node", &[], at, at + 1_000)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: claim for {code}: {error}"))
                 .unwrap_or_else(|| panic!("{backend}: the job is claimable for {code}"));
             assert!(
                 store
-                    .fail_cluster_fragment_index(
+                    .fixture_fail_cluster_fragment_index(
                         cache_key,
                         target,
                         &claimed.owner_node_id,
@@ -18212,13 +18515,13 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
 
         // An uncharged yield refunds its attempt, so it must not appear.
         let preempted = store
-            .claim_cluster_fragment_index("history-node", &[], now, now + 1_000)
+            .fixture_claim_cluster_fragment_index("history-node", &[], now, now + 1_000)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim for yield: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the job is claimable for yield"));
         assert!(
             store
-                .yield_cluster_fragment_index(
+                .fixture_yield_cluster_fragment_index(
                     &cache_key,
                     &job.target_node_id,
                     &preempted.owner_node_id,
@@ -18233,20 +18536,37 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
         now += 10_000;
 
         // The third charged attempt is a lease that lapses while the budget
-        // still has room: the claim sweep reclaims it back to `queued` and
-        // appends `lease_expired`. That is the branch the outage produced
+        // still has room: takeover charges the abandoned attempt, and an
+        // uncharged yield returns it to `queued` with `lease_expired` retained.
+        // That is the abandoned-owner branch the outage produced
         // 9,915 times, so it is the one most worth pinning.
         let lapsing = store
-            .claim_cluster_fragment_index("history-node", &[], now, now + 1)
+            .fixture_claim_cluster_fragment_index("history-node", &[], now, now + 1)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim for reclaim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the job is claimable for reclaim"));
         assert_eq!(lapsing.attempts, 3, "backend {backend}");
-        now += 10_000;
-        let _ = store
-            .claim_cluster_fragment_index("sweeping-node", &[], now, now + 1_000)
+        now += plurx_core::store::background_jobs::JOB_LEASE_MS + 1;
+        let takeover = store
+            .fixture_claim_cluster_fragment_index("sweeping-node", &[], now, now + 1_000)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: reclaim sweep: {error}"));
+            .unwrap_or_else(|error| panic!("{backend}: reclaim sweep: {error}"))
+            .expect("successor claims the expired owner");
+        assert_eq!(
+            takeover.attempts, 4,
+            "three charged attempts plus the live successor"
+        );
+        assert!(store
+            .fixture_yield_cluster_fragment_index(
+                &cache_key,
+                &target,
+                &takeover.owner_node_id,
+                takeover.fence,
+                now + 1,
+                now + 2
+            )
+            .await
+            .expect("yield successor"));
         let reclaimed = store
             .cluster_fragment_index_job(&cache_key, &target)
             .await
@@ -18274,17 +18594,18 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
         // the sweep retires the row instead of reclaiming it — a different
         // branch of the same statement, appending the same code.
         let lapsed = store
-            .claim_cluster_fragment_index("history-node", &[], now, now + 1)
+            .fixture_claim_cluster_fragment_index("history-node", &[], now, now + 1)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim for lapse: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the job is claimable for lapse"));
         assert_eq!(lapsed.attempts, 5, "backend {backend}");
-        now += 10_000;
-        // Sweeping is a side effect of the next claim on any node.
-        let _ = store
-            .claim_cluster_fragment_index("sweeping-node", &[], now, now + 1_000)
+        now += plurx_core::store::background_jobs::JOB_LEASE_MS + 1;
+        // Upkeep is independent of claims, so exhaustion settles even when
+        // execution is disabled or no worker has compatible capabilities.
+        assert!(store
+            .maintain_jobs(now)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: sweep claim: {error}"));
+            .expect("reap exhausted owner"));
 
         let dead = store
             .cluster_fragment_index_job(&cache_key, &job.target_node_id)
@@ -18345,8 +18666,7 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
             "backend {backend}: an exhausted budget keeps its history"
         );
 
-        // A row the sweep expires *is* reopened, and a fresh budget starts a
-        // fresh history.
+        // Demand expiry releases work but preserves its receipt and charged history.
         let expiring_pipeline = "c".repeat(64);
         let expiring_key =
             cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &expiring_pipeline)
@@ -18372,21 +18692,17 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
             "source_unavailable",
         )
         .await;
-        // Seven hours on, the claim sweep expires a row that never got a slot.
-        let expired_at = now + 7 * 60 * 60 * 1_000;
-        let _ = store
-            .claim_cluster_fragment_index("sweeping-node", &[], expired_at, expired_at + 1_000)
+        let expired_at = now + 24 * 60 * 60 * 1_000;
+        store
+            .maintain_jobs(expired_at)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: expiry sweep: {error}"));
+            .expect("expire inactive demand");
         let expired = store
             .cluster_fragment_index_job(&expiring_key, &job.target_node_id)
             .await
             .unwrap_or_else(|error| panic!("{backend}: read expired job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the expiring row exists"));
-        assert_eq!(
-            expired.last_error_code, "queue_expired",
-            "backend {backend}"
-        );
+        assert_eq!(expired.state, "cancelled", "backend {backend}");
         assert_eq!(
             expired.attempt_errors, "source_unavailable",
             "backend {backend}: expiry is not a charged attempt, so it appends nothing"
@@ -18396,7 +18712,7 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
         reopened.not_before_ms = expired_at;
         reopened.created_at_ms = expired_at;
         assert!(
-            store
+            !store
                 .enqueue_cluster_fragment_index(&reopened)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: reopen expired: {error}")),
@@ -18407,35 +18723,23 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: read reopened job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the reopened row exists"));
-        assert_eq!(fresh.attempts, 0, "backend {backend}");
+        assert_eq!(fresh.attempts, 1, "backend {backend}");
         assert_eq!(
-            fresh.attempt_errors, "",
-            "backend {backend}: a fresh budget starts a fresh history"
+            fresh.attempt_errors, "source_unavailable",
+            "backend {backend}: an expired demand cannot reset the retained retry budget"
         );
     })
     .await;
 }
 
-/// Every reopen that resets the retry budget resets the history with it.
-///
-/// Three statements reset `attempts`, and each one had to learn about the
-/// history separately: the request hand-off (a forced rebuild), the ordinary
-/// enqueue, and the artifact requeue. A reset that misses one leaves a job
-/// carrying the codes of a budget it no longer has, which is worse than no
-/// history at all — it is a history that disagrees with the count beside it.
+/// Reopened domain projections reflect their new durable interest's budget.
+/// The common queue owns retry counts and histories; independent interests
+/// cannot inherit a previous interest's exhausted budget.
 #[tokio::test]
 async fn fragment_index_attempt_history_resets_wherever_the_budget_does() {
     for_each_backend(|store, backend| async move {
         let (_, file_id) = seed_file(&store, "history-reset").await;
         let source_sha256 = "a".repeat(64);
-
-        // The forced hand-off's reset is not reachable from here: it only
-        // applies to a *generation* cache key, which only
-        // `submit_fragment_index_analysis` can create, and reaching it twice
-        // needs two forced requests for one identity — which
-        // `analysis_requests_one_active_forced_successor` exists to forbid.
-        // `every_attempts_reset_resets_the_attempt_history` pins that
-        // statement's shape instead.
 
         // 2. The artifact requeue. It reopens a `ready` row whose holders
         //    could not supply the blob, and that is a fresh budget too.
@@ -18463,13 +18767,13 @@ async fn fragment_index_attempt_history_resets_wherever_the_budget_does() {
             "backend {backend}"
         );
         let first = store
-            .claim_cluster_fragment_index("reset-node", &[], 40, 1_040)
+            .fixture_claim_cluster_fragment_index("reset-node", &[], 40, 1_040)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim ready job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the ready job is claimable"));
         assert!(
             store
-                .fail_cluster_fragment_index(
+                .fixture_fail_cluster_fragment_index(
                     &ready_key,
                     "reset-node",
                     &first.owner_node_id,
@@ -18484,7 +18788,7 @@ async fn fragment_index_attempt_history_resets_wherever_the_budget_does() {
             "backend {backend}"
         );
         let second = store
-            .claim_cluster_fragment_index("reset-node", &[], 50, 1_050)
+            .fixture_claim_cluster_fragment_index("reset-node", &[], 50, 1_050)
             .await
             .unwrap_or_else(|error| panic!("{backend}: reclaim ready job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the ready job is claimable again"));
@@ -18509,7 +18813,7 @@ async fn fragment_index_attempt_history_resets_wherever_the_budget_does() {
         };
         assert!(
             store
-                .complete_cluster_fragment_index(&second, &artifact, &location, 51)
+                .fixture_complete_cluster_fragment_index(&second, &artifact, &location, 51)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: complete ready job: {error}")),
             "backend {backend}"
@@ -18597,7 +18901,7 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
         );
 
         let claimed = store
-            .claim_cluster_fragment_index("lease-node", &[], 10, 1_010)
+            .fixture_claim_cluster_fragment_index("lease-node", &[], 10, 1_010)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the queued job is claimable"));
@@ -18607,7 +18911,7 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
         // The renewal the heartbeat sends on its very first tick.
         assert!(
             store
-                .renew_cluster_fragment_index(
+                .fixture_renew_cluster_fragment_index(
                     &cache_key,
                     &claimed.target_node_id,
                     &claimed.owner_node_id,
@@ -18620,13 +18924,13 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
             "backend {backend}: the owner's renewal must move the lease"
         );
         let renewed = read_lease_job(&store, &cache_key, &job.target_node_id, backend).await;
-        assert_eq!(renewed.lease_expires_ms, 2_020, "backend {backend}");
+        assert_eq!(renewed.lease_expires_ms, 30_020, "backend {backend}");
         assert_eq!(renewed.state, "running", "backend {backend}");
         assert_eq!(renewed.attempts, 1, "backend {backend}");
 
-        // The reorder must not have loosened any predicate: a stale fence, a
-        // different owner, a different target and an expired lease each still
-        // refuse.
+        // Delivery target is now an independent waiter identity. Stale
+        // execution fences, other owners and expired leases still refuse;
+        // full boot/claim/revision fencing is covered by the queue contracts.
         for (label, target, owner, fence, now) in [
             (
                 "stale fence",
@@ -18643,23 +18947,16 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
                 21,
             ),
             (
-                "other target",
-                "other-target",
-                claimed.owner_node_id.as_str(),
-                claimed.fence,
-                21,
-            ),
-            (
                 "expired lease",
                 claimed.target_node_id.as_str(),
                 claimed.owner_node_id.as_str(),
                 claimed.fence,
-                3_000,
+                30_021,
             ),
         ] {
             assert!(
                 !store
-                    .renew_cluster_fragment_index(
+                    .fixture_renew_cluster_fragment_index(
                         &cache_key,
                         target,
                         owner,
@@ -18676,7 +18973,7 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
         // A node-local refusal returns the claim and refunds its attempt.
         assert!(
             store
-                .yield_cluster_fragment_index(
+                .fixture_yield_cluster_fragment_index(
                     &cache_key,
                     &claimed.target_node_id,
                     &claimed.owner_node_id,
@@ -18692,14 +18989,14 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
         assert_eq!(yielded.state, "queued", "backend {backend}");
         assert_eq!(yielded.attempts, 0, "backend {backend}");
         assert_eq!(yielded.owner_node_id, "", "backend {backend}");
-        assert_eq!(
-            yielded.last_error_code, "node_local_refusal",
-            "backend {backend}"
+        assert!(
+            yielded.last_error_code.is_empty(),
+            "{backend}: a yield does not invent a failure"
         );
         assert_eq!(yielded.not_before_ms, 40, "backend {backend}");
 
         let reclaimed = store
-            .claim_cluster_fragment_index("lease-node", &[], 40, 1_040)
+            .fixture_claim_cluster_fragment_index("lease-node", &[], 40, 1_040)
             .await
             .unwrap_or_else(|error| panic!("{backend}: reclaim job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the yielded job is claimable again"));
@@ -18709,7 +19006,7 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
         );
         assert!(
             store
-                .renew_cluster_fragment_index(
+                .fixture_renew_cluster_fragment_index(
                     &cache_key,
                     &reclaimed.target_node_id,
                     &reclaimed.owner_node_id,
@@ -18743,7 +19040,7 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
         };
         assert!(
             store
-                .complete_cluster_fragment_index(&reclaimed, &artifact, &location, 60)
+                .fixture_complete_cluster_fragment_index(&reclaimed, &artifact, &location, 60)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: complete the job: {error}")),
             "backend {backend}: a renewed lease can still complete"
@@ -18827,7 +19124,7 @@ async fn analysis_history_contract_runs_through_dyn_store() {
             "backend {backend}"
         );
         let worker = store
-            .claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: worker claim"));
@@ -18852,7 +19149,7 @@ async fn analysis_history_contract_runs_through_dyn_store() {
         };
         assert!(
             store
-                .complete_cluster_fragment_index(&worker, &artifact, &location, 12)
+                .fixture_complete_cluster_fragment_index(&worker, &artifact, &location, 12)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: complete worker: {error}")),
             "backend {backend}"
@@ -18862,7 +19159,7 @@ async fn analysis_history_contract_runs_through_dyn_store() {
                 .settle_analysis_requests(13)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: settle old generation: {error}")),
-            1,
+            0,
             "backend {backend}"
         );
 
@@ -19008,12 +19305,12 @@ async fn fragment_location_retention_is_bounded_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue retained failure: {error}")));
         let retained_claim = store
-            .claim_cluster_fragment_index("retained-node", &[], 1, 1_000)
+            .fixture_claim_cluster_fragment_index("retained-node", &[], 1, 1_000)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim retained failure: {error}"))
             .unwrap_or_else(|| panic!("{backend}: retained failure claim"));
         assert!(store
-            .fail_cluster_fragment_index(
+            .fixture_fail_cluster_fragment_index(
                 &retained_claim.cache_key,
                 &retained_claim.target_node_id,
                 &retained_claim.owner_node_id,
@@ -19062,7 +19359,7 @@ async fn fragment_location_retention_is_bounded_through_dyn_store() {
                 )));
         }
         let claim = store
-            .claim_cluster_fragment_index("analysis-node", &[], 1, 1_000)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 1, 1_000)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim retention fixture: {error}"))
             .unwrap_or_else(|| panic!("{backend}: retention fixture claim"));
@@ -19086,7 +19383,7 @@ async fn fragment_location_retention_is_bounded_through_dyn_store() {
             last_seen_at_ms: 1,
         };
         assert!(store
-            .complete_cluster_fragment_index(&claim, &artifact, &first_location, 10)
+            .fixture_complete_cluster_fragment_index(&claim, &artifact, &first_location, 10)
             .await
             .unwrap_or_else(|error| panic!("{backend}: complete retention fixture: {error}")));
         for index in 1..3 {
@@ -19095,8 +19392,8 @@ async fn fragment_location_retention_is_bounded_through_dyn_store() {
                     cache_key: cache_key.clone(),
                     node_id: format!("node-{index}"),
                     bytes: 128,
-                    verified_at_ms: index + 1,
-                    last_seen_at_ms: index + 1,
+                    verified_at_ms: index + 11,
+                    last_seen_at_ms: index + 11,
                 })
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: seed stale location {index}: {error}"));
@@ -20091,7 +20388,7 @@ async fn analysis_priority_ages_fairly_and_survives_worker_handoff_through_dyn_s
                 .map(|(_, cache_key)| cache_key)
                 .expect("staged priority cache key");
             let worker = store
-                .claim_cluster_fragment_index("analysis-node", &[], 600_010, 700_010)
+                .fixture_claim_cluster_fragment_index("analysis-node", &[], 600_010, 700_010)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: claim {expected_name} worker: {error}"))
                 .unwrap_or_else(|| panic!("{backend}: missing {expected_name} worker"));
@@ -20099,6 +20396,17 @@ async fn analysis_priority_ages_fairly_and_survives_worker_handoff_through_dyn_s
                 &worker.cache_key, expected_cache_key,
                 "{backend}: request priority survives the structural worker handoff"
             );
+            assert!(store
+                .fixture_yield_cluster_fragment_index(
+                    &worker.cache_key,
+                    &worker.target_node_id,
+                    &worker.owner_node_id,
+                    worker.fence,
+                    600_011,
+                    700_000,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: release priority fixture: {error}")));
         }
     })
     .await;
@@ -20219,7 +20527,7 @@ async fn foreground_demand_promotes_an_existing_structural_job_through_dyn_store
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue competing job: {error}")));
         let claimed = store
-            .claim_cluster_fragment_index("analysis-node", &[], 600, 1_600)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 600, 1_600)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim promoted job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: foreground claim"));
@@ -20305,7 +20613,7 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
         );
 
         let first_claim = store
-            .claim_cluster_fragment_index("analysis-node", &[], 12, 1_012)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 12, 1_012)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim metrics worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: metrics worker claim"));
@@ -20325,7 +20633,7 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
         );
 
         assert!(store
-            .fail_cluster_fragment_index(
+            .fixture_fail_cluster_fragment_index(
                 &first_claim.cache_key,
                 &first_claim.target_node_id,
                 &first_claim.owner_node_id,
@@ -20355,12 +20663,12 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
         );
 
         let current_claim = store
-            .claim_cluster_fragment_index("analysis-node", &[], 14, 1_014)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 14, 1_014)
             .await
             .unwrap_or_else(|error| panic!("{backend}: reclaim metrics worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: reclaimed metrics worker"));
         assert!(store
-            .fail_cluster_fragment_index(
+            .fixture_fail_cluster_fragment_index(
                 &current_claim.cache_key,
                 &current_claim.target_node_id,
                 &current_claim.owner_node_id,
@@ -20383,7 +20691,7 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
             "{backend}: repeated retries are durable events"
         );
         let current_claim = store
-            .claim_cluster_fragment_index("analysis-node", &[], 16, 1_016)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 16, 1_016)
             .await
             .unwrap_or_else(|error| panic!("{backend}: second reclaim metrics worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: twice-reclaimed metrics worker"));
@@ -20407,7 +20715,7 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
             last_seen_at_ms: 17,
         };
         assert!(store
-            .complete_cluster_fragment_index(&current_claim, &artifact, &location, 17)
+            .fixture_complete_cluster_fragment_index(&current_claim, &artifact, &location, 17)
             .await
             .unwrap_or_else(|error| panic!("{backend}: publish metrics worker: {error}")));
         assert_eq!(
@@ -20415,7 +20723,7 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
                 .settle_analysis_requests(18)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: settle metrics request: {error}")),
-            1,
+            0,
             "backend {backend}"
         );
         let published = store
@@ -20482,7 +20790,7 @@ async fn a_hydrated_job_settles_from_another_nodes_artifact_through_dyn_store() 
 
         // Node A builds it.
         let built = store
-            .claim_cluster_fragment_index("node-a", &[], 20, 1_020)
+            .fixture_claim_cluster_fragment_index("node-a", &[], 20, 1_020)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim for node-a: {error}"))
             .unwrap_or_else(|| panic!("{backend}: a queued job for node-a"));
@@ -20499,7 +20807,7 @@ async fn a_hydrated_job_settles_from_another_nodes_artifact_through_dyn_store() 
             built_at_ms: 30,
         };
         assert!(store
-            .complete_cluster_fragment_index(
+            .fixture_complete_cluster_fragment_index(
                 &built,
                 &artifact,
                 &ClusterFragmentIndexLocation {
@@ -20516,13 +20824,13 @@ async fn a_hydrated_job_settles_from_another_nodes_artifact_through_dyn_store() 
 
         // Node B claims its own job and settles from A's artifact.
         let hydrating = store
-            .claim_cluster_fragment_index("node-b", &[], 40, 1_040)
+            .fixture_claim_cluster_fragment_index("node-b", &[], 40, 1_040)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim for node-b: {error}"))
             .unwrap_or_else(|| panic!("{backend}: a queued job for node-b"));
         assert_eq!(hydrating.target_node_id, "node-b", "{backend}");
         assert!(store
-            .complete_cluster_fragment_index_by_hydration(
+            .fixture_complete_cluster_fragment_index_by_hydration(
                 &hydrating,
                 &artifact,
                 &ClusterFragmentIndexLocation {
@@ -20604,7 +20912,7 @@ async fn hydration_refuses_a_stale_claim_and_a_mismatched_blob() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}")));
         let claim = store
-            .claim_cluster_fragment_index("node-b", &[], 20, 1_020)
+            .fixture_claim_cluster_fragment_index("node-b", &[], 20, 1_020)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: a queued job"));
@@ -20631,7 +20939,7 @@ async fn hydration_refuses_a_stale_claim_and_a_mismatched_blob() {
         // Nothing published yet: there is no artifact to hydrate from, so the
         // job must not settle. Hydration never writes an artifact row.
         let unpublished = store
-            .complete_cluster_fragment_index_by_hydration(&claim, &artifact, &location, 40)
+            .fixture_complete_cluster_fragment_index_by_hydration(&claim, &artifact, &location, 40)
             .await;
         assert!(
             !matches!(unpublished, Ok(true)),
@@ -20651,7 +20959,9 @@ async fn hydration_refuses_a_stale_claim_and_a_mismatched_blob() {
         stale.fence -= 1;
         assert!(
             !store
-                .complete_cluster_fragment_index_by_hydration(&stale, &artifact, &location, 45)
+                .fixture_complete_cluster_fragment_index_by_hydration(
+                    &stale, &artifact, &location, 45
+                )
                 .await
                 .unwrap_or(false),
             "{backend}: a stale fence must not settle a job"
@@ -20725,7 +21035,7 @@ async fn the_prometheus_snapshot_answers_what_the_queue_verdict_asks() {
         );
 
         let claim = store
-            .claim_cluster_fragment_index("health-node", &[], NOW_MS, NOW_MS + 60_000)
+            .fixture_claim_cluster_fragment_index("health-node", &[], NOW_MS, NOW_MS + 60_000)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim health job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: health job claim"));
@@ -20780,7 +21090,7 @@ async fn the_prometheus_snapshot_answers_what_the_queue_verdict_asks() {
             last_seen_at_ms: NOW_MS + 1_000,
         };
         assert!(store
-            .complete_cluster_fragment_index(&claim, &artifact, &location, NOW_MS + 1_000)
+            .fixture_complete_cluster_fragment_index(&claim, &artifact, &location, NOW_MS + 1_000)
             .await
             .unwrap_or_else(|error| panic!("{backend}: complete health job: {error}")));
         let produced = store
@@ -20946,12 +21256,12 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue terminal worker: {error}")));
         let terminal_claim = store
-            .claim_cluster_fragment_index("analysis-node", &[], 30, 1_030)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 30, 1_030)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim terminal worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: terminal worker claim"));
         assert!(store
-            .fail_cluster_fragment_index(
+            .fixture_fail_cluster_fragment_index(
                 &terminal_claim.cache_key,
                 &terminal_claim.target_node_id,
                 &terminal_claim.owner_node_id,
@@ -21011,12 +21321,12 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue transient worker: {error}")));
         let transient_claim = store
-            .claim_cluster_fragment_index("analysis-node", &[], 110, 1_110)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 110, 1_110)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim transient worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: transient worker claim"));
         assert!(store
-            .fail_cluster_fragment_index(
+            .fixture_fail_cluster_fragment_index(
                 &transient_claim.cache_key,
                 &transient_claim.target_node_id,
                 &transient_claim.owner_node_id,
@@ -21029,13 +21339,13 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
             .await
             .unwrap_or_else(|error| panic!("{backend}: retry transient worker: {error}")));
         assert!(store
-            .claim_cluster_fragment_index("analysis-node", &[], 120, 1_120)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 120, 1_120)
             .await
             .unwrap_or_else(|error| panic!("{backend}: early transient claim: {error}"))
             .is_none());
         assert_eq!(
             store
-                .claim_cluster_fragment_index("analysis-node", &[], 121, 1_121)
+                .fixture_claim_cluster_fragment_index("analysis-node", &[], 121, 1_121)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: due transient claim: {error}"))
                 .unwrap_or_else(|| panic!("{backend}: due transient worker"))
@@ -21048,7 +21358,7 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
 }
 
 #[tokio::test]
-async fn expired_structural_analysis_lease_uses_stable_backoff_through_dyn_store() {
+async fn expired_structural_analysis_lease_allows_fenced_takeover_through_dyn_store() {
     for_each_backend(|store, backend| async move {
         let (_, file_id) = seed_file(&store, "analysis-structural-lease-backoff").await;
         let source_sha256 = "e".repeat(64);
@@ -21078,31 +21388,28 @@ async fn expired_structural_analysis_lease_uses_stable_backoff_through_dyn_store
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue structural lease job: {error}")));
         let expired = store
-            .claim_cluster_fragment_index("analysis-node-a", &[], 10, 20)
+            .fixture_claim_cluster_fragment_index("analysis-node-a", &[], 10, 20)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim structural lease job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: structural lease claim"));
+        let retry_at = expired.lease_expires_ms;
         assert!(store
-            .claim_cluster_fragment_index("analysis-node-b", &[], 20, 30)
+            .fixture_claim_cluster_fragment_index(
+                "analysis-node-b",
+                &[],
+                retry_at - 1,
+                retry_at + 1_000,
+            )
             .await
-            .unwrap_or_else(|error| panic!("{backend}: expire structural lease: {error}"))
-            .is_none());
-        let retry_seed = format!("{}:{}", job.cache_key, job.target_node_id);
-        let retry_at = 20 + analysis_backoff_ms(&retry_seed, 1, 5_000, 300_000);
-        let queued = store
-            .cluster_fragment_index_job(&job.cache_key, &job.target_node_id)
-            .await
-            .unwrap_or_else(|error| panic!("{backend}: read queued structural retry: {error}"))
-            .unwrap_or_else(|| panic!("{backend}: retained structural retry"));
-        assert_eq!(queued.state, "queued", "backend {backend}");
-        assert_eq!(queued.not_before_ms, retry_at, "backend {backend}");
-        assert!(store
-            .claim_cluster_fragment_index("analysis-node-b", &[], retry_at - 1, retry_at + 9,)
-            .await
-            .unwrap_or_else(|error| panic!("{backend}: early structural retry: {error}"))
+            .expect("early takeover query")
             .is_none());
         let successor = store
-            .claim_cluster_fragment_index("analysis-node-b", &[], retry_at, retry_at + 1_000)
+            .fixture_claim_cluster_fragment_index(
+                "analysis-node-b",
+                &[],
+                retry_at,
+                retry_at + 1_000,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: due structural retry: {error}"))
             .unwrap_or_else(|| panic!("{backend}: successor structural claim"));
@@ -21147,15 +21454,14 @@ async fn exhausted_structural_lease_counts_loss_and_failure_through_dyn_store() 
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue exhausted lease job: {error}")));
         store
-            .claim_cluster_fragment_index("analysis-node-a", &[], 10, 20)
+            .fixture_claim_cluster_fragment_index("analysis-node-a", &[], 10, 20)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim exhausted lease job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: exhausted lease claim"));
-        assert!(store
-            .claim_cluster_fragment_index("analysis-node-b", &[], 20, 30)
+        store
+            .maintain_jobs(30_010)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: expire exhausted lease: {error}"))
-            .is_none());
+            .expect("expire exhausted lease");
 
         let failed = store
             .cluster_fragment_index_job(&job.cache_key, &job.target_node_id)
@@ -21165,7 +21471,7 @@ async fn exhausted_structural_lease_counts_loss_and_failure_through_dyn_store() 
         assert_eq!(failed.state, "failed", "backend {backend}");
         assert_eq!(failed.last_error_code, "attempt_limit", "backend {backend}");
         let metrics = store
-            .prometheus_store_snapshot("analysis-node-b", 20)
+            .prometheus_store_snapshot("analysis-node-b", 30_010)
             .await
             .unwrap_or_else(|error| panic!("{backend}: exhausted lease metrics: {error}"));
         assert_eq!(
@@ -21218,7 +21524,7 @@ async fn requeue_through_the_no_holder_arm_preserves_exhausted_lease_terminality
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue repair seed: {error}")));
         let repair_claim = store
-            .claim_cluster_fragment_index("analysis-node-a", &[], 1, 5)
+            .fixture_claim_cluster_fragment_index("analysis-node-a", &[], 1, 5)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim repair seed: {error}"))
             .unwrap_or_else(|| panic!("{backend}: repair seed claim"));
@@ -21242,7 +21548,12 @@ async fn requeue_through_the_no_holder_arm_preserves_exhausted_lease_terminality
             last_seen_at_ms: 2,
         };
         assert!(store
-            .complete_cluster_fragment_index(&repair_claim, &repair_artifact, &repair_location, 2,)
+            .fixture_complete_cluster_fragment_index(
+                &repair_claim,
+                &repair_artifact,
+                &repair_location,
+                2,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: publish repair seed: {error}")));
 
@@ -21270,13 +21581,17 @@ async fn requeue_through_the_no_holder_arm_preserves_exhausted_lease_terminality
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue cleanup victim: {error}")));
         store
-            .claim_cluster_fragment_index("analysis-node-b", &[], 10, 20)
+            .fixture_claim_cluster_fragment_index("analysis-node-b", &[], 10, 20)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim cleanup victim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: cleanup victim claim"));
+        store
+            .maintain_jobs(30_010)
+            .await
+            .expect("expire repair victim lease");
         let repair_requeue = NewClusterFragmentIndexJob {
-            not_before_ms: 20,
-            created_at_ms: 20,
+            not_before_ms: 30_010,
+            created_at_ms: 30_010,
             ..repair
         };
         assert!(
@@ -21300,7 +21615,7 @@ async fn requeue_through_the_no_holder_arm_preserves_exhausted_lease_terminality
             "{backend}: attempt-limit cleanup cannot be reopened as queue expiry"
         );
         let metrics = store
-            .prometheus_store_snapshot("analysis-node-b", 20)
+            .prometheus_store_snapshot("analysis-node-b", 30_010)
             .await
             .unwrap_or_else(|error| panic!("{backend}: repair cleanup metrics: {error}"));
         assert_eq!(
@@ -21447,12 +21762,12 @@ async fn analysis_admin_retry_queues_only_its_forced_generation_through_dyn_stor
             .await
             .unwrap_or_else(|error| panic!("{backend}: submit retry original: {error}")));
         let original_worker = store
-            .claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim retry original worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: retry original worker"));
         assert!(store
-            .fail_cluster_fragment_index(
+            .fixture_fail_cluster_fragment_index(
                 &original_worker.cache_key,
                 &original_worker.target_node_id,
                 &original_worker.owner_node_id,
@@ -21469,7 +21784,7 @@ async fn analysis_admin_retry_queues_only_its_forced_generation_through_dyn_stor
                 .settle_analysis_requests(13)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: settle retry original: {error}")),
-            1,
+            0,
             "{backend}"
         );
 
@@ -21522,7 +21837,7 @@ async fn analysis_admin_retry_queues_only_its_forced_generation_through_dyn_stor
             .unwrap_or_else(|error| panic!("{backend}: submit forced retry: {error}")));
         assert_eq!(
             store
-                .claim_cluster_fragment_index("analysis-node", &[], 21, 1_021)
+                .fixture_claim_cluster_fragment_index("analysis-node", &[], 21, 1_021)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: claim only retry worker: {error}"))
                 .unwrap_or_else(|| panic!("{backend}: forced retry worker"))
@@ -21734,7 +22049,7 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             .await
             .unwrap_or_else(|error| panic!("{backend}: submit normal generation: {error}")));
         let normal_worker = store
-            .claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim normal worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: normal worker"));
@@ -21757,23 +22072,21 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             verified_at_ms: 12,
             last_seen_at_ms: 12,
         };
-        assert!(
-            store
-                .complete_cluster_fragment_index(
-                    &normal_worker,
-                    &normal_artifact,
-                    &normal_location,
-                    12,
-                )
-                .await
-                .unwrap_or_else(|error| panic!("{backend}: publish normal generation: {error}"))
-        );
+        assert!(store
+            .fixture_complete_cluster_fragment_index(
+                &normal_worker,
+                &normal_artifact,
+                &normal_location,
+                12,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: publish normal generation: {error}")));
         assert_eq!(
             store
                 .settle_analysis_requests(13)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: settle normal generation: {error}")),
-            1,
+            0,
             "backend {backend}"
         );
 
@@ -21819,18 +22132,13 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             .await
             .unwrap_or_else(|error| panic!("{backend}: submit forced generation: {error}")));
         let forced_worker = store
-            .claim_cluster_fragment_index("analysis-node", &[], 21, 30)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 21, 30)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim forced worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: forced worker"));
-        assert!(store
-            .claim_cluster_fragment_index("analysis-node-next", &[], 30, 1_030)
-            .await
-            .unwrap_or_else(|error| panic!("{backend}: expire forced worker: {error}"))
-            .is_none());
-        let retry_at = 30 + analysis_backoff_ms(&generation_key, 1, 5_000, 300_000);
+        let retry_at = forced_worker.lease_expires_ms;
         let current_forced_worker = store
-            .claim_cluster_fragment_index("analysis-node", &[], retry_at, retry_at + 1_000)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], retry_at, retry_at + 1_000)
             .await
             .unwrap_or_else(|error| panic!("{backend}: reclaim forced worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: reclaimed forced worker"));
@@ -21852,7 +22160,7 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
         };
         assert!(
             !store
-                .complete_cluster_fragment_index(
+                .fixture_complete_cluster_fragment_index(
                     &forced_worker,
                     &stale_artifact,
                     &stale_location,
@@ -21902,7 +22210,7 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             ..stale_location
         };
         assert!(store
-            .complete_cluster_fragment_index(
+            .fixture_complete_cluster_fragment_index(
                 &current_forced_worker,
                 &forced_artifact,
                 &forced_location,
@@ -21915,7 +22223,7 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
                 .settle_analysis_requests(retry_at + 2)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: settle forced generation: {error}")),
-            1,
+            0,
             "backend {backend}"
         );
         assert_eq!(
@@ -21945,7 +22253,12 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             .await
             .unwrap_or_else(|error| panic!("{backend}: requeue forced generation: {error}")));
         let repair_claim = store
-            .claim_cluster_fragment_index("repair-node", &[], retry_at + 10, retry_at + 1_010)
+            .fixture_claim_cluster_fragment_index(
+                "repair-node",
+                &[],
+                retry_at + 10,
+                retry_at + 1_010,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim forced repair: {error}"))
             .unwrap_or_else(|| panic!("{backend}: forced repair claim"));
@@ -21960,8 +22273,25 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             last_seen_at_ms: retry_at + 11,
             ..forced_location
         };
+        assert!(
+            !store
+                .fixture_complete_cluster_fragment_index(
+                    &repair_claim,
+                    &rebuilt_artifact,
+                    &rebuilt_location,
+                    retry_at + 11,
+                )
+                .await
+                .expect("reject changed provenance"),
+            "{backend}: repair cannot replace immutable builder provenance"
+        );
+        let rebuilt_artifact = store
+            .cluster_fragment_index_artifact(&generation_key)
+            .await
+            .expect("read immutable repair provenance")
+            .expect("original immutable artifact");
         assert!(store
-            .complete_cluster_fragment_index(
+            .fixture_complete_cluster_fragment_index(
                 &repair_claim,
                 &rebuilt_artifact,
                 &rebuilt_location,
@@ -22009,12 +22339,12 @@ async fn content_analysis_retry_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}")));
         let claimed = store
-            .claim_cluster_fragment_index("node-a", &[], 10, 1_000)
+            .fixture_claim_cluster_fragment_index("node-a", &[], 10, 1_000)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: initial claim"));
         assert!(store
-            .fail_cluster_fragment_index_typed(&plurx_core::store::ClusterFragmentIndexFailure {
+            .fixture_fail_cluster_fragment_index_typed(&queue_fixture::FragmentFailureFixture {
                 cache_key: claimed.cache_key.clone(),
                 target_node_id: claimed.target_node_id.clone(),
                 node_id: "node-a".to_owned(),
@@ -22040,7 +22370,7 @@ async fn content_analysis_retry_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: foreground rediscovery: {error}")));
         assert!(
             store
-                .claim_cluster_fragment_index("node-a", &[], 31, 1_031)
+                .fixture_claim_cluster_fragment_index("node-a", &[], 31, 1_031)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: early claim: {error}"))
                 .is_none(),
@@ -22050,7 +22380,7 @@ async fn content_analysis_retry_contract_runs_through_dyn_store() {
         let six_hours = 6 * 60 * 60 * 1_000;
         let retry_deadline = 20 + plurx_core::content_analysis::INDEX_RETRY_WINDOW_MS;
         let retried = store
-            .claim_cluster_fragment_index("node-a", &[], six_hours, retry_deadline + 1_000)
+            .fixture_claim_cluster_fragment_index("node-a", &[], six_hours, retry_deadline + 1_000)
             .await
             .unwrap_or_else(|error| panic!("{backend}: six-hour claim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: retry was incorrectly queue-expired"));
@@ -22060,8 +22390,9 @@ async fn content_analysis_retry_contract_runs_through_dyn_store() {
             "{backend}: rediscovery must retain the original retry deadline"
         );
         assert_eq!(
-            retried.lease_expires_ms, retry_deadline,
-            "{backend}: an initial claim cannot lease work past its retry deadline"
+            retried.lease_expires_ms,
+            six_hours + plurx_core::store::background_jobs::JOB_LEASE_MS,
+            "{backend}: a retry receives the common bounded lease"
         );
         let artifact = ClusterFragmentIndexArtifact {
             cache_key: retried.cache_key.clone(),
@@ -22084,7 +22415,12 @@ async fn content_analysis_retry_contract_runs_through_dyn_store() {
         };
         assert!(
             !store
-                .complete_cluster_fragment_index(&retried, &artifact, &location, retry_deadline,)
+                .fixture_complete_cluster_fragment_index(
+                    &retried,
+                    &artifact,
+                    &location,
+                    retry_deadline,
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: expired completion: {error}")),
             "{backend}: completion at the retry deadline must be rejected"
@@ -22205,12 +22541,12 @@ async fn content_analysis_repair_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: submit predecessor: {error}")));
         let worker = store
-            .claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim predecessor: {error}"))
             .unwrap_or_else(|| panic!("{backend}: predecessor worker"));
         assert!(store
-            .fail_cluster_fragment_index(
+            .fixture_fail_cluster_fragment_index(
                 &worker.cache_key,
                 &worker.target_node_id,
                 &worker.owner_node_id,
@@ -22227,7 +22563,7 @@ async fn content_analysis_repair_contract_runs_through_dyn_store() {
                 .settle_analysis_requests(13)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: settle predecessor: {error}")),
-            1,
+            0,
             "{backend}"
         );
 
@@ -22910,6 +23246,31 @@ async fn settings_contract_runs_through_dyn_store() {
             (Some("L".to_owned()), Some("R".to_owned())),
             "backend {backend}"
         );
+        let selected = store
+            .get_settings(&[
+                "contract.right",
+                "contract.left",
+                "missing",
+                "contract.left",
+            ])
+            .await
+            .expect("selected settings snapshot");
+        assert_eq!(
+            selected.len(),
+            2,
+            "{backend}: return only selected present keys, once"
+        );
+        assert_eq!(selected.get("contract.left").map(String::as_str), Some("L"));
+        assert_eq!(
+            selected.get("contract.right").map(String::as_str),
+            Some("R")
+        );
+        assert!(store
+            .get_settings(&[])
+            .await
+            .expect("empty selection")
+            .is_empty());
+        assert!(store.get_settings(&["contract.left"; 33]).await.is_err());
         let settings = store.settings_snapshot().await.expect("settings snapshot");
         assert_eq!(
             settings.get("contract.key").map(String::as_str),
@@ -23380,6 +23741,33 @@ async fn bounded_catalogue_reader_matches_authority_and_falls_back_exactly_once(
         .await
         .expect("Authority fallback value");
 
+    let preference_reader = CatalogueReader::validation_replicated(
+        Arc::clone(&authority_store),
+        Arc::clone(&store),
+        PassiveRaftMetrics::validation_bounded_ready(),
+        64,
+    );
+    for (saved, expected_authority) in [("0", 1), ("1", 0)] {
+        store
+            .put_setting(plurx_core::store::keys::BOUNDED_REPLICA_READS, saved)
+            .await
+            .expect("save preference without readiness gating");
+        store.validation_reset_operation_counts();
+        let actual = preference_reader
+            .get_item(20)
+            .await
+            .expect("live preference");
+        assert_eq!(
+            serde_json::to_value(actual).expect("result"),
+            serde_json::to_value(&expected).expect("expected")
+        );
+        assert_eq!(
+            store.validation_operation_counts().consistent_query_calls,
+            expected_authority,
+            "saved preference must apply without constructing another reader"
+        );
+    }
+
     store.validation_reset_operation_counts();
     store.validation_fail_next_non_consistent_query();
     let query_error_reader = CatalogueReader::validation_replicated(
@@ -23417,7 +23805,7 @@ async fn bounded_catalogue_reader_matches_authority_and_falls_back_exactly_once(
         serde_json::to_value(&expected).expect("serialize expected item")
     );
     let counts = store.validation_operation_counts();
-    assert_eq!(counts.non_consistent_query_calls, 1);
+    assert_eq!(counts.non_consistent_query_calls, 2); // preference + discarded catalogue query
     assert_eq!(counts.consistent_query_calls, 1);
 
     store.validation_reset_operation_counts();
@@ -31206,7 +31594,7 @@ async fn fragment_index_builders_held_by_names_the_builder_on_every_backend() {
             "backend {backend}"
         );
         let claimed = store
-            .claim_cluster_fragment_index("builder-node", &[], 10, 1_010)
+            .fixture_claim_cluster_fragment_index("builder-node", &[], 10, 1_010)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the job is claimable"));
@@ -31231,7 +31619,7 @@ async fn fragment_index_builders_held_by_names_the_builder_on_every_backend() {
         };
         assert!(
             store
-                .complete_cluster_fragment_index(
+                .fixture_complete_cluster_fragment_index(
                     &claimed,
                     &artifact,
                     &location("builder-node", 11),
@@ -32334,12 +32722,12 @@ async fn subtitle_backfill_never_selects_active_or_unexpired_terminal_request() 
             .expect("terminal enqueue")
             .expect("request");
         let running = store
-            .claim_analysis_request_foreground(&queued.request_id, "node-a", 11, 1000)
+            .claim_subtitle_fixture(&queued.request_id, "node-a", 11, 1000)
             .await
             .expect("claim")
             .expect("running");
         assert!(store
-            .complete_analysis_request(&running, "stamp", 12)
+            .complete_subtitle_fixture(&running, "stamp", 12)
             .await
             .expect("complete"));
         let candidates = store
@@ -32540,7 +32928,7 @@ async fn subtitle_source_foreground_join_promotes_queued_normal_in_place_and_lea
         assert_eq!(promoted.request_id, queued.request_id, "{backend}");
         assert_eq!(promoted.priority, "foreground", "{backend}");
         let running = store
-            .claim_analysis_request_foreground(&queued.request_id, "node-a", 12, 1000)
+            .claim_subtitle_fixture(&queued.request_id, "node-a", 12, 1000)
             .await
             .expect("self claim")
             .expect("running");
@@ -32557,7 +32945,7 @@ async fn subtitle_source_foreground_join_promotes_queued_normal_in_place_and_lea
 }
 
 #[tokio::test]
-async fn subtitle_source_promoted_row_is_claimed_before_forced_and_normal() {
+async fn subtitle_source_promoted_row_uses_common_claim_and_leaves_legacy_order_intact() {
     for_each_backend(|store, backend| async move {
         let (_, subtitle_file) = seed_file(&store, "subtitle-m2-order-subtitle").await;
         let (_, forced_file) = seed_file(&store, "subtitle-m2-order-forced").await;
@@ -32596,7 +32984,7 @@ async fn subtitle_source_promoted_row_is_claimed_before_forced_and_normal() {
             .await
             .expect("promote");
         let first = store
-            .claim_analysis_request("analysis-node", 3, 1000)
+            .claim_subtitle_fixture(&stamp.generation(0), "analysis-node", 3, 1000)
             .await
             .expect("claim first")
             .expect("first");
@@ -32666,7 +33054,7 @@ async fn subtitle_source_retiring_ready_reenqueues_new_generation_and_fourth_rep
                 "{backend}"
             );
             let running = store
-                .claim_analysis_request_foreground(
+                .claim_subtitle_fixture(
                     &queued.request_id,
                     "node-a",
                     11 + epoch * 10,
@@ -32677,7 +33065,7 @@ async fn subtitle_source_retiring_ready_reenqueues_new_generation_and_fourth_rep
                 .expect("running");
             assert!(
                 store
-                    .complete_analysis_request(&running, "stamp", 12 + epoch * 10)
+                    .complete_subtitle_fixture(&running, "stamp", 12 + epoch * 10)
                     .await
                     .expect("complete"),
                 "{backend}"
@@ -32719,7 +33107,7 @@ async fn subtitle_source_partial_ready_uncovered_ordinal_gets_foreground_repair_
             .expect("initial enqueue")
             .expect("initial request");
         let running = store
-            .claim_analysis_request_foreground(&initial.request_id, "node-a", 11, 1_000)
+            .claim_subtitle_fixture(&initial.request_id, "node-a", 11, 1_000)
             .await
             .expect("initial claim")
             .expect("running");
@@ -32728,7 +33116,7 @@ async fn subtitle_source_partial_ready_uncovered_ordinal_gets_foreground_repair_
             .await
             .expect("PGS publication");
         assert!(store
-            .complete_analysis_request(&running, "stamp", 12)
+            .complete_subtitle_fixture(&running, "stamp", 12)
             .await
             .expect("complete partial request"));
 
@@ -32787,7 +33175,7 @@ async fn subtitle_source_live_foreground_ordinal_absent_from_scanner_repairs_par
             .expect("initial enqueue")
             .expect("request");
         let running = store
-            .claim_analysis_request_foreground(&initial.request_id, "node-a", 11, 1_000)
+            .claim_subtitle_fixture(&initial.request_id, "node-a", 11, 1_000)
             .await
             .expect("claim")
             .expect("running");
@@ -32799,7 +33187,7 @@ async fn subtitle_source_live_foreground_ordinal_absent_from_scanner_repairs_par
             .await
             .expect("scanner track publication");
         assert!(store
-            .complete_analysis_request(&running, "stamp", 12)
+            .complete_subtitle_fixture(&running, "stamp", 12)
             .await
             .expect("complete"));
         let ready = store
@@ -32852,7 +33240,7 @@ async fn subtitle_source_foreground_repair_ignores_stale_digest_at_same_size_and
             .expect("initial enqueue")
             .expect("request");
         let running = store
-            .claim_analysis_request_foreground(&initial.request_id, "node-a", 11, 1_000)
+            .claim_subtitle_fixture(&initial.request_id, "node-a", 11, 1_000)
             .await
             .expect("claim")
             .expect("running");
@@ -32864,7 +33252,7 @@ async fn subtitle_source_foreground_repair_ignores_stale_digest_at_same_size_and
             .await
             .expect("stale publication");
         assert!(store
-            .complete_analysis_request(&running, "stamp", 12)
+            .complete_subtitle_fixture(&running, "stamp", 12)
             .await
             .expect("complete"));
         assert!(store
@@ -32897,12 +33285,12 @@ async fn subtitle_source_repair_epoch_stays_monotonic_after_daily_allowance_rese
             .expect("first enqueue")
             .expect("first request");
         let running = store
-            .claim_analysis_request_foreground(&first.request_id, "node-a", 11, 1_000)
+            .claim_subtitle_fixture(&first.request_id, "node-a", 11, 1_000)
             .await
             .expect("first claim")
             .expect("running");
         assert!(store
-            .complete_analysis_request(&running, "stamp", 12)
+            .complete_subtitle_fixture(&running, "stamp", 12)
             .await
             .expect("first complete"));
         assert!(store
@@ -32947,7 +33335,7 @@ async fn subtitle_source_repair_epoch_and_daily_budget_survive_terminal_history_
                 first_id = queued.request_id.clone();
             }
             let running = store
-                .claim_analysis_request_foreground(
+                .claim_subtitle_fixture(
                     &queued.request_id,
                     "node-a",
                     11 + epoch * 10,
@@ -32957,7 +33345,7 @@ async fn subtitle_source_repair_epoch_and_daily_budget_survive_terminal_history_
                 .expect("claim")
                 .expect("running");
             assert!(store
-                .complete_analysis_request(&running, "stamp", 12 + epoch * 10)
+                .complete_subtitle_fixture(&running, "stamp", 12 + epoch * 10)
                 .await
                 .expect("complete"));
             assert!(store
@@ -33020,7 +33408,12 @@ async fn subtitle_source_transient_ready_is_repaired_by_later_backfill_until_set
                 "{backend}"
             );
             let running = store
-                .claim_analysis_request("node-a", 11 + epoch * 130_000, 1_000 + epoch * 130_000)
+                .claim_subtitle_fixture(
+                    &queued.request_id,
+                    "node-a",
+                    11 + epoch * 130_000,
+                    1_000 + epoch * 130_000,
+                )
                 .await
                 .expect("worker claim")
                 .expect("running");
@@ -33037,7 +33430,7 @@ async fn subtitle_source_transient_ready_is_repaired_by_later_backfill_until_set
                 .await
                 .expect("transient publication");
             assert!(store
-                .complete_analysis_request(&running, "stamp", 12 + epoch * 130_000)
+                .complete_subtitle_fixture(&running, "stamp", 12 + epoch * 130_000)
                 .await
                 .expect("complete request"));
             let candidates = store
@@ -33211,6 +33604,7 @@ async fn sqlite_v70_migration_adds_the_read_indexes_and_keeps_the_catalogue() {
         .expect("count read indexes")
     };
     let conn = rusqlite::Connection::open(&path).expect("open downgrade fixture");
+    queue_fixture::remove_common_queue_schema(&conn);
     assert_eq!(
         count_indexes(&conn),
         3,
@@ -33235,6 +33629,10 @@ async fn sqlite_v70_migration_adds_the_read_indexes_and_keeps_the_catalogue() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("user_version");
     assert_eq!(version, plurx_core::store::SQLITE_SCHEMA_VERSION);
+    assert!(
+        version >= 70,
+        "the read-index migration and every later step ran"
+    );
     drop(conn);
     SqliteStore::open(&path).expect("a current database reopens without replaying v70");
 }
@@ -33395,6 +33793,7 @@ async fn sqlite_v69_migration_from_v68_preserves_file_grants_and_live_analysis_r
     drop(store);
 
     let conn = rusqlite::Connection::open(&path).expect("open downgrade fixture");
+    queue_fixture::remove_common_queue_schema(&conn);
     let current_table: String = conn
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='analysis_requests'",

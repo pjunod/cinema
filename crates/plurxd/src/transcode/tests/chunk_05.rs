@@ -1485,6 +1485,44 @@
         seed_file_at(store, &placeholder_source().await).await
     }
 
+    /// The stand-in, not FFmpeg, is what the start spawned. Its marker is
+    /// written by the process itself, so wait for it; the bound only turns a
+    /// producer that never ran into a failure instead of a hang.
+    #[cfg(unix)]
+    async fn wait_for_stand_in(marker: &std::path::Path) {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the start ran the hardware encoder stand-in");
+    }
+
+    /// Stand in for FFmpeg driving a hardware encoder this host may not have.
+    ///
+    /// The hardware-admission tests start a session with `nvenc: true` to
+    /// hold a hardware slot, and what they assert is the slot and CPU
+    /// accounting, not the encode. On a runner without an NVIDIA GPU the real
+    /// FFmpeg cannot open `*_nvenc` and exits in about 70 ms; that exit then
+    /// raced the manager's registration of the start (a lost race failed the
+    /// start with `DecisionMismatch`) and the test's own assertions (a later
+    /// one handed the live slot back). The stand-in runs, as a working encoder
+    /// would, until the session stops it, and marks `<dir>/started` when it
+    /// does, so the test can tell that it — not FFmpeg — was the producer.
+    #[cfg(unix)]
+    fn hardware_encoder_stand_in(dir: &std::path::Path) -> std::path::PathBuf {
+        let marker = dir.join("started");
+        let bin = dir.join("hardware-ffmpeg");
+        crate::write_test_executable(
+            &bin,
+            format!("#!/bin/sh\n: > '{}'\nexec sleep 600\n", marker.display()),
+            0o700,
+        );
+        super::with_producer_ffmpeg_for_test(bin.to_string_lossy());
+        marker
+    }
+
     /// The placeholder source every `seed_file` test plays: a real file with
     /// the exact shape the seeded probe records (hevc · mkv · 3840×2160 ·
     /// 6,000 s), so the held-source scan comparison agrees with the catalog
@@ -1871,6 +1909,8 @@
     /// authorizing two encoders, which is the contention the cap exists to
     /// prevent. What it must do instead is reserve the CPU the pipeline has
     /// started spending, which before this milestone it did not do at all.
+    // The encoder stand-in is a /bin/sh script.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_retry_that_keeps_its_encoder_keeps_its_slot_and_pays_for_its_decode() {
         super::require_ffmpeg();
@@ -1878,6 +1918,8 @@
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
         let work = crate::test_tempdir().expect("work");
+        let encoder = crate::test_tempdir().expect("encoder stand-in");
+        let producer_started = hardware_encoder_stand_in(encoder.path());
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -1900,6 +1942,7 @@
             .start(file_id, 1080, 0.0, None, None, "paul", "pb-mixed")
             .await
             .expect("hardware start");
+        wait_for_stand_in(&producer_started).await;
         assert_eq!(
             mgr.codec_qualification_encoder_count(Encoder::Nvenc, OutputGrade::Sdr),
             1,

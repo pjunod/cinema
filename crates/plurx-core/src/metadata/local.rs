@@ -182,6 +182,9 @@ pub async fn enrich_home_library_with_publication(
     // Folders come last from the store query, so by the time one is handled
     // its children already have the poster it inherits.
     for item in items {
+        if crate::process::bounded::check_cancellation().is_err() {
+            break;
+        }
         let poster = match item.kind {
             ItemKind::Folder => match folder_poster(store, artwork_dir, item.id).await {
                 Some(name) => {
@@ -399,83 +402,81 @@ async fn generate_thumb_with(
         duration_ms,
         expected,
     } = request;
-    let mut cmd = tokio::process::Command::new(ffmpeg);
-    cmd.arg("-nostdin").args(["-v", "error"]);
+    use std::ffi::OsString;
+    let mut args: Vec<OsString> = ["-nostdin", "-v", "error"]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
     if kind == ItemKind::Video {
-        cmd.arg("-ss")
-            .arg(format!("{:.3}", seek_seconds(duration_ms)));
+        args.extend([
+            OsString::from("-ss"),
+            OsString::from(format!("{:.3}", seek_seconds(duration_ms))),
+        ]);
     }
-    cmd.arg("-i")
-        .arg(media)
-        .args(["-frames:v", "1"])
-        .args(["-vf", &format!("scale=w={THUMB_WIDTH}:h=-2")])
-        .args(["-q:v", "4"])
-        .args(["-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-
-    match crate::process::spawn_job_owned(
-        &mut cmd,
+    args.extend([OsString::from("-i"), media.as_os_str().to_owned()]);
+    args.extend(["-frames:v", "1", "-vf"].into_iter().map(OsString::from));
+    args.push(OsString::from(format!("scale=w={THUMB_WIDTH}:h=-2")));
+    args.extend(
+        [
+            "-q:v",
+            "4",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "mjpeg",
+            "pipe:1",
+        ]
+        .into_iter()
+        .map(OsString::from),
+    );
+    let output = match crate::process::bounded::output(
+        ffmpeg,
+        &args,
+        std::time::Duration::from_secs(30),
+        super::MAX_ARTWORK_BYTES.saturating_add(1) as usize,
         crate::process::ChildWork::background("library scan thumbnail"),
-    ) {
-        Ok((mut child, _job)) => {
-            use tokio::io::AsyncReadExt;
-            let mut bytes = Vec::new();
-            let read = match child.stdout.take() {
-                Some(stdout) => {
-                    stdout
-                        .take(super::MAX_ARTWORK_BYTES.saturating_add(1))
-                        .read_to_end(&mut bytes)
-                        .await
-                }
-                None => return None,
-            };
-            if read.is_err() || bytes.is_empty() || bytes.len() as u64 > super::MAX_ARTWORK_BYTES {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                tracing::warn!(path = %media.display(), "thumbnail output exceeded its bounded pipe");
-                return None;
-            }
-            let status = child.wait().await.ok()?;
-            if !status.success() {
-                tracing::warn!(path = %media.display(), %status, "thumbnail generation failed");
-                return None;
-            }
-            let legacy_filename = format!("{item_id}-poster.jpg");
-            let filename = match (store, expected) {
-                (Some(_), Some(expected)) => super::matching_materialized_artwork_filename(
-                    &legacy_filename,
-                    &bytes,
-                    expected,
-                )?,
-                (Some(store), None) => {
-                    match store
-                        .scoped_artwork_filename(&legacy_filename, &bytes)
-                        .await
-                    {
-                        Ok(filename) => filename,
-                        Err(error) => {
-                            tracing::warn!(item = item_id, %error, "fencing generated local artwork");
-                            return None;
-                        }
-                    }
-                }
-                (None, _) => format!("{item_id}-poster.jpg"),
-            };
-            let published =
-                crate::fs_secure::atomic_write_child(artwork_dir, &filename, &bytes).await;
-            match published {
-                Ok(()) => Some(filename),
+    )
+    .await
+    {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            tracing::warn!(path = %media.display(), status = %output.status, "thumbnail generation failed");
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(path = %media.display(), %error, "thumbnail generation failed");
+            return None;
+        }
+    };
+    let bytes = output.stdout;
+    if bytes.is_empty() || bytes.len() as u64 > super::MAX_ARTWORK_BYTES {
+        tracing::warn!(path = %media.display(), "thumbnail output exceeded its bounded pipe");
+        return None;
+    }
+    let legacy_filename = format!("{item_id}-poster.jpg");
+    let filename = match (store, expected) {
+        (Some(_), Some(expected)) => {
+            super::matching_materialized_artwork_filename(&legacy_filename, &bytes, expected)?
+        }
+        (Some(store), None) => {
+            match store
+                .scoped_artwork_filename(&legacy_filename, &bytes)
+                .await
+            {
+                Ok(filename) => filename,
                 Err(error) => {
-                    tracing::warn!(item = item_id, %error, "publishing generated local artwork");
-                    None
+                    tracing::warn!(item = item_id, %error, "fencing generated local artwork");
+                    return None;
                 }
             }
         }
-        Err(e) => {
-            tracing::warn!(path = %media.display(), error = %e, "spawning ffmpeg for a thumbnail");
+        (None, _) => format!("{item_id}-poster.jpg"),
+    };
+    let published = crate::fs_secure::atomic_write_child(artwork_dir, &filename, &bytes).await;
+    match published {
+        Ok(()) => Some(filename),
+        Err(error) => {
+            tracing::warn!(item = item_id, %error, "publishing generated local artwork");
             None
         }
     }

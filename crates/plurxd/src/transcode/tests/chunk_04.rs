@@ -2038,7 +2038,7 @@
             .await
             .expect("predecessor segment");
         let session = watchdog_session(dir.path(), Some(long_running_child()), false);
-        let reply_pause = Arc::new(tokio::sync::Barrier::new(2));
+        let reply_pause = crate::seam_hooks::AsyncPause::new("producer attempt reply");
         session
             .control
             .pause_producer_attempt_reply(Arc::clone(&reply_pause));
@@ -2049,7 +2049,7 @@
                 let _ = session.kill_child_for_replacement().await;
             }
         });
-        reply_pause.wait().await;
+        let held = reply_pause.reached().await;
         assert_eq!(
             session.control.current_producer_attempt(),
             1,
@@ -2066,7 +2066,7 @@
 
         // Release the actor so it can observe the dropped reply and process
         // the retirement command scheduled by the transaction's Drop.
-        reply_pause.wait().await;
+        held.release();
         tokio::time::timeout(Duration::from_secs(1), async {
             while !session.control.is_retired() {
                 tokio::task::yield_now().await;

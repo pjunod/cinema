@@ -493,8 +493,10 @@ impl TranscodeManager {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_vod_terminal_detach_pause_for_test(&self, pause: Arc<tokio::sync::Barrier>) {
-        self.vod.set_terminal_detach_pause_for_test(pause);
+    pub(crate) fn arm_vod_terminal_detach_pause_for_test(
+        &self,
+    ) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.vod.arm_terminal_detach_pause_for_test()
     }
 
     #[cfg(test)]

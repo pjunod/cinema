@@ -50,6 +50,15 @@ private struct LayoutFramePreferenceKey: PreferenceKey {
     }
 }
 
+private struct HeroContentFramePreferenceKey: PreferenceKey {
+    static var defaultValue: CGRect = .null
+
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        value = value.isNull ? next : value.union(next)
+    }
+}
+
 private struct NativeAPIContractFixture: Decodable {
     let server: ServerInfo
     let itemDetail: ItemDetail
@@ -968,7 +977,7 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(detail.reading?.locator.locations?.totalProgression, 0.55)
     }
 
-    func testBookReaderPolicyAcceptsOnlyAvailablePhoneAndTabletEpubs() {
+    func testBookReaderPolicyKeepsSupportedBooksInTheApp() {
         let epub = MediaFile(id: 90, filename: "Contract.EPUB", available: true)
         let pdf = MediaFile(id: 91, filename: "Contract.pdf", available: true)
         let missing = MediaFile(id: 92, filename: "Missing.epub", available: false)
@@ -1005,6 +1014,13 @@ final class AppleClientTests: XCTestCase {
             available: true,
             reader: pdfRead
         )
+        let localOnlyPDF = MediaFile(
+            id: 96,
+            filename: "Legacy.pdf",
+            size: 4_096,
+            available: true,
+            reader: serverHandoff
+        )
 
         XCTAssertTrue(BookReaderPolicy.canRead(epub, onTelevision: false))
         XCTAssertTrue(BookReaderPolicy.canDownload(epub, onTelevision: false))
@@ -1017,6 +1033,7 @@ final class AppleClientTests: XCTestCase {
         XCTAssertFalse(BookReaderPolicy.canDownload(nativePDF, onTelevision: false))
         XCTAssertFalse(BookReaderPolicy.canRead(nativePDF, onTelevision: true))
         XCTAssertFalse(BookReaderPolicy.canRead(unverifiablePDF, onTelevision: false))
+        XCTAssertTrue(BookReaderPolicy.canRead(localOnlyPDF, onTelevision: false))
     }
 
     #if os(iOS)
@@ -6033,8 +6050,12 @@ final class AppleClientTests: XCTestCase {
         defaults.set(true, forKey: "plurx.acceptance.probe")
 
         XCTAssertEqual(
-            PlaybackAcceptanceLaunch.current(defaults: defaults),
+            PlaybackAcceptanceLaunch.current(
+                defaults: defaults,
+                arguments: ["plurx", "-plurx.origin", "http://192.168.4.143:52773"]
+            ),
             PlaybackAcceptanceLaunch(
+                requestedOrigin: "http://192.168.4.143:52773",
                 itemId: 17,
                 fileId: 42,
                 startMs: 91_000,
@@ -6044,6 +6065,26 @@ final class AppleClientTests: XCTestCase {
                 probesEnabled: true
             )
         )
+
+        let missingProxy = try XCTUnwrap(
+            PlaybackAcceptanceLaunch.current(defaults: defaults, arguments: ["plurx"])
+        )
+        XCTAssertFalse(missingProxy.matchesActiveOrigins(
+            model: "http://192.168.4.7:32400",
+            session: "http://192.168.4.7:32400"
+        ))
+        let launch = try XCTUnwrap(PlaybackAcceptanceLaunch.current(
+            defaults: defaults,
+            arguments: ["plurx", "-plurx.origin", "http://192.168.4.143:52773"]
+        ))
+        XCTAssertTrue(launch.matchesActiveOrigins(
+            model: "http://192.168.4.143:52773",
+            session: "http://192.168.4.143:52773"
+        ))
+        XCTAssertFalse(launch.matchesActiveOrigins(
+            model: "http://192.168.4.143:52773",
+            session: "http://192.168.4.7:32400"
+        ))
     }
 
     func testApplePlaybackProbeCarriesRunwayAndNoCredentialSurface() throws {
@@ -7158,15 +7199,15 @@ final class AppleClientTests: XCTestCase {
     func testPlaybackQualityChoicesMatchTheAndroidClientAndSpellTheDecisionOverride() {
         XCTAssertEqual(
             PlaybackQuality.allCases.map(\.rawValue),
-            ["auto", "original", "2160", "1440", "1080", "720", "480", "360"]
+            ["auto", "original", "2160", "1440", "1080", "720", "480", "360", "240", "144"]
         )
         XCTAssertEqual(
             PlaybackQuality.allCases.map(\.label),
-            ["Auto", "Original", "4K · 2160p", "1440p", "1080p", "720p", "480p", "360p"]
+            ["Auto", "Original", "4K · 2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p"]
         )
         XCTAssertEqual(
             PlaybackQuality.allCases.map(\.rungHeight),
-            [nil, nil, 2_160, 1_440, 1_080, 720, 480, 360]
+            [nil, nil, 2_160, 1_440, 1_080, 720, 480, 360, 240, 144]
         )
 
         XCTAssertNil(PlaybackQuality.auto.decisionForce)
@@ -10030,20 +10071,34 @@ final class AppleClientTests: XCTestCase {
             context.fill(CGRect(x: 0, y: 0, width: 160, height: 90))
         }
 
-        for viewportWidth: CGFloat in [375, 430] {
+        for viewportWidth: CGFloat in [320, 375, 402, 430] {
             var heroFrame: CGRect = .null
+            var contentFrame: CGRect = .null
             let controller = UIHostingController(rootView:
                 NavigationStack {
                     ScrollView {
                         LazyVStack(alignment: .leading) {
                             NavigationLink(value: 1) {
-                                ZStack {
+                                ZStack(alignment: .bottomLeading) {
                                     Image(uiImage: backdrop)
                                         .resizable()
                                         .aspectRatio(contentMode: .fill)
-                                        .frame(maxWidth: .infinity)
-                                        .frame(height: HomeHeroMetrics.compactHeight)
-                                        .clipped()
+                                        .modifier(IOSHomeHeroArtworkLayout())
+                                    VStack(alignment: .leading) {
+                                        Text("CONTINUE")
+                                        Text("Featured movie")
+                                        Color.clear.frame(height: 3)
+                                        Label("Resume", systemImage: "play.fill")
+                                    }
+                                    .background {
+                                        GeometryReader { geometry in
+                                            Color.clear.preference(
+                                                key: HeroContentFramePreferenceKey.self,
+                                                value: geometry.frame(in: .global)
+                                            )
+                                        }
+                                    }
+                                    .padding(16)
                                 }
                                 .modifier(IOSHomeHeroCardLayout())
                                 .reportLayoutFrame()
@@ -10056,6 +10111,9 @@ final class AppleClientTests: XCTestCase {
                 }
                 .onPreferenceChange(LayoutFramePreferenceKey.self) {
                     heroFrame = $0
+                }
+                .onPreferenceChange(HeroContentFramePreferenceKey.self) {
+                    contentFrame = $0
                 }
             )
 
@@ -10077,6 +10135,9 @@ final class AppleClientTests: XCTestCase {
                 viewportWidth - HomeHeroMetrics.horizontalInset,
                 accuracy: 0.5
             )
+            XCTAssertFalse(contentFrame.isNull)
+            XCTAssertEqual(contentFrame.minX, heroFrame.minX + 16, accuracy: 0.5)
+            XCTAssertEqual(contentFrame.maxX, heroFrame.maxX - 16, accuracy: 0.5)
             window.isHidden = true
         }
     }

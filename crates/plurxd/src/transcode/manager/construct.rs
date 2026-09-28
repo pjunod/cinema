@@ -104,6 +104,7 @@ impl TranscodeManager {
             requests: std::sync::Mutex::new(HashMap::new()),
             producer: ProducerTuning::default(),
             background_producer: Mutex::new(()),
+            background_heavy: Arc::new(tokio::sync::Semaphore::new(1)),
             offline_waiting: AtomicBool::new(false),
             dv_strippable: false,
             dv_convertible: false,
@@ -322,6 +323,7 @@ impl TranscodeManager {
     }
 
     pub(crate) fn with_subtitle_jobs(mut self, jobs: Arc<crate::state::JobManager>) -> Self {
+        jobs.share_subtitle_admissions(self.admissions.clone());
         self.subtitle_jobs = Some(jobs);
         self
     }
@@ -880,6 +882,88 @@ impl TranscodeManager {
     /// Speculative work never reserves a queue row while foreground/offline
     /// encoding already owns or is waiting for this node's capacity. A race
     /// after this observation is still resolved by admission before ffmpeg.
+    /// Acquire real media capacity before durable ownership. The decoder is
+    /// not resolved yet, so reserve the conservative whole-pipeline CPU share
+    /// as well as the selected hardware session. Planning cannot oversubscribe
+    /// a viewer's admission pool.
+    pub(crate) async fn admit_pretranscode(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        target_height: i64,
+    ) -> Result<Option<PretranscodeAdmission>, String> {
+        if !self.pretranscode_worker_idle() {
+            return Ok(None);
+        }
+        let Ok(heavy) = Arc::clone(&self.background_heavy).try_acquire_owned() else {
+            return Ok(None);
+        };
+        let policy = self
+            .try_pretranscode_policy_snapshot()
+            .await
+            .map_err(|error| error.to_string())?;
+        // Selection from the boot inventory performs no source probes. The
+        // later bound-source planner may fall back to software, for which the
+        // same conservative CPU reservation is already held.
+        let encoder = self.caps.choose(&policy.requested_encoder);
+        let threads = Workload::of(file, target_height).software_threads();
+        let estimate = TranscodeResourceEstimate {
+            hardware_slot: encoder != Encoder::Software,
+            cpu_threads: threads,
+            decoder_threads: None,
+        };
+        Ok(self
+            .admissions
+            .try_admit_bundle(
+                self.max_hw_sessions().await,
+                self.software_budget().await,
+                &estimate,
+                Priority::Background,
+            )
+            .map(|permit| PretranscodeAdmission {
+                _heavy: heavy,
+                encoder,
+                threads,
+                _permit: permit,
+            }))
+    }
+
+    pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {
+        if !self.pretranscode_worker_idle() {
+            return None;
+        }
+        let heavy = Arc::clone(&self.background_heavy)
+            .try_acquire_owned()
+            .ok()?;
+        // Copy indexing can still run CPU transforms. Reserve the available
+        // software budget conservatively until a per-pipeline estimate exists.
+        let threads = self.software_budget().await.max(1);
+        self.admissions
+            .try_admit_bundle(
+                self.max_hw_sessions().await,
+                threads,
+                &TranscodeResourceEstimate {
+                    hardware_slot: false,
+                    cpu_threads: threads,
+                    decoder_threads: None,
+                },
+                Priority::Background,
+            )
+            .map(|permit| FragmentAdmission {
+                _heavy: heavy,
+                threads,
+                _permit: permit,
+            })
+    }
+
+    pub(crate) fn fragment_worker_idle(&self, admission: &FragmentAdmission) -> bool {
+        !self.admissions.live_is_waiting()
+            && self.admissions.in_use() == 0
+            && self.admissions.software_in_use() <= admission.threads
+            && !self
+                .offline_waiting
+                .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub fn pretranscode_worker_idle(&self) -> bool {
         !self.admissions.live_is_waiting()
             && self.admissions.in_use() == 0

@@ -2436,38 +2436,34 @@ that the voter can use replicated storage or sees a leader. The private Ansible
 deployment uses `serial: 1`, fails the whole play on the first node error, and
 now gates each Cinema host on `/readyz`.
 
-**Enable bounded catalogue reads only after the rolling update settles.** Keep
-`cluster.bounded_replica_reads = false` while any voter runs an older build.
-After every voter is ready on the same bounded-read protocol, set the following
-identically on every voter and restart them one at a time again:
+**Bounded catalogue reads are the normal replicated read path.** The Developer
+tab's **Local catalogue reads** preference can turn them off or on without
+restarting nodes. Its readiness rows are advisory. A saved preference replicates
+like other settings; a node observes it when that entry applies. The original
+`cluster.bounded_replica_reads` option supplies the initial preference (default
+`true`); the saved Developer preference overrides it. The apply-lag budget
+remains `cluster.bounded_replica_max_lag_entries`, default 64.
 
-```toml
-[cluster]
-bounded_replica_reads = true
-bounded_replica_max_lag_entries = 64
-```
+The optimization covers library browse, item/file lookup, recently-added,
+genre, Home previews and technical aggregates. Authentication, settings APIs,
+membership, leases, jobs, ownership and mutations remain Authority operations.
+Search keeps its existing local derived-index path. Watch reads additionally
+require the browser's latest acknowledged write position: the web client echoes
+`X-Plurx-Commit-Index` as `X-Plurx-Read-After` for 60 seconds, across nodes.
+Unknown write outcomes, unindexed writes and sign-in changes discard that floor.
+Clients without the echo continue to use Authority for watch reads.
 
-The optimization is limited to library browse, item/file lookup,
-recently-added, genre, Home previews, and technical-aggregate calls in the
-native and Plex-compatible read handlers. Authentication, watch state,
-settings, membership, leases, jobs, cache/offline ownership, mutations, and
-every write remain Authority operations. Search remains its existing
-node-local derived-index operation. Write-followed-by-read handlers continue to
-use Authority.
+A local result requires a fresh one-second quorum watermark, matching local
+term/leader/epoch, negotiated protocol and the configured `0..10000` entry lag
+budget before and after the operation. Missing/changing proof or local SQL
+errors discard the local result and use Authority. The preference itself costs
+one local settings lookup inside that proof; it adds no leader round trip.
+Existing multi-statement genre/count and media-shape semantics remain unchanged.
 
-A local result is returned only when a one-second quorum watermark, local
-term/leader/epoch, negotiated protocol, and the configured `0..10000` entry
-lag budget remain valid before and after the complete operation. Missing or
-changing proof and local SQL/mapping errors discard the local result and retry
-Authority. The existing multi-statement genre/count and media-shape operations
-retain their Authority semantics; the permit is not a new cross-statement
-snapshot guarantee.
-
-Set `cluster.bounded_replica_reads = false` on all voters, one at a time, for an
-immediate rollback that changes no schema or membership. `/readyz` removes a
-voter whose quorum proof is absent or whose local apply lag is nonzero; the
-read helper also falls back independently, so bypassing the load balancer does
-not turn an expired proof into a stale response.
+Turn off **Local catalogue reads** in Developer to return eligible reads to
+Authority. This changes no schema or membership. `/readyz` removes a voter whose
+quorum proof is absent or whose apply lag is nonzero; the reader independently
+falls back, so bypassing the proxy does not bypass its consistency checks.
 
 **Use readiness conservatively at the reverse proxy.** `/readyz` is an active
 replicated-store proof, not a free process counter: it checks cluster health and
@@ -3061,7 +3057,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_CREDENTIAL_KEY_FILE` | `cluster.credential_key_file` | `<data_dir>/credentials.key` | Node-local key that encrypts the stored Trakt bearer credential. Minted mode-`0600` on first boot, and required to stay owner-only. **Back it up with the database** — plurx refuses to start if the sealed rows outlive it, or if the key present is not the one that sealed them ([SECURITY.md](SECURITY.md)) |
 | `PLURX_SHARED_CACHE_DIR` | `cluster.shared_cache_dir` | empty | Optional node-local path to a writable cache filesystem mounted on every participating voter. Requires `PLURX_SHARED_CACHE_ID`; a path alone is never trusted as proof of shared storage |
 | `PLURX_SHARED_CACHE_ID` | `cluster.shared_cache_id` | empty | Stable operator name for that shared filesystem: 1–64 ASCII letters, digits, dots, dashes, or underscores. Every voter mounting the same filesystem must use the same value |
-| `PLURX_CLUSTER_BOUNDED_REPLICA_READS` | `cluster.bounded_replica_reads` | `false` | Cluster-wide opt-in and Authority-read kill switch for the named lag-gated catalogue slice. Enable only after every voter advertises the current bounded-read protocol |
+| `PLURX_CLUSTER_BOUNDED_REPLICA_READS` | `cluster.bounded_replica_reads` | `true` | Initial bounded-read preference; the replicated Developer setting overrides it. Each read proves consistency independently |
 | `PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES` | `cluster.bounded_replica_max_lag_entries` | `64` | Maximum quorum-commit to local-applied gap admitted for a bounded catalogue operation; `0..10000`, identical on every voter |
 | `PLURX_CLUSTER_READ_POOL_SIZE` | `cluster.read_pool_size` | `4` | Local replicated-read connection pool, bounded 1–16; tune only with retained 4/8/16 evidence |
 | `PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS` | `cluster.snapshot_chunk_timeout_secs` | `30` | One non-final snapshot chunk RPC in seconds, bounded 5–300; must not exceed the transfer timeout and must match on every voter |
@@ -4179,9 +4175,64 @@ When `cache_produce_mins` is non-zero, one cluster lease owner ranks Continue
 Watching, Next Up, and Recently Added candidates and enqueues immutable source
 generations. It does not encode them. The generation identity includes the
 requested encoder and rate-control policy plus normalized audio language,
-subtitle language, and subtitle mode. Every voter with a configured local
-cache then competes for a distinct compatible row, so three idle workers can
-prepare three titles at once without three schedulers selecting the same work.
+subtitle language, and subtitle mode. Every eligible voter or ready learner with a configured local
+cache then competes for a compatible durable artifact job. Whole-title preparation and
+fragment indexing share one ownership queue, one heavy worker per node and two
+reader slots per shared storage domain. Unmapped roots use one global domain. Spare nodes can prepare different titles
+without duplicating the same computation or multiplying NAS reads by node count.
+
+Settings → Developer → Shared storage budgets assigns the same domain name to
+mount paths on the same NAS. Independent storage may use different names. A
+multi-root library conservatively reserves all of its domains, even for a
+file-specific job. Save mapping changes while background jobs are idle; an
+active reservation cannot change identity. Ordinary library path edits that
+change required domains stop renewal and publication until a later attempt
+acquires the new slots. Enable switches remain independent of these mappings
+and their advisory observations.
+
+Library scans and refreshes are accepted durably and dispatched on an eligible
+source-readable voter. Their request/result history survives the HTTP node's
+restart. Provider maintenance shares request spacing and cooldowns across
+nodes; adding workers does not multiply that allowance. The Developer card
+reports this node's artifact and catalogue authority separately. Learners
+retain immutable-result execution only; they cannot become scan/provider
+coordinators through the artifact claim path.
+
+Whole-source subtitle preparation uses that same queue. Different selected
+tracks join the existing all-track pass, with immutable representations fetched
+through verified peer transfer. The old analysis row remains its durable demand
+and progress record. A foreground fallback claims this same job and reserves a
+CPU thread from the streaming admission pool. A wait timeout does not start a
+second extractor alongside a running owner. Source replacement, cancellation
+and lease loss prevent later publication; incomplete work restarts under a new
+claim. SQLite 76 / replicated 54 invalidate old subtitle owners during the
+maintenance cutover; queued requests are drained through the bounded outbox.
+
+Semantic search keeps its existing enable preference. Enabled nodes reuse
+verified embedding artifacts instead of recomputing unchanged item text. The
+identity includes model weights, tokenizer, dimensions and normalization;
+source changes cannot publish into an older item generation. Maintenance
+re-probes submit bounded pages of leaf work to the queue. The scan coordinator
+retains matching, catalogue identity, deletion decisions and completion.
+
+Scheduled transcode and artwork verification runs through the same physical
+admission and ownership rules as preparation. It yields to playback, checks
+bounded byte/object pages, and retires only the observed cache generation.
+Repair attempts verified copies first, then one original typed rebuild and
+one delivery. With no advertised holder, it advances to the original producer
+without charging an impossible copy attempt. Exhaustion, explicit cancellation
+or source replacement stops the plan. Activity lists up to 64 recent plans,
+with destination, phase and a link to the current work; source paths and raw
+producer payloads are omitted. The underlying job's existing Retry action is
+a deliberate new interest, not an automatic restart of the whole repair plan.
+
+SQLite 82 / replicated 60 add repair records and retained producer intent.
+Completed job history may expire without losing the original rebuild identity.
+Verification affects derived artifacts only; it does not rewrite media files.
+Corrupt generation bytes remain subject to existing reader-safe orphan cleanup.
+The repair ledger holds at most 4,096 plans. If it is full, verification still
+retires bad locators and records `repair_capacity` on the verification job;
+ordinary demand can rebuild a later cache miss.
 
 Workers advertise the capabilities the local daemon actually proved at boot.
 A row that needs an unsupported decoder, encoder family, HLS output contract,
@@ -4202,21 +4253,51 @@ yielded job reclaimed on the same node resumes its numbered parts. Foreground
 playback still has priority and receives the encoder lane inside the existing
 five-second admission window.
 
-The queue admits at most 4,096 active and 10,000 total rows. Each candidate
-pass removes up to 512 ready rows whose local location has been evicted and
-retains only the newest 4,096 failed/cancelled dedupe tombstones. This bounds
-Raft history while preserving recent terminal suppression; terminal rows
-discard their capability/policy and staging payloads. Capability scans
-page in groups of 128 until they find the highest compatible row; a large band
-of GPU-specific work cannot starve a software-capable title behind it.
-Worker polling measures current free space and makes one cheap claim; it does
-not run a cache walk on every empty-queue poll. Each producer-enabled node also
+The shared queue admits at most 4,096 active and 10,000 retained computations;
+automatic work stops at 3,840 active rows to reserve foreground headroom. At
+most 16,384 interests (128 per user) retain separate cancellation and request
+identities. Request receipts last seven days; bounded upkeep preserves the
+up to 16 resolved attempts per job. At global history pressure it compacts older resolved attempts beyond the two-minute reconciliation window, preserving each job's newest attempt and lifetime counters. Terminal payloads remain available for
+explicit audited retry. Ordinary scheduler ticks never reset a failed budget.
+A successfully completed transcode whose last cache location was evicted can
+receive one fresh repair interest.
+
+Workers scan candidates in pages of 128, skip incompatible work and poll with
+5–30 second jittered idle backoff. Empty candidate polling makes no claim or
+renewal write. Polling measures current free space without walking every cache.
+Each producer-enabled node also
 rate-limits one bounded local cache sweep to every 15 minutes, even while its
 queue is empty; the normal cleanup schedule remains an independent backstop.
 Both paths recognize queue staging and fenced final-directory syntax, so
 abandoned queue bytes remain reclaimable after restart even when there are no
 cache-location rows. Rename-to-publication holds both the recipe eviction
 guard and final-directory orphan guard until fenced completion.
+
+Settings → Activity lists durable work separately from live playback and offers
+admin cancellation and explicit retry. A cancelled interest does not cancel
+another viewer's demand. Running children keep their physical permits until
+they have exited. Offline packages retain their own quota and download
+permissions; an exact recipe already preparing on their delivery node can be
+joined at priority 2 without starting another encoder. Cross-node offline
+transcode delivery is not yet provided by this queue adapter.
+
+Settings → Developer contains enable controls and timestamped advisory
+requirements for the existing analysis and speculative-preparation preferences.
+Unknown or unmet observations do not prevent saving the choice. There is no
+queue certification or fleet receipt to obtain. The first schema conversion
+requires the stopped-writer maintenance procedure in the
+[queue migration contract](cluster/DURABLE-WORK-QUEUE-IMPLEMENTATION.md#7-migration-and-rollback--one-ownership-system-after-cutover);
+do not perform a mixed-version rolling cutover or a binary-only downgrade.
+
+Queue count, oldest age, source-I/O reservations and legacy backlog gauges
+come from the existing cached Store sampler. Worker-event counters and claim,
+queue-wait and execution histograms are process-local; every metrics scrape is
+Store-free. Counts of acknowledged transitions can undercount lost replies and
+reset on restart; durable attempts remain the audit record. Increasing
+`plurx_background_legacy_pending` needs migration attention. Queued work with
+idle compatible workers suggests source/admission trouble; rising age with all
+reservations held suggests capacity pressure. `claim_write` events without
+eligible work indicate an idle-poll regression.
 
 The cache bytes remain node-local. With P5 remote placement enabled, any
 ingress may select a voter that advertises the exact verified generation and
@@ -5063,7 +5144,7 @@ node-local and reset on restart; compare `rate()`s, not raw values.
 | 1 | First frame p50/95/99 | `histogram_quantile(0.95, sum by (le, method) (rate(plurx_ttff_ms_bucket[1h])))`. `plurx_ttff_ms{method,client}` has buckets to 120 s so a slow start's p99 is a number, not `+Inf`. |
 | 2 | Seek to moving picture | `histogram_quantile(0.95, sum by (le) (rate(plurx_seek_to_picture_ms_bucket[1h])))`, and the share of seeks that reached a picture: `sum(rate(plurx_seek_to_picture_ms_count[1h])) / sum(rate(plurx_seeks_total[1h]))`. **Zero until clients emit `seek_resumed` / `seek_abandoned`** — no first-party client does yet. |
 | 3 | Stalled seconds per playback hour | `3600 * sum(rate(plurx_stalled_seconds_total[1d])) / sum(rate(plurx_watched_seconds_total[1d]))`. |
-| 4 | Failed starts per attempt | **Not built.** `plurx_start_outcomes_total{method,outcome}` is reserved; see the plan's §7.7. Live TV has its own: `plurx_live_tv_starts_total{outcome}`. |
+| 4 | Failed starts per attempt | `sum(rate(plurx_start_outcomes_total{outcome=~"failed\|refused"}[1d])) / sum(rate(plurx_start_outcomes_total[1d]))`, and `sum by (method, outcome)` for the split. Sum across nodes; read `plurx_start_outcomes_unpaired_total` beside it (below) before trusting a cluster-wide `cancelled`. Live TV has its own: `plurx_live_tv_starts_total{outcome}`. |
 | 5 | Replacement failure rate | `sum(rate(plurx_playback_preparation_staged_total{outcome="refused"}[1d])) / sum(rate(plurx_playback_preparation_decisions_total{outcome="prepare"}[1d]))` — the share of decisions to prepare a replacement that never reached the staging ledger. No new series. `plurx_playback_preparation_cancelled_total{reason}` is a separate question (a staged successor torn down before anyone watched it, mostly because the viewer moved on) and is not in this ratio. |
 | 6 | Admission wait | `histogram_quantile(0.95, sum by (le, pool) (rate(plurx_admission_wait_seconds_bucket[1h])))`. The decode-facts probe gate is timed by `plurx_decode_facts_phase_seconds{phase="gate_wait"}` and is not repeated here. |
 | 7 | Actual vs reserved scratch | **Reserved name only:** `plurx_scratch_bytes{kind="reserved\|actual"}`, built by the seek-scratch reservation effort. |
@@ -5078,6 +5159,8 @@ node-local and reset on restart; compare `rate()`s, not raw values.
 | `plurx_watched_seconds_total{method}` | Seconds this node saw a player's position advance between two consecutive live progress beats (`POST /api/v1/items/{id}/progress`) for the same viewer and item. Each beat credits the smaller of the position's advance and the wall time since the previous beat; a paused or stalled player credits nothing, an advance of more than twice the wall time plus two seconds is a seek and credits nothing, and a gap over two minutes restarts the baseline. "The previous beat" is cluster-wide: beats are not held to one node (Android keeps no cookie, and any non-HLS request may be routed anywhere), so a node that finds the viewer's durable progress row written by another node since its own last beat credits only the time since that row. Beats alternating between N nodes are therefore credited once, not N times, and `sum(rate(plurx_watched_seconds_total[…]))` across nodes is the cluster's watched time. That comparison uses the row's `updated_at` (whole seconds, the writing node's clock), so it assumes the nodes' clocks agree to within a second or two, as NTP gives; two nodes committing the same viewer within the same instant can still overlap by one beat interval. Offline replays (`recorded_at`) and Plex-compatible `/:/timeline` clients are not counted. `method` is what the beat names (`direct_play`, `remux`, `transcode`); the web player names it, the native clients do not yet, so their seconds are `unknown` — the row-3 sum is complete, the per-method split of row 8 is not until they do. |
 | `plurx_delivered_bytes_total{method}` | Media bytes handed to viewers' connections. HLS (rolling and VOD) and progressive remux count at the delivery meter, after the downstream has taken each piece; direct play counts each chunk as its body yields it. Peer relay, offline downloads and artwork are not viewer playback and are not counted. |
 | `plurx_admission_wait_seconds{pool}` | One observation per admission wait, however it ended — a wait that timed out is the long tail, not a missing sample, and so is a request abandoned while it waited (a player that seeks again aborts the GET it had parked): each pool times its wait from a guard that records when it is dropped. `vod_blocked_get`: a VOD segment GET admitted to the pool for a segment not yet materialized, from admission to the end of its wait — including one whose recheck found the segment before it parked, and one aborted mid-wait (refusals are `plurx_vod_blocked_get_refusals_total`, not here). `encode_permit`: a live start queued for an encoder slot or software permit, for as long as it queued. `image_materialize`: an artwork derivative waiting for a derive permit, granted, timed out or abandoned. |
+| `plurx_start_outcomes_total{method,outcome}` | One per finite-playback start attempt, counted once when it ends. An attempt opens on the first media request for a file by a viewer — an HLS create, a direct-play GET or a `stream.mp4` — never on `/decision`, which detail pages also ask; further requests for that file while it is pending join it. It ends on the first of: the viewer's `ttff` beacon (`ok`); a start-failure beacon — web `playback_failed`, `stream_rejected`, `hls_fatal`, `stream_refused`, Android `playback_error`, Apple `avplayer_item_failed` — before any frame (`failed`); the server answering a start request for that file with an error (`refused`, also counted when no attempt was in flight, so every refused request is one attempt); or 180 s with none of those (`cancelled`: the viewer left, or the player hung and said nothing). A "not yet" answer the clients retry (`startup_timeout`, `media_owner_transition`, `vod_index_pending`, `vod_engine_unattested`, `transcode_capacity_pending`) does not end the attempt: the retry, or the web's `stream.mp4` fallback, joins it, and only a client that stops asking before anything is served makes it `refused` at the 180 s deadline. A client fallback after a failure (direct play refused by the decoder, then a transcode) is a second attempt. After a first frame the same viewer's requests, beacons and progress beats for that title keep it one play, and a failure or refused replacement then is not a failed start. Only the web beats while paused; Apple and Android are silent, so a request after five minutes of silence is held as a possible resume and becomes a new attempt only on a `ttff` reported as a fresh open (`cold-start` / `resume`), a start-failure beacon or a refusal; otherwise it rejoins the play uncounted. A play is forgotten after 24 hours with no sign of its viewer. So the same title reopened and abandoned before its picture is not counted as `cancelled`, and a native player that fails just after resuming a long pause counts one `failed`. `method` is the method the first frame was reported through when the beacon names one, else the method of the request that opened the attempt; a refused HLS create with nothing in flight is `unknown`, because the create had not yet decided. Library channel tunes and Live TV are not finite-playback starts and are not counted. |
+| `plurx_start_outcomes_unpaired_total{outcome}` | A `ttff` (`ok`) or start-failure beacon (`failed`) this node could not pair with an attempt it opened. **The size of the start family's one known error**: attempts are node-local, and a client with no cookie (Android) behind a cluster address can send its request to one node and its beacon to another. The request's node then counts the attempt `cancelled`, and the beacon's node counts it here. A single node, and a web client pinned by its cookie, keep this near zero; a first frame after the 180 s deadline gave up also lands here. |
 
 #### Defining an effort's exit counter
 

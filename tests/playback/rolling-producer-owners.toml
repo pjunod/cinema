@@ -181,7 +181,15 @@ also_in = ["crates/plurxd/src/transcode"]
 # `new_with_job` registrations, the production registration inside
 # `install_replacement_child`, and the `#[cfg(test)]`
 # `test_session_with_control` helper.
-expected_occurrences = 22
+# 22 -> 23 with S-14 M8 (seam migration, `AttemptChild`), measured by zeroing
+# this row: the one new occurrence is `AttemptChild::new_with_job(` in the
+# test-only `attempt_child_shipped_shape` (`transcode/tests/chunk_02.rs`), which
+# registers a supervisor over the `long_running_child()` fixture it spawned,
+# suspends and resumes it, requests termination and waits for the published
+# reap before returning. It registers no shipped producer. The migration's own
+# constructor split (`new` and `new_with_job` both delegating to the private
+# `new_with_hooks`) adds no `new(`/`new_with_job(` call.
+expected_occurrences = 23
 kind = "process_owner"
 replacement = "retained as the sole OS-child supervisor, registered before publication"
 
@@ -434,7 +442,13 @@ also_in = ["crates/plurxd/src/transcode"]
 # HEVC color repair: -1 test-only log-polling sleep. The old rolling-copy
 # argv fixture is replaced by direct refusal/override admission assertions;
 # no production timer or recovery owner changed.
-expected_occurrences = 47
+# 47 -> 48 with the loaded-runner flake fixes (`fix/loaded-runner-flakes`),
+# measured by zeroing this row: `wait_for_stand_in` in
+# `transcode/tests/chunk_05.rs` polls every 5 ms, inside a 30 s hang guard,
+# for the marker the hardware-encoder stand-in writes when it starts. Test-only;
+# the stand-in producer is started and stopped by the manager under test, and
+# the poll owns no producer, process or recovery decision.
+expected_occurrences = 48
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -631,7 +645,10 @@ expected_occurrences = 8
 [[module_symbols]]
 id = "m4-decision-transport"
 pattern = "RollingDecisionTransport"
-expected_occurrences = 6
+# 6 -> 7 with S-14 M8's control group: the owner's name as a string in
+# `seam_census_of_the_workspace`'s migrated-owner list. No transport was
+# constructed and nothing new holds one.
+expected_occurrences = 7
 
 [[module_symbols]]
 id = "m4-first-media-publication-handoff"
@@ -965,7 +982,16 @@ pattern = "ServingAuthority"
 # re-probe case and the full-rate prefix case, each passed to
 # `pump_tuner_fanout` exactly as the M1 fan-out cases do. No production
 # authority is added or projected differently.
-expected_occurrences = 34
+# 34 -> 35 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: the `authority: ServingAuthority` parameter of
+# `VodServingAdmission::with_hooks`, the production constructor `new` now
+# delegates to. It carries the same authority into the same struct field; no
+# new projection reader.
+# E3: one shared-ingest body carries the existing serving authority; it owns no task.
+# PR #537 current-main integration: measured after replacing the temporary
+# owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
+expected_occurrences = 35
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -973,7 +999,12 @@ pattern = "commit_guard_before"
 # 13 -> 14 with M6's acknowledgement settlement. The new guard bounds the
 # exact commit-or-abort Store mutation authorized by the actor; it is held only
 # across the bounded executor call and never across worker teardown.
-expected_occurrences = 15
+# 15 -> 17 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: the two calls in `vod_serving_admission_shipped_shape`,
+# which ask the production-built admission for its commit guard before and
+# after serving is lost. Test-only; no new commit site.
+expected_occurrences = 17
 
 [[module_symbols]]
 id = "m4-serving-authority-admission-token"
@@ -1217,7 +1248,13 @@ pattern = "RollingRetirementSettlement"
 # and completes the settlement. The race test's construction changed from
 # `::new` to `::with_hooks` (same count). The settlement is still created only
 # by the retirement path in `rolling/retirement.rs`; no new owner.
-expected_occurrences = 8
+# 8 -> 9 with S-14 M8's §7 Q3 census, measured by zeroing this row: the one
+# new occurrence is the owner name in `seam_census_of_the_workspace`
+# (`transcode/tests/seam_census.rs`), a string that test matches against the
+# census's owner column to assert a migrated owner keeps no test-only seams. It
+# constructs nothing; the settlement is still created only by the retirement
+# path in `rolling/retirement.rs`.
+expected_occurrences = 9
 
 [[module_symbols]]
 id = "m4-exact-rolling-scratch-owner-latch"
@@ -1512,7 +1549,14 @@ pattern = "TerminalCleanup"
 # one that never completes, and that fixture constructs it. Both are test
 # scaffolding for the maintenance bound; neither adds a cleanup owner to the
 # production graph, which still mints exactly one per tombstoned session.
-expected_occurrences = 20
+# 20 -> 22 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: the race test builds its cleanup through
+# `TerminalCleanup::with_hooks` (was `new` plus a field write, same count),
+# `terminal_cleanup_shipped_shape` builds one through `new`, and
+# `seam_census_of_the_workspace` names the owner as a string. Test-only; the
+# production graph still mints exactly one cleanup per tombstoned session.
+expected_occurrences = 22
 
 [[module_symbols]]
 id = "m4-vod-terminal-rendition-compaction"
@@ -1532,7 +1576,11 @@ expected_occurrences = 9
 [[module_symbols]]
 id = "m4-vod-dormant-purge-settlement"
 pattern = "purge_if_dormant"
-expected_occurrences = 9
+# 9 -> 10 with S-14 M8 (VOD `Shared`), measured from the validation unittests' actual count:
+# `dormant_purge_point_precedes_producer_termination` calls `purge_if_dormant` once, test-only,
+# from a task it awaits within a five-second bound. No production caller was added; the
+# settlement owner is unchanged.
+expected_occurrences = 10
 
 # Whole-module structural sentinels use normalized Rust code rather than a
 # list of today's helper names: comments and literals cannot contribute to or
@@ -1564,7 +1612,11 @@ expected_occurrences = 9
 
 [[module_structures]]
 id = "namespaced-task-spawn"
-pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
+# Durable queue: background_jobs.rs adds one ActiveJob-owned heartbeat (joined
+# before retirement), plus two joined race/process fixtures; ffmpeg.rs adds a
+# joined cancellation fixture. main.rs starts the daemon-owned consumer loop.
+# state.rs removes two domain heartbeats and adds guarded upkeep (-1 net).
+pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # 348 since M2: the Dolby Vision facts backfill is spawned from the per-tick
 # maintenance block beside the genre backfill. It is a leased catalogue job
 # (`catalogue:dv-facts`) that walks a node-local cursor and writes columns —
@@ -2110,6 +2162,35 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # test-only: the offline worker loop under test in
 # `offline::tests::claim_a_wake_claims_what_the_local_replica_does_not_show_yet`,
 # aborted before the test returns. No production spawn.
+# 639 -> 641 (measured) with S-04 M2, the frozen Fontconfig environment:
+# `fontenv::blocking`'s `tokio::task::spawn_blocking`, the one bounded
+# filesystem owner that reads and copies the rule files, links the fonts,
+# stats the environment and sweeps a predecessor's directories; every
+# JoinHandle is awaited by its caller and a panicked task is a failure. And
+# the test-only `crate::producer_spawn::spawn(` in
+# `fontenv::tests::a_frozen_environment_names_only_the_captured_fonts`, which
+# runs `fc-list` through the production builder and reaps it before the test
+# returns. Neither owns a producer or a recipe decision.
+# 641 -> 642 (measured by zeroing this row) with #553's review round,
+# test-only: the `tokio::spawn` in
+# `fontenv::tests::a_cancelled_capture_leaves_no_environment_behind`, which
+# runs one capture paused on its test hook, is aborted and then awaited
+# (`is_cancelled`) before the test asserts. The production blocking owner is
+# unchanged: `fontenv::blocking` now also carries the environment's directory
+# guard in and out of each task, so a task that outlives its abandoned caller
+# drops the guard, and removes the directory, when the runtime drops its
+# output. No producer, process or recipe decision.
+# 639 -> 640 with S-14 M8 (`AttemptChild`), measured by zeroing this row:
+# `crate::playback_control::RollingControlHandle::spawn(` in the test-only
+# `attempt_child_shipped_shape`, the ordinary test-actor shape counted many
+# times above. The handle it returns is the test's only owner; the test drops
+# it on return, which closes the actor's sender and ends its run loop. It owns
+# no producer; the test reaps its own fixture child before returning.
+# 640 -> 641 with the review round of S-14 M8 (#556, finding 1), measured by
+# zeroing this row, test-only: the `std::thread::spawn` in
+# `supervisor_pause_releases_its_supervisor_when_the_test_unwinds`, a plain
+# thread standing in for a supervisor held at a `SupervisorPause`. The test
+# joins it before returning. It owns no producer, process, task or timer.
 # 639 -> 641 with K-10 M4 (offline expiry sweep), measured from the
 # validation unittests' actual count, both test-only: the offline worker loop
 # under test in `offline::tests::expiry_an_idle_worker_sweeps_only_on_the_forced_interval`
@@ -2117,10 +2198,94 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # each aborted before its test returns. No production spawn; the expiry pass
 # runs inside the existing offline worker loop. Neither owns a producer, a
 # process or a recipe decision.
+# 642 + K-10 M4 -> 644 (measured by zeroing this row) on the merge of main
+# into #553: S-04 M2's three occurrences and K-10 M4's two test-only offline
+# worker spawns coexist unchanged; the merge adds no new site.
+# 641 + K-10 M4 -> 643 (measured by zeroing this row) on the merge of main
+# into #556: S-14 M8's two test-only sites and K-10 M4's two test-only
+# offline worker spawns coexist unchanged; the merge adds no new site.
+# E0 removes the direct full-scan spawn and process-local retry spawn; the bounded-process cancellation fixture adds one retained test task.
+# E0 subtitles remove the independent foreground analysis heartbeat task;
+# the retained common job heartbeat owns that lifetime.
+# 644 + S-14 M8 -> 646 (measured by zeroing this row) on the merge of main
+# into #553 after #556: S-04 M2's three, S-14 M8's two test-only and K-10
+# M4's two test-only sites coexist unchanged; the merge adds no new site.
+# main @ d95503c25 has 647; with S-04 M2's three -> 650 (measured by zeroing this row)
+# on the merge of main into #553 after #532 and #563; the merge adds no new site.
+# Combined E0 and S-04 M2 ownership sites; neither parent is discarded.
+# E1 artwork adds one daemon-owned durable consumer; no request spawns an encoder.
+# E0 HTTP scan fixtures retain a consumer handle and abort it on teardown.
+# E1 cache copies: one daemon consumer owns joined transfer/cancellation;
+# request/body deadlines and pressure polling are bounded by that consumer.
+# The response status inspection launches no process.
+# E1 copy-body regression owns one local HTTP server and aborts/joins it.
+# E2 adds one daemon-owned leaf-probe consumer; bounded subprocesses are reaped before admission release.
+# E2 integrity adds one daemon-owned consumer; all admitted reads finish before release.
+# E2 integration retains and counts both E1/S-14 and the admitted analysis/integrity owners.
+# E3: bounded peer-ingest/read/recovery deadlines and retained two-node test server.
+# E3 final-review regression retains and joins the production DVR loop; its bounded wait proves reconciliation completed.
+# main @ 86f2e870a has 660; with the S-14 M8 control group's +1 reviewed below (the
+# production-constructor handle in `rolling_control_group_shipped_shape`; the 47 renamed
+# `::spawn_for_test(` sites stay counted through the alias) -> 661, measured by zeroing
+# this row on the merge of main into #573. Main's additions and this branch's coexist
+# unchanged; the merge adds no new site.
+# 661 -> 663 with the #573 review round (finding 1), measured from the validation unittests'
+# actual count, both test-only in `actor_wakes_the_executor_before_its_command_settles`: its
+# `RollingControlHandle::spawn_for_test(` (the actor and passive executor, which exit when the
+# test drops its handle) and the `tokio::spawn` that sends the decision install while the test
+# holds the actor, awaited before the test goes on. No production spawn; neither owns a
+# producer, a process or a recipe decision.
+# 660 -> 662 with the loaded-runner flake fixes (`fix/loaded-runner-flakes`),
+# measured by zeroing this row. Both test-only: the 1 Hz settings-observer
+# loop `the_producer_answers_only_once_two_segments_are_listed` now runs as
+# `start_path_fixture` does (it holds only a `Weak` manager, ends with it, and
+# is aborted at the end of the test), and the four `std::thread::spawn`
+# forkers of `a_fixture_executes_at_once_while_other_threads_fork` in
+# main.rs, each joined before the test returns. Neither owns a producer.
+# Merge of main @ 319569b6a (#573, 663) into `fix/loaded-runner-flakes` (662):
+# 665 measured by zeroing this row. Both sets retained unchanged (main's +3 and
+# this branch's +2, all test-only, reviewed above); the merge adds no new site.
+# 663 -> 668 with S-14 M8 (`Rendition`, VOD `Shared`), measured from the validation unittests'
+# actual count, all test-only and each awaited by its test: `tokio::spawn` of the attach in
+# `rendition_install_point_precedes_admission`, of the purge in
+# `dormant_purge_point_precedes_producer_termination`, and of the blocked segment GET in
+# `segment_ready_point_precedes_the_file_open` and `vod_shared_shipped_shape`; and
+# `tokio::task::spawn_blocking` of `rendition_shipped_shape`'s wall-clock belief wait. None owns
+# a producer, a process or a recipe decision.
+# Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 670 measured by zeroing this
+# row. Both sets retained unchanged (main's and this branch's, reviewed above); the merge
+# adds no new site.
+# PR #537 current-main integration: measured after replacing the temporary
+# owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
+expected_occurrences = 669
+# E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
+# 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: +7 in `seam_hooks.rs` (the two
+# `std::thread::spawn` wall-clock bound timers of the test-only `AsyncPause`,
+# which only sleep and then flip a watch value, and five `tokio::spawn`s in
+# its own tests, each joined or finished before the test returns) and -3 in
+# `vod/tests/chunk_03.rs` (the three spawned `Barrier` observers the
+# `Encoding` admission tests no longer need). Test-only; none owns a producer,
+# a process or a recipe decision.
+# main @ `d4fa763c7` has 650; with S-14 M8's +4 (above) -> 654, measured by zeroing this row
+# on the merge of main into #562. Main's additions and this branch's coexist unchanged; the merge adds no new site.
+# main @ 1d70a1fed has 649; with S-14 M8's +4 reviewed above -> 653, measured by zeroing this row
+# on the merge of main into #562. Main's E0 fixtures and this branch's coexist unchanged; the merge adds no new site.
+# S-14 M8 control group: the pattern also matches `::spawn_for_test(`, the
+# test constructor that builds a `RollingControlHandle` with the test hooks.
+# It spawns the same actor task and passive executor as the production
+# `spawn`, so the 47 test call sites renamed from `::spawn(` stay counted
+# here. The prepublication test constructors
+# (`spawn_prepublication_producer_for_test`,
+# `spawn_prepublication_transcode_for_test`) are not matched, as their
+# production names were not; without the alias the count would have fallen to 607 while the tasks
+# stayed. 653 -> 654: `rolling_control_group_shipped_shape` builds one handle
+# through the production `RollingControlHandle::spawn`; the handle is dropped
+# and its actor exits through the exit fence before the test returns.
 # PR #537: +1 guide_replica_loop spawn in main. It belongs to the existing
 # background shutdown token, copies sanitized guide state, and starts no
 # media process or tuner transport. Reviewed with the cluster resource change.
-expected_occurrences = 642
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2129,6 +2294,8 @@ expected_occurrences = 642
 
 [[module_structures]]
 id = "method-spawn"
+# Durable queue removes the state.rs fragment JoinSet launcher. The common
+# consumer now awaits each admitted execution and owns its fence through reap.
 pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # +4 M5b: the JoinSet-owned leased file worker and three bounded subprocess or
 # blocking-I/O owners. Each is awaited, cancellation-bound, or deliberately
@@ -2228,7 +2395,34 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # aborted at the census budget and dropped (aborting any stragglers) when it
 # returns. Each task awaits one bounded, ChildWork-launched ffmpeg that is
 # killed on drop. No rolling-producer owner.
-expected_occurrences = 47
+# 47 -> 48 (measured) with S-04 M2: `handle.spawn_blocking(remove)` in
+# `fontenv::release` (moved there from `FontEnvironment::drop` by #553's review
+# round, count unchanged; it is now also reached from the capture guard
+# `Owned`'s drop), which removes a released or abandoned environment's
+# directory off the runtime worker. Fire-and-forget by design (a drop cannot await);
+# the removal is idempotent, holds no permit, and a removal that never runs
+# is covered by the next process's sweep. It owns no producer or process.
+# main @ d95503c25 has 46; with S-04 M2's one -> 47 (measured by zeroing this row)
+# on the merge of main into #553 after #532 and #563; the merge adds no new site.
+# 47 -> 48 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: the `sleep 60` child `head_child_owner_shipped_shape`
+# starts so the production `HeadChildOwner::new` has a process to reap.
+# main @ `d4fa763c7` has 47; with S-14 M8's +1 (above) -> 48, measured by zeroing this row
+# on the merge of main into #562. Main's additions and this branch's coexist unchanged; the merge adds no new site.
+# 48 -> 49 with the loaded-runner flake fixes (`fix/loaded-runner-flakes`),
+# measured by zeroing this row: `write_test_executable` in main.rs spawns the
+# `/bin/sh` child that writes a test fixture, feeds it the fixture on stdin and
+# waits for it with `wait_with_output` before returning. Test-only
+# (`cfg(all(test, unix))`); it owns no producer and outlives nothing.
+# 48 -> 49 with S-14 M8 (VOD `Shared`), measured from the validation unittests' actual count:
+# the `.spawn()` of `dormant_purge_point_precedes_producer_termination`'s fake `sleep 60`
+# producer, test-only, `kill_on_drop`, attached to the rendition's slot and reaped by the
+# production dormant-purge settlement owner the test drives.
+# Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 50 measured by zeroing this row.
+# Both +1s retained unchanged (main's `write_test_executable` child and this branch's fake
+# dormant producer, reviewed above); the merge adds no new site.
+expected_occurrences = 50
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2245,6 +2439,14 @@ expected_occurrences = 10
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# Durable queue: background_jobs.rs adds four claim/heartbeat lease timers and
+# three bounded fixture waits (+7); ffmpeg replaces timeout with sleep and adds
+# three fixture waits (+3); fragindex removes two outer waits in favor of the
+# cancellable collector and awaited reap (-2). Developer observations add two
+# bounded read timeouts (+2). state replaces two heartbeat timers with two
+# consumer pacing sleeps and one cancellation poll (+1). produce adds one
+# offline join poll bounded by its existing deadline (+1). No recovery owner
+# is added: ActiveJob owns leases and the existing producer owns media.
 pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
 # 503 since settle_producer_flow_signal_before joined
 # request_producer_flow_before: two tokio::time::timeout_at calls, each
@@ -3004,6 +3206,22 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # and the zero-length `tokio::time::timeout` in the `#[cfg(test)]`
 # `OfflineManager::take_wake` probe, which only asks whether a wake permit is
 # stored. No production timer.
+# 1009 -> 1011 (measured) with S-04 M2, both test-only: the two
+# `tokio::time::sleep` waits in
+# `fontenv::tests::recipes_frozen_from_one_closure_share_it_until_the_last_is_released`
+# (one fixed 100 ms settle, one 20 ms poll bounded by a 10 s deadline) while
+# the environment's directory removal runs on the blocking pool. No
+# production timer.
+# 1011 -> 1013 (measured by zeroing this row) with #553's review round, both
+# test-only: the `tokio::time::sleep` poll in `fontenv::tests::environments_left`
+# (20 ms steps under a 10 s deadline, waiting for a refused or abandoned
+# capture's removal on the blocking pool), and the 60 s `tokio::time::timeout`
+# in `a_cancelled_capture_leaves_no_environment_behind` bounding the wait for
+# the paused capture to reach its hook. No production timer.
+# 1009 -> 1010 with S-14 M8 (`AttemptChild`), measured by zeroing this row:
+# one `tokio::time::timeout(` in the test-only `attempt_child_shipped_shape`,
+# bounding (5 s) the wait for the supervisor to publish the reap after the
+# termination request. It is awaited by the test, which fails on expiry.
 # 1009 -> 1012 with K-10 M4 (offline expiry sweep), measured from the
 # validation unittests' actual count, all test-only (virtual clock) in
 # `offline::tests`: the 30-minute idle wait, the 65 s idle wait and the
@@ -3011,13 +3229,111 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # worker's one `tokio::time::sleep(delay)`, now never sleeping past the next
 # 60 s expiry pass on Tokio's clock. No production timer; none paces or
 # bounds a producer.
+# 1013 + K-10 M4 -> 1016 (measured by zeroing this row) on the merge of
+# main into #553: S-04 M2's four test-only waits and K-10 M4's three
+# virtual-clock test waits coexist unchanged; the merge adds no new site.
+# 1010 + K-10 M4 -> 1013 (measured by zeroing this row) on the merge of
+# main into #556: S-14 M8's one test-only timeout and K-10 M4's three
+# virtual-clock test waits coexist unchanged; the merge adds no new site.
+# E0 adds one library playback-pressure timer and three bounded cancellation-fixture observations. Replacing old scan scheduling timers leaves the state.rs total unchanged.
+# E0 adds one bounded Developer worker-authority observation; it owns no work or lease.
+# E0 subtitles add one common-worker idle poll and one physical-pressure
+# observation. Both remain inside the worker that joins its child on loss.
+# 1016 + S-14 M8 -> 1017 (measured by zeroing this row) on the merge of
+# main into #553 after #556: S-14 M8's one test-only timeout joins S-04
+# M2's four and K-10 M4's three test waits; the merge adds no new site.
+# main @ d95503c25 has 1025; with S-04 M2's four -> 1029 (measured by zeroing this row)
+# on the merge of main into #553 after #532 and #563; the merge adds no new site.
+# Combined E0 and S-04 M2 ownership sites; neither parent is discarded.
+# E1 replaces the request resize timeout with the joined collector; adds worker idle/preemption observations and a bounded cancellation regression.
+# E1 cache copies: one daemon consumer owns joined transfer/cancellation;
+# request/body deadlines and pressure polling are bounded by that consumer.
+# The response status inspection launches no process.
+# E1 copy-body regression bounds cancellation completion with one timeout.
+# E2 semantic work adds one bounded pressure observation; the consumer joins CPU inference before release.
+# E2 adds a probe idle poll, pressure observation and coordinator result wait, all bounded by their owner.
+# E2 admitted integrity worker owns its bounded read window and idle wait.
+# E2 integration retains and counts both E1/S-14 and the admitted analysis/integrity owners.
+# E3: bounded peer-ingest/read/recovery deadlines and retained two-node test server.
+# E3 final-review regression retains and joins the production DVR loop; its bounded wait proves reconciliation completed.
+# E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
+# virtual-clock test waits coexist unchanged; the merge adds no new site.
+# 1013 -> 1021 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: +4 `tokio::time::timeout`s bounding the shipped-shape
+# tests (`encoding_shipped_shape`, `head_child_owner_shipped_shape`,
+# `vod_serving_admission_shipped_shape` twice), -3 bounds the old barrier
+# observers needed, and +7 in `seam_hooks.rs` (the two `std::thread::sleep`
+# bound timers of the test-only `AsyncPause` and five bounds and one paused-
+# clock sleep in its own tests). Test-only; no production timer.
+# main @ `d4fa763c7` has 1029; with S-14 M8's +8 (above) -> 1037, measured by zeroing this row
+# on the merge of main into #562. Main's additions and this branch's coexist unchanged; the merge adds no new site.
+# main @ 1d70a1fed has 1036; with S-14 M8's +8 reviewed above -> 1044, measured by zeroing this row
+# on the merge of main into #562. Main's E0 sites and this branch's coexist unchanged; the merge adds no new site.
+# 1013 -> 1015 with C-08 M5 row 4 (start outcomes), measured by zeroing this
+# row on the merge of main into #559: both new sites are test-only in
+# `http::tests`: the 5 ms `tokio::time::sleep` that polls for
+# `note_playback_started`'s detached task to open the attempt, and the 20 ms
+# sleep that separates the attempt's open from the progress beat that must
+# refresh it. No production timer: the start ledger's deadline is swept from
+# `Instant` comparisons on ledger operations and on the /metrics scrape,
+# never by a timer.
+# main @ d4fa763c7 has 1029; with C-08 M5 row 4's two test-only sleeps
+# reviewed above -> 1031 (measured by zeroing this row) on the merge of
+# main into #559; the merge adds no new site.
+# main @ 1d70a1fed has 1036; with C-08 M5 row 4's two test-only sleeps reviewed above -> 1038,
+# measured by zeroing this row on the merge of main into #559; main's E0 sites and this
+# branch's coexist unchanged; the merge adds no new site.
+# main @ c61bb6409 (S-14 #562) has 1044; with C-08 M5 row 4's two test-only sleeps reviewed above
+# -> 1046, measured by zeroing this row on the merge of main into #559; S-14's sites and this
+# branch's coexist unchanged; the merge adds no new site.
+# main @ 82df7f59e (#572) has 1063; with C-08 M5 row 4's two test-only sleeps reviewed above
+# -> 1065, measured by zeroing this row on the merge of main into #559; #572's E1-E3 sites and
+# this branch's coexist unchanged; the merge adds no new site.
+# 1044 -> 1049 with S-14 M8: four `tokio::time::timeout` bounds in
+# `rolling_control_group_shipped_shape` (the attempt, the decision install,
+# the terminal command and the exit fence's retirement) and one in
+# `started_session_cleanup_shipped_shape` (the race test's one-second bound on
+# reacquiring the replacement gate). All are test-side bounds; no production
+# timer was added.
+# main @ 86f2e870a has 1065; with the S-14 M8 control group's +5 test-only bounds reviewed
+# above -> 1070, measured by zeroing this row on the merge of main into #573; the merge adds
+# no new site.
+# 1065 -> 1072 with the loaded-runner flake fixes (`fix/loaded-runner-flakes`),
+# measured by zeroing this row, all test-only or `cfg(test)`:
+# live_tv.rs +5 — the two-segments test's hang-guard sleep in its `select!`
+# and its settings-observer's 1 s sleep, the `linger_after_warm_reap` seam's
+# 5 ms poll and 500 ms linger (compiled only under test, run only when a test
+# sets the flag), and the start timeout of
+# `a_warm_restart_holds_its_tuner_seat_through_a_slow_reap`;
+# transcode/tests/chunk_05.rs +2 — `wait_for_stand_in`'s 30 s guard and 5 ms
+# poll. The fixed 700 ms/2 s waits these tests replaced became guard constants
+# at the same sites, so they are not counted twice. None owns a producer, a
+# process or a recovery decision.
+# Merge of main @ 319569b6a (#573, 1070) into `fix/loaded-runner-flakes` (1072):
+# 1077 measured by zeroing this row. Both sets retained unchanged (main's +5 and
+# this branch's +7, all test-only, reviewed above); the merge adds no new site.
+# 1070 -> 1075 with S-14 M8 (`Rendition`, VOD `Shared`), measured from the validation
+# unittests' actual count, all test-side: -2 in `http/hls/tests/chunk_01.rs` (the two
+# `tokio::time::timeout` bounds on the VOD detach Barrier waits; the AsyncPause that replaces
+# them is bounded itself); +2 five-second bounds in `rendition_install_point_precedes_admission`
+# and `dormant_purge_point_precedes_producer_termination`; +5 in `vod/tests/chunk_03.rs`:
+# `rendition_shipped_shape`'s `std::thread::sleep` inside its wall-clock belief wait,
+# `vod_shared_shipped_shape`'s three bounds (the Store route read, the wait registration, the
+# GET) and `segment_ready_point_precedes_the_file_open`'s bound on the GET. No production timer
+# was added.
+# Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 1082 measured by zeroing this
+# row. Both sets retained unchanged (main's and this branch's, reviewed above); the merge
+# adds no new site.
+# PR #537 current-main integration: measured after replacing the temporary
+# owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
+expected_occurrences = 1088
 # PR #537: +13 bounded transport/finalizer lease waits, guide replica polling
 # and release, worker readiness/snapshot bounds. Transport/finalizer futures
 # belong to the operation's cancellation scope; replica polling ends on the
 # daemon shutdown token. None independently selects or starts a producer.
 # The slow-sink regression switches two existing observations from std to
 # Tokio time; the inventory counts both, so no constructor is added.
-expected_occurrences = 1025
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3026,11 +3342,19 @@ expected_occurrences = 1
 
 [[module_structures]]
 id = "tokio-time-import"
+# Durable queue imports Instant in background_jobs.rs for the monotonic claim
+# deadline. It does not introduce a separate timer or recovery authority.
 pattern = "use\\s+tokio::time"
-expected_occurrences = 1
+# E1 cache copies: one daemon consumer owns joined transfer/cancellation;
+# request/body deadlines and pressure polling are bounded by that consumer.
+# The response status inspection launches no process.
+expected_occurrences = 3
 
 [[module_structures]]
 id = "process-command-construction"
+# Durable queue adds two test-only shell children, in background_jobs.rs and
+# ffmpeg.rs. Both run through the production cancellable collector; tests await
+# the collector and verify ESRCH before releasing their retained admission.
 pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # +2: the two HDR10 boot probes in `ffmpeg.rs`
 # (`has_hdr10_passthrough`, `has_hdr10_passthrough_qsv`). Both are one-shot
@@ -3293,10 +3617,45 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # x265 fixture encode, its concat mux, the framemd5 decode and the production
 # copy pipe. Each is collected by testfixtures::run or Command::output before
 # its temporary directory drops. No detached owner.
-expected_occurrences = 188
+# 188 -> 191 (measured) with S-04 M2. One production: `fontenv::build`'s
+# `tokio::process::Command::new(program)`, which constructs the capture-time
+# `fc-conflist` and `fc-list` under the frozen environment's variables and,
+# since #553's review round (count unchanged; its `fc-cache` construction was
+# removed), the one-frame probe burn with the recipe's own encoder; each goes
+# through `ffmpeg::font_probe_output` (the bounded,
+# job-owned engine probe with its 30 s budget), is reaped there, and runs once
+# per recipe capture, never per segment. Two test-only: `fontenv::tests::fc`'s
+# `std::process::Command::new(tool)` for the Fontconfig tools, and the ffmpeg
+# glyph render in
+# `a_frozen_host_environment_matches_and_renders_like_the_live_one`; both
+# `.output()`, waited to completion. The live enumeration's `fc-conflist`
+# construction moved within `font_render_engine_inner`; it is not new.
+# main @ d95503c25 has 190; with S-04 M2's three -> 193 (measured by zeroing this row)
+# on the merge of main into #553 after #532 and #563; the merge adds no new site.
+# 188 -> 189 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: the `sleep 60` child of
+# `head_child_owner_shipped_shape`; test-only, reaped by the owner under test.
+# main @ `d4fa763c7` has 193; with S-14 M8's +1 (above) -> 194, measured by zeroing this row
+# on the merge of main into #562. Main's additions and this branch's coexist unchanged; the merge adds no new site.
+# 194 -> 197 with the loaded-runner flake fixes (`fix/loaded-runner-flakes`),
+# measured by zeroing this row, all in main.rs and test-only: the `/bin/sh`
+# child `write_test_executable` writes each fixture through (waited to
+# completion), and in `a_fixture_executes_at_once_while_other_threads_fork`
+# the `/bin/true` forkers and the fixture it executes, both `.status()`,
+# waited to completion.
+# 194 -> 195 with S-14 M8 (VOD `Shared`), measured from the validation unittests' actual
+# count: `dormant_purge_point_precedes_producer_termination` builds one test-only
+# `tokio::process::Command::new("sleep")`, the fake producer the settlement owner reaps.
+# Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 198 measured by zeroing this
+# row. Both sets retained unchanged (main's and this branch's, reviewed above); the merge
+# adds no new site.
+expected_occurrences = 198
 
 [[module_structures]]
 id = "process-capable-launch-method"
+# Durable queue removes state.rs JoinSet.spawn for the fragment worker. This
+# is the same removed task counted by method-spawn, not an OS child.
 pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +2 for the Android-DV boundary regressions: one test-only finite FFmpeg
 # `.output()` described by the command-construction entry, plus one Axum
@@ -3688,7 +4047,50 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Command::output calls (framemd5 decode, production copy pipe) that collect
 # finite fixture children. The census's own ffmpeg starts through
 # process::bounded::output with ChildWork::realtime.
-expected_occurrences = 389
+# 389 -> 391 (measured) with S-04 M2, both test-only: the `.output()` of
+# the two commands described under `process-command-construction` above
+# (`fontenv::tests::fc` and the glyph render). Same children, counted once in
+# each sentinel; each is spawned, drained and reaped in one call.
+# main @ d95503c25 has 388; with S-04 M2's two -> 390 (measured by zeroing this row)
+# on the merge of main into #553 after #532 and #563; the merge adds no new site.
+# E1 cache copies: one daemon consumer owns joined transfer/cancellation;
+# request/body deadlines and pressure polling are bounded by that consumer.
+# The response status inspection launches no process.
+# 389 -> 390 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: the `.spawn()` of that same test child.
+# main @ `d4fa763c7` has 390; with S-14 M8's +1 (above) -> 391, measured by zeroing this row
+# on the merge of main into #562. Main's additions and this branch's coexist unchanged; the merge adds no new site.
+# E1 plus S-14 M8: both reviewed fixture ownership sets retained.
+# E2 integration retains and counts both E1/S-14 and the admitted analysis/integrity owners.
+# E3: bounded peer-ingest/read/recovery deadlines and retained two-node test server.
+# 389 -> 396 with C-08 M5 row 4 (start outcomes), measured from the
+# validation unittests' actual count: seven `Response::status()` reads in
+# the three start-outcome handler tests (`http::tests`), HTTP status codes on
+# in-process `oneshot` responses. No child process, no producer, nothing to
+# own.
+# main @ d4fa763c7 has 390; with C-08 M5 row 4's seven test-only
+# `Response::status()` reads reviewed above -> 397 (measured by zeroing this
+# row) on the merge of main into #559; the merge adds no new site.
+# main @ c61bb6409 (S-14 #562) has 391; with C-08 M5 row 4's seven test-only `Response::status()`
+# reads reviewed above -> 398, measured by zeroing this row on the merge of main into #559;
+# S-14's test child and this branch's reads coexist unchanged; the merge adds no new site.
+# main @ 82df7f59e (#572) has 395; with C-08 M5 row 4's seven test-only `Response::status()`
+# reads reviewed above -> 402, measured by zeroing this row on the merge of main into #559;
+# #572's owners and this branch's reads coexist unchanged; the merge adds no new site.
+# 402 -> 405 with the loaded-runner flake fixes (`fix/loaded-runner-flakes`),
+# measured by zeroing this row: the same three main.rs test-only children as
+# process-command-construction — `write_test_executable`'s `.spawn()` (fed and
+# waited with `wait_with_output`), and the forkers' and fixture's `.status()`,
+# each waited to completion. No producer, nothing left running.
+# 402 -> 403 with S-14 M8 (VOD `Shared`), measured from the validation unittests' actual
+# count: the same test-only fake producer's `.spawn()`.
+# Merge of main @ 7a4133860 (#577) into `plan/S-14-7`: 406 measured by zeroing this
+# row. Both sets retained unchanged (main's and this branch's, reviewed above); the merge
+# adds no new site.
+# PR #537 current-main integration: measured after replacing the temporary
+# owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
+expected_occurrences = 404
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -3702,6 +4104,9 @@ expected_occurrences = 0
 
 [[module_structures]]
 id = "process-lifecycle-method"
+# Durable queue adds start_kill and an awaited wait to the ffmpeg collector.
+# Cancellation/expiry retains the child job and caller admission until reap;
+# the normal completion wait remains. There is no second process owner.
 pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # +3: the bounded chapter probe kills and reaps oversized output, and reaps
 # ordinary completion. Cancellation/deadline drops the kill-on-drop child.
@@ -3857,10 +4262,52 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # 405 measured by zeroing this row after merging `origin/main` at
 # `4b112204b` into S-14 M8 (#543): main's 404, reviewed above, plus this
 # branch's one reviewed test-only call.
-expected_occurrences = 405
+# 405 -> 406 (measured) with S-04 M2, test-only: the `.wait()` that reaps
+# the `fc-list` child `a_frozen_environment_names_only_the_captured_fonts`
+# launches through `producer_spawn::spawn`, after its stdout is read.
+# 405 -> 397 with the review round of S-14 M8 (#556, finding 1), measured by
+# zeroing this row. All eight removed calls were `std::sync::Barrier::wait`,
+# in-process test synchronization and never a child-process call: the two
+# per fence point in `AttemptChildPauses` (four) and the two per race test in
+# `producer_signal_and_retirement_share_one_authorization_linearization` and
+# `actor_task_exit_fences_a_reserved_signal_and_cleanup_still_progresses`
+# (four). Their bounded replacement (`SupervisorPause::hold` /
+# `wait_reached` and a release guard) waits through `Condvar::wait_timeout_while`,
+# which this pattern does not match. No production lifecycle call changed.
+# 397 + S-04 M2 -> 398 (measured by zeroing this row) on the merge of main
+# into #553 after #556: S-14 M8's review round removed eight Barrier waits,
+# and S-04 M2's one test-only fc-list reap remains; no new site.
+# main @ d95503c25 has 399; with S-04 M2's one -> 400 (measured by zeroing this row)
+# on the merge of main into #553 after #532 and #563; the merge adds no new site.
+# 397 -> 373 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: net -24. 25 `Barrier::wait` calls the five seams and their
+# race tests made are gone (the pauses are now `AsyncPause::hold`/`reached`),
+# and one `cleanup.wait()` (`TerminalCleanup::wait`, not a process call) is
+# added by `terminal_cleanup_shipped_shape`. No process lifecycle call was
+# added or removed.
+# main @ `d4fa763c7` has 400; with S-14 M8's -24 (above) -> 376, measured by zeroing this row
+# on the merge of main into #562. Main's additions and this branch's coexist unchanged; the merge adds no new site.
+# 376 -> 352 with S-14 M8 (net -24, all `Barrier::wait` calls removed): the
+# executor's two pauses (two waits each) and the deferred attempt reply's
+# pause (two waits) left the production functions for the control group's
+# hooks, and nine race tests (six in `playback_control.rs`, one in
+# `transcode/tests/chunk_04.rs`, two in `chunk_06.rs`) moved from Barrier
+# pairs to `seam_hooks::AsyncPause` (two waits each). No kill, wait or reap of
+# a process changed.
+# 352 -> 325 with S-14 M8 (`Rendition`, VOD `Shared`; net -27, all `Barrier::wait` calls
+# removed), measured from the validation unittests' actual count: the VOD registry's six
+# pauses left the production functions (`vod/serve/control.rs` -4, `end.rs` -2, `serve.rs` -3,
+# `vod/shared.rs` -4) for `VodSharedHooks`, and their race tests moved from Barrier pairs to
+# `seam_hooks::AsyncPause` (`vod/tests/chunk_02.rs` -4, `chunk_03.rs` -8,
+# `http/hls/tests/chunk_01.rs` -2). No kill, wait or reap of a process changed.
+expected_occurrences = 325
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
+# Durable queue adds two test-only libc::kill(pid, 0) observations, one in
+# background_jobs.rs and one in ffmpeg.rs. They send no signal; ESRCH proves
+# the production collector reaped the child before returning capacity.
 pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe)|(?<![:.\\w])(?:kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe))\\s*\\("
 # 32 -> 33 with M1: `libc::kill` targets the negative process-group id on
 # cancellation or timeout so descendants inheriting the held media descriptor
@@ -3901,7 +4348,20 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # `libc::execv` from inside a `pre_exec`, which reproduces the decode-fact
 # probe's exec-from-`pre_exec` to show that a priority registered after it
 # never runs. The child is owned by `spawn_job_owned` and killed on drop.
-expected_occurrences = 50
+# E0 adds one test-only kill(pid, 0) observation proving cooperative cancellation reaped its bounded child before returning.
+# E1 cancellation regression probes the fixture PID after the encoder has been joined; it owns no surviving child.
+# 50 -> 51 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: the `libc::kill(pid, 0)` in
+# `head_child_owner_shipped_shape` that proves the production reaper reaped
+# its child (signal 0 sends nothing).
+# main @ `d4fa763c7` has 52; with S-14 M8's +1 (above) -> 53, measured by zeroing this row
+# on the merge of main into #562. Main's additions and this branch's coexist unchanged; the merge adds no new site.
+# main @ 1d70a1fed has 53 (E0's kill(pid, 0) above); with S-14 M8's +1 reviewed above -> 54, measured by
+# zeroing this row on the merge of main into #562. Both test-only observations coexist; the merge adds no new site.
+# E1 plus S-14 M8: both reviewed fixture ownership sets retained.
+# E2 integration retains and counts both E1/S-14 and the admitted analysis/integrity owners.
+expected_occurrences = 55
 
 [[module_structures]]
 id = "kill-on-drop-construction"
@@ -3999,7 +4459,12 @@ pattern = "kill_on_drop\\s*\\("
 # 87 -> 89 with P-02 M3 (measured). Test-only: the priority tests' re-exec
 # sleeper and the Activity HTTP test's `sleep 300` child are `kill_on_drop`,
 # so a failed assertion cannot strand either.
-expected_occurrences = 89
+# 89 -> 90 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
+# `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
+# zeroing this row: the `kill_on_drop(true)` of that same test child.
+# 90 -> 91 with S-14 M8 (VOD `Shared`), measured from the validation unittests' actual count:
+# the same test-only fake producer is `kill_on_drop(true)`.
+expected_occurrences = 91
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
@@ -4008,7 +4473,11 @@ pattern = "AttemptChild::new(?:_with_job)?\\s*\\("
 # the same two test-only predecessor children.
 # The Windows constructor variant is included because it is the same exact
 # attempt supervisor with an additional retained Job Object guard.
-expected_occurrences = 22
+# 22 -> 23 with S-14 M8 (`AttemptChild`), measured by zeroing this row: the
+# module-wide twin of `supervisor-registration`, and the same one test-only
+# `new_with_job(` in `attempt_child_shipped_shape`, which reaps its own fixture
+# child before returning.
+expected_occurrences = 23
 
 [[module_structures]]
 id = "forbidden-timer-or-task-alias"

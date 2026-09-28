@@ -11,6 +11,7 @@ pub mod home;
 pub mod nfo;
 pub mod parse;
 pub mod probe;
+mod probe_batch;
 pub mod recordings;
 
 use std::collections::{BTreeMap, HashSet};
@@ -24,6 +25,14 @@ use walkdir::WalkDir;
 use crate::domain::{Item, ItemKind, Library, LibraryKind, MetadataPatch, NewItem, ProbeResult};
 use crate::error::{ProbeError, StoreError};
 use crate::store::{PublicationStore, ReconcileOutcome, RootFingerprintStatus, Store};
+
+/// A cancelled census must never reach reconcile, even if its last page was
+/// empty. Blocking walkers and bounded probe children are joined by their
+/// owners before this error reaches the caller's admission guard.
+fn check_scan_cancellation() -> Result<(), StoreError> {
+    crate::process::bounded::check_cancellation()
+        .map_err(|error| StoreError::Task(error.to_string()))
+}
 
 const WALK_PAGE: usize = 256;
 const WALK_PAGES_IN_FLIGHT: usize = 4;
@@ -81,11 +90,18 @@ fn spawn_walker_with_entry_hook<F>(
 where
     F: Fn() + Send + 'static,
 {
+    let cancellation = crate::process::bounded::cancellation();
     let (tx, rx) = tokio::sync::mpsc::channel(WALK_PAGES_IN_FLIGHT);
     let handle = tokio::task::spawn_blocking(move || {
         let mut page = Vec::with_capacity(WALK_PAGE);
         let mut last_root = None;
         for root in roots {
+            if cancellation
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
+            {
+                return;
+            }
             last_root = Some(root.clone());
             if !root.is_dir() {
                 page.push(WalkEvent::RootNotDirectory(root.clone()));
@@ -96,7 +112,11 @@ where
                     // subtitles/documents tree may produce no page at all; only
                     // checking `blocking_send` would keep walking that tree after
                     // the scan and its lease were gone.
-                    if tx.is_closed() {
+                    if tx.is_closed()
+                        || cancellation
+                            .as_ref()
+                            .is_some_and(|token| token.is_cancelled())
+                    {
                         tracing::warn!(
                             path = %root.display(),
                             "walker orphaned: consumer gone before walk finished"
@@ -303,7 +323,7 @@ pub const TEXT_BOOK_EXTS: &[&str] = &["epub", "pdf", "mobi", "azw", "azw3", "fb2
 /// walk failures`. It deliberately overlaps the record buckets, and the fields
 /// below let the UI show *which* — "2 added (2 incomplete)" rather than "2
 /// added … 2 errors" with no stated relationship between the two numbers.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ScanReport {
     pub added: usize,
     pub updated: usize,
@@ -365,7 +385,7 @@ pub struct ScanReport {
 ///
 /// Returned by the targeted scan so the caller can act on the result instead
 /// of polling to find out what happened.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlacedFile {
     pub item_id: i64,
     pub file_id: i64,
@@ -373,7 +393,7 @@ pub struct PlacedFile {
 }
 
 /// One folder's skipped files, collapsed into a single reportable row.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SkipGroup {
     /// The folder the files sit under — the show directory, not the release
     /// subfolder. Grouping any deeper reproduces the per-file list one level
@@ -468,44 +488,76 @@ pub async fn reprobe_files_with_publication(
     files: &[crate::domain::MediaFile],
 ) -> Result<ReprobeReport, StoreError> {
     let mut report = ReprobeReport::default();
-    for file in files {
-        report.attempted += 1;
-        let path_str = file.path.to_string_lossy().into_owned();
-        // Re-stat rather than trusting the stored size/mtime: if the file has
-        // changed since, the fresh values are what belong in the record.
-        let (size, mtime) = match file_stat(&file.path).await {
-            Ok(stat) => stat,
-            Err(e) => {
-                report.gone += 1;
-                tracing::warn!(path = %path_str, error = %e, "cannot stat file during re-probe");
-                report.problems.push(format!(
-                    "`{path_str}` could not be read at all: {e} — check that the path still \
+    let pipeline = probe::pipeline_digest().await;
+    for batch in files.chunks(128) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+        let pending = probe_batch::enqueue(store, batch, pipeline.as_deref()).await?;
+        // Complete admitted leaves before any legacy local work in this page.
+        let ordered = batch
+            .iter()
+            .filter(|file| pending.contains_key(&file.id))
+            .chain(batch.iter().filter(|file| !pending.contains_key(&file.id)));
+        for file in ordered {
+            check_scan_cancellation()?;
+            report.attempted += 1;
+            let path_str = file.path.to_string_lossy().into_owned();
+            // Re-stat rather than trusting the stored size/mtime: if the file has
+            // changed since, the fresh values are what belong in the record.
+            let (size, mtime) = match file_stat(&file.path).await {
+                Ok(stat) => stat,
+                Err(e) => {
+                    report.gone += 1;
+                    tracing::warn!(path = %path_str, error = %e, "cannot stat file during re-probe");
+                    report.problems.push(format!(
+                        "`{path_str}` could not be read at all: {e} — check that the path still \
                      exists and is readable by the plurx user"
-                ));
-                continue;
+                    ));
+                    continue;
+                }
+            };
+            if let Some(job_id) = pending.get(&file.id) {
+                match probe_batch::consume(store, file, job_id, deadline).await? {
+                    Some(true) => {
+                        report.repaired += 1;
+                        continue;
+                    }
+                    Some(false) => {
+                        report.gone += 1;
+                        continue;
+                    }
+                    None => {
+                        report.still_failing += 1;
+                        report.problems.push(format!("`{path_str}`: durable leaf probe failed; inspect background job {job_id}"));
+                        continue;
+                    }
+                }
             }
-        };
-        match probe_with_outcome(&file.path).await {
-            Ok(probe) => {
-                store
-                    .upsert_file(file.item_id, &path_str, size, mtime, &probe)
-                    .await?;
-                report.repaired += 1;
-                tracing::info!(path = %path_str, "media details recovered");
-            }
-            Err(e @ ProbeError::Transient { .. }) => {
-                report.still_failing += 1;
-                tracing::error!(path = %path_str, error = %e, "re-probe did not finish");
-                report.problems.push(format!(
+            match probe_with_outcome(&file.path).await {
+                Ok(probe) => {
+                    if file_stat(&file.path).await.ok() != Some((size, mtime)) {
+                        report.gone += 1;
+                        continue;
+                    }
+                    store
+                        .upsert_file(file.item_id, &path_str, size, mtime, &probe)
+                        .await?;
+                    report.repaired += 1;
+                    tracing::info!(path = %path_str, "media details recovered");
+                }
+                Err(e @ ProbeError::Transient { .. }) => {
+                    report.still_failing += 1;
+                    tracing::error!(path = %path_str, error = %e, "re-probe did not finish");
+                    report.problems.push(format!(
                     "`{path_str}` still has no media details because its probe did not finish: {e}"
                 ));
-            }
-            Err(e) => {
-                report.still_failing += 1;
-                tracing::error!(path = %path_str, error = %e, "re-probe failed");
-                report
-                    .problems
-                    .push(format!("`{path_str}` still has no media details: {e}"));
+                }
+                Err(e) => {
+                    report.still_failing += 1;
+                    tracing::error!(path = %path_str, error = %e, "re-probe failed");
+                    report
+                        .problems
+                        .push(format!("`{path_str}` still has no media details: {e}"));
+                }
             }
         }
     }
@@ -704,6 +756,7 @@ pub async fn scan_library_with_publication_and_prune_limit(
     progress: Option<&ScanProgress>,
     prune_limit: u64,
 ) -> Result<ScanReport, StoreError> {
+    check_scan_cancellation()?;
     let mut report = ScanReport::default();
     let mut seen: HashSet<String> = HashSet::new();
     // Capture the configured path-set identity before walking. A root that
@@ -774,6 +827,7 @@ pub async fn scan_library_with_publication_and_prune_limit(
         .await
         .map_err(|error| StoreError::Task(format!("library walker task failed: {error}")))?;
     candidates.sort();
+    check_scan_cancellation()?;
     observe_scan_phase(&SCAN_PHASE_METRICS.walk, walk_started.elapsed());
 
     if candidates.is_empty() && walk_errors == 0 {
@@ -813,6 +867,7 @@ pub async fn scan_library_with_publication_and_prune_limit(
     // directory unreadable (NAS unmounted, permissions), the files under it
     // are invisible, not deleted, and removing them here would wipe the
     // library's records over a transient mount problem.
+    check_scan_cancellation()?;
     if walk_errors == 0 {
         let known = store.library_file_paths(library.id).await?;
         let known_count = known.len();
@@ -984,7 +1039,7 @@ pub fn library_root_fingerprint(paths: &[std::path::PathBuf]) -> Result<String, 
 }
 
 /// What a targeted scan produced.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TargetedScan {
     pub report: ScanReport,
     pub items: Vec<PlacedFile>,
@@ -1051,6 +1106,7 @@ pub async fn scan_path_with_publication(
     library: &Library,
     target: &Path,
 ) -> Result<TargetedScan, TargetError> {
+    check_scan_cancellation()?;
     let roots: Vec<String> = library
         .paths
         .iter()
@@ -1139,6 +1195,7 @@ pub async fn scan_path_with_publication(
         })?;
     }
     candidates.sort();
+    check_scan_cancellation()?;
     observe_scan_phase(&SCAN_PHASE_METRICS.walk, walk_started.elapsed());
 
     if candidates.is_empty() {
@@ -1237,6 +1294,7 @@ async fn record_candidates(
     let mut skips: BTreeMap<String, SkipGroup> = BTreeMap::new();
 
     for path in candidates {
+        check_scan_cancellation()?;
         if let Some(p) = progress {
             p.processed.fetch_add(1, Ordering::Relaxed);
         }
@@ -1440,6 +1498,7 @@ async fn record_candidates(
             }
         };
 
+        check_scan_cancellation()?;
         let file_id = store
             .upsert_file(item_id, &path_str, size, mtime, &probe)
             .await?;
@@ -1496,6 +1555,7 @@ async fn refresh_audiobook_runtimes(
         .map(|placed| placed.item_id)
         .collect::<std::collections::BTreeSet<_>>();
     for item_id in item_ids {
+        check_scan_cancellation()?;
         let Some(item) = store.get_item(item_id).await? else {
             continue;
         };
@@ -2001,6 +2061,38 @@ mod tests {
             visits.load(Ordering::SeqCst) < 64,
             "cancellation must not wait for a page of matching media"
         );
+    }
+
+    #[tokio::test]
+    async fn cooperative_scan_cancellation_joins_a_sparse_walker() {
+        let dir = tempfile::tempdir().expect("tmp");
+        for index in 0..100 {
+            std::fs::write(dir.path().join(format!("sidecar-{index}.txt")), b"").expect("sidecar");
+        }
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let signal = cancellation.clone();
+        let visits = std::sync::Arc::new(AtomicUsize::new(0));
+        let observed = visits.clone();
+        crate::process::bounded::cancellable(cancellation, async {
+            let (mut pages, walker) = spawn_walker_with_entry_hook(
+                vec![dir.path().to_path_buf()],
+                WalkFilter {
+                    kind: LibraryKind::Movies,
+                },
+                move || {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    signal.cancel();
+                },
+            );
+            while pages.recv().await.is_some() {}
+            walker.await.expect("joined cancelled walker");
+            assert!(
+                check_scan_cancellation().is_err(),
+                "partial census cannot reconcile"
+            );
+        })
+        .await;
+        assert_eq!(visits.load(Ordering::SeqCst), 1);
     }
 
     #[test]

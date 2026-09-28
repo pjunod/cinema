@@ -1,3 +1,4 @@
+use crate::queue_fixture::QueueFixture;
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering::AcqRel};
 
@@ -306,7 +307,7 @@
             .await
             .expect("enqueue"));
         let claimed = sqlite
-            .claim_cluster_fragment_index("node-a", &[], now, now + 60_000)
+            .fixture_claim_cluster_fragment_index("node-a", &[], now, now + 60_000)
             .await
             .expect("claim")
             .expect("claimed job");
@@ -341,7 +342,7 @@
             last_seen_at_ms: now + 1,
         };
         assert!(sqlite
-            .complete_cluster_fragment_index(&claimed, &artifact, &location, now + 1)
+            .fixture_complete_cluster_fragment_index(&claimed, &artifact, &location, now + 1)
             .await
             .expect("publish artifact"));
         let cache = crate::test_tempdir().expect("cluster index cache");
@@ -392,8 +393,10 @@
             .expect("read repair job")
             .expect("the no-holder arm retains a repair job");
         assert_eq!(repair.state, "queued");
-        assert_eq!(repair.priority, "foreground");
-        assert_eq!(repair.trigger, "foreground");
+        // The failed viewer request is no longer a live waiter. Its bounded
+        // automatic repair must leave foreground capacity for active viewers.
+        assert_eq!(repair.priority, "normal");
+        assert_eq!(repair.trigger, "background");
     }
 
     fn fixture_file() -> MediaFile {
@@ -822,10 +825,7 @@
             ahead_hold: AtomicBool::new(false),
             init_notify: Notify::new(),
             wake: Notify::new(),
-            #[cfg(test)]
-            stopped_poll_armed: Notify::new(),
-            #[cfg(test)]
-            stopped_poll_fired: Notify::new(),
+            hooks: Box::new(RenditionTestHooks::default()),
             gen_epoch: AtomicU64::new(0),
             last_child_pid: AtomicU32::new(0),
             dormant_since: StdMutex::new(None),
@@ -2183,28 +2183,61 @@
         panic!("{what} never happened within {deadline:?}");
     }
 
+    /// The race test's hooks: the first waiter past its re-check holds the
+    /// pause; later ones pass through once it is released.
+    struct WaitCheckPause(Arc<crate::seam_hooks::AsyncPause>);
+
+    impl crate::vodserve::session::CleanupWaitHooks for WaitCheckPause {
+        fn after_wait_check(&self) -> crate::seam_hooks::HookFuture<'_> {
+            Box::pin(async move {
+                self.0.hold().await;
+            })
+        }
+    }
+
     #[tokio::test]
     async fn terminal_cleanup_completion_after_wait_registration_is_not_lost() {
-        let cleanup = Arc::new(TerminalCleanup::new());
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *cleanup
-            .wait_enabled_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let pause = crate::seam_hooks::AsyncPause::new("terminal cleanup wait check");
+        let cleanup = Arc::new(TerminalCleanup::with_hooks(Box::new(WaitCheckPause(
+            Arc::clone(&pause),
+        ))));
         let waiter = tokio::spawn({
             let cleanup = Arc::clone(&cleanup);
             async move { cleanup.wait().await }
         });
 
-        // `wait` has enabled its Notified future but has not performed the
-        // state re-check. `notify_waiters` in this exact gap used to vanish.
-        pause.wait().await;
+        // `wait` has re-read the finished flag (still false) and has not yet
+        // awaited its Notified future. A completion in this gap is seen by no
+        // later state read, so only a waiter registered before the re-check
+        // observes it; one registered after the re-check never wakes.
+        let held = pause.reached().await;
         cleanup.complete();
-        pause.wait().await;
+        held.release();
         tokio::time::timeout(Duration::from_millis(250), waiter)
             .await
             .expect("registered terminal waiter must observe completion")
             .expect("terminal waiter task");
+    }
+
+    /// The race test's scenario through the production constructor: the
+    /// no-op hook is ready at once, so the first poll leaves the waiter parked
+    /// on its enabled notification, and the completion in that gap wakes it.
+    /// Polled by hand, no task and no timer.
+    #[test]
+    fn terminal_cleanup_shipped_shape() {
+        use std::future::Future;
+        let cleanup = TerminalCleanup::new();
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut waiter = std::pin::pin!(cleanup.wait());
+        assert!(
+            waiter.as_mut().poll(&mut context).is_pending(),
+            "an unfinished cleanup parks its waiter"
+        );
+        cleanup.complete();
+        assert!(
+            waiter.as_mut().poll(&mut context).is_ready(),
+            "the production hook let the waiter reach its enabled notification"
+        );
     }
 
     #[tokio::test(start_paused = true)]

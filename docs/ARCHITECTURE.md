@@ -198,6 +198,64 @@ playlist.
 Scanner and metadata-refresh jobs are leader-scheduled singletons (distributed
 lock), so three nodes don't triple-hit TMDB or thrash shared storage.
 
+### 2.4 Durable preparation — shared intent, fenced publication
+
+Whole-title preparation and fragment-index construction use the common
+`BackgroundJobStore` on SQLite and Hiqlite. Independent interests share one
+computation identity; cancelling an interest leaves other consumers intact.
+Fragment delivery is a separate node-targeted hydration job, so a builder can
+finish before every consumer is online. Existing offline work can join an
+already-running preparation on the same node when its resolved source and
+recipe match. Completed transcodes and artwork have portable, verified holder
+metadata and node-targeted copies. Hot demand can request a second holder;
+ordinary cache policy retains cold output without copying it everywhere.
+
+Workers reserve physical capacity before claiming and retain it until child
+processes are reaped. The shared claim carries node, boot, claim, fence,
+revision and expiry; renewal cannot transfer ownership. The production lease
+monitor cancels execution at its confirmed monotonic deadline. Publication
+checks the exact claim and current source, then commits domain metadata,
+waiter outcomes and delivery intents atomically. Immutable bytes are renamed
+before that transaction; an uncommitted orphan cannot become a current result.
+
+The queue bounds active work, request receipts and attempt history. Its SQL
+contract and numerical limits live in
+[`background_jobs.rs`](../crates/plurx-core/src/store/background_jobs.rs).
+Idle consumers poll with local jitter and make no empty-queue writes. Metrics
+read cached observations; Activity exposes paged work and attempt history.
+Developer prerequisites are advisory and never veto saving enable preferences.
+
+Library intent and results use the same queue, with the existing catalogue
+lease bound to the exact attempt. Ready learners may execute immutable
+preparation, indexing and hydration through the artifact-only claim interface;
+scans, provider coordination, discovery and outbox admission remain voter work.
+Renewal and publication recheck live execution authority. Named library-root
+storage domains share two reader slots across aliases; unmapped work shares
+the global fallback. Provider requests use a replicated pacing/cooldown ledger
+across library, artwork and genre maintenance. These records participate in
+backup import and the replicated-state digest.
+
+Semantic embedding jobs publish vectors keyed by content and the full model,
+tokenizer, dimensions and normalization identity. Nodes reuse these artifacts
+in their existing local search index; corrupt shared or cached vectors are
+rejected. Pure media probes carry the source snapshot and coordinator fence.
+Workers return facts; only the still-current coordinator applies them.
+
+Transcode and artwork verification use admitted, node-targeted jobs. A bounded
+object page resumes from its durable cursor and yields to playback. Verification
+retires only its observed holder generation. A finite repair plan first tries
+verified copy, then at most one original typed rebuild and delivery. Original
+transcode producer intent survives job-history retirement. Plans, producer
+metadata and cursors use the same replicated Store and backup mapping.
+
+Cutover seals old accepted requests in a finite backlog, drains bounded pages
+without losing capacity-refused work, and removes the old execution APIs.
+Operators must quiesce old workers before conversion; mixed old/new execution
+is not a supported rolling migration. See
+[OPERATIONS.md](OPERATIONS.md#distributed-speculative-production) for operation
+and [the queue contract](cluster/DURABLE-WORK-QUEUE-IMPLEMENTATION.md) for
+failure recovery, retention and extension boundaries.
+
 ## 3. Playback pipeline — get out of the way first
 
 The whole pipeline is built around one belief: the server's best move is to send

@@ -3504,6 +3504,11 @@ pub(crate) struct LiveTvManager {
     /// a `stat` on a stalled mount does.
     #[cfg(test)]
     hang_scratch_scans: AtomicBool,
+    /// Test seam: a warm start that disagreed lingers after reaping its
+    /// FFmpeg, as a slow reap on a loaded host does, until the tuner's
+    /// fan-out has seen that FFmpeg's feed closed and kept going.
+    #[cfg(test)]
+    linger_after_warm_reap: AtomicBool,
     #[cfg(test)]
     scratch_scans_started: AtomicU64,
     /// Test seam: every orphan directory removal started from now on hangs,
@@ -3562,6 +3567,8 @@ impl LiveTvManager {
             withhold_reaps: AtomicBool::new(false),
             #[cfg(test)]
             hang_scratch_scans: AtomicBool::new(false),
+            #[cfg(test)]
+            linger_after_warm_reap: AtomicBool::new(false),
             #[cfg(test)]
             scratch_scans_started: AtomicU64::new(0),
             #[cfg(test)]
@@ -3911,7 +3918,7 @@ impl LiveTvManager {
                 "Run the Live TV readiness check to test the live-TV FFmpeg graph".to_owned(),
             // 3 = client-supplied request ids and the /live-tv/starts/*
             // recovery routes. An ingress intersects this with its own list.
-            start_protocols: vec![1, 2, 3, 4],
+            start_protocols: vec![1, 2, 3, 5],
         })
     }
 
@@ -7122,17 +7129,32 @@ async fn run_live_session_inner(
             scan.abort();
         }
         let terminal = match terminal {
+            Ok(Some(_)) if !transport.reserve_seat() => {
+                Err(transport.terminal_error().unwrap_or_else(|| {
+                    LiveTvError::StreamFailed(
+                        "the shared tuner connection closed before the start could restart".into(),
+                    )
+                }))
+            }
             Ok(Some(probed)) => {
                 // The warm plan was wrong for this tune. Stop the FFmpeg it
                 // started, keep this viewer's seat on the tuner, forget the
                 // cached facts, and start again from the probed ones — the cold
                 // path, inside the same start budget (`session.started` is
                 // unchanged). Nothing was published from the first FFmpeg.
+                //
+                // The seat was reserved (above) before the pump goes. Aborting
+                // the pump drops this viewer's feed, the fan-out closes it at
+                // its next chunk, and a transport with no live consumer and no
+                // seat retires there and then. Reserved only after the reap, as
+                // it once was, any reap slower than one tuner chunk — a loaded
+                // host — handed the restart a closed tuner connection.
                 pump.abort();
                 let _ = pump.await;
                 let _ = child.start_kill();
                 let reaped = tokio::time::timeout(SESSION_DRAIN_TIMEOUT, child.wait()).await;
                 if !matches!(reaped, Ok(Ok(_))) {
+                    transport.release_seat();
                     *session.process.lock().await = Some(LiveTvProcess {
                         child,
                         _job: child_job,
@@ -7144,6 +7166,8 @@ async fn run_live_session_inner(
                             .into(),
                     ));
                 }
+                #[cfg(test)]
+                linger_after_warm_reap(manager, &transport, &session.capability).await;
                 if let Some(stderr) = stderr {
                     stderr.abort();
                     let _ = stderr.await;
@@ -7151,14 +7175,6 @@ async fn run_live_session_inner(
                 // The job goes with this iteration; the encoder admission is
                 // given back now, before the restart asks for its own.
                 drop(admission);
-                if !transport.reserve_seat() {
-                    return Err(transport.terminal_error().unwrap_or_else(|| {
-                        LiveTvError::StreamFailed(
-                            "the shared tuner connection closed before the start could restart"
-                                .into(),
-                        )
-                    }));
-                }
                 session.hold_seat_on(Arc::clone(&transport));
                 transport.detach_viewer(&session.capability);
                 remove_session_directory(&session.directory).await?;
@@ -8363,6 +8379,35 @@ fn input_contradicts_plan(planned: &LiveSourceFacts, input: &LiveTvSourceFormat)
 }
 
 type ScratchScanTask = tokio::task::JoinHandle<Result<Option<ScratchInventory>, LiveTvError>>;
+
+/// The `linger_after_warm_reap` seam: hold a disagreeing warm start between
+/// its FFmpeg's reap and its restart until the transport has closed this
+/// viewer's feed, then for as long again as a slow reap would, so the fan-out
+/// has run many chunks with that viewer gone. Bounded, so a fan-out that
+/// never runs cannot hang the test here.
+#[cfg(test)]
+async fn linger_after_warm_reap(
+    manager: &Weak<LiveTvManager>,
+    transport: &dvr::DvrTransport,
+    capability: &str,
+) {
+    if !manager
+        .upgrade()
+        .is_some_and(|manager| manager.linger_after_warm_reap.load(Ordering::Acquire))
+    {
+        return;
+    }
+    let until = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < until
+        && transport
+            .live_viewers()
+            .iter()
+            .any(|viewer| viewer.capability == capability)
+    {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+}
 
 /// Start one inventory scan of a session's scratch on its own task, so the
 /// session's tick can stop waiting for it without abandoning it.
@@ -9571,6 +9616,12 @@ mod tests {
 
     use super::guide::LiveTvProgramme;
     use super::*;
+
+    /// How long a test waits on an event before calling it a hang. It is not
+    /// a latency promise: a loaded runner can take seconds to schedule the
+    /// fixture processes these tests drive, and the tests assert on what
+    /// happens, not on how quickly.
+    const LIVE_TV_TEST_HANG_GUARD: Duration = Duration::from_secs(60);
 
     async fn serve_once(response: Vec<u8>) -> (reqwest::Url, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -10959,12 +11010,11 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn the_producer_answers_only_once_two_segments_are_listed() {
-        use std::os::unix::fs::PermissionsExt;
         use std::sync::atomic::AtomicUsize;
 
         let root = crate::test_tempdir().expect("lifecycle root");
         let ffmpeg = root.path().join("fake-ffmpeg");
-        std::fs::write(
+        crate::write_test_executable(
             &ffmpeg,
             r#"#!/bin/sh
 for output do playlist="$output"; done
@@ -10978,20 +11028,16 @@ printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENC
 mv "$playlist.tmp" "$playlist"
 exec /bin/cat >/dev/null
 "#,
-        )
-        .expect("fake FFmpeg");
-        std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o755))
-            .expect("executable fake FFmpeg");
+            0o755,
+        );
         let ffprobe = root.path().join("fake-ffprobe");
-        std::fs::write(
+        crate::write_test_executable(
             &ffprobe,
             r#"#!/bin/sh
 printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width":1920,"height":1080,"field_order":"progressive"},{"codec_type":"audio","codec_name":"ac3","channels":2}]}'
 "#,
-        )
-        .expect("fake FFprobe");
-        std::fs::set_permissions(&ffprobe, std::fs::Permissions::from_mode(0o755))
-            .expect("executable fake FFprobe");
+            0o755,
+        );
         let system = SystemInfo {
             ffmpeg: ffmpeg.to_string_lossy().into_owned(),
             ffprobe: ffprobe.to_string_lossy().into_owned(),
@@ -11056,44 +11102,67 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
             }
         });
 
+        // The session's per-second fence validates against the node's 1 Hz
+        // settings observation; run that loop as production does (and as
+        // `start_path_fixture` does), because this test now drives the start
+        // for as long as it waits and the session's timers run with it.
+        let observed = Arc::downgrade(&manager);
+        let observer = tokio::spawn(async move {
+            while let Some(manager) = observed.upgrade() {
+                manager.observe_fence().await;
+                drop(manager);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
         let request = test_session(root.path().join("unused"), 1).request.clone();
         let mut start = Box::pin(manager.start_local(request.clone()));
+        // Drive the start while watching its session: it must still be
+        // unanswered when the producer has listed exactly one segment. The
+        // start used to be polled for a fixed 700 ms and then left alone while
+        // the registry was read, so a runner too loaded to register the
+        // session inside that window found no session at all. The wait is
+        // bounded only against a hang.
+        let first_publication = async {
+            loop {
+                let observed = {
+                    let registry = manager.registry.lock().expect("registry");
+                    registry.sessions.values().next().map(|session| {
+                        let state = session.state.lock().expect("session state");
+                        assert!(state.startup.is_none());
+                        state
+                            .publication
+                            .as_ref()
+                            .map(|publication| publication.listed)
+                    })
+                };
+                if observed == Some(Some(1)) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::select! {
+            biased;
+            answered = &mut start => panic!(
+                "one listed segment must not answer the start (answered ok: {})",
+                answered.is_ok()
+            ),
+            () = first_publication => {}
+            () = tokio::time::sleep(LIVE_TV_TEST_HANG_GUARD) => {
+                panic!("producer never published its first listed segment")
+            }
+        }
+        // And one listed segment keeps it unanswered while it is driven on.
         assert!(
             tokio::time::timeout(Duration::from_millis(700), &mut start)
                 .await
                 .is_err(),
             "one listed segment must not answer the start"
         );
-        // The fixture drip-feeds fewer than SOURCE_PREFIX_BYTES, so the real
-        // source-observation stage spends SOURCE_PREFIX_TIME before FFmpeg is
-        // launched. Bound the publication wait from that production contract,
-        // not from a scheduler-sensitive subsecond guess.
-        let first_publication_deadline =
-            tokio::time::Instant::now() + SOURCE_PREFIX_TIME + Duration::from_secs(3);
-        loop {
-            let observed = {
-                let registry = manager.registry.lock().expect("registry");
-                let session = registry.sessions.values().next().expect("starting session");
-                let state = session.state.lock().expect("session state");
-                assert!(state.startup.is_none());
-                state
-                    .publication
-                    .as_ref()
-                    .map(|publication| publication.listed)
-            };
-            if observed == Some(1) {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < first_publication_deadline,
-                "producer never published its first listed segment; last count {observed:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
         tokio::fs::write(manager.scratch_root.join("release-second"), b"release")
             .await
             .expect("release second segment");
-        let provisional = tokio::time::timeout(Duration::from_secs(2), &mut start)
+        let provisional = tokio::time::timeout(LIVE_TV_TEST_HANG_GUARD, &mut start)
             .await
             .expect("second segment publication deadline")
             .expect("first HLS publication");
@@ -11164,6 +11233,7 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
         assert!(manager.activities().is_empty());
         assert!(!session.directory.exists());
         tuner.await.expect("fake tuner");
+        observer.abort();
     }
 
     /// A loopback HDHomeRun for start-path tests. It answers discovery and
@@ -11305,31 +11375,32 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
         ffmpeg: &str,
         lineup_gate: usize,
     ) -> (Arc<LiveTvManager>, FixtureTuner) {
-        use std::os::unix::fs::PermissionsExt;
+        start_path_fixture_for_node(root, ffmpeg, lineup_gate, "node-a").await
+    }
 
+    #[cfg(unix)]
+    async fn start_path_fixture_for_node(
+        root: &Path,
+        ffmpeg: &str,
+        lineup_gate: usize,
+        node: &str,
+    ) -> (Arc<LiveTvManager>, FixtureTuner) {
         let ffmpeg_path = root.join("fake-ffmpeg");
-        std::fs::write(&ffmpeg_path, format!("#!/bin/sh\n{ffmpeg}\n")).expect("fake FFmpeg");
-        std::fs::set_permissions(&ffmpeg_path, std::fs::Permissions::from_mode(0o755))
-            .expect("executable fake FFmpeg");
+        crate::write_test_executable(&ffmpeg_path, format!("#!/bin/sh\n{ffmpeg}\n"), 0o755);
         let ffprobe_path = root.join("fake-ffprobe");
-        std::fs::write(
-            &ffprobe_path,
-            format!(
+        crate::write_test_executable(&ffprobe_path, format!(
                 "#!/bin/sh\n[ -f '{slow}' ] && /bin/sleep 1\n[ -f '{answer}' ] || exit 1\n/bin/cat '{answer}'\nstatus=$?\n/bin/date +%s%N >> '{finished}'\nexit $status\n",
                 slow = root.join("probe.slow").display(),
                 answer = root.join("probe.json").display(),
                 finished = root.join("probe.finished").display(),
-            ),
-        )
-        .expect("fake FFprobe");
-        std::fs::set_permissions(&ffprobe_path, std::fs::Permissions::from_mode(0o755))
-            .expect("executable fake FFprobe");
+            ), 0o755);
         let system = SystemInfo {
             ffmpeg: ffmpeg_path.to_string_lossy().into_owned(),
             ffprobe: ffprobe_path.to_string_lossy().into_owned(),
             ..SystemInfo::default()
         };
         let mut manager = test_manager_with_system(root, system);
+        Arc::get_mut(&mut manager).expect("unique manager").node_id = node.into();
         seed_test_config(&manager).await;
         let (client, mut tuner) = fixture_tuner(lineup_gate).await;
         Arc::get_mut(&mut manager)
@@ -11641,6 +11712,48 @@ exec /bin/cat > {sink}"#,
                 .and_then(|facts| facts.video_codec),
             Some("h264".into()),
             "the cache now holds what this tune probed"
+        );
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    /// The restart keeps its tuner however long the wrong FFmpeg takes to
+    /// reap. The seam holds the start after that reap until the fan-out has
+    /// closed the aborted pump's feed and run on for half a second: with no
+    /// live viewer on it, the transport retires at its next chunk unless the
+    /// restart already holds a seat. It used to reserve that seat only after
+    /// the reap, so on a loaded runner this start failed with "the shared
+    /// tuner connection closed".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_warm_restart_holds_its_tuner_seat_through_a_slow_reap() {
+        let root = crate::test_tempdir().expect("root");
+        let (manager, tuner) =
+            start_path_fixture(root.path(), &publishing_ffmpeg(root.path(), false), 1).await;
+        std::fs::write(root.path().join("probe.json"), PROBED_480).expect("probe answer");
+        watch_once_cold(&manager).await;
+
+        std::fs::write(root.path().join("probe.json"), PROBED_H264_180).expect("new format");
+        manager
+            .linger_after_warm_reap
+            .store(true, Ordering::Release);
+        let provisional = tokio::time::timeout(
+            STARTUP_FEEDING_TIMEOUT,
+            manager.start_local(fixture_request(2)),
+        )
+        .await
+        .expect("the restarted start stays inside the start budget")
+        .expect("the restart kept a live tuner connection");
+        let delivery = provisional.delivery.expect("delivery");
+        assert_eq!(delivery.source.video_codec.as_deref(), Some("h264"));
+        assert_eq!(
+            start_plans(&manager),
+            [1, 0, 0, 1],
+            "cold, then warm_disagreed"
+        );
+        assert_eq!(
+            tuner.gets.load(Ordering::SeqCst),
+            2,
+            "the restart kept its tuner"
         );
         manager.shutdown().await.expect("shutdown");
     }
@@ -13737,7 +13850,7 @@ Output #0, hls, to 'index.m3u8':
             refresh_error: None,
             ffmpeg_graph_ready: false,
             ffmpeg_graph_message: "not probed".to_owned(),
-            start_protocols: vec![1, 2, 3, 4],
+            start_protocols: vec![1, 2, 3, 5],
         }
     }
 

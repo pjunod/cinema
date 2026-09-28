@@ -28,7 +28,7 @@ original problem analysis and review remain as the design history.
   the cluster ledger. A viewer does not necessarily consume another tuner.
 - **One indexed record store, one CAS revision.** The typed state machine is in
   [live_tv_resource.rs](../../crates/plurx-core/src/live_tv_resource.rs), with
-  SQLite v71 and replicated v49 adapters. Individually indexed records carry
+  SQLite v83 and replicated v61 adapters. Individually indexed records carry
   starts, ingests, capture/finalization claims, and compact legacy retire
   barriers. Only changed records enter transactions. Terminal-history counts
   do not require downloading response history on every renewal. DVR row
@@ -39,10 +39,10 @@ original problem analysis and review remain as the design history.
   authority, per-attempt assignment, generation checks and expired-lease
   rejection still govern actual operations. Legacy owner fields remain wire
   compatibility fields; they do not place work.
-- **Protocol 4 intents.** The server persists a `v4_` intent before returning
+- **Protocol 4 intents.** The server persists a `v5_` intent before returning
   its ID. All first-party clients preserve its exact playback envelope on
   replay. Legacy 32-hex IDs retain the bounded 24-hour retire contract. Unknown
-  protocol 4 IDs cannot use legacy admission after history collection.
+  protocol 5 IDs cannot use legacy admission after history collection.
 - **DVR publication.** Capture admission and the scheduled-to-recording row
   change commit before local tuner or file work. A stable storage marker
   distinguishes recording namespaces. Capture attempts are append-only;
@@ -368,18 +368,18 @@ peer requests, independent of current placement or resource settings.
 
 ### 4.5 Admission tickets make pruning enforceable
 
-**New client protocol 4:** add authenticated `POST /live-tv/start-intents`.
+**New client protocol 5:** add authenticated `POST /live-tv/start-intents`.
 The body contains the semantic channel/output request. The server generates
 a fresh unpredictable request ID; callers cannot select or reuse its ID.
-Protocol-4 IDs have the exact grammar `v4_` followed by 32 lowercase hex
+Protocol-4 IDs have the exact grammar `v5_` followed by 32 lowercase hex
 digits (128 random bits). Legacy IDs keep their existing 32-hex grammar.
-The namespaces are disjoint and server enforced: any `v4_` ID requires the
-protocol-4 path and cannot fall back to legacy admission when a ticket is
+The namespaces are disjoint and server enforced: any `v5_` ID requires the
+protocol-5 path and cannot fall back to legacy admission when a ticket is
 missing, invalid or expired. Persist a protocol discriminator on each row
 and reject a known row whose protocol disagrees with its ID grammar. Dispatch
 validation by ID shape, never just by presence of a header or ticket. Update
 start, internal relay, resume, retire and start-state validators together;
-unknown `v4_` IDs remain non-admissible even after detailed-record GC.
+unknown `v5_` IDs remain non-admissible even after detailed-record GC.
 Before returning, persist an `issued` start row containing the semantic
 digest, user ID, ticket expiry and a reserved terminal-record slot. Return
 that ID and an opaque authenticated ticket bound to those fields and the
@@ -402,7 +402,7 @@ verification of outstanding tickets, or explicitly expire them without opens.
 Retire performs **insert-or-terminalize**, not update-if-present. For a known
 row it durably records terminal intent, even if no worker was assigned; all
 late dispatch and activation checks observe that state. For an unknown
-protocol-4 ID, absence itself prevents admission, so authenticated retirement
+protocol-5 ID, absence itself prevents admission, so authenticated retirement
 can acknowledge without allocating a tombstone. A delayed intent response
 still resolves to a retired issued row, never a second row with that ID.
 
@@ -412,7 +412,7 @@ Unknown retire inserts a tombstone keyed by `(user_id, request_id)` before
 acknowledgement. An absent legacy POST after that horizon may be treated as a
 new operation; indefinite rejection cannot be promised after discarding the
 ID. State this in API docs and test it explicitly. Upgraded first-party
-clients use protocol 4, including its preparation, cancellation and recovery
+clients use protocol 5, including its preparation, cancellation and recovery
 flow; do not silently downgrade them on a cluster-mode capable server.
 
 **Capacity and GC:** bound issued/active rows to 32 per user and 4096 for the
@@ -714,7 +714,7 @@ new publication authority; physical arbitration still permits spare tuners.
 ### 8.2 Keep playback wire compatibility and update every settings surface
 
 Preserve `ltv1.<encoded worker node>.<random UUID>` and the existing public
-playback endpoints; add protocol 4 intent preparation as specified in §4.5. Retain legacy settings fields in responses for clients
+playback endpoints; add protocol 5 intent preparation as specified in §4.5. Retain legacy settings fields in responses for clients
 with required decoders; return the saved historical owner value as deprecated
 metadata, never as the selected worker. Add explicit cluster resource mode
 and node-readiness fields. New clients ignore legacy owner metadata.

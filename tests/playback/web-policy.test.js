@@ -342,7 +342,7 @@ test("the sampling tick resamples the wait sentence before the presenter paints"
     (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
     () => {},
     (v, p) => order.push(["sampled", v, p]),
-    { AUTO_DEFAULTS: { sampleMs: 1000 } },
+    { AUTO_DEFAULTS: { sampleMs: 5000, decisionMs: 1000 } },
     () => { installedMediaSession += 1; },
   );
   const v = { id: "v" }, p = { id: "p" };
@@ -352,6 +352,8 @@ test("the sampling tick resamples the wait sentence before the presenter paints"
   assert.equal(installedMediaSession, 2, "a re-arm left the OS transport pointing at the old stream");
   const half = intervals.find((entry) => entry.ms === 500);
   assert.ok(half, "armPlaybackSampling no longer arms a 500 ms tick");
+  assert.ok(intervals.find((entry) => entry.ms === 1000),
+    "Auto decides every second while its health reads remain on the slower cadence");
   half.fn();
   assert.deepEqual(order.at(-1), ["sampled", v, p]);
   assert.match(shippedSource("adoptPlaybackMediaElement"), /setInterval\(\(\)=>playbackSamplingTick\(v,p\),500\)/);
@@ -1670,6 +1672,76 @@ test("a bandwidth cliff drops from 1080p to the sustainable rung in one move", (
   assert.equal(decision.emergency, true);
 });
 
+test("the two measured A-04 cliffs select encoded low rungs with peak headroom", () => {
+  const ladder = [
+    ...serverLadder,
+    { height: 240, total_kbps: 660, peak_kbps: 910 },
+    { height: 144, total_kbps: 260, peak_kbps: 310 },
+  ];
+  const first = policy.decideRung({
+    ladder,
+    currentHeight: 720,
+    estimateKbps: 8_000,
+    recentEstimateKbps: 1_100,
+    recentEstimateAtMs: 9_000,
+    runwaySeconds: 5,
+    nowMs: 10_000,
+  });
+  assert.equal(first.height, 240);
+  assert.equal(first.reason, "bandwidth cliff");
+  const second = policy.decideRung({
+    ladder,
+    currentHeight: 240,
+    estimateKbps: 1_100,
+    recentEstimateKbps: 350,
+    recentEstimateAtMs: 19_000,
+    runwaySeconds: 5,
+    nowMs: 20_000,
+  });
+  assert.equal(second.height, 144);
+  assert.equal(second.reason, "bandwidth cliff");
+});
+
+test("fresh 2.2 Mb/s cliff evidence carries the 360p peak in one move", () => {
+  const ladder = [...serverLadder,
+    { height: 240, total_kbps: 660, peak_kbps: 910 },
+    { height: 144, total_kbps: 260, peak_kbps: 310 }];
+  const decision = policy.decideRung({ladder,currentHeight:720,
+    estimateKbps:8061,recentEstimateKbps:2202,
+    recentEstimateAtMs:9000,runwaySeconds:11,nowMs:10000});
+  assert.equal(decision.height,360);
+  assert.equal(decision.reason,"bandwidth cliff");
+});
+
+test("a low-rung transfer below nominal is urgent despite a deep buffer", () => {
+  const ladder = [...serverLadder,
+    { height: 240, total_kbps: 660, peak_kbps: 910 },
+    { height: 144, total_kbps: 260, peak_kbps: 310 }];
+  const decision = policy.decideRung({ladder,currentHeight:240,
+    estimateKbps:1100,recentEstimateKbps:626,
+    recentEstimateAtMs:9000,runwaySeconds:43,
+    previousRunwaySeconds:42,nowMs:10000});
+  assert.equal(decision.height,144);
+  assert.equal(decision.reason,"bandwidth cliff");
+});
+
+test("a high-rung mixed fragment waits for a clean cliff sample", () => {
+  const ladder = [...serverLadder,
+    { height: 240, total_kbps: 660, peak_kbps: 910 },
+    { height: 144, total_kbps: 260, peak_kbps: 310 }];
+  const mixed = policy.decideRung({ladder,currentHeight:720,
+    estimateKbps:8075,recentEstimateKbps:3170,
+    recentEstimateAtMs:9000,runwaySeconds:12,
+    previousRunwaySeconds:13,nowMs:10000});
+  assert.equal(mixed.height,720);
+  const clean = policy.decideRung({ladder,currentHeight:720,
+    estimateKbps:8075,recentEstimateKbps:1095,
+    recentEstimateAtMs:10500,runwaySeconds:10,
+    previousRunwaySeconds:12,nowMs:11000});
+  assert.equal(clean.height,240);
+  assert.equal(clean.reason,"bandwidth cliff");
+});
+
 test("an active supply stall without a completed slow transfer retains quality", () => {
   const decision = policy.decideRung({
     ladder: serverLadder,
@@ -2529,10 +2601,15 @@ test("healthy producer capacity evidence survives an empty-runway urgency signal
 });
 
 test("recovery holds for 45 seconds, moves up once, and respects pixel height", () => {
+  // The next 1080p rung peaks at 12,160 kb/s. Recovery needs 1.8x fresh
+  // measured peak headroom, so 16,000 kb/s cannot start the hold anymore.
+  const recoveredKbps = 24_000;
   const first = policy.decideRung({
     ladder: serverLadder,
     currentHeight: 720,
-    estimateKbps: 16_000,
+    estimateKbps: recoveredKbps,
+    recentEstimateKbps: recoveredKbps,
+    recentEstimateAtMs: 59_000,
     runwaySeconds: 20,
     nowMs: 60_000,
     lastSwitchAtMs: 0,
@@ -2543,7 +2620,9 @@ test("recovery holds for 45 seconds, moves up once, and respects pixel height", 
   const upgrade = policy.decideRung({
     ladder: serverLadder,
     currentHeight: 720,
-    estimateKbps: 16_000,
+    estimateKbps: recoveredKbps,
+    recentEstimateKbps: recoveredKbps,
+    recentEstimateAtMs: 104_000,
     runwaySeconds: 20,
     nowMs: 105_000,
     lastSwitchAtMs: 0,
@@ -2555,7 +2634,9 @@ test("recovery holds for 45 seconds, moves up once, and respects pixel height", 
   const dwell = policy.decideRung({
     ladder: serverLadder,
     currentHeight: 720,
-    estimateKbps: 16_000,
+    estimateKbps: recoveredKbps,
+    recentEstimateKbps: recoveredKbps,
+    recentEstimateAtMs: 114_000,
     runwaySeconds: 20,
     nowMs: 115_000,
     lastSwitchAtMs: 105_000,
@@ -2566,7 +2647,9 @@ test("recovery holds for 45 seconds, moves up once, and respects pixel height", 
   const capped = policy.decideRung({
     ladder: serverLadder,
     currentHeight: 480,
-    estimateKbps: 16_000,
+    estimateKbps: recoveredKbps,
+    recentEstimateKbps: recoveredKbps,
+    recentEstimateAtMs: 119_000,
     runwaySeconds: 20,
     playerHeight: 700,
     nowMs: 120_000,
@@ -2574,6 +2657,48 @@ test("recovery holds for 45 seconds, moves up once, and respects pixel height", 
     upgradeSinceMs: 70_000,
   });
   assert.equal(capped.height, 480, "the 720p rung exceeds the player");
+});
+
+test("Auto upgrade needs fresh peak headroom and successor runway", () => {
+  const ladder = [...serverLadder,
+    { height: 240, total_kbps: 660, peak_kbps: 910 },
+    { height: 144, total_kbps: 260, peak_kbps: 310 }];
+  const base = { ladder, currentHeight: 144, estimateKbps: 8_000,
+    runwaySeconds: 60, recentSpeed: 6, nowMs: 120_000,
+    lastSwitchAtMs: 0, upgradeSinceMs: 70_000 };
+  assert.equal(policy.decideRung({ ...base, recentEstimateKbps: 1_100,
+    recentEstimateAtMs: 119_000 }).height, 144,
+  "a short fragment must not promote beyond the measured link");
+  assert.equal(policy.decideRung({ ...base, recentEstimateKbps: 8_000,
+    recentEstimateAtMs: 100_000 }).height, 144,
+  "a stale transfer must not authorize recovery");
+  assert.equal(policy.decideRung({ ...base, recentEstimateKbps: 8_000,
+    recentEstimateAtMs: 119_000, runwaySeconds: 3 }).height, 144,
+  "the prepared successor cannot consume the incumbent's last runway");
+  assert.equal(policy.decideRung({ ...base, recentEstimateKbps: 8_000,
+    recentEstimateAtMs: 119_000 }).height, 240);
+  assert.equal(policy.decideRung({ ...base, recentEstimateKbps: 8_000,
+    recentEstimateAtMs: 119_000, lastCliffAtMs: 60_000 }).height, 144,
+  "a recent cliff keeps bursty transfer estimates from undoing the downshift");
+  assert.equal(policy.decideRung({ ...base, recentEstimateKbps: 8_000,
+    recentEstimateAtMs: 119_000, lastCliffAtMs: 60_000,
+    recentMediaDeliveryKbps: 1_900 }).height, 240,
+  "sustained main-fragment delivery can establish early headroom");
+  assert.equal(policy.decideRung({ ...base, recentEstimateKbps: 8_000,
+    recentEstimateAtMs: 119_000, lastCliffAtMs: 20_000 }).height, 240,
+  "the stabilization window ends so an underused low rung can explore later");
+});
+
+test("completed main fragments give a bounded delivery window without burst optimism", () => {
+  const samples = [
+    { bytes: 80_000, startedAtMs: 100_000, endedAtMs: 100_300, atMs: 100_300 },
+    { bytes: 80_000, startedAtMs: 106_000, endedAtMs: 106_300, atMs: 106_300 },
+  ];
+  assert.equal(Math.round(policy.completedMediaWindowKbps(samples, 107_000)), 203,
+  "idle time between completed fragments counts against sustained capacity");
+  assert.equal(policy.completedMediaWindowKbps(samples.slice(1), 107_000), null);
+  assert.equal(policy.completedMediaWindowKbps(samples, 121_301), null,
+  "old bytes cannot authorize an upgrade");
 });
 
 test("native element transfer errors never spend a compatibility transcode", () => {
@@ -4260,7 +4385,7 @@ asyncTest("a burn session-open refusal reaches the surface as a refused change",
     [
       'const API="/api/v1"; let TOKEN="token", AUTH_GENERATION=0;',
       'const PLAYBACK_ID="playback-1"; let STREAM_FAILURE=null;',
-      shippedSource("api"),
+      (require("../web/shell-source.js").apiPrelude()+shippedSource("api")),
       // `openSession` attaches this browser's capabilities document; the burn
       // refusal under test does not care what is in it, only that building one
       // does not throw.
@@ -5649,6 +5774,8 @@ test("an upgrade needs encode headroom, not just a bandwidth estimate", () => {
     ladder,
     currentHeight: 720,
     estimateKbps: 200_000,
+    recentEstimateKbps: 200_000,
+    recentEstimateAtMs: 499_000,
     runwaySeconds: 40,
     previousRunwaySeconds: 40,
     nowMs: 500_000,

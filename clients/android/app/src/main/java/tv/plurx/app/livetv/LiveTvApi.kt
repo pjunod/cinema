@@ -659,7 +659,7 @@ class LiveTvApi(origin: String, private val token: String, context: Context? = n
         val response = Net.json.parseToJsonElement(request(url("live-tv", "channels", channel, "intents"), "POST",
             authenticated = true, body = body, starting = true)).jsonObject
         val id = response["request_id"]?.jsonPrimitive?.content ?: throw LiveTvFailure("no_answer")
-        if (!id.startsWith("v4_") || !isLiveTvRequestId(id)) throw LiveTvFailure("no_answer")
+        if (!id.startsWith("v5_") || !isLiveTvRequestId(id)) throw LiveTvFailure("no_answer")
         synchronized(intentBodies) {
             intentBodies[id] = body
             while (intentBodies.size > 64) intentBodies.remove(intentBodies.keys.first())

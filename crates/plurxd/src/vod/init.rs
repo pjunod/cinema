@@ -52,6 +52,7 @@ pub(super) async fn regenerate_init_head(
     #[cfg(windows)]
     let descriptors = crate::producer_spawn::Descriptors::default();
     let program = recipe_program(recipe);
+    let env = recipe_child_env(recipe);
     let spawned = crate::producer_spawn::spawn(
         &program,
         &args,
@@ -59,7 +60,7 @@ pub(super) async fn regenerate_init_head(
             runtime_cache,
             progress: crate::producer_spawn::Progress::None,
             descriptors,
-            env: &[],
+            env: &env,
             work: crate::process_control::ChildWork::realtime("VOD init segment"),
         },
     )

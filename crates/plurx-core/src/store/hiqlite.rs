@@ -114,8 +114,32 @@ const SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE: i64 = FILE_GRANTS_SCHEMA_VERSION;
 /// K-05 M5: the catalogue read indexes (`sql_source::ITEM_READ_INDEXES`).
 const ITEM_READ_INDEXES_SCHEMA_VERSION: i64 = 48;
 const ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE: i64 = SUBTITLE_SOURCE_SCHEMA_VERSION;
-const LIVE_TV_RESOURCE_SCHEMA_VERSION: i64 = 49;
-const LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE: i64 = ITEM_READ_INDEXES_SCHEMA_VERSION;
+const BACKGROUND_JOBS_SCHEMA_VERSION: i64 = 49;
+const BACKGROUND_JOBS_SCHEMA_MIGRATION_SOURCE: i64 = ITEM_READ_INDEXES_SCHEMA_VERSION;
+const LIBRARY_JOBS_SCHEMA_VERSION: i64 = 50;
+const LIBRARY_JOBS_SCHEMA_MIGRATION_SOURCE: i64 = BACKGROUND_JOBS_SCHEMA_VERSION;
+const LIBRARY_REQUESTS_SCHEMA_VERSION: i64 = 51;
+const LIBRARY_REQUESTS_SCHEMA_MIGRATION_SOURCE: i64 = LIBRARY_JOBS_SCHEMA_VERSION;
+const JOB_RESOURCES_SCHEMA_VERSION: i64 = 52;
+const JOB_RESOURCES_SCHEMA_MIGRATION_SOURCE: i64 = LIBRARY_REQUESTS_SCHEMA_VERSION;
+const PROVIDER_BUDGET_SCHEMA_VERSION: i64 = 53;
+const PROVIDER_BUDGET_SCHEMA_MIGRATION_SOURCE: i64 = JOB_RESOURCES_SCHEMA_VERSION;
+const SUBTITLE_JOBS_SCHEMA_VERSION: i64 = 54;
+const SUBTITLE_JOBS_SCHEMA_MIGRATION_SOURCE: i64 = PROVIDER_BUDGET_SCHEMA_VERSION;
+const ARTWORK_JOBS_SCHEMA_VERSION: i64 = 55;
+const ARTWORK_JOBS_SCHEMA_MIGRATION_SOURCE: i64 = SUBTITLE_JOBS_SCHEMA_VERSION;
+const TRANSCODE_COPIES_SCHEMA_VERSION: i64 = 56;
+const TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE: i64 = ARTWORK_JOBS_SCHEMA_VERSION;
+const PREDICTIONS_SCHEMA_VERSION: i64 = 57;
+const PREDICTIONS_SCHEMA_MIGRATION_SOURCE: i64 = TRANSCODE_COPIES_SCHEMA_VERSION;
+const EMBEDDINGS_SCHEMA_VERSION: i64 = 58;
+const EMBEDDINGS_SCHEMA_MIGRATION_SOURCE: i64 = PREDICTIONS_SCHEMA_VERSION;
+const PROBE_JOBS_SCHEMA_VERSION: i64 = 59;
+const PROBE_JOBS_SCHEMA_MIGRATION_SOURCE: i64 = EMBEDDINGS_SCHEMA_VERSION;
+const INTEGRITY_JOBS_SCHEMA_VERSION: i64 = 60;
+const INTEGRITY_JOBS_SCHEMA_MIGRATION_SOURCE: i64 = PROBE_JOBS_SCHEMA_VERSION;
+const LIVE_TV_RESOURCE_SCHEMA_VERSION: i64 = 61;
+const LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE: i64 = INTEGRITY_JOBS_SCHEMA_VERSION;
 pub const AUTH_SCHEMA_VERSION: i64 = LIVE_TV_RESOURCE_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
@@ -1355,6 +1379,23 @@ pub(super) fn disconnected_test_client() -> TimedClient {
 }
 
 impl HiqliteAuthStore {
+    pub(super) async fn local_bounded_reads_enabled(
+        &self,
+        default: bool,
+    ) -> Result<bool, StoreError> {
+        let rows = self
+            .client()
+            .query_map::<SettingValueRow, _>(
+                "SELECT value FROM settings WHERE key = $1",
+                params!(super::keys::BOUNDED_REPLICA_READS),
+            )
+            .await?;
+        Ok(super::stored_switch(
+            rows.first().map(|row| row.value.as_str()),
+            default,
+        ))
+    }
+
     pub(super) fn client(&self) -> &TimedClient {
         &self.client
     }
@@ -1543,6 +1584,7 @@ impl HiqliteAuthStore {
         super::hiqlite_shared_cache::install_schema(&client).await?;
         super::hiqlite_timeline_annotations::install_schema(&client).await?;
         super::hiqlite_fragment_index_cluster::install_schema(&client).await?;
+        super::hiqlite_background_jobs::install_schema(&client).await?;
         super::hiqlite_library_channels::install_schema(&client).await?;
         super::hiqlite_dvr::install_schema(&client).await?;
         client
@@ -2763,6 +2805,182 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(BACKGROUND_JOBS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(BACKGROUND_JOBS_SCHEMA_VERSION, now, BACKGROUND_JOBS_SCHEMA_MIGRATION_SOURCE),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(BACKGROUND_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(LIBRARY_JOBS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_domain::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(LIBRARY_JOBS_SCHEMA_VERSION, now, LIBRARY_JOBS_SCHEMA_MIGRATION_SOURCE),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(LIBRARY_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(LIBRARY_REQUESTS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_library::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(LIBRARY_REQUESTS_SCHEMA_VERSION, now, LIBRARY_REQUESTS_SCHEMA_MIGRATION_SOURCE),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        LIBRARY_REQUESTS_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(JOB_RESOURCES_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_resources::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(JOB_RESOURCES_SCHEMA_VERSION, now, JOB_RESOURCES_SCHEMA_MIGRATION_SOURCE),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(JOB_RESOURCES_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(PROVIDER_BUDGET_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_provider::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(PROVIDER_BUDGET_SCHEMA_VERSION, now, PROVIDER_BUDGET_SCHEMA_MIGRATION_SOURCE),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(PROVIDER_BUDGET_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(SUBTITLE_JOBS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_subtitle::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push((
+                        super::background_jobs_subtitle::RESET_LEGACY.to_owned(),
+                        params!(),
+                    ));
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(SUBTITLE_JOBS_SCHEMA_VERSION, now, SUBTITLE_JOBS_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(SUBTITLE_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(ARTWORK_JOBS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_artwork::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(ARTWORK_JOBS_SCHEMA_VERSION, now, ARTWORK_JOBS_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(ARTWORK_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_transcode::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(TRANSCODE_COPIES_SCHEMA_VERSION, now, TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(PREDICTIONS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_predictions::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(PREDICTIONS_SCHEMA_VERSION, now, PREDICTIONS_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(PREDICTIONS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(EMBEDDINGS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_embeddings::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(EMBEDDINGS_SCHEMA_VERSION, now, EMBEDDINGS_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(EMBEDDINGS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(PROBE_JOBS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_probe::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(PROBE_JOBS_SCHEMA_VERSION, now, PROBE_JOBS_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(PROBE_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(INTEGRITY_JOBS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs_integrity::SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(INTEGRITY_JOBS_SCHEMA_VERSION, now, INTEGRITY_JOBS_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(INTEGRITY_JOBS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
                     let mut statements = super::hiqlite_live_tv_resource::schema_statements();
@@ -2963,6 +3181,50 @@ impl HiqliteAuthStore {
     pub async fn validation_reset_contract_state(&self) -> Result<(), StoreError> {
         self.telemetry.clear().await?;
         let statements = vec![
+            ("DELETE FROM background_job_commands".to_owned(), params!()),
+            ("DELETE FROM background_predictions".to_owned(), params!()),
+            ("DELETE FROM background_embeddings".to_owned(), params!()),
+            (
+                "DELETE FROM background_artifact_repairs".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM background_transcode_artifacts".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM background_artwork_locations".to_owned(),
+                params!(),
+            ),
+            ("DELETE FROM background_job_legacy".to_owned(), params!()),
+            ("DELETE FROM background_job_migration".to_owned(), params!()),
+            (
+                "DELETE FROM background_fragment_targets".to_owned(),
+                params!(),
+            ),
+            ("DELETE FROM background_job_waiters".to_owned(), params!()),
+            (
+                "DELETE FROM background_job_reservations".to_owned(),
+                params!(),
+            ),
+            ("DELETE FROM background_job_attempts".to_owned(), params!()),
+            (
+                "DELETE FROM background_job_domain_leases".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM background_library_requests".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM background_storage_domains".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM background_provider_budgets".to_owned(),
+                params!(),
+            ),
+            ("DELETE FROM background_jobs".to_owned(), params!()),
             (
                 "DELETE FROM analysis_lifecycle_counters".to_owned(),
                 params!(),
@@ -3705,7 +3967,15 @@ impl MetricsStore for HiqliteAuthStore {
                       WHERE state = 'running' \
                         AND COALESCE(lease_expires_ms, 0) < $2 * 1000) AS analysis_running_past_lease, \
                     (SELECT COALESCE(MAX(updated_at_ms), 0) FROM cluster_fragment_index_jobs \
-                      WHERE state = 'ready') AS analysis_last_ready_at_ms \
+                      WHERE state = 'ready') AS analysis_last_ready_at_ms, \
+                    (SELECT json_object('jobs', json((SELECT COALESCE(json_group_array(json_object( \
+                        'kind', grouped.kind, 'state', grouped.state, 'count', grouped.count, \
+                        'oldest_age_ms', MAX(0, $2 * 1000 - grouped.created))), '[]') \
+                        FROM (SELECT kind, state, COUNT(*) AS count, MIN(created_at_ms) AS created \
+                            FROM background_jobs GROUP BY kind, state LIMIT 128) grouped)), \
+                        'source_io_reservations', (SELECT COUNT(*) FROM background_job_reservations \
+                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000), \
+                        'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))) AS background_jobs_json \
                  FROM offline_packages WHERE node_id = $1",
                 params!(node_id, now),
             )
@@ -3713,7 +3983,7 @@ impl MetricsStore for HiqliteAuthStore {
             .into_iter()
             .next()
             .ok_or_else(|| StoreError::Database("Prometheus snapshot returned no row".to_owned()))?;
-        Ok(row.into())
+        row.try_into()
     }
 }
 
@@ -3786,6 +4056,19 @@ impl SettingsStore for HiqliteAuthStore {
             }
         }
         Ok(pair)
+    }
+
+    async fn get_settings(
+        &self,
+        keys: &[&str],
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        let keys = super::selected_settings_json(keys)?;
+        // authority: related playback preferences share one committed settings snapshot.
+        let rows = self.client().query_consistent_map::<SettingEntryRow, _>(
+            "SELECT key, value FROM settings WHERE key IN (SELECT value FROM json_each($1)) ORDER BY key",
+            params!(keys),
+        ).await?;
+        Ok(rows.into_iter().map(|row| (row.key, row.value)).collect())
     }
 
     async fn settings_snapshot(
@@ -4739,6 +5022,18 @@ fn schema_migration_action(
         | FILE_GRANTS_SCHEMA_MIGRATION_SOURCE
         | SUBTITLE_SOURCE_SCHEMA_MIGRATION_SOURCE
         | ITEM_READ_INDEXES_SCHEMA_MIGRATION_SOURCE
+        | BACKGROUND_JOBS_SCHEMA_MIGRATION_SOURCE
+        | LIBRARY_JOBS_SCHEMA_MIGRATION_SOURCE
+        | LIBRARY_REQUESTS_SCHEMA_MIGRATION_SOURCE
+        | JOB_RESOURCES_SCHEMA_MIGRATION_SOURCE
+        | PROVIDER_BUDGET_SCHEMA_MIGRATION_SOURCE
+        | SUBTITLE_JOBS_SCHEMA_MIGRATION_SOURCE
+        | ARTWORK_JOBS_SCHEMA_MIGRATION_SOURCE
+        | TRANSCODE_COPIES_SCHEMA_MIGRATION_SOURCE
+        | PREDICTIONS_SCHEMA_MIGRATION_SOURCE
+        | EMBEDDINGS_SCHEMA_MIGRATION_SOURCE
+        | PROBE_JOBS_SCHEMA_MIGRATION_SOURCE
+        | INTEGRITY_JOBS_SCHEMA_MIGRATION_SOURCE
         | LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
@@ -4862,6 +5157,7 @@ struct PrometheusStoreRow {
     analysis_claimable: i64,
     analysis_running_past_lease: i64,
     analysis_last_ready_at_ms: i64,
+    background_jobs_json: String,
 }
 
 impl From<&mut Row<'_>> for PrometheusStoreRow {
@@ -4891,13 +5187,18 @@ impl From<&mut Row<'_>> for PrometheusStoreRow {
             analysis_claimable: row.get("analysis_claimable"),
             analysis_running_past_lease: row.get("analysis_running_past_lease"),
             analysis_last_ready_at_ms: row.get("analysis_last_ready_at_ms"),
+            background_jobs_json: row.get("background_jobs_json"),
         }
     }
 }
 
-impl From<PrometheusStoreRow> for PrometheusStoreSnapshot {
-    fn from(row: PrometheusStoreRow) -> Self {
-        Self {
+impl TryFrom<PrometheusStoreRow> for PrometheusStoreSnapshot {
+    type Error = StoreError;
+    fn try_from(row: PrometheusStoreRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            background_jobs: super::background_jobs_observation::background_job_metrics(
+                &row.background_jobs_json,
+            )?,
             libraries: row.libraries,
             users: row.users,
             offline: OfflinePackageStats {
@@ -4926,7 +5227,7 @@ impl From<PrometheusStoreRow> for PrometheusStoreSnapshot {
                     last_ready_at_ms: row.analysis_last_ready_at_ms,
                 },
             ),
-        }
+        })
     }
 }
 
@@ -6760,14 +7061,14 @@ mod tests {
             "v47 must advance exactly one step to the read-index schema"
         );
         assert_eq!(
-            ITEM_READ_INDEXES_SCHEMA_VERSION + 1,
+            INTEGRITY_JOBS_SCHEMA_VERSION + 1,
             LIVE_TV_RESOURCE_SCHEMA_VERSION,
-            "v48 must advance exactly one step to the Live TV resource schema"
+            "v60 advances to the Live TV resource schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 44,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 56,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v49 step"
+            "this implementation contains every additive v5→v61 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

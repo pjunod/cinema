@@ -1245,6 +1245,7 @@ mod tests {
         drop(store);
 
         let connection = rusqlite::Connection::open(&path).expect("downgrade fixture");
+        crate::queue_fixture::remove_common_queue_schema(&connection);
         connection
             .execute_batch(
                 // Everything v44 and later built has to go, or the replayed
@@ -1433,7 +1434,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 27] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 39] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1486,7 +1487,21 @@ mod tests {
             // `CREATE INDEX IF NOT EXISTS` on v2's `items`, so the replay after
             // either wind-back finds them standing and does nothing.
             "CREATE INDEX IF NOT EXISTS idx_items_top_level_title",
-            // v71 adds the claim ledger and DVR revision triggers; both fixtures drop all four.
+            // v71 queue objects are removed before older domain columns.
+            "CREATE TABLE IF NOT EXISTS background_jobs",
+            "CREATE TABLE IF NOT EXISTS background_job_domain_leases",
+            "CREATE TABLE IF NOT EXISTS background_library_requests",
+            "CREATE TABLE IF NOT EXISTS background_storage_domains",
+            "CREATE TABLE IF NOT EXISTS background_provider_budgets",
+            // v76 adds only background-prefixed triggers, removed by the same fixture helper.
+            "CREATE TRIGGER IF NOT EXISTS background_subtitle_claimed",
+            "CREATE TABLE IF NOT EXISTS background_artwork_locations",
+            "CREATE TABLE IF NOT EXISTS background_transcode_artifacts",
+            "CREATE TABLE IF NOT EXISTS background_predictions",
+            "CREATE TABLE IF NOT EXISTS background_embeddings",
+            "CREATE TRIGGER IF NOT EXISTS background_job_publish_probe_command",
+            "CREATE TABLE IF NOT EXISTS background_artifact_repairs",
+            // v83 adds the claim ledger and DVR revision triggers; both fixtures drop all four.
             "CREATE TABLE IF NOT EXISTS live_tv_resource_records",
         ];
 

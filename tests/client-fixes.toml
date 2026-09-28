@@ -1,6 +1,69 @@
 version = 1
 enforce_after = "e8a910f"
 
+# A-04 physical shaping acceptance refuses a saved-server fallback when the
+# explicit Debug launch proxy is absent or does not match the server identity.
+[[fixes]]
+id = "apple.physical-acceptance-proxy-origin"
+commits = ["31a5a4697"]
+source = "clients/apple/Sources/AppModel.swift"
+source_anchor = "let acceptance = PlaybackAcceptanceLaunch.current()"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPhysicalDeviceAcceptanceLaunchReadsOnlyExplicitDebugDefaults"
+
+# The release-input correction is a separate client commit, so its counter
+# claim needs a direct policy-test bridge as well as the original proxy fix.
+[[fixes]]
+id = "apple.a04-release-counter-after-proxy-fix"
+commits = ["ac51adb13"]
+source = "clients/apple/project.yml"
+source_anchor = "CURRENT_PROJECT_VERSION:"
+test = "tests/validation/test_mobile_versions.py"
+test_anchor = "test_apple_counter_the_target_already_ships_fails_against_the_target"
+
+[[fixes]]
+id = "apple.home-hero-foreground-clipping"
+commits = ["50784639d"]
+source = "clients/apple/Sources/HomeView.swift"
+source_anchor = "struct IOSHomeHeroArtworkLayout: ViewModifier"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPhoneHomeHeroKeepsEqualInsetsOnBothEdges"
+
+# D-03's internal reader corrections need a durable source-to-test bridge.
+# The Android PDF checks below are source contracts; simulator/device behavior
+# remains separate acceptance evidence on the D-03 workboard.
+[[fixes]]
+id = "clients.book-actions-stay-inside-plurx"
+commits = ["c5396c1c7"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/DetailScreen.kt"
+source_anchor = "onReadPdf(playable.id, playable.size)"
+test = "tests/operations/test_android_credential_exposure.py"
+test_anchor = "test_mobile_book_actions_keep_account_urls_inside_plurx"
+
+[[fixes]]
+id = "android.pdf-selected-size-and-profile"
+commits = ["269f7c39b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/PdfReaderScreen.kt"
+source_anchor = "if (temporary.length() != expectedSize)"
+test = "tests/operations/test_android_credential_exposure.py"
+test_anchor = "test_pdf_download_checks_selected_size_and_profile"
+
+[[fixes]]
+id = "android.pdf-page-failure-and-scroll-reset"
+commits = ["53c450b81"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/PdfReaderScreen.kt"
+source_anchor = "bitmap?.recycle()"
+test = "tests/operations/test_android_credential_exposure.py"
+test_anchor = "test_pdf_page_error_is_local_and_scroll_resets_per_page"
+
+[[fixes]]
+id = "apple.tvos-settings-picker-menu"
+commits = ["26f8749f7"]
+source = "clients/apple/Sources/SettingsView.swift"
+source_anchor = ".pickerStyle(.menu)"
+test = "clients/apple/UITests/TVPhysicalInputTests.swift"
+test_anchor = "func testSettingsChoicesOpenAsMenusOnAppleTV() throws"
+
 [[fixes]]
 id = "web.live-tv-picture-evidence"
 commits = ["148829768"]
@@ -2745,3 +2808,13 @@ source = "clients/android/app/src/main/java/tv/plurx/app/BackNavigation.kt"
 source_anchor = "internal fun NavController.popBackStackFrom(entry: NavBackStackEntry): Boolean {"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/BackNavigationTest.kt"
 test_anchor = "fun secondBackDuringExitAnimationKeepsHomeVisible()"
+
+# Server-issued Live TV capabilities contain dots and UUID hyphens. The
+# client must preserve that spelling when validating start and resume URLs.
+[[fixes]]
+id = "apple.live-tv-server-capability-url"
+commits = ["de991b9b4"]
+source = "clients/apple/Sources/LiveTv.swift"
+source_anchor = "return value.addingPercentEncoding(withAllowedCharacters: unreserved)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testRealCapabilityMasterIsAcceptedAfterStartAndResume() throws"

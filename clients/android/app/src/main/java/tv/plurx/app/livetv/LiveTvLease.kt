@@ -49,7 +49,7 @@ internal fun newLiveTvRequestId(random: SecureRandom = SecureRandom()): String {
 }
 
 internal fun isLiveTvRequestId(value: String): Boolean =
-    value.removePrefix("v4_").let { raw -> raw.length == 32 && raw.all { it in '0'..'9' || it in 'a'..'f' } }
+    value.removePrefix("v5_").let { raw -> raw.length == 32 && raw.all { it in '0'..'9' || it in 'a'..'f' } }
 
 /** How often a touched hint is actually committed to disk. See [LiveTvHintStore.touch]. */
 internal const val LIVE_TV_HINT_WRITE_INTERVAL_MS: Long = 60_000L
@@ -241,7 +241,7 @@ internal data class LiveTvProtocolSupport(val requestId: Boolean, val recoveryRo
 
         fun from(protocols: List<Int>?): LiveTvProtocolSupport =
             if (protocols != null && 3 in protocols) {
-                LiveTvProtocolSupport(requestId = true, recoveryRoutes = true, intents = 4 in protocols)
+                LiveTvProtocolSupport(requestId = true, recoveryRoutes = true, intents = 5 in protocols)
             } else {
                 legacy
             }

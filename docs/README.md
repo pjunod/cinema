@@ -32,6 +32,8 @@ Native Home restoration: [Original Apple Home screens](apple-builds/334-original
 
 Library-page revision: [Quiet Home and open media details](clients/CALM-LIBRARY-PAGES.md) — **built**; web Home and item page since restored to their originals.
 
+Apple Home clipping: [Featured movie content bounds](apple-builds/570-home-hero-clipping.md).
+
 ## Find it fast
 
 | You want to know… | Read |
@@ -187,6 +189,8 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [CODEC-AND-GPU-QUALIFICATION.md](streaming/CODEC-AND-GPU-QUALIFICATION.md) | Implementation plan from the 2026-09-20 architecture review: what it takes to qualify one more codec/GPU graph end to end, why NVENC and VideoToolbox work is conditional on a fleet inventory, and how Q8's three argument questions are each settled on their own evidence. | open |
 | [PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md](streaming/PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md) | Implementation plan from the 2026-09-20 architecture review: why DV Profile 5 was refused and the media-origin probe went dead after the Windows refactor; the fix to `output_job_owned` with a portable child test, the full caller audit, and a bounded, killable library scan probe. | built |
 | [MEDIA-BODY-BUFFERS.md](streaming/MEDIA-BODY-BUFFERS.md) | Implementation plan from the 2026-09-20 architecture review: the four 4 KiB `ReaderStream` sites, the exact HLS pump acknowledgement contract, a measurement protocol, and the later ack-batching change. | open |
+| [MEDIA-WRITE-STALL-GUARD.md](streaming/MEDIA-WRITE-STALL-GUARD.md) | Implementation plan from the 2026-09-26 Silo comparison: why the HLS pump's timers free a file handle but never the socket, one transport-level write-stall guard on every accepted connection, disabled by default with the client prerequisites listed in the Developer tab. | open |
+| [DV-STRIP-TRIAL-PROBE.md](streaming/DV-STRIP-TRIAL-PROBE.md) | Implementation plan from the 2026-09-26 Silo comparison: a two-second trial of `dovi_rpu=strip` per file before the strip is planned, a unit-type strip for files whose SEI the filter cannot read, the verdict grafted into `probe_json` and read by every argv builder through `CopyVideoOptions::from_probe`. | open |
 | [ENCODED-VOD-HOLD-AND-RELEASE.md](streaming/ENCODED-VOD-HOLD-AND-RELEASE.md) | Implementation plan from the 2026-09-20 architecture review: SIGSTOP instead of SIGKILL for encoded producers past the ahead horizon, a low-water mark, and the stopped→release transition driven by `Admissions::live_is_waiting`, proven in pure scheduler tests first. | open |
 | [FONT-ATTESTATION-AND-BLOCKING-IO.md](streaming/FONT-ATTESTATION-AND-BLOCKING-IO.md) | Implementation plan from the 2026-09-20 architecture review: moving the font/engine `stat` loops off the runtime, then freezing a burn recipe's fontconfig environment so per-segment `fc-list` becomes unnecessary because the inputs cannot change. | open |
 | [FFMPEG-SPAWN-UNIFICATION.md](streaming/FFMPEG-SPAWN-UNIFICATION.md) | Implementation plan from the 2026-09-20 architecture review: one producer spawn path for rolling HLS, VOD and progressive remux and one strict progress-line classifier, with the accidental differences closed by tests. | open |
@@ -282,6 +286,9 @@ conversion, decoder selection, and the stall/stutter investigations.
 
 ## cluster/ — replication, membership, and recovery
 
+Durable cluster work: [implementation](cluster/DURABLE-WORK-QUEUE-IMPLEMENTATION.md) ·
+[build status](cluster/DURABLE-WORK-QUEUE-STATUS.md) — **done**.
+
 Phase 4 and everything under it: the clustering transition, the performance
 and media-pool work built on top, and the diagnoses of specific replicated
 failures.
@@ -329,6 +336,8 @@ player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
+| [Live TV cluster resource](apple-builds/537-live-tv-cluster-resource.md) | Apple build 192 durable cluster start intents and protocol negotiation; validation limits. | built |
+| [Live TV station startup](apple-builds/568-live-tv-session-url.md) | Apple build 189 repair for valid station URLs rejected as expired sessions; regression and delivery limits. | built |
 | [STATUS-HISTORY.md](clients/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
 | [NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md](clients/NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md) | The build plan the adaptive-quality design produced: settle the four policy disagreements in the web first, type the reopen cause on the wire only in the change that first sends one, add the Swift and JVM runners of the shared fixture, then one adapter at a time — each one disabled until its own shaped-network trace beats its own baseline. | open |
 | [NATIVE-ADAPTIVE-QUALITY-DESIGN.md](clients/NATIVE-ADAPTIVE-QUALITY-DESIGN.md) | Implementation plan from the 2026-09-20 architecture review: what adaptive quality on the Apple and Android clients would have to be — one shared policy, five named kinds of evidence, and the shaped-network trace that would let it be switched on. | open |
@@ -341,7 +350,7 @@ player obeys, subtitles and overlays, layouts and themes.
 | [NATIVE-LIBRARY-PAGING.md](clients/NATIVE-LIBRARY-PAGING.md) | Implementation plan from the 2026-09-20 architecture review: paging large libraries on demand on Apple and Android while preserving merged multi-library order and defined search behaviour for unloaded titles. | open |
 | [ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET.md](clients/ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET.md) | Implementation plan from the 2026-09-20 architecture review: `Display.Mode` selection on TV (Media3 has no ALWAYS strategy), and sizing the playback byte budget from measured heap classes rather than a fixed floor. | open |
 | [ANDROID-LIFECYCLE-PLAYER-BUILDER-AND-ERROR-CLASSIFICATION.md](clients/ANDROID-LIFECYCLE-PLAYER-BUILDER-AND-ERROR-CLASSIFICATION.md) | Implementation plan from the 2026-09-20 architecture review: background pause and audio foreground service as one contract, one player builder with role overrides, live-window recovery, audio-sink error classification, and status-gated node failover. | open |
-| [ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD.md](clients/ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD.md) | Implementation plan from the 2026-09-20 architecture review: a scoped short-lived grant instead of the account bearer for external players, the DataStore excluded from both backup rule files, dispatcher separation after a trace, and shipping the release variant. | open |
+| [ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD.md](clients/ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD.md) | D-03 plan and 2026-09-25 approval ruling: the server grant exists, external book handoff remains open, and the mobile clients use in-app readers; also covers backup exclusions, dispatcher evidence, and signed release deployment. | open |
 | [WATCH-AND-BROWSE-IMPLEMENTATION.md](clients/WATCH-AND-BROWSE-IMPLEMENTATION.md) | Approved movie/episode watch browser, retained web host, task ownership, tests and pending native/real-media gates. | open |
 | [WATCH-VIEW-LAYOUT.md](clients/WATCH-VIEW-LAYOUT.md) | What the web watch view shows beside and below the picture: the collapsible chapter rail with on-request thumbnails, the media ledger whose chips pick tracks, one Close, and the Developer switch behind the thumbnails. | built |
 | [APPLE-CLIENT-PARITY.md](clients/APPLE-CLIENT-PARITY.md) | What the Apple client has, what it lacks, and which build proved it. | live |
@@ -369,6 +378,7 @@ player obeys, subtitles and overlays, layouts and themes.
 | [PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md](clients/PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md) | Hand-off for a Mac: compile and test M2 and M5's Swift, which has never seen a compiler. | open |
 | [PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md](clients/PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md) | The same for M3 and M5's Kotlin: Gradle, the mutations, the device runs. | open |
 | [PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-PROMPT.md](clients/PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-PROMPT.md) | M4: the four §7 recipes on an Apple TV, an iPhone and an Android TV, and what counts as a pass. | open |
+| [ANDROID-DV-LEVEL-CENSUS-PROMPT.md](clients/ANDROID-DV-LEVEL-CENSUS-PROMPT.md) | For the session with the Android devices: dump each decoder's Dolby Vision profile/level pairs so a server-side level check is built only if some device needs it. | open |
 | [PLAYBACK-SURFACE-REMUX-ORIGIN-MEASUREMENT-PROMPT.md](clients/PLAYBACK-SURFACE-REMUX-ORIGIN-MEASUREMENT-PROMPT.md) | M6's gate: the one measurement that decides whether the Android remux-seek landing gets built at all. | open |
 | [WEB-UI-USABILITY-AUDIT.md](clients/WEB-UI-USABILITY-AUDIT.md) | Approved twelve-part web usability audit and acceptance criteria. | open |
 | [WEB-UI-IMPLEMENTATION-STATUS.md](clients/WEB-UI-IMPLEMENTATION-STATUS.md) · [status page](clients/WEB-UI-STATUS.html) | Progress, decisions, review and final fast-lane evidence for the web UI implementation. | open |

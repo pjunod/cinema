@@ -257,18 +257,18 @@ impl HlsDeliveryFixture {
 
         let (control, mut executor_registration) = if actor_managed {
             let (control, registration) = if copy {
-                crate::playback_control::RollingControlHandle::spawn_prepublication_producer(
+                crate::playback_control::RollingControlHandle::spawn_prepublication_producer_for_test(
                     "test-copy-start",
                 )
             } else {
-                crate::playback_control::RollingControlHandle::spawn_prepublication_transcode(
+                crate::playback_control::RollingControlHandle::spawn_prepublication_transcode_for_test(
                     "test-transcode-start",
                 )
             };
             (control, Some(registration))
         } else {
             (
-                crate::playback_control::RollingControlHandle::spawn("test-start"),
+                crate::playback_control::RollingControlHandle::spawn_for_test("test-start"),
                 None,
             )
         };
@@ -638,7 +638,7 @@ impl HlsDeliveryFixture {
 pub(super) fn test_session(dir: PathBuf) -> Session {
     test_session_with_control(
         dir,
-        crate::playback_control::RollingControlHandle::spawn("test-start"),
+        crate::playback_control::RollingControlHandle::spawn_for_test("test-start"),
     )
 }
 

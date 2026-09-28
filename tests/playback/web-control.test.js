@@ -8,7 +8,7 @@ const TEST_CAPTURE_OWNER=Object.freeze({lifecycleId:"test-player",attachmentGene
 const captureSnapshot=(value,intentGeneration=0,owner=TEST_CAPTURE_OWNER)=>
   control.capture(value,intentGeneration,owner);
 
-const {shellSource} = require("../web/shell-source.js");
+const {shellSource,apiPrelude} = require("../web/shell-source.js");
 // The app's body rows, joined in served order.
 const SHIPPED_UI = shellSource().bodyScript;
 const DECLARATIONS = ["\nfunction ", "\nasync function "];
@@ -1267,6 +1267,8 @@ async function main() {
       shippedSource("preparedVideoElement"), shippedSource("preparedState"),
       shippedSource("queuePlaybackControlAcknowledgement"),
       shippedSource("destroyHlsInstance"),
+      shippedSource("resumePreparedIncumbentLoad"),
+      shippedSource("detachPreparedOverlapListeners"), shippedSource("restorePreparedOverlap"),
       shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
       "function cancelPreparedFirstFrame(){} function cancelHlsStartup(){}",
       shippedSource("rememberPlaybackTransportIntent"),shippedSource("pausePlaybackInternally"),
@@ -1511,7 +1513,7 @@ async function main() {
       "let now=0,timer,bodyResolve;const performance={now:()=>now},requests=[],released=[];let TOKEN=null,AUTH_GENERATION=0,PLAYER=null;const API='/api',PLAYBACK_ID='playback';const PlaybackPolicy={};",
       "function setTimeout(fn){timer=fn;return 1;}function clearTimeout(){}function fetch(url,options){return new Promise(resolve=>requests.push({url,options,resolve}));}function logout(){}",
       "function currentCapsDocument(){return {};}function capsDocumentIsUsable(){return false;}function prePlaySelectionQuery(){return '';}function decisionUrl(){return '/decision';}function vodClientContract(){return {session:{}};}function newRequestId(){return 'request';}",
-      shippedSource('api'),shippedSource('askDecision'),shippedSource('openSession'),shippedSource('beginPlaybackPreparation'),
+      apiPrelude()+shippedSource('api'),shippedSource('askDecision'),shippedSource('openSession'),shippedSource('beginPlaybackPreparation'),
       "return {requests,released,start(endpoint){const owner=beginPlaybackPreparation(()=>true);return owner.run(signal=>endpoint==='decision'?askDecision('f','auto',null,signal):openSession('f',{start:0},signal),value=>{if(value.session_id)released.push(value.session_id);});},headers(bodyHeld){requests[0].resolve({status:200,ok:true,json:()=>bodyHeld?new Promise(resolve=>bodyResolve=resolve):Promise.resolve({session_id:'late'})});},body(){bodyResolve({session_id:'late'});},expire(){now=20000;timer();}};",
     ].join('\n'))();
     const opening=h.start(endpoint);const outcome=opening.catch(error=>error);
@@ -1586,7 +1588,7 @@ async function main() {
       surfaceSeam(),
       "const performance={now:()=>now};const API='/api',TOKEN=null,AUTH_GENERATION=0;function logout(){}function fetch(url,options){return new Promise(resolve=>pending.push({url,options,resolve}));}",
       "function setTimeout(fn,ms){const id=++timerId;timers.set(id,{fn,at:now+ms});return id;}function clearTimeout(id){timers.delete(id);}function exactWireId(x){return x.id;}function toast(text){notices.push(text);}function autoNextOn(){return true;}function setLoading(value){loading.push(value);}function closePlayer(){closed++;}",
-      shippedSource('api'),shippedSource('beginPlaybackPreparation'),
+      apiPrelude()+shippedSource('api'),shippedSource('beginPlaybackPreparation'),
       shippedSource('playbackContinuation'),shippedSource('playNextEpisode'),shippedSource('finishPlayback'),
       "return {pending,loading,notices,surface:surfacePainted,events:()=>surfaceEvents,location,start:()=>finishPlayback(true),result:()=>({AUTOPLAY,closed}),advance(ms){now+=ms;for(const[id,t]of [...timers])if(t.at<=now){timers.delete(id);t.fn();}}};",
     ].join('\n'))();
@@ -2133,6 +2135,32 @@ async function main() {
   assert.equal(PREPARE_FIXTURE.media_origin_ms, 0);
   assert.equal(PREPARE_FIXTURE.playlist_url,
     `/api/v1/hls/${PREPARE_SESSION}/index.m3u8`);
+  const successorBootstrap={...bootstrap(),
+    url:`/api/v1/hls/${PREPARE_SESSION}/control`,
+    generation:"55555555-5555-4555-8555-555555555555"};
+  assert.equal(control.validPreparation({...PREPARE_FIXTURE,control:successorBootstrap}),true);
+  assert.equal(control.validPreparation({...PREPARE_FIXTURE,
+    control:{...successorBootstrap,url:"/api/v1/hls/other/control"}}),false,
+  "a preparation cannot hand the reporter to another session");
+  {
+    const live={id:"video"}, started=[];
+    let scheduled=null;
+    const player={sessionId:PREPARE_SESSION,
+      preparedControlPending:{actionId:PREPARE_ACTION_ID,sessionId:PREPARE_SESSION,
+        bootstrap:successorBootstrap},
+      controlAcknowledgements:[{action_id:PREPARE_ACTION_ID,state:"committed"}]};
+    const settle=new Function("PLAYER","document","setTimeout","playbackOwnsAttachedMedia",
+      "startPlaybackControl",`${shippedSource("settlePlaybackControlAcknowledgement")};
+        return settlePlaybackControlAcknowledgement;`)(player,{getElementById:()=>live},
+      fn=>{scheduled=fn;},()=>true,(video,p,controlBootstrap)=>
+        started.push({video,p,controlBootstrap}));
+    settle(player,{acknowledgement:{action_id:PREPARE_ACTION_ID,state:"committed"}});
+    assert.equal(player.controlAcknowledgements.length,0);
+    assert.equal(started.length,0,"the old reporter finishes its accepted exchange first");
+    scheduled();
+    assert.deepEqual(started,[{video:live,p:player,controlBootstrap:successorBootstrap}],
+      "the successor reporter is bound to the visible element and its own session");
+  }
   {
     // A whole exchange, so the fixture is proven through `validResponse` and
     // not only through the validator it happens to call.
@@ -2539,6 +2567,8 @@ async function main() {
         shippedSource("finishStoppingPlaybackControl"),
         shippedSource("continueStoppingPlaybackControl"),
         shippedSource("destroyHlsInstance"),
+        shippedSource("resumePreparedIncumbentLoad"),
+        shippedSource("detachPreparedOverlapListeners"), shippedSource("restorePreparedOverlap"),
         shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
         // The dispatch under test: a `prepare` answer must reach the player's
         // state machine. Recorded rather than run — the pipeline itself has its
@@ -3518,6 +3548,8 @@ async function main() {
         shippedSource("finishStoppingPlaybackControl"),
         shippedSource("continueStoppingPlaybackControl"),
         shippedSource("destroyHlsInstance"),
+        shippedSource("resumePreparedIncumbentLoad"),
+        shippedSource("detachPreparedOverlapListeners"), shippedSource("restorePreparedOverlap"),
         shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
         shippedSource("askPlaybackControl"),
         shippedSource("settlePlaybackControlWaiters"),
@@ -3912,6 +3944,8 @@ async function main() {
       on(event, fn) { this.events[event] = fn; }
       loadSource(url) { this.source = url; }
       attachMedia(media) { this.media = media; }
+      stopLoad() { this.loadsStopped = (this.loadsStopped || 0) + 1; }
+      startLoad() { this.loadsResumed = (this.loadsResumed || 0) + 1; }
       destroy() { this.destroyed = true; }
     }
     const scope = new Function(
@@ -3935,11 +3969,18 @@ async function main() {
         "function tok(url){return url;}",
         "function preferNativeHls(){return nativeHls;}",
         "function bufferTargets(){return {fwd:20,back:10,budgeted:false};}",
+        shippedSource("bufferRunway"),
         "function vodClientContract(){return {fragLoadPolicy:{}};}",
         shippedConst("PREPARED_HANDOFF_KEY"),
         shippedConst("PREPARED_BUFFER_LEAD_MS"),
         shippedConst("PREPARED_ALIGN_SLACK_MS"),
         shippedConst("PREPARED_FIRST_FRAME_MS"),
+        shippedConst("PREPARED_MONOTONIC_FRAME_STEPS"),
+        shippedConst("PREPARED_HANDOFF_FRAME_AGE_MS"),
+        shippedConst("PREPARED_FRAME_PROOF_MS"),
+        shippedConst("PREPARED_RETIRE_ADVANCING_FRAMES"),
+        shippedConst("PREPARED_RETIRE_MAX_MS"),
+        shippedConst("PREPARED_RETIRE_IDLE_TIMEOUT_MS"),
         shippedConst("PREPARED_TERMINAL_STATES"),
         shippedConst("PREPARED_ACK_QUEUE_MAX"),
         shippedConst("PREPARED_SETTLED_MEMORY"),
@@ -3957,6 +3998,7 @@ async function main() {
         shippedSource("handlePreparedReplacementAction"),
         shippedSource("beginPreparedReplacement"), shippedSource("preparedSelectionText"),
         shippedSource("preparedHlsAttach"), shippedSource("preparedNativeAttach"),
+        shippedSource("resumePreparedIncumbentLoad"),
         shippedSource("notePreparedMetadata"), shippedSource("preparedBufferedThroughMs"),
         shippedConst("PREPARED_ALIGN_SEEK_MS"), shippedConst("PREPARED_ALIGN_ATTEMPTS"),
         shippedSource("notePreparedBuffer"), shippedSource("commitPreparedReplacement"),
@@ -3964,7 +4006,8 @@ async function main() {
         // successor is exposed, so a corrective seek can no longer put a
         // blank element in front of the viewer.
         shippedSource("alignPreparedReplacement"), shippedSource("preparedAlignSeek"),
-        shippedSource("preparedAlignedBuffered"), shippedSource("exposePreparedReplacement"),
+        shippedSource("preparedAlignedBuffered"), shippedSource("exposePreparedReplacementAtFrame"),
+        shippedSource("exposePreparedReplacement"),
         // M3's instruments. Sliced rather than stubbed, so a commit in this
         // harness exercises the real recording and the assertions below can
         // read what it recorded.
@@ -3973,9 +4016,12 @@ async function main() {
         shippedSource("notePreparedSwitchCommit"),
         shippedSource("notePreparedSwitchFirstFrame"),
         shippedSource("preparedSwitchLedger"),
+        shippedSource("detachPreparedOverlapListeners"),
+        shippedSource("restorePreparedOverlap"),
         // The directed change the commit and its failure now settle.
         shippedSource("settleDirectedChange"), shippedSource("supersedeDirectedChange"),
         shippedSource("fallBackDirectedChange"),
+        shippedSource("deferPreparedPredecessorRetirement"),
         shippedSource("retirePreparedPredecessor"), shippedSource("rollbackPreparedReplacement"),
         shippedSource("adoptPlaybackMediaElement"), shippedSource("disposeRetiredMediaElement"),
         shippedSource("preparedFirstFrame"), shippedSource("cancelPreparedFirstFrame"),
@@ -3997,6 +4043,7 @@ async function main() {
         "async function requestPlaybackMediaChange(p,change){mediaChanges.push(change);return true;}",
         "function selectedAudioIndex(){return 0;} function playQuality(){return quality;}",
         "function hlsStartupCurrent(){return false;}",
+        "function recordAutoSwitch(p,from,to,reason,pos,id){(p.abr.switches||(p.abr.switches=[])).push({from,to,reason,pos,id});}",
         shippedConst("PREPARED_OFFER_BOUND_MS"),
         shippedConst("PREPARED_OFFER_CADENCE_MS"),
         shippedSource("playbackControlSelection"),
@@ -4097,6 +4144,23 @@ async function main() {
       head: () => api.pending("active"),
       fire(id) { const t = timers.get(id); if (t) { timers.delete(id); t.fn(); } },
       fireAll() { for (const [id] of [...timers]) this.fire(id); },
+      provePrepared(firstVisibleFrame = true) {
+        const successor = this.spare;
+        const incumbent = attached.find((node) => node.id === "video");
+        assert.ok(successor && incumbent, "both media layers exist during frame proof");
+        incumbent.paused = false;
+        successor.readyState = 4;
+        const at = successor.currentTime;
+        for (let step = 0; step <= 3; step += 1) {
+          assert.equal(typeof successor.frameCallback, "function", "successor frame proof is armed");
+          successor.frameCallback(0, { mediaTime: at + step / 30, presentedFrames: step + 1 });
+        }
+        assert.equal(typeof incumbent.frameCallback, "function", "incumbent frame rendezvous is armed");
+        incumbent.frameCallback(0, { mediaTime: incumbent.currentTime, presentedFrames: 1 });
+        assert.equal(successor.id, "video", "the successor takes the picture after both frame proofs");
+        if (firstVisibleFrame)
+          successor.frameCallback(0, { mediaTime: at + 4 / 30, presentedFrames: 5 });
+      },
       timers,
     });
   }
@@ -4112,6 +4176,53 @@ async function main() {
     offset: 0, vod: true, hls: null, prepared: null, priorKbps: 0,
     controlAcknowledgement: null, pendingMediaChange: null, wantsPlayback: true,
   }, overrides);
+
+  // A warmed successor remains under the incumbent until aligned advancing
+  // successor frames meet a fresh incumbent frame.
+  {
+    const h = preparedHarness();
+    h.live.currentTime = 20;
+    h.live.ranges = [[18, 29]];
+    const incumbent = { destroy() {} };
+    const p = h.set(preparedPlayer({ hls: incumbent }));
+    h.handle(prepareAction());
+    h.spare.frameCallback();
+    h.instances[0].events.manifest();
+    h.spare.currentTime = 20;
+    h.spare.ranges = [[20, 30]];
+    h.instances[0].events.append();
+    assert.equal(p.hls, incumbent, "the predecessor stays visible until the warm frame callback");
+    assert.equal(h.spare.id, "video-prepared");
+    h.provePrepared();
+    assert.equal(p.hls, h.instances[0], "the successor becomes authoritative after both frame proofs");
+  }
+
+  // Preparing a second HLS pipeline temporarily gives it the shaped link.
+  // Every abort and the bounded pause must restore incumbent loading.
+  {
+    const h = preparedHarness();
+    h.live.currentTime = 20;
+    h.live.ranges = [[18, 29]];
+    const incumbent = { stopped: 0, resumed: 0, destroyed: false,
+      stopLoad() { this.stopped++; }, startLoad() { this.resumed++; },
+      destroy() { this.destroyed = true; } };
+    const p = h.set(preparedPlayer({ hls: incumbent }));
+    h.handle(prepareAction());
+    assert.equal(incumbent.stopped, 1);
+    assert.equal(incumbent.resumed, 0);
+    h.abandon("aborted", "fixture abort");
+    assert.equal(incumbent.resumed, 1, "abort resumes the still-authoritative pipeline");
+    assert.equal(incumbent.destroyed, false);
+    h.fireAll();
+    assert.equal(incumbent.resumed, 1, "a canceled timer cannot resume twice");
+    h.handle(prepareAction({ action_id: "817334fb-1472-4be4-9240-fc890a346cf8" }));
+    assert.equal(incumbent.stopped, 2);
+    h.fireAll();
+    assert.equal(incumbent.resumed, 2, "the bounded pause expires even before settlement");
+    h.abandon("aborted", "fixture abort after bound");
+    assert.equal(incumbent.resumed, 2);
+    assert.equal(p.hls, incumbent);
+  }
 
   // §4 — the alignment functions, as pure functions, with no player at all.
   {
@@ -4129,6 +4240,28 @@ async function main() {
     assert.equal(h.film(Number.NaN, 900_000, false), 0);
     assert.equal(h.local(910_000, 900_000), 10_000, "and the inverse puts the successor there");
     assert.equal(h.local(10_000, 900_000), 0, "a successor never starts before its own zero");
+  }
+
+  // With safe incumbent runway, the successor begins one lead ahead and
+  // cannot commit until its buffered range covers the incumbent's real second.
+  {
+    const h = preparedHarness();
+    h.live.currentTime = 20;
+    h.live.ranges = [[18, 29]];
+    const p = h.set(preparedPlayer({ hls: { destroy() {} } }));
+    const incumbent = p.hls;
+    h.handle(prepareAction());
+    assert.equal(h.instances[0].config.startPosition, 23);
+    h.instances[0].events.manifest();
+    h.spare.currentTime = 24;
+    h.spare.ranges = [[24, 30]];
+    h.instances[0].events.append();
+    assert.ok(p.prepared, "a range beginning ahead cannot skip the incumbent's 20th second");
+    h.live.currentTime = 24;
+    h.instances[0].events.append();
+    assert.equal(p.hls, incumbent, "buffer readiness still waits for presented frames");
+    h.provePrepared();
+    assert.equal(p.hls, h.instances[0], "overlap, runway, and frame proof permit the handoff");
   }
 
   // Building the second pipeline: one instance, on the hidden element, and the
@@ -4154,7 +4287,8 @@ async function main() {
     assert.equal(p.hls, incumbent, "the incumbent instance is untouched");
     assert.equal(incumbent.destroyed, false, "…and specifically not destroyed");
     assert.equal(h.spare.muted, true, "the successor is muted until the switch");
-    assert.equal(h.spare.style.display, "none", "…and invisible until the switch");
+    assert.equal(h.spare.style.opacity, "", "…and fully painted beneath the incumbent while its decoder warms");
+    assert.equal(h.spare.style.position, "absolute", "…without shrinking the incumbent's picture");
     // §C6 — the successor's local zero is `media_origin_ms` in film time, so a
     // successor primed for film 900 s whose zero is 600 s starts at 300 s.
     assert.equal(h.instances[0].config.startPosition, 300,
@@ -4174,13 +4308,13 @@ async function main() {
 
     // Buffered short of the lead is not ready…
     h.spare.currentTime = 300;
-    h.spare.ranges = [[300, 302]];
+    h.spare.ranges = [[300, 301.5]];
     h.instances[0].events.append();
     assert.equal(latest(h).state, "metadata_ready",
       "buffered to the playhead is not buffered past the switch point");
     // Intent can change while the successor is preparing. The commit must
     // sample this boundary, not replay the snapshot from preparation start.
-    p.wantsPlayback = false;
+    p.wantsPlayback = true;
     h.live.muted = true;
     h.live.volume = 0.35;
     h.live.defaultPlaybackRate = 1.5;
@@ -4193,8 +4327,12 @@ async function main() {
     assert.equal(buffered.buffered_through_ms, PREPARE_ORIGIN_MS + 320_000,
       "buffered_through_ms is film time, not the successor's local time");
 
-    // The switch itself — which readiness leads straight into, because the
-    // client decides when to switch and the server never orders it.
+    // Buffer readiness starts frame proof while the incumbent stays visible.
+    assert.equal(p.hls, incumbent, "readiness alone cannot expose a successor");
+    assert.equal(latest(h).state, "buffer_ready");
+    const replacementElement = h.spare;
+    h.provePrepared();
+    // The client decides when to switch and the server never orders it.
     assert.equal(p.hls, h.instances[0], "the prepared instance is now authoritative");
     assert.equal(incumbent.destroyed, false,
       "the predecessor remains recoverable until the successor proves a frame");
@@ -4203,24 +4341,59 @@ async function main() {
     assert.equal(p.health, null, "the successor never inherits predecessor server telemetry");
     assert.equal(p.healthObservedAt, null, "the successor starts without a server-sample age");
     assert.equal(p.presentationAdvancedAt, null, "the successor must observe its own presentation advance");
-    assert.equal(h.spare.id, "video", "the successor is the element the page addresses");
+    assert.equal(replacementElement.id, "video", "the successor is the element the page addresses");
     assert.equal(h.live.id, "video-prepared", "and the predecessor is the spare");
-    assert.equal(h.spare.muted, true, "a muted incumbent cannot leak an audible successor frame");
-    assert.equal(h.spare.volume, 0.35);
-    assert.equal(h.spare.defaultPlaybackRate, 1.5);
-    assert.equal(h.spare.playbackRate, 1.5);
-    assert.equal(h.spare.paused, true, "a pause during preparation survives the switch");
-    assert.equal(h.spare.style.display, "", "…and visible only after the switch");
-    assert.equal(h.live.style.display, "none");
+    assert.equal(replacementElement.muted, true, "a muted incumbent cannot leak an audible successor frame");
+    assert.equal(replacementElement.volume, 0.35);
+    assert.equal(replacementElement.defaultPlaybackRate, 1.5);
+    assert.equal(replacementElement.playbackRate, 1.5);
+    assert.equal(replacementElement.paused, false, "the playing successor keeps its running clock at the switch");
+    assert.equal(replacementElement.style.display, "", "…and visible only after the switch");
+    assert.equal(replacementElement.style.opacity, "", "…without the warm overlay's opacity");
+    assert.equal(replacementElement.style.zIndex, "3", "…above the still-live predecessor layer");
+    assert.equal(h.live.style.display, "", "the predecessor remains displayed until idle retirement");
+    assert.equal(h.live.style.pointerEvents, "none", "the hidden predecessor cannot take controls");
     assert.equal(h.live.muted, true);
     assert.equal(p.prepared, null, "the slot is free once the switch is made");
-    assert.equal(latest(h).state, "buffer_ready",
-      "and the commit waits for a frame rather than being claimed at the swap");
-    h.spare.frameCallback();
     assert.equal(latest(h).state, "committed");
     assert.ok(latest(h).first_frame_unix_ms > 0);
+    assert.equal(incumbent.destroyed, false,
+      "first-frame proof acknowledges the switch without blocking its next frame on decoder teardown");
+    assert.ok(p.preparedRetiring, "the hidden predecessor has a bounded retirement owner");
+    const paintsBeforeDrain = h.adopted.filter(([kind]) => kind === "render").length;
+    h.teardown();
     assert.equal(incumbent.destroyed, true,
-      "first-frame proof retires the predecessor through the normal teardown");
+      "a new attachment drains pending predecessor retirement");
+    assert.equal(p.preparedRetiring, null);
+    assert.equal(h.adopted.filter(([kind]) => kind === "render").length, paintsBeforeDrain,
+      "direct retirement does not repaint in the media teardown turn");
+    h.fireAll();
+    assert.equal(h.adopted.filter(([kind]) => kind === "render").length, paintsBeforeDrain + 1,
+      "direct retirement still refreshes attached delivery badges later");
+  }
+
+  // A pause while both decoders are proving frames leaves the original
+  // picture authoritative; the preparation cannot turn playback back on.
+  {
+    const h = preparedHarness();
+    const incumbent = { destroy() {} };
+    const p = h.set(preparedPlayer({ hls: incumbent }));
+    h.handle(prepareAction());
+    h.instances[0].events.manifest();
+    h.spare.ranges = [[0, 30]];
+    h.instances[0].events.append();
+    assert.deepEqual(h.wired, [], "buffer readiness does not adopt an unproved successor");
+    const successor = h.spare;
+    h.live.paused = false;
+    successor.readyState = 4;
+    for (let step = 0; step <= 3; step += 1)
+      successor.frameCallback(0, { mediaTime: step / 30, presentedFrames: step + 1 });
+    p.wantsPlayback = false;
+    h.live.frameCallback(0, { mediaTime: 0, presentedFrames: 1 });
+    assert.equal(latest(h).state, "failed", "a pause during proof cancels the handoff");
+    assert.equal(p.hls, incumbent, "the paused viewer keeps the original picture");
+    assert.equal(h.live.id, "video");
+    assert.equal(p.wantsPlayback, false);
   }
 
   // The commit is sent only after a frame renders. It is a claim that the
@@ -4228,14 +4401,15 @@ async function main() {
   {
     const h = preparedHarness();
     const p = h.set(preparedPlayer({ hls: { bandwidthEstimate: 1, destroy() {} } }));
+    const incumbent = p.hls;
     h.handle(prepareAction());
     h.instances[0].events.manifest();
     h.spare.ranges = [[0, 30]];
     h.instances[0].events.append();
     assert.equal(latest(h).state, "buffer_ready",
       "no commit before a frame — requestVideoFrameCallback has not fired");
-    assert.equal(p.hls, h.instances[0], "…even though the switch itself has happened");
-    h.spare.frameCallback();
+    assert.equal(p.hls, incumbent, "…and the incumbent still owns the picture");
+    h.provePrepared();
     assert.equal(latest(h).state, "committed");
     assert.ok(latest(h).first_frame_unix_ms > 1_600_000_000_000,
       "committed carries the wall clock of the first qualifying frame");
@@ -4280,13 +4454,14 @@ async function main() {
     assert.equal(h.live.id, "video");
     assert.equal(h.live.style.display, "");
     assert.equal(h.live.muted, true);
-    assert.equal(h.live.volume, 0.4);
-    assert.equal(h.live.defaultPlaybackRate, 1.25);
-    assert.equal(h.live.playbackRate, 1.25);
+    assert.equal(h.live.volume, 0, "the incumbent keeps the viewer's newer volume");
+    assert.equal(h.live.defaultPlaybackRate, 0.5);
+    assert.equal(h.live.playbackRate, 0.5);
     assert.equal(h.live.paused, true);
     assert.equal(h.live.parentNode !== null, true);
-    assert.deepEqual(h.removed, [h.created[0]],
-      "the discarded successor, not the recovered predecessor, leaves the page");
+    assert.deepEqual(h.removed, [],
+      "failure before exposure clears the spare decoder without removing either media node");
+    assert.equal(h.created[0].style.display, "none");
   }
 
   // §C12.6 — an abandoned preparation is settled, and the instance is freed.
@@ -4791,7 +4966,7 @@ async function main() {
     h.spare.currentTime = 900;
     h.spare.ranges = [[900, 930]];
     h.instances[0].events.append();
-    h.spare.frameCallback();
+    h.provePrepared();
     assert.equal(latest(h).state, "committed");
     assert.equal(latest(h).committed_media_origin_ms, PREPARE_ORIGIN_MS,
       "the commit echoes the offer, not the number this client aligned against");
@@ -4810,6 +4985,10 @@ async function main() {
     h.spare.currentTime = 306;                // six seconds of drift while priming
     h.spare.ranges = [[306, 330]];
     h.live.currentTime = 301;                 // film 901 s
+    h.instances[0].events.append();
+    assert.equal(h.spare.currentTime, 306,
+      "a disjoint range is not a safe place to align the successor");
+    h.spare.ranges = [[300, 330]];
     h.instances[0].events.append();
     assert.equal(h.spare.currentTime, 301,
       "the successor is put on the incumbent's second before the picture changes");
@@ -4830,6 +5009,8 @@ async function main() {
     assert.equal(p.prepared.state, "metadata_ready", "…and nothing switched");
     h.spare.ranges = [[0, 30], [60, 600]];
     h.instances[0].events.append();
+    assert.equal(p.prepared.state, "committing", "the range containing the playhead starts frame proof");
+    h.provePrepared();
     assert.equal(p.prepared, null, "the range containing the playhead is the one that counts");
   }
   {
@@ -4897,13 +5078,15 @@ async function main() {
     h.instances[0].events.manifest();
     h.spare.ranges = [[0, 30]];
     h.instances[0].events.append();
+    assert.deepEqual(h.wired, [], "buffer readiness does not adopt an unproved successor");
+    h.provePrepared();
     // The listener set and the per-playback bindings move to the element that
     // now owns the picture. Without this the scrubber freezes, the stall
     // watchdog goes deaf, the decode rescue goes silent and the end of the
     // film does nothing — for the rest of the page's life, because `wirePlayer`
     // runs once.
     assert.deepEqual(h.wired, [successor], "the media listener set follows the picture");
-    for (const binding of ["hitch", "airplay", "render"]) {
+    for (const binding of ["hitch", "airplay"]) {
       assert.ok(h.adopted.some((entry) => entry[0] === binding),
         `the switch re-binds ${binding}`);
     }
@@ -4916,18 +5099,19 @@ async function main() {
     assert.ok(h.adopted.some((entry) => entry[0] === "ended"),
       "and the end of the film is handled on it — autoplay-next and watched "
         + "state both hang off this one listener");
-    assert.equal(successor.plays >= 1, true,
-      "and it is asked to play again after being un-muted — WebKit pauses an "
-        + "element that loses its mute without a gesture");
+    assert.equal(successor.plays >= 1, true, "the successor was already playing during preparation");
     // The predecessor stays available until the successor proves a frame.
     assert.deepEqual(h.removed, [], "nothing is disposed during the rollback window");
     assert.equal(h.live.parentNode !== null, true);
-    successor.frameCallback();
+    h.fireAll();
     // The retired element then leaves the page. Keeping it as the next
     // successor's host would have a hidden pipeline driving the visible
     // stream's overlays.
-    assert.deepEqual(h.removed, [h.live], "first-frame proof disposes the predecessor");
+    assert.deepEqual(h.removed, [h.live], "bounded retirement disposes the predecessor after proof");
     assert.equal(h.live.parentNode, null);
+    h.fireAll();
+    assert.ok(h.adopted.some((entry) => entry[0] === "render"),
+      "the new session badges repaint after retirement");
     const second = "77777777-7777-4777-8777-777777777777";
     h.handle(prepareAction({ action_id: second }));
     assert.notEqual(h.spare, h.live, "a second preparation never restages the retired element");
@@ -4947,6 +5131,7 @@ async function main() {
     h.instances[0].events.manifest();
     h.spare.ranges = [[0, 30]];
     h.instances[0].events.append();
+    h.provePrepared(false);
     assert.ok(p.preparedCommitting, "the staging is still this player's until a frame settles");
     assert.equal(h.timers.size, 1, "…and the watchdog is armed");
     h.cancelFrame();
@@ -4975,6 +5160,7 @@ async function main() {
     h.instances[0].events.manifest();
     h.spare.ranges = [[0, 30]];
     h.instances[0].events.append();
+    h.provePrepared(false);
     h.teardown();
     assert.equal(latest(h).state, "failed");
     assert.equal(successor.destroyed, true, "teardown destroys the unproven successor");
@@ -5166,7 +5352,7 @@ async function main() {
     await flush();
     h.exchange(offerRequest(5), offerResponse({ delivery: { preparation: "staging" } }));
     assert.equal(reporter.notifies, 0, "the cadence is a timer, not an immediate storm");
-    const cadence = [...h.timers.entries()].find(([, t]) => t.ms === 1000);
+    const cadence = [...h.timers.entries()].find(([, t]) => t.ms === 500);
     assert.ok(cadence, "a staging exchange schedules one cadence wake");
     h.fire(cadence[0]);
     assert.equal(reporter.notifies, 1, "…which comes back for the offer");
@@ -5262,10 +5448,12 @@ async function main() {
     fireOfferConfirm(h);
     await outcomeOf(pending);
     h.instances[0].events.manifest();
+    const successor = h.spare;
     h.spare.ranges = [[0, 30]];
     h.instances[0].events.append();
-    assert.equal(h.spare.id, "video", "the successor took the picture");
-    h.spare.frameCallback(0, { presentationTime: 1, presentedFrames: 1 });
+    assert.equal(successor.id, "video-prepared", "the successor waits below the original picture for frame proof");
+    h.provePrepared();
+    assert.equal(successor.id, "video", "the successor took the picture");
     assert.equal(p.directedChange.settled, true);
     assert.equal(p.directedChange.outcome, "committed");
     assert.equal(h.plays.length, 0, "a switch that committed owes the viewer nothing");
@@ -5339,7 +5527,7 @@ async function main() {
     // cancels a preparation on `waiting`/`stalled` anyway, so asking would
     // spend twelve seconds to be told no — with the viewer already stalled.
     const h = preparedHarness();
-    const p = directedPlayer(h, { abr: { switching: false } });
+    const p = directedPlayer(h, { abr: { switching: false, switches: [] } });
     offerReporter(h);
     p.waitAt = 1;                      // the incumbent is not decoding
     await h.autoRung(720, { height: 1080, reason: "runway" });
@@ -5369,7 +5557,7 @@ async function main() {
   // ---- §7.4 D3-a, the web half: Auto carries the rung it wants -------------
   {
     const h = preparedHarness();
-    const p = directedPlayer(h, { abr: { switching: false } });
+    const p = directedPlayer(h, { abr: { switching: false, switches: [] } });
     offerReporter(h);
     p.autoHeight = 720;
     assert.deepEqual(h.selection().quality, { mode: "auto" },
@@ -5389,14 +5577,30 @@ async function main() {
     h.exchange(offerRequest(6), offerResponse({ action: prepareAction() }));
     fireOfferConfirm(h);
     await outcomeOf(moving);
+    assert.equal(p.abr.switching, true,
+      "the first prepared Auto ask keeps later controller ticks from opening another owner");
+    assert.equal(p.autoFallbackInFlight, true);
+    await h.autoRung(720, { height: 1080, reason: "runway" });
+    assert.equal(h.instances.length, 1, "a second tick cannot open another preparation");
     h.instances[0].events.manifest();
     h.spare.ranges = [[0, 30]];
     h.instances[0].events.append();
-    h.spare.frameCallback(0, { presentationTime: 1, presentedFrames: 1 });
-    assert.equal(p.autoRequestedHeight, null,
-      "a committed rung is the delivered one now; the selection returns to plain Auto");
-    assert.deepEqual(h.selection().quality, { mode: "auto" },
-      "…which is a stable digest rather than a standing ask");
+    h.provePrepared();
+    assert.equal(p.abr.switching, false);
+    assert.equal(p.autoFallbackInFlight, false);
+    assert.equal(p.autoHeight, 1080, "the committed rung is the next tick's delivered height");
+    assert.equal(p.abr.switches.length, 1, "prepared Auto success is recorded as a switch");
+    assert.equal(p.autoRequestedHeight, 1080,
+      "the committed acknowledgement must retain the selection that staged the successor");
+    assert.deepEqual(h.selection().quality, { mode: "auto", height: 1080 },
+      "clearing the ask before acknowledgement makes the server retire the successor");
+    const committed=h.pending("active");
+    assert.equal(committed.state,"committed");
+    h.settle({acknowledgement:committed});
+    assert.equal(p.autoRequestedHeight, 1080,
+      "the successor reporter continues to ask for the delivered rung");
+    assert.deepEqual(h.selection().quality, { mode: "auto", height: 1080 },
+      "plain Auto would stage an unwanted replacement on the successor");
   }
   {
     // A viewer who picks by hand overrides whatever the controller wanted.
@@ -5486,13 +5690,16 @@ async function main() {
     assert.equal(h.live.id, "video", "…and the incumbent still owns the picture");
     assert.equal(h.live.style.display, "", "…is still displayed");
     assert.equal(h.live.muted, false, "…and is still audible while the seek runs");
-    assert.equal(h.spare.style.display, "none", "the successor is not exposed yet");
+    assert.equal(h.spare.style.zIndex, "1", "the successor stays beneath the incumbent");
     assert.equal(p.prepared.state, "committing", "the staging is mid-commit, not exposed");
     // Now it lands, on a range that covers where it landed.
     h.spare.ranges = [[300, 330]];
     h.spare.emit("seeked");
     await flush(); await flush();
-    assert.equal(h.spare.id, "video", "a completed, decoded seek exposes the successor");
+    const successor = h.spare;
+    assert.equal(successor.id, "video-prepared", "a completed seek still waits for frame proof");
+    h.provePrepared();
+    assert.equal(successor.id, "video", "a completed, decoded seek exposes the successor");
     assert.equal(h.live.id, "video-prepared");
     assert.equal(h.live.muted, true, "and only then is the predecessor silenced");
   }
@@ -6398,6 +6605,95 @@ async function vendoredHlsStartupTests(){
   const VendoredHls=require("../../crates/plurxd/src/web/hls.min.js");
   assert.equal(typeof VendoredHls.DefaultConfig.loader.prototype.openAndSendXhr,"function",
     "the vendored stock loader exposes the final-send seam the adapter wraps");
+
+  {
+    // The same adapter must see media bytes before FRAG_LOADED, without
+    // replacing hls.js's progress handler or accepting stale attachment data.
+    const sample=new Function("PlaybackPolicy",[
+      "let now=0;const performance={now:()=>now};",
+      "const attachment={current:()=>true};const hls={};",
+      "let PLAYER={hls,mediaAttachment:attachment,controlIntentGeneration:1,abr:{recentEstimateKbps:null,recentEstimateAtMs:null}};",
+      "const episode={player:PLAYER,attachment,mediaAttachment:attachment,hls,state:'presenting',loaders:new Set()};PLAYER.hlsStartup=episode;",
+      "class StockLoader{constructor(){}load(context,config,callbacks){this.context=context;this.callbacks=callbacks;return this.openAndSendXhr(context.xhr,context,config);}openAndSendXhr(xhr){xhr.onprogress=()=>{xhr.stockProgress=(xhr.stockProgress||0)+1;};}abort(){}destroy(){}}",
+      "class FakeXHR{constructor(status=200){this.status=status;this.listeners={};}addEventListener(name,fn){this.listeners[name]=fn;}progress(loaded){this.onprogress({loaded});if(this.listeners.progress)this.listeners.progress({loaded});}}",
+      shippedSource("playbackAttemptTerminallyStopped"),
+      shippedSource("hlsStartupCurrent"),
+      shippedSource("hlsStartupManifestRequest"),
+      shippedSource("createHlsStartupLoader"),
+      "function scheduleUrgentAutoControllerTick(){}",
+      "const Loader=createHlsStartupLoader(StockLoader,episode);const loader=new Loader({});",
+      "const xhr=new FakeXHR();loader.load({xhr,frag:{type:'main',duration:2}}, {}, {});",
+      "return {xhr,player:PLAYER,setNow:value=>{now=value;},rejected(status){const x=new FakeXHR(status);loader.load({xhr:x,frag:{type:'main',duration:2}}, {}, {});return x;},manifest(){const x=new FakeXHR();loader.load({xhr:x,type:'manifest',url:'/index.m3u8'}, {}, {});return x;}};",
+    ].join("\n"))(require("../../crates/plurxd/src/web/playback-policy.js"));
+    sample.xhr.progress(20_000);
+    sample.setNow(1_000);
+    sample.xhr.progress(60_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,null,"a short delta cannot classify a cliff");
+    sample.setNow(1_600);
+    sample.xhr.progress(80_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,300,"60 kB over 1.6 s is measured, not inferred from runway");
+    assert.equal(sample.player.abr.recentEstimateAtMs,1_600);
+    assert.equal(sample.player.abr.recentEstimateSource,'progress');
+    assert.equal(sample.xhr.stockProgress,3,"hls.js keeps its own progress accounting");
+    for(const status of [0,503]){
+      const rejected=sample.rejected(status);
+      rejected.progress(20_000);
+      sample.setNow(status===0?3_200:4_800);
+      rejected.progress(140_000);
+      assert.equal(sample.player.abr.recentEstimateAtMs,1_600,
+        `HTTP ${status} progress must not become bandwidth evidence`);
+    }
+    sample.player.controlIntentGeneration=2;
+    sample.setNow(5_000);
+    sample.xhr.progress(200_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,300,"a superseded intent cannot overwrite throughput");
+    assert.equal(sample.manifest().listeners.progress,undefined,"manifest bytes are not media throughput");
+  }
+
+  {
+    // A staged HLS instance becomes the attached player without a new open.
+    // Its own loader must start sampling only then, and a later cliff must
+    // not be decided from the predecessor's expired bandwidth sample.
+    const sample=new Function("PlaybackPolicy",[
+      "let now=0;const performance={now:()=>now};",
+      "const predecessor={};const successor={};let PLAYER={hls:predecessor,sessionId:'old',abr:{recentEstimateKbps:1097,recentEstimateAtMs:-70000}};",
+      "const state={hls:successor,sessionId:'new'};",
+      "class StockLoader{load(context,config,callbacks){return this.openAndSendXhr(context.xhr,context,config);}openAndSendXhr(xhr){xhr.onprogress=()=>{};}}",
+      "class FakeXHR{constructor(status=200){this.status=status;this.listeners={};}addEventListener(name,fn){this.listeners[name]=fn;}progress(loaded){this.onprogress({loaded});this.listeners.progress?.({loaded});}}",
+      shippedSource("attachedPreparedHls"),
+      shippedSource("createPreparedHlsLoader"),
+      shippedSource("notePreparedHlsFragmentLoaded"),
+      "function scheduleUrgentAutoControllerTick(){} function noteCompletedAutoTransfer(){}",
+      "const Loader=createPreparedHlsLoader(StockLoader,PLAYER,state);const loader=new Loader({});",
+      "const xhr=new FakeXHR();loader.load({xhr,url:'/new/frag1',frag:{type:'main',duration:2}}, {}, {});",
+      "return {player:PLAYER,state,xhr,setNow:value=>{now=value;},attach(){PLAYER.hls=successor;PLAYER.sessionId='new';},reject(){const bad=new FakeXHR(503);loader.load({xhr:bad,url:'/new/frag2',frag:{type:'main',duration:2}}, {}, {});return bad;},complete(data){notePreparedHlsFragmentLoaded(PLAYER,state,data);}};",
+    ].join("\n"))(require("../../crates/plurxd/src/web/playback-policy.js"));
+    sample.xhr.progress(20_000);
+    sample.setNow(1_600);sample.xhr.progress(80_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,1097,
+      "staging traffic cannot replace the attached predecessor's estimate");
+    sample.attach();
+    sample.xhr.progress(100_000);
+    sample.setNow(3_200);sample.xhr.progress(160_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,300);
+    assert.equal(sample.player.abr.recentEstimateAtMs,3_200);
+    sample.complete({frag:{url:'/new/frag1',duration:2,
+      stats:{loaded:100_000,loading:{start:1_600,end:3_200}}}});
+    assert.equal(sample.player.abr.recentEstimateKbps,300,
+      "a complete average cannot overwrite fresh progress from the same fragment");
+    const rejected=sample.reject();rejected.progress(20_000);
+    sample.setNow(4_800);rejected.progress(160_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,300,
+      "non-2xx successor bytes cannot become bandwidth evidence");
+    sample.complete({frag:{url:'/new/frag3',duration:2,
+      stats:{loaded:100_000,loading:{start:3_200,end:4_800}}}});
+    assert.equal(sample.player.abr.recentEstimateKbps,500,
+      "the attached successor publishes a fresh complete-fragment estimate");
+    sample.player.hls={};
+    sample.setNow(6_400);sample.xhr.progress(240_000);
+    assert.equal(sample.player.abr.recentEstimateKbps,500,
+      "a retired successor cannot overwrite its replacement's estimate");
+  }
 
   async function actualVendoredLoaderCase({xhrSetup=null}={}){
     const policy=require("../../crates/plurxd/src/web/playback-policy.js");

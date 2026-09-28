@@ -40,7 +40,7 @@ function clusterBackupCard(settings,readiness){
 // A readiness status is evidence, not authority. The daemon can report facts
 // it can observe on this node; the controls remain available regardless of
 // the answer, including when the reading itself is unavailable.
-const DEV_READINESS_LABEL={met:"met",unmet:"not met",unobservable:"not observable"};
+const DEV_READINESS_LABEL={met:"met",unmet:"not met",unobservable:"not observable",unknown:"unknown",unavailable:"unavailable"};
 function devReadinessRow(readiness,itemId,reqId){
   if(!readiness||!Array.isArray(readiness.items)) return null;
   const item=readiness.items.find(row=>row&&row.id===itemId);
@@ -57,7 +57,7 @@ function devReadinessPill(found,readiness){
 }
 function devReadinessEvidence(found,readiness){
   if(readiness&&readiness.unavailable) return `The prerequisite reading failed: ${readiness.unavailable}`;
-  if(found) return found.evidence;
+  if(found) return found.evidence+(readiness?.observed_at_ms?` Observed ${new Date(readiness.observed_at_ms).toLocaleString()}.`:"");
   return readiness?"This server did not report on this prerequisite.":"";
 }
 function devReq(readiness,itemId,reqId,title,detail){
@@ -135,10 +135,12 @@ function autoQualityCard(settings){
       ${togRow("pabr",`Adjust Auto quality while playing <span class="pill warn">experimental</span>`,`Off keeps the server's first Auto choice and the full manual quality menu. On lets supported clients adjust rungs and recover supply stalls.`,enabled)}
       <div class="hint"><b>This switch is the enable path.</b> It is saved on the server and is never disabled or overridden by the readiness rows below. It affects eligible Auto sessions; a manual rung remains the viewer's choice.</div>
       <details class="setdetails" open><summary>Requirements and current evidence</summary><div class="setdetails-body">
-      ${devStaticReq("Web controller in this browser",webController?"met":"not met","This page can see the shipped browser controller. A missing controller means this browser cannot adjust Auto while playing.",webController?"ok":"warn")}
+      ${devStaticReq("Web controller implementation",webController?"present":"absent","This page can see the browser controller function. Presence confirms the implementation loaded; the dated recovery traces below describe runtime qualification.",webController?"ok":"warn")}
       ${devStaticReq("Native controllers","not met in this build","Apple and Android native adapters have not shipped. The server setting remains selectable and applies to a native client only when that client's controller exists.","warn")}
-      ${devStaticReq("Chrome shaped-network recovery","not met · 2026-09-24","The 8 to 1.5 Mb/s trace restarted and downshifted after 21.113 s, with a 4.2665 s maximum frame gap. Repeat the D3 cliff matrix after improving recovery.","warn")}
-      ${devStaticReq("Safari, Firefox and physical devices","not measured · 2026-09-24","Safari WebDriver session creation timed out; Firefox was unavailable. Native two-cliff, HDR and device traces remain owed. Record each platform's first-frame, gap, rung and restart results.","warn")}
+      ${devStaticReq("Chrome shaped-network recovery","not met · 2026-09-26","The final-code two-cliff repeat downshifted in 7.215 s and 7.672 s with no restart or stall, but its 133.30 ms and 166.70 ms frame gaps exceeded the unchanged 100 ms limit. An earlier candidate pass did not repeat; loaded-host qualification remains open.","warn")}
+      ${devStaticReq("Firefox shaped-network recovery","failed · 2026-09-26","Candidate and final-code traces missed the 100 ms gap limit. The integrated repeat restarted at cliff two with a 1.73 s gap; a further source-exact experiment reached 216.66 ms and 1,766.68 ms gaps. A stable final-branch pass remains owed.","warn")}
+      ${devStaticReq("HDR playback","incomplete · 2026-09-26","Chrome could not present the synthetic HDR fixture's first frame in the 30 s smoke window. This display reported no HDR support and the server selected CPU tone-mapping to SDR. A real HDR display trace remains owed.","warn")}
+      ${devStaticReq("Safari and physical devices","not measured · 2026-09-26","Safari WebDriver session creation failed before playback. Apple and Android device traces remain owed. Record first frame, gap, rung, restarts and unexpected SDR transitions per platform.","warn")}
       <p class="devcheck-note">Evidence is dated because this server cannot inspect another device's trace. Recheck the architecture-review fleet evidence before enabling broadly. These observations never gate this checkbox.</p>
       </div></details><div class="err" id="aqerr" role="alert"></div>
       ${setCardFoot("saveAutoQuality")}`);
@@ -339,6 +341,71 @@ async function saveLiveTvEnable(button){
     cacheSettings(saved);toast("Live TV enablement saved");if(button)setCardSaved(button);
   }catch(e){if(err&&err.isConnected)err.textContent=e.message;if(button&&button.isConnected)button.disabled=false;}
 }
+function clusterPlacementCard(settings){
+  const ready=!!settings.cluster_media_pool_ready;
+  return setCard(`${cardHead("Cluster media placement","Place new streams on compatible workers with spare capacity.",'<span class="pill">Cluster</span>')}
+    ${togRow("cluster-placement-enabled","Enable remote media placement","Existing sessions keep their owner; new sessions can use another worker.",!!settings.cluster_media_pool_enabled)}
+    ${togRow("cluster-takeover-enabled","Enable session takeover","Allow compatible expired sessions to acquire a new owner when remote placement is enabled.",!!settings.cluster_session_takeover_enabled)}
+    ${devStaticReq("Peer protocol observations",ready?"met":"not fully met","Compatible reachable peers are considered individually. A stale or older peer never disables the other workers.",ready?"ok":"")}
+    ${devStaticReq("Worker resources","checked for each start","A selected worker needs the requested codecs, readable source, writable scratch space and an available hardware or CPU reservation.","")}
+    <p class="hint">Requirements are advisory and never prevent saving. Unknown performance measurements affect ranking only. Streams continue through their existing ingress proxy, so ingress bandwidth is still used.</p>
+    <div class="err" id="cluster-placement-error" role="alert"></div>${setCardFoot("saveClusterPlacement")}`,{id:"cluster-placement-settings"});
+}
+async function saveClusterPlacement(btn){
+  const err=document.getElementById("cluster-placement-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{
+      cluster_media_pool_enabled:/** @type {HTMLInputElement} */(document.getElementById("cluster-placement-enabled")).checked,
+      cluster_session_takeover_enabled:/** @type {HTMLInputElement} */(document.getElementById("cluster-takeover-enabled")).checked
+    }}));
+    const card=document.getElementById("cluster-placement-settings");if(card)card.outerHTML=clusterPlacementCard(saved);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
+function boundedCatalogueCard(settings,readiness){
+  return setCard(`${cardHead("Local catalogue reads","Use each replica for browsing when its current consistency proof permits it.",'<span class="pill">Cluster reads</span>')}
+    ${togRow("bounded-catalogue-reads","Enable local catalogue reads","Falls back to authority when a replica is stale or a watch-write position is unknown.",settings.bounded_replica_reads!==false)}
+    ${devReq(readiness,"bounded_catalogue_reads","replica_proof","Fresh replica proof","The current term, quorum watermark and apply lag are checked for each read. Saving this preference does not require a readiness result.")}
+    ${devReq(readiness,"bounded_catalogue_reads","watch_floor","Watch state consistency","The web client carries its latest acknowledged watch-write position across nodes for 60 seconds. Other clients retain authority reads until they implement the same echo.")}
+    <div class="err" id="bounded-catalogue-error" role="alert"></div>${setCardFoot("saveBoundedCatalogueReads")}`,{id:"bounded-catalogue-settings"});
+}
+async function saveBoundedCatalogueReads(btn){
+  const err=document.getElementById("bounded-catalogue-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{bounded_replica_reads:/** @type {HTMLInputElement} */(document.getElementById("bounded-catalogue-reads")).checked}}));
+    const card=document.getElementById("bounded-catalogue-settings");if(card)card.outerHTML=boundedCatalogueCard(saved,DEVELOPER_READINESS);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
+function durableQueueCard(settings,readiness){
+  const cadence=Number(settings.cache_produce_mins)||0;
+  return setCard(`${cardHead("Durable cluster work","Share preparation across eligible idle workers and keep accepted work through restarts.",'<span class="pill">Shared queue</span>')}
+    ${togRow("durable-analysis","Enable fragment indexing and analysis workers","Use the existing analysis preference. Pausing keeps accepted requests and their history.",!!settings.vod_index_cluster_cache)}
+    ${togRow("durable-pretranscode","Enable pre-transcoding workers","Use the existing scheduled preparation preference. Enabling keeps the current cadence, or uses every six hours when it was off.",cadence>0)}
+    <input type="hidden" id="durable-cadence" value="${cadence>0?cadence:360}">
+    <p class="hint">Pre-transcoding still uses the configured <a href="#/settings/maintenance">cache disk budget</a>. A zero budget leaves no room for production. Queue cleanup and cancellation remain active while workers are paused.</p>
+    <details class="setdetails" open><summary>Requirements and current observations</summary><div class="setdetails-body">
+      ${devReq(readiness,"durable_cluster_work","durable_role","Worker authority","Ready learners can prepare immutable artifacts. Library scans and provider coordination remain voter work.")}
+      ${devReq(readiness,"durable_cluster_work","durable_store","Durable storage responds","Accepted work needs the replicated Store, or the local Store on a standalone server.")}
+      ${devReq(readiness,"durable_cluster_work","durable_tools","Compatible tools","A worker needs decoders and the exact output recipe required by its job.")}
+      ${devReq(readiness,"durable_cluster_work","durable_capacity","Spare capacity","Live playback takes precedence. Heavy jobs share one local lane and bounded source I/O across the cluster.")}
+      ${devReq(readiness,"durable_cluster_work","durable_scratch","Cache headroom","Each output needs writable local storage and enough room for its stage and final artifact.")}
+      ${devReq(readiness,"durable_cluster_work","durable_sources","Readable sources","At least one eligible worker must be able to read and validate the source.")}
+      ${devReq(readiness,"durable_cluster_work","durable_peers","Peer compatibility","Peers are checked individually. One unavailable peer does not disable the saved preference.")}
+      <p class="devcheck-note">Advisory only. Every preference can be saved regardless of these observations.</p>
+    </div></details>
+    <p><a href="#/activity">Inspect queued work, owners, retries and attempts in Activity</a>.</p>
+    <div class="err" id="durable-setting-error" role="alert"></div>${setCardFoot("saveDurableQueueSettings")}`,{id:"durable-queue-settings"});
+}
+async function saveDurableQueueSettings(btn){
+  const err=document.getElementById("durable-setting-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{
+      vod_index_cluster_cache:/** @type {HTMLInputElement} */ (document.getElementById("durable-analysis")).checked,
+      cache_produce_mins:/** @type {HTMLInputElement} */ (document.getElementById("durable-pretranscode")).checked?Number(/** @type {HTMLInputElement} */ (document.getElementById("durable-cadence")).value):0
+    }}));
+    const card=document.getElementById("durable-queue-settings");if(card)card.outerHTML=durableQueueCard(saved,DEVELOPER_READINESS);
+    toast("Cluster work preferences saved");
+  }catch(error){if(err)err.textContent=error.message||String(error);btn.disabled=false;}
+}
 
 function developerPanel(settings,readiness){
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
@@ -353,6 +420,7 @@ function developerPanel(settings,readiness){
   return `${setHead("Developer","Experimental features still awaiting device qualification.")}
       ${destinations}
       <div class="setsection" id="enable-live-tv"><h2>Enable Live TV</h2><p>Cluster use of the network tuner, with advisory prerequisites.</p></div>${liveTvEnableCard(settings)}
+      <div class="setsection"><h2>Cluster work</h2><p>Shared preparation and durable job history.</p></div>${durableQueueCard(settings,readiness)}${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${storageDomainsCard()}
       <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
       <div class="setsection"><h2>Live TV video</h2><p>Output choices whose device and node capacity evidence remains advisory.</p></div>${liveTvDeinterlaceCard(settings)}
       <div class="setsection"><h2>Recovery</h2><p>Portable backup scheduling and visible readiness. Saving is never gated by these observations.</p></div>${clusterBackupCard(settings,readiness)}
@@ -588,4 +656,36 @@ async function saveHevcCopy(btn){
     const card=document.getElementById("hevc-copy-card"); if(card)card.outerHTML=hevcCopyCard(saved);
     toast("HEVC copy preference saved");
   }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
+}
+
+function storageDomainsCard(){
+  return setCard(`${cardHead("Shared storage budgets","Give mount paths on the same disk or NAS the same domain name.",'<span class="pill">2 readers per domain</span>')}
+    <p class="hint">An empty domain uses the shared default. A library with multiple roots reserves each domain before starting. Library jobs also share provider concurrency. Maintenance requests are paced across nodes: TMDB at most one dispatch per 100 ms, AniList one per 2.1 seconds, with shared server cooldowns.</p>
+    <div id="storage-domain-roots"><button type="button" class="ghost" onclick="loadStorageDomains(this)">Load library roots</button></div>
+    <p class="hint">Save identity changes while background jobs are idle so existing reservations keep their meaning. This does not change any feature's enable switch.</p>
+    <div id="storage-domain-error" class="err" role="alert"></div>
+    <button type="button" class="ghost" onclick="saveStorageDomains(this)">Save storage domains</button>`);
+}
+async function loadStorageDomains(btn){
+  btn.disabled=true;
+  const error=document.getElementById("storage-domain-error");if(error)error.textContent="";
+  try{
+    const data=await api("/cluster/work/storage-domains");
+    const roots=document.getElementById("storage-domain-roots");if(!roots)return;
+    roots.innerHTML=(data.libraries||[]).flatMap(library=>(library.paths||[]).map(root=>{
+      const mapping=(data.mappings||[]).find(row=>String(row.library_id)===String(library.id)&&row.root_path===root);
+      return `<label class="field">${esc(library.name)} · ${esc(root)}<input class="storage-domain-input" data-library="${esc(String(library.id))}" data-root="${esc(root)}" maxlength="64" value="${esc(mapping?mapping.domain_id:"")}" placeholder="Shared default"></label>`;
+    })).join("")||'<p class="hint">No library roots configured.</p>';
+    roots.dataset.loaded="true";
+  }catch(e){if(error)error.textContent=e.message||String(e);btn.disabled=false;}
+}
+async function saveStorageDomains(btn){
+  const roots=document.getElementById("storage-domain-roots"),error=document.getElementById("storage-domain-error");
+  if(error)error.textContent="";
+  if(!roots||roots.dataset.loaded!=="true"){if(error)error.textContent="Load library roots before saving.";return;}
+  const mappings=Array.from(roots.querySelectorAll(".storage-domain-input")).map(element=>{const input=/** @type {HTMLInputElement} */(element);return {library_id:Number(input.dataset.library),root_path:input.dataset.root,domain_id:input.value.trim()};}).filter(row=>row.domain_id);
+  btn.disabled=true;
+  try{await api("/cluster/work/storage-domains",{method:"PUT",body:mappings});toast("Storage domains saved");}
+  catch(e){if(error)error.textContent=e.message||String(e);}
+  finally{btn.disabled=false;}
 }

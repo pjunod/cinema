@@ -1,4 +1,5 @@
 use super::*;
+use crate::seam_hooks::{HookFuture, HookReady};
 
 /// The rendition's init identity and where it came from — `from_disk` marks a
 /// resurrection adoption, which is the only case §5's mismatch arm may purge
@@ -84,12 +85,9 @@ pub(super) struct Rendition {
     /// The driver's kick: wait registration, segment GETs, attach/detach,
     /// maintain ticks.
     pub(super) wake: Notify,
-    /// Deterministic observation point for tests that must prove the driver's
-    /// stopped-encoder poll, rather than a direct `driver_pass`, caused work.
-    #[cfg(test)]
-    pub(super) stopped_poll_armed: Notify,
-    #[cfg(test)]
-    pub(super) stopped_poll_fired: Notify,
+    /// The driver's observation points (TRANSCODE-DECOMPOSITION-PLAN §3.9,
+    /// M8), held in every build and chosen where the rendition is built.
+    pub(super) hooks: Box<dyn RenditionHooks>,
     /// Bumped whenever the driver kills or replaces the producer, so a
     /// generation that ends can tell "I died on my own" from "I was told to".
     pub(super) gen_epoch: AtomicU64,
@@ -111,6 +109,62 @@ pub(super) struct Rendition {
     pub(super) handoff_expiry_armed: AtomicBool,
     /// First blocked demand per plan entry, retained across HTTP 503 retries.
     pub(super) demand_since: StdMutex<HashMap<u32, MaterializeClock>>,
+}
+
+/// The points of a [`Rendition`]'s driver that a test observes
+/// (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
+///
+/// A rendition holds one of these in every build, so its layout is the same in
+/// the test and release binaries. Both points are records: synchronous, and
+/// the no-op that production installs ([`NoopRenditionHooks`]) does nothing.
+/// Tests that must prove the driver's stopped-encoder poll, rather than a
+/// direct `driver_pass`, caused work install [`RenditionTestHooks`]. `Any` is
+/// a supertrait only so a test can reach the test hooks behind a rendition.
+pub(super) trait RenditionHooks: std::any::Any + Send + Sync {
+    /// The driver chose the stopped-encoder poll and is about to wait on it.
+    fn stopped_poll_armed(&self);
+    /// The driver's stopped-encoder wait ended, by the poll or by a kick.
+    fn stopped_poll_fired(&self);
+}
+
+/// What production installs: both points do nothing.
+pub(super) struct NoopRenditionHooks;
+
+impl RenditionHooks for NoopRenditionHooks {
+    fn stopped_poll_armed(&self) {}
+
+    fn stopped_poll_fired(&self) {}
+}
+
+/// The test hooks: each point notifies, so a test can wait for the driver to
+/// arm its stopped-encoder timer before it moves a paused clock.
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct RenditionTestHooks {
+    pub(super) stopped_poll_armed: Notify,
+    pub(super) stopped_poll_fired: Notify,
+}
+
+#[cfg(test)]
+impl RenditionTestHooks {
+    /// The test hooks of a rendition a test built with them.
+    pub(super) fn of(rendition: &Rendition) -> &Self {
+        let hooks: &dyn std::any::Any = &*rendition.hooks;
+        hooks
+            .downcast_ref()
+            .expect("the rendition was built with RenditionTestHooks")
+    }
+}
+
+#[cfg(test)]
+impl RenditionHooks for RenditionTestHooks {
+    fn stopped_poll_armed(&self) {
+        self.stopped_poll_armed.notify_one();
+    }
+
+    fn stopped_poll_fired(&self) {
+        self.stopped_poll_fired.notify_one();
+    }
 }
 
 impl Rendition {
@@ -242,22 +296,48 @@ impl Rendition {
     }
 }
 
+/// The points of a terminal cleanup's `wait` that a test can pause at
+/// (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
+///
+/// The cleanup holds one of these in every build, so its layout and the await
+/// points of its `wait` are the same in the test and release binaries. Production installs [`NoopCleanupWaitHooks`]; the race test
+/// installs a pausing implementation. A paused hook's timing is still a test
+/// artefact: what this makes identical is the struct and the set of await
+/// points, not scheduling.
+pub(super) trait CleanupWaitHooks: Send + Sync {
+    /// A waiter has registered its `Notify` interest and re-read the finished
+    /// flag, and has not yet awaited the notification. A completion that lands
+    /// here must still wake it.
+    fn after_wait_check(&self) -> HookFuture<'_>;
+}
+
+/// What production installs: the point is already ready.
+pub(super) struct NoopCleanupWaitHooks;
+
+impl CleanupWaitHooks for NoopCleanupWaitHooks {
+    fn after_wait_check(&self) -> HookFuture<'_> {
+        Box::pin(HookReady)
+    }
+}
+
 pub(super) struct TerminalCleanup {
     finished: AtomicBool,
     notify: Notify,
     completed_at: std::sync::OnceLock<tokio::time::Instant>,
-    #[cfg(test)]
-    pub(super) wait_enabled_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
+    hooks: Box<dyn CleanupWaitHooks>,
 }
 
 impl TerminalCleanup {
     pub(super) fn new() -> Self {
+        Self::with_hooks(Box::new(NoopCleanupWaitHooks))
+    }
+
+    pub(super) fn with_hooks(hooks: Box<dyn CleanupWaitHooks>) -> Self {
         Self {
             finished: AtomicBool::new(false),
             notify: Notify::new(),
             completed_at: std::sync::OnceLock::new(),
-            #[cfg(test)]
-            wait_enabled_pause: StdMutex::new(None),
+            hooks,
         }
     }
 
@@ -283,28 +363,19 @@ impl TerminalCleanup {
 
     pub(super) async fn wait(&self) {
         while !self.is_finished() {
+            // `notify_waiters` stores no permit: it wakes only the waiters
+            // registered when it runs. Register this one (Tokio counts a
+            // `Notified` as registered once `notified()` returns; `enable` makes
+            // that explicit) before the second state read, so a completion on
+            // either side of that read, or between it and the await, is not
+            // lost.
             let notified = self.notify.notified();
             tokio::pin!(notified);
-            // `notify_waiters` stores no permit for a future that has only
-            // been constructed. Register it before the second state read so
-            // completion can occur on either side of that read without being
-            // lost.
             notified.as_mut().enable();
-            #[cfg(test)]
-            {
-                let pause = self
-                    .wait_enabled_pause
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
-                if let Some(pause) = pause {
-                    pause.wait().await;
-                    pause.wait().await;
-                }
-            }
             if self.is_finished() {
                 return;
             }
+            self.hooks.after_wait_check().await;
             notified.await;
         }
     }
@@ -325,44 +396,56 @@ pub(super) struct HeadChildOwner {
     child: Option<tokio::process::Child>,
     child_job: Option<crate::process_control::ChildJob>,
     pub(super) permit: Option<crate::vodencode::EncodePermit>,
-    #[cfg(test)]
-    reap_pause: Option<Arc<tokio::sync::Barrier>>,
+    /// Shared with the reaper task, which outlives the owner.
+    hooks: Arc<dyn HeadChildOwnerHooks>,
+}
+
+/// The points of a [`HeadChildOwner`]'s reaper that a test can pause at
+/// (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
+///
+/// The owner holds one of these in every build and its detached reaper task
+/// runs through a clone of it, so the owner's layout and the reaper's await
+/// points are the same in the test and release binaries. Production installs
+/// [`NoopHeadChildOwnerHooks`]; the test constructor installs a pausing
+/// implementation. A paused hook's timing is still a test artefact: what this
+/// makes identical is the struct and the set of await points, not scheduling.
+pub(super) trait HeadChildOwnerHooks: Send + Sync {
+    /// The child was sent SIGKILL and its reaper owns it, before the reaper
+    /// waits for the exit.
+    fn before_reap(&self) -> HookFuture<'_>;
+}
+
+/// What production installs: the point is already ready.
+pub(super) struct NoopHeadChildOwnerHooks;
+
+impl HeadChildOwnerHooks for NoopHeadChildOwnerHooks {
+    fn before_reap(&self) -> HookFuture<'_> {
+        Box::pin(HookReady)
+    }
 }
 
 impl HeadChildOwner {
     pub(super) fn new(child: tokio::process::Child) -> Self {
-        Self {
-            child: Some(child),
-            child_job: None,
-            permit: None,
-            #[cfg(test)]
-            reap_pause: None,
-        }
+        Self::with_hooks(child, None, Arc::new(NoopHeadChildOwnerHooks))
     }
 
     pub(super) fn new_job_owned(
         child: tokio::process::Child,
         child_job: crate::process_control::ChildJob,
     ) -> Self {
-        Self {
-            child: Some(child),
-            child_job: Some(child_job),
-            permit: None,
-            #[cfg(test)]
-            reap_pause: None,
-        }
+        Self::with_hooks(child, Some(child_job), Arc::new(NoopHeadChildOwnerHooks))
     }
 
-    #[cfg(test)]
-    pub(super) fn with_reap_pause(
+    pub(super) fn with_hooks(
         child: tokio::process::Child,
-        reap_pause: Arc<tokio::sync::Barrier>,
+        child_job: Option<crate::process_control::ChildJob>,
+        hooks: Arc<dyn HeadChildOwnerHooks>,
     ) -> Self {
         Self {
             child: Some(child),
-            child_job: None,
+            child_job,
             permit: None,
-            reap_pause: Some(reap_pause),
+            hooks,
         }
     }
 
@@ -371,16 +454,11 @@ impl HeadChildOwner {
         let child_job = self.child_job.take();
         let permit = self.permit.take();
         let _ = child.start_kill();
-        #[cfg(test)]
-        let reap_pause = self.reap_pause.take();
+        let hooks = Arc::clone(&self.hooks);
         Some(tokio::spawn(async move {
             let _child_job = child_job;
             let _permit = permit;
-            #[cfg(test)]
-            if let Some(pause) = reap_pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
+            hooks.before_reap().await;
             let _ = child.wait().await;
         }))
     }

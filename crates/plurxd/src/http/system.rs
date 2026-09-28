@@ -864,6 +864,20 @@ pub async fn client_log(
     }
 
     let event = client_playback_event(&ev, user.id);
+    // A first frame or a failure report settles the start attempt this
+    // node opened for the viewer and file (C-08 M5 row 4); any other beacon
+    // about a play in progress keeps that play alive. The beacon's own
+    // `file_id`: the session join below may replace it with the session's.
+    if let Some(file_id) = event.file_id {
+        state.start_attempts.client_event(
+            user.id,
+            file_id,
+            &event.event,
+            event.method.as_deref(),
+            event.reason.as_deref(),
+            std::time::Instant::now(),
+        );
+    }
     // Deliberately not `ev.ua`: the class must come from the same input the
     // read paths use, or the prior is written under a key nothing reads.
     // The same derivation labels `plurx_ttff_ms{client}`, and it is taken
@@ -1728,6 +1742,7 @@ pub struct SettingsDto {
     /// Default-off content-addressed cluster queue and peer hydration for VOD
     /// indexes. The cadence above remains the operator's I/O budget.
     pub vod_index_cluster_cache: bool,
+    pub bounded_replica_reads: bool,
     /// Durable analysis claim/retry policy. These remain operator-visible and
     /// bounded because slow storage may need more time without permitting an
     /// unsupported source to retry forever.
@@ -1762,8 +1777,7 @@ pub struct SettingsDto {
     /// turns the whole thing off.
     pub subtitle_store: crate::subtitle_source::StoreDiagnostics,
     /// Cluster-wide opt-in for placing new HLS workers on another voter. The
-    /// readiness bit is true only while the replicated flag is enabled and
-    /// every committed voter publishes the current media protocol.
+    /// readiness bit reports fleet protocol observations as advisory only.
     pub cluster_media_pool_enabled: bool,
     pub cluster_media_pool_ready: bool,
     /// Opt-in replacement of expired HLS owners. This remains independently
@@ -2032,8 +2046,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     let genre_backfill = setting(keys::GENRE_BACKFILL).is_some_and(|v| v.trim() == "1");
     let cluster_media_pool_enabled =
         setting(keys::CLUSTER_MEDIA_POOL_ENABLED).as_deref() == Some("1");
-    let cluster_media_pool_ready =
-        cluster_media_pool_enabled && state.media_pool.remote_rollout_ready().await;
+    let cluster_media_pool_ready = state.media_pool.remote_rollout_ready().await;
     let cluster_session_takeover_enabled =
         setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED).as_deref() == Some("1");
     let analysis_max_attempts = plurx_core::store::bounded_analysis_max_attempts(
@@ -2151,6 +2164,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         vod_index_mins: setting(keys::VOD_INDEX_MINS).map_or(15, |value| mins(Some(value))),
         vod_index_cluster_cache: setting(keys::VOD_INDEX_CLUSTER_CACHE)
             .is_some_and(|value| value.trim() == "1"),
+        bounded_replica_reads: plurx_core::store::stored_switch(
+            setting(keys::BOUNDED_REPLICA_READS).as_deref(),
+            state.catalogue.bounded_reads_default(),
+        ),
         analysis_max_attempts,
         analysis_lease_secs,
         analysis_backoff_base_secs,
@@ -2418,6 +2435,7 @@ pub struct UpdateSettings {
     pub vod_blocked_get_cap: Option<String>,
     pub vod_index_mins: Option<i64>,
     pub vod_index_cluster_cache: Option<bool>,
+    pub bounded_replica_reads: Option<bool>,
     pub analysis_max_attempts: Option<i64>,
     pub analysis_lease_secs: Option<i64>,
     pub analysis_backoff_base_secs: Option<i64>,
@@ -2574,6 +2592,7 @@ impl UpdateSettings {
             || self.vod_materialize_budget_secs.is_some()
             || self.vod_index_mins.is_some()
             || self.vod_index_cluster_cache.is_some()
+            || self.bounded_replica_reads.is_some()
             || self.analysis_max_attempts.is_some()
             || self.analysis_lease_secs.is_some()
             || self.analysis_backoff_base_secs.is_some()
@@ -3168,33 +3187,7 @@ pub async fn update_settings(
         ));
     }
 
-    // Dynamic preconditions are reads/probes, not persistence. Complete them
-    // after syntax/range validation and before any of this aggregate is stored.
-    if req.cluster_media_pool_enabled == Some(true)
-        && !state.media_pool.remote_rollout_ready().await
-    {
-        return Err(ApiError::Conflict(
-            "cluster media placement cannot be enabled until every committed voter is reachable and publishing the current media protocol".into(),
-        ));
-    }
-    if req.cluster_session_takeover_enabled == Some(true) {
-        let media_pool_enabled = match req.cluster_media_pool_enabled {
-            Some(enabled) => enabled,
-            None => {
-                state
-                    .store
-                    .get_setting(keys::CLUSTER_MEDIA_POOL_ENABLED)
-                    .await?
-                    .as_deref()
-                    == Some("1")
-            }
-        };
-        if !media_pool_enabled || !state.media_pool.remote_rollout_ready().await {
-            return Err(ApiError::Conflict(
-                "cluster media session takeover requires remote placement to be enabled and every committed voter to publish the current media protocol".into(),
-            ));
-        }
-    }
+    // Cluster enable preferences always persist; fleet readiness is advisory.
     // The behavior probe may persist the effective encoder mode. Run it before
     // every ordinary store write so Busy/probe refusal also leaves the rest of
     // this request untouched.
@@ -3548,6 +3541,12 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::LIVE_TV_DEINTERLACE_OUTPUT, output.as_str())
+            .await?;
+    }
+    if let Some(on) = req.bounded_replica_reads {
+        state
+            .store
+            .put_setting(keys::BOUNDED_REPLICA_READS, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(on) = req.vod_index_cluster_cache {
@@ -4848,6 +4847,7 @@ pub(crate) struct MetricsState {
     live_tv_peers: Arc<crate::http::live_tv::LiveTvPeerMetrics>,
     backup: Arc<crate::backup::BackupMetrics>,
     plex_census: Arc<super::PlexCensus>,
+    start_attempts: Arc<crate::playstart::StartAttempts>,
 }
 
 impl FromRef<AppState> for MetricsState {
@@ -4869,6 +4869,7 @@ impl FromRef<AppState> for MetricsState {
             live_tv_peers: state.live_tv_peers.metrics_handle(),
             backup: state.backup.metrics(),
             plex_census: Arc::clone(&state.plex_census),
+            start_attempts: Arc::clone(&state.start_attempts),
         }
     }
 }
@@ -5139,6 +5140,31 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
         offline.active_leases,
         offline.pinned_bytes,
     ));
+    use plurx_core::store::background_jobs::{JOB_METRIC_KINDS, JOB_METRIC_STATES};
+    out.push_str("# HELP plurx_background_jobs Retained durable computations by kind and state.\n\
+        # TYPE plurx_background_jobs gauge\n\
+        # HELP plurx_background_job_oldest_age_seconds Age of the oldest retained computation in each class.\n\
+        # TYPE plurx_background_job_oldest_age_seconds gauge\n");
+    for (kind_index, kind) in JOB_METRIC_KINDS.iter().enumerate() {
+        for (state_index, state) in JOB_METRIC_STATES.iter().enumerate() {
+            let slot = kind_index * JOB_METRIC_STATES.len() + state_index;
+            out.push_str(&format!(
+                "plurx_background_jobs{{kind=\"{kind}\",state=\"{state}\"}} {}\n\
+                 plurx_background_job_oldest_age_seconds{{kind=\"{kind}\",state=\"{state}\"}} {}\n",
+                sample.background_jobs.counts[slot],
+                sample.background_jobs.oldest_age_seconds[slot]
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "# HELP plurx_background_resource_reservations Unexpired shared admission reservations.\n\
+         # TYPE plurx_background_resource_reservations gauge\n\
+         plurx_background_resource_reservations{{resource_class=\"source_io\"}} {}\n\
+         # HELP plurx_background_legacy_pending Sealed legacy interests awaiting bounded import.\n\
+         # TYPE plurx_background_legacy_pending gauge\n\
+         plurx_background_legacy_pending {}\n",
+        sample.background_jobs.source_io_reservations, sample.background_jobs.legacy_pending,
+    ));
     let analysis = sample.analysis;
     out.push_str(
         "# HELP plurx_analysis_queue_depth Durable analysis jobs by state, component, priority, and trigger.\n\
@@ -5264,6 +5290,10 @@ pub(crate) async fn metrics(
     State(state): State<MetricsState>,
 ) -> impl axum::response::IntoResponse {
     let uptime = state.started_at.elapsed().as_secs();
+    // Settle every start attempt past its deadline before the counters are
+    // read, so an idle node still reports the last one that was abandoned
+    // (C-08 M5 row 4). In memory only: no Store read on a scrape.
+    state.start_attempts.sweep(Instant::now());
     let (sessions, active_cache_entries) = state.transcode.snapshot();
     let decode_fact_metrics = state.transcode.decode_facts_prometheus();
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
@@ -5298,7 +5328,7 @@ pub(crate) async fn metrics(
         super::prometheus_http_request_metrics(),
         crate::panics::prometheus_panics(),
         crate::state::fragment_index_validation_prometheus(),
-        crate::subtitle_source::prometheus(),
+        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
     let live_tv_metrics = state.live_tv.prometheus() + &state.live_tv_peers.prometheus();
@@ -5876,6 +5906,11 @@ mod tests {
         });
         assert!(stale.contains("plurx_store_metrics_sample_valid 0"));
         assert!(stale.contains("plurx_store_metrics_sample_age_seconds 121"));
+        assert!(
+            stale.contains("plurx_background_jobs{kind=\"transcode_prepare\",state=\"queued\"} 0")
+        );
+        assert!(stale
+            .contains("plurx_background_resource_reservations{resource_class=\"source_io\"} 0"));
         assert!(stale.contains("plurx_libraries_total 3"));
         assert!(stale.contains("plurx_users_total 4"));
         // The whole verdict family is absent, not zero, until a sample lands.

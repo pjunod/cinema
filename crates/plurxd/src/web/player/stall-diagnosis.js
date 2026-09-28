@@ -204,13 +204,15 @@ function autoSwitchLabel(value){
   return typeof value==='number'?`${value}p`:String(value||'Auto');
 }
 function recordAutoSwitch(p,from,to,reason,position,targetSessionId){
+  const atMs=performance.now();
   const fromHeight=typeof from==='number'&&Number.isFinite(from)?from:null;
   const toHeight=typeof to==='number'&&Number.isFinite(to)?to:null;
-  const entry={seq:++AUTO_SWITCH_SEQ,at_ms:performance.now(),
+  const entry={seq:++AUTO_SWITCH_SEQ,at_ms:atMs,
     from:autoSwitchLabel(from),to:autoSwitchLabel(to),from_height:fromHeight,to_height:toHeight,reason,
     position:Math.max(0,position||0),target_method:p.method||null,
     target_session_id:targetSessionId||p.sessionId||null,target_attempt_id:p.attemptId||null};
   p.abr.switches.push(entry);
+  if(reason==='bandwidth cliff') p.abr.lastCliffAtMs=atMs;
   if(p.abr.switches.length>8) p.abr.switches.shift();
   clientLog(Object.assign({level:"warn",event:"quality_switch",reason:"auto",
     detail:`from=${entry.from} to=${entry.to} cause=${reason}`,
@@ -275,6 +277,41 @@ function recordAutoDecision(p,currentHeight,result,runway,throughputKbps){
     message:`Auto quality retained ${currentHeight}p — ${result.reason}`},
     playbackContext()));
 }
+// A media-fragment progress delta can establish a severe link cliff just after
+// the periodic Auto tick. Queue the same decision immediately for that fresh
+// observation, without running two health polls or two selection asks at once.
+function queueAutoControllerTick(p,urgent){
+  if(!p||PLAYER!==p||!p.abr||!playbackOwnsAttachedMedia(p)) return;
+  if(p.abr.controllerTickRunning){
+    if(urgent) p.abr.controllerUrgentPending=true;
+    return;
+  }
+  p.abr.controllerTickRunning=true;
+  Promise.resolve().then(()=>autoControllerTick()).catch(()=>{}).finally(()=>{
+    p.abr.controllerTickRunning=false;
+    if(p.abr.controllerUrgentPending){
+      p.abr.controllerUrgentPending=false;
+      queueAutoControllerTick(p,false);
+    }
+  });
+}
+function scheduleUrgentAutoControllerTick(p,kbps,now){
+  if(!p||PLAYER!==p||!p.abr||p.abr.switching||p.method!=="transcode"
+    ||qualityForce()!=="auto"||!(SERVER&&SERVER.playback_auto_abr)) return;
+  const v=/** @type {HTMLVideoElement|null} */ (document.getElementById("video"));
+  const height=Number(p.health&&p.health.target_height||p.autoHeight||v&&v.videoHeight);
+  const ladder=PlaybackPolicy.normalizedLadder(p.ladder);
+  const index=ladder.findIndex(rung=>rung.height===height);
+  if(index<=0) return;
+  const current=ladder[index];
+  const ratio=index<PlaybackPolicy.AUTO_DEFAULTS.lowRungEmergencyCount
+    ?1:PlaybackPolicy.AUTO_DEFAULTS.severeEstimateRatio;
+  if(!(kbps>0&&kbps<current.total_kbps*ratio)) return;
+  const prior=p.abr.lastUrgentAutoTickAtMs;
+  if(prior!=null&&now-prior<PlaybackPolicy.AUTO_DEFAULTS.decisionMs) return;
+  p.abr.lastUrgentAutoTickAtMs=now;
+  queueAutoControllerTick(p,true);
+}
 async function switchAutoRung(currentHeight,decision){
   const p=PLAYER, v=document.getElementById("video");
   if(!p||!v||!p.abr||p.abr.switching||!(decision&&decision.height>0)) return;
@@ -294,6 +331,7 @@ async function switchAutoRung(currentHeight,decision){
       {title:`Quality → ${decision.height}p — ${decision.reason}`});
     return attached;
   };
+  let retainClaim=false;
   try{
     // A stalled incumbent has nothing to hand off from. The server cancels a
     // preparation on `waiting` or `stalled` anyway, so asking would spend the
@@ -306,8 +344,27 @@ async function switchAutoRung(currentHeight,decision){
     // already carries the rung and the server sees a selection change rather
     // than the same Auto it has been reading all along.
     p.autoRequestedHeight=decision.height;
-    await requestQualityChange(p,"auto-quality",reopen);
-  } finally { releaseAutoFallback(p); }
+    p.abr.switching=true;
+    if(decision.reason==="bandwidth cliff"){
+      const decidedAtMs=performance.now();
+      clientLog(Object.assign({level:"info",event:"auto_quality_signal",
+        detail:"severe_estimate",
+        message:`severe Auto estimate sample_at_ms=${Math.round(p.abr.recentEstimateAtMs)} `+
+          `decision_at_ms=${Math.round(decidedAtMs)} `+
+          `sample_source=${p.abr.recentEstimateSource||"unknown"} `+
+          `sample_kbps=${Math.round(p.abr.recentEstimateKbps)} `+
+          `from=${currentHeight}p to=${decision.height}p`},playbackContext()));
+    }
+    const outcome=await requestQualityChange(p,"auto-quality",reopen,
+      {from:currentHeight,to:decision.height,switchReason:decision.reason});
+    if(outcome==="prepared"&&p.directedChange&&!p.directedChange.settled){
+      const change=p.directedChange;
+      change.commitTimer=setTimeout(()=>fallBackDirectedChange(p,change,"commit_timeout"),
+        Math.max(0,10000-(performance.now()-change.tappedAt)));
+      retainClaim=true;
+      return;
+    }
+  } finally { if(!retainClaim) releaseAutoFallback(p); }
 }
 async function rescueAutoSupply(causeEvidence){
   const p=PLAYER, v=document.getElementById("video");
@@ -372,7 +429,9 @@ async function autoControllerTick(){
   if(!playbackOwnsAttachedMedia(p)) return;
   if(!(SERVER&&SERVER.playback_auto_abr)||!p||!v||!p.abr||qualityForce()!=='auto'||!p.started||v.paused||p.abr.switching) return;
   if(p.autoFallbackInFlight) return;
-  await pollSessionHealth(true);
+  if(p.healthObservedAt==null
+    ||performance.now()-p.healthObservedAt>=PlaybackPolicy.AUTO_DEFAULTS.sampleMs)
+    await pollSessionHealth(true);
   // Re-checked after the poll for the same reason it is checked before it: the
   // unawaited `maybeDecodeRescue()` earlier in this interval can have claimed
   // the automatic move while this tick was waiting on the health request.
@@ -407,16 +466,20 @@ async function autoControllerTick(){
   const estimateBps=(p.hls&&p.hls.bandwidthEstimate)||p.bandwidthSeedBps;
   const estimateKbps=estimateBps>0?estimateBps/1000:(p.priorKbps||null);
   const runway=bufferRunway(v);
+  const recentMediaDeliveryKbps=PlaybackPolicy.completedMediaWindowKbps(
+    p.abr.completedTransfers,now);
   const activeSupplyStall=!!p.waitAt && runway<SUPPLY_RUNWAY_SECS;
   const result=PlaybackPolicy.decideRung({
     ladder,currentHeight,estimateKbps,
     recentEstimateKbps:p.abr.recentEstimateKbps,
     recentEstimateAtMs:p.abr.recentEstimateAtMs,runwaySeconds:runway,
+    recentMediaDeliveryKbps,
     previousRunwaySeconds:p.abr.previousRunway,
     recentSpeed:health.recent_speed,
     activeSupplyStall,supplyStalls:p.abr.stallEvents.supply.length,
     lastStallAtMs:p.abr.lastStallAtMs,nowMs:now,
     lastSwitchAtMs:p.abr.lastSwitchAtMs,mildSamples:p.abr.mildSamples,
+    lastCliffAtMs:p.abr.lastCliffAtMs,
     upgradeSinceMs:p.abr.upgradeSinceMs,playerHeight:playerPixelHeight(v),
     blockedHeights:p.abr.failedHeights,causeEvidence
   });
@@ -572,4 +635,3 @@ async function probePlaybackSource(url,headers,evidence){
     })()]);
   }finally{clearTimeout(timer);ctl.abort();}
 }
-

@@ -215,7 +215,7 @@ contracts, not unimplemented behavior or unrun tests.
 
 | Finding | Disposition | Verification and remaining evidence |
 |---|---|---|
-| F1 · P1 | Resolved in the design | §4.5 creates durable issued intents before returning protocol-4 tickets, rejects absent ticketed starts, reserves terminal capacity, and defines absent retirement. Legacy IDs explicitly retain a bounded 24 h guarantee, with a compact per-user admission block when unknown retirement cannot allocate history. Prove both protocols' actual GET counts across retirement, quota exhaustion and GC. |
+| F1 · P1 | Resolved in the design | §4.5 creates durable issued intents before returning protocol-5 tickets, rejects absent ticketed starts, reserves terminal capacity, and defines absent retirement. Legacy IDs explicitly retain a bounded 24 h guarantee, with a compact per-user admission block when unknown retirement cannot allocate history. Prove both protocols' actual GET counts across retirement, quota exhaustion and GC. |
 | F2 · P1 | Resolved in the design | §4.1 and §6.1 add durable consumers, restrict joinable states, serialize last detach/drain against join, preserve pending demand and renew linked ingest/capture authority atomically. The current channel key explicitly excludes epoch. Prove both race orders, abandoned attachment and ingest-loss propagation. |
 | F3 · P2 | Resolved in the design | §6.3 separates stop from delete and introduces independent finalizer authority for already sealed bytes. A finalizer does not reopen the tuner; deletion prevents publication and resurrection. Prove stop before/after sealing, worker loss, stable recording identity and deletion races. |
 | F4 · P2 | Resolved as an explicit implementation prerequisite | §8.1 names SQLite/replicated schema compatibility and committed-membership admission, requires upgrade or removal of absent incompatible members, and mandates an actual predecessor-binary restart fixture. If that path is insufficient, a prerequisite fence release is required before mode enablement. The existing fence has not been accepted merely on assertion. |
@@ -225,9 +225,9 @@ contracts, not unimplemented behavior or unrun tests.
 The first revision introduced tickets while leaving request namespaces
 unspecified. A pruned ticketed ID submitted to the legacy start API without
 its ticket could then be mistaken for a new arbitrary legacy ID. That would
-undo the stronger protocol-4 guarantee without touching the recovery endpoint.
+undo the stronger protocol-5 guarantee without touching the recovery endpoint.
 
-The final revision requires protocol-4 IDs to be `v4_` plus 32 lowercase hex
+The final revision requires protocol-5 IDs to be `v5_` plus 32 lowercase hex
 digits, while legacy IDs remain exactly 32 hex digits. Dispatch is enforced
 by ID grammar and a durable protocol discriminator, not by a caller's choice
 of header or ticket presence. All start, relay and recovery validators change

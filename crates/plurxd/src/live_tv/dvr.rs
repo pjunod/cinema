@@ -5487,20 +5487,16 @@ mod tests {
     /// is absent, so a test decides what each probe sees.
     #[cfg(unix)]
     fn scripted_ffprobe(root: &std::path::Path) -> Arc<super::super::SystemInfo> {
-        use std::os::unix::fs::PermissionsExt;
-
         let script = root.join("fake-ffprobe");
         let answer = root.join("probe.json");
-        std::fs::write(
+        crate::write_test_executable(
             &script,
             format!(
                 "#!/bin/sh\n[ -f '{0}' ] || exit 1\nexec /bin/cat '{0}'\n",
                 answer.display()
             ),
-        )
-        .expect("fake FFprobe");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .expect("executable fake FFprobe");
+            0o755,
+        );
         Arc::new(super::super::SystemInfo {
             ffprobe: script.to_string_lossy().into_owned(),
             ..super::super::SystemInfo::default()

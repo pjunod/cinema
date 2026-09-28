@@ -47,7 +47,7 @@ function apiHarness(answer) {
       "const API='/api/v1';let TOKEN='t';let AUTH_GENERATION=0;",
       "function logout(options){calls.logout.push(options);}",
       "function fetch(){return Promise.resolve(answer);}",
-      shippedSource("api"),
+      (require("./shell-source.js").apiPrelude()+shippedSource("api")),
       "return api;",
     ].join("\n"),
   )({ parseStreamFailure: () => null }, answer, calls);

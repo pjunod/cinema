@@ -20,10 +20,12 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `130` — cluster Live TV intents and advisory
-> Developer enablement. Build 129 restores the tablet fullscreen picture fix;
-> build 128 adds data-preserving signed release rotation and exact-artifact
-> reinstall. Build 127 separates playback source, stream, and
+> Status: **v0.3.0**, build `132` — cluster Live TV intents and advisory Developer enablement.
+> Build 131 adds in-app PDF/EPUB reading. Build 129 restores
+> the Live TV picture to the fullscreen box on tablets after a push-mirror
+> rewind erased its earlier merge. Build 128 rotates the signed release key
+> while preserving data, with exact-artifact reinstall.
+> Build 127 separates playback source, stream, and
 > display dimensions; build 126 preserves Back navigation history; build 125
 > preserves native viewer parity across phone, foldable, and TV. Build 124
 > settles a progressive remux seek after later rendered video

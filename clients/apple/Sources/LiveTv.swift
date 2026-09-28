@@ -770,7 +770,7 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
     private var intentOrder: [String] = []
     private func intentProtocol() -> Bool {
         protocolLock.lock(); defer { protocolLock.unlock() }
-        return negotiatedProtocols?.contains(4) == true
+        return negotiatedProtocols?.contains(5) == true
     }
     private func rememberEnvelope(_ envelope: LiveTvPlaybackEnvelope, id: String) {
         protocolLock.lock(); defer { protocolLock.unlock() }
@@ -804,7 +804,12 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
     }
 
     static func pathComponent(_ value: String) -> String {
-        value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        // RFC 3986 unreserved characters keep the server's capability spelling:
+        // real session ids contain dots and UUID hyphens. Escaping those made
+        // playlistURL reject the server-issued master before AVPlayer attached.
+        let unreserved = CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? ""
     }
 
     func playlistURL(_ playlistUrl: String, sessionId: String) throws -> URL {
@@ -925,7 +930,7 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
         struct Intent: Decodable { let requestId: String }
         let intent = try decode(Intent.self, data: await request("live-tv/channels/\(Self.pathComponent(channel))/intents",
             method: "POST", authenticated: true, body: body, session: transport))
-        guard intent.requestId.hasPrefix("v4_"), LiveTvStartReducer.isRequestId(intent.requestId) else {
+        guard intent.requestId.hasPrefix("v5_"), LiveTvStartReducer.isRequestId(intent.requestId) else {
             throw LiveTvFailure(code: "no_answer")
         }
         rememberEnvelope(envelope, id: intent.requestId)
@@ -1205,7 +1210,7 @@ enum LiveTvStartReducer {
     /// 32 lower-case hex characters — the shape the ingress validates with
     /// `^[0-9a-f]{32}$`.
     static func isRequestId(_ value: String) -> Bool {
-        { let raw = value.hasPrefix("v4_") ? String(value.dropFirst(3)) : value
+        { let raw = value.hasPrefix("v5_") ? String(value.dropFirst(3)) : value
             return raw.count == 32 && raw.allSatisfy { "0123456789abcdef".contains($0) } }()
     }
 

@@ -1,6 +1,6 @@
 # Live TV cluster resource — implementation status
 
-**Status:** review addressed; final result tracked on PR #537 · **Updated:** 2026-09-25 · **Branch:**
+**Status:** review addressed; final result tracked on PR #537 · **Updated:** 2026-09-27 · **Branch:**
 `codex/live-tv-cluster-resource` · **Base:** current main integrated before promotion
 
 The [implementation contract](LIVE-TV-CLUSTER-RESOURCE-IMPLEMENTATION.md)
@@ -18,9 +18,25 @@ The user's existing checkouts are not build or edit workspaces for this work.
 | Worker placement and lifecycle | Implemented | Candidate placement, shared-channel claims, boot/epoch/generation and monotonic lease fencing. |
 | DVR claims, storage and finalization | Implemented | Pre-I/O claims, storage identities, independent finalization, immutable publication and storage-local deletion. |
 | Guide, Activity and reminders | Implemented | Source-refresh lease, persistent guide copies and local worker Activity are integrated; validation pending. |
-| Developer enablement and clients | Implemented | Advisory Developer control and protocol 4 intents wired on web, Apple and Android. iOS/tvOS and Android compilation passed. |
+| Developer enablement and clients | Implemented | Advisory Developer control and protocol 5 intents wired on web, Apple and Android. iOS/tvOS and Android compilation passed. |
 | One adversarial code review | Complete | Five findings corrected and verified in the same independent review pass; approved for final lane. |
 | Fast lane and merge | Live result | [PR #537 checks and merge state](http://192.168.4.7:3000/noirr/plurx/pulls/537) are the authoritative result; one unit/fast-lane set, then failures only. |
+
+## Current-main integration
+
+Main `ffe965764` is integrated. Its background-work migrations precede this
+feature at SQLite 83 / replicated 61. Its reserved-tuner warm-restart repair
+is preserved. Main's temporary owner-relay placement is superseded by durable
+resource admission; media-pool load ranking remains an advisory worker preference.
+Protocol 5 and `v5_` tickets distinguish durable admission from main's protocol 4.
+The advertised list is `[1, 2, 3, 5]`; old owner-relay nodes cannot receive new
+resource claims. Apple build 192 and Android build 132 preserve main's client
+fixes. The existing reviewer approved this integration after correcting a legacy
+media-pool capability advertisement. Legacy relay capability is false; durable
+resource capability is separate and defaults false for older peers. Pinned
+compilation, web regressions, TypeScript, documentation and source inventories
+pass. The required fast lane records the final result on PR #537. The replacement
+Apple runner is available.
 
 ## Delivery decisions
 
@@ -62,7 +78,7 @@ cover schema and SQL inventories, downgrade fixtures, protocol 4 and advisory
 settings expectations, durable-claim session fixtures, legacy duplicate
 recovery, guide-lease error accounting and a deterministic slow-sink check.
 Focused core and daemon reruns pass. Main `abb6fe647` is integrated; its
-catalogue migration precedes the Live TV schema at SQLite 71 / replicated 49.
+catalogue migration precedes the Live TV schema at SQLite 83 / replicated 61.
 Android build 130 preserves main's tablet fullscreen fix. The merged schema
 and ledger checks pass, as do web settings and the task/timer inventory.
 The integration also fixes macOS-only warnings in main's new child-priority

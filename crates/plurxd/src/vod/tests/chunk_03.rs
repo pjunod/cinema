@@ -614,13 +614,12 @@
         // Pause the session-owned task at the exact pre-detach point. Status
         // preparation is therefore free to inspect the reader registry before
         // End publishes its cleanup marker.
-        let terminal_detach_pause = Arc::new(tokio::sync::Barrier::new(2));
-        *serve
+        let terminal_detach_pause = serve.arm_terminal_detach_pause_for_test();
+        let control_applied = serve
             .shared
-            .terminal_detach_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(Arc::clone(&terminal_detach_pause));
+            .test_hooks()
+            .control_applied
+            .arm("vod control applied");
         let pending = {
             let serve = Arc::clone(&serve);
             let session_id = session_id.clone();
@@ -654,6 +653,21 @@
                     .await
             })
         };
+        // The applied point sits after the End commit published the
+        // session-owned cleanup and before that cleanup is spawned.
+        let applied = control_applied.reached().await;
+        assert!(
+            serve.shared.sessions.lock().await[&session_id]
+                .terminal_cleanup
+                .is_some(),
+            "the End commit publishes its cleanup before the applied point"
+        );
+        assert!(
+            !terminal_detach_pause.was_reached(),
+            "the terminal cleanup is spawned after the applied point"
+        );
+        assert!(rendition.readers.lock().await.contains_key(&session_id));
+        applied.release();
         let cleanup = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let cleanup = serve.shared.sessions.lock().await[&session_id]
@@ -668,7 +682,7 @@
         })
         .await
         .expect("terminal commit publishes session-owned cleanup");
-        terminal_detach_pause.wait().await;
+        let detach_held = terminal_detach_pause.reached().await;
         assert!(!cleanup.is_finished());
         pending.abort();
         let cancellation = match pending.await {
@@ -677,13 +691,11 @@
         };
         assert!(cancellation.is_cancelled());
 
-        let terminal_replay_pause = Arc::new(tokio::sync::Barrier::new(2));
-        *serve
+        let terminal_replay_pause = serve
             .shared
-            .terminal_replay_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(Arc::clone(&terminal_replay_pause));
+            .test_hooks()
+            .terminal_replay
+            .arm("vod terminal replay before the detach fence");
         let replay = {
             let serve = Arc::clone(&serve);
             let session_id = session_id.clone();
@@ -711,14 +723,14 @@
                     .await
             })
         };
-        terminal_replay_pause.wait().await;
+        let replay_held = terminal_replay_pause.reached().await;
         assert!(
             !committer.started.load(Acquire),
             "a replacement waiter at the cleanup fence cannot expose terminal settlement while detach is pinned"
         );
-        terminal_replay_pause.wait().await;
+        replay_held.release();
         assert!(rendition.readers.lock().await.contains_key(&session_id));
-        terminal_detach_pause.wait().await;
+        detach_held.release();
         tokio::time::timeout(Duration::from_secs(1), cleanup.wait())
             .await
             .expect("detached cleanup survives request cancellation");
@@ -898,12 +910,17 @@
         let target = entry_containing(&rendition.plan, 300.0);
         let ledger = Arc::clone(&rendition.readers.lock().await[VIEWER].marker_prewarm);
         ledger.lock().expect("ledger").enabled = true;
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *serve
+        let pause = serve
             .shared
-            .control_applied_pause
-            .lock()
-            .expect("pause lock") = Some(Arc::clone(&pause));
+            .test_hooks()
+            .control_applied
+            .arm("vod control applied");
+        // Armed across the whole exchange: only a terminal replay reaches it.
+        let terminal_replay = serve
+            .shared
+            .test_hooks()
+            .terminal_replay
+            .arm("vod terminal replay before the detach fence");
         let accepted = {
             let serve = Arc::clone(&serve);
             let snapshot = snapshot.clone();
@@ -923,7 +940,7 @@
                     .await
             })
         };
-        pause.wait().await;
+        let held = pause.reached().await;
         assert_eq!(
             rendition.readers.lock().await[VIEWER].frontier,
             target,
@@ -932,11 +949,7 @@
         assert!(!ledger.lock().expect("ledger").enabled, "accepted intent invalidates old speculation even when the later marker update is cancelled");
         accepted.abort();
         let _ = accepted.await;
-        *serve
-            .shared
-            .control_applied_pause
-            .lock()
-            .expect("pause lock") = None;
+        held.release();
         let replay = serve
             .control(crate::playback_control::LocalControlRequest {
                 session_id: VIEWER,
@@ -957,6 +970,11 @@
             crate::playback_control::ControlDisposition::Replay
         );
         assert_eq!(rendition.readers.lock().await[VIEWER].frontier, target);
+        assert!(
+            !terminal_replay.was_reached(),
+            "the terminal-replay point follows the lookup that found a terminal replay"
+        );
+        terminal_replay.release();
     }
 
     #[tokio::test]
@@ -965,8 +983,16 @@
         let serve = bare_serve(base.path());
         let rendition = synthetic_rendition(base.path()).await;
         rendition.attach_reader("viewer", 3).await;
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *serve.shared.segment_ready_pause.lock().expect("pause lock") = Some(Arc::clone(&pause));
+        let registered = serve
+            .shared
+            .test_hooks()
+            .segment_wait_registered
+            .arm("vod segment wait registered");
+        let ready = serve
+            .shared
+            .test_hooks()
+            .segment_ready
+            .arm("vod segment ready before open");
         let get = {
             let serve = Arc::clone(&serve);
             let rendition = Arc::clone(&rendition);
@@ -982,7 +1008,14 @@
                     .await
             })
         };
-        pause.wait().await;
+        registered.reached().await.release();
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !ready.was_reached(),
+            "the ready point follows the wait's answer, not its registration"
+        );
         // Publication follows the production GET's post-registration check;
         // the oneshot remembers Ready even if it precedes the next poll.
         rendition
@@ -996,7 +1029,7 @@
             .await
             .expect("publish");
         serve.shared.pool.satisfy(&rendition.key, 45);
-        pause.wait().await;
+        let ready_held = ready.reached().await;
         let windows = eviction_windows(&serve.shared, &rendition).await;
         let mut manifest = rendition.manifest.lock().await;
         rendition
@@ -1006,7 +1039,7 @@
             .expect("pressure sweep");
         assert!(manifest.state(45).expect("target").is_materialized());
         drop(manifest);
-        pause.wait().await;
+        ready_held.release();
         assert_eq!(get.await.expect("GET task").expect("response file").len, 12);
         assert!(serve.shared.pool.retained(&rendition.key).is_empty());
         let windows = eviction_windows(&serve.shared, &rendition).await;
@@ -1020,6 +1053,151 @@
             !manifest.state(45).expect("target").is_materialized(),
             "opening releases the narrow pin; old destinations do not become permanent retention"
         );
+    }
+
+    /// The ready point sits before the blocked GET opens its file: a file
+    /// unlinked while the GET is held there is not served, and the GET answers
+    /// pending instead.
+    #[tokio::test]
+    async fn segment_ready_point_precedes_the_file_open() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.attach_reader("viewer", 3).await;
+        let registered = serve
+            .shared
+            .test_hooks()
+            .segment_wait_registered
+            .arm("vod segment wait registered");
+        let ready = serve
+            .shared
+            .test_hooks()
+            .segment_ready
+            .arm("vod segment ready before open");
+        let get = {
+            let serve = Arc::clone(&serve);
+            let rendition = Arc::clone(&rendition);
+            tokio::spawn(async move {
+                serve
+                    .serve_segment(
+                        &rendition,
+                        "viewer",
+                        45,
+                        Duration::from_secs(5),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
+                    .await
+            })
+        };
+        registered.reached().await.release();
+        rendition
+            .dir
+            .materialize(
+                &mut *rendition.manifest.lock().await,
+                45,
+                b"target bytes",
+                now_ms(),
+            )
+            .await
+            .expect("publish");
+        serve.shared.pool.satisfy(&rendition.key, 45);
+        let held = ready.reached().await;
+        tokio::fs::remove_file(rendition.dir.path().join(segment_name(45)))
+            .await
+            .expect("unlink the published file behind the manifest");
+        held.release();
+        let answer = tokio::time::timeout(Duration::from_secs(5), get)
+            .await
+            .expect("the GET answers")
+            .expect("GET task");
+        assert!(
+            matches!(answer, Err(VodError::Pending { .. })),
+            "the GET opens its file after the ready point, so it finds the file gone"
+        );
+    }
+
+    /// The VOD registry built by the production constructor reads the no-op
+    /// hooks: every pause point is ready at its first poll, the route is read
+    /// from the Store, and a blocked GET crosses both of its points to a
+    /// response.
+    #[tokio::test]
+    async fn vod_shared_shipped_shape() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let hooks = serve.shared.hooks.get();
+        let installed: &dyn std::any::Any = hooks;
+        assert!(
+            installed.is::<NoopVodSharedHooks>(),
+            "the production constructor leaves the registry on the no-op hooks"
+        );
+        let waker = futures_util::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        for (point, mut hook) in [
+            ("before_terminal_replay_join", hooks.before_terminal_replay_join()),
+            ("after_control_applied", hooks.after_control_applied()),
+            ("after_segment_wait_registered", hooks.after_segment_wait_registered()),
+            ("before_segment_ready_open", hooks.before_segment_ready_open()),
+            ("before_terminal_detach", hooks.before_terminal_detach()),
+            ("after_rendition_installed", hooks.after_rendition_installed()),
+            ("after_dormant_purge_removed", hooks.after_dormant_purge_removed()),
+        ] {
+            assert!(
+                hook.as_mut().poll(&mut context).is_ready(),
+                "the production {point} point is ready at its first poll"
+            );
+        }
+        assert_eq!(hooks.terminal_route_outcome("no-route"), None);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                serve.shared.terminal_route_durably_non_live("no-route"),
+            )
+            .await
+            .expect("the route is read from the Store"),
+            "a session with no durable route is not live"
+        );
+
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.attach_reader("viewer", 3).await;
+        let get = {
+            let serve = Arc::clone(&serve);
+            let rendition = Arc::clone(&rendition);
+            tokio::spawn(async move {
+                serve
+                    .serve_segment(
+                        &rendition,
+                        "viewer",
+                        45,
+                        Duration::from_secs(5),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while serve.shared.pool.blocked_on(&rendition.key) != Some(45) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the GET registers its wait");
+        rendition
+            .dir
+            .materialize(
+                &mut *rendition.manifest.lock().await,
+                45,
+                b"target bytes",
+                now_ms(),
+            )
+            .await
+            .expect("publish");
+        serve.shared.pool.satisfy(&rendition.key, 45);
+        let ready = tokio::time::timeout(Duration::from_secs(5), get)
+            .await
+            .expect("the production segment points do not hold the GET")
+            .expect("GET task")
+            .expect("response file");
+        assert_eq!(ready.len, 12);
     }
 
     #[tokio::test]
@@ -1288,6 +1466,19 @@
         let mutable = Arc::get_mut(&mut rendition).expect("unshared rendition");
         mutable.recipe.file = file;
         mutable.recipe.encoding = Some(Arc::clone(&encoding_a));
+        park_stopped_at_horizon(&serve, &rendition, permit).await;
+        (serve, rendition, encoding_a, encoding_b)
+    }
+
+    /// Materialize a rendition through its ahead horizon, give it a fake
+    /// running producer holding `permit`, and register it, so the driver's
+    /// first pass stops the producer at the horizon.
+    #[cfg(unix)]
+    async fn park_stopped_at_horizon(
+        serve: &VodServe,
+        rendition: &Arc<Rendition>,
+        permit: crate::vodencode::EncodePermit,
+    ) {
         let horizon = ((f64::from(AHEAD_HORIZON_SECONDS) / rendition.seconds_per_segment).ceil()
             as u32)
             .max(1);
@@ -1312,8 +1503,7 @@
             .renditions
             .lock()
             .await
-            .insert(rendition.key.clone(), Arc::clone(&rendition));
-        (serve, rendition, encoding_a, encoding_b)
+            .insert(rendition.key.clone(), Arc::clone(rendition));
     }
 
     #[cfg(unix)]
@@ -1421,7 +1611,7 @@
         // before moving the paused Tokio clock. There is deliberately no
         // rendition kick here: a rolling-live waiter is outside the VOD
         // registry, so the poll is the only wake source.
-        rendition.stopped_poll_armed.notified().await;
+        RenditionTestHooks::of(&rendition).stopped_poll_armed.notified().await;
         tokio::time::advance(STOPPED_ENCODER_POLL - Duration::from_millis(1)).await;
         tokio::task::yield_now().await;
         assert!(
@@ -1429,7 +1619,7 @@
             "a rolling-live waiter sends no VOD registry kick"
         );
         tokio::time::advance(Duration::from_millis(1)).await;
-        rendition.stopped_poll_fired.notified().await;
+        RenditionTestHooks::of(&rendition).stopped_poll_fired.notified().await;
         wait_for_belief(
             &rendition,
             |belief| matches!(belief, Producer::Absent { .. }),
@@ -1453,6 +1643,107 @@
         close_test_driver(&rendition, driver).await;
     }
 
+    /// The stopped-encoder poll on a rendition built by the production
+    /// `build_rendition`, which installs the no-op hooks. With no observation
+    /// point to wait on, the test moves the paused clock one poll at a time,
+    /// and the real driver still yields its stopped child to a waiting live
+    /// start.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rendition_shipped_shape() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let (file, encoding) = encoded_fixture(base.path()).await;
+        let contender = encoding
+            .clone_with_admissions_for_test(encoding.admissions.clone())
+            .await;
+        encoding
+            .store
+            .put_setting(
+                plurx_core::store::keys::SW_POOL_THREADS,
+                &encoding.resources.cpu_threads.max(1).to_string(),
+            )
+            .await
+            .expect("one-encoder software budget");
+        let permit = encoding.try_permit().await.expect("encoder permit");
+        let index = synthetic_index(240);
+        let policy = CutPolicy::new(6, 2, 64 * 1024 * 1024, 15, 16_000);
+        let ms = index_video_ms(&index);
+        let plan = plurx_core::segplan::plan_copy(
+            &index,
+            &policy,
+            &TrackDurations {
+                video_ms: ms,
+                audio_ms: ms,
+                audio_bits_per_second: 256_000,
+            },
+        );
+        let rendition = serve
+            .shared
+            .build_rendition(
+                "shipped-shape",
+                None,
+                Recipe {
+                    file,
+                    audio_index: None,
+                    aac: true,
+                    video: CopyVideoOptions::new(false, false),
+                    source_object_version: Some(encoding.source_object_version.clone()),
+                    cluster_cache_key: None,
+                    encoding: Some(Arc::clone(&encoding)),
+                },
+                plan,
+                &settings(),
+            )
+            .await
+            .expect("a production-built encoded rendition");
+        let hooks: &dyn std::any::Any = &*rendition.hooks;
+        assert!(
+            hooks.is::<NoopRenditionHooks>(),
+            "build_rendition installs the no-op hooks"
+        );
+        park_stopped_at_horizon(&serve, &rendition, permit).await;
+        rendition.attach_reader("viewer", 0).await;
+        tokio::time::pause();
+        let driver = spawn_driver(Arc::clone(&serve.shared), Arc::clone(&rendition));
+        rendition.kick();
+        wait_for_belief(
+            &rendition,
+            |belief| matches!(belief, Producer::Stopped { .. }),
+            "the real driver to stop at the ahead horizon",
+        )
+        .await;
+        let waiting = encoding.admissions.wait_for_slot();
+        assert!(encoding.admissions.live_is_waiting());
+        let mut polls = 0;
+        while !matches!(rendition.slot.belief().await, Producer::Absent { .. }) {
+            assert!(
+                polls < 4,
+                "the stopped-encoder poll never yielded the child; belief is {:?}",
+                rendition.slot.belief().await
+            );
+            polls += 1;
+            tokio::time::advance(STOPPED_ENCODER_POLL).await;
+            for _ in 0..40 {
+                if matches!(rendition.slot.belief().await, Producer::Absent { .. }) {
+                    break;
+                }
+                tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(5)))
+                    .await
+                    .expect("wall-clock belief wait");
+            }
+        }
+        assert!(rendition.ahead_hold.load(Acquire));
+        let contender_permit = contender
+            .try_permit()
+            .await
+            .expect("the live contender takes the yielded child's permit");
+        drop(contender_permit);
+        drop(waiting);
+        close_test_driver(&rendition, driver).await;
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_yielded_encoder_does_not_take_the_permit_back_while_still_ahead() {
@@ -1471,9 +1762,9 @@
         .await;
         let waiting = encoding.admissions.wait_for_slot();
         assert!(encoding.admissions.live_is_waiting());
-        rendition.stopped_poll_armed.notified().await;
+        RenditionTestHooks::of(&rendition).stopped_poll_armed.notified().await;
         tokio::time::advance(STOPPED_ENCODER_POLL).await;
-        rendition.stopped_poll_fired.notified().await;
+        RenditionTestHooks::of(&rendition).stopped_poll_fired.notified().await;
         wait_for_belief(
             &rendition,
             |belief| matches!(belief, Producer::Absent { .. }),
@@ -1501,22 +1792,16 @@
             .expect("reader")
             .frontier = before_low_water;
 
-        // If this pass incorrectly asks for admission, the production test
-        // seam rendezvous with `try_permit` and makes the defect observable
-        // before a real ffmpeg can spawn.
-        let admission = Arc::new(tokio::sync::Barrier::new(2));
-        *encoding
-            .admission_pause
-            .lock()
-            .expect("admission test seam") = Some(Arc::clone(&admission));
-        let observer = Arc::clone(&admission);
-        let mut admission_reached = tokio::spawn(async move { observer.wait().await });
+        // If this pass incorrectly asks for admission, the encoding's
+        // admission hook holds `try_permit` at its pause and makes the defect
+        // observable before a real ffmpeg can spawn.
+        let admission = encoding.pause_next_admission();
         rendition.kick();
         for _ in 0..20 {
             tokio::task::yield_now().await;
         }
         assert!(
-            !admission_reached.is_finished(),
+            !admission.was_reached(),
             "the rendition must not re-admit above the low-water line"
         );
         assert!(matches!(
@@ -1532,16 +1817,14 @@
             .expect("reader")
             .frontier = through.saturating_sub(resume);
         rendition.kick();
-        tokio::time::timeout(Duration::from_secs(1), &mut admission_reached)
-            .await
-            .expect("low-water crossing reaches admission")
-            .expect("admission observer");
+        // The low-water crossing reaches admission.
+        let held = admission.reached().await;
 
-        // Close before releasing the second rendezvous: the assertion is the
-        // attempted re-admission at the exact boundary, not a real encoder
-        // generation beyond this lifecycle test's scope.
+        // Close before releasing the pause: the assertion is the attempted
+        // re-admission at the exact boundary, not a real encoder generation
+        // beyond this lifecycle test's scope.
         rendition.closed.store(true, Release);
-        admission.wait().await;
+        held.release();
         rendition.kick();
         driver.await.expect("test driver exits");
     }
@@ -1582,11 +1865,11 @@
             "the stopped child retains its full permit before TTL reap"
         );
 
-        rendition.stopped_poll_armed.notified().await;
+        RenditionTestHooks::of(&rendition).stopped_poll_armed.notified().await;
         // Maintenance observes the real wall-clock session TTL, detaches the
         // reader and wakes the already-armed stopped-encoder driver wait.
         serve.maintain().await;
-        rendition.stopped_poll_fired.notified().await;
+        RenditionTestHooks::of(&rendition).stopped_poll_fired.notified().await;
         assert!(!serve
             .shared
             .sessions
@@ -1927,21 +2210,11 @@
             .encoding
             .as_ref()
             .expect("encoded predecessor");
-        let admission = Arc::new(tokio::sync::Barrier::new(2));
-        *predecessor_encoding
-            .admission_pause
-            .lock()
-            .expect("admission test seam") = Some(Arc::clone(&admission));
-        let observer = Arc::clone(&admission);
-        let admission_reached = tokio::spawn(async move { observer.wait().await });
+        let admission = predecessor_encoding.pause_next_admission();
         driver_pass(&fixture.serve.shared, &fixture.predecessor).await;
-        assert!(!admission_reached.is_finished());
-        admission_reached.abort();
-        predecessor_encoding
-            .admission_pause
-            .lock()
-            .expect("admission test seam")
-            .take();
+        assert!(!admission.was_reached());
+        // Disarm: a released pause passes its next admission straight through.
+        admission.release();
 
         let permit = fixture
             .successor_encoding
@@ -2133,26 +2406,18 @@
             .encoding
             .as_ref()
             .expect("encoded predecessor");
-        let admission = Arc::new(tokio::sync::Barrier::new(2));
-        *predecessor_encoding
-            .admission_pause
-            .lock()
-            .expect("admission test seam") = Some(Arc::clone(&admission));
-        let observer = Arc::clone(&admission);
-        let admission_reached = tokio::spawn(async move { observer.wait().await });
+        let admission = predecessor_encoding.pause_next_admission();
         let pass = tokio::spawn({
             let shared = Arc::clone(&fixture.serve.shared);
             let predecessor = Arc::clone(&fixture.predecessor);
             async move { driver_pass(&shared, &predecessor).await }
         });
-        tokio::time::timeout(Duration::from_secs(1), admission_reached)
-            .await
-            .expect("the released predecessor reaches admission on its next pass")
-            .expect("admission observer");
+        // The released predecessor reaches admission on its next pass.
+        let held = admission.reached().await;
         // Stop before a real generation: after admission the pass re-reads
         // `closed` and returns, dropping whatever permit it took.
         fixture.predecessor.closed.store(true, Release);
-        admission.wait().await;
+        held.release();
         pass.await.expect("predecessor pass");
     }
 

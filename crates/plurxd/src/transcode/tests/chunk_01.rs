@@ -157,7 +157,6 @@
     #[tokio::test]
     async fn source_change_refuses_bound_plan() {
         use plurx_core::store::SqliteStore;
-        use std::os::unix::fs::PermissionsExt as _;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let media = crate::test_tempdir().expect("media");
@@ -171,16 +170,11 @@
             .expect("media file");
 
         let probe_path = media.path().join("ffprobe-source-change");
-        std::fs::write(
+        crate::write_test_executable(
             &probe_path,
             "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then printf '%s\\n' 'ffprobe version source-change'; exit 0; fi\nprintf '%s\\n' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"h264\",\"profile\":\"High\",\"pix_fmt\":\"yuv420p\",\"width\":160,\"height\":120,\"avg_frame_rate\":\"24/1\",\"r_frame_rate\":\"24/1\",\"color_transfer\":\"bt709\",\"disposition\":{\"attached_pic\":0}}]}'\n",
-        )
-        .expect("probe fixture");
-        let mut permissions = std::fs::metadata(&probe_path)
-            .expect("probe metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&probe_path, permissions).expect("executable probe");
+            0o755,
+        );
         let probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(
             probe_path.to_str().expect("probe path"),
         )
@@ -256,7 +250,6 @@
     async fn decode_fact_probes_take_the_class_of_the_caller_waiting_on_them() {
         use crate::process_control::{priority::spawns_of, ChildClass};
         use plurx_core::store::SqliteStore;
-        use std::os::unix::fs::PermissionsExt as _;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let media = crate::test_tempdir().expect("media");
@@ -278,16 +271,11 @@
             .as_secs() as i64;
 
         let probe_path = media.path().join("ffprobe-caller-class");
-        std::fs::write(
+        crate::write_test_executable(
             &probe_path,
             "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then printf '%s\\n' 'ffprobe version caller-class'; exit 0; fi\nprintf '%s\\n' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"h264\",\"profile\":\"High\",\"pix_fmt\":\"yuv420p\",\"width\":160,\"height\":120,\"avg_frame_rate\":\"24/1\",\"r_frame_rate\":\"24/1\",\"color_transfer\":\"bt709\",\"disposition\":{\"attached_pic\":0}}]}'\n",
-        )
-        .expect("probe fixture");
-        let mut permissions = std::fs::metadata(&probe_path)
-            .expect("probe metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&probe_path, permissions).expect("executable probe");
+            0o755,
+        );
         let discover = || {
             crate::decode_facts::DecodeProbeIdentity::discover_fixture(
                 probe_path.to_str().expect("probe path"),
@@ -381,7 +369,7 @@
         assert!(!joined.contains("remove_types=32-34"), "{joined}");
 
         let (control, mut registration) =
-            crate::playback_control::RollingControlHandle::spawn_prepublication_producer(
+            crate::playback_control::RollingControlHandle::spawn_prepublication_producer_for_test(
                 "channel-repair-test",
             );
         registration
@@ -556,7 +544,6 @@
     #[tokio::test]
     async fn prepared_plan_is_not_reprobed_during_producer_execution() {
         use plurx_core::store::SqliteStore;
-        use std::os::unix::fs::PermissionsExt as _;
 
         super::require_ffmpeg();
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
@@ -579,16 +566,11 @@
             .as_secs() as i64;
 
         let probe = media.path().join("slow-ffprobe");
-        std::fs::write(
+        crate::write_test_executable(
             &probe,
             "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\n  printf '%s\\n' 'ffprobe version neutral-timeout'\n  exit 0\nfi\nsleep 5\nprintf '%s\\n' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"h264\"}]}'\n",
-        )
-        .expect("write slow probe");
-        let mut permissions = std::fs::metadata(&probe)
-            .expect("probe metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&probe, permissions).expect("executable probe");
+            0o755,
+        );
         let probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(
             probe.to_str().expect("probe path"),
         )
@@ -652,7 +634,6 @@
     #[tokio::test]
     async fn prepared_plan_keeps_producer_execution_out_of_the_probe_lane() {
         use plurx_core::store::SqliteStore;
-        use std::os::unix::fs::PermissionsExt as _;
 
         super::require_ffmpeg();
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
@@ -675,16 +656,11 @@
             .as_secs() as i64;
 
         let probe = media.path().join("fast-ffprobe");
-        std::fs::write(
+        crate::write_test_executable(
             &probe,
             "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\n  printf '%s\\n' 'ffprobe version final-observation-timeout'\n  exit 0\nfi\nprintf '%s\\n' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"h264\"}]}'\n",
-        )
-        .expect("write fast probe");
-        let mut permissions = std::fs::metadata(&probe)
-            .expect("probe metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&probe, permissions).expect("executable probe");
+            0o755,
+        );
         let probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(
             probe.to_str().expect("probe path"),
         )

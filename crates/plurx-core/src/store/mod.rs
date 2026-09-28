@@ -51,6 +51,8 @@ mod hiqlite;
 #[doc(hidden)]
 pub use hiqlite::validation_time_http_store_operation;
 #[cfg(feature = "hiqlite-store")]
+mod hiqlite_background_jobs;
+#[cfg(feature = "hiqlite-store")]
 mod hiqlite_catalog;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_coordination;
@@ -96,6 +98,31 @@ mod placeholder_census;
 #[cfg(all(test, feature = "hiqlite-store"))]
 mod consistent_read_census;
 
+pub mod background_jobs;
+pub use background_jobs::BackgroundJobStore;
+pub mod background_jobs_artwork;
+mod background_jobs_delivery;
+pub mod background_jobs_domain;
+pub mod background_jobs_embeddings;
+mod background_jobs_fragment;
+pub mod background_jobs_fragment_admission;
+pub mod background_jobs_integrity;
+pub mod background_jobs_library;
+mod background_jobs_maintenance;
+mod background_jobs_migration;
+mod background_jobs_observation;
+mod background_jobs_offline;
+pub mod background_jobs_predictions;
+pub mod background_jobs_preparation;
+pub mod background_jobs_pretranscode;
+pub mod background_jobs_probe;
+pub mod background_jobs_provider;
+mod background_jobs_publication;
+pub mod background_jobs_resources;
+pub mod background_jobs_subtitle;
+#[cfg(test)]
+mod background_jobs_tests;
+pub mod background_jobs_transcode;
 pub mod classification_schedule;
 pub mod offline_claim;
 pub mod offline_expiry;
@@ -894,17 +921,17 @@ pub use fragment_index_cluster::{
     AnalysisAttempt, AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter,
     AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisIndexRepairCandidate,
     AnalysisIndexRepairResult, AnalysisRequest, AnalysisStatusSummary,
-    ClusterFragmentIndexArtifact, ClusterFragmentIndexFailure, ClusterFragmentIndexJob,
-    ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
-    NewAnalysisRequest, NewClusterFragmentIndexJob, SubtitleBackfillCandidate,
-    SubtitleBackfillDiagnostics, SubtitleSourcePublication, SubtitleSourceStamp,
-    CONTENT_ANALYSIS_REPAIR_HEADROOM, CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
-    CONTENT_ANALYSIS_REPAIR_REVISION, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
-    DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
-    DEFAULT_SUBTITLE_WINDOW_SECS, MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS,
-    MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS,
-    MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES, MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS,
-    SUBTITLE_SOURCE_REPAIR_LIMIT, SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
+    ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
+    ClusterFragmentIndexStore, FragmentIndexSourceObservation, NewAnalysisRequest,
+    NewClusterFragmentIndexJob, SubtitleBackfillCandidate, SubtitleBackfillDiagnostics,
+    SubtitleSourcePublication, SubtitleSourceStamp, CONTENT_ANALYSIS_REPAIR_HEADROOM,
+    CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES, CONTENT_ANALYSIS_REPAIR_REVISION,
+    DEFAULT_ANALYSIS_BACKOFF_BASE_SECS, DEFAULT_ANALYSIS_BACKOFF_MAX_SECS,
+    DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS, DEFAULT_SUBTITLE_WINDOW_SECS,
+    MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS,
+    MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
+    MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT,
+    SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
 };
 pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{prometheus_sqlite_health, SqliteStore, SQLITE_SCHEMA_VERSION};
@@ -913,17 +940,16 @@ use async_trait::async_trait;
 
 use crate::cluster::coordination::{Lease, LeaseClaim};
 use crate::domain::{
-    BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheManifestCheck, CacheStorageMember,
-    CachedTranscode, DolbyVisionFacts, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind,
-    ItemPage, ItemSort, Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome,
+    BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheStorageMember, CachedTranscode,
+    DolbyVisionFacts, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind, ItemPage,
+    ItemSort, Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome,
     MediaSessionActivationSettlement, MediaSessionProjectionCompletion, MediaSessionRenewal,
     MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch,
     NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
-    NewPretranscodeJob, OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome,
-    OfflinePackage, OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport,
-    OwnedMediaSessionLease, PlaybackEvent, PlaybackEventQuery, PretranscodeJob,
-    PretranscodeWorkerCapabilities, ProbeResult, ReadingState, ReadingStateWrite, RecentItem,
-    SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
+    OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage,
+    OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease,
+    PlaybackEvent, PlaybackEventQuery, PretranscodeJob, ProbeResult, ReadingState,
+    ReadingStateWrite, RecentItem, SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
@@ -1069,6 +1095,7 @@ pub struct PrometheusStoreSnapshot {
     pub offline: OfflinePackageStats,
     pub watched_outbox: (i64, i64, i64),
     pub analysis: AnalysisStoreMetrics,
+    pub background_jobs: background_jobs::BackgroundJobMetrics,
 }
 
 pub const ANALYSIS_METRIC_COMPONENTS: [&str; 3] =
@@ -1848,6 +1875,7 @@ pub mod keys {
     /// Content-addressed cluster coordination for VOD indexes. Missing/zero is
     /// off so an upgrade never starts full-library reads without the operator's
     /// topology measurement and explicit opt-in.
+    pub const BOUNDED_REPLICA_READS: &str = "cluster.bounded_replica_reads";
     pub const VOD_INDEX_CLUSTER_CACHE: &str = "playback.vod_index_cluster_cache";
     /// Durable analysis retry budget. The settings API constrains this to a
     /// small positive range so an operator can tune slow media without making
@@ -2074,6 +2102,8 @@ pub trait SettingsStore: Send + Sync + 'static {
         first: &str,
         second: &str,
     ) -> Result<(Option<String>, Option<String>), StoreError>;
+    /// Read at most 32 named settings from one snapshot. Missing keys are absent.
+    async fn get_settings(&self, keys: &[&str]) -> Result<BTreeMap<String, String>, StoreError>;
     /// Read the complete settings table from one database snapshot.
     ///
     /// Administrative views render many independent settings at once. A
@@ -2118,6 +2148,15 @@ pub trait SettingsStore: Send + Sync + 'static {
     ) -> Result<bool, StoreError>;
     /// The stable unique id of this logical server.
     async fn instance_id(&self) -> Result<String, StoreError>;
+}
+
+pub(crate) fn selected_settings_json(keys: &[&str]) -> Result<String, StoreError> {
+    if keys.len() > 32 || keys.iter().any(|key| key.is_empty() || key.len() > 256) {
+        return Err(StoreError::Task(
+            "settings read requires at most 32 nonempty bounded keys".into(),
+        ));
+    }
+    serde_json::to_string(keys).map_err(|error| StoreError::Task(error.to_string()))
 }
 
 pub(crate) fn validate_generated_settings(
@@ -3614,24 +3653,6 @@ pub trait TranscodeCacheStore: Send + Sync + 'static {
         limit: i64,
     ) -> Result<Vec<CachedTranscode>, StoreError>;
 
-    /// Bounded set of manifest-fenced local generations for background
-    /// integrity scrubbing. Unlike the eviction view this includes pinned
-    /// offline locations: pinning protects valid bytes from LRU, not corrupt
-    /// bytes from invalidation.
-    async fn cache_manifest_candidates(
-        &self,
-        node_id: &str,
-        limit: i64,
-    ) -> Result<Vec<CachedTranscode>, StoreError>;
-
-    /// Advance the scrub cursor only if the checked immutable publication is
-    /// still current. Reusing `last_seen_at` rotates a bounded oldest-first
-    /// scan without changing the playback LRU clock.
-    async fn mark_cache_manifests_checked(
-        &self,
-        checks: &[CacheManifestCheck],
-    ) -> Result<usize, StoreError>;
-
     /// Claims older than `older_than_unix` that never completed — a producer
     /// that died. Their directories are garbage and their rows are lies.
     async fn stale_cache_claims(
@@ -3849,98 +3870,14 @@ pub trait SharedCacheStore: Send + Sync + 'static {
     ) -> Result<Option<Lease>, StoreError>;
 }
 
-/// Durable distributed work for speculative whole-title transcodes.
-///
-/// Candidate generation is a singleton, but execution is deliberately not:
-/// every compatible node competes for rows through this boundary. Ownership
-/// is a queue-row fence rather than a generic scheduler lease so a worker can
-/// renew, yield, and settle independently of the next candidate pass.
+/// Domain history and staging retention for whole-title preparation.
+/// Execution ownership belongs exclusively to [`BackgroundJobStore`].
 #[async_trait]
 pub trait PretranscodeJobStore: Send + Sync + 'static {
-    /// Read one row for bounded diagnostics and lifecycle verification.
+    /// Common execution view, or sealed legacy history before import.
     async fn pretranscode_job(&self, id: &str) -> Result<Option<PretranscodeJob>, StoreError>;
-
-    /// Insert one active generation unless an equivalent active/terminal job
-    /// or still-verifiable ready location already satisfies it. A ready row
-    /// whose last location was evicted is deliberately eligible again.
-    async fn enqueue_pretranscode_job(
-        &self,
-        job: &NewPretranscodeJob,
-        lease: &Lease,
-        replacement: &Lease,
-    ) -> Result<bool, StoreError>;
-
-    /// Claim the highest-priority compatible due row. Expired running rows are
-    /// eligible for takeover and advance their monotone fence.
-    async fn claim_pretranscode_job(
-        &self,
-        node_id: &str,
-        capabilities: &PretranscodeWorkerCapabilities,
-        // Bounded process-local refusals (for example, sources this node
-        // cannot mount). Other nodes remain eligible immediately.
-        excluded_job_ids: &[String],
-        now_unix_ms: i64,
-        lease_expires_ms: i64,
-    ) -> Result<Option<PretranscodeJob>, StoreError>;
-
-    /// Active queue rows whose resumable part directories belong to this
-    /// node. Housekeeping uses the ids as a fail-closed keep-list without
-    /// publishing an incomplete cache location.
+    /// Legacy staging references retained until import and retirement.
     async fn pretranscode_staging_jobs(&self, node_id: &str) -> Result<Vec<String>, StoreError>;
-
-    /// Complete bounded active-id universe for pruning node-local source
-    /// refusals. The queue schema caps active rows at 4,096.
-    async fn active_pretranscode_job_ids(&self) -> Result<Vec<String>, StoreError>;
-
-    async fn renew_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        now_unix_ms: i64,
-        lease_expires_ms: i64,
-    ) -> Result<Option<PretranscodeJob>, StoreError>;
-
-    /// Capacity/preemption is not a failed encode. Return the row to the due
-    /// queue without incrementing attempts.
-    async fn yield_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        now_unix_ms: i64,
-        not_before_ms: i64,
-    ) -> Result<bool, StoreError>;
-
-    /// Record one stable failure code. The fifth failure is terminal; earlier
-    /// failures return to the queue at the caller's bounded backoff deadline.
-    async fn fail_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        error_code: &str,
-        now_unix_ms: i64,
-        not_before_ms: i64,
-    ) -> Result<bool, StoreError>;
-
-    /// Permanently cancel a claimed source generation that no longer exists
-    /// or no longer matches its snapshotted bytes.
-    async fn cancel_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        error_code: &str,
-        now_unix_ms: i64,
-    ) -> Result<bool, StoreError>;
-
-    /// Publish the node-local cache location and ready job state in one fenced
-    /// transaction after the filesystem generation has been renamed.
-    #[allow(clippy::too_many_arguments)]
-    async fn complete_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        recipe_hash: &str,
-        recipe_version: i64,
-        relative_dir: &str,
-        bytes: i64,
-        expected_previous_bytes: Option<i64>,
-        manifest_digest: &str,
-        now_unix_ms: i64,
-    ) -> Result<bool, StoreError>;
 }
 
 /// Durable app-managed offline packages and their one renewable capability.
@@ -5304,6 +5241,7 @@ pub trait TimelineAnnotationStore: Send + Sync + 'static {
 pub trait Store:
     crate::live_tv_resource::LiveTvResourceStore
     + SettingsStore
+    + BackgroundJobStore
     + DvConversionStore
     + MetricsStore
     + UserStore
@@ -5340,6 +5278,7 @@ pub trait Store:
 impl<T> Store for T where
     T: crate::live_tv_resource::LiveTvResourceStore
         + SettingsStore
+        + BackgroundJobStore
         + DvConversionStore
         + MetricsStore
         + UserStore
@@ -5634,6 +5573,32 @@ impl CatalogueReader {
         }
     }
 
+    /// The initial preference before the operator saves a replicated override.
+    #[must_use]
+    pub fn bounded_reads_default(&self) -> bool {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(bounded) = &self.bounded {
+            return bounded.enabled;
+        }
+        true
+    }
+
+    /// Advisory observation only; every actual read obtains its own permit.
+    /// `None` means this process has no replicated reader (for example SQLite).
+    pub async fn bounded_read_observation(&self) -> Option<bool> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(bounded) = &self.bounded {
+            return Some(
+                bounded
+                    .metrics
+                    .run_bounded_replica_after(bounded.max_apply_lag_entries, 0, || async {})
+                    .await
+                    .is_some(),
+            );
+        }
+        None
+    }
+
     /// Construct the production bounded reader for real seeded-store
     /// contracts outside this module.
     #[cfg(all(feature = "hiqlite-store", feature = "cluster-read-cost-validation"))]
@@ -5702,9 +5667,6 @@ impl CatalogueReader {
         Fut: std::future::Future<Output = Result<T, StoreError>>,
     {
         let bounded = self.bounded.as_ref()?;
-        if !bounded.enabled {
-            return None;
-        }
         let min_applied_index = min_applied_index(&bounded.store)?;
         let store = Arc::clone(&bounded.store);
         #[cfg(feature = "cluster-read-cost-validation")]
@@ -5721,7 +5683,13 @@ impl CatalogueReader {
                 bounded.max_apply_lag_entries,
                 min_applied_index,
                 move || async move {
-                    let result = local_read(store).await;
+                    // A stale preference only chooses between two safe read paths.
+                    // Read it under the same proof, without contacting the leader.
+                    let result = if store.local_bounded_reads_enabled(bounded.enabled).await? {
+                        local_read(store).await.map(Some)
+                    } else {
+                        Ok(None)
+                    };
                     #[cfg(feature = "cluster-read-cost-validation")]
                     if revoke_after_local.swap(false, std::sync::atomic::Ordering::Relaxed) {
                         post_query_metrics.validation_revoke_bounded_proof();
@@ -5731,6 +5699,7 @@ impl CatalogueReader {
             )
             .await?
             .ok()
+            .flatten()
     }
 
     /// Per-user watch state for `item_ids`. Local only behind the

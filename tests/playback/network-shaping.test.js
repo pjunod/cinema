@@ -173,6 +173,11 @@ async function withOrigin(bytes, run, { firstResponseDelayMs = 0 } = {}) {
   let requests = 0;
   const origin = http.createServer((request, response) => {
     const reply = () => {
+      if (request.url === "/api/v1/server") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ instance_id: "test-server", build: "test" }));
+        return;
+      }
       response.writeHead(200, { "content-type": "application/octet-stream" });
       response.end(Buffer.alloc(request.url === "/healthz" ? 1 : bytes, 0x61));
     };
@@ -404,6 +409,26 @@ test("device-run passes an explicitly requested manual quality height", async ()
       assert.ok(heightFlag > 0);
       assert.equal(launches[0][heightFlag + 1], "480");
     });
+  });
+});
+
+test("device-run refuses a dead proxy API before launching the physical app", async () => {
+  await withTempDir(async (directory) => {
+    const launches = [];
+    await assert.rejects(lab.deviceRunCommand({
+      device: "physical-device-17",
+      target: "http://127.0.0.1:1",
+      public_host: "127.0.0.1",
+      file_id: "42",
+      network_profile: "8mbps-to-1mbps",
+      json: path.join(directory, "unreachable.json"),
+    }, {
+      createShaper: (profile, target, options) => new lab.ShapingProxy(profile, target, {
+        ...options, listenHost: "127.0.0.1",
+      }),
+      launchDevice: (args) => launches.push(args),
+    }), /device proxy API preflight/);
+    assert.deepEqual(launches, []);
   });
 });
 
@@ -2307,13 +2332,15 @@ test("transition scoring retains gaps and reopens that precede the steady window
 
 test("player snapshots retain stall and hitch counts across object replacement", () => {
   let now = 10_000;
-  const page = {};
+  const observedVideos = [];
+  const page = { __plurxLabInstallVideoProbe: (video) => observedVideos.push(video) };
   const video = {
     currentTime: 10, duration: 100, paused: false, seeking: false, ended: false,
     readyState: 4, videoWidth: 1920, videoHeight: 1080, playbackRate: 1, error: null,
     getVideoPlaybackQuality: () => ({ droppedVideoFrames: 0, totalVideoFrames: 100 }),
   };
-  const document = { getElementById: () => video };
+  let currentVideo = video;
+  const document = { getElementById: () => currentVideo };
   const performance = { now: () => ++now };
   const take = (player, lifetimeStalls, lifetimeHitches) => new Function(
     "PLAYER", "document", "performance", "bufferRunway", "globalThis",
@@ -2348,6 +2375,18 @@ test("player snapshots retain stall and hitch counts across object replacement",
     [take(null, 4, 6).lifetime_stalls, take(null, 4, 6).lifetime_hitches],
     [4, 6],
   );
+  second.recoveringStall = { player: second, kind: "supply", action: "restart",
+    position: 42, targetHeight: 240 };
+  const duringRecovery = take(second, 4, 6);
+  assert.deepEqual(duringRecovery.recovering_stall,
+    { kind: "supply", action: "restart", position: 42, target_height: 240 });
+  assert.doesNotThrow(() => JSON.stringify(duringRecovery),
+    "a persistent-stall snapshot must not return its cyclic runtime player");
+  const successor = { ...video, videoHeight: 240 };
+  currentVideo = successor;
+  take(second, 4, 6);
+  assert.equal(observedVideos.at(-1), successor,
+    "a prepared switch installs the trace probes on the new authoritative video");
   assert.deepEqual(
     [take(null, 4, 6).lifetime_stalls, take(null, 4, 6).lifetime_hitches],
     [4, 6],

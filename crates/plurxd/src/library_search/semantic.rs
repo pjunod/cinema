@@ -1,10 +1,24 @@
-//! Optional CPU sentence embeddings. Model files and vectors stay on this node.
+//! Optional CPU sentence embeddings. Durable portable vectors feed a local serving index.
 use crate::state::AppState;
 use anyhow::{bail, Result};
 use candle_core::{Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config, DTYPE};
-use plurx_core::store::classification::Entry;
+use plurx_core::store::background_jobs_embeddings::{
+    embedding_text, entry_digest as source_key, EmbeddingModel,
+};
+#[path = "semantic_work.rs"]
+mod work;
+fn model_identity() -> EmbeddingModel {
+    EmbeddingModel {
+        weights_sha256: FILES[2].1.into(),
+        config_sha256: FILES[0].1.into(),
+        tokenizer_sha256: FILES[1].1.into(),
+        tokenizer_version: "tokenizers-0.22-truncate256-v1".into(),
+        dimensions: DIM,
+        normalization_version: "mean-pool-l2-text-v1".into(),
+    }
+}
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -53,7 +67,12 @@ impl Encoder {
             tokenizer,
         })
     }
+    /// One sentence vector, computed on [`EMBED_POOL`] rather than on
+    /// whichever rayon registry the caller happens to be in.
     fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        on_embed_pool(|| self.embed_here(text))?
+    }
+    fn embed_here(&self, text: &str) -> Result<Vec<f32>> {
         let tokens = self
             .tokenizer
             .encode(text, true)
@@ -66,6 +85,36 @@ impl Encoder {
             .squeeze(0)?
             .to_vec1::<f32>()?;
         normalize(output)
+    }
+}
+/// Worker threads for inference (K-08 M5, plan §3.7(d)). candle 0.11's
+/// matmul hands `gemm` `Parallelism::Rayon(n)`, and gemm runs those `n` tasks
+/// on the *current* rayon registry. Called from a `spawn_blocking` thread that
+/// registry is rayon's global pool, which the first embedding therefore built
+/// at one thread per logical CPU, so one forward pass could occupy every core
+/// a transcode was using. A pool owned here and entered with `install` bounds
+/// inference to these threads and never builds, sizes or reconfigures the
+/// global pool that any other rayon user would get.
+///
+/// Two is a chosen bound on the cores one forward pass can take, not the
+/// fastest size. With the inference crates optimized, two threads keep three
+/// quarters or more of the best throughput, 23 to 27 ms per text against
+/// 18 to 22 ms at eight threads; `embed_thread_scaling` measures it
+/// and plan §3.7(d) records the runs.
+const EMBED_THREADS: usize = 2;
+static EMBED_POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+fn on_embed_pool<R: Send>(work: impl FnOnce() -> R + Send) -> Result<R> {
+    let pool = EMBED_POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(EMBED_THREADS)
+            .thread_name(|index| format!("plurx-embed-{index}"))
+            .build()
+            .map_err(|error| tracing::warn!(%error, "semantic search could not start its inference threads"))
+            .ok()
+    });
+    match pool {
+        Some(pool) => Ok(pool.install(work)),
+        None => bail!("semantic search inference threads unavailable"),
     }
 }
 /// The tokenizer exactly as inference configures it, shared with the backend
@@ -93,12 +142,36 @@ fn normalize(mut values: Vec<f32>) -> Result<Vec<f32>> {
 #[derive(Clone, Serialize, Deserialize)]
 struct Vector {
     source: String,
+    #[serde(default)]
+    digest: String,
     embedding: Vec<f32>,
 }
 #[derive(Default, Serialize, Deserialize)]
 struct Index {
     revision: String,
     rows: BTreeMap<i64, Vector>,
+}
+impl Index {
+    fn install(
+        &mut self,
+        artifact: plurx_core::store::background_jobs_embeddings::SharedEmbedding,
+    ) -> Result<()> {
+        artifact.validate()?;
+        if artifact.model.digest() != model_identity().digest() {
+            bail!("embedding model changed");
+        }
+        if self.rows.len() < MAX_ITEMS || self.rows.contains_key(&artifact.item_id) {
+            self.rows.insert(
+                artifact.item_id,
+                Vector {
+                    source: artifact.content_digest,
+                    digest: artifact.vector_sha256,
+                    embedding: artifact.vector,
+                },
+            );
+        }
+        Ok(())
+    }
 }
 #[derive(Default)]
 struct Runtime {
@@ -174,38 +247,9 @@ async fn download(dir: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn embedding_text(entry: &Entry) -> Result<String> {
-    let input = entry.input()?;
-    let labels = entry
-        .record
-        .as_ref()
-        .filter(|r| r.source_json == entry.source_json)
-        .map(|r| r.classification.terms(&r.overrides).join(", "))
-        .unwrap_or_default();
-    Ok(format!(
-        "{}. {}. {}. {}. {}",
-        input.title,
-        input.genres.join(", "),
-        input.tags.join(", "),
-        labels,
-        input.overview
-    )
-    .chars()
-    .take(8000)
-    .collect())
-}
-fn source_key(entry: &Entry) -> String {
-    // Corrections and newly imported provider keywords also invalidate embeddings.
-    hex::encode(Sha256::digest(
-        format!(
-            "{}:{}",
-            entry.source_json,
-            entry.record.as_ref().map(|r| r.revision).unwrap_or(0)
-        )
-        .as_bytes(),
-    ))
-}
 pub async fn worker(state: AppState, shutdown: CancellationToken) {
+    let boot = uuid::Uuid::new_v4().to_string();
+    let mut jobs = None;
     let mut cursor = 0;
     let mut seen = BTreeSet::new();
     loop {
@@ -223,7 +267,17 @@ pub async fn worker(state: AppState, shutdown: CancellationToken) {
             seen.clear();
         } else {
             ENABLED.store(true, Ordering::Release);
-            let result = tokio::select! {_=shutdown.cancelled()=>{disable();return;},result=step(&state,&mut cursor,&mut seen)=>result};
+            // Keep joined model work inside this future through cancellation.
+            let result = async {
+                step(&state, &mut cursor, &mut seen, &shutdown).await?;
+                for _ in 0..16 {
+                    if !work::run(&state, &boot, &mut jobs, &shutdown).await? {
+                        break;
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
             if let Err(error) = result {
                 tracing::warn!(%error,"Embedded semantic search paused; local text search remains available");
                 phase("unavailable");
@@ -232,7 +286,12 @@ pub async fn worker(state: AppState, shutdown: CancellationToken) {
         tokio::select! {_=shutdown.cancelled()=>{disable();return;},_=tokio::time::sleep(Duration::from_secs(if enabled&&cursor>0{1}else{30}))=>{}}
     }
 }
-async fn step(state: &AppState, cursor: &mut i64, seen: &mut BTreeSet<i64>) -> Result<()> {
+async fn step(
+    state: &AppState,
+    cursor: &mut i64,
+    seen: &mut BTreeSet<i64>,
+    shutdown: &CancellationToken,
+) -> Result<()> {
     if !ENABLED.load(Ordering::Acquire) {
         return Ok(());
     }
@@ -244,7 +303,7 @@ async fn step(state: &AppState, cursor: &mut i64, seen: &mut BTreeSet<i64>) -> R
     };
     if !loaded {
         phase("downloading");
-        download(&dir).await?;
+        tokio::select! { () = shutdown.cancelled() => return Ok(()), result = download(&dir) => result? };
         phase("loading");
         let r = runtime();
         let model_dir = dir.clone();
@@ -254,10 +313,12 @@ async fn step(state: &AppState, cursor: &mut i64, seen: &mut BTreeSet<i64>) -> R
             let path = model_dir.join("vectors.json");
             if std::fs::metadata(&path).is_ok_and(|m| m.len() < 300_000_000) {
                 if let Ok(cached) = serde_json::from_slice::<Index>(&std::fs::read(path)?) {
-                    if cached.revision == REVISION
+                    if cached.revision == model_identity().digest()
                         && cached.rows.len() <= MAX_ITEMS
                         && cached.rows.values().all(|v| {
                             v.embedding.len() == DIM && v.embedding.iter().all(|x| x.is_finite())
+                                && plurx_core::store::background_jobs_embeddings::SharedEmbedding::vector_digest(&v.embedding) == v.digest
+                                && (v.embedding.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>() - 1.0).abs() <= 0.005
                         })
                     {
                         index = cached;
@@ -282,7 +343,7 @@ async fn step(state: &AppState, cursor: &mut i64, seen: &mut BTreeSet<i64>) -> R
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut r = r.lock().map_err(|_| anyhow::anyhow!("model lock"))?;
             r.index.rows.retain(|id, _| keep.contains(id));
-            r.index.revision = REVISION.into();
+            r.index.revision = model_identity().digest();
             r.phase = if capped {
                 "ready_capacity_limit"
             } else {
@@ -303,25 +364,32 @@ async fn step(state: &AppState, cursor: &mut i64, seen: &mut BTreeSet<i64>) -> R
         let id = entry.input()?.id;
         *cursor = id;
         seen.insert(id);
+        if shutdown.is_cancelled() || !ENABLED.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let source = source_key(&entry);
-        let text = embedding_text(&entry)?;
-        let r = runtime();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let mut r = r.lock().map_err(|_| anyhow::anyhow!("model lock"))?;
-            if !ENABLED.load(Ordering::Acquire) {
-                *r = Runtime::default();
-                return Ok(());
+        let present = runtime()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("model lock"))?
+            .index
+            .rows
+            .get(&id)
+            .is_some_and(|row| row.source == source);
+        if present {
+            continue;
+        }
+        let lookup = state
+            .store
+            .embedding_for(id, &source, &model_identity().digest())
+            .await?;
+        if let Some(artifact) = lookup.artifact {
+            let mut r = rt.lock().map_err(|_| anyhow::anyhow!("model lock"))?;
+            if ENABLED.load(Ordering::Acquire) && r.encoder.is_some() {
+                r.index.install(artifact)?;
             }
-            if r.index.rows.get(&id).is_some_and(|v| v.source == source) {
-                return Ok(());
-            }
-            if let Some(encoder) = &r.encoder {
-                let embedding = encoder.embed(&text)?;
-                r.index.rows.insert(id, Vector { source, embedding });
-            }
-            Ok(())
-        })
-        .await??;
+        } else {
+            work::enqueue(state, id, &source, lookup.last_completed_job.as_deref()).await?;
+        }
     }
     Ok(())
 }
@@ -402,6 +470,38 @@ pub async fn related(state: &AppState, query: &str) -> Vec<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// §3.7(d): inference runs on the embedder's own two named threads, not
+    /// on the global pool (whose size is the machine's CPU count) and not on
+    /// the calling thread.
+    #[test]
+    fn inference_runs_on_its_own_bounded_pool() {
+        let (threads, name) = on_embed_pool(|| {
+            (
+                rayon::current_num_threads(),
+                std::thread::current().name().map(str::to_owned),
+            )
+        })
+        .expect("embed pool");
+        assert_eq!(threads, EMBED_THREADS);
+        let name = name.expect("pool threads are named");
+        assert!(name.starts_with("plurx-embed-"), "ran on {name:?}");
+        // gemm's fan-out lands on the same registry.
+        let fan_out = on_embed_pool(|| {
+            use rayon::prelude::*;
+            (0..64)
+                .into_par_iter()
+                .map(|_| std::thread::current().name().map(str::to_owned))
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .expect("embed pool");
+        assert!(
+            fan_out.iter().all(|name| name
+                .as_deref()
+                .is_some_and(|n| n.starts_with("plurx-embed-"))),
+            "parallel work escaped the embed pool: {fan_out:?}"
+        );
+        assert!(fan_out.len() <= EMBED_THREADS);
+    }
     #[test]
     fn vector_validation_rejects_invalid_model_output() {
         assert!(normalize(vec![0.; DIM]).is_err());
@@ -413,6 +513,47 @@ mod tests {
     /// is the only thing its `onig` / `fancy-regex` backend choice changes:
     /// `Split` and `ByteLevel` pre-tokenizers and the `Replace` normalizer.
     const REGEX_BACKED: [&str; 3] = ["Split", "ByteLevel", "Replace"];
+
+    #[test]
+    fn completed_vector_is_available_before_catalogue_discovery_wraps() {
+        use plurx_core::store::background_jobs_embeddings::SharedEmbedding;
+        let mut index = Index::default();
+        let mut vector = vec![0.0; DIM];
+        vector[0] = 1.0;
+        let artifact = SharedEmbedding {
+            item_id: 1,
+            content_digest: "a".repeat(64),
+            model: model_identity(),
+            vector_sha256: SharedEmbedding::vector_digest(&vector),
+            vector: vector.clone(),
+        };
+        index
+            .install(artifact)
+            .expect("install published completion");
+        // Discovery has more pages, but the serving index can already score
+        // the first completed item with the query vector.
+        assert_eq!(index.rows.len(), 1);
+        assert_eq!(
+            index.rows[&1]
+                .embedding
+                .iter()
+                .zip(&vector)
+                .map(|(a, b)| a * b)
+                .sum::<f32>(),
+            1.0
+        );
+        let mut incompatible = model_identity();
+        incompatible.normalization_version = "incompatible".into();
+        let rejected = SharedEmbedding {
+            item_id: 2,
+            content_digest: "b".repeat(64),
+            model: incompatible,
+            vector_sha256: SharedEmbedding::vector_digest(&vector),
+            vector,
+        };
+        assert!(index.install(rejected).is_err());
+        assert!(!index.rows.contains_key(&2));
+    }
 
     fn regex_backed_components(node: &serde_json::Value, found: &mut Vec<String>) {
         match node {
@@ -546,6 +687,64 @@ mod tests {
         }
     }
 
+    /// §3.7(d)'s measurement: embedding latency by inference thread count.
+    /// Prints one line per pool size; asserts only that every size produces
+    /// the same vectors, since the thread count must not change a result.
+    ///
+    /// The timings only mean something with the inference crates optimized,
+    /// as a release build has them. The dev and test profiles leave candle
+    /// and gemm at opt-level 0, which is over ten times slower per text and
+    /// makes more threads look better than they are. Plan §3.7(d)'s numbers
+    /// come from:
+    ///
+    /// ```text
+    /// PLURX_TEST_MINILM_DIR=<verified model dir> cargo test --locked -p plurxd \
+    ///   --bin plurxd --config 'profile.dev.package."*".opt-level=3' \
+    ///   embed_thread_scaling -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs the pinned model (PLURX_TEST_MINILM_DIR) and optimized dependencies; the doc comment has the command"]
+    fn embed_thread_scaling() {
+        let dir = std::env::var("PLURX_TEST_MINILM_DIR").expect("model directory");
+        let encoder = Encoder::load(Path::new(&dir)).expect("load");
+        let texts: Vec<String> = include_str!("testdata/tokenizer_corpus.txt")
+            .lines()
+            .filter(|line| !line.starts_with("# ") && !line.trim().is_empty())
+            .map(str::to_owned)
+            .collect();
+        let cpus = std::thread::available_parallelism().map_or(1, usize::from);
+        let mut reference: Option<Vec<Vec<f32>>> = None;
+        for threads in [1, 2, 4, 8, cpus] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("pool");
+            // One warm-up pass so allocation and page faults are not timed.
+            pool.install(|| encoder.embed_here(&texts[0]))
+                .expect("warm up");
+            let started = std::time::Instant::now();
+            let vectors: Vec<Vec<f32>> = texts
+                .iter()
+                .map(|text| pool.install(|| encoder.embed_here(text)).expect("embed"))
+                .collect();
+            let elapsed = started.elapsed();
+            println!(
+                "embed_thread_scaling: {threads:>2} threads: {} texts in {:.0} ms, {:.2} ms/text",
+                texts.len(),
+                elapsed.as_secs_f64() * 1e3,
+                elapsed.as_secs_f64() * 1e3 / texts.len() as f64
+            );
+            match &reference {
+                None => reference = Some(vectors),
+                Some(reference) => {
+                    for (a, b) in reference.iter().zip(&vectors) {
+                        let dot = a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+                        assert!(dot > 0.99999, "thread count changed a vector: {dot}");
+                    }
+                }
+            }
+        }
+    }
     #[test]
     #[ignore = "downloads are opt-in; set PLURX_TEST_MINILM_DIR to verified model files"]
     fn embedded_model_distinguishes_meaning() {

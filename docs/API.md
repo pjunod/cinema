@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 233
+One binary serves everything on one port (`:32400` by default). plurx has 239
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -771,8 +771,8 @@ matching is the one 422 in the API, and its body names every configured root:
 
 | Status | Meaning |
 |---|---|
-| 200 `{"status":"scanned", …, "report", "items"}` | Ran synchronously to completion — a real filesystem walk and ffprobe work happened inline on the request |
-| 202 `{"status":"queued", "request_id", …}` | The library was busy. **Queued, never dropped** — importing a season fires one request per episode within seconds, and dropping N−1 would leave the season half-indexed. Duplicates by path collapse |
+| 200 `{"status":"scanned", …, "report", "items"}` | A durable result was already ready when the request was acknowledged |
+| 202 `{"status":"queued", "request_id", …}` | Durably accepted for an eligible cluster worker. Requests survive process restart; same-path requests share a scan while retaining each caller’s hints and result |
 | 400 | Relative path, nonpositive `series.tmdb`, or invalid `book` fields |
 | 422 | Path under no library root |
 
@@ -786,9 +786,11 @@ notification counter *before* path resolution, so a request rejected for a
 path-mapping mistake still proves the caller reached plurx with a working key.
 
 `GET /api/v1/scan/requests/{id}` returns the record verbatim. `status` is
-`running` · `queued` · `done` · `failed`; `report` and `items` appear only at
-a terminal state, `error` only on failure. Records live in a 256-entry
-in-memory ring and 404 once evicted, so poll promptly.
+`queued` · `done` · `failed` · `cancelled`; `report` and `items` appear only at
+a terminal state, `error` only on failure. Request receipts and results persist
+for seven days. The recent list is bounded to 256 records; an older record can
+still be read by ID until its receipt expires. A library admits at most 256
+pending requests; overload is an explicit rejection before acceptance.
 
 ### 6.4 Root identity, and why a scan refuses to prune
 
@@ -874,7 +876,14 @@ immutable means the URL itself must change when the bytes do, so every artwork
 URL is built as `…?v={item.updated_at}`: the replicated item revision advances
 on every artwork patch and makes an otherwise mutable filename a new cache
 identity. The `?v=` value is a cache key only; the handler ignores it. There
-are **no sizing parameters** — the stored bytes are what you get.
+supports `?size=original|w300|w500|w780`. Original requests preserve the stored
+hero/backdrop bytes. A cold smaller variant returns the original with
+`Cache-Control: private, max-age=0, must-revalidate` and
+`X-Plurx-Artwork: original-fallback`, while recording one durable preparation
+interest for this node. Published variants use strong digest ETags. Their
+identity includes the source digest, width, format and renderer pipeline;
+preparation uses spare capacity, and another node can hydrate verified bytes
+instead of encoding them again.
 
 On a local miss the node fetches from a reachable peer voter and atomically
 materializes the file: 8 concurrent materializations process-wide, 3 peers
@@ -2120,7 +2129,7 @@ is `health.verdict == "dead"`, and the fix — once the underlying cause is gone
 | GET | `/api/v1/live-tv/guide` | bearer | The cached programme guide, clipped to `?from=<unix>&hours=<1..336>`. Never triggers a fetch. Carries `next_refresh_at` so a client polls on the owner's clock |
 | POST | `/api/v1/live-tv/guide/refresh` | admin | Forces one guide refresh on the owner and returns the new document |
 | GET | `/api/v1/live-tv/guide/readiness` | admin | Advisory: what has to be true for the configured source to work, and whether it is |
-| POST | `/api/v1/live-tv/channels/{channel}/intents` | bearer | Persist a protocol 4 start intent before tuner admission; returns its ID, expiry and configuration generation |
+| POST | `/api/v1/live-tv/channels/{channel}/intents` | bearer | Persist a protocol 5 start intent before tuner admission; returns its ID, expiry and configuration generation |
 | POST | `/api/v1/live-tv/channels/{channel}/sessions` | bearer | Two-phase start; issues the capability |
 | GET | `/api/v1/live-tv/sessions/{capability}/master.m3u8` | **capability** | Caption-advertising master playlist returned by start and resume |
 | GET | `/api/v1/live-tv/sessions/{capability}/index.m3u8` | **capability** | Live media playlist referenced by the master |
@@ -2216,9 +2225,9 @@ Protocol 4 clients first POST the playback envelope to the channel's
 `intents` route. The response is `{request_id, admission_expires_at_ms,
 config_generation}`. Persist `request_id` before POSTing the same playback
 envelope and ID to `sessions`; replay must retain the same envelope.
-`v4_` IDs contain 32 lowercase hexadecimal digits and have a five-minute
+`v5_` IDs contain 32 lowercase hexadecimal digits and have a five-minute
 admission window. Retirement is durable even before admission, and an unknown
-protocol 4 ID can never fall back to legacy admission. Legacy 32-hex IDs retain
+protocol 5 ID can never fall back to legacy admission. Legacy 32-hex IDs retain
 a bounded 24-hour retire guarantee. User-scoped recovery routes resolve the
 same durable assignment through any ingress.
 
@@ -2233,7 +2242,7 @@ generation, checks[], snapshot?}`, with `{id, ready, message}` checks.
 | `configuration` | Address format, policy capacity and output settings; an empty address may be saved, but playback needs a private/link-local device address |
 | `cluster_protocol` | Legacy protocol publication by active serving nodes |
 | `start_recovery` | Negotiated recovery protocol support |
-| `cluster_resource` | A reachable worker advertises protocol 4 durable intents |
+| `cluster_resource` | A reachable worker advertises protocol 5 durable intents |
 | `worker_observations` | Per-node device identity, capacity, protocol and encoder results; timeouts remain explicit |
 | `clock_sync` | Clock synchronization and shared storage identity require operator verification |
 | `serving_authority` | Current quorum serving authority |
@@ -2574,6 +2583,12 @@ Every route is admin unless the row says otherwise. `/cluster/status` and
 |---|---|---|---|
 | POST | `/api/v1/cluster/join-tokens` | admin | Mints one single-use **voter** join token |
 | POST | `/api/v1/cluster/learner-join-tokens` | admin | The same, wire-distinct, for a **learner** |
+| GET | `/api/v1/cluster/work/storage-domains` | admin | Library roots and persisted domain mappings; two shared readers per domain and two concurrent library workers per provider |
+| PUT | `/api/v1/cluster/work/storage-domains` | admin | Array of `{library_id, root_path, domain_id}` replaces the mapping, at most 256 roots / 64 KiB. Empty IDs are omitted for the global fallback. Returns 409 while live work owns reservations or a root no longer exists; feature enable settings are independent |
+| GET | `/api/v1/cluster/jobs` | admin | Optional `state`, `kind`, and `cursor` query parameters; at most 100 durable job summaries, bounded counts, next cursor and up to 64 recent repair plans; payloads, paths and ownership tokens omitted |
+| GET | `/api/v1/cluster/jobs/{id}` | admin | Durable summary, latest 16 attempts and first 100 interests; `more_waiters` identifies truncation |
+| POST | `/api/v1/cluster/jobs/{id}/cancel` | admin | Idempotent cooperative cancellation; running children retain reservations until joined or expired |
+| POST | `/api/v1/cluster/jobs/{id}/retry` | admin | JSON `request_id` UUID identifies one deliberate retry; failed/cancelled core work creates a fresh admin interest or fragment analysis generation. Preserve the UUID across transport retries; active work returns conflict |
 | GET | `/api/v1/cluster/nodes` | admin | Live roster, capacity, protocol range, per-node readiness |
 | GET | `/api/v1/cluster/status` | admin (cache-only ok) | The aggregate: roster + own snapshot + cached peer observations |
 | GET | `/api/v1/cluster/support-bundle` | admin (cache-only ok) | ZIP: the aggregate, a redacted log tail, a README, a manifest |
@@ -2591,6 +2606,10 @@ Every route is admin unless the row says otherwise. `/cluster/status` and
 | POST | `/api/v1/cluster/join/{redeem,finalize}` | **join-token digest** | Stages, then confirms, a voter |
 | POST | `/api/v1/cluster/learner/join/{redeem,finalize}` | **learner token digest** | The same on the learner path |
 | GET | `/api/v1/cluster/artwork/{filename}` | **cluster HMAC** | Serves node-local artwork to a peer |
+
+A fragment job retry retains its exact copy-video variant. If the source or
+pipeline changed so that variant cannot be resolved, it returns conflict; use
+the media detail analysis action to request a new current generation.
 
 `GET /api/v1/cluster/ingress` is the one route here any signed-in user may
 call: it returns reachable peer **origins** a client can retry a media
@@ -2795,7 +2814,13 @@ bearer because this is a peer-to-peer capability, not a household one — the
 same rule the join routes state from the other direction. And it **never
 proxies a second hop**: the handler reads local bytes only, so a filename
 absent everywhere is a bounded 404 instead of a fan-out cycle around the
-cluster. The user-facing image route (§6.6) is the one that races peers.
+cluster. The user-facing image route (§6.7) is the one that races peers.
+
+The reserved `variant-{64 lowercase hex artifact key}` name serves a published
+artwork derivative under the same exact-name proof. The response must match
+the committed blob digest and byte count on the serving node. It never reads
+an unpublished staging file, never resizes for a peer, and still rejects a
+`size` query. Older peers return a bounded miss for this name.
 
 ### 19.7 `GET /cluster/support-bundle`
 
@@ -2935,6 +2960,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | GET | `/internal/v1/media/snapshot` | — | This node's media-pool snapshot |
 | POST | `/internal/v1/media/offers` | 64 KiB | One placement bid; starts no work |
 | POST | `/api/v1/internal/media/shared-cache-canary` | 1 KiB | Proves shared-cache identity and generation |
+| GET | `/internal/media/cache-copy/{recipe}/{digest}/{object}` | — | A signed committed member may fetch the authenticated manifest (`object=manifest`) or one zero-based manifest object from a published local transcode. Full digest checks, bounded response permits and cache reader pins apply; this never starts an encoder. |
 | GET | `/internal/media/fragment-index/{cache_key}` | — | Streams the verified local fragment index |
 | GET | `/internal/media/subtitle-source/{file_id}/{ordinal}/{format}` | — | Streams a verified local subtitle-source representation (`sup`, `webvtt`, or `matroska`) named by this node's manifest. Requires a signed cluster read request and the subtitle-cluster-sources switch; returns 404 for a missing or corrupt object so the caller can try another published holder. The source video is never opened. |
 | POST | `/internal/media/subtitle-range` | Range identity (file ID, stamp, ordinal, anchor, span and sampled source attestation) | Produces one indexed Matroska text playback window. Exact signed request and response; 4 KiB request body, 8 MiB VTT bound, two workers per node and one per requesting peer, 25 s worker deadline. Source is resolved from the catalog and checked before and after extraction. Partial ranges never become whole-track publications. |

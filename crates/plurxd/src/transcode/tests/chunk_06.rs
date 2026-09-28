@@ -114,6 +114,8 @@
     /// potentially a whole film. And the admission record must flip to the
     /// software class, or every speed measured from the replacement encoder
     /// is filed as evidence about hardware.
+    // The encoder stand-in is a /bin/sh script.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_fallback_to_software_frees_the_hardware_slot_at_once() {
         super::require_ffmpeg();
@@ -121,6 +123,8 @@
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
         let work = crate::test_tempdir().expect("work");
+        let encoder = crate::test_tempdir().expect("encoder stand-in");
+        let producer_started = hardware_encoder_stand_in(encoder.path());
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -139,6 +143,7 @@
             .start(file_id, 1080, 0.0, None, None, "paul", "pb-fallback")
             .await
             .expect("hardware start");
+        wait_for_stand_in(&producer_started).await;
         assert_eq!(mgr.admissions.in_use(), 1, "the start holds the only slot");
 
         let session = mgr
@@ -485,7 +490,7 @@
             child,
             cached,
             actor_managed_prepublication,
-            crate::playback_control::RollingControlHandle::spawn("test-start"),
+            crate::playback_control::RollingControlHandle::spawn_for_test("test-start"),
             0,
         )
     }
@@ -553,15 +558,13 @@
         session.first_media_handoff_applied.store(true, Release);
         reserve_test_admissions(&session, &admissions);
         let reap_pause = Arc::new(LifecycleTestPause::new());
-        *session
+        session
             .child
             .lock()
             .await
             .as_ref()
             .expect("attempt child")
-            .terminate_before_reap_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&reap_pause));
+            .pause_terminate_before_reap(Arc::clone(&reap_pause));
 
         let settlement = spawn_published_failure_cleanup_owner(
             &session,
@@ -664,7 +667,7 @@
             .expect("seed init segment");
 
         let (control, mut registration) =
-            crate::playback_control::RollingControlHandle::spawn_prepublication_transcode(
+            crate::playback_control::RollingControlHandle::spawn_prepublication_transcode_for_test(
                 "published-frontier-test",
             );
         registration.register().await.expect("register executor");
@@ -1208,7 +1211,7 @@
             sessions.insert("a-blocked".to_owned(), Arc::clone(&blocked));
             sessions.insert("b-follower".to_owned(), Arc::clone(&follower));
         }
-        let actor_pause = Arc::new(tokio::sync::Barrier::new(2));
+        let actor_pause = crate::seam_hooks::AsyncPause::new("producer attempt reply");
         blocked
             .control
             .pause_producer_attempt_reply(Arc::clone(&actor_pause));
@@ -1216,7 +1219,7 @@
             let control = blocked.control.clone();
             async move { control.begin_producer_attempt().await }
         });
-        actor_pause.wait().await;
+        let held = actor_pause.reached().await;
 
         let fence = tokio::spawn({
             let manager = Arc::clone(&manager);
@@ -1256,7 +1259,7 @@
             "a later snapshot member cannot publish while an earlier actor is stalled"
         );
 
-        actor_pause.wait().await;
+        held.release();
         let _ = actor_command.await.expect("blocked actor command");
         fence.await.expect("authority fence task");
         assert_eq!(
@@ -1301,7 +1304,7 @@
             .lock()
             .await
             .insert("bounded-stop".to_owned(), Arc::clone(&session));
-        let actor_pause = Arc::new(tokio::sync::Barrier::new(2));
+        let actor_pause = crate::seam_hooks::AsyncPause::new("producer attempt reply");
         session
             .control
             .pause_producer_attempt_reply(Arc::clone(&actor_pause));
@@ -1309,7 +1312,7 @@
             let control = session.control.clone();
             async move { control.begin_producer_attempt().await }
         });
-        actor_pause.wait().await;
+        let held = actor_pause.reached().await;
         let dropped = Arc::new(AtomicBool::new(false));
 
         assert!(
@@ -1333,7 +1336,7 @@
             "actor settlement must not retain the global registry lock"
         );
 
-        actor_pause.wait().await;
+        held.release();
         let _ = actor_command.await.expect("blocked actor command");
         tokio::time::timeout(Duration::from_secs(2), async {
             while !dropped.load(Acquire)
@@ -1373,15 +1376,13 @@
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&owner_pause));
         let reap_pause = Arc::new(LifecycleTestPause::new());
-        *session
+        session
             .child
             .lock()
             .await
             .as_ref()
             .expect("attempt child")
-            .terminate_before_reap_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&reap_pause));
+            .pause_terminate_before_reap(Arc::clone(&reap_pause));
         manager
             .sessions
             .lock()
@@ -1446,15 +1447,13 @@
             watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
         reserve_test_admissions(&session, &admissions);
         let reap_pause = Arc::new(LifecycleTestPause::new());
-        *session
+        session
             .child
             .lock()
             .await
             .as_ref()
             .expect("attempt child")
-            .terminate_before_reap_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&reap_pause));
+            .pause_terminate_before_reap(Arc::clone(&reap_pause));
         manager
             .sessions
             .lock()

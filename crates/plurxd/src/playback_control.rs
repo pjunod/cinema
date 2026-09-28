@@ -908,6 +908,7 @@ impl ControlResponseV1 {
                     playlist_url,
                     media_origin_ms,
                     effective_selection,
+                    ..
                 } => prepared_payload_is_valid(
                     Some(action_id),
                     session_id,
@@ -1773,6 +1774,10 @@ pub(crate) enum ControlAction {
         action_id: String,
         session_id: String,
         playlist_url: String,
+        /// The staged session's own reporter identity. The incumbent reporter
+        /// carries the commit, then this one renews the successor's lease.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        control: Option<Box<ControlBootstrap>>,
         /// Exact source position the successor's session-relative zero maps
         /// to. Without it a client cannot align the second timeline with the
         /// first, and the commit boundary is expressed in film time.
@@ -1802,6 +1807,7 @@ pub(crate) struct PreparedSuccessorAction {
     pub deadline_ms: i64,
     pub session_id: String,
     pub playlist_url: String,
+    pub control: Option<Box<ControlBootstrap>>,
     pub media_origin_ms: i64,
     pub effective_selection: EffectiveSelection,
 }
@@ -1812,6 +1818,7 @@ impl PreparedSuccessorAction {
             action_id: uuid::Uuid::new_v4().to_string(),
             session_id: self.session_id,
             playlist_url: self.playlist_url,
+            control: self.control,
             media_origin_ms: self.media_origin_ms,
             effective_selection: self.effective_selection,
         }
@@ -6777,24 +6784,50 @@ pub(crate) trait RollingTerminalAdmission: Send + Sync {
     fn accepted(&self, outcome: RollingControlOutcome);
 }
 
+/// The points of [`RollingFlowSync`] that a test can pause at
+/// (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
+///
+/// The flow sync holds one of these in every build, so its layout and the
+/// await points of [`RollingFlowSync::wait_for`] are the same in the test and
+/// release binaries. Production installs [`NoopRollingFlowSyncHooks`]; the
+/// race test installs a pausing implementation. A paused hook's timing is
+/// still a test artefact: what this makes identical is the struct and the set
+/// of await points, not scheduling.
+trait RollingFlowSyncHooks: Send + Sync {
+    /// A waiter has registered its `Notify` interest and found its ticket not
+    /// yet applied, before it awaits the notification.
+    fn after_wait_check(&self) -> crate::seam_hooks::HookFuture<'_>;
+}
+
+/// What production installs: the point is already ready.
+struct NoopRollingFlowSyncHooks;
+
+impl RollingFlowSyncHooks for NoopRollingFlowSyncHooks {
+    fn after_wait_check(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+}
+
 struct RollingFlowSync {
     requested: AtomicU64,
     applied: AtomicU64,
     request_notify: tokio::sync::Notify,
     applied_notify: tokio::sync::Notify,
-    #[cfg(test)]
-    wait_after_check: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    hooks: Box<dyn RollingFlowSyncHooks>,
 }
 
 impl RollingFlowSync {
     fn new() -> Self {
+        Self::with_hooks(Box::new(NoopRollingFlowSyncHooks))
+    }
+
+    fn with_hooks(hooks: Box<dyn RollingFlowSyncHooks>) -> Self {
         Self {
             requested: AtomicU64::new(0),
             applied: AtomicU64::new(0),
             request_notify: tokio::sync::Notify::new(),
             applied_notify: tokio::sync::Notify::new(),
-            #[cfg(test)]
-            wait_after_check: std::sync::Mutex::new(None),
+            hooks,
         }
     }
 
@@ -6830,17 +6863,7 @@ impl RollingFlowSync {
             if self.applied.load(Ordering::Acquire) >= ticket {
                 return;
             }
-            #[cfg(test)]
-            let pause = self
-                .wait_after_check
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            #[cfg(test)]
-            if let Some(pause) = pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
+            self.hooks.after_wait_check().await;
             notified.as_mut().await;
         }
     }
@@ -6867,8 +6890,7 @@ struct RollingProducerIngress {
     state: std::sync::Mutex<RollingProducerIngressState>,
     notify: tokio::sync::Notify,
     flow_capacity_available: tokio::sync::Notify,
-    #[cfg(test)]
-    flow_capacity_wait_started: tokio::sync::Notify,
+    hooks: Arc<dyn RollingControlHooks>,
 }
 
 struct RollingProducerIngressState {
@@ -6897,8 +6919,6 @@ struct RollingProducerIngressState {
     /// Applied flow barriers moved into queued command envelopes still occupy
     /// their fixed slots until the actor consumes that envelope.
     sealed_flow_barriers: usize,
-    #[cfg(test)]
-    last_flow_applied: Option<RollingProducerFlowObservation>,
 }
 
 impl Default for RollingProducerIngressState {
@@ -6915,8 +6935,6 @@ impl Default for RollingProducerIngressState {
             flow: std::collections::VecDeque::new(),
             flow_reservations: 0,
             sealed_flow_barriers: 0,
-            #[cfg(test)]
-            last_flow_applied: None,
         }
     }
 }
@@ -7195,13 +7213,18 @@ impl RollingProducerIngressBlock {
 }
 
 impl RollingProducerIngress {
+    /// An ingress with the test hooks, for tests that build one directly.
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_hooks(RollingControlTestHooks::new())
+    }
+
+    fn with_hooks(hooks: Arc<dyn RollingControlHooks>) -> Self {
         Self {
             state: std::sync::Mutex::new(RollingProducerIngressState::default()),
             notify: tokio::sync::Notify::new(),
             flow_capacity_available: tokio::sync::Notify::new(),
-            #[cfg(test)]
-            flow_capacity_wait_started: tokio::sync::Notify::new(),
+            hooks,
         }
     }
 
@@ -7282,8 +7305,7 @@ impl RollingProducerIngress {
             if has_capacity {
                 return true;
             }
-            #[cfg(test)]
-            self.flow_capacity_wait_started.notify_one();
+            self.hooks.flow_capacity_wait_started();
             tokio::select! {
                 _ = notified.as_mut() => {}
                 _ = actor.closed() => return false,
@@ -7312,12 +7334,13 @@ impl RollingProducerIngress {
             return;
         }
         let published_at = rolling_now();
-        Self::push_flow_barrier(&mut state, observation, published_at);
+        self.push_flow_barrier(&mut state, observation, published_at);
         drop(state);
         self.notify.notify_one();
     }
 
     fn push_flow_barrier(
+        &self,
         state: &mut RollingProducerIngressState,
         observation: RollingProducerFlowObservation,
         published_at: Instant,
@@ -7326,10 +7349,7 @@ impl RollingProducerIngress {
         state.next_sequence = state.next_sequence.saturating_add(1);
         let sequence = state.next_sequence;
         let preceding_progress = state.progress.take();
-        #[cfg(test)]
-        {
-            state.last_flow_applied = Some(observation);
-        }
+        self.hooks.flow_barrier_applied(observation);
         state.flow.push_back(SequencedProducerBarrier {
             preceding_progress,
             event: SequencedProducerEvent {
@@ -7347,7 +7367,7 @@ impl RollingProducerIngress {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(state.flow.len() < ROLLING_PRODUCER_FLOW_BARRIER_CAPACITY);
-        Self::push_flow_barrier(&mut state, observation, published_at);
+        self.push_flow_barrier(&mut state, observation, published_at);
         drop(state);
         self.notify.notify_one();
     }
@@ -7606,6 +7626,233 @@ impl RollingProducerIngress {
     }
 }
 
+/// The points of the rolling control group — the handle, its actor task,
+/// the actor's exit fence, the passive decision executor and the producer
+/// ingress — that a test observes or pauses at
+/// (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
+///
+/// One `Arc` of these is shared by every member of the group in every build,
+/// so their layout and the await points of the actor's command loop and the
+/// executor's poll loop are the same in the test and release binaries.
+/// Production installs [`NoopRollingControlHooks`]; the `_for_test`
+/// constructors install `RollingControlTestHooks`. A paused hook's timing is
+/// still a test artefact: what this makes identical is the structs and the
+/// set of await points, not scheduling. `Any` is a supertrait only so a test
+/// can reach the test hooks behind a handle.
+trait RollingControlHooks: std::any::Any + Send + Sync {
+    /// The actor task was spawned.
+    fn actor_spawned(&self, actor: &tokio::task::JoinHandle<()>);
+    /// The legacy passive executor task was spawned.
+    fn executor_spawned(&self, executor: &tokio::task::JoinHandle<()>);
+    /// The actor's run loop installed its exit fence and is about to take
+    /// its first command.
+    fn actor_run_started(&self);
+    /// The actor's exit fence began to drop, before it takes the transition
+    /// fence to publish retirement.
+    fn actor_exit_fence_started(&self);
+    /// The actor applied one command, released the transition and woke the
+    /// executor; awaited before it takes the next command.
+    fn after_command_settled(&self) -> crate::seam_hooks::HookFuture<'_>;
+    /// The passive executor was woken and began observing, before it polls
+    /// the actor.
+    fn before_executor_poll(&self) -> crate::seam_hooks::HookFuture<'_>;
+    /// The passive executor's poll returned, before it acts on the result.
+    fn after_executor_poll(&self) -> crate::seam_hooks::HookFuture<'_>;
+    /// A flow-barrier waiter re-checked capacity under the ingress lock and
+    /// found none, after registering its wake and before awaiting it.
+    fn flow_capacity_wait_started(&self);
+    /// A flow barrier entered the ingress, under the ingress lock.
+    fn flow_barrier_applied(&self, observation: RollingProducerFlowObservation);
+}
+
+/// What production installs: every point records nothing and is ready at once.
+struct NoopRollingControlHooks;
+
+impl RollingControlHooks for NoopRollingControlHooks {
+    fn actor_spawned(&self, _actor: &tokio::task::JoinHandle<()>) {}
+
+    fn executor_spawned(&self, _executor: &tokio::task::JoinHandle<()>) {}
+
+    fn actor_run_started(&self) {}
+
+    fn actor_exit_fence_started(&self) {}
+
+    fn after_command_settled(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn before_executor_poll(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn after_executor_poll(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+
+    fn flow_capacity_wait_started(&self) {}
+
+    fn flow_barrier_applied(&self, _observation: RollingProducerFlowObservation) {}
+}
+
+/// The test hooks: they keep the abort handles, notify the start and exit
+/// points, remember the last flow barrier, and hold one armed
+/// [`AsyncPause`](crate::seam_hooks::AsyncPause) per pausing point. Each pause
+/// is one-shot: the point that reaches it takes it.
+#[cfg(test)]
+pub(crate) struct RollingControlTestHooks {
+    actor: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
+    executor: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
+    actor_run_started: tokio::sync::Notify,
+    actor_exit_fence_started: tokio::sync::Notify,
+    flow_capacity_wait_started: tokio::sync::Notify,
+    last_flow_applied: std::sync::Mutex<Option<RollingProducerFlowObservation>>,
+    executor_poll: std::sync::Mutex<Option<Arc<crate::seam_hooks::AsyncPause>>>,
+    executor_observation: std::sync::Mutex<Option<Arc<crate::seam_hooks::AsyncPause>>>,
+    producer_attempt_reply: std::sync::Mutex<Option<Arc<crate::seam_hooks::AsyncPause>>>,
+    deferred_attempt_reply: std::sync::Mutex<Option<DeferredProducerAttemptReply>>,
+    command_settled: std::sync::Mutex<Option<Arc<crate::seam_hooks::AsyncPause>>>,
+}
+
+#[cfg(test)]
+impl RollingControlTestHooks {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            actor: std::sync::Mutex::new(None),
+            executor: std::sync::Mutex::new(None),
+            actor_run_started: tokio::sync::Notify::new(),
+            actor_exit_fence_started: tokio::sync::Notify::new(),
+            flow_capacity_wait_started: tokio::sync::Notify::new(),
+            last_flow_applied: std::sync::Mutex::new(None),
+            executor_poll: std::sync::Mutex::new(None),
+            executor_observation: std::sync::Mutex::new(None),
+            producer_attempt_reply: std::sync::Mutex::new(None),
+            deferred_attempt_reply: std::sync::Mutex::new(None),
+            command_settled: std::sync::Mutex::new(None),
+        })
+    }
+
+    fn of(hooks: &dyn RollingControlHooks) -> Option<&Self> {
+        let hooks: &dyn std::any::Any = hooks;
+        hooks.downcast_ref()
+    }
+
+    fn arm(
+        slot: &std::sync::Mutex<Option<Arc<crate::seam_hooks::AsyncPause>>>,
+        pause: Arc<crate::seam_hooks::AsyncPause>,
+    ) {
+        *slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    }
+
+    fn take(
+        slot: &std::sync::Mutex<Option<Arc<crate::seam_hooks::AsyncPause>>>,
+    ) -> Option<Arc<crate::seam_hooks::AsyncPause>> {
+        slot.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    /// Keep a `BeginProducerAttempt` reply, with the reply pause armed when
+    /// the command was applied, for `after_command_settled` to deliver.
+    fn defer_attempt_reply(
+        &self,
+        reply: tokio::sync::oneshot::Sender<Result<u64, ProducerAttemptRejection>>,
+        outcome: Result<u64, ProducerAttemptRejection>,
+    ) {
+        let reply_pause = Self::take(&self.producer_attempt_reply);
+        *self
+            .deferred_attempt_reply
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(DeferredProducerAttemptReply {
+                reply,
+                outcome,
+                reply_pause,
+            });
+    }
+
+    fn pause_at(
+        slot: &std::sync::Mutex<Option<Arc<crate::seam_hooks::AsyncPause>>>,
+    ) -> crate::seam_hooks::HookFuture<'_> {
+        let pause = Self::take(slot);
+        Box::pin(async move {
+            if let Some(pause) = pause {
+                pause.hold().await;
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+impl RollingControlHooks for RollingControlTestHooks {
+    fn actor_spawned(&self, actor: &tokio::task::JoinHandle<()>) {
+        *self
+            .actor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(actor.abort_handle());
+    }
+
+    fn executor_spawned(&self, executor: &tokio::task::JoinHandle<()>) {
+        *self
+            .executor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(executor.abort_handle());
+    }
+
+    fn actor_run_started(&self) {
+        self.actor_run_started.notify_one();
+    }
+
+    fn actor_exit_fence_started(&self) {
+        self.actor_exit_fence_started.notify_one();
+    }
+
+    fn after_command_settled(&self) -> crate::seam_hooks::HookFuture<'_> {
+        let deferred = self
+            .deferred_attempt_reply
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let settled = Self::take(&self.command_settled);
+        Box::pin(async move {
+            if let Some(DeferredProducerAttemptReply {
+                reply,
+                outcome,
+                reply_pause,
+            }) = deferred
+            {
+                if let Some(reply_pause) = reply_pause {
+                    reply_pause.hold().await;
+                }
+                let _ = reply.send(outcome);
+            }
+            if let Some(settled) = settled {
+                settled.hold().await;
+            }
+        })
+    }
+
+    fn before_executor_poll(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Self::pause_at(&self.executor_poll)
+    }
+
+    fn after_executor_poll(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Self::pause_at(&self.executor_observation)
+    }
+
+    fn flow_capacity_wait_started(&self) {
+        self.flow_capacity_wait_started.notify_one();
+    }
+
+    fn flow_barrier_applied(&self, observation: RollingProducerFlowObservation) {
+        *self
+            .last_flow_applied
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observation);
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct RollingControlHandle {
     sender: tokio::sync::mpsc::Sender<RollingControlEnvelope>,
@@ -7618,16 +7865,6 @@ pub(crate) struct RollingControlHandle {
     /// final handle must close the actor rather than leave a self-owned task.
     #[allow(dead_code)]
     decision_transport: Arc<RollingDecisionTransport>,
-    #[cfg(test)]
-    producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
-    #[cfg(test)]
-    actor_abort: Option<tokio::task::AbortHandle>,
-    #[cfg(test)]
-    executor_abort: Option<tokio::task::AbortHandle>,
-    #[cfg(test)]
-    actor_run_started: Arc<tokio::sync::Notify>,
-    #[cfg(test)]
-    actor_exit_fence_started: Arc<tokio::sync::Notify>,
 }
 
 struct OwnedLocalControlRequest {
@@ -8005,10 +8242,9 @@ struct RollingDecisionTransport {
     producer_events: Arc<RollingProducerIngress>,
     executor_observation: Arc<RollingExecutorObservation>,
     terminal_projection: Arc<AtomicU8>,
-    #[cfg(test)]
-    executor_poll_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
-    #[cfg(test)]
-    executor_observation_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
+    /// The control group's hooks, shared with the actor, its exit fence and
+    /// the producer ingress (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
+    hooks: Arc<dyn RollingControlHooks>,
 }
 
 impl RollingDecisionTransport {
@@ -8100,10 +8336,7 @@ impl RollingDecisionTransport {
         mut inbox: RollingSessionExecutorInbox,
     ) -> tokio::task::JoinHandle<()> {
         let observation = Arc::clone(&self.executor_observation);
-        #[cfg(test)]
-        let executor_poll_pause = Arc::clone(&self.executor_poll_pause);
-        #[cfg(test)]
-        let executor_observation_pause = Arc::clone(&self.executor_observation_pause);
+        let hooks = Arc::clone(&self.hooks);
         tokio::spawn(async move {
             let mut observed_sequence = 0_u64;
             loop {
@@ -8128,31 +8361,9 @@ impl RollingDecisionTransport {
                 if !observation.begin_observing() {
                     break;
                 }
-                #[cfg(test)]
-                let poll_pause = {
-                    executor_poll_pause
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .take()
-                };
-                #[cfg(test)]
-                if let Some(pause) = poll_pause {
-                    pause.wait().await;
-                    pause.wait().await;
-                }
+                hooks.before_executor_poll().await;
                 let poll = transport.poll_after(observed_sequence).await;
-                #[cfg(test)]
-                let observation_pause = {
-                    executor_observation_pause
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .take()
-                };
-                #[cfg(test)]
-                if let Some(pause) = observation_pause {
-                    pause.wait().await;
-                    pause.wait().await;
-                }
+                hooks.after_executor_poll().await;
                 match poll {
                     DecisionTransportPoll::Available(ProducerDecisionPoll::Idle) => {
                         if !observation.finish_observing() {
@@ -8302,7 +8513,7 @@ impl RollingProducerExecutorRegistration {
 struct DeferredProducerAttemptReply {
     reply: tokio::sync::oneshot::Sender<Result<u64, ProducerAttemptRejection>>,
     outcome: Result<u64, ProducerAttemptRejection>,
-    reply_pause: Option<Arc<tokio::sync::Barrier>>,
+    reply_pause: Option<Arc<crate::seam_hooks::AsyncPause>>,
 }
 
 struct RollingActorRuntime {
@@ -8312,12 +8523,7 @@ struct RollingActorRuntime {
     flow_sync: Arc<RollingFlowSync>,
     producer_events: Arc<RollingProducerIngress>,
     decision_wake: Arc<RollingDecisionWake>,
-    #[cfg(test)]
-    producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
-    #[cfg(test)]
-    actor_run_started: Arc<tokio::sync::Notify>,
-    #[cfg(test)]
-    actor_exit_fence_started: Arc<tokio::sync::Notify>,
+    hooks: Arc<dyn RollingControlHooks>,
 }
 
 /// Publishes actor unavailability under the same transition fence used by
@@ -8330,14 +8536,12 @@ struct RollingActorExitFence {
     producer_transition: Arc<std::sync::Mutex<RollingProducerTransitionFence>>,
     flow_sync: Arc<RollingFlowSync>,
     producer_events: Arc<RollingProducerIngress>,
-    #[cfg(test)]
-    started: Arc<tokio::sync::Notify>,
+    hooks: Arc<dyn RollingControlHooks>,
 }
 
 impl Drop for RollingActorExitFence {
     fn drop(&mut self) {
-        #[cfg(test)]
-        self.started.notify_one();
+        self.hooks.actor_exit_fence_started();
         let _transition = self
             .producer_transition
             .lock()
@@ -8696,12 +8900,7 @@ struct RollingControlActor {
     producer_signal_authorized: bool,
     executor_loss_cutoff_pending: bool,
     last_flow_ticket: u64,
-    #[cfg(test)]
-    producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
-    #[cfg(test)]
-    actor_run_started: Arc<tokio::sync::Notify>,
-    #[cfg(test)]
-    actor_exit_fence_started: Arc<tokio::sync::Notify>,
+    hooks: Arc<dyn RollingControlHooks>,
 }
 
 impl RollingControlActor {
@@ -8710,7 +8909,8 @@ impl RollingControlActor {
         let producer_transition = Arc::new(std::sync::Mutex::new(
             RollingProducerTransitionFence::new(now + ROLLING_LEGACY_LEASE_TIMEOUT),
         ));
-        let producer_events = Arc::new(RollingProducerIngress::new());
+        let hooks: Arc<dyn RollingControlHooks> = RollingControlTestHooks::new();
+        let producer_events = Arc::new(RollingProducerIngress::with_hooks(Arc::clone(&hooks)));
         let (executor_wake, _executor_inbox) = RollingSessionExecutorInbox::new();
         Self::with_runtime(
             now,
@@ -8728,9 +8928,7 @@ impl RollingControlActor {
                     executor_observation: Arc::new(RollingExecutorObservation::default()),
                     terminal_projection: Arc::new(AtomicU8::new(0)),
                 }),
-                producer_attempt_reply_pause: Arc::new(std::sync::Mutex::new(None)),
-                actor_run_started: Arc::new(tokio::sync::Notify::new()),
-                actor_exit_fence_started: Arc::new(tokio::sync::Notify::new()),
+                hooks,
             },
         )
     }
@@ -8748,12 +8946,7 @@ impl RollingControlActor {
             flow_sync,
             producer_events,
             decision_wake,
-            #[cfg(test)]
-            producer_attempt_reply_pause,
-            #[cfg(test)]
-            actor_run_started,
-            #[cfg(test)]
-            actor_exit_fence_started,
+            hooks,
         } = runtime;
         Self {
             control: ControlState::default(),
@@ -8807,12 +9000,7 @@ impl RollingControlActor {
             producer_signal_authorized: !prepublication_transcode,
             executor_loss_cutoff_pending: false,
             last_flow_ticket: 0,
-            #[cfg(test)]
-            producer_attempt_reply_pause,
-            #[cfg(test)]
-            actor_run_started,
-            #[cfg(test)]
-            actor_exit_fence_started,
+            hooks,
         }
     }
 
@@ -11640,9 +11828,8 @@ impl RollingControlActor {
             command,
         } = envelope;
         // Keep the non-Send transition guard inside a lexical scope rather
-        // than relying on an explicit `drop` for async Send analysis. Only the
-        // test reply tuple may cross the later await.
-        let _deferred_begin_reply = {
+        // than relying on an explicit `drop` for async Send analysis.
+        let (previous_decision_sequence, previous_probe_sequence, was_retired) = {
             let transition = Arc::clone(&self.producer_transition);
             let mut transition = transition
                 .lock()
@@ -11705,8 +11892,6 @@ impl RollingControlActor {
             if let Some(metric_index) = command.metric_index() {
                 ROLLING_CONTROL_COMMANDS[metric_index].fetch_add(1, Ordering::Relaxed);
             }
-            #[cfg(test)]
-            let mut deferred_begin_reply: Option<DeferredProducerAttemptReply> = None;
             match command {
                 #[cfg(test)]
                 RollingControlCommand::Renew {
@@ -11773,22 +11958,16 @@ impl RollingControlActor {
                     // that linearization point and make the just-published owner
                     // stale before the publication itself completes.
                     let outcome = self.begin_producer_attempt_at(published_at);
-                    #[cfg(test)]
-                    let reply_pause = self
-                        .producer_attempt_reply_pause
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .take();
-                    #[cfg(test)]
-                    {
-                        deferred_begin_reply = Some(DeferredProducerAttemptReply {
-                            reply,
-                            outcome,
-                            reply_pause,
-                        });
+                    // The test hooks answer at `after_command_settled`, once
+                    // the transition is released and the executor woken, so
+                    // a test can hold the actor between the mutation and the
+                    // reply.
+                    match RollingControlTestHooks::of(self.hooks.as_ref()) {
+                        Some(hooks) => hooks.defer_attempt_reply(reply, outcome),
+                        None => {
+                            let _ = reply.send(outcome);
+                        }
                     }
-                    #[cfg(not(test))]
-                    let _ = reply.send(outcome);
                 }
                 RollingControlCommand::RegisterProducerExecutor { reply } => {
                     let _ = reply.send(self.register_producer_executor_at());
@@ -12144,27 +12323,12 @@ impl RollingControlActor {
             drop(transition);
             self.producer_events
                 .release_sealed_flow_barriers(sealed_flow_barriers);
-            #[cfg(test)]
-            let deferred_result = deferred_begin_reply;
-            #[cfg(not(test))]
-            let deferred_result = std::marker::PhantomData::<()>;
             (
-                deferred_result,
                 previous_decision_sequence,
                 previous_probe_sequence,
                 was_retired,
             )
         };
-        #[cfg(test)]
-        let (
-            deferred_begin_reply,
-            previous_decision_sequence,
-            previous_probe_sequence,
-            was_retired,
-        ) = _deferred_begin_reply;
-        #[cfg(not(test))]
-        let (_, previous_decision_sequence, previous_probe_sequence, was_retired) =
-            _deferred_begin_reply;
         // The actor state is committed and all actor/ingress locks are
         // released before settling/notifying the passive executor.
         self.wake_executor_after_transition(
@@ -12172,19 +12336,7 @@ impl RollingControlActor {
             previous_probe_sequence,
             was_retired,
         );
-        #[cfg(test)]
-        if let Some(DeferredProducerAttemptReply {
-            reply,
-            outcome,
-            reply_pause,
-        }) = deferred_begin_reply
-        {
-            if let Some(reply_pause) = reply_pause {
-                reply_pause.wait().await;
-                reply_pause.wait().await;
-            }
-            let _ = reply.send(outcome);
-        }
+        self.hooks.after_command_settled().await;
     }
 
     #[cfg(test)]
@@ -12253,11 +12405,9 @@ impl RollingControlActor {
             producer_transition: Arc::clone(&self.producer_transition),
             flow_sync: Arc::clone(&self.flow_sync),
             producer_events: Arc::clone(&self.producer_events),
-            #[cfg(test)]
-            started: Arc::clone(&self.actor_exit_fence_started),
+            hooks: Arc::clone(&self.hooks),
         };
-        #[cfg(test)]
-        self.actor_run_started.notify_one();
+        self.hooks.actor_run_started();
         loop {
             if self.retired {
                 let producer_events = Arc::clone(&self.producer_events);
@@ -12449,6 +12599,7 @@ impl RollingControlHandle {
     fn spawn_unbound(
         initial_kind: &'static str,
         prepublication_transcode: bool,
+        hooks: Arc<dyn RollingControlHooks>,
     ) -> (Self, RollingSessionExecutorInbox, Arc<tokio::sync::Notify>) {
         let (sender, receiver) = tokio::sync::mpsc::channel(ROLLING_ACTOR_MAILBOX_CAPACITY);
         let retired = Arc::new(AtomicBool::new(false));
@@ -12458,15 +12609,11 @@ impl RollingControlHandle {
             RollingProducerTransitionFence::new(now + ROLLING_LEGACY_LEASE_TIMEOUT),
         ));
         let flow_sync = Arc::new(RollingFlowSync::new());
-        let producer_events = Arc::new(RollingProducerIngress::new());
+        let producer_events = Arc::new(RollingProducerIngress::with_hooks(Arc::clone(&hooks)));
         let (executor_wake, executor_inbox) = RollingSessionExecutorInbox::new();
         let executor_observation = Arc::new(RollingExecutorObservation::default());
         let decision_notify = Arc::new(tokio::sync::Notify::new());
         let terminal_projection = Arc::new(AtomicU8::new(0));
-        #[cfg(test)]
-        let executor_poll_pause = Arc::new(std::sync::Mutex::new(None));
-        #[cfg(test)]
-        let executor_observation_pause = Arc::new(std::sync::Mutex::new(None));
         let decision_wake = Arc::new(RollingDecisionWake {
             decision_notify: Arc::clone(&decision_notify),
             executor_wake,
@@ -12479,17 +12626,8 @@ impl RollingControlHandle {
             producer_events: Arc::clone(&producer_events),
             executor_observation,
             terminal_projection,
-            #[cfg(test)]
-            executor_poll_pause,
-            #[cfg(test)]
-            executor_observation_pause,
+            hooks: Arc::clone(&hooks),
         });
-        #[cfg(test)]
-        let producer_attempt_reply_pause = Arc::new(std::sync::Mutex::new(None));
-        #[cfg(test)]
-        let actor_exit_fence_started = Arc::new(tokio::sync::Notify::new());
-        #[cfg(test)]
-        let actor_run_started = Arc::new(tokio::sync::Notify::new());
         let actor = RollingControlActor::with_runtime(
             now,
             initial_kind,
@@ -12501,17 +12639,11 @@ impl RollingControlHandle {
                 flow_sync: Arc::clone(&flow_sync),
                 producer_events: Arc::clone(&producer_events),
                 decision_wake,
-                #[cfg(test)]
-                producer_attempt_reply_pause: Arc::clone(&producer_attempt_reply_pause),
-                #[cfg(test)]
-                actor_run_started: Arc::clone(&actor_run_started),
-                #[cfg(test)]
-                actor_exit_fence_started: Arc::clone(&actor_exit_fence_started),
+                hooks: Arc::clone(&hooks),
             },
         );
         let actor_task = tokio::spawn(actor.run(receiver));
-        #[cfg(test)]
-        let actor_abort = Some(actor_task.abort_handle());
+        hooks.actor_spawned(&actor_task);
         drop(actor_task);
         let handle = Self {
             sender,
@@ -12521,16 +12653,6 @@ impl RollingControlHandle {
             flow_sync,
             producer_events,
             decision_transport,
-            #[cfg(test)]
-            producer_attempt_reply_pause,
-            #[cfg(test)]
-            actor_abort,
-            #[cfg(test)]
-            executor_abort: None,
-            #[cfg(test)]
-            actor_run_started,
-            #[cfg(test)]
-            actor_exit_fence_started,
         };
         (handle, executor_inbox, decision_notify)
     }
@@ -12539,27 +12661,63 @@ impl RollingControlHandle {
     /// observer registers synchronously before the actor can arm a legacy
     /// attempt, and it never acknowledges or executes a producer decision.
     pub(crate) fn spawn(initial_kind: &'static str) -> Self {
-        let (handle, executor_inbox, decision_notify) = Self::spawn_unbound(initial_kind, false);
-        #[cfg(test)]
-        let mut handle = handle;
+        Self::spawn_with_hooks(initial_kind, Arc::new(NoopRollingControlHooks))
+    }
+
+    fn spawn_with_hooks(initial_kind: &'static str, hooks: Arc<dyn RollingControlHooks>) -> Self {
+        let (handle, executor_inbox, decision_notify) =
+            Self::spawn_unbound(initial_kind, false, hooks);
         let _ = handle.decision_transport.executor_observation.register();
         let executor_task = handle.decision_transport.spawn_executor(
             Arc::downgrade(&handle.decision_transport),
             decision_notify,
             executor_inbox,
         );
-        #[cfg(test)]
-        {
-            handle.executor_abort = Some(executor_task.abort_handle());
-        }
+        handle
+            .decision_transport
+            .hooks
+            .executor_spawned(&executor_task);
         drop(executor_task);
         handle
+    }
+
+    /// [`Self::spawn`] with the test hooks, which a test arms after
+    /// construction (pauses, abort handles, start and exit notifications).
+    #[cfg(test)]
+    pub(crate) fn spawn_for_test(initial_kind: &'static str) -> Self {
+        Self::spawn_with_hooks(initial_kind, RollingControlTestHooks::new())
     }
 
     pub(crate) fn spawn_prepublication_producer(
         initial_kind: &'static str,
     ) -> (Self, RollingProducerExecutorRegistration) {
-        let (handle, inbox, _decision_notify) = Self::spawn_unbound(initial_kind, true);
+        Self::spawn_prepublication_producer_with_hooks(
+            initial_kind,
+            Arc::new(NoopRollingControlHooks),
+        )
+    }
+
+    /// [`Self::spawn_prepublication_producer`] with the test hooks.
+    #[cfg(test)]
+    pub(crate) fn spawn_prepublication_producer_for_test(
+        initial_kind: &'static str,
+    ) -> (Self, RollingProducerExecutorRegistration) {
+        Self::spawn_prepublication_producer_with_hooks(initial_kind, RollingControlTestHooks::new())
+    }
+
+    /// [`Self::spawn_prepublication_transcode`] with the test hooks.
+    #[cfg(test)]
+    pub(crate) fn spawn_prepublication_transcode_for_test(
+        initial_kind: &'static str,
+    ) -> (Self, RollingProducerExecutorRegistration) {
+        Self::spawn_prepublication_producer_for_test(initial_kind)
+    }
+
+    fn spawn_prepublication_producer_with_hooks(
+        initial_kind: &'static str,
+        hooks: Arc<dyn RollingControlHooks>,
+    ) -> (Self, RollingProducerExecutorRegistration) {
+        let (handle, inbox, _decision_notify) = Self::spawn_unbound(initial_kind, true, hooks);
         let registration = RollingProducerExecutorRegistration {
             transport: Arc::downgrade(&handle.decision_transport),
             terminal_projection: Arc::clone(&handle.decision_transport.terminal_projection),
@@ -12583,15 +12741,15 @@ impl RollingControlHandle {
         let producer_transition = Arc::new(std::sync::Mutex::new(
             RollingProducerTransitionFence::new(now + ROLLING_LEGACY_LEASE_TIMEOUT),
         ));
-        let producer_events = Arc::new(RollingProducerIngress::new());
+        let hooks: Arc<dyn RollingControlHooks> = RollingControlTestHooks::new();
+        let producer_events = Arc::new(RollingProducerIngress::with_hooks(Arc::clone(&hooks)));
         let decision_transport = Arc::new(RollingDecisionTransport {
             sender: sender.clone(),
             producer_transition: Arc::clone(&producer_transition),
             producer_events: Arc::clone(&producer_events),
             executor_observation: Arc::new(RollingExecutorObservation::default()),
             terminal_projection: Arc::new(AtomicU8::new(0)),
-            executor_poll_pause: Arc::new(std::sync::Mutex::new(None)),
-            executor_observation_pause: Arc::new(std::sync::Mutex::new(None)),
+            hooks,
         });
         Self {
             sender,
@@ -12601,11 +12759,6 @@ impl RollingControlHandle {
             flow_sync: Arc::new(RollingFlowSync::new()),
             producer_events,
             decision_transport,
-            producer_attempt_reply_pause: Arc::new(std::sync::Mutex::new(None)),
-            actor_abort: None,
-            executor_abort: None,
-            actor_run_started: Arc::new(tokio::sync::Notify::new()),
-            actor_exit_fence_started: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -13036,30 +13189,40 @@ impl RollingControlHandle {
         )
     }
 
+    /// The test hooks this handle was built with. Panics for a handle built
+    /// by a production constructor, which installs the no-op hooks.
     #[cfg(test)]
-    pub(crate) fn pause_executor_poll_for_test(&self, pause: Arc<tokio::sync::Barrier>) {
-        *self
-            .decision_transport
-            .executor_poll_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    fn test_hooks(&self) -> &RollingControlTestHooks {
+        RollingControlTestHooks::of(self.decision_transport.hooks.as_ref())
+            .expect("this handle has production hooks; build it with a `_for_test` constructor")
     }
 
     #[cfg(test)]
-    pub(crate) fn pause_executor_observation_for_test(&self, pause: Arc<tokio::sync::Barrier>) {
-        *self
-            .decision_transport
-            .executor_observation_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    pub(crate) fn pause_executor_poll_for_test(&self, pause: Arc<crate::seam_hooks::AsyncPause>) {
+        RollingControlTestHooks::arm(&self.test_hooks().executor_poll, pause);
     }
 
     #[cfg(test)]
-    pub(crate) fn pause_producer_attempt_reply(&self, pause: Arc<tokio::sync::Barrier>) {
-        *self
-            .producer_attempt_reply_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    pub(crate) fn pause_executor_observation_for_test(
+        &self,
+        pause: Arc<crate::seam_hooks::AsyncPause>,
+    ) {
+        RollingControlTestHooks::arm(&self.test_hooks().executor_observation, pause);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_producer_attempt_reply(&self, pause: Arc<crate::seam_hooks::AsyncPause>) {
+        RollingControlTestHooks::arm(&self.test_hooks().producer_attempt_reply, pause);
+    }
+
+    /// Hold the actor at `after_command_settled` once the next command it
+    /// applies has settled, whichever command that is.
+    #[cfg(test)]
+    pub(crate) fn pause_after_command_settled_for_test(
+        &self,
+        pause: Arc<crate::seam_hooks::AsyncPause>,
+    ) {
+        RollingControlTestHooks::arm(&self.test_hooks().command_settled, pause);
     }
 
     pub(crate) async fn authorize_producer_install(
@@ -13550,11 +13713,10 @@ impl RollingControlHandle {
 
     #[cfg(test)]
     pub(crate) fn producer_flow_applied_for_test(&self) -> Option<(u64, bool)> {
-        self.producer_events
-            .state
+        self.test_hooks()
+            .last_flow_applied
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .last_flow_applied
             .map(|applied| {
                 (
                     applied.producer_attempt,
@@ -13581,7 +13743,7 @@ impl RollingControlHandle {
 
     #[cfg(test)]
     pub(crate) async fn wait_for_producer_flow_deferral_for_test(&self) {
-        self.producer_events
+        self.test_hooks()
             .flow_capacity_wait_started
             .notified()
             .await;
@@ -13589,7 +13751,10 @@ impl RollingControlHandle {
 
     #[cfg(test)]
     pub(crate) fn abort_actor_for_test(&self) {
-        self.actor_abort
+        self.test_hooks()
+            .actor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .expect("spawned actor abort handle")
             .abort();
@@ -13597,7 +13762,10 @@ impl RollingControlHandle {
 
     #[cfg(test)]
     pub(crate) fn abort_executor_for_test(&self) {
-        self.executor_abort
+        self.test_hooks()
+            .executor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .expect("spawned executor abort handle")
             .abort();
@@ -13605,12 +13773,12 @@ impl RollingControlHandle {
 
     #[cfg(test)]
     pub(crate) async fn wait_for_actor_start_for_test(&self) {
-        self.actor_run_started.notified().await;
+        self.test_hooks().actor_run_started.notified().await;
     }
 
     #[cfg(test)]
     pub(crate) async fn wait_for_actor_exit_fence_for_test(&self) {
-        self.actor_exit_fence_started.notified().await;
+        self.test_hooks().actor_exit_fence_started.notified().await;
     }
 
     /// Authorize the one physical producer transition guarded by `guard`.
@@ -15075,6 +15243,7 @@ mod tests {
         // survive to be acknowledged.
         let binding = || PreparedActionBinding {
             successor: PreparedSuccessorAction {
+                control: None,
                 staged_incarnation_id: staged.clone(),
                 deadline_ms: i64::MAX,
                 session_id: "session".to_owned(),
@@ -15083,6 +15252,7 @@ mod tests {
                 effective_selection: selection.clone(),
             },
             action: ControlAction::Prepare {
+                control: None,
                 action_id: action_id.clone(),
                 session_id: "session".to_owned(),
                 playlist_url: "/hls/session/index.m3u8".to_owned(),
@@ -16769,6 +16939,7 @@ mod tests {
             let control = ControlState {
                 prepared_action: Some(PreparedActionBinding {
                     successor: PreparedSuccessorAction {
+                        control: None,
                         staged_incarnation_id: staged.clone(),
                         deadline_ms: i64::MAX,
                         session_id: "session".to_owned(),
@@ -16785,6 +16956,7 @@ mod tests {
                         },
                     },
                     action: ControlAction::Prepare {
+                        control: None,
                         action_id: action_id.clone(),
                         session_id: "session".to_owned(),
                         playlist_url: "/hls/session/index.m3u8".to_owned(),
@@ -17032,6 +17204,7 @@ mod tests {
     fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         let session = uuid::Uuid::new_v4().to_string();
         let honest = ControlAction::Prepare {
+            control: None,
             action_id: uuid::Uuid::new_v4().to_string(),
             session_id: session.clone(),
             playlist_url: format!("/api/v1/hls/{session}/master.m3u8"),
@@ -17056,6 +17229,7 @@ mod tests {
             (
                 "a protocol-relative URL onto another host",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("//attacker.invalid/{session_id}/master.m3u8"),
@@ -17066,6 +17240,7 @@ mod tests {
             (
                 "an absolute URL onto another host",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("https://example.invalid/{session_id}/master.m3u8"),
@@ -17076,6 +17251,7 @@ mod tests {
             (
                 "no session at all",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: String::new(),
                     playlist_url: "/api/v1/hls//master.m3u8".to_owned(),
@@ -17086,6 +17262,7 @@ mod tests {
             (
                 "no action id to fence the acknowledgement with",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: String::new(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/api/v1/hls/{session_id}/master.m3u8"),
@@ -17096,6 +17273,7 @@ mod tests {
             (
                 "an action id that acknowledgements cannot parse",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: "not-a-uuid".to_owned(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/api/v1/hls/{session_id}/master.m3u8"),
@@ -17106,6 +17284,7 @@ mod tests {
             (
                 "a backslash-relative URL, which browsers treat as //",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/\\attacker.invalid/{session_id}/master.m3u8"),
@@ -17116,6 +17295,7 @@ mod tests {
             (
                 "the session named only in a query parameter",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/anything/at/all.m3u8?session={session_id}"),
@@ -17126,6 +17306,7 @@ mod tests {
             (
                 "the session named only in a fragment",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/anything/at/all.m3u8#{session_id}"),
@@ -17136,6 +17317,7 @@ mod tests {
             (
                 "a path that climbs out of the session's own",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/api/v1/hls/{session_id}/../../../etc/master.m3u8"),
@@ -17146,6 +17328,7 @@ mod tests {
             (
                 "encoded dot segments normalized after validation",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/api/v1/hls/{session_id}/%2e%2e/%2e%2e/settings"),
@@ -17156,6 +17339,7 @@ mod tests {
             (
                 "an internal backslash normalized as a path separator",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/api/v1/hls/{session_id}\\..\\settings"),
@@ -17166,6 +17350,7 @@ mod tests {
             (
                 "an arbitrary same-origin route containing the session id",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/settings/{session_id}/master.m3u8"),
@@ -17176,6 +17361,7 @@ mod tests {
             (
                 "a session id that is not one",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: "a".to_owned(),
                     playlist_url: "//attacker.invalid/a/master.m3u8".to_owned(),
@@ -17186,6 +17372,7 @@ mod tests {
             (
                 "an origin before the start of the film",
                 ControlAction::Prepare {
+                    control: None,
                     action_id: action_id.clone(),
                     session_id: session_id.clone(),
                     playlist_url: format!("/api/v1/hls/{session_id}/master.m3u8"),
@@ -17200,6 +17387,7 @@ mod tests {
         let mut invalid_selection = effective_selection;
         invalid_selection.height = crate::transcode::MAX_HEIGHT + 1;
         let invalid_nested = ControlAction::Prepare {
+            control: None,
             action_id,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/master.m3u8"),
@@ -17229,6 +17417,7 @@ mod tests {
     fn a_relayed_preparation_needs_the_declared_vocabulary() {
         let session = uuid::Uuid::new_v4().to_string();
         let action = ControlAction::Prepare {
+            control: None,
             action_id: uuid::Uuid::new_v4().to_string(),
             session_id: session.clone(),
             playlist_url: format!("/api/v1/hls/{session}/master.m3u8"),
@@ -17249,6 +17438,7 @@ mod tests {
     fn prepare_action() -> ControlAction {
         let session = uuid::Uuid::new_v4().to_string();
         ControlAction::Prepare {
+            control: None,
             action_id: uuid::Uuid::new_v4().to_string(),
             session_id: session.clone(),
             playlist_url: format!("/api/v1/hls/{session}/master.m3u8"),
@@ -17354,6 +17544,7 @@ mod tests {
             ));
             let prepared_session_id = uuid::Uuid::new_v4().to_string();
             let successor = PreparedSuccessorAction {
+                control: None,
                 staged_incarnation_id: staged_incarnation_id.clone(),
                 deadline_ms: i64::MAX,
                 session_id: prepared_session_id.clone(),
@@ -17609,6 +17800,7 @@ mod tests {
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id: staged_incarnation_id.clone(),
             deadline_ms: i64::MAX,
             session_id: prepared_session_id.clone(),
@@ -17724,6 +17916,7 @@ mod tests {
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id: staged_incarnation_id.clone(),
             deadline_ms: i64::MAX,
             session_id: prepared_session_id.clone(),
@@ -18104,6 +18297,7 @@ mod tests {
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id,
             deadline_ms: i64::MAX,
             session_id: prepared_session_id.clone(),
@@ -18201,6 +18395,7 @@ mod tests {
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id: staged_incarnation_id.clone(),
             deadline_ms: i64::MAX,
             session_id: prepared_session_id.clone(),
@@ -18364,6 +18559,7 @@ mod tests {
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id: staged_incarnation_id.clone(),
             deadline_ms: i64::MAX,
             session_id: prepared_session_id.clone(),
@@ -18454,6 +18650,7 @@ mod tests {
             ));
             let prepared_session_id = uuid::Uuid::new_v4().to_string();
             let successor = PreparedSuccessorAction {
+                control: None,
                 staged_incarnation_id: staged_incarnation_id.clone(),
                 deadline_ms: preparation_deadline,
                 session_id: prepared_session_id.clone(),
@@ -18547,6 +18744,7 @@ mod tests {
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id: staged_incarnation_id.clone(),
             deadline_ms: preparation_deadline,
             session_id: prepared_session_id.clone(),
@@ -18695,6 +18893,7 @@ mod tests {
         ));
         let session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id,
             deadline_ms: i64::MAX,
             session_id: session_id.clone(),
@@ -18748,6 +18947,7 @@ mod tests {
         ));
         let session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id,
             deadline_ms: i64::MAX,
             session_id: session_id.clone(),
@@ -18808,6 +19008,7 @@ mod tests {
         ));
         let session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id,
             deadline_ms: i64::MAX,
             session_id: session_id.clone(),
@@ -18861,6 +19062,7 @@ mod tests {
         ));
         let session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id,
             deadline_ms: 10_000,
             session_id: session_id.clone(),
@@ -19549,7 +19751,7 @@ mod tests {
     /// touching state. These drive a real spawned actor.
     #[tokio::test]
     async fn a_staged_successor_round_trips_through_the_actor_mailbox() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
         assert!(
             handle
                 .stage_preparation(
@@ -19572,6 +19774,7 @@ mod tests {
         let request = request();
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id: "successor-1".to_owned(),
             deadline_ms: i64::MAX,
             session_id: prepared_session_id.clone(),
@@ -19643,7 +19846,7 @@ mod tests {
 
     #[tokio::test]
     async fn preparation_ownership_transfers_before_a_dropped_actor_reply() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
         let mut request = request();
         let staged_incarnation_id = "successor-1".to_owned();
         assert!(
@@ -19658,6 +19861,7 @@ mod tests {
         );
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            control: None,
             staged_incarnation_id: staged_incarnation_id.clone(),
             deadline_ms: i64::MAX,
             session_id: prepared_session_id.clone(),
@@ -19743,7 +19947,7 @@ mod tests {
     /// with a preparation nothing can finish.
     #[tokio::test]
     async fn a_lost_commit_frees_the_slot_and_refuses_a_retry() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
         assert!(
             handle
                 .stage_preparation(
@@ -19776,7 +19980,7 @@ mod tests {
     /// through the mailbox the executor actually uses.
     #[tokio::test]
     async fn an_ended_playback_refuses_an_unacknowledged_preparation() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
         assert!(
             handle
                 .stage_preparation(
@@ -20425,7 +20629,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_end_and_authority_fence_have_one_actor_winner() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
         let barrier = Arc::new(tokio::sync::Barrier::new(3));
         let end = {
             let handle = handle.clone();
@@ -20460,7 +20664,7 @@ mod tests {
 
     #[tokio::test]
     async fn accepted_control_end_is_terminal_and_exactly_replayable() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
         let mut end = request();
         end.demand = PlaybackDemand::End;
         end.playback_rate = 0.0;
@@ -20540,7 +20744,7 @@ mod tests {
             RollingTerminalCause::End,
             RollingTerminalCause::AuthorityFence,
         ] {
-            let handle = RollingControlHandle::spawn("session-start");
+            let handle = RollingControlHandle::spawn_for_test("session-start");
             handle
                 .set_renewal_for_test(
                     rolling_now() - ROLLING_LEGACY_LEASE_TIMEOUT,
@@ -20569,7 +20773,7 @@ mod tests {
 
     #[tokio::test]
     async fn late_terminal_commands_return_the_immutable_winning_cause() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
         assert_eq!(
             handle.end().await.expect("end verdict"),
             RollingTerminalOutcome::Won(RollingTerminalCause::End)
@@ -22005,7 +22209,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn lifecycle_commands_before_at_and_after_provisional_producer_due_still_win() {
         for offset in [-1_i64, 0, 1] {
-            let handle = RollingControlHandle::spawn("session-start");
+            let handle = RollingControlHandle::spawn_for_test("session-start");
             assert_eq!(handle.begin_producer_attempt().await, Ok(1));
             let advance = if offset < 0 {
                 PRODUCER_STARTUP_BUDGET - Duration::from_millis(offset.unsigned_abs())
@@ -22225,7 +22429,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn real_actor_control_after_producer_deadline_exposes_due_projection() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
         let attempt = handle
             .begin_producer_attempt()
             .await
@@ -22255,14 +22459,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn real_actor_timer_and_mailbox_tie_settles_due_before_control() {
-        let handle = RollingControlHandle::spawn("session-start");
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        let handle = RollingControlHandle::spawn_for_test("session-start");
+        let pause = crate::seam_hooks::AsyncPause::new("producer attempt reply");
         handle.pause_producer_attempt_reply(Arc::clone(&pause));
         let begin = {
             let handle = handle.clone();
             tokio::spawn(async move { handle.begin_producer_attempt().await })
         };
-        pause.wait().await;
+        let held = pause.reached().await;
         let attempt = handle.current_producer_attempt();
         assert!(attempt > 0);
 
@@ -22278,7 +22482,7 @@ mod tests {
                 reply,
             })
         );
-        pause.wait().await;
+        held.release();
         assert_eq!(begin.await.expect("begin task"), Ok(attempt));
 
         let outcome = response
@@ -22292,14 +22496,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn real_actor_predeadline_command_keeps_publication_time_after_delayed_dispatch() {
-        let handle = RollingControlHandle::spawn("session-start");
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        let handle = RollingControlHandle::spawn_for_test("session-start");
+        let pause = crate::seam_hooks::AsyncPause::new("producer attempt reply");
         handle.pause_producer_attempt_reply(Arc::clone(&pause));
         let begin = {
             let handle = handle.clone();
             tokio::spawn(async move { handle.begin_producer_attempt().await })
         };
-        pause.wait().await;
+        let held = pause.reached().await;
         let attempt = handle.current_producer_attempt();
         assert!(attempt > 0);
 
@@ -22316,7 +22520,7 @@ mod tests {
             })
         );
         tokio::time::advance(Duration::from_millis(2)).await;
-        pause.wait().await;
+        held.release();
         assert_eq!(begin.await.expect("begin task"), Ok(attempt));
 
         let outcome = response
@@ -22529,14 +22733,14 @@ mod tests {
 
     #[tokio::test]
     async fn producer_ingress_survives_a_full_actor_mailbox_with_command_causality() {
-        let handle = RollingControlHandle::spawn("session-start");
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        let handle = RollingControlHandle::spawn_for_test("session-start");
+        let pause = crate::seam_hooks::AsyncPause::new("producer attempt reply");
         handle.pause_producer_attempt_reply(Arc::clone(&pause));
         let begin = {
             let handle = handle.clone();
             tokio::spawn(async move { handle.begin_producer_attempt().await })
         };
-        pause.wait().await;
+        let held = pause.reached().await;
         let attempt = handle.current_producer_attempt();
         assert!(attempt > 0, "attempt admission precedes its paused reply");
 
@@ -22556,7 +22760,7 @@ mod tests {
 
         handle.observe_producer_progress(attempt, Some(5_000), Some(1_250), Some(1_100));
         handle.observe_producer_progress(attempt, Some(6_000), Some(1_200), Some(1_050));
-        pause.wait().await;
+        held.release();
         assert_eq!(
             begin.await.expect("attempt task"),
             Ok(attempt),
@@ -22575,7 +22779,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_predecessor_exit_cannot_steal_successor_progress_before_drain() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
         let predecessor = handle
             .begin_producer_attempt()
             .await
@@ -22916,7 +23120,7 @@ mod tests {
 
     #[tokio::test]
     async fn rolling_mailbox_orders_media_retirement_and_observation() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
         assert!(handle.renew_media("playlist").await);
         assert_eq!(
             handle.snapshot().await.expect("snapshot").last_renewal_kind,
@@ -22927,15 +23131,25 @@ mod tests {
         assert!(handle.snapshot().await.is_some_and(|lease| lease.retired));
     }
 
+    /// The race test's hooks: the first waiter to pass its check holds the
+    /// pause; later ones pass through once it is released.
+    struct FlowWaitPause(Arc<crate::seam_hooks::AsyncPause>);
+
+    impl RollingFlowSyncHooks for FlowWaitPause {
+        fn after_wait_check(&self) -> crate::seam_hooks::HookFuture<'_> {
+            Box::pin(async move {
+                self.0.hold().await;
+            })
+        }
+    }
+
     #[tokio::test]
     async fn flow_completion_between_check_and_await_cannot_be_lost() {
-        let sync = Arc::new(RollingFlowSync::new());
+        let pause = crate::seam_hooks::AsyncPause::new("flow wait after check");
+        let sync = Arc::new(RollingFlowSync::with_hooks(Box::new(FlowWaitPause(
+            Arc::clone(&pause),
+        ))));
         let ticket = sync.request();
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *sync
-            .wait_after_check
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
         let waiter = {
             let sync = Arc::clone(&sync);
             tokio::spawn(async move { sync.wait_for(ticket).await })
@@ -22943,18 +23157,40 @@ mod tests {
 
         // The waiter has registered but has not awaited the notification.
         // `notify_waiters` in this exact interval must still release it.
-        pause.wait().await;
+        let held = pause.reached().await;
         sync.complete(ticket);
-        pause.wait().await;
+        held.release();
         tokio::time::timeout(Duration::from_secs(1), waiter)
             .await
             .expect("registered completion wake was retained")
             .expect("waiter task");
     }
 
+    /// The race test's scenario through the production constructor: the
+    /// no-op hook is ready at once, so the first poll leaves the waiter parked
+    /// on its registered notification, and the completion in that gap wakes
+    /// it. Polled by hand, no task and no timer.
+    #[test]
+    fn rolling_flow_sync_shipped_shape() {
+        use std::future::Future;
+        let sync = RollingFlowSync::new();
+        let ticket = sync.request();
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut waiter = std::pin::pin!(sync.wait_for(ticket));
+        assert!(
+            waiter.as_mut().poll(&mut context).is_pending(),
+            "an unapplied ticket parks its waiter"
+        );
+        sync.complete(ticket);
+        assert!(
+            waiter.as_mut().poll(&mut context).is_ready(),
+            "the production hook let the waiter reach its registered notification"
+        );
+    }
+
     #[tokio::test]
     async fn unavailable_mailbox_fence_orders_after_an_inflight_producer_signal() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
         let transition = handle.lock_producer_transition();
         assert!(handle.producer_transition_is_live(&transition));
         let (fenced, observed) = std::sync::mpsc::channel();
@@ -22981,7 +23217,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn actor_timer_publishes_the_fence_at_each_modes_exact_deadline() {
-        let legacy = RollingControlHandle::spawn("session-start");
+        let legacy = RollingControlHandle::spawn_for_test("session-start");
         tokio::task::yield_now().await;
         tokio::time::advance(ROLLING_LEGACY_LEASE_TIMEOUT).await;
         tokio::task::yield_now().await;
@@ -22991,7 +23227,7 @@ mod tests {
             .await
             .is_some_and(|lease| { lease.retired && lease.expiration_claimed }));
 
-        let explicit = RollingControlHandle::spawn("session-start");
+        let explicit = RollingControlHandle::spawn_for_test("session-start");
         let request = request();
         explicit
             .control(LocalControlRequest {
@@ -23062,7 +23298,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropped_replies_preserve_the_shared_fence_and_committed_sequence() {
-        let expiry = RollingControlHandle::spawn("session-start");
+        let expiry = RollingControlHandle::spawn_for_test("session-start");
         expiry
             .set_renewal_for_test(
                 Instant::now() - ROLLING_LEGACY_LEASE_TIMEOUT - Duration::from_secs(1),
@@ -23087,7 +23323,7 @@ mod tests {
             Ok(RollingExpiryClaim::Retired(_))
         ));
 
-        let retirement = RollingControlHandle::spawn("session-start");
+        let retirement = RollingControlHandle::spawn_for_test("session-start");
         let (reply, dropped) = tokio::sync::oneshot::channel();
         retirement
             .enqueue_command(RollingControlCommand::Terminal {
@@ -23113,7 +23349,7 @@ mod tests {
             Some(RollingTerminalCause::End)
         );
 
-        let control = RollingControlHandle::spawn("session-start");
+        let control = RollingControlHandle::spawn_for_test("session-start");
         let request = request();
         let never_polled = control.control(LocalControlRequest {
             session_id: "unused",
@@ -23160,7 +23396,7 @@ mod tests {
             .expect("request remains admissible");
         assert_eq!(replay.disposition, ControlDisposition::Accepted);
 
-        let expired = RollingControlHandle::spawn("session-start");
+        let expired = RollingControlHandle::spawn_for_test("session-start");
         let (reply, response) = tokio::sync::oneshot::channel();
         expired
             .enqueue_command(RollingControlCommand::Control {
@@ -23182,7 +23418,7 @@ mod tests {
             "a queued control cannot mutate after its inherited deadline"
         );
 
-        let terminal_control = RollingControlHandle::spawn("session-start");
+        let terminal_control = RollingControlHandle::spawn_for_test("session-start");
         let mut end = request.clone();
         end.demand = PlaybackDemand::End;
         end.playback_rate = 0.0;
@@ -23229,7 +23465,7 @@ mod tests {
 
     #[tokio::test]
     async fn mailbox_expiry_and_media_renewal_have_one_ordered_winner() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
         handle
             .set_renewal_for_test(
                 Instant::now() - ROLLING_LEGACY_LEASE_TIMEOUT - Duration::from_secs(1),
@@ -25179,7 +25415,7 @@ mod tests {
         let concrete = SqliteStore::open_in_memory().expect("store");
         let (predecessor, _) = activate_route(&concrete, now_ms, 900_000).await;
         let store: Arc<dyn plurx_core::store::Store> = Arc::new(concrete);
-        let control = RollingControlHandle::spawn("session-start");
+        let control = RollingControlHandle::spawn_for_test("session-start");
         let executor = PreparationExecutor::new(
             Arc::clone(&store),
             Arc::new(control.clone()),
@@ -26276,7 +26512,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn prepublication_executor_registration_gates_the_initial_policy() {
         let (handle, mut registration) =
-            RollingControlHandle::spawn_prepublication_transcode("session-start");
+            RollingControlHandle::spawn_prepublication_transcode_for_test("session-start");
         let policy = hardware_policy("presentation-a", "recipe-a");
 
         assert_eq!(
@@ -27692,7 +27928,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn bounded_copy_classification_is_sequenced_after_preceding_process_exit() {
         let (handle, mut registration) =
-            RollingControlHandle::spawn_prepublication_producer("copy-classification");
+            RollingControlHandle::spawn_prepublication_producer_for_test("copy-classification");
         assert_eq!(registration.register().await, Ok(()));
         assert_eq!(
             handle
@@ -28219,7 +28455,7 @@ mod tests {
     #[tokio::test]
     async fn first_media_deadline_rejects_and_fences_a_late_handoff() {
         let (control, mut registration) =
-            RollingControlHandle::spawn_prepublication_transcode("first-media-deadline");
+            RollingControlHandle::spawn_prepublication_transcode_for_test("first-media-deadline");
         assert_eq!(registration.register().await, Ok(()));
         assert_eq!(
             control
@@ -28272,14 +28508,14 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_queued_before_deadline_settles_after_deadline_without_reclassification() {
-        let handle = RollingControlHandle::spawn("queued-terminal-deadline");
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        let handle = RollingControlHandle::spawn_for_test("queued-terminal-deadline");
+        let pause = crate::seam_hooks::AsyncPause::new("producer attempt reply");
         handle.pause_producer_attempt_reply(Arc::clone(&pause));
         let begin = tokio::spawn({
             let handle = handle.clone();
             async move { handle.begin_producer_attempt().await }
         });
-        pause.wait().await;
+        let held = pause.reached().await;
 
         let deadline = rolling_now() + Duration::from_millis(100);
         let ending = tokio::spawn({
@@ -28302,7 +28538,7 @@ mod tests {
             "an admitted Terminal waits for actor settlement instead of timing out"
         );
 
-        pause.wait().await;
+        held.release();
         assert!(begin.await.expect("begin task").is_ok());
         assert_eq!(
             ending.await.expect("End task"),
@@ -29194,9 +29430,53 @@ mod tests {
         assert!(actor.decision_committed_at.is_none());
     }
 
+    /// `after_command_settled` comes after the executor wake
+    /// (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8; #573 review finding 1). The
+    /// actor is held at that point after a decision install, a command that
+    /// changes what the executor sees. The executor must already have been
+    /// woken and begun observing, and it must stay at its poll, because the
+    /// held actor cannot answer, until the actor goes on. With the point
+    /// above the wake, the held actor has not woken the executor, which
+    /// stays idle.
+    #[tokio::test]
+    async fn actor_wakes_the_executor_before_its_command_settles() {
+        let handle = RollingControlHandle::spawn_for_test("session-start");
+        let settled = crate::seam_hooks::AsyncPause::new("rolling control command settled");
+        handle.pause_after_command_settled_for_test(Arc::clone(&settled));
+        let decision = ProducerDecision::Fail {
+            decision_sequence: 9,
+            failed_attempt: 1,
+            reason: ProducerDecisionReason::ReaderFailed,
+            proposal: None,
+            cleanup: ProducerFailureCleanup {
+                kind: ProducerFailureCleanupKind::ProducerFailureCleanup,
+                cleanup_policy: CleanupPolicy::DiscardPrepublication,
+            },
+        };
+        let install = {
+            let handle = handle.clone();
+            tokio::spawn(async move { handle.install_producer_decision_for_test(decision).await })
+        };
+        let held = settled.reached().await;
+        assert!(install.await.expect("install task"));
+
+        wait_for_executor_observation(&handle, "executing", None).await;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            handle.executor_observation_for_test(),
+            ("executing".to_owned(), 0),
+            "the executor's poll waits on the held actor"
+        );
+
+        held.release();
+        wait_for_executor_observation(&handle, "idle", Some(9)).await;
+    }
+
     #[tokio::test]
     async fn decision_poll_replays_without_a_fake_application_acknowledgement() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
         let decision = ProducerDecision::Fail {
             decision_sequence: 4,
             failed_attempt: 1,
@@ -29267,7 +29547,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_decision_poll_does_not_consume_the_actor_slot() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
         let decision = ProducerDecision::Retry {
             decision_sequence: 12,
             failed_attempt: 1,
@@ -29298,7 +29578,7 @@ mod tests {
 
     #[tokio::test]
     async fn decision_transport_is_registered_before_begin_attempt_and_terminal_wake_is_retained() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
         assert_eq!(handle.begin_producer_attempt().await, Ok(1));
         assert!(
             handle
@@ -29335,7 +29615,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn timer_only_lease_expiry_wakes_the_passive_executor() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
 
         handle.wait_for_actor_start_for_test().await;
         tokio::time::advance(ROLLING_LEGACY_LEASE_TIMEOUT + Duration::from_millis(1)).await;
@@ -29351,7 +29631,7 @@ mod tests {
 
     #[tokio::test]
     async fn unexpected_executor_exit_is_visible_while_the_actor_remains_live() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
 
         handle.abort_executor_for_test();
         wait_for_executor_observation(&handle, "lost", None).await;
@@ -29389,7 +29669,7 @@ mod tests {
 
     #[tokio::test]
     async fn unexpected_actor_exit_is_not_reported_as_a_committed_terminal_cause() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
 
         handle.wait_for_actor_start_for_test().await;
         handle.abort_actor_for_test();
@@ -29403,8 +29683,8 @@ mod tests {
 
     #[tokio::test]
     async fn stale_poll_result_cannot_overwrite_terminal_executor_state() {
-        let handle = RollingControlHandle::spawn("session-start");
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        let handle = RollingControlHandle::spawn_for_test("session-start");
+        let pause = crate::seam_hooks::AsyncPause::new("executor observation");
         handle.pause_executor_observation_for_test(Arc::clone(&pause));
         assert!(
             handle
@@ -29420,21 +29700,21 @@ mod tests {
                 })
                 .await
         );
-        pause.wait().await;
+        let held = pause.reached().await;
 
         assert_eq!(
             handle.end().await,
             Ok(RollingTerminalOutcome::Won(RollingTerminalCause::End))
         );
         assert_eq!(handle.executor_observation_for_test().0, "terminal");
-        pause.wait().await;
+        held.release();
         wait_for_executor_observation(&handle, "terminal", Some(17)).await;
     }
 
     #[tokio::test]
     async fn actor_loss_during_executor_poll_is_reported_as_lost_not_terminal() {
-        let handle = RollingControlHandle::spawn("session-start");
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        let handle = RollingControlHandle::spawn_for_test("session-start");
+        let pause = crate::seam_hooks::AsyncPause::new("executor poll");
         handle.pause_executor_poll_for_test(Arc::clone(&pause));
         assert!(
             handle
@@ -29450,12 +29730,12 @@ mod tests {
                 })
                 .await
         );
-        pause.wait().await;
+        let held = pause.reached().await;
 
         handle.abort_actor_for_test();
         handle.wait_for_actor_exit_fence_for_test().await;
         handle.sender.closed().await;
-        pause.wait().await;
+        held.release();
         wait_for_executor_observation(&handle, "lost", None).await;
 
         assert_eq!(handle.decision_transport.committed_terminal(), None);
@@ -29463,7 +29743,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_the_last_handle_does_not_leave_the_actor_mailbox_self_owned() {
-        let handle = RollingControlHandle::spawn("session-start");
+        let handle = RollingControlHandle::spawn_for_test("session-start");
         let retired = Arc::clone(&handle.retired);
         let transport = Arc::downgrade(&handle.decision_transport);
 
@@ -29481,6 +29761,99 @@ mod tests {
         })
         .await
         .expect("actor must exit promptly after its final external sender is dropped");
+    }
+
+    /// The control group's race scenarios through the production constructor
+    /// (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8). Every no-op hook is ready at
+    /// once, so the actor answers an attempt and settles each command, the
+    /// passive executor passes both of its poll points to observe a committed
+    /// decision and then the terminal, and dropping the last handle runs the
+    /// exit fence.
+    #[tokio::test]
+    async fn rolling_control_group_shipped_shape() {
+        let handle = RollingControlHandle::spawn("session-start");
+        assert!(
+            RollingControlTestHooks::of(handle.decision_transport.hooks.as_ref()).is_none(),
+            "the production constructor installs the no-op hooks"
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), handle.begin_producer_attempt())
+                .await
+                .expect("the actor answers through its production hooks"),
+            Ok(1)
+        );
+        assert!(tokio::time::timeout(
+            Duration::from_secs(5),
+            handle.install_producer_decision_for_test(ProducerDecision::Fail {
+                decision_sequence: 17,
+                failed_attempt: 1,
+                reason: ProducerDecisionReason::ReaderFailed,
+                proposal: None,
+                cleanup: ProducerFailureCleanup {
+                    kind: ProducerFailureCleanupKind::ProducerFailureCleanup,
+                    cleanup_policy: CleanupPolicy::DiscardPrepublication,
+                },
+            }),
+        )
+        .await
+        .expect("the actor settles its first command and takes the next"));
+        wait_for_executor_observation(&handle, "idle", Some(17)).await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), handle.end())
+                .await
+                .expect("the actor answers the terminal command"),
+            Ok(RollingTerminalOutcome::Won(RollingTerminalCause::End))
+        );
+        wait_for_executor_observation(&handle, "terminal", Some(17)).await;
+
+        let retired = Arc::clone(&handle.retired);
+        drop(handle);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !retired.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the exit fence publishes retirement through the production hooks");
+    }
+
+    /// The producer ingress's two points through the production hooks,
+    /// polled by hand: a waiter that finds no flow-barrier capacity parks on
+    /// its registered wake and the release of one reservation wakes it, and a
+    /// flow barrier still enters the ingress.
+    #[tokio::test]
+    async fn rolling_producer_ingress_shipped_shape() {
+        use std::future::Future;
+        let ingress = RollingProducerIngress::with_hooks(Arc::new(NoopRollingControlHooks));
+        for _ in 0..ROLLING_PRODUCER_FLOW_BARRIER_CAPACITY {
+            assert!(ingress.reserve_flow_barrier());
+        }
+        let retired = AtomicBool::new(false);
+        let (actor, _receiver) = tokio::sync::mpsc::channel(1);
+        let observation = RollingProducerFlowObservation {
+            producer_attempt: 1,
+            state: ProducerPhysicalFlowState::Held,
+        };
+        {
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            let mut waiter =
+                std::pin::pin!(ingress.wait_for_flow_barrier_capacity(&retired, &actor));
+            assert!(
+                waiter.as_mut().poll(&mut context).is_pending(),
+                "a full ingress parks its waiter"
+            );
+            ingress.finish_reserved_flow_barrier(observation, false);
+            assert_eq!(
+                waiter.as_mut().poll(&mut context),
+                std::task::Poll::Ready(true),
+                "the production hook let the waiter reach its registered wake"
+            );
+        }
+        ingress.finish_reserved_flow_barrier(observation, true);
+        assert_eq!(
+            ingress.drain(),
+            vec![RollingProducerEvent::FlowApplied(observation)]
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -30726,6 +31099,7 @@ mod tests {
             deadline_ms: i64::MAX,
             session_id: "prepared".to_owned(),
             playlist_url: "/api/v1/hls/prepared/index.m3u8".to_owned(),
+            control: None,
             media_origin_ms,
             effective_selection: prepared_selection(),
         };

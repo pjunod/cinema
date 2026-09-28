@@ -11,7 +11,7 @@
 // the incumbent playing, wait for the successor the server builds -- with
 // exactly ONE reopen as the answer to every way it can go wrong.
 const PREPARED_OFFER_BOUND_MS=12000;
-const PREPARED_OFFER_CADENCE_MS=1000;
+const PREPARED_OFFER_CADENCE_MS=500;
 // `askPlaybackControl` cannot serve this and cannot be made to. Its waiter
 // settles on the FIRST exchange at or after its floor, and a `Prepare` arrives
 // on a later exchange than the one that carried the ask -- the server has to
@@ -46,6 +46,7 @@ async function awaitPreparedOffer(p,tappedAt){
     const waiter={kind:"offer",minSequence,generation,controlEpoch,
       intentGeneration,tappedAt,player:p,preparedActionId:null,settled:false,
       timer:null,cadence:null,confirm:null,
+      firstStagingAtMs:null,offerReceivedAtMs:null,
       settle:(outcome)=>{
         if(waiter.settled) return;
         waiter.settled=true;
@@ -119,6 +120,15 @@ function settlePreparedOfferWaiter(p,waiter,mine,response,error){
   const action=response.action||null;
   if(action&&window.PlurxPlaybackControl
      &&action.type===PlurxPlaybackControl.PREPARE_ACTION_TAG){
+    if(waiter.offerReceivedAtMs==null){
+      waiter.offerReceivedAtMs=performance.now();
+      clientLog(Object.assign({level:"info",event:"prepared_offer_timing",
+        detail:"offer_received",
+        message:`prepared offer received at_ms=${Math.round(waiter.offerReceivedAtMs)} `+
+          `ask_elapsed_ms=${Math.round(waiter.offerReceivedAtMs-waiter.tappedAt)} `+
+          `staging_elapsed_ms=${waiter.firstStagingAtMs==null?"none":Math.round(waiter.offerReceivedAtMs-waiter.firstStagingAtMs)}`},
+        playbackContext()));
+    }
     waiter.preparedActionId=action.action_id||null;
     // The server replays a `Prepare` byte-identically until it processes the
     // acknowledgement, so a replay of one this client already built settles at
@@ -135,6 +145,14 @@ function settlePreparedOfferWaiter(p,waiter,mine,response,error){
   // to remove. Only the explicit value declines; absent stays armed and lets
   // the bound decide.
   if(preparation==="none"){ waiter.settle("declined"); return; }
+  if(preparation==="staging"&&waiter.firstStagingAtMs==null){
+    waiter.firstStagingAtMs=performance.now();
+    clientLog(Object.assign({level:"info",event:"prepared_offer_timing",
+      detail:"staging_seen",
+      message:`prepared staging seen at_ms=${Math.round(waiter.firstStagingAtMs)} `+
+        `ask_elapsed_ms=${Math.round(waiter.firstStagingAtMs-waiter.tappedAt)}`},
+      playbackContext()));
+  }
   if(preparation==="staging"&&waiter.cadence==null){
     // Staging is progress, not an answer. Come back sooner than ordinary
     // cadence so the offer is collected as soon as it exists rather than up to
@@ -156,11 +174,12 @@ function settlePreparedOfferWaiter(p,waiter,mine,response,error){
 // `fallback` is optional and is how Auto keeps its own reopen: the automatic
 // controller goes through `requestPlaybackMediaChange` so the create carries
 // the rung, where the menu goes through `play()`.
-async function requestQualityChange(p,reason,fallback){
+async function requestQualityChange(p,reason,fallback,autoMove){
   if(!p) return "superseded";
   const change={intentGeneration:p.controlIntentGeneration||0,
     tappedAt:performance.now(),settled:false,reason:reason||"manual",
-    fallback:fallback||null,outcome:null,outcomeAt:null};
+    fallback:fallback||null,autoMove:autoMove||null,commitTimer:null,
+    outcome:null,outcomeAt:null};
   p.directedChange=change;
   let outcome="timed_out";
   try{ outcome=await awaitPreparedOffer(p,change.tappedAt); }catch(e){ outcome="timed_out"; }
@@ -183,6 +202,7 @@ function fallBackDirectedChange(p,change,why){
   if(change.settled||p.directedChange!==change
      ||(p.controlIntentGeneration||0)!==change.intentGeneration) return false;
   change.settled=true;
+  if(change.commitTimer!=null){ clearTimeout(change.commitTimer); change.commitTimer=null; }
   change.outcome=why;
   change.outcomeAt=performance.now();
   const v=document.getElementById("video");
@@ -190,6 +210,7 @@ function fallBackDirectedChange(p,change,why){
   // The reopen's own create carries the rung explicitly, so the ask on the
   // wire has done its job and would otherwise keep re-announcing itself.
   p.autoRequestedHeight=null;
+  if(change.autoMove&&p.abr){ p.abr.switching=false; releaseAutoFallback(p); }
   clientLog(Object.assign({level:"warn",event:"quality_switch",
     detail:`via=fallback why=${why}`,reason:change.reason||"manual",
     message:`prepared handoff did not carry the change (${why}); reopening the stream`},
@@ -215,12 +236,27 @@ function settleDirectedChange(p,change,why,detail){
   const owned=change||(p&&p.directedChange);
   if(!p||!owned||owned.settled||p.directedChange!==owned) return false;
   owned.settled=true;
+  if(owned.commitTimer!=null){ clearTimeout(owned.commitTimer); owned.commitTimer=null; }
   owned.outcome=why;
   owned.outcomeAt=performance.now();
   if(detail!=null) owned.detail=detail;
-  // Requested and delivered are the same rung now, so the selection goes back
-  // to plain Auto -- a stable digest rather than a standing ask.
-  p.autoRequestedHeight=null;
+  // The successor is visible, but the server has not accepted its committed
+  // acknowledgement yet. Keep the exact selection that staged it until that
+  // exchange succeeds: changing to plain Auto here makes the server reject
+  // the commit as a different ask and retire the stream we just exposed.
+  if(why!=="committed"||!owned.autoMove) p.autoRequestedHeight=null;
+  if(owned.autoMove&&p.abr){
+    if(why==="committed"){
+      const now=performance.now(), move=owned.autoMove;
+      p.autoHeight=move.to;
+      Object.assign(p.abr,{lastSwitchAtMs:now,stableSinceMs:now,
+        mildSamples:0,upgradeSinceMs:null,previousRunway:null});
+      recordAutoSwitch(p,move.from,move.to,move.switchReason,
+        positionForPlaybackIntent(document.getElementById("video"),p),p.sessionId);
+    }
+    p.abr.switching=false;
+    releaseAutoFallback(p);
+  }
   return true;
 }
 // A viewer command, a teardown, a stream replacement. The ask is retired and
@@ -381,8 +417,12 @@ function startPlaybackControl(v,p,bootstrap){
     const attachment=p.mediaAttachment;
     const owner=Object.freeze({lifecycleId:CONTROL_CLIENT_ID,
       attachmentGeneration:startPlaybackControl.captureGeneration=(startPlaybackControl.captureGeneration||0)+1});
+    // A prepared commit swaps the DOM video while retaining this reporter to
+    // deliver the acknowledgement on the predecessor's control session.
+    // Sample the visible successor after that swap, never the retired node.
     const capture=()=>p.mediaAttachment===attachment&&playbackOwnsAttachedMedia(p)
-      ?PlurxPlaybackControl.capture(playbackControlSnapshot(v,p),p.controlIntentGeneration||0,owner):null;
+      ?PlurxPlaybackControl.capture(playbackControlSnapshot(document.getElementById("video"),p),
+        p.controlIntentGeneration||0,owner):null;
     const reporter=new PlurxPlaybackControl.Reporter({bootstrap,
       clientInstanceId:CONTROL_CLIENT_ID,
       capture,
@@ -762,4 +802,3 @@ function releaseSession(sessionId){
       headers:TOKEN?{"authorization":"Bearer "+TOKEN}:{}}).catch(()=>{});
   }catch(e){}
 }
-

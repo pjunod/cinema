@@ -1,8 +1,46 @@
 
+    /// The cleanup holds the player's replacement gate until it settles,
+    /// and it settles only after it has aborted the worker and settled the
+    /// request claim (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8; #573 review
+    /// finding 2). While the test holds the cleanup at
+    /// `after_cleanup_settled`, the worker is already gone and the claim is
+    /// already retryable, and a takeover for the player still waits on the
+    /// gate. The worker is published as the guard's own incarnation at owner
+    /// epoch 1, so the cleanup's owner-fenced abort reaches it.
     #[tokio::test(start_paused = true)]
     async fn started_session_guard_holds_replacement_gate_until_cleanup_settles() {
         let dir = crate::test_tempdir().expect("state dir");
-        let fixture = HlsDeliveryFixture::publish(dir.path(), "guard-lifetime").await;
+        let incarnation_id = uuid::Uuid::new_v4().to_string();
+        let fixture =
+            HlsDeliveryFixture::publish_takeover(dir.path(), "guard-lifetime", &incarnation_id, 1)
+                .await;
+        assert!(fixture.worker_is_registered("guard-lifetime").await);
+        let user = fixture
+            .state
+            .store
+            .create_user("guard-lifetime", "hash", false)
+            .await
+            .expect("create guard user");
+        let request_id = "guard-lifetime-request";
+        let fingerprint = "c".repeat(64);
+        let now_ms = unix_ms();
+        assert!(matches!(
+            fixture
+                .state
+                .store
+                .claim_media_session_request(
+                    user.id,
+                    request_id,
+                    &fingerprint,
+                    "guard-lifetime-player",
+                    &incarnation_id,
+                    now_ms,
+                    now_ms.saturating_add(60_000),
+                )
+                .await
+                .expect("claim guarded request"),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
         let request = crate::transcode::SessionRequest {
             control_sequence: None,
             file_id: 1,
@@ -31,23 +69,54 @@
             )
             .await
             .expect("replacement gate");
-        let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let settled = crate::seam_hooks::AsyncPause::new("started session cleanup settled");
         let (released_tx, released_rx) = tokio::sync::oneshot::channel();
         let mut guard = StartedSessionGuard::new(
             fixture.state.clone(),
             fixture.state.node_id.clone(),
-            uuid::Uuid::new_v4().to_string(),
+            incarnation_id.clone(),
             "guard-lifetime".to_owned(),
-            7,
-            "guard-lifetime-request".to_owned(),
+            user.id,
+            request_id.to_owned(),
             Some(replacement),
         );
-        guard.hold_cleanup_for_test(settled_tx, release_rx, released_tx);
+        guard.hold_cleanup_for_test(std::sync::Arc::clone(&settled), released_tx);
         drop(guard);
-        settled_rx
+        let held = settled.reached().await;
+
+        assert!(
+            !fixture.worker_is_registered("guard-lifetime").await,
+            "the cleanup aborts the worker before it settles"
+        );
+        let retry_incarnation = uuid::Uuid::new_v4().to_string();
+        let retry_now_ms = unix_ms();
+        let retried = fixture
+            .state
+            .store
+            .claim_media_session_request(
+                user.id,
+                request_id,
+                &fingerprint,
+                "guard-lifetime-player",
+                &retry_incarnation,
+                retry_now_ms,
+                retry_now_ms.saturating_add(60_000),
+            )
             .await
-            .expect("cleanup reached its settlement seam");
+            .expect("retry guarded request");
+        assert!(
+            matches!(
+                &retried,
+                MediaSessionRequestClaim::Acquired { incarnation_id } if *incarnation_id == retry_incarnation
+            ),
+            "the cleanup settles the request claim before it settles: {retried:?}"
+        );
+        assert!(fixture
+            .state
+            .store
+            .fail_media_session_request(user.id, request_id, &retry_incarnation, unix_ms())
+            .await
+            .expect("settle retry claim"));
 
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let blocked = tokio::spawn({
@@ -85,7 +154,7 @@
             "cleanup must retain the replacement gate"
         );
 
-        release_tx.send(()).expect("cleanup release");
+        held.release();
         released_rx
             .await
             .expect("replacement guard was dropped after cleanup settlement");
@@ -131,6 +200,68 @@
             )
             .await
             .expect("disarm releases the replacement gate synchronously");
+        drop(reacquired);
+    }
+
+    /// The race test's teardown through the production hooks
+    /// (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8): the no-op settlement point is
+    /// ready at once, so dropping an armed guard settles its cleanup and
+    /// releases the replacement gate, and the next takeover for the player
+    /// acquires it inside the bound the race test holds it past.
+    #[tokio::test(start_paused = true)]
+    async fn started_session_cleanup_shipped_shape() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "cleanup-shape").await;
+        let request = crate::transcode::SessionRequest {
+            control_sequence: None,
+            file_id: 1,
+            playback_id: "cleanup-shape-player".to_owned(),
+            request_id: None,
+            automatic: true,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: crate::transcode::SessionKind::Transcode { height: 720 },
+            start_seconds: 0.0,
+            audio_index: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: crate::transcode::Presentation::Live,
+            block_budget_secs: None,
+            transport: None,
+        };
+        let replacement = fixture
+            .state
+            .transcode
+            .acquire_cluster_takeover_replacement(
+                &request,
+                7,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("replacement gate");
+        drop(StartedSessionGuard::new(
+            fixture.state.clone(),
+            fixture.state.node_id.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            "cleanup-shape".to_owned(),
+            7,
+            "cleanup-shape-request".to_owned(),
+            Some(replacement),
+        ));
+        // The race test's bound: a gate still held by its cleanup is not
+        // acquired inside one second, even with a ten-second deadline.
+        let reacquired = tokio::time::timeout(
+            Duration::from_secs(1),
+            fixture.state.transcode.acquire_cluster_takeover_replacement(
+                &request,
+                7,
+                tokio::time::Instant::now() + Duration::from_secs(10),
+            ),
+        )
+        .await
+        .expect("the production cleanup settles and releases the replacement gate")
+        .expect("replacement gate after cleanup");
         drop(reacquired);
     }
 
@@ -1624,6 +1755,83 @@
         assert!(!crate::subtitles::is_sidecar_pending_error(
             "text subtitle extraction failed; suppressing retries for now"
         ));
+    }
+
+    /// C-08 M5 row 4 (#559 review, finding 1): every create answer the
+    /// clients' retry ladder waits out carries a code the start ledger keeps
+    /// pending, so the retry that plays is one `ok`; a refusal that is not a
+    /// wait still ends the attempt `refused`.
+    #[test]
+    fn every_create_not_yet_answer_keeps_its_start_attempt_open() {
+        let not_yet = [
+            session_start_error(
+                42,
+                format!(
+                    "{}the source is still being read for this track",
+                    crate::subtitles::SIDECAR_PENDING_PREFIX
+                ),
+            ),
+            session_start_error(
+                42,
+                "transcode capacity is temporarily unavailable: waiting for this player's \
+                 previous start: held"
+                    .to_owned(),
+            ),
+            session_start_error(
+                42,
+                crate::transcode::vod_refusal_error("vod_index_pending", "indexing"),
+            ),
+            session_start_error(
+                42,
+                crate::transcode::vod_refusal_error("vod_engine_unattested", "probing"),
+            ),
+            super::segment::media_owner_transition(),
+        ];
+        for error in &not_yet {
+            let ledger = crate::playstart::StartAttempts::new();
+            let t0 = std::time::Instant::now();
+            for at in [0, 1, 3] {
+                ledger.refused(
+                    1,
+                    42,
+                    None,
+                    error.code(),
+                    t0 + std::time::Duration::from_secs(at),
+                );
+            }
+            ledger.opened(
+                1,
+                42,
+                Some(7),
+                "transcode",
+                t0 + std::time::Duration::from_secs(7),
+            );
+            ledger.client_event(
+                1,
+                42,
+                "ttff",
+                None,
+                Some("cold-start"),
+                t0 + std::time::Duration::from_secs(9),
+            );
+            assert_eq!(ledger.count("transcode", "ok"), 1, "{error:?}");
+            assert_eq!(ledger.count("unknown", "refused"), 0, "{error:?}");
+        }
+        for error in [
+            session_start_error(
+                42,
+                crate::transcode::vod_refusal_error("vod_disabled", "off"),
+            ),
+            session_start_error(
+                42,
+                "transcode capacity is temporarily unavailable: background encoding did not yield"
+                    .to_owned(),
+            ),
+        ] {
+            let ledger = crate::playstart::StartAttempts::new();
+            ledger.refused(1, 42, None, error.code(), std::time::Instant::now());
+            assert_eq!(ledger.count("unknown", "refused"), 1, "{error:?}");
+        }
     }
 
     #[test]

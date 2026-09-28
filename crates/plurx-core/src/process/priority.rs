@@ -227,8 +227,9 @@ pub fn observe(pid: u32) -> Observed {
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     {
-        let Ok(pid) = libc::id_t::try_from(u64::from(pid)) else {
-            return Observed::default();
+        let pid = match libc::id_t::try_from(pid) {
+            Ok(pid) => pid,
+            Err(_) => return Observed::default(),
         };
         // SAFETY: plain syscall; errno distinguishes -1 as a value from -1
         // as an error, and a pid that no longer exists reads as unknown.

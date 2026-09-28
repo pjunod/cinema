@@ -471,7 +471,7 @@ fn parse_public_request_id(value: &str) -> Result<&str, ApiError> {
 /// What *this binary's public surface* accepts: body fields and recovery
 /// routes. An owner advertising 3 says nothing about the ingress a client is
 /// talking to, so what the client reads is the intersection.
-const INGRESS_START_PROTOCOLS: &[u8] = &[1, 2, 3, 4];
+const INGRESS_START_PROTOCOLS: &[u8] = &[1, 2, 3, 5];
 
 fn negotiated_protocols(owner: &[u8]) -> Vec<u8> {
     INGRESS_START_PROTOCOLS
@@ -496,7 +496,7 @@ pub(crate) async fn issue_start(
         ))
     })?;
     let config = live_tv_enabled_config(&state).await?;
-    let request_id = format!("v4_{}", uuid::Uuid::new_v4().simple());
+    let request_id = format!("v5_{}", uuid::Uuid::new_v4().simple());
     let config =
         select_start_worker(&state, config, user.id, &request_id, &channel, deadline).await?;
     let snapshot = owner_snapshot_within(&state, &config, false, false, deadline)
@@ -801,6 +801,8 @@ async fn select_start_worker(
         peers.sort();
         candidates.extend(peers);
     }
+    let preferred = state.media_pool.live_tv_worker(state).await;
+    candidates.sort_by_key(|node| node != &preferred);
     let mut last = LiveTvError::OwnerUnavailable("no reachable channel worker".into());
     for candidate in candidates.into_iter().take(3) {
         config.owner_node_id = candidate;
@@ -813,7 +815,7 @@ async fn select_start_worker(
         )
         .await
         {
-            Ok(snapshot) if snapshot.start_protocols.contains(&4) => return Ok(config),
+            Ok(snapshot) if snapshot.start_protocols.contains(&5) => return Ok(config),
             Ok(_) => {
                 last = LiveTvError::OwnerUnavailable(
                     "the candidate needs the cluster resource protocol".into(),
@@ -1057,8 +1059,8 @@ pub(crate) async fn readiness_for_config(
 
     checks.push(LiveTvReadinessCheck {
         id: "cluster_resource",
-        ready: negotiated.contains(&4),
-        message: if negotiated.contains(&4) {
+        ready: negotiated.contains(&5),
+        message: if negotiated.contains(&5) {
             "A reachable worker supports durable channel assignment and server-issued start intents"
                 .into()
         } else {
@@ -1083,12 +1085,12 @@ pub(crate) async fn readiness_for_config(
         .await;
         match result {
             Ok(Ok(snapshot)) => (
-                snapshot.start_protocols.contains(&4) && snapshot.ffmpeg_graph_ready,
+                snapshot.start_protocols.contains(&5) && snapshot.ffmpeg_graph_ready,
                 format!(
-                    "{node}: device {}, {} tuners, protocol 4 {}, encoder {}",
+                    "{node}: device {}, {} tuners, protocol 5 {}, encoder {}",
                     snapshot.device.device_id,
                     snapshot.device.tuner_count,
-                    snapshot.start_protocols.contains(&4),
+                    snapshot.start_protocols.contains(&5),
                     snapshot.ffmpeg_graph_ready
                 ),
             ),
@@ -2253,9 +2255,10 @@ mod tests {
         assert_eq!(negotiated_protocols(&[]), Vec::<u8>::new());
         assert_eq!(negotiated_protocols(&[1, 2]), vec![1, 2]);
         assert_eq!(negotiated_protocols(&[1, 2, 3]), vec![1, 2, 3]);
+        assert_eq!(negotiated_protocols(&[4]), Vec::<u8>::new());
         assert_eq!(
-            negotiated_protocols(&[1, 2, 3, 4, 5]),
-            vec![1, 2, 3, 4],
+            negotiated_protocols(&[1, 2, 3, 4, 5, 6]),
+            vec![1, 2, 3, 5],
             "an owner newer than this ingress does not make this ingress newer"
         );
     }

@@ -409,7 +409,7 @@ pub(crate) async fn subtitle_range(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-async fn authorize(
+pub(super) async fn authorize(
     state: &AppState,
     headers: &HeaderMap,
     method: &str,

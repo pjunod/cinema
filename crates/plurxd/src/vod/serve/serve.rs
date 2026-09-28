@@ -504,36 +504,17 @@ impl VodServe {
                 segment_name(u64::from(index))
             )));
         }
-        #[cfg(test)]
-        let waiting_pause = self
-            .shared
-            .segment_ready_pause
-            .lock()
-            .expect("segment pause lock")
-            .clone();
-        #[cfg(test)]
-        if let Some(pause) = waiting_pause {
-            // Phase one proves the post-registration recheck has finished;
-            // the Ready arm supplies phases two and three around file open.
-            pause.wait().await;
-        }
+        self.shared
+            .hooks
+            .get()
+            .after_segment_wait_registered()
+            .await;
         let outcome = wait
             .wait(deadline.saturating_duration_since(tokio::time::Instant::now()))
             .await;
         match outcome {
             WaitOutcome::Ready => {
-                #[cfg(test)]
-                let pause = self
-                    .shared
-                    .segment_ready_pause
-                    .lock()
-                    .expect("segment pause lock")
-                    .clone();
-                #[cfg(test)]
-                if let Some(pause) = pause {
-                    pause.wait().await;
-                    pause.wait().await;
-                }
+                self.shared.hooks.get().before_segment_ready_open().await;
                 match self.open_materialized(rendition, index, &delivery).await? {
                     Some(ready) => Ok(ready),
                     // An eviction already committed before registration, or an

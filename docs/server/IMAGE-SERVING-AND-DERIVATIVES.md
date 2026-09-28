@@ -515,3 +515,50 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#431](http://192.168.4.7:3000/noirr/plurx/pulls/431) | Identity-bound digest cache, separate local-byte/peer-fetch permits, authenticated 304, strong ETag and bounded metrics implemented; `cargo test -p plurxd http::images -- --test-threads=1` passed 25 tests. Lab and device observations remain pending. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#431](http://192.168.4.7:3000/noirr/plurx/pulls/431) | Closed `size` buckets, digest-keyed derivatives, two-child/timeout/output bounds, single-flight, original fallback, conservative orphan cleanup, DTO readiness and fixed-cardinality metrics implemented. The existing job-owned bounded-file child was used instead of widening the probe-only output helper. Focused image tests pass; §6.2-§6.4 fleet, browser and device observations remain pending. |
 | 2026-09-22 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 review | [#431](http://192.168.4.7:3000/noirr/plurx/pulls/431) | Adversarial review answered: all nine findings fixed, none deferred or disputed. The `derived/` key gained its source filename so orphan retention is decided per source (§3.2); the sweep's prefix comparison narrowed to the 16 hex characters every source family publishes; fallbacks revalidate instead of caching an original as `immutable` under a `?size=` URL; the post-generation fence compares file identity instead of re-reading and admitting the source a second time; the derived key is resolved from the cached digest before the original is read; `.tmp` temporaries and the superseded key layout are reclaimable; the resize child caches in `runtime_cache`. `serve_derivative` gained real coverage — the five missing §5.2 tests plus the fallback response, the warm hit and its 304, and the identity fence — each proved to fail with its fix reverted. `peer_route_refuses_size` drives `serve_verified_peer_artwork` rather than the route, because `verify_artwork_peer_auth` needs a consistent cluster read no unit test can supply. Gates at `79f9a4d57`: `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked -D warnings`, `cargo test -p plurxd --bin plurxd` 2551 passed / 0 failed, `make operations-check` 435 passed, `make history-check`, `make validation-lint`, `tests/validation` 200 passed, four Node suites. §6.2-§6.4 lab1 concurrency, Chrome cold/warm byte and Apple TV / Android TV observations are still not gathered and remain pending. |
+
+
+## Durable preparation continuation — 2026-09-26
+
+The E1 branch of the [durable cluster programme](../cluster/DURABLE-WORK-QUEUE-IMPLEMENTATION.md)
+replaces request-owned resizing with shared queue ownership. Cold requests
+persist a node-specific interest and return the original with revalidation;
+repeated grid requests coalesce, and do not reset a failed job's retry budget.
+A new real request may retry a terminal interest after an hour. Interests
+expire after 24 hours. An in-memory, bounded 30-second debounce avoids writing
+another replicated admission for every concurrent image request.
+
+The variant key includes the full source digest, supported width, output
+format and the renderer/dependency digest under `ffmpeg-lanczos-fit-v1`.
+Changing that pipeline creates a new identity. Aliases of the same source
+share the computation. Original hero/backdrop bytes remain unchanged.
+
+A worker reserves the existing background CPU/heavy-work admission before
+claiming. It retains that admission through cancellation and encoder reap;
+the encoder keeps its five-second deadline and 15 MiB output bound. Completed
+bytes use `variant-{full_key}-b{full_output_digest}.{format}`, independent of
+the source alias and within a fixed filename bound. An expired owner's staging rename
+cannot overwrite a published generation. The Store atomically publishes the
+holder, settles the attempt and leaves remote interests awaiting hydration.
+Only verified bytes on the receiving node settle those interests.
+
+The existing artwork peer endpoint accepts an exact, signed `variant-{key}`
+name. It reads local published bytes only. The transfer reuses the bounded
+artwork client, checks byte count and full digest, and installs atomically.
+Variant reads require published metadata; a bounded local proof cache keeps
+warm reads off the authority path, and its misses re-read the Store. Corrupt
+replacements are quarantined. The existing original serving path and reader
+byte budget remain authoritative.
+
+SQLite 77 / Hiqlite 55 include bounded holder records (32,768 maximum),
+seven-day observation retention, backup import and replicated-state digest.
+Expired/removed holder observations are not availability proof; historical
+producer metadata separately permits a canonical rebuild without changing
+provenance. Staging cleanup observes the current job fence before reclaiming
+an aged file. Final-byte cleanup checks current local publication by full key
+and digest, with a 24-hour grace. It skips a pass when a worker owns any derive
+permit, excluding the rename/publication interval. General hot-copy selection
+is implemented in E1; scheduled repair/audit remains E2 work.
+
+Construction compilation and new regression targets are recorded on the
+[status page](../cluster/DURABLE-WORK-QUEUE-STATUS.md). They are not production
+or fast-lane acceptance evidence until the final review and validation run.

@@ -1288,6 +1288,35 @@ impl ClusterJobAuthority for MembershipManager {
     async fn may_run_cluster_jobs(&self) -> bool {
         MembershipManager::may_run_cluster_jobs(self).await
     }
+
+    async fn may_execute_job(&self, kind: crate::store::background_jobs::JobKind) -> bool {
+        if self.may_run_cluster_jobs().await {
+            return true;
+        }
+        if !kind.permits_artifact_execution()
+            || self.local_maintenance_active()
+            || !matches!(
+                self.local_serving_role().await,
+                Ok(LocalServingRole::Learner)
+            )
+            || !matches!(self.local_node_is_committed_member().await, Ok(true))
+        {
+            return false;
+        }
+        let Some(inner) = self.inner.as_ref() else {
+            return false;
+        };
+        // Learner execution needs current serving admission as well as a live
+        // committed membership entry. A removed learner cannot keep publishing
+        // through its old cached serving-role projection.
+        inner.client
+            // authority: artifact dispatch/publication requires non-removed committed membership.
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM cluster_nodes WHERE node_id = $1 AND removed_at IS NULL
+                    AND NOT EXISTS (SELECT 1 FROM cluster_node_removals WHERE node_id = $1)",
+                params!(inner.identity.node_id.as_str()),
+            ).await.is_ok_and(|rows| rows.first().is_some_and(|row| row.count == 1))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

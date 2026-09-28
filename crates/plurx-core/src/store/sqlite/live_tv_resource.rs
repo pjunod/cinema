@@ -191,7 +191,7 @@ mod tests {
     #[tokio::test]
     async fn ticket_retirement_survives_history_gc_without_legacy_fallback() {
         let store = store().await;
-        let id = "v4_11111111111111111111111111111111";
+        let id = "v5_11111111111111111111111111111111";
         store
             .live_tv_resource_command(Command::Issue(start(id, "2.1")), 1000)
             .await

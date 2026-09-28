@@ -1,6 +1,6 @@
 # Bounded replica reads rollout — a consistency-policy change, one route at a time
 
-**Status:** in progress — M0-M1 merged (#428); M2-M3 server side in draft PR #504, review pending; the web `X-Plurx-Read-After` echo and M4 not started · **Executes:** S1, F-sc-1, F-core-4 from
+**Status:** M0–M3 server implementation merged; web echo and normal default in E1 construction (`codex/cluster-cache-preparation`), final review/validation pending · **Executes:** S1, F-sc-1, F-core-4 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
@@ -14,6 +14,18 @@ then flip the default. If a step seems to require caching an ordinary
 authentication result, serving a watch-state read locally without a fence,
 or turning `bounded_replica_reads` on before a route's fallback has a test,
 stop and flag it.
+
+**2026-09-26 continuation:** the durable-cluster-work E1 build now owns the web
+echo and normal bounded-read default. It adds a replicated Developer preference
+with advisory observations; absent/stale replica proof and unknown watch-write
+positions still use Authority. The browser uses decimal u64 indexes, a monotonic
+60-second window, auth-generation isolation and invalidation of in-flight
+receipts after an unknown write. Existing fallback/parity contracts are extended
+for live preference changes. No authentication cache is introduced. Tests run
+only after E1's completed-PR adversarial review, per the user's delivery order;
+no production rollout or fleet benchmark is claimed by construction checks.
+Earlier “not built” and default-false entries below are the historical M2–M3
+record. Current build evidence lives in [DURABLE-WORK-QUEUE-STATUS.md](DURABLE-WORK-QUEUE-STATUS.md).
 
 **Correction to the review:** none on the facts. Two clarifications the
 plan depends on. First, `search_items` is already a local read on hiqlite

@@ -1429,9 +1429,12 @@ async fn probe_completion_expectation(
     source: &std::fs::File,
     source_object_version: &str,
     budget: Duration,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<(ProbedSource, Instant), IndexFailure> {
     let started = Instant::now();
-    match probe_completion_expectation_inner(source, source_object_version, budget, started).await {
+    match probe_completion_expectation_inner(source, source_object_version, budget, started, cancel)
+        .await
+    {
         Ok(probed) => Ok((probed, started)),
         Err(mut failure) => {
             failure.diagnostic.elapsed_ms =
@@ -1448,6 +1451,7 @@ async fn probe_completion_expectation_inner(
     source_object_version: &str,
     budget: Duration,
     started: Instant,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<ProbedSource, IndexFailure> {
     let mut view = source;
     view.seek(SeekFrom::Start(0)).map_err(|error| {
@@ -1463,21 +1467,12 @@ async fn probe_completion_expectation_inner(
                 | std::io::ErrorKind::WouldBlock
         ))
     })?;
-    let result = tokio::time::timeout(
+    let result = crate::ffmpeg::held_source_index_probe_json(
+        source,
         budget.saturating_sub(started.elapsed()),
-        crate::ffmpeg::held_source_index_probe_json(source),
+        cancel,
     )
-    .await
-    .map_err(|_| {
-        IndexFailure::new(
-            IndexFailureCode::IndexBudgetExceeded,
-            format!(
-                "metadata probe exceeded the {}s index budget",
-                budget.as_secs()
-            ),
-            0,
-        )
-    })?;
+    .await;
     let reset = view.seek(SeekFrom::Start(0));
     if let Err(error) = reset {
         return Err(IndexFailure::new(
@@ -1605,6 +1600,7 @@ pub(crate) async fn build_riding(
         budget,
         progress,
         ride_along,
+        None,
     )
     .await;
     built.source_unchanged = source.unchanged();
@@ -1631,6 +1627,7 @@ pub async fn build_from_attested_file(
         budget,
         None,
         None,
+        None,
     )
     .await
     .outcome
@@ -1649,6 +1646,7 @@ pub(crate) async fn build_from_attested_file_with_progress<F>(
     budget: Duration,
     progress: F,
     ride_along: Option<&RideAlongGate>,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> IndexBuild
 where
     F: Fn(&PassProgress) + Send + Sync + 'static,
@@ -1662,6 +1660,7 @@ where
         budget,
         Some(Arc::new(progress)),
         ride_along,
+        Some(cancel),
     )
     .await
 }
@@ -1680,6 +1679,7 @@ async fn build_attested(
     budget: Duration,
     progress: Option<SharedIndexProgress>,
     ride_along: Option<&RideAlongGate>,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> IndexBuild {
     #[cfg(windows)]
     let path = match crate::ffmpeg::windows_source_path(source) {
@@ -1687,7 +1687,7 @@ async fn build_attested(
         Err(reason) => return IndexBuild::plain(IndexOutcome::Unsupported(reason)),
     };
     let (probed, started) =
-        match probe_completion_expectation(source, source_object_version, budget).await {
+        match probe_completion_expectation(source, source_object_version, budget, cancel).await {
             Ok(value) => value,
             Err(failure) => return IndexBuild::plain(IndexOutcome::Failed(Box::new(failure))),
         };
@@ -1722,6 +1722,7 @@ async fn build_attested(
         budget,
         started,
         progress,
+        cancel,
     )
     .await
 }
@@ -1736,6 +1737,7 @@ async fn build_with_args(
     budget: Duration,
     started: Instant,
     progress: Option<SharedIndexProgress>,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> IndexBuild {
     let IndexPass {
         args,
@@ -1753,6 +1755,9 @@ async fn build_with_args(
         );
     }
 
+    if cancel.is_some_and(|token| token.is_cancelled()) {
+        return IndexBuild::plain(IndexOutcome::Unsupported("index cancelled".into()));
+    }
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
     #[cfg(unix)]
@@ -1882,7 +1887,7 @@ async fn build_with_args(
             });
         }
     };
-    let (mut outcome, deadline_fired) = match tokio::time::timeout(
+    let stream = tokio::time::timeout(
         budget.saturating_sub(started.elapsed()),
         index_stream_with_progress(
             stdout,
@@ -1891,11 +1896,15 @@ async fn build_with_args(
             dolby_vision,
             Some(&record_progress),
         ),
-    )
-    .await
-    {
-        Ok(outcome) => (outcome, false),
-        Err(_) => {
+    );
+    tokio::pin!(stream);
+    let result = tokio::select! {
+        result = &mut stream => Some(result),
+        () = async { match cancel { Some(token) => token.cancelled().await, None => std::future::pending().await } } => None,
+    };
+    let (mut outcome, deadline_fired) = match result {
+        Some(Ok(outcome)) => (outcome, false),
+        Some(Err(_)) | None => {
             let rows = observed.lock().map(|value| value.2).unwrap_or_default();
             (
                 IndexOutcome::Failed(Box::new(IndexFailure::new(
@@ -1949,7 +1958,7 @@ async fn build_with_args(
             // A second wait is required after escalating to kill; otherwise
             // the process can remain unreaped while the stderr task is
             // abandoned below.
-            let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+            let _ = child.wait().await;
             if !deadline_fired {
                 let rows = observed.lock().map(|value| value.2).unwrap_or_default();
                 outcome = IndexOutcome::Failed(Box::new(IndexFailure::new(
@@ -3656,6 +3665,7 @@ mod ride_along_tests {
             Duration::from_secs(60),
             started,
             None,
+            None,
         )
         .await;
         assert!(matches!(baseline.outcome, IndexOutcome::Built(_)));
@@ -3694,6 +3704,7 @@ mod ride_along_tests {
             cache.path(),
             Duration::from_secs(60),
             Instant::now(),
+            None,
             None,
         )
         .await;
@@ -3735,6 +3746,7 @@ mod ride_along_tests {
             Duration::from_secs(60),
             Instant::now(),
             None,
+            None,
         )
         .await;
         assert!(
@@ -3761,6 +3773,7 @@ mod ride_along_tests {
             Duration::from_secs(60),
             |_: &crate::fragindex::PassProgress| {},
             Some(&gate),
+            &tokio_util::sync::CancellationToken::new(),
         )
         .await;
         assert!(
@@ -3816,6 +3829,7 @@ mod ride_along_tests {
             Duration::from_secs(60),
             Instant::now(),
             Some(progress),
+            None,
         ));
         let deadline = Instant::now() + Duration::from_secs(12);
         let mut marked = false;
@@ -3881,6 +3895,7 @@ mod ride_along_tests {
             cache.path(),
             Duration::from_secs(60),
             Instant::now(),
+            None,
             None,
         ));
         // Mid-pass: the tee has opened its slaves in the stage.

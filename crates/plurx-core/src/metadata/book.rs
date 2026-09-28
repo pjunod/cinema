@@ -9,7 +9,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,7 +16,6 @@ use futures_util::StreamExt;
 use quick_xml::events::{BytesStart, BytesText, Event};
 use quick_xml::Reader;
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncReadExt;
 
 use crate::domain::{
     ArtworkAttempt, BookMetadataPatch, BookMetadataSource, ItemKind, MediaFile, MetadataPatch,
@@ -190,6 +188,9 @@ pub async fn materialize_item_cover(
     if item.kind == ItemKind::Audiobook {
         let _worker = worker;
         for file in &files {
+            if crate::process::bounded::check_cancellation().is_err() {
+                return Ok(Some(false));
+            }
             let Some(probe) = store.get_file_probe_json(file.id).await? else {
                 continue;
             };
@@ -486,6 +487,9 @@ pub async fn enrich_library_with_publication(
         return report;
     }
     for item in items {
+        if crate::process::bounded::check_cancellation().is_err() {
+            break;
+        }
         if item.kind != ItemKind::Book && item.kind != ItemKind::Audiobook {
             continue;
         }
@@ -594,6 +598,9 @@ async fn enrich_audiobook_cover(
     report: &mut BookEnrichReport,
 ) {
     for file in files {
+        if crate::process::bounded::check_cancellation().is_err() {
+            return;
+        }
         let probe = match store.raw().get_file_probe_json(file.id).await {
             Ok(Some(probe)) => probe,
             Ok(None) => continue,
@@ -675,54 +682,52 @@ async fn extract_attached_picture(
     expected: Option<&[String]>,
 ) -> Result<String, BookMetadataError> {
     tokio::fs::create_dir_all(artwork_dir).await?;
-    let mut command = tokio::process::Command::new(ffmpeg_bin());
-    command
-        .kill_on_drop(true)
-        .arg("-nostdin")
-        .args(["-v", "error", "-y", "-i"])
-        .arg(media)
-        .args(["-map", &format!("0:{stream_index}"), "-frames:v", "1"])
-        .args(["-c:v", "copy", "-f", "image2pipe", "pipe:1"])
-        .stdout(Stdio::piped())
-        // The bounded stdout is the diagnostic that matters. Discarding
-        // stderr also prevents a malformed input from filling a second pipe
-        // while the byte-bound reader is waiting on the first one.
-        .stderr(Stdio::null());
-    let extract = async move {
-        let (mut child, _job) = crate::process::spawn_job_owned(
-            &mut command,
-            crate::process::ChildWork::background("book cover extraction"),
-        )
-        .map_err(|error| BookMetadataError::EmbeddedCover(error.to_string()))?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            BookMetadataError::EmbeddedCover("ffmpeg stdout was unavailable".to_owned())
-        })?;
-        let mut bytes = Vec::new();
-        stdout
-            .take(MAX_COVER_BYTES.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|error| BookMetadataError::EmbeddedCover(error.to_string()))?;
-        if bytes.len() > MAX_COVER_BYTES as usize {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            return Err(BookMetadataError::Limit);
-        }
-        let status = child
-            .wait()
-            .await
-            .map_err(|error| BookMetadataError::EmbeddedCover(error.to_string()))?;
-        if !status.success() {
-            return Err(BookMetadataError::EmbeddedCover(format!(
-                "ffmpeg exited with {status}"
-            )));
-        }
-        Ok(bytes)
-    };
-    let bytes = tokio::time::timeout(COVER_EXTRACT_TIMEOUT, extract)
-        .await
-        .map_err(|_| BookMetadataError::EmbeddedCover("ffmpeg timed out".to_owned()))??;
+    let bytes = collect_attached_picture(&ffmpeg_bin(), media, stream_index).await?;
     write_cached_cover(store, artwork_dir, item_id, &bytes, expected).await
+}
+
+async fn collect_attached_picture(
+    program: &str,
+    media: &Path,
+    stream_index: i64,
+) -> Result<Vec<u8>, BookMetadataError> {
+    let stream = format!("0:{stream_index}");
+    let args: Vec<&std::ffi::OsStr> = vec![
+        "-nostdin".as_ref(),
+        "-v".as_ref(),
+        "error".as_ref(),
+        "-y".as_ref(),
+        "-i".as_ref(),
+        media.as_os_str(),
+        "-map".as_ref(),
+        stream.as_ref(),
+        "-frames:v".as_ref(),
+        "1".as_ref(),
+        "-c:v".as_ref(),
+        "copy".as_ref(),
+        "-f".as_ref(),
+        "image2pipe".as_ref(),
+        "pipe:1".as_ref(),
+    ];
+    let output = crate::process::bounded::output(
+        program,
+        &args,
+        COVER_EXTRACT_TIMEOUT,
+        MAX_COVER_BYTES as usize + 1,
+        crate::process::ChildWork::background("book cover extraction"),
+    )
+    .await?;
+    if output.stdout.len() > MAX_COVER_BYTES as usize {
+        return Err(BookMetadataError::Limit);
+    }
+    if !output.status.success() {
+        return Err(BookMetadataError::EmbeddedCover(format!(
+            "ffmpeg exited with {}",
+            output.status
+        )));
+    }
+    crate::process::bounded::check_cancellation()?;
+    Ok(output.stdout)
 }
 
 /// Fetch one Curator-provided Open Library cover with no redirects, no bearer,
@@ -1150,6 +1155,64 @@ mod tests {
         ProbeResult,
     };
     use crate::store::{LibraryStore, MediaStore, SettingsStore, SqliteStore};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn audiobook_cover_cancellation_reaps_before_releasing_work() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("fixture");
+        let program = root.path().join("cover-child");
+        let pid_path = root.path().join("child.pid");
+        // The fake extractor ignores ffmpeg arguments and announces its pid.
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nexec sleep 300\n",
+                pid_path.display()
+            ),
+        )
+        .expect("script");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
+            .expect("executable");
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let work = crate::process::bounded::cancellable(
+            cancellation.clone(),
+            collect_attached_picture(program.to_str().expect("program"), Path::new("unused"), 0),
+        );
+        let cancel = async {
+            let pid: i32 = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(value) = tokio::fs::read_to_string(&pid_path).await {
+                        if let Ok(pid) = value.trim().parse() {
+                            break pid;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("child started");
+            cancellation.cancel();
+            pid
+        };
+        let (result, pid) =
+            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(work, cancel) })
+                .await
+                .expect("foreground release budget");
+        assert!(
+            matches!(result, Err(BookMetadataError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted)
+        );
+        // SAFETY: signal zero observes this fixture's process without signalling it.
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "child outlived the operation"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
 
     fn canonical_tempdir() -> tempfile::TempDir {
         let root = std::fs::canonicalize(std::env::temp_dir())

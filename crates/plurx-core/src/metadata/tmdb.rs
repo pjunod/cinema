@@ -89,6 +89,7 @@ pub struct EpisodeMeta {
 }
 
 pub struct TmdbClient {
+    budget: super::budget::SharedProviderBudget,
     api_key: String,
     http: reqwest::Client,
     /// API base (defaults to [`API_BASE`]); overridable for a self-hosted
@@ -121,6 +122,11 @@ pub struct TmdbClient {
 type GenreIndex = std::collections::HashMap<i64, String>;
 
 impl TmdbClient {
+    pub fn with_budget(mut self, budget: super::budget::SharedProviderBudget) -> Self {
+        self.budget = budget;
+        self
+    }
+
     /// Keywords are a separate metadata feed, retained locally by the classifier.
     pub async fn keywords(&self, id: i64, kind: &str) -> Result<Vec<String>, MetadataError> {
         let (route, field) = if kind == "show" {
@@ -142,6 +148,7 @@ impl TmdbClient {
 
     pub fn new(api_key: impl Into<String>) -> Self {
         TmdbClient {
+            budget: None,
             api_key: api_key.into(),
             http: provider_client(
                 Provider::Tmdb,
@@ -220,16 +227,22 @@ impl TmdbClient {
         let started = Instant::now();
         let mut delay = RETRY_BASE_DELAY;
         for attempt in 1..=MAX_ATTEMPTS {
+            super::budget::acquire(&self.budget, Provider::Tmdb).await?;
             let remaining = PROVIDER_CALL_BUDGET.saturating_sub(started.elapsed());
             if remaining < PROVIDER_CONNECT_TIMEOUT {
                 return Err(MetadataError::Timeout(
                     "provider call retry budget exhausted".to_owned(),
                 ));
             }
-            let resp = build()
-                .timeout(remaining.min(PROVIDER_TOTAL_TIMEOUT))
-                .send()
-                .await;
+            let resp = super::budget::cancellable(
+                build()
+                    .timeout(remaining.min(PROVIDER_TOTAL_TIMEOUT))
+                    .send(),
+            )
+            .await?;
+            if let Ok(response) = &resp {
+                super::budget::observe(&self.budget, Provider::Tmdb, response).await?;
+            }
             let last = attempt == MAX_ATTEMPTS;
             match resp {
                 Ok(resp) if resp.status().is_success() => return Ok(resp),
@@ -250,7 +263,7 @@ impl TmdbClient {
                         wait_ms = wait.as_millis() as u64,
                         "tmdb retrying"
                     );
-                    tokio::time::sleep(wait).await;
+                    super::budget::cancellable(tokio::time::sleep(wait)).await?;
                 }
                 // A connection that never completed is the same kind of
                 // transient as a 503, and the request was never served, so
@@ -262,7 +275,7 @@ impl TmdbClient {
                     if delay >= remaining {
                         return Err(request_error(e));
                     }
-                    tokio::time::sleep(delay).await;
+                    super::budget::cancellable(tokio::time::sleep(delay)).await?;
                 }
             }
             delay *= 2;

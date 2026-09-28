@@ -151,7 +151,7 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
         executable: crate::ffmpeg::EncodedExecutable::capture()
             .await
             .expect("frozen encoder"),
-        engine: crate::ffmpeg::EncodedEngine::capture(false)
+        engine: crate::ffmpeg::EncodedEngine::capture(None)
             .await
             .expect("frozen engine"),
         admissions: crate::admission::Admissions::new(),
@@ -162,7 +162,7 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
         handoff_wait: AtomicBool::new(false),
         last_refusal: StdMutex::new(None),
         handoff_claim: StdMutex::new(None),
-        admission_pause: StdMutex::new(None),
+        hooks: Box::new(crate::vodencode::EncodingAdmissionPause::default()),
     });
     (file, encoding)
 }
@@ -364,7 +364,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
         executable: crate::ffmpeg::EncodedExecutable::capture()
             .await
             .expect("encoder"),
-        engine: crate::ffmpeg::EncodedEngine::capture(false)
+        engine: crate::ffmpeg::EncodedEngine::capture(None)
             .await
             .expect("engine"),
         admissions: encoding.admissions.clone(),
@@ -375,7 +375,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
         handoff_wait: AtomicBool::new(false),
         last_refusal: StdMutex::new(None),
         handoff_claim: StdMutex::new(None),
-        admission_pause: StdMutex::new(None),
+        hooks: Box::new(crate::vodencode::EncodingAdmissionPause::default()),
     });
     new.try_create(
         VodRecipeRequest {
@@ -571,16 +571,14 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
             "viewer",
         )
         .expect("admitted forward seek");
-    let pause = Arc::new(tokio::sync::Barrier::new(2));
-    *encoding.admission_pause.lock().expect("admission seam") = Some(Arc::clone(&pause));
+    let pause = encoding.pause_next_admission();
     let pass = {
         let shared = Arc::clone(&serve.shared);
         let rendition = Arc::clone(&rendition);
         tokio::spawn(async move { driver_pass(&shared, &rendition).await })
     };
-    tokio::time::timeout(Duration::from_secs(5), pause.wait())
-        .await
-        .expect("driver reaches policy await");
+    // The driver reaches the policy await.
+    let held = pause.reached().await;
     assert_eq!(
         encoding.admissions.software_in_use(),
         0,
@@ -624,7 +622,7 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
             "viewer",
         )
         .expect("admitted backward seek");
-    pause.wait().await;
+    held.release();
     tokio::time::timeout(Duration::from_secs(5), pass)
         .await
         .expect("one permit cannot self-deadlock")
