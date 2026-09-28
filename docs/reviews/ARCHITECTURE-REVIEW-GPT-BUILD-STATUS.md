@@ -1,8 +1,38 @@
 # Architecture review GPT build — execution status
 
-**Status:** open · **Updated:** 2026-09-28 07:02 UTC · **Audited main:** `862372aa4ac8663b560e507a084f554f7084501a`
+**Status:** open · **Updated:** 2026-09-28 07:44 UTC · **Audited main:** `b08b180b38caf780899dc9097146304759197f0f`
 
-**Current native batch:** Apple198/Android135 production and regression-source compilation/signing are complete. The Apple source-only fixture repair has corrected identity fb1954f; its original a9e artifacts retain their true provenance through whole-tree identity proof. Corrected root590 source dd26 is integrated; its fast qualification and all final rollouts remain pending. Exactly one590 review; no594 review or behavior tests yet. The seven current workboard notes are compacted with their dated snapshots preserved verbatim in [history](ARCHITECTURE-REVIEW-GPT-WORKBOARD-HISTORY-2026-09-28.md).
+## Current work
+
+[PR #590](http://192.168.4.7:3000/noirr/plurx/pulls/590) has exactly one completed adversarial review. Its finding and observed fast-lane failures are fixed. Exact candidate `8c5619a4132f12a3940ebb7053c704a108ee9f98` includes current main; pinned Rust1.97.1 check and Clippy pass. [Fast lane #3478](http://192.168.4.7:3000/noirr/plurx/actions/runs/3478) is running against exact base `b08b180b38caf780899dc9097146304759197f0f`. Merge and rollout follow selected green jobs and the qualification receipt.
+
+[Draft #594](http://192.168.4.7:3000/noirr/plurx/pulls/594) contains ordinary native caption controls and explicit known-channel capacity actions. Apple198 and Android135 production and regression sources compile; signed apps and physical runner products are retained. Its sole independent review and behavior tests have not run. Integrate actual590 main before review, address findings, execute focused regressions and required selected fast lane, then merge green.
+
+| Work | Actual evidence | Remaining |
+|---|---|---|
+| Fleet | All four nodes currently run historical `dfef993b`; fresh07:39 readiness is healthy with quorum, leader, lag0 and restarts0. Exactly one historical collector is active. | Qualified current-main rollout; one new uniform normal-use/hour/24-hour/seven-day observation window. |
+| Devices | Apple194 is installed on six devices; signed Android133 on five. Qualified-source Apple197/Android134 and draft-source198/135 products are sealed, not installed. | In-place installs with identity/data readback; locked, offline or absent named hardware remains owed. |
+| D-02 | M1–M5/M7–M9 client code merged through582. | Plan§5.6 physical lifecycle, controller/route, decoder/error and timing matrix. |
+| D-03 | Actual API36 and37 synthetic local restores pass on signed133; positive control and exclusions verified, owned emulator storage cleaned. | Current physical PDF/EPUB/offline behavior; cloud/D2D/physical restore and installed ART performance. |
+| A-02 / A-03 | TV paging/Settings focused cases pass against194 with grouping restored. Historical GoogleTV459/325 filter counts are observed. | Final installed-build controller/seek/lifecycle evidence; named Lenovo6000-item tail/order/request/frame matrix. |
+| W-02 / A-04 | Official fixtures passed historically; Firefox isolated startup is repaired. Current HLS regression passes and old-source control fails its intended assertion. | Final merged/uniform Chrome/Firefox traces, unchanged official cases, LG/FireTV and Safari/HDR/native matrix. |
+| L-03 M2/M4 | Real6.1 source contains439 caption packets. Native selectors and capacity actions are compiled in594. | Sole594 review and qualification, final rollout, actual HLS advertisement/selector/rendered-text and shared-capacity/DVR/device evidence. |
+
+## Current immutable evidence
+
+| Receipt | SHA-256 | Scope |
+|---|---|---|
+| `/private/tmp/codex-pr590-final-compiler-v8-20260928/receipt.json` | `d2982ed3bdb8f7ae4e5801397c775f11dd931ad48127a28abcf196e2f19d375f` | Exact8c candidate/baseb08, pinned check and Clippy; no tests. |
+| `/private/tmp/codex-pr590-current-base-checks-20260928/receipt.json` | `863d38f07dbd6d0bd228ea035f775e08006c00381f3105f2e95487b16709f774` | Actual2585 compiler and focused web, ownership and process checks; current source blob parity retained. |
+| `/private/tmp/codex-pr590-metadata-focused-binding-20260928.json` | `296447d9bd678f89f9985ecca058837223159f9bc324beef16bb7aa558caca50` | Actual focused metadata1/0 execution and source binding; identity amendments do not relabel its original provenance. |
+| `/private/tmp/codex-apple198-final-source-artifact-handoff-20260928/receipt.json` | `b9d2c20948b104fc4051777b9f8d4055b03d65e4ff1d92d7f995136547a117e8` | Signed production, actual Release test-source compilation and physical runner; no tests or installs. |
+| `/private/tmp/codex-pr594-android135-release-20260928/signed-artifact-receipt.json` | `5cbbada22a69c85e4051fb796ed2426b6c7a21492b475d51cbefef9d2b58c835` | Signed135 and production/regression compilation; no tests or installs. |
+
+The seven assigned workboard notes retain their dated source and evidence history in [the verbatim snapshot](ARCHITECTURE-REVIEW-GPT-WORKBOARD-HISTORY-2026-09-28.md). Durations, inaccessible hardware and unperformed actions remain owed.
+
+## Retained dated checkpoints — historical scopes
+
+The entries below preserve earlier candidates, failures and decisions. Their pending-state statements describe those checkpoints; the current table above controls the queue.
 
 Main595 changes STATUS.md only and is integrated as c6b7ced949729143f9d5c69aebdc94a632ea5207. Exact2585 pinned compiler/Clippy and focused web, ownership census and process cancellation all pass (combined receipt863d38f07dbd6d0bd228ea035f775e08006c00381f3105f2e95487b16709f774). Signed Apple197 production and physical runner are sealed; exact current-source Android134 signing and regression-source compilation pass. These products are not yet installed.
 
