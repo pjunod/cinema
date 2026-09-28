@@ -2818,3 +2818,12 @@ source = "clients/apple/Sources/LiveTv.swift"
 source_anchor = "return value.addingPercentEncoding(withAllowedCharacters: unreserved)"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "func testRealCapabilityMasterIsAcceptedAfterStartAndResume() throws"
+
+# Seek attachment pictures belong to the dispatched seek, not a title startup.
+[[fixes]]
+id = "web.seek-picture-does-not-inflate-ttff"
+commits = ["3dc5464a5"]
+source = "crates/plurxd/src/web/player/measurements.js"
+source_anchor = 'if(p.attemptReason==="seek"||p.controlSeek?.seekTelemetry){'
+test = "tests/web/seek-telemetry.test.js"
+test_anchor = "seek attachment startup cannot inflate TTFF before or after its target frame"
