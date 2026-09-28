@@ -340,6 +340,48 @@ fn optical_media(state: &AppState, enabled: bool) -> DeveloperEnableItem {
                 .to_owned()
         },
     });
+    let mut disc_status = if snapshots.is_empty() {
+        RequirementStatus::Unobservable
+    } else {
+        RequirementStatus::Met
+    };
+    let disc_evidence = if snapshots.is_empty() {
+        "No configured drive is available to report a disc state.".to_owned()
+    } else {
+        snapshots
+            .iter()
+            .map(|snapshot| {
+                let state = match &snapshot.state {
+                    OpticalDriveState::Empty => {
+                        if disc_status == RequirementStatus::Met {
+                            disc_status = RequirementStatus::Unobservable;
+                        }
+                        "empty".to_owned()
+                    }
+                    OpticalDriveState::Inspecting { .. } => {
+                        if disc_status == RequirementStatus::Met {
+                            disc_status = RequirementStatus::Unobservable;
+                        }
+                        "reading the inserted disc".to_owned()
+                    }
+                    OpticalDriveState::Ready { .. } => "ready".to_owned(),
+                    OpticalDriveState::Busy { .. } => "in use".to_owned(),
+                    OpticalDriveState::Failed { reason, .. } => {
+                        disc_status = RequirementStatus::Unmet;
+                        format!("failed: {reason}")
+                    }
+                };
+                format!("{}: {state}.", snapshot.label)
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    requirements.push(DeveloperRequirement {
+        id: "optical_disc_state",
+        title: "Current configured-drive state",
+        status: disc_status,
+        evidence: disc_evidence,
+    });
     let ready_count = snapshots
         .iter()
         .filter(|snapshot| matches!(snapshot.state, OpticalDriveState::Ready { .. }))

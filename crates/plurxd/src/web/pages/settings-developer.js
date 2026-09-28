@@ -233,6 +233,7 @@ function opticalMediaCard(settings,readiness){
       ${devReq(readiness,"optical_media","optical_mount","Read-only media mount","The configured mount must exist where the Blu-ray reader expects it.")}
       ${devReq(readiness,"optical_media","optical_permissions","Runtime permissions","The daemon must be able to read the device and perform explicitly authorized ejects. This is checked again for each operation.")}
       ${devReq(readiness,"optical_media","optical_cluster_compatibility","Cluster compatibility","Every drive owner must advertise the versioned optical protocol in a fresh media-pool snapshot; incompatible or stale owners are refused, never guessed.")}
+      ${devReq(readiness,"optical_media","optical_disc_state","Current disc state","Each configured drive reports empty, reading, ready, in use, or a bounded failure reason. Empty and reading states are informational, not enablement failures.")}
       ${devReq(readiness,"optical_media","optical_physical_acceptance","Physical-media qualification","Qualify representative authored and retail DVD/Blu-ray media, seeks, chapters, track changes and installed-package behavior on the real drive.")}
       <p class="devcheck-note">Readiness is advisory and never changes this checkbox. Authorization, drive ownership, one-reader admission and insertion-generation checks remain enforced operational safety rules.</p>
       </div></details>
