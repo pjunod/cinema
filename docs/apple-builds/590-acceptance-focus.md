@@ -1,6 +1,6 @@
 # Keep physical TV focus on the requested control
 
-**Status:** open — sole review complete and its grouping finding addressed; qualification and corrected physical acceptance pending.
+**Status:** open — sole review finding addressed; signed compilation and source-scoped regressions pass; fast qualification and final installed acceptance pending.
 
 Build: 196
 Issue: #590
@@ -14,3 +14,5 @@ The sole PR590 review identified the retained Library grouping prerequisite. The
 Focused regressions ran after that review. Web readiness passed and unchanged old source failed its intended assertion; physical paging passed against canonical194 with grouping restored. Three retained Settings failures led to one bounded diagnostic: Quality focus is an anonymous leaf Other with exactly the uniquely identified Button's frame. The helper accepts only that observed proxy, with nonzero matching geometry and no focused descendants. A larger Cell is not evidence of picker focus. The diagnostic also restored the first failed case's Autoplay change from Off to its original On through observed ordinary UI.
 
 Main moved through #589 to f400c0ea with native Live TV changes and claimed195. This candidate reserves196; fresh signed production apps and focused runner compilation precede qualification. Previous195 artifacts remain historical. No second adversarial review is requested.
+
+Fresh signed196 iOS/tvOS and physical runner compilation passed on72d69a32/mainf400. The corrected runner passed paging and Settings once each against canonical194, zero failures/skips; original grouping restored and Auto/Original menu observed. Receipt545c1f86dda7c1ee9628d494aba892c12cf4eb0975f58c288dc82f3fd2940c20. Final196 installed/current-main acceptance follows qualified deployment.
