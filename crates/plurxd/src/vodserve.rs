@@ -768,6 +768,7 @@ impl Recipe {
         }
     }
 
+    #[cfg(test)]
     fn file(&self) -> &MediaFile {
         self.file_opt()
             .expect("a managed optical recipe has no catalog file")
@@ -5955,10 +5956,12 @@ impl Shared {
         duration_ms: i64,
     ) -> Result<SegmentPlan, String> {
         if matches!(recipe.source, RecipeSource::ManagedOptical { .. }) {
-            let encoding = recipe
-                .encoding
-                .as_ref()
-                .expect("managed optical playback always uses an encoded plan");
+            let encoding = recipe.encoding.as_ref().ok_or_else(|| {
+                crate::transcode::vod_refusal_error(
+                    "vod_source_unsupported",
+                    "managed optical copy VOD has no admitted title-aware index",
+                )
+            })?;
             return Ok(encoding.grid.plan(
                 duration_ms,
                 (encoding.options.video_bitrate_kbps + encoding.options.audio_bitrate_kbps)
@@ -5982,7 +5985,12 @@ impl Shared {
                     .into(),
             )
         } else {
-            let index = index.as_ref().expect("copy recipe has a fragment index");
+            let index = index.as_ref().ok_or_else(|| {
+                crate::transcode::vod_refusal_error(
+                    "vod_index_missing",
+                    "copy VOD requires a complete immutable fragment index",
+                )
+            })?;
             let policy = shipped_policy(index.timescale);
             let tracks = track_durations(index, recipe, duration_ms);
             plurx_core::segplan::plan_copy(index, &policy, &tracks)
@@ -5991,9 +5999,18 @@ impl Shared {
             // Never stored: an empty plan under the key would poison it.
             return Ok(plan);
         }
+        let file_id = recipe
+            .file_opt()
+            .ok_or_else(|| {
+                crate::transcode::vod_refusal_error(
+                    "vod_source_unsupported",
+                    "managed optical copy VOD has no admitted title-aware index",
+                )
+            })?
+            .id;
         let stored = self
             .store
-            .put_rendition_plan(key, recipe.file().id, &plan, identity)
+            .put_rendition_plan(key, file_id, &plan, identity)
             .await
             .map_err(|error| format!("storing the rendition plan: {error}"))?;
         if stored {
@@ -7081,7 +7098,18 @@ async fn spawn_generation(
     // the muxer now — `dvpipe` rewrites the RPUs inside the fragments this
     // process writes — so the producer is the producer it always was.
     let (mut child, stdout, stderr) = {
-        let args = recipe_pipe_args(recipe, start_seconds, attested);
+        let args = match recipe_pipe_args(recipe, start_seconds, attested) {
+            Ok(args) => args,
+            Err(cause) => {
+                record_failure(
+                    shared,
+                    rendition,
+                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                    cause,
+                );
+                return;
+            }
+        };
         let mut command = tokio::process::Command::new(recipe_program(recipe));
         attach_recipe_descriptors(
             &mut command,
@@ -7181,7 +7209,11 @@ fn recipe_program(recipe: &Recipe) -> std::path::PathBuf {
     )
 }
 
-fn recipe_pipe_args(recipe: &Recipe, start_seconds: f64, attested: bool) -> Vec<String> {
+fn recipe_pipe_args(
+    recipe: &Recipe,
+    start_seconds: f64,
+    attested: bool,
+) -> Result<Vec<String>, String> {
     if let Some(encoding) = &recipe.encoding {
         // Plan duration is rounded to a complete output frame, just like the
         // terminal -t. Neither audio padding nor the source's final VFR gap
@@ -7191,18 +7223,15 @@ fn recipe_pipe_args(recipe: &Recipe, start_seconds: f64, attested: bool) -> Vec<
             .entries
             .last()
             .map_or(0, |entry| entry.start_ticks + entry.duration_ticks);
-        let mut args = match recipe.file_opt() {
-            Some(file) => {
+        let mut args = match &recipe.source {
+            RecipeSource::File(file) => {
                 let mut file = file.clone();
                 if attested {
                     file.path = "/dev/fd/3".into();
                 }
                 encoding.args(&file, start_seconds, end as f64 / f64::from(plan.timescale))
             }
-            None => {
-                let RecipeSource::ManagedOptical { input, .. } = &recipe.source else {
-                    unreachable!("a non-file recipe is a managed optical source")
-                };
+            RecipeSource::ManagedOptical { input, .. } => {
                 encoding.managed_args(input, start_seconds, end as f64 / f64::from(plan.timescale))
             }
         };
@@ -7218,11 +7247,14 @@ fn recipe_pipe_args(recipe: &Recipe, start_seconds: f64, attested: bool) -> Vec<
                 }
             }
         }
-        args
+        Ok(args)
     } else {
-        let file = recipe
-            .file_opt()
-            .expect("managed optical playback does not use the copy path");
+        let file = recipe.file_opt().ok_or_else(|| {
+            crate::transcode::vod_refusal_error(
+                "vod_source_unsupported",
+                "managed optical copy VOD has no admitted title-aware index",
+            )
+        })?;
         let mut args = copy_pipe_args_with_dolby_vision(
             file,
             start_seconds,
@@ -7234,7 +7266,7 @@ fn recipe_pipe_args(recipe: &Recipe, start_seconds: f64, attested: bool) -> Vec<
         if attested {
             replace_inputs_with_attested_descriptor(&mut args);
         }
-        args
+        Ok(args)
     }
 }
 
@@ -7867,10 +7899,31 @@ fn rendition_key(recipe: &Recipe, identity: &SourceIdentity) -> String {
             hasher.update(file.audio_offset_ms.to_le_bytes());
         }
         RecipeSource::ManagedOptical { source, facts, .. } => {
-            hasher.update(b"managed-optical-v1\0");
-            let source = serde_json::to_vec(source).expect("validated playback source serializes");
-            hasher.update((source.len() as u64).to_le_bytes());
-            hasher.update(source);
+            hasher.update(b"managed-optical-v2\0");
+            match source {
+                plurx_core::optical::PlaybackSourceRef::Optical {
+                    owner_node_id,
+                    drive_id,
+                    media_generation,
+                    disc_id,
+                    title_id,
+                    angle,
+                } => {
+                    for value in [owner_node_id, drive_id, media_generation, disc_id, title_id] {
+                        hasher.update((value.len() as u64).to_le_bytes());
+                        hasher.update(value.as_bytes());
+                    }
+                    hasher.update(angle.to_le_bytes());
+                }
+                plurx_core::optical::PlaybackSourceRef::File { file_id } => {
+                    // This variant is rejected by managed-source admission,
+                    // but keeping its key distinct makes the hash helper
+                    // total instead of turning a future validation bug into
+                    // a daemon panic or a cache alias.
+                    hasher.update(b"invalid-file-source\0");
+                    hasher.update(file_id.to_le_bytes());
+                }
+            }
             hasher.update(facts.audio_offset_ms.to_le_bytes());
         }
     }
@@ -8198,7 +8251,7 @@ async fn regenerate_init_head(
     } else {
         None
     };
-    let args = recipe_pipe_args(recipe, 0.0, cfg!(unix));
+    let args = recipe_pipe_args(recipe, 0.0, cfg!(unix)).map_err(HeadRegenerationError::Failed)?;
     let audio_source = reopen_encoded_audio(Some(source), recipe)
         .await
         .map_err(HeadRegenerationError::Failed)?;
