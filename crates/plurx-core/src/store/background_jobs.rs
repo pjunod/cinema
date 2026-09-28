@@ -53,6 +53,11 @@ pub const MAX_CHECKPOINT_BYTES: usize = 4 * 1_024;
 
 pub(crate) const SCHEMA: &str = include_str!("background_jobs_schema.sql");
 
+// Settled history is evicted under pressure rather than refusing new work;
+// this migration replaces the enqueue and upkeep triggers. See the file's
+// header for the failure it answers.
+pub(crate) const RETENTION_SCHEMA: &str = include_str!("background_jobs_retention.sql");
+
 // Both backends execute the same admission statement and schema trigger.
 // The returned snapshot is the verdict that authorized the mutation, not a
 // follow-up read which might observe a different concurrent request.
@@ -302,7 +307,13 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
     WHEN json_extract(body, '$.request.scope') LIKE 'user:%' AND (SELECT COUNT(*) FROM background_job_waiters
       WHERE request_scope = json_extract(body, '$.request.scope')
         AND state IN ('pending','awaiting_hydration')) >= 128 THEN 'queue_full'
-    WHEN active_job IS NULL AND (SELECT COUNT(*) FROM background_jobs) >= 10000 THEN 'queue_full'
+    WHEN active_job IS NULL AND (SELECT COUNT(*) FROM background_jobs) >= 10000
+      AND NOT EXISTS (SELECT 1 FROM background_jobs job WHERE job.state IN ('succeeded','failed','cancelled')
+        AND NOT EXISTS (SELECT 1 FROM background_job_legacy remaining WHERE remaining.state = 'awaiting_import'
+          AND remaining.kind = 'fragment_index_build'
+          AND json_extract(remaining.snapshot_json, '$.cache_key') = json_extract(job.payload_json, '$.cache_key'))
+        AND NOT EXISTS (SELECT 1 FROM background_job_waiters
+          WHERE job_id = job.id AND state IN ('pending','awaiting_hydration'))) THEN 'queue_full'
     WHEN active_job IS NULL AND (SELECT COUNT(*) FROM background_jobs
       WHERE state IN ('queued','running','cancelling')) >=
         CASE WHEN json_extract(body, '$.priority') >= 2 THEN 4096 ELSE 3840 END THEN 'queue_full'

@@ -1434,7 +1434,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 40] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 41] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1506,6 +1506,9 @@ mod tests {
             // v84 replaces a background-prefixed trigger. Both fixtures call
             // remove_common_queue_schema before dropping older domain columns.
             "DROP TRIGGER IF EXISTS background_subtitle_settled",
+            // v85 replaces the enqueue and upkeep triggers under their own
+            // names; remove_common_queue_schema drops every background_* object.
+            "DROP TRIGGER IF EXISTS background_job_enqueue_command",
         ];
 
         assert!(

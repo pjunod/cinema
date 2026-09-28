@@ -1058,6 +1058,12 @@ pub enum TargetError {
         roots: Vec<String>,
     },
     Store(StoreError),
+    /// The durable queue would not admit the request — it is full, or the
+    /// same request is being cancelled. Nothing is broken and nothing was
+    /// lost: the caller may try again. Distinct from `Store` because that
+    /// one surfaces as an internal error, and a retryable refusal reported
+    /// as a 500 sends the operator looking for a crash that never happened.
+    Refused(String),
 }
 
 impl std::fmt::Display for TargetError {
@@ -1069,6 +1075,9 @@ impl std::fmt::Display for TargetError {
                 roots.join(", ")
             ),
             TargetError::Store(e) => write!(f, "{e}"),
+            TargetError::Refused(outcome) => {
+                write!(f, "the durable queue refused this request: {outcome}")
+            }
         }
     }
 }

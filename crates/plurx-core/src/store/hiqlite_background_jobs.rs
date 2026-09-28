@@ -70,6 +70,12 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     for result in timeout_store(client.batch(super::background_jobs_predictions::SCHEMA)).await? {
         result.map_err(database_error)?;
     }
+    // Last, as the v62→v63 upgrade applies it, so a fresh cluster and an
+    // upgraded one load the replaced triggers in the same order.
+    validate_sql(super::background_jobs::RETENTION_SCHEMA)?;
+    for result in timeout_store(client.batch(super::background_jobs::RETENTION_SCHEMA)).await? {
+        result.map_err(database_error)?;
+    }
     Ok(())
 }
 

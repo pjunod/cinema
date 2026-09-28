@@ -72,7 +72,7 @@ impl JobManager {
         }
     }
 
-    async fn admit_library(&self, input: NewLibraryWork) -> Result<(), StoreError> {
+    async fn admit_library(&self, input: NewLibraryWork) -> Result<(), TargetError> {
         match self.store.enqueue_library_work(input).await? {
             EnqueueOutcome::Accepted { .. }
             | EnqueueOutcome::Existing {
@@ -81,9 +81,19 @@ impl JobManager {
                 self.library_wake.notify_one();
                 Ok(())
             }
-            outcome => Err(StoreError::Task(format!(
+            // Full, or the same request is still being cancelled: nothing is
+            // wrong and trying again is the answer. A conflict, a library that
+            // vanished, or fenced producer is not — those stay failures.
+            outcome @ (EnqueueOutcome::QueueFull
+            | EnqueueOutcome::JobCancelling { .. }
+            | EnqueueOutcome::Existing {
+                cancelled: true, ..
+            }) => Err(TargetError::Refused(format!(
                 "library work was not accepted: {outcome:?}"
             ))),
+            outcome => Err(TargetError::Store(StoreError::Task(format!(
+                "library work was not accepted: {outcome:?}"
+            )))),
         }
     }
 
@@ -425,6 +435,9 @@ impl JobManager {
                         error: error.to_string(),
                     },
                     Err(TargetError::Store(error)) => return Err(error),
+                    Err(error @ TargetError::Refused(_)) => LibraryWorkResult::Failed {
+                        error: error.to_string(),
+                    },
                 };
                 for (id, _) in requests {
                     self.complete_library_request(publisher, fence, id, result.clone())
