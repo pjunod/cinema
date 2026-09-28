@@ -146,7 +146,7 @@ function newAttempt(reason){
   PLAYER.attemptAt=performance.now();
 }
 function playbackContext(){
-  const v=document.getElementById("video"), p=PLAYER||{};
+  const v=document.getElementById("video"), p=/** @type {Player} */(PLAYER||{});
   return {
     // What is on screen, not what was asked for — under Auto the request
     // carries no height at all, and a beacon that reported null would lose the
@@ -249,11 +249,20 @@ function beginWait(v){
   const p=PLAYER;
   if(!p||!p.started||v.seeking||v.paused) return;
   if(!playbackOwnsAttachedMedia(p)) return;
+  // `seeked` can fire before a sparse VOD target is fetched. The local
+  // seek's bounded fallback owns that gap, including `waiting` events after
+  // the element has cleared its seeking flag.
+  const pending=p.controlSeek;
+  if(pending?.localVodSeekFallbackPending&&pending.executed
+     &&!playbackSeekBufferCovers(v,p,pending.targetMs)){
+    if(p.waitAt!=null) endWait(false);
+    return;
+  }
   if(p.waitAt) return;                       // already hungry; not a second one
   p.waitAt=performance.now();
   p.waitStartedRunway=bufferRunway(v);
   p.waitNudgedAt=null;
-  p.waitReported=false;
+  p.waitReported=false; p.waitReportedMs=null; p.waitReportedDetail=null;
   const began=p.waitAt;
   const generation=p._seekToken||0;
   const actionGeneration=p.controlIntentGeneration||0;
@@ -297,8 +306,23 @@ function endWait(resumed){
   const ms=Math.round(performance.now()-began);
   const runway=p.waitStartedRunway;
   const reported=!!p.waitReported;
+  const reportedMs=Number(p.waitReportedMs)||0;
+  const reportedDetail=p.waitReportedDetail||"persistent";
   p.waitAt=null; p.waitStartedRunway=null; p.waitNudgedAt=null; p.waitReported=false;
-  if(reported) return;                       // persistentWait already emitted it
+  p.waitReportedMs=null; p.waitReportedDetail=null;
+  if(reported){
+    // persistentWait already reported this stall, while it was still frozen,
+    // with the time up to then. Send the rest now that it has ended, however
+    // it ended (resumed, recovered, or left), or the server's stalled seconds
+    // stop counting every long web stall at that first report. Same detail,
+    // so the same kind; a separate event, so it is still one stall.
+    const rest=ms-reportedMs;
+    if(rest>0) clientLog(Object.assign({level:"info",event:"stall_end",detail:reportedDetail,
+      ms:rest,message:`stall ended after ${(ms/1000).toFixed(1)}s`+
+        ` (${(rest/1000).toFixed(1)}s after its report)${resumed?"":" without resuming"}`},
+      playbackContext()));
+    return;
+  }
   if(!resumed || ms<STALL_MIN_MS) return;    // a hitch, not a stall
   let video=null; try{video=document.getElementById&&document.getElementById("video");}catch(e){}
   const kind=persistentWaitEvidence(video,runway).kind;
@@ -362,6 +386,12 @@ async function persistentWait(v,p,began,generation,actionGeneration){
      (p.controlIntentGeneration||0)!==actionGeneration ||
      p.wantsPlayback===false || (p.wantsPlayback==null&&v.paused) ||
      (v.seeking&&!p.controlSeek?.executed&&!p.progressWatch?.fired)) return;
+  const pending=p.controlSeek;
+  if(pending?.localVodSeekFallbackPending&&pending.executed
+     &&!playbackSeekBufferCovers(v,p,pending.targetMs)){
+    endWait(false);
+    return;
+  }
   p.waitTimer=null;
   const ms=Math.round(performance.now()-began);
   const startedRunway=p.waitStartedRunway;
@@ -369,6 +399,8 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   let evidence=persistentWaitEvidence(v,currentRunway), kind=evidence.kind;
   const firstReport=!p.waitReported;
   p.waitReported=true;
+  // What this report credits, so endWait can send exactly the rest.
+  if(firstReport){ p.waitReportedMs=ms; p.waitReportedDetail=`${kind}-persistent`; }
   // This exact transition owns the legacy reopen. Cadence alone is too late:
   // the replacement normally stops this reporter before its next scheduled
   // exchange, leaving the server with only the earlier `waiting` fact.
@@ -414,6 +446,12 @@ async function persistentWait(v,p,began,generation,actionGeneration){
      (p.controlIntentGeneration||0)!==actionGeneration ||
      p.wantsPlayback===false || (p.wantsPlayback==null&&v.paused) ||
      (v.seeking&&!p.controlSeek?.executed&&!p.progressWatch?.fired)) return;
+  const currentPending=p.controlSeek;
+  if(currentPending?.localVodSeekFallbackPending&&currentPending.executed
+     &&!playbackSeekBufferCovers(v,p,currentPending.targetMs)){
+    endWait(false);
+    return;
+  }
   // The ask itself consumes frozen-picture time. Re-read the absolute age
   // after it settles so a slow control response cannot extend the deadline.
   const controlElapsedMs=Math.round(performance.now()-began);
@@ -674,7 +712,11 @@ function artHtml(it, cls){
   // A photo whose thumbnail hasn't been generated yet still has itself to
   // show — the endpoint falls back to the original.
   const src=it.poster||it.backdrop||(it.kind==='photo'?`/api/v1/items/${it.id}/photo?size=thumb`:null);
-  if(src) return `<img class="art ${cls||''}" loading="lazy" src="${esc(tok(src))}" alt="">`;
+  // `decoding="async"` keeps a grid of posters off the main thread's critical
+  // path: the browser may decode each image whenever it likes instead of
+  // blocking the paint that reveals the card. It is advisory and understood
+  // everywhere `loading="lazy"` is, so there is nothing to feature-detect.
+  if(src) return `<img class="art ${cls||''}" loading="lazy" decoding="async" src="${esc(tok(src))}" alt="">`;
   if(it.kind==='season' && it.season_number!=null)
     return `<div class="art ph season ${cls||''}"><div class="snum">${it.season_number}</div><div class="sl">Season</div></div>`;
   if(it.kind==='audiobook') return `<div class="art ph ${cls||''}" aria-label="Audiobook">♫</div>`;
@@ -682,4 +724,3 @@ function artHtml(it, cls){
   const label=(it.title||"?").split(/\s+/).slice(0,2).map(w=>w[0]||"").join("").toUpperCase()||"?";
   return `<div class="art ph ${cls||''}">${esc(label)}</div>`;
 }
-

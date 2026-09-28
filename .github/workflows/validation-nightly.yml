@@ -116,10 +116,73 @@ jobs:
             fuzz/artifacts
           if-no-files-found: warn
           retention-days: 14
+      - name: Summarize the PGS campaign
+        if: always()
+        run: scripts/fuzz-campaign --summarize inspect_sup target/validation/pgs-fuzz.log ${{ steps.pgs_fuzz.outcome == 'failure' && 1 || 0 }}
       - name: Fail when the PGS fuzzer finds a crash
         if: always() && steps.pgs_fuzz.outcome == 'failure'
         run: |
           echo "The bounded PGS fuzz campaign found a reproducible failure." \
+            >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+  # The four parser seams of docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md
+  # §3.6, on the same bounded budget and artefact upload as the PGS campaign.
+  # They are their own cargo-fuzz package, fuzz/parsers/, so the PGS job above
+  # never compiles plurx-core under AddressSanitizer inside its step budget.
+  # One matrix job rather than four copies: the toolchain and cargo-fuzz install
+  # are identical, and `fail-fast: false` keeps one target's finding from
+  # cancelling the other three. `scripts/fuzz-campaign` writes executions and
+  # corpus growth as a one-row table into each job's own step summary, and the
+  # run's summary page lists all five campaigns under their job headings, so a
+  # target that has stopped finding new edges is visible without opening its
+  # log; fifteen minutes per target is a budget, not coverage evidence.
+  parser-fuzz:
+    name: bounded ${{ matrix.target }} fuzz campaign
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fmp4_reader, rpu_rewrite, nfo_parse, epub_facts]
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+      # One cache key for the whole matrix: the four targets share every
+      # dependency, so whichever job saves first warms the other three.
+      - uses: https://github.com/Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: nightly-parser-fuzz
+          workspaces: |
+            fuzz/parsers -> target
+      - name: Install the fuzz runner
+        run: |
+          rustup toolchain install nightly-2026-08-01 --profile minimal
+          cargo install cargo-fuzz --locked
+        timeout-minutes: 20
+      - name: Check the seed corpus is present
+        run: scripts/fuzz-seeds --check
+      - name: Fuzz ${{ matrix.target }}
+        id: campaign
+        continue-on-error: true
+        timeout-minutes: 60
+        run: scripts/fuzz-campaign ${{ matrix.target }} 900
+      - name: Upload ${{ matrix.target }} fuzz evidence
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: nightly-fuzz-${{ matrix.target }}-evidence
+          path: |
+            target/validation/fuzz-${{ matrix.target }}.log
+            fuzz/parsers/artifacts
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Fail when the ${{ matrix.target }} fuzzer finds a crash
+        if: always() && steps.campaign.outcome == 'failure'
+        run: |
+          echo "The bounded ${{ matrix.target }} fuzz campaign found a reproducible failure." \
             >> "$GITHUB_STEP_SUMMARY"
           exit 1
 

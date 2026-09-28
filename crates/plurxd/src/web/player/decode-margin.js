@@ -255,7 +255,7 @@ const MSE_BACK_BYTES=12e6;
 const MSE_MIN_RESIDENT_BYTES=48e6;
 // `segSecs` is the longest segment this session publishes, once known.
 function bufferTargets(segSecs){
-  const p=PLAYER||{};
+  const p=/** @type {Player} */(PLAYER||{});
   // Only a copied stream puts the source's own bitrate on the wire. A
   // transcode's output is bounded by the rung, and its SOURCE bitrate says
   // nothing about what it will send — using it here would shrink the buffer on
@@ -352,6 +352,10 @@ function destroyHlsInstance(p,hls,element){
   resetPlaybackTransportEvents(element);
 }
 function teardownHls(){
+  // A committed switch may still own a hidden predecessor while its idle
+  // retirement waits. A seek or close must drain it before replacing media.
+  if(PLAYER&&PLAYER.preparedRetiring)
+    retirePreparedPredecessor(PLAYER,PLAYER.preparedRetiring);
   if(PLAYER) cancelHlsStartup(PLAYER,'teardown');
   if(PLAYER) PLAYER.mediaAttachment=null;
   // A staged successor belongs to the stream it was prepared against. Any new
@@ -490,9 +494,12 @@ function handlePlaybackTransportEvent(v,p,event){
 // with it and the callbacks run forever.
 function stopPlayerTimers(){
   if(!PLAYER) return;
+  if(PLAYER.preparedRetiring)
+    retirePreparedPredecessor(PLAYER,PLAYER.preparedRetiring);
   stopPlaybackControl(PLAYER);
   clearPendingSeekTimer();
   clearInterval(PLAYER.timer); PLAYER.timer=null;
+  clearInterval(PLAYER.autoTimer); PLAYER.autoTimer=null;
   clearInterval(PLAYER.progressTimer); PLAYER.progressTimer=null;
   clearTimeout(PLAYER.idleTimer); PLAYER.idleTimer=null;
   clearTimeout(PLAYER.stallTimer); PLAYER.stallTimer=null;
@@ -501,7 +508,7 @@ function stopPlayerTimers(){
 }
 // Every per-player sampling timer, armed together: the 500 ms progress tick —
 // which is the stall detector, the presenter's only evidence and the clock its
-// timed notices age against — and the 5 s controller tick.
+// timed notices age against — the 1 s Auto decision and the 5 s maintenance tick.
 //
 // `play()` arms them when a stream attaches. `armStall` re-arms them for a
 // stream that starts again after the recovery owner stopped the player, because
@@ -513,12 +520,20 @@ function armPlaybackSampling(v,p){
   if(!v||!p) return;
   clearInterval(p.progressTimer);
   p.progressTimer=setInterval(()=>playbackSamplingTick(v,p),500);
+  clearInterval(p.autoTimer);
+  p.autoTimer=setInterval(()=>{
+    if(playbackOwnsAttachedMedia(p)) queueAutoControllerTick(p,false);
+  },PlaybackPolicy.AUTO_DEFAULTS.decisionMs);
   clearInterval(p.timer);
   p.timer=setInterval(()=>{
     if(!playbackOwnsAttachedMedia(p)) return;
     reportProgress(p.fileId); reportHitches(); maybeDecodeRescue();
-    autoControllerTick().catch(()=>{}); refreshSegTimes(); libraryChannelTick();
+    refreshSegTimes(); libraryChannelTick();
   }, PlaybackPolicy.AUTO_DEFAULTS.sampleMs);
+  // The OS transport belongs to whatever stream is attached now, and this is
+  // where a stream that attaches gets its timers. Re-arming re-installs, which
+  // is what a Force transcode out of a stall needs: the same handlers pointing
+  // at the element that is actually playing.
+  installPlayerMediaSession();
   p.samplingStopped=false;
 }
-

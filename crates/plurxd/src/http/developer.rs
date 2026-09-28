@@ -40,9 +40,8 @@ use crate::state::AppState;
 
 /// What the server can see of this prerequisite right now.
 ///
-/// Deliberately three values. Two would force every fact the daemon cannot
-/// reach into either a false `Met` or a misleading `Unmet`, and both of those
-/// are worse than saying so.
+/// Separate an unmet requirement from unknown evidence and unavailable reads.
+/// Older cards retain `Unobservable` for their existing API contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RequirementStatus {
@@ -53,6 +52,10 @@ pub(crate) enum RequirementStatus {
     /// Not answerable from a running daemon, or answerable only in part.
     /// `evidence` says what was read, what was not, and where the rest lives.
     Unobservable,
+    /// No observation proves the requirement for the pending work.
+    Unknown,
+    /// The observation could not be obtained.
+    Unavailable,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,6 +99,7 @@ pub(crate) struct DeveloperEnableItem {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct DeveloperReadiness {
+    pub observed_at_ms: i64,
     /// Nothing here is cached between requests. Most rows are read when the
     /// request arrives; three of them (`recovery_receipt`, `fleet_receipt`,
     /// `server_preparation_is_real`) are statements about an artifact or about
@@ -166,6 +170,18 @@ pub(crate) async fn readiness(
             .map(String::as_str),
         true,
     );
+    let cluster_sources_on = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::SUBTITLE_CLUSTER_SOURCES)
+            .map(String::as_str),
+        false,
+    );
+    let subtitle_backfill_on = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::SUBTITLE_BACKFILL)
+            .map(String::as_str),
+        false,
+    );
 
     // Absent is on, unlike every other switch here, because a Profile 7 title
     // reaching a Dolby Vision client as HDR10 is what the conversion exists to
@@ -194,7 +210,19 @@ pub(crate) async fn readiness(
         .await?;
 
     Ok(Json(DeveloperReadiness {
+        observed_at_ms: crate::state::clock_ms(),
         items: vec![
+            durable_cluster_work(&state).await,
+            bounded_catalogue_reads(
+                &state,
+                plurx_core::store::stored_switch(
+                    settings
+                        .get(plurx_core::store::keys::BOUNDED_REPLICA_READS)
+                        .map(String::as_str),
+                    state.catalogue.bounded_reads_default(),
+                ),
+            )
+            .await,
             cluster_backup(
                 &state,
                 settings.get(plurx_core::store::keys::BACKUP_DESTINATION),
@@ -221,16 +249,256 @@ pub(crate) async fn readiness(
             live_hls_recovery(live_recovery_on),
             pgs_overlay(overlay_on),
             subtitle_stored_sources(stored_sources_on, &state.runtime_cache_dir),
+            subtitle_cluster_sources(
+                &state,
+                cluster_sources_on,
+                state.jobs.analysis_queue_enabled().await,
+            )
+            .await,
+            subtitle_backfill(&state, subtitle_backfill_on).await,
             subtitle_not_ready_503(plurx_core::store::stored_switch(
                 settings
                     .get(plurx_core::store::keys::SUBTITLE_NOT_READY_503)
                     .map(String::as_str),
                 false,
             )),
+            chapter_thumbnails(&state).await,
             dolby_vision_convert(convert_on),
             source_probe_comparison().await,
         ],
     }))
+}
+
+async fn bounded_catalogue_reads(state: &AppState, enabled: bool) -> DeveloperEnableItem {
+    let observed = state.catalogue.bounded_read_observation().await;
+    DeveloperEnableItem {
+        id: "bounded_catalogue_reads", title: "Local catalogue reads", enabled: Some(enabled),
+        setting: Some("bounded_replica_reads"),
+        requirements: vec![DeveloperRequirement {
+            id: "replica_proof", title: "Fresh replica proof",
+            status: match observed { Some(true) => RequirementStatus::Met, Some(false) => RequirementStatus::Unmet, None => RequirementStatus::Unobservable },
+            evidence: match observed {
+                Some(true) => "This node currently has a fresh quorum watermark, matching Raft term and acceptable apply lag. Each read revalidates that proof before returning.",
+                Some(false) => "This node cannot currently prove a bounded local read. Reads automatically use authority until the proof recovers.",
+                None => "This process uses the ordinary Store reader; standalone SQLite needs no replica optimization.",
+            }.into(),
+        }, DeveloperRequirement {
+            id: "watch_floor", title: "Watch state consistency", status: RequirementStatus::Met,
+            evidence: "Watch reads require a valid client write-position echo and a sufficiently applied replica. Missing, expired or unknown positions use authority; authentication always uses authority.".into(),
+        }],
+    }
+}
+
+/// Facts only: these observations are never consulted by settings updates.
+async fn durable_cluster_work(state: &AppState) -> DeveloperEnableItem {
+    use plurx_core::cluster::coordination::ClusterJobAuthority;
+    use plurx_core::store::background_jobs::JobKind;
+    use RequirementStatus::{Met, Unavailable, Unknown, Unmet};
+    let (queue_status, queue_evidence) = match tokio::time::timeout(
+        std::time::Duration::from_secs(3), state.store.job_migration_status()
+    ).await {
+        Ok(Ok(migration)) => (Met, format!(
+            "The durable Store responded; {} sealed legacy interests await import and {} are mapped. This is a current read, not a future quorum guarantee.",
+            migration.awaiting_import, migration.materialized)),
+        Ok(Err(error)) => (Unavailable, format!("The durable queue observation failed: {error}")),
+        Err(_) => (Unavailable, "The durable queue did not answer within the three-second observation budget.".into()),
+    };
+    let capabilities = state.transcode.pretranscode_capabilities();
+    let inventory_status = if capabilities.decoders.is_empty() {
+        Unknown
+    } else {
+        Met
+    };
+    let capacity_idle = state.transcode.pretranscode_worker_idle();
+    let (peer_status, peer_evidence) = match tokio::time::timeout(
+        std::time::Duration::from_secs(3), state.membership.media_peers()
+    ).await {
+        Ok(Ok(peers)) => (Unknown, format!(
+            "{} reachable media peers are reported. Reachability does not prove each job's payload version, source access or encoder recipe; workers check those individually.",
+            peers.iter().filter(|peer| peer.reachable).count())),
+        Ok(Err(error)) => (Unavailable, format!("The peer directory could not be observed: {error}")),
+        Err(_) => (Unavailable, "The peer directory did not answer within the three-second observation budget.".into()),
+    };
+    let (role_status, role_evidence) = match tokio::time::timeout(
+        std::time::Duration::from_secs(3), async {
+            tokio::join!(state.membership.may_execute_job(JobKind::FragmentIndexBuild),
+                state.membership.may_run_cluster_jobs())
+        }
+    ).await {
+        Ok((artifact, catalogue)) => (if artifact { Met } else { Unmet }, format!(
+            "This node currently has artifact execution authority: {artifact}; catalogue/provider coordination authority: {catalogue}. Ready learners may execute immutable preparation, but scans and provider ownership remain voter work.")),
+        Err(_) => (Unavailable, "Worker authority did not answer within the three-second observation budget.".into()),
+    };
+    DeveloperEnableItem {
+        id: "durable_cluster_work", title: "Durable cluster work", enabled: None, setting: None,
+        requirements: vec![
+            DeveloperRequirement { id: "durable_role", title: "Current worker authority", status: role_status, evidence: role_evidence },
+            DeveloperRequirement { id: "durable_store", title: "Durable queue storage", status: queue_status, evidence: queue_evidence },
+            DeveloperRequirement { id: "durable_tools", title: "Worker tool inventory", status: inventory_status,
+                evidence: format!("This worker reports {} boot-probed decoders and {} encoder families. Each job still needs its exact pipeline and output recipe.", capabilities.decoders.len(), capabilities.encoder_families.len()) },
+            DeveloperRequirement { id: "durable_capacity", title: "Spare processing capacity", status: if capacity_idle { Met } else { Unmet },
+                evidence: if capacity_idle { "No foreground or offline encoder reservation currently blocks background admission. This observation does not reserve a slot." } else { "Foreground, offline or background work currently occupies the media pool; queued work waits for actual admission." }.into() },
+            DeveloperRequirement { id: "durable_scratch", title: "Fresh cache headroom", status: if capabilities.scratch_bytes > 0 { Met } else { Unknown },
+                evidence: format!("The current scratch sampler reports {} usable bytes. Zero can mean no fresh sample; actual jobs also check their own size, cache budget and writable destination.", capabilities.scratch_bytes) },
+            DeveloperRequirement { id: "durable_sources", title: "Source access on a worker", status: Unknown,
+                evidence: "This page does not scan library mounts. Each claimed job checks its source generation and readable descriptor on the chosen worker.".into() },
+            DeveloperRequirement { id: "durable_peers", title: "Compatible peers", status: peer_status, evidence: peer_evidence },
+        ],
+    }
+}
+
+/// Readiness is a report about this node and the peers it can currently see.
+/// Saving either switch goes through Settings without consulting these rows.
+async fn subtitle_cluster_sources(
+    state: &AppState,
+    enabled: bool,
+    queue_enabled: bool,
+) -> DeveloperEnableItem {
+    use crate::subtitle_ride_along::{free_space, local_filesystem};
+
+    let root = crate::subtitle_source::store_root(&state.runtime_cache_dir);
+    let checked = if root.is_dir() {
+        root
+    } else {
+        state.runtime_cache_dir.clone()
+    };
+    let peers = state.membership.media_peers().await;
+    let (peer_status, peer_evidence) = match peers {
+        Ok(peers) if peers.iter().any(|peer| peer.reachable) => (
+            RequirementStatus::Met,
+            format!(
+                "{} reachable media peer(s) currently advertise capacity.",
+                peers.iter().filter(|peer| peer.reachable).count()
+            ),
+        ),
+        Ok(peers) => (
+            RequirementStatus::Unmet,
+            format!(
+                "{} media peer(s) are known, but none currently advertises reachable capacity.",
+                peers.len()
+            ),
+        ),
+        Err(error) => (
+            RequirementStatus::Unobservable,
+            format!("The media peer directory could not be read: {error}"),
+        ),
+    };
+    let (filesystem_status, filesystem_evidence) = match local_filesystem(&checked) {
+        Ok(kind) => (
+            RequirementStatus::Met,
+            format!("{} is on a local filesystem ({kind}).", checked.display()),
+        ),
+        Err(error) => (
+            RequirementStatus::Unmet,
+            format!("{}: {error}", checked.display()),
+        ),
+    };
+    let (space_status, space_evidence) = match free_space(&checked) {
+        Ok(space) => (
+            RequirementStatus::Met,
+            format!("{}: {space}.", checked.display()),
+        ),
+        Err(error) => (
+            RequirementStatus::Unmet,
+            format!("{}: {error}", checked.display()),
+        ),
+    };
+    DeveloperEnableItem {
+        id: "subtitle_cluster_sources",
+        title: "Share stored subtitle tracks across the cluster",
+        enabled: Some(enabled),
+        setting: Some("subtitle_cluster_sources"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "analysis_queue",
+                title: "Cluster analysis queue is enabled",
+                status: if queue_enabled { RequirementStatus::Met } else { RequirementStatus::Unmet },
+                evidence: format!("The cluster analysis scheduler currently reports {}.", if queue_enabled { "available" } else { "unavailable" }),
+            },
+            DeveloperRequirement {
+                id: "schema_v47",
+                title: "Every voter runs schema 47",
+                status: RequirementStatus::Unobservable,
+                evidence: "This binary supports schema 47. The daemon has no per-voter schema-version reading; inspect the committed voter fleet before enabling.".to_owned(),
+            },
+            DeveloperRequirement { id: "reachable_peer", title: "A reachable media peer", status: peer_status, evidence: peer_evidence },
+            DeveloperRequirement { id: "local_cache", title: "A local subtitle store", status: filesystem_status, evidence: filesystem_evidence },
+            DeveloperRequirement { id: "free_space", title: "Space for stored tracks", status: space_status, evidence: space_evidence },
+        ],
+    }
+}
+
+async fn subtitle_backfill(state: &AppState, enabled: bool) -> DeveloperEnableItem {
+    let observed = state
+        .subtitle_backfill_status()
+        .await
+        .map_err(|error| error.to_string());
+    subtitle_backfill_item(enabled, observed)
+}
+
+fn subtitle_backfill_item(
+    enabled: bool,
+    observed: Result<crate::state::SubtitleBackfillStatus, String>,
+) -> DeveloperEnableItem {
+    let (lease, enqueued, remaining, bytes) = match observed {
+        Ok(status) => {
+            let holder = status
+                .lease_holder
+                .as_deref()
+                .unwrap_or("none between passes");
+            (
+                DeveloperRequirement {
+                    id: "backfill_lease",
+                    title: "Exclusive backfill lease",
+                    status: if status.lease_holder.is_some() {
+                        RequirementStatus::Met
+                    } else {
+                        RequirementStatus::Unobservable
+                    },
+                    evidence: format!("Current media:subtitle-source:backfill lease holder: {holder}."),
+                },
+                DeveloperRequirement {
+                    id: "backfill_enqueued",
+                    title: "Files enqueued by this process",
+                    status: RequirementStatus::Met,
+                    evidence: format!("{} files enqueued since this process started.", status.enqueued_process),
+                },
+                DeveloperRequirement {
+                    id: "backfill_remaining",
+                    title: "Eligible files remaining",
+                    status: RequirementStatus::Met,
+                    evidence: format!("{} files still have an eligible subtitle ordinal without settling coverage.", status.remaining_files),
+                },
+                DeveloperRequirement {
+                    id: "backfill_bytes",
+                    title: "Estimated bytes remaining",
+                    status: RequirementStatus::Met,
+                    evidence: format!("{} source bytes across the eligible files; this is an estimate of source reading, not output size.", status.remaining_bytes),
+                },
+            )
+        }
+        Err(error) => {
+            let unavailable = |id: &'static str, title: &'static str| DeveloperRequirement {
+                id,
+                title,
+                status: RequirementStatus::Unobservable,
+                evidence: format!("The backfill diagnostics read failed: {error}."),
+            };
+            (
+                unavailable("backfill_lease", "Exclusive backfill lease"),
+                unavailable("backfill_enqueued", "Files enqueued by this process"),
+                unavailable("backfill_remaining", "Eligible files remaining"),
+                unavailable("backfill_bytes", "Estimated bytes remaining"),
+            )
+        }
+    };
+    DeveloperEnableItem {
+        id: "subtitle_backfill",
+        title: "Backfill uncovered subtitle tracks while idle",
+        enabled: Some(enabled),
+        setting: Some("subtitle_backfill"),
+        requirements: vec![lease, enqueued, remaining, bytes],
+    }
 }
 
 fn cluster_backup(state: &AppState, destination: Option<&String>) -> DeveloperEnableItem {
@@ -718,15 +986,15 @@ fn subtitle_stored_sources(enabled: bool, runtime_cache: &std::path::Path) -> De
         ),
         SelfTest::Failed { reason } => (
             RequirementStatus::Unmet,
-            format!("Failed, so the index pass keeps no PGS tracks on this process: {reason}"),
+            format!("Failed; inspect this ffmpeg build before relying on stored tracks: {reason}"),
         ),
         SelfTest::Running => (
             RequirementStatus::Unobservable,
-            "Running now; the index pass keeps no PGS tracks until it passes.".to_owned(),
+            "Running now; its result is advisory and does not change the saved switch.".to_owned(),
         ),
         SelfTest::NotRun => (
             RequirementStatus::Unobservable,
-            "Has not run in this process; the index pass keeps no PGS tracks until it passes."
+            "Has not run in this process; verify the configured ffmpeg build before relying on stored tracks."
                 .to_owned(),
         ),
     };
@@ -743,11 +1011,7 @@ fn subtitle_stored_sources(enabled: bool, runtime_cache: &std::path::Path) -> De
         ),
         Err(reason) => (
             RequirementStatus::Unmet,
-            format!(
-                "{}: {reason}. The index pass keeps no PGS tracks here: a blocked stage \
-                 write would stall the demuxer the index shares.",
-                checked.display()
-            ),
+            format!("{}: {reason}. A blocked stage write may stall the shared index demuxer; the setting remains available.", checked.display()),
         ),
     };
     let (space_status, space_evidence) = match ride_along::free_space(&checked) {
@@ -757,11 +1021,7 @@ fn subtitle_stored_sources(enabled: bool, runtime_cache: &std::path::Path) -> De
         ),
         Err(reason) => (
             RequirementStatus::Unmet,
-            format!(
-                "{}: {reason}. The index pass keeps no PGS tracks until there is room: stage \
-                 writes share the disk with the index blob the pass is about to publish.",
-                checked.display()
-            ),
+            format!("{}: {reason}. Stage writes share capacity with the index blob; the setting remains available.", checked.display()),
         ),
     };
     let failed = ride_along::failed_ride_count();
@@ -1302,6 +1562,128 @@ fn prepared_quality_handoff(enabled: bool) -> DeveloperEnableItem {
     }
 }
 
+// Chapter thumbnails.
+//
+// The watch view's chapter rail shows a frame per chapter, made on request by
+// one ffmpeg seek and kept under the runtime cache. The switch is the enable
+// path; the rows say what an extraction needs and what this process has done
+// so far, and never turn the switch.
+async fn chapter_thumbnails(state: &AppState) -> DeveloperEnableItem {
+    use crate::http::chapter_thumbs;
+    use crate::subtitle_ride_along as ride_along;
+
+    let enabled = chapter_thumbs::enabled(state).await;
+    let counts = chapter_thumbs::snapshot();
+    let root = chapter_thumbs::cache_root(&state.runtime_cache_dir);
+    let checked = if root.is_dir() {
+        root.clone()
+    } else {
+        state.runtime_cache_dir.clone()
+    };
+    // Two directory walks and a statvfs, off the async runtime.
+    let runtime_cache = state.runtime_cache_dir.clone();
+    let checked_for_space = checked.clone();
+    let ((files, bytes), space) = tokio::task::spawn_blocking(move || {
+        (
+            chapter_thumbs::cache_footprint(&runtime_cache),
+            ride_along::free_space(&checked_for_space),
+        )
+    })
+    .await
+    .unwrap_or_else(|_| ((0, 0), Err("the readiness walk panicked".to_owned())));
+    let (ffmpeg_status, ffmpeg_evidence) = match state.system.ffmpeg_version.as_deref() {
+        Some(version) if !version.trim().is_empty() => (
+            RequirementStatus::Met,
+            format!(
+                "{} answered `-version` at startup: {}.",
+                state.system.ffmpeg,
+                version.trim()
+            ),
+        ),
+        _ => (
+            RequirementStatus::Unmet,
+            format!(
+                "{} did not answer `-version` at startup, so every extraction will fail \
+                 and the rail shows numbered tiles.",
+                state.system.ffmpeg
+            ),
+        ),
+    };
+    let (space_status, space_evidence) = match space {
+        Ok(evidence) => (
+            RequirementStatus::Met,
+            format!("{}: {evidence}.", checked.display()),
+        ),
+        Err(reason) => (
+            RequirementStatus::Unmet,
+            format!(
+                "{}: {reason}. A thumbnail is tens of kilobytes, but a cache with no room \
+                 fails every write.",
+                checked.display()
+            ),
+        ),
+    };
+    DeveloperEnableItem {
+        id: "chapter_thumbnails",
+        title: "Make chapter thumbnails for the watch view",
+        enabled: Some(enabled),
+        setting: Some("chapter_thumbnails"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "chapter_thumbs_ffmpeg",
+                title: "ffmpeg can decode a frame",
+                status: ffmpeg_status,
+                evidence: ffmpeg_evidence,
+            },
+            DeveloperRequirement {
+                id: "chapter_thumbs_cache_space",
+                title: "The runtime cache has room",
+                status: space_status,
+                evidence: space_evidence,
+            },
+            DeveloperRequirement {
+                id: "chapter_thumbs_work",
+                title: "What this process has extracted",
+                // Counters read from this process, so always answerable.
+                status: RequirementStatus::Met,
+                evidence: format!(
+                    "Since this process started: {} thumbnail(s) made, {} served from the \
+                     cache, {} extraction(s) failed, {} running now, {} request(s) refused \
+                     while the switch was off. Each extraction is one ffmpeg seek and one \
+                     decoded frame, CPU only, bounded to {} at a time and {} seconds each; \
+                     nothing runs unless a watch page asks for that chapter, and a failed \
+                     chapter is not retried for an hour. On disk: {files} thumbnail(s), {} \
+                     under {}.",
+                    counts.generated,
+                    counts.served_cached,
+                    counts.failed,
+                    counts.in_flight,
+                    counts.refused_off,
+                    chapter_thumbs::EXTRACT_CONCURRENCY,
+                    chapter_thumbs::EXTRACT_TIMEOUT.as_secs(),
+                    human_bytes(bytes),
+                    root.display()
+                ),
+            },
+        ],
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 /// Refusing a subtitle segment whose sidecar has failed, instead of serving a
 /// syntactically valid empty track.
 ///
@@ -1651,6 +2033,80 @@ fn channel_subjects(enabled: bool) -> DeveloperEnableItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn developer_item_renders_each_requirement_from_real_probes() {
+        let item = subtitle_backfill_item(
+            true,
+            Ok(crate::state::SubtitleBackfillStatus {
+                lease_holder: Some("node-b".to_owned()),
+                enqueued_process: 7,
+                remaining_files: 12,
+                remaining_bytes: 987_654,
+            }),
+        );
+        assert_eq!(item.enabled, Some(true));
+        assert_eq!(item.setting, Some("subtitle_backfill"));
+        assert_eq!(
+            item.requirements
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            [
+                "backfill_lease",
+                "backfill_enqueued",
+                "backfill_remaining",
+                "backfill_bytes"
+            ]
+        );
+        for (row, expected) in
+            item.requirements
+                .iter()
+                .zip(["node-b", "7 files", "12 files", "987654 source bytes"])
+        {
+            assert!(
+                row.evidence.contains(expected),
+                "{}: {}",
+                row.id,
+                row.evidence
+            );
+            assert_eq!(row.status, RequirementStatus::Met);
+        }
+
+        let between_passes = subtitle_backfill_item(
+            true,
+            Ok(crate::state::SubtitleBackfillStatus {
+                lease_holder: None,
+                enqueued_process: 0,
+                remaining_files: 0,
+                remaining_bytes: 0,
+            }),
+        );
+        assert_eq!(
+            between_passes.enabled,
+            Some(true),
+            "a missing lease never changes the saved switch"
+        );
+        assert_eq!(
+            between_passes.requirements[0].status,
+            RequirementStatus::Unobservable
+        );
+        assert!(between_passes.requirements[0]
+            .evidence
+            .contains("none between passes"));
+
+        let unavailable = subtitle_backfill_item(true, Err("store unavailable".to_owned()));
+        assert_eq!(
+            unavailable.enabled,
+            Some(true),
+            "an unavailable probe never changes the saved switch"
+        );
+        assert!(unavailable
+            .requirements
+            .iter()
+            .all(|row| row.status == RequirementStatus::Unobservable
+                && row.evidence.contains("store unavailable")));
+    }
 
     #[test]
     fn android_display_mode_readiness_is_advisory_and_observation_based() {

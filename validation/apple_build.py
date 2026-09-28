@@ -91,15 +91,9 @@ class Surface:
     label: str
 
 
-def workspace_version(root: Path = REPO_ROOT) -> str:
-    """The one place the release number is declared.
-
-    The status-line patterns below anchor on it, and carrying it as a literal
-    here meant a workspace bump silently stopped them matching — the rewrite
-    then failed closed on "found 0", one release too late to be useful.
-    """
-    contents = (root / CARGO).read_text(encoding="utf-8")
-    matches = re.findall(r'^version = "(\d+\.\d+\.\d+)"$', contents, re.MULTILINE)
+def declared_version(cargo: str) -> str:
+    """The workspace version one `Cargo.toml`'s contents declare."""
+    matches = re.findall(r'^version = "(\d+\.\d+\.\d+)"$', cargo, re.MULTILINE)
     if len(matches) != 1:
         raise AppleBuildError(
             f"{CARGO} must declare exactly one workspace version; found {matches}"
@@ -107,24 +101,44 @@ def workspace_version(root: Path = REPO_ROOT) -> str:
     return matches[0]
 
 
-_VERSION = re.escape(workspace_version())
+def workspace_version(root: Path = REPO_ROOT) -> str:
+    """The one place the release number is declared.
 
-SURFACES: tuple[Surface, ...] = (
-    Surface(PROJECT, re.compile(r'(?<=CURRENT_PROJECT_VERSION: ")[1-9]\d*(?=")'),
-            "project.yml CURRENT_PROJECT_VERSION"),
-    Surface(APPLE_README, re.compile(rf"(?<=^> Status: \*\*v{_VERSION}\*\*, build `)[1-9]\d*(?=`)",
-                                     re.MULTILINE),
-            "Apple README status line"),
-    Surface(PARITY, re.compile(rf"(?<=^> Status \(\d{{4}}-\d{{2}}-\d{{2}}\): source is v{_VERSION}, "
-                               r"Apple build )[1-9]\d*(?=\.)", re.MULTILINE),
-            "Apple parity status line"),
-    Surface(STATUS, re.compile(r"(?<=· Apple build )[1-9]\d*(?= source, not yet uploaded)"),
-            "STATUS.html viewers tile"),
-    Surface(STATUS, re.compile(r"(?<=upload Apple build )[1-9]\d*(?= \(release notes:)"),
-            "STATUS.html TestFlight upload item"),
-    Surface(STATUS, re.compile(r"(?<=Install Apple build )[1-9]\d*(?= and Android versionCode)"),
-            "STATUS.html physical install item"),
-)
+    The status-line patterns below anchor on it, and carrying it as a literal
+    here meant a workspace bump silently stopped them matching — the rewrite
+    then failed closed on "found 0", one release too late to be useful.
+    """
+    return declared_version((root / CARGO).read_text(encoding="utf-8"))
+
+
+def surfaces(version: str) -> tuple[Surface, ...]:
+    """Every generated occurrence of the build number, for a tree at `version`.
+
+    Two status lines anchor on the workspace version, so the surfaces are a
+    function of the tree being read, not of the checkout this module was
+    imported from: `scripts/release-cut` renders a tree whose version it has
+    just moved, and `check_repository` may be pointed at another root.
+    """
+    escaped = re.escape(version)
+    return (
+        Surface(PROJECT, re.compile(r'(?<=CURRENT_PROJECT_VERSION: ")[1-9]\d*(?=")'),
+                "project.yml CURRENT_PROJECT_VERSION"),
+        Surface(APPLE_README, re.compile(rf"(?<=^> Status: \*\*v{escaped}\*\*, build `)[1-9]\d*(?=`)",
+                                         re.MULTILINE),
+                "Apple README status line"),
+        Surface(PARITY, re.compile(rf"(?<=^> Status \(\d{{4}}-\d{{2}}-\d{{2}}\): source is v{escaped}, "
+                                   r"Apple build )[1-9]\d*(?=\.)", re.MULTILINE),
+                "Apple parity status line"),
+        Surface(STATUS, re.compile(r"(?<=· Apple build )[1-9]\d*(?= source, not yet uploaded)"),
+                "STATUS.html viewers tile"),
+        Surface(STATUS, re.compile(r"(?<=upload Apple build )[1-9]\d*(?= \(release notes:)"),
+                "STATUS.html TestFlight upload item"),
+        Surface(STATUS, re.compile(r"(?<=Install Apple build )[1-9]\d*(?= and Android versionCode)"),
+                "STATUS.html physical install item"),
+    )
+
+
+SURFACES: tuple[Surface, ...] = surfaces(workspace_version())
 
 
 def _read(root: Path, path: str) -> str:
@@ -182,10 +196,11 @@ def render(read: Callable[[str], str], build: int,
     """The full contents every generated surface should have at ``build``.
 
     Returns only files whose contents change, so an already-correct tree renders
-    empty and the check is a plain equality rather than a diff heuristic.
+    empty and the check is a plain equality rather than a diff heuristic. The
+    status-line anchors follow the version the same ``read`` declares.
     """
     rendered: dict[str, str] = {}
-    for surface in SURFACES:
+    for surface in surfaces(declared_version(read(CARGO))):
         contents = rendered.get(surface.path, read(surface.path))
         rendered[surface.path] = rewrite(contents, surface, build)
     for path in fragments:

@@ -1,15 +1,56 @@
 "use strict";
 // ---- api helpers ----------------------------------------------------------
+// Session-scoped watch-write floor. Keep the decimal string intact: Raft
+// indexes may exceed JavaScript's exact Number range. Expiry is monotonic.
+let READ_AFTER={generation:-1,epoch:0,index:"",expires:0};
+function readAfterRequest(){
+  if(READ_AFTER.generation!==AUTH_GENERATION){
+    READ_AFTER={generation:AUTH_GENERATION,epoch:READ_AFTER.epoch+1,index:"",expires:0};
+  }
+  if(performance.now()>=READ_AFTER.expires) READ_AFTER.index="";
+  return {generation:AUTH_GENERATION,epoch:READ_AFTER.epoch,index:READ_AFTER.index};
+}
+function forgetReadAfter(request){
+  if(request.generation!==AUTH_GENERATION) return;
+  READ_AFTER={generation:AUTH_GENERATION,epoch:READ_AFTER.epoch+1,index:"",expires:0};
+}
+function observeReadAfter(value,request){
+  if(request.generation!==AUTH_GENERATION||value==null) return;
+  if(!/^[1-9][0-9]{0,19}$/.test(value)||
+      (value.length===20&&value>"18446744073709551615")){
+    forgetReadAfter(request);
+    return;
+  }
+  // An unknown write invalidates already-in-flight indexed replies too.
+  if(request.epoch!==READ_AFTER.epoch) return;
+  const previous=READ_AFTER.index;
+  if(!previous||value.length>previous.length||(value.length===previous.length&&value>=previous)){
+    READ_AFTER.index=value;
+    READ_AFTER.expires=performance.now()+60000;
+  }
+}
 async function api(path, {method="GET", body=null, raw=false, signal=null, keepSessionOn401=false}={}){
   const authGeneration=AUTH_GENERATION;
+  const readAfter=readAfterRequest();
   const headers={};
+  if(readAfter.index) headers["x-plurx-read-after"]=readAfter.index;
   if(TOKEN) headers["authorization"]="Bearer "+TOKEN;
   if(body){ headers["content-type"]="application/json"; }
-  const res=await fetch(API+path,{method,headers,body:body?JSON.stringify(body):null,signal});
+  let res;
+  try{
+    res=await fetch(API+path,{method,headers,body:body?JSON.stringify(body):null,signal});
+  }catch(error){
+    if(method!=="GET"&&method!=="HEAD") forgetReadAfter(readAfter);
+    throw error;
+  }
   if(authGeneration!==AUTH_GENERATION){
     const error=new Error("stale authorization"); error.status=401; error.staleAuth=true;
     throw error;
   }
+  const commitIndex=res.headers?.get("x-plurx-commit-index")??null;
+  // Older peers may acknowledge a write without an indexed receipt.
+  if(commitIndex==null&&method!=="GET"&&method!=="HEAD") forgetReadAfter(readAfter);
+  else observeReadAfter(commitIndex,readAfter);
   // `keepSessionOn401` belongs to the two cluster recovery reads, whose guard
   // answers from a process-local proof cache. A closed cache there is a
   // statement about the cluster, not about this credential, and ending the
@@ -31,11 +72,21 @@ async function api(path, {method="GET", body=null, raw=false, signal=null, keepS
     // caller, and the panel paints it.
     try{ await api("/me"); }catch(probe){ void probe; }
   }else if(res.status===401){
+    // A sign-in that sat unused past the server's idle window says so
+    // (`session_expired`), and the login screen repeats the server's sentence
+    // — "Signed out after 90 days of inactivity" — instead of the generic one.
+    // Never throws: an unreadable body is an ordinary session end.
+    let expired=null;
+    try{
+      const reason=JSON.parse(await res.text());
+      if(reason&&reason.code==="session_expired"&&typeof reason.message==="string"&&reason.message) expired=reason.message;
+    }catch(e){ void e; }
     // Parallel requests from an expired credential may finish after the user
     // has already signed in again. Only the credential generation that sent
     // this request may clear the current session.
-    if(authGeneration===AUTH_GENERATION) void logout({revoke:false,notice:"Your session ended on the server."});
+    if(authGeneration===AUTH_GENERATION) void logout({revoke:false,notice:expired||"Your session ended on the server."});
     const error=new Error("unauthorized"); error.status=401;
+    if(expired) error.code="session_expired";
     throw error;
   }
   // `{error}` is the legacy body; `{code, message}` is the typed one routes
@@ -116,7 +167,7 @@ function refreshClientErrorReporterAuth(){
 // throws, never blocks playback; auto-fills context from the active PLAYER.
 function clientLog(ev){
   try{
-    const p=PLAYER||{}, s=p.source||{};
+    const p=/** @type {Player} */(PLAYER||{}), s=p.source||{};
     const body=Object.assign({
       ua:browserLabel(),
       method:p.method||null,

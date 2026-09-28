@@ -815,12 +815,55 @@ impl SecureDirectory {
     }
 
     pub async fn atomic_write_child(&self, destination: &str, bytes: &[u8]) -> io::Result<()> {
+        self.atomic_write_child_with_commit(destination, bytes, |rename| rename())
+            .await
+    }
+
+    /// Stage and sync bytes before entering the caller's synchronous rename
+    /// boundary. The held directory remains authority on every path.
+    pub async fn atomic_write_child_with_commit<F>(
+        &self,
+        destination: &str,
+        bytes: &[u8],
+        commit: F,
+    ) -> io::Result<()>
+    where
+        F: FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send + 'static,
+    {
+        self.atomic_write_child_controlled(destination, bytes, || true, commit)
+            .await
+    }
+
+    /// Cooperatively stop between bounded writes, and join the blocking writer
+    /// before returning. Interrupted output is removed before releasing ownership.
+    pub async fn atomic_write_child_cooperative(
+        &self,
+        destination: &str,
+        bytes: &[u8],
+        can_continue: impl Fn() -> bool + Send + 'static,
+    ) -> io::Result<()> {
+        self.atomic_write_child_controlled(destination, bytes, can_continue, |rename| rename())
+            .await
+    }
+
+    async fn atomic_write_child_controlled<F>(
+        &self,
+        destination: &str,
+        bytes: &[u8],
+        can_continue: impl Fn() -> bool + Send + 'static,
+        commit: F,
+    ) -> io::Result<()>
+    where
+        F: FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send + 'static,
+    {
         let directory = Arc::clone(&self.file);
         let destination = child_name(destination)?;
         let bytes = bytes.to_vec();
-        tokio::task::spawn_blocking(move || atomic_write_blocking(&directory, &destination, &bytes))
-            .await
-            .map_err(io::Error::other)?
+        tokio::task::spawn_blocking(move || {
+            atomic_write_blocking_controlled(&directory, &destination, &bytes, can_continue, commit)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     pub async fn rename_child(&self, from: &str, to: &str) -> io::Result<()> {
@@ -1186,6 +1229,31 @@ fn rename_child_blocking(
 }
 
 fn atomic_write_blocking(directory: &File, destination: &OsStr, bytes: &[u8]) -> io::Result<()> {
+    atomic_write_blocking_with_commit(directory, destination, bytes, |rename| rename())
+}
+
+fn atomic_write_blocking_with_commit<F>(
+    directory: &File,
+    destination: &OsStr,
+    bytes: &[u8],
+    commit: F,
+) -> io::Result<()>
+where
+    F: FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()>,
+{
+    atomic_write_blocking_controlled(directory, destination, bytes, || true, commit)
+}
+
+fn atomic_write_blocking_controlled<F>(
+    directory: &File,
+    destination: &OsStr,
+    bytes: &[u8],
+    can_continue: impl Fn() -> bool,
+    commit: F,
+) -> io::Result<()>
+where
+    F: FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()>,
+{
     let temporary = OsString::from(format!(
         ".{}.{}.part",
         destination.to_string_lossy(),
@@ -1193,9 +1261,31 @@ fn atomic_write_blocking(directory: &File, destination: &OsStr, bytes: &[u8]) ->
     ));
     let mut file = create_write_child_blocking(directory, &temporary)?;
     let result = (|| {
-        file.write_all(bytes)?;
+        for chunk in bytes.chunks(128 * 1024) {
+            if !can_continue() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "write cancelled",
+                ));
+            }
+            file.write_all(chunk)?;
+        }
+        if !can_continue() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "write cancelled",
+            ));
+        }
         file.sync_all()?;
-        rename_child_blocking(directory, &temporary, directory, destination, true).map(|_| ())
+        if !can_continue() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "write cancelled",
+            ));
+        }
+        commit(&mut || {
+            rename_child_blocking(directory, &temporary, directory, destination, true).map(|_| ())
+        })
     })();
     if result.is_err() {
         let _ = unlink_child_blocking(directory, &temporary);

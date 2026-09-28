@@ -148,8 +148,9 @@ private struct ReaderWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             guard !started else { return }
-            guard let token = Session.shared.token,
-                  Session.shared.origin == parent.origin,
+            let credentials = Session.shared.credentials
+            guard let token = credentials.token,
+                  credentials.origin == parent.origin,
                   let script = NativeReaderHandoff.startScript(
                     token: token,
                     itemId: parent.context.itemId,

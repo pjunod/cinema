@@ -22,6 +22,7 @@ from unittest import mock
 
 from validation.apple_build import (
     APPLE_README,
+    CARGO,
     NOTES_DIR,
     PARITY,
     PROJECT,
@@ -232,6 +233,8 @@ class SequentialMergeCase(unittest.TestCase):
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(ROOT / path, destination)
         shutil.copytree(ROOT / NOTES_DIR, self.root / NOTES_DIR)
+        # The status-line anchors follow the version the tree itself declares.
+        shutil.copy(ROOT / CARGO, self.root / CARGO)
         self._git_ok("init", "-q", "-b", "main")
         self._git_ok("add", "-A")
         self._git_ok("commit", "-qm", "base")

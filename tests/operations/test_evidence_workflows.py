@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import unittest
+from validation.rust_modules import module_source
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,6 +20,13 @@ class EvidenceWorkflowCase(unittest.TestCase):
             self.assertIn("workflow_dispatch:", triggers)
             self.assertNotIn("  pull_request:", triggers)
             self.assertNotIn("branches: [main]", triggers)
+            if name == "release-readiness":
+                # The one scheduled runtime sweep, and only once a week: Paul
+                # chose weekly release tags cut from a green scheduled run on
+                # 2026-09-23 (docs/RELEASING.md "The weekly release tag").
+                self.assertEqual(triggers.count("- cron:"), 1)
+                self.assertIn('  schedule:\n    - cron: "0 6 * * 1"\n', triggers)
+                continue
             self.assertNotIn("  schedule:", triggers)
         fast = self.read(".github/workflows/main-fast-lane.yml")
         self.assertIn(
@@ -142,10 +150,98 @@ class EvidenceWorkflowCase(unittest.TestCase):
         self.assertIn("exit 1", workflow)
         self.assertTrue((ROOT / "fuzz/corpus/inspect_sup/minimal-header").is_file())
 
+    def test_parser_fuzzers_are_bounded_seeded_artifacted_and_gating(self) -> None:
+        """P-02 M8: the four parser seams run nightly on the PGS campaign's terms.
+
+        Each target is a `[[bin]]` in fuzz/parsers/, a cargo-fuzz package of
+        its own with a seed corpus committed beside it; the matrix job runs
+        every one on the same bounded budget, uploads its log and artefacts
+        whatever happens, and fails from the recorded outcome; and the campaign
+        script writes executions and corpus growth into each job's step
+        summary, so the run's summary page lists all five campaigns. The PGS
+        package in fuzz/ must not depend on plurx-core: the PGS job builds it
+        under AddressSanitizer inside a 20-minute step budget, and compiling
+        plurx-core there would spend that budget on the parser targets' crate.
+        """
+        targets = ("fmp4_reader", "rpu_rewrite", "nfo_parse", "epub_facts")
+        manifest = self.read("fuzz/parsers/Cargo.toml")
+        workflow = self.read(".github/workflows/validation-nightly.yml")
+        campaign = self.read("scripts/fuzz-campaign")
+        seeds = self.read("scripts/fuzz-seeds")
+
+        self.assertNotIn("plurx-core", self.read("fuzz/Cargo.toml"))
+        self.assertIn('name = "plurx-parser-fuzz"', manifest)
+        self.assertIn("cargo-fuzz = true", manifest)
+        self.assertIn('plurx-core = { path = "../../crates/plurx-core" }', manifest)
+        self.assertIn('dolby_vision = { path = "../../vendor/dolby_vision" }', manifest)
+        self.assertTrue((ROOT / "fuzz/parsers/Cargo.lock").is_file())
+        self.assertEqual(
+            self.read("fuzz/parsers/rust-toolchain.toml"),
+            self.read("fuzz/rust-toolchain.toml"),
+        )
+        for target in targets:
+            self.assertIn(f'name = "{target}"', manifest)
+            self.assertIn(f'path = "fuzz_targets/{target}.rs"', manifest)
+            self.assertFalse((ROOT / f"fuzz/fuzz_targets/{target}.rs").exists())
+            source = self.read(f"fuzz/parsers/fuzz_targets/{target}.rs")
+            self.assertIn("#![no_main]", source)
+            self.assertIn("fuzz_target!", source)
+            self.assertIn("MAX_FUZZ_BYTES", source, f"{target} has no input bound")
+            corpus = ROOT / "fuzz/parsers/corpus" / target
+            self.assertTrue(
+                any(path.is_file() for path in corpus.iterdir()) if corpus.is_dir() else False,
+                f"fuzz/parsers/corpus/{target} has no seeds; run scripts/fuzz-seeds",
+            )
+            self.assertIn(target, seeds)
+        self.assertIn('CORPUS="$ROOT/fuzz/parsers/corpus"', seeds)
+        # Sliced threads would make the fMP4 seeds follow the host's CPU count.
+        self.assertIn("-threads 1", seeds)
+
+        # The filesystem seam reads only its own tempfile (assessment F-build-13).
+        epub = self.read("fuzz/parsers/fuzz_targets/epub_facts.rs")
+        self.assertIn("tempfile::NamedTempFile", epub)
+        self.assertIn("read_epub_facts(input.path())", epub)
+
+        parser = workflow.split("\n  parser-fuzz:\n", 1)[1].split("\n  ffmpeg8-pacing:\n", 1)[0]
+        self.assertIn("target: [fmp4_reader, rpu_rewrite, nfo_parse, epub_facts]", parser)
+        self.assertIn("fail-fast: false", parser)
+        self.assertIn("fuzz/parsers -> target", parser)
+        self.assertIn("scripts/fuzz-seeds --check", parser)
+        self.assertIn("scripts/fuzz-campaign ${{ matrix.target }} 900", parser)
+        self.assertIn("continue-on-error: true", parser)
+        self.assertIn("steps.campaign.outcome == 'failure'", parser)
+        self.assertIn("fuzz/parsers/artifacts", parser)
+        self.assertIn("target/validation/fuzz-${{ matrix.target }}.log", parser)
+        self.assertIn("name: nightly-fuzz-${{ matrix.target }}-evidence", parser)
+        self.assertIn("exit 1", parser)
+        self.assertNotIn("needs:", parser)
+
+        # Five campaigns on one summary page: the PGS job reports through the
+        # same script with its recorded outcome, and the script records
+        # executions and corpus growth.
+        self.assertIn(
+            "scripts/fuzz-campaign --summarize inspect_sup target/validation/pgs-fuzz.log "
+            "${{ steps.pgs_fuzz.outcome == 'failure' && 1 || 0 }}",
+            workflow,
+        )
+        self.assertIn(
+            'fuzz run --fuzz-dir fuzz/parsers "$TARGET" "fuzz/parsers/corpus/$TARGET"',
+            campaign,
+        )
+        self.assertIn("fuzz/parsers/artifacts", campaign)
+        self.assertIn("-max_total_time=", campaign)
+        self.assertIn("-print_final_stats=1", campaign)
+        self.assertIn("stat::number_of_executed_units", campaign)
+        self.assertIn("Done [0-9]+ runs", campaign)
+        self.assertIn('STATUS="${PIPESTATUS[0]}"', campaign)
+        self.assertIn("GITHUB_STEP_SUMMARY", campaign)
+        self.assertIn("| Target | Executions | Corpus before → after | Outcome |", campaign)
+
     def test_nightly_deep_fuzz_and_mutation_jobs_are_independent(self) -> None:
         workflow = self.read(".github/workflows/validation-nightly.yml")
         deep = workflow.split("\n  deep-validation:\n", 1)[1].split("\n  pgs-fuzz:\n", 1)[0]
-        fuzz = workflow.split("\n  pgs-fuzz:\n", 1)[1].split("\n  mutation:\n", 1)[0]
+        fuzz = workflow.split("\n  pgs-fuzz:\n", 1)[1].split("\n  parser-fuzz:\n", 1)[0]
+        parser = workflow.split("\n  parser-fuzz:\n", 1)[1].split("\n  mutation:\n", 1)[0]
         mutation = workflow.split("\n  mutation:\n", 1)[1]
 
         self.assertIn("run: make validate-nightly", deep)
@@ -153,6 +249,8 @@ class EvidenceWorkflowCase(unittest.TestCase):
         self.assertNotIn("cargo-mutants", deep)
         self.assertIn("cargo-fuzz", fuzz)
         self.assertNotIn("needs:", fuzz)
+        self.assertIn("cargo-fuzz", parser)
+        self.assertNotIn("needs:", parser)
         self.assertIn("cargo-mutants", mutation)
         self.assertNotIn("needs:", mutation)
 
@@ -186,6 +284,9 @@ class EvidenceWorkflowCase(unittest.TestCase):
 
     def test_media_origin_and_contract_routing_remain_wired(self) -> None:
         android = self.read("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt")
+        android_builder = self.read(
+            "clients/android/app/src/main/java/tv/plurx/app/player/PlurxPlayerBuilder.kt"
+        )
         android_screen = self.read(
             "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
         )
@@ -199,11 +300,12 @@ class EvidenceWorkflowCase(unittest.TestCase):
         apple_view = self.read("clients/apple/Sources/PlayerView.swift")
         apple_adapter = self.read("clients/apple/Sources/PlayerRemoteAdapter.swift")
         apple_policy = self.read("clients/apple/Sources/PlayerInputRouting.swift")
-        hls = self.read("crates/plurxd/src/http/hls.rs")
+        hls = module_source("crates/plurxd/src/http/hls.rs")
 
         self.assertIn("return realMediaPositionMs(", android)
         self.assertIn("val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)", android)
-        self.assertIn(".setTransferListener(progressiveMediaOrigin)", android)
+        self.assertIn("transferListener = progressiveMediaOrigin,", android)
+        self.assertIn("dataSource.setTransferListener(transferListener)", android_builder)
         self.assertIn(".playerInputAdapter(", android_screen)
         self.assertIn("PlayerInputPolicy.route(surface, state(), input)", android_adapter)
         self.assertIn("PlayerInputState.Hidden ->", android_policy)
@@ -278,7 +380,7 @@ class EvidenceWorkflowCase(unittest.TestCase):
         apple_model = self.read("clients/apple/Sources/AppModel.swift")
         apple_api = self.read("clients/apple/Sources/PlurxAPI.swift")
         self.assertIn("let capturedOrigin = origin", apple_model)
-        self.assertIn("Session.shared.token == token", apple_model)
+        self.assertIn("Session.shared.credentials.token == token", apple_model)
         self.assertIn("where code == 401", apple_model)
         self.assertIn(
             "PlurxAPI(origin: capturedOrigin).logout(token: token)", apple_model

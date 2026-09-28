@@ -186,12 +186,15 @@ pub(crate) struct BoundedDiagnosticChild {
 }
 
 impl BoundedDiagnosticChild {
-    pub fn spawn(command: &mut tokio::process::Command) -> std::io::Result<Self> {
+    pub fn spawn(
+        command: &mut tokio::process::Command,
+        work: crate::process_control::ChildWork,
+    ) -> std::io::Result<Self> {
         command
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        let (mut child, child_job) = crate::process_control::spawn_job_owned(command)?;
+        let (mut child, child_job) = crate::process_control::spawn_job_owned(command, work)?;
         let stderr = child.stderr.take();
         Ok(Self {
             child: Some(child),
@@ -206,12 +209,15 @@ impl BoundedDiagnosticChild {
     /// Spawn a child whose media output is owned by the daemon. The caller
     /// must consume it with [`Self::output_to_bounded_file`]; no subprocess
     /// ever receives a cache pathname it can grow past the enforced bound.
-    pub fn spawn_piped_output(command: &mut tokio::process::Command) -> std::io::Result<Self> {
+    pub fn spawn_piped_output(
+        command: &mut tokio::process::Command,
+        work: crate::process_control::ChildWork,
+    ) -> std::io::Result<Self> {
         command
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        let (mut child, child_job) = crate::process_control::spawn_job_owned(command)?;
+        let (mut child, child_job) = crate::process_control::spawn_job_owned(command, work)?;
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         Ok(Self {
@@ -353,8 +359,7 @@ pub(crate) struct EncodedExecutable {
 
 impl EncodedExecutable {
     pub async fn capture() -> Result<Self, String> {
-        let path = resolve_executable_path(&ffmpeg_bin())
-            .ok_or("cannot resolve the encoder executable")?;
+        let path = encoder_executable_path().ok_or("cannot resolve the encoder executable")?;
         Self::capture_at(path).await
     }
 
@@ -399,12 +404,21 @@ pub async fn ffmpeg_build() -> String {
 /// this document with the scanner's document prevents a same-size,
 /// same-second pathname replacement from pairing fresh bytes with stale
 /// geometry, tracks, cadence, or color facts.
-pub(crate) async fn held_source_probe_json(source: &std::fs::File) -> Result<String, String> {
+///
+/// `work` is the caller's: a session start that is waiting on this probe
+/// passes a realtime class, since the probe runs under a five-second bound
+/// whose miss the viewer sees as a refusal.
+pub(crate) async fn held_source_probe_json(
+    source: &std::fs::File,
+    work: crate::process_control::ChildWork,
+) -> Result<String, String> {
     let document = held_source_probe_json_with_limits(
         source,
         ENGINE_PROBE_TIMEOUT,
         ENGINE_PROBE_MAX_BYTES,
         "engine probe",
+        work,
+        None,
     )
     .await?;
     Ok(stamped_with_this_reporter(document).await)
@@ -428,12 +442,18 @@ async fn stamped_with_this_reporter(document: String) -> String {
 /// The content-index probe has its own budget. A metadata read on a slow held
 /// source may legitimately take longer than an executable capability probe,
 /// while its JSON is expected to remain far smaller.
-pub(crate) async fn held_source_index_probe_json(source: &std::fs::File) -> Result<String, String> {
+pub(crate) async fn held_source_index_probe_json(
+    source: &std::fs::File,
+    budget: Duration,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<String, String> {
     let document = held_source_probe_json_with_limits(
         source,
-        Duration::from_secs(30),
+        Duration::from_secs(30).min(budget),
         1024 * 1024,
         "index metadata probe",
+        crate::process_control::ChildWork::background("fragment index metadata probe"),
+        cancel,
     )
     .await?;
     // Stamped for the same reason the engine probe is: the two entry points
@@ -541,10 +561,11 @@ pub(crate) async fn held_source_packet_probe_json(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
-    let (mut child, _child_job) =
-        crate::process_control::spawn_job_owned(&mut command).map_err(|error| {
-            HeldPacketProbeError::Process(format!("spawning packet probe: {error}"))
-        })?;
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::background("fragment index packet probe"),
+    )
+    .map_err(|error| HeldPacketProbeError::Process(format!("spawning packet probe: {error}")))?;
     let stdout = child.stdout.take().ok_or_else(|| {
         HeldPacketProbeError::Process("packet probe started without stdout".to_owned())
     })?;
@@ -627,6 +648,8 @@ async fn held_source_probe_json_with_limits(
     timeout: Duration,
     max_bytes: u64,
     label: &'static str,
+    work: crate::process_control::ChildWork,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<String, String> {
     #[cfg(windows)]
     {
@@ -653,7 +676,9 @@ async fn held_source_probe_json_with_limits(
             "-show_chapters",
         ]);
         command.arg(&source_path);
-        let output = bounded_command_output_with_limits(command, timeout, max_bytes, label).await?;
+        let output =
+            bounded_command_output_cancellable(command, timeout, max_bytes, label, cancel, work)
+                .await?;
         if plurx_core::fs_secure::std_file_identity(source)
             .map_err(|error| format!("re-reading held source identity: {error}"))?
             != held_identity
@@ -685,7 +710,9 @@ async fn held_source_probe_json_with_limits(
             "-show_chapters",
             "/dev/fd/3",
         ]);
-        let output = bounded_command_output_with_limits(command, timeout, max_bytes, label).await?;
+        let output =
+            bounded_command_output_cancellable(command, timeout, max_bytes, label, cancel, work)
+                .await?;
         String::from_utf8(output.stdout)
             .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}"))
     }
@@ -694,6 +721,13 @@ async fn held_source_probe_json_with_limits(
 fn normalized_probe_document(raw: &str) -> Result<serde_json::Value, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(raw).map_err(|error| format!("invalid ffprobe JSON: {error}"))?;
+    if let Some(document) = value.as_object_mut() {
+        // plurx's own record of a measurement it made from the stored probe's
+        // source revision (`transcode::hevc_census`), grafted after the scan.
+        // A fresh probe never carries it, and its presence says nothing about
+        // whether the bytes changed.
+        document.remove(plurx_core::transcode::hevc_census::PROBE_KEY);
+    }
     if let Some(format) = value
         .get_mut("format")
         .and_then(serde_json::Value::as_object_mut)
@@ -1794,7 +1828,7 @@ struct FragmentIndexEngine {
 /// reuse across nodes or daemon restarts: hardware/driver behavior cannot be
 /// proven byte-identical merely because the selected encoder has the same
 /// name. Within one daemon, every loaded dependency and (for text burn) every
-/// active Fontconfig rule and discoverable font file is still rechecked
+/// object of the recipe's frozen Fontconfig environment is still rechecked
 /// before spawning and publication.
 #[derive(Debug, Clone)]
 pub(crate) struct EncodedEngine {
@@ -1802,15 +1836,28 @@ pub(crate) struct EncodedEngine {
     process_identity: String,
     /// The encoder dependency closure. Statted under `kind="media"`.
     objects: Arc<[(std::path::PathBuf, String)]>,
-    /// The Fontconfig rules and font files a text burn captured, kept apart
-    /// from `objects` so their cost is charged under `kind="font"`. Empty
-    /// for every recipe that does not burn text.
+    /// The frozen Fontconfig environment a text burn renders under, kept
+    /// apart from `objects` so its cost is charged under `kind="font"`.
+    /// Empty for every recipe that does not burn text.
     font_objects: Arc<[(std::path::PathBuf, String)]>,
-    font_digest: Option<String>,
+    /// The environment itself: the producer reads only its copies and links,
+    /// and the last recipe holding it removes it.
+    font_env: Option<Arc<crate::fontenv::FontEnvironment>>,
 }
 
 impl EncodedEngine {
-    pub async fn capture(text_burn: bool) -> Result<Self, String> {
+    /// `text_burn` is the runtime cache a text burn's frozen Fontconfig
+    /// environment is built under, or `None` for a recipe that burns no text.
+    pub async fn capture(text_burn: Option<&std::path::Path>) -> Result<Self, String> {
+        Self::capture_from(text_burn, None).await
+    }
+
+    /// `source_config` replaces the daemon's Fontconfig configuration for the
+    /// live enumeration only; tests use it to stand up a known closure.
+    pub(crate) async fn capture_from(
+        text_burn: Option<&std::path::Path>,
+        source_config: Option<&std::path::Path>,
+    ) -> Result<Self, String> {
         let media = FRAGMENT_INDEX_ENGINE
             .get_or_init(fragment_index_engine_inner)
             .await;
@@ -1836,12 +1883,13 @@ impl EncodedEngine {
         digest.update(process.as_bytes());
         let mut objects = media.objects.to_vec();
         let mut font_objects: Vec<(std::path::PathBuf, String)> = Vec::new();
-        let mut font_digest = None;
-        if text_burn {
+        let mut font_env = None;
+        if let Some(root) = text_burn {
             // Fontconfig's closure is live configuration, unlike the process's
             // loaded media libraries. Probe it for every recipe capture so a
-            // newly installed font or rule cannot reuse the old URI identity.
-            let enumeration = font_render_engine_inner().await;
+            // newly installed font or rule cannot reuse the old URI identity,
+            // then freeze what it found so the producer can see nothing else.
+            let enumeration = font_render_engine_inner(source_config).await;
             charges.add(
                 EngineAttestationKind::Font,
                 EngineAttestationPhase::Spawn,
@@ -1852,7 +1900,7 @@ impl EncodedEngine {
                 EngineAttestationPhase::Stat,
                 enumeration.stat_elapsed,
             );
-            let fonts = enumeration.engine;
+            let fonts = &enumeration.engine;
             let attested = if fonts.usable {
                 let (current, elapsed) =
                     engine_objects_are_current_batch(None, Arc::clone(&fonts.objects)).await;
@@ -1871,9 +1919,40 @@ impl EncodedEngine {
                     "Fontconfig rules and resolved font files could not be attested".to_owned(),
                 );
             }
-            digest.update(fonts.digest.as_bytes());
-            font_digest = Some(fonts.digest.clone());
-            font_objects = fonts.objects.to_vec();
+            let versions: std::collections::HashMap<_, _> = fonts.objects.iter().cloned().collect();
+            let (frozen, cost) = crate::fontenv::freeze(
+                root,
+                crate::fontenv::FontSources {
+                    digest: &fonts.digest,
+                    rules: &enumeration.rules,
+                    fonts: &enumeration.fonts,
+                    versions: &versions,
+                    listing: &enumeration.listing,
+                },
+            )
+            .await;
+            charges.add(
+                EngineAttestationKind::Font,
+                EngineAttestationPhase::Spawn,
+                cost.spawn,
+            );
+            charges.add(
+                EngineAttestationKind::Font,
+                EngineAttestationPhase::Stat,
+                cost.stat,
+            );
+            let frozen = match frozen {
+                Ok(frozen) => frozen,
+                Err(error) => {
+                    charges.flush();
+                    return Err(format!(
+                        "the text burn's Fontconfig environment could not be frozen: {error}"
+                    ));
+                }
+            };
+            digest.update(frozen.digest().as_bytes());
+            font_objects = frozen.objects().to_vec();
+            font_env = Some(frozen);
         }
         charges.flush();
         objects.sort_by(|left, right| left.0.cmp(&right.0));
@@ -1885,14 +1964,15 @@ impl EncodedEngine {
             process_identity: process.to_owned(),
             objects: objects.into(),
             font_objects: font_objects.into(),
-            font_digest,
+            font_env,
         })
     }
 
     /// Re-attest every input which can change the bytes emitted under this
-    /// recipe. Fontconfig must be enumerated again: checking only the files
-    /// captured earlier detects replacements and removals, but not additions
-    /// which change font resolution.
+    /// recipe. A text burn is not re-enumerated: its producer reads only the
+    /// frozen environment, so a font or rule installed since capture cannot
+    /// reach it, and a replaced, removed or edited object of the environment
+    /// changes a captured version.
     #[cfg(test)]
     pub async fn is_current(&self) -> bool {
         self.is_current_charged(None).await.0
@@ -1934,41 +2014,47 @@ impl EncodedEngine {
             charges.flush();
             return (false, charges);
         }
-        let Some(expected_font_digest) = self.font_digest.as_deref() else {
+        if self.font_env.is_none() {
             charges.flush();
             return (true, charges);
-        };
+        }
 
-        // Three font stat batches, one observation: the captured font
-        // objects, the re-enumeration's own stat loop, and the freshly
-        // enumerated closure.
-        let (captured_current, captured_elapsed) =
+        // One stat batch and no child: the frozen environment cannot gain
+        // inputs, so there is nothing for `fc-list` to find.
+        let (fonts_current, fonts_elapsed) =
             engine_objects_are_current_batch(None, Arc::clone(&self.font_objects)).await;
         charges.add(
             EngineAttestationKind::Font,
             EngineAttestationPhase::Stat,
-            captured_elapsed,
-        );
-        let enumeration = font_render_engine_inner().await;
-        charges.add(
-            EngineAttestationKind::Font,
-            EngineAttestationPhase::Spawn,
-            enumeration.spawn_elapsed,
-        );
-        charges.add(
-            EngineAttestationKind::Font,
-            EngineAttestationPhase::Stat,
-            enumeration.stat_elapsed,
-        );
-        let (closure_current, closure_elapsed) =
-            font_closure_is_current(expected_font_digest, &enumeration.engine).await;
-        charges.add(
-            EngineAttestationKind::Font,
-            EngineAttestationPhase::Stat,
-            closure_elapsed,
+            fonts_elapsed,
         );
         charges.flush();
-        (captured_current && closure_current, charges)
+        (fonts_current, charges)
+    }
+
+    /// What a producer running this recipe adds to its environment: a text
+    /// burn names its frozen Fontconfig sysroot and root configuration, so
+    /// libass resolves fonts from the captured environment and nothing
+    /// else. Child-local, like `configure_ffmpeg_runtime`'s cache; the
+    /// daemon's own environment and every other child are untouched.
+    pub(crate) fn child_env(&self) -> Vec<(&'static str, &std::ffi::OsStr)> {
+        self.font_env
+            .iter()
+            .flat_map(|environment| environment.child_env())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn font_environment(&self) -> Option<&Arc<crate::fontenv::FontEnvironment>> {
+        self.font_env.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn is_current_charged_for_test(
+        &self,
+    ) -> (bool, Vec<(&'static str, &'static str, usize)>) {
+        let (current, charges) = self.is_current_charged(None).await;
+        (current, charges.charged())
     }
 
     pub fn process_identity(&self) -> &str {
@@ -1994,7 +2080,7 @@ impl EncodedEngine {
             process_identity: process.to_owned(),
             objects: objects.into(),
             font_objects: Vec::new().into(),
-            font_digest: None,
+            font_env: None,
         })
     }
 }
@@ -2007,24 +2093,6 @@ pub(crate) fn encoded_process_identity() -> &'static str {
     ENCODED_PROCESS_IDENTITY
         .get_or_init(|| uuid::Uuid::new_v4().to_string())
         .as_str()
-}
-
-/// Compare a freshly enumerated Fontconfig closure with the captured digest,
-/// returning what the stat batch cost so the caller can charge it once for
-/// the whole attestation.
-async fn font_closure_is_current(
-    expected_digest: &str,
-    current: &FragmentIndexEngine,
-) -> (bool, Duration) {
-    if !current.usable {
-        return (false, Duration::ZERO);
-    }
-    let (objects_current, elapsed) =
-        engine_objects_are_current_batch(None, Arc::clone(&current.objects)).await;
-    (
-        objects_current && current.digest == expected_digest,
-        elapsed,
-    )
 }
 
 /// Digest the executable bytes and its complete self/dependency reports once
@@ -2081,7 +2149,7 @@ fn engine_objects_are_current(objects: &[(std::path::PathBuf, String)]) -> bool 
 /// task, so no caller has to stat it on a runtime worker. It reports its
 /// elapsed time rather than observing, because one attestation is several of
 /// these batches and the histogram is charged once for the whole check.
-async fn engine_objects_are_current_batch(
+pub(crate) async fn engine_objects_are_current_batch(
     extra: Option<(std::path::PathBuf, String)>,
     objects: Arc<[(std::path::PathBuf, String)]>,
 ) -> (bool, Duration) {
@@ -2220,28 +2288,55 @@ struct FontEnumeration {
     engine: FragmentIndexEngine,
     spawn_elapsed: Duration,
     stat_elapsed: Duration,
+    /// Every loaded configuration file, in the order `fc-conflist` reports
+    /// it: the order each *finished* loading, root last. That is not the
+    /// order its rules apply (see `fontenv`), so the freeze only compares it.
+    rules: Vec<std::path::PathBuf>,
+    /// Every font file `fc-list` named, sorted and unique.
+    fonts: Vec<std::path::PathBuf>,
+    /// The raw `fc-list` answer, one line per face.
+    listing: String,
 }
 
-async fn font_render_engine_inner() -> FontEnumeration {
+/// A Fontconfig tool run under the font probe budget, answering its stdout.
+pub(crate) async fn font_probe_output(command: tokio::process::Command) -> Result<Vec<u8>, String> {
+    bounded_command_output_with_timeout(command, FONT_ENGINE_PROBE_TIMEOUT)
+        .await
+        .map(|output| output.stdout)
+}
+
+async fn font_render_engine_inner(source_config: Option<&std::path::Path>) -> FontEnumeration {
     let probe_started = Instant::now();
     let mut digest = Sha256::new();
     digest.update(b"plurx/font-render/engine-v1\0");
     let mut usable = true;
     let mut paths = Vec::new();
+    let mut fonts = Vec::new();
+    let mut rules: Vec<std::path::PathBuf> = Vec::new();
+    let mut listing = String::new();
 
     let mut font_list = tokio::process::Command::new("fc-list");
-    font_list.arg("--format=%{file}\n");
+    font_list.arg(crate::fontenv::FONT_LISTING_FORMAT);
+    let mut configuration = tokio::process::Command::new("fc-conflist");
+    if let Some(config) = source_config {
+        font_list.env("FONTCONFIG_FILE", config);
+        configuration.env("FONTCONFIG_FILE", config);
+    }
     match bounded_command_output_with_timeout(font_list, FONT_ENGINE_PROBE_TIMEOUT).await {
         Ok(output) => {
             digest.update((output.stdout.len() as u64).to_be_bytes());
             digest.update(&output.stdout);
-            paths.extend(
-                String::from_utf8_lossy(&output.stdout)
+            listing = String::from_utf8_lossy(&output.stdout).into_owned();
+            fonts.extend(
+                listing
                     .lines()
-                    .map(str::trim)
+                    .filter_map(|line| line.split('\t').next())
                     .filter(|path| path.starts_with('/'))
                     .map(std::path::PathBuf::from),
             );
+            fonts.sort();
+            fonts.dedup();
+            paths.extend(fonts.iter().cloned());
         }
         Err(error) => {
             usable = false;
@@ -2249,19 +2344,22 @@ async fn font_render_engine_inner() -> FontEnumeration {
         }
     }
 
-    let configuration = tokio::process::Command::new("fc-conflist");
     match bounded_command_output_with_timeout(configuration, FONT_ENGINE_PROBE_TIMEOUT).await {
         Ok(output) => {
             digest.update((output.stdout.len() as u64).to_be_bytes());
             digest.update(&output.stdout);
-            paths.extend(
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .filter_map(|line| line.strip_prefix("+ "))
-                    .filter_map(|line| line.split_once(": ").map(|(path, _)| path))
-                    .filter(|path| path.starts_with('/'))
-                    .map(std::path::PathBuf::from),
-            );
+            for rule in String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.strip_prefix("+ "))
+                .filter_map(|line| line.split_once(": ").map(|(path, _)| path))
+                .filter(|path| path.starts_with('/'))
+                .map(std::path::PathBuf::from)
+            {
+                if !rules.contains(&rule) {
+                    rules.push(rule);
+                }
+            }
+            paths.extend(rules.iter().cloned());
         }
         Err(error) => {
             usable = false;
@@ -2296,6 +2394,9 @@ async fn font_render_engine_inner() -> FontEnumeration {
         },
         spawn_elapsed,
         stat_elapsed,
+        rules,
+        fonts,
+        listing,
     }
 }
 
@@ -2351,10 +2452,14 @@ where
     (result, started.elapsed())
 }
 
-struct BoundedOutput {
-    stdout: Vec<u8>,
+pub(crate) struct BoundedOutput {
+    pub(crate) stdout: Vec<u8>,
     stderr: Vec<u8>,
 }
+
+/// Every engine probe is a capability probe nobody is waiting on.
+const ENGINE_PROBE: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::background("engine capability probe");
 
 async fn bounded_command_output(command: tokio::process::Command) -> Result<BoundedOutput, String> {
     bounded_command_output_with_timeout(command, ENGINE_PROBE_TIMEOUT).await
@@ -2364,50 +2469,82 @@ async fn bounded_command_output_with_timeout(
     command: tokio::process::Command,
     timeout: Duration,
 ) -> Result<BoundedOutput, String> {
-    bounded_command_output_with_limits(command, timeout, ENGINE_PROBE_MAX_BYTES, "engine probe")
-        .await
+    bounded_command_output_with_limits(
+        command,
+        timeout,
+        ENGINE_PROBE_MAX_BYTES,
+        "engine probe",
+        ENGINE_PROBE,
+    )
+    .await
 }
 
 async fn bounded_command_output_with_limits(
+    command: tokio::process::Command,
+    timeout: Duration,
+    max_bytes: u64,
+    label: &'static str,
+    work: crate::process_control::ChildWork,
+) -> Result<BoundedOutput, String> {
+    bounded_command_output_cancellable(command, timeout, max_bytes, label, None, work).await
+}
+
+pub(crate) async fn bounded_command_output_cancellable(
     mut command: tokio::process::Command,
     timeout: Duration,
     max_bytes: u64,
     label: &'static str,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    work: crate::process_control::ChildWork,
 ) -> Result<BoundedOutput, String> {
+    if cancel.is_some_and(|token| token.is_cancelled()) {
+        return Err(format!("{label} cancelled"));
+    }
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let (mut child, child_job) =
-        crate::process_control::spawn_job_owned(&mut command).map_err(|error| error.to_string())?;
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command, work)
+        .map_err(|error| error.to_string())?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "engine probe has no stdout".to_owned())?;
+        .ok_or_else(|| format!("{label} has no stdout"))?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| "engine probe has no stderr".to_owned())?;
-    let collect = async move {
-        let _child_job = child_job;
-        let (stdout, stderr, status) = tokio::join!(
-            read_bounded_with_limit(stdout, max_bytes, label),
-            read_bounded_with_limit(stderr, max_bytes, label),
-            child.wait()
-        );
-        let status = status.map_err(|error| error.to_string())?;
-        if !status.success() {
-            return Err(format!("engine probe exited {status}"));
+        .ok_or_else(|| format!("{label} has no stderr"))?;
+    let stopped = {
+        let collect = async {
+            let (stdout, stderr, status) = tokio::join!(
+                read_bounded_with_limit(stdout, max_bytes, label),
+                read_bounded_with_limit(stderr, max_bytes, label),
+                child.wait()
+            );
+            let status = status.map_err(|e| e.to_string())?;
+            if !status.success() {
+                return Err(format!("{label} exited {status}"));
+            }
+            Ok(BoundedOutput {
+                stdout: stdout?,
+                stderr: stderr?,
+            })
+        };
+        tokio::pin!(collect);
+        tokio::select! {
+            result = &mut collect => return result,
+            () = tokio::time::sleep(timeout) => format!("{label} timed out after {} seconds", timeout.as_secs()),
+            () = async { match cancel { Some(token) => token.cancelled().await, None => std::future::pending().await } } => format!("{label} cancelled"),
         }
-        Ok(BoundedOutput {
-            stdout: stdout?,
-            stderr: stderr?,
-        })
     };
-    tokio::time::timeout(timeout, collect)
+    let _ = child.start_kill();
+    // Keep the caller's admission alive until the child is reaped.
+    child
+        .wait()
         .await
-        .map_err(|_| format!("{label} timed out after {} seconds", timeout.as_secs()))?
+        .map_err(|error| format!("{stopped}; waiting for child: {error}"))?;
+    Err(stopped)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2505,7 +2642,7 @@ async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String),
     Ok((object.finalize().to_vec(), version))
 }
 
-fn engine_path_version(path: &std::path::Path) -> Result<String, String> {
+pub(crate) fn engine_path_version(path: &std::path::Path) -> Result<String, String> {
     #[cfg(unix)]
     {
         let metadata =
@@ -2623,6 +2760,13 @@ fn normalized_dependency_report(report: &[u8]) -> Vec<u8> {
         .into_bytes()
 }
 
+/// The encoder every producer runs, as [`EncodedExecutable::capture`]
+/// attests it; a text burn's frozen environment is proved against the same
+/// program.
+pub(crate) fn encoder_executable_path() -> Option<std::path::PathBuf> {
+    resolve_executable_path(&ffmpeg_bin())
+}
+
 fn resolve_executable_path(bin: &str) -> Option<std::path::PathBuf> {
     let path = std::path::Path::new(bin);
     if path.components().count() > 1 {
@@ -2674,6 +2818,19 @@ async fn probe_ffmpeg(args: &[&str]) -> Result<String, String> {
         Ok(out) => Ok(merged_output(&out.stdout, &out.stderr)),
         Err(error) => Err(error),
     }
+}
+
+/// Read-only Developer advice. A missing measurement is not a save gate.
+pub(crate) async fn hevc_header_trace_available() -> Option<bool> {
+    static VALUE: tokio::sync::OnceCell<Option<bool>> = tokio::sync::OnceCell::const_new();
+    *VALUE
+        .get_or_init(|| async {
+            probe_ffmpeg(&["-hide_banner", "-bsfs"])
+                .await
+                .ok()
+                .map(|list| declares_bsf(&list, "trace_headers"))
+        })
+        .await
 }
 
 /// Classify a `-bsfs` listing, including the case where it never arrived.
@@ -2788,7 +2945,10 @@ async fn probe_dovi_reshape_graph(encoder: Encoder) -> bool {
         .kill_on_drop(true);
     tokio::time::timeout(
         Duration::from_secs(20),
-        crate::process_control::status_job_owned(&mut command),
+        crate::process_control::status_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::background("Dolby Vision reshape capability probe"),
+        ),
     )
     .await
     .is_ok_and(|result| result.is_ok_and(|status| status.success()))
@@ -2901,7 +3061,7 @@ pub async fn has_dovi_passthrough() -> bool {
                 .args(["-f", "null", "-"]);
             let output = tokio::time::timeout(
                 Duration::from_secs(20),
-                crate::process_control::output_job_owned(&mut command),
+                crate::process_control::output_job_owned(&mut command, crate::process_control::ChildWork::background("Dolby Vision passthrough capability probe")),
             )
             .await;
             let Ok(Ok(output)) = output else {
@@ -2977,7 +3137,12 @@ pub async fn has_hdr10_passthrough() -> bool {
                 .args(["-f", "null", "-"]);
             let output = tokio::time::timeout(
                 Duration::from_secs(20),
-                crate::process_control::output_job_owned(&mut command),
+                crate::process_control::output_job_owned(
+                    &mut command,
+                    crate::process_control::ChildWork::background(
+                        "HDR10 passthrough capability probe",
+                    ),
+                ),
             )
             .await;
             let Ok(Ok(output)) = output else {
@@ -3037,7 +3202,12 @@ pub async fn has_hdr10_passthrough_qsv() -> bool {
                 .args(["-f", "null", "-"]);
             let passed = tokio::time::timeout(
                 Duration::from_secs(20),
-                crate::process_control::status_job_owned(&mut command),
+                crate::process_control::status_job_owned(
+                    &mut command,
+                    crate::process_control::ChildWork::background(
+                        "HDR10 QSV passthrough capability probe",
+                    ),
+                ),
             )
             .await
             .is_ok_and(|result| result.is_ok_and(|status| status.success()));
@@ -3092,7 +3262,7 @@ pub async fn has_dovi_passthrough_with(encoder: Encoder) -> bool {
                 .args(["-f", "null", "-"]);
             let passed = tokio::time::timeout(
                 Duration::from_secs(20),
-                crate::process_control::status_job_owned(&mut command),
+                crate::process_control::status_job_owned(&mut command, crate::process_control::ChildWork::background("Dolby Vision passthrough capability probe")),
             )
                 .await
                 .is_ok_and(|result| result.is_ok_and(|status| status.success()));
@@ -3112,7 +3282,11 @@ pub async fn has_dovi_passthrough_with(encoder: Encoder) -> bool {
         .await
 }
 
-async fn dovi_probe_output(file: &MediaFile, apply: bool) -> Result<Vec<String>, String> {
+async fn dovi_probe_output(
+    file: &MediaFile,
+    apply: bool,
+    class: crate::process_control::ChildClass,
+) -> Result<Vec<String>, String> {
     let seek = file
         .duration_ms
         .map(|duration| (duration / 5).saturating_sub(1_000) as f64 / 1_000.0)
@@ -3135,7 +3309,10 @@ async fn dovi_probe_output(file: &MediaFile, apply: bool) -> Result<Vec<String>,
         .args(["-f", "framemd5", "-"]);
     let output = tokio::time::timeout(
         Duration::from_secs(30),
-        crate::process_control::output_job_owned(&mut command),
+        crate::process_control::output_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::new(class, "Dolby Vision pixel probe"),
+        ),
     )
     .await
     .map_err(|_| "Dolby Vision pixel probe timed out".to_owned())?
@@ -3161,9 +3338,15 @@ async fn dovi_probe_output(file: &MediaFile, apply: bool) -> Result<Vec<String>,
 /// data through the production graph and that tonemapx changes pixels when
 /// Dolby Vision application is enabled. A mere option probe cannot make that
 /// claim because a frame with no DOVI metadata makes the option a no-op.
-pub async fn dovi_reshape_changes_pixels(file: &MediaFile) -> bool {
-    let enabled = dovi_probe_output(file, true).await;
-    let disabled = dovi_probe_output(file, false).await;
+///
+/// `class` is the caller's: a session start waiting on the proof passes
+/// realtime, a background pass background.
+pub async fn dovi_reshape_changes_pixels(
+    file: &MediaFile,
+    class: crate::process_control::ChildClass,
+) -> bool {
+    let enabled = dovi_probe_output(file, true, class).await;
+    let disabled = dovi_probe_output(file, false, class).await;
     match (enabled, disabled) {
         (Ok(enabled), Ok(disabled)) if enabled != disabled => true,
         (Ok(_), Ok(_)) => {
@@ -3323,7 +3506,12 @@ async fn probe_burst() -> Result<Duration, String> {
     let start = std::time::Instant::now();
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     command.args(args);
-    match crate::process_control::output_job_owned(&mut command).await {
+    match crate::process_control::output_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::background("ffmpeg read-rate burst probe"),
+    )
+    .await
+    {
         Ok(out) if out.status.success() => Ok(start.elapsed()),
         Ok(out) => Err(format!("exited with {}", out.status)),
         Err(error) => Err(error.to_string()),
@@ -3332,6 +3520,61 @@ async fn probe_burst() -> Result<Duration, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_probe_reaps_child_before_returning() {
+        let directory = tempfile::tempdir().expect("directory");
+        let marker = directory.path().join("child.pid");
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .args([
+                "-c",
+                "echo $$ > \"$1\"; exec sleep 60",
+                "durable-queue-test",
+            ])
+            .arg(&marker);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let child_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            super::bounded_command_output_cancellable(
+                command,
+                std::time::Duration::from_secs(60),
+                1024,
+                "cancel regression",
+                Some(&child_cancel),
+                crate::process_control::ChildWork::background("cancel regression"),
+            )
+            .await
+        });
+        let pid = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(&marker).await {
+                    if let Ok(pid) = text.trim().parse::<i32>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("child started");
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("cancel joined")
+            .expect("task");
+        assert!(result.is_err());
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "child remains alive after admission could be released"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
     /// Admission as a boolean. Production reads the richer comparison; these
     /// regressions are about the verdict, which must stay identical.
     fn probes_describe_same_input(stored: &str, held: &str) -> Result<bool, String> {
@@ -3349,9 +3592,12 @@ mod tests {
             .args(["-hide_banner", "-loglevel", "error"])
             .args(["-f", "lavfi", "-i", "testsrc=size=64x64:rate=1:duration=2"])
             .args(["-frames:v", "2", "-an", "-f", "framemd5", "-"]);
-        let output = crate::process_control::output_job_owned(&mut command)
-            .await
-            .expect("framemd5 probe output");
+        let output = crate::process_control::output_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::background("test"),
+        )
+        .await
+        .expect("framemd5 probe output");
         assert!(
             output.status.success(),
             "framemd5 probe failed: {}",
@@ -3447,6 +3693,35 @@ mod tests {
         current["streams"][1]["tags"]["name"] = serde_json::json!("GROUP DDP5.1 Atmos");
         plurx_core::scan::probe::stamp_reporter(&mut current, "ffprobe version 8.1.2-Jellyfin");
         current
+    }
+
+    /// A stored probe carrying the HEVC parameter-set census still describes
+    /// the bytes a fresh probe of the same file reads. Without this every
+    /// encoded session of a censused HEVC title was refused as
+    /// `vod_source_rescan_required`, and a reanalysis only earned it a new
+    /// census and the same refusal.
+    #[test]
+    fn a_recorded_hevc_census_is_not_a_change_in_the_source() {
+        let held = current_reporter_probe();
+        let mut stored = held.clone();
+        stored[plurx_core::transcode::hevc_census::PROBE_KEY] = serde_json::json!({
+            "revision": 1, "verdict": "varying", "size": 1, "mtime": 1,
+            "samples": 7, "differing": 7,
+        });
+        let comparison = super::compare_probe_documents(&stored.to_string(), &held.to_string())
+            .expect("compare");
+        assert!(comparison.same, "{:?}", comparison.differences);
+        assert!(
+            !comparison.admitted_on_reporter_drift,
+            "one build on both sides compares the whole document"
+        );
+        // Still a real comparison: a changed fact beside the record refuses.
+        stored["streams"][0]["width"] = serde_json::json!(1920);
+        assert!(
+            !super::compare_probe_documents(&stored.to_string(), &held.to_string())
+                .expect("compare")
+                .same
+        );
     }
 
     /// The production failure this exists to stop: three refusals on `media1`
@@ -4446,26 +4721,10 @@ mod tests {
             "a non-burn check stats the dependency closure and nothing else"
         );
 
-        let fonts = EncodedEngine::capture_test_objects(std::slice::from_ref(&font), "p")
-            .await
-            .expect("font objects");
-        let burn = EncodedEngine {
-            digest: media.digest.clone(),
-            process_identity: media.process_identity.clone(),
-            objects: Arc::clone(&media.objects),
-            font_objects: Arc::clone(&fonts.objects),
-            font_digest: Some("captured-font-closure".to_owned()),
-        };
-        assert_eq!(
-            burn.is_current_charged(None).await.1.charged(),
-            vec![
-                ("font", "spawn", 1),
-                ("font", "stat", 3),
-                ("media", "stat", 1)
-            ],
-            "a burn check charges its dependency closure to media, and folds its three \
-             font stat batches into one observation"
-        );
+        // The burn half — one `font,stat` observation and no `font,spawn`
+        // per check — needs a real frozen environment and is pinned by
+        // `fontenv::tests::a_new_system_font_does_not_withdraw_a_frozen_recipe`.
+        let _ = font;
     }
 
     #[tokio::test]
@@ -4502,27 +4761,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_changed_fontconfig_closure_invalidates_the_retained_recipe() {
-        let captured = FragmentIndexEngine {
-            digest: "font-closure-a".to_owned(),
-            objects: Vec::new().into(),
-            usable: true,
-        };
-        let added_font = FragmentIndexEngine {
-            digest: "font-closure-b".to_owned(),
-            objects: Vec::new().into(),
-            usable: true,
-        };
-
-        assert!(font_closure_is_current("font-closure-a", &captured).await.0);
-        assert!(
-            !font_closure_is_current("font-closure-a", &added_font)
-                .await
-                .0
-        );
-    }
-
     #[test]
     fn font_inventory_keeps_a_load_tolerant_probe_budget() {
         assert!(FONT_ENGINE_PROBE_TIMEOUT >= Duration::from_secs(30));
@@ -4532,7 +4770,8 @@ mod tests {
     #[tokio::test]
     async fn text_renderer_attests_active_font_rules_and_files() {
         plurx_core::testfixtures::require_ffmpeg();
-        let engine = EncodedEngine::capture(true)
+        let runtime_cache = crate::test_tempdir().expect("runtime cache");
+        let engine = EncodedEngine::capture(Some(runtime_cache.path()))
             .await
             .expect("text renderer attestation");
         assert!(engine.is_current().await);
@@ -4632,9 +4871,12 @@ mod tests {
             let stored: serde_json::Value = serde_json::from_str(&scanned).expect("stored probe");
             assert!(stored.get("chapters").is_none());
             let source = std::fs::File::open(path).expect("hold source");
-            let held = held_source_probe_json(&source)
-                .await
-                .expect("descriptor-bound probe");
+            let held = held_source_probe_json(
+                &source,
+                crate::process_control::ChildWork::background("test fixture probe"),
+            )
+            .await
+            .expect("descriptor-bound probe");
             let current: serde_json::Value = serde_json::from_str(&held).expect("held probe");
             assert_eq!(
                 current["chapters"].as_array().expect("chapter array").len(),
@@ -4793,7 +5035,11 @@ mod tests {
             "-c",
             "i=0; while [ $i -lt 4096 ]; do printf '0123456789abcdef0123456789abcdef' >&2; i=$((i + 1)); done; printf 'terminal extractor error' >&2; printf 'discarded stdout'; exit 7",
         ]);
-        let mut owner = BoundedDiagnosticChild::spawn(&mut command).expect("noisy child");
+        let mut owner = BoundedDiagnosticChild::spawn(
+            &mut command,
+            crate::process_control::ChildWork::background("test"),
+        )
+        .expect("noisy child");
         let (reaped_tx, reaped_rx) = tokio::sync::oneshot::channel();
         owner.reaped = Some(reaped_tx);
         let (status, tail) = tokio::time::timeout(Duration::from_secs(5), owner.output())
@@ -4816,8 +5062,11 @@ mod tests {
             "-c",
             "while :; do printf '0123456789abcdef'; printf 'extracting' >&2; done",
         ]);
-        let mut owner =
-            BoundedDiagnosticChild::spawn_piped_output(&mut command).expect("piped child");
+        let mut owner = BoundedDiagnosticChild::spawn_piped_output(
+            &mut command,
+            crate::process_control::ChildWork::background("test"),
+        )
+        .expect("piped child");
         let (reaped_tx, reaped_rx) = tokio::sync::oneshot::channel();
         owner.reaped = Some(reaped_tx);
         let error = tokio::time::timeout(
@@ -4848,8 +5097,11 @@ mod tests {
             "-c",
             "while :; do printf 'blocked stdout'; printf 'extracting' >&2; done",
         ]);
-        let mut owner =
-            BoundedDiagnosticChild::spawn_piped_output(&mut command).expect("piped child");
+        let mut owner = BoundedDiagnosticChild::spawn_piped_output(
+            &mut command,
+            crate::process_control::ChildWork::background("test"),
+        )
+        .expect("piped child");
         let (reaped_tx, reaped_rx) = tokio::sync::oneshot::channel();
         owner.reaped = Some(reaped_tx);
         let error = tokio::time::timeout(
@@ -4868,7 +5120,11 @@ mod tests {
     async fn cancelling_bounded_extraction_transfers_exact_child_to_reaper() {
         let mut command = tokio::process::Command::new("/bin/sh");
         command.args(["-c", "while :; do printf 'waiting extractor' >&2; done"]);
-        let mut owner = BoundedDiagnosticChild::spawn(&mut command).expect("noisy pending child");
+        let mut owner = BoundedDiagnosticChild::spawn(
+            &mut command,
+            crate::process_control::ChildWork::background("test"),
+        )
+        .expect("noisy pending child");
         let pid = owner
             .child
             .as_ref()

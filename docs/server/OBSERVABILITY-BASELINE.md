@@ -60,8 +60,11 @@ finding.
 3. Logs can be emitted as JSON, and never carry ANSI escapes into a
    non-terminal.
 4. A panic anywhere reaches `tracing::error!` with redaction, a bounded
-   backtrace, a recursion guard and the default hook still running after
-   it — and increments a bounded counter.
+   backtrace, a reporting path that cannot itself panic, and the default hook
+   still running after it — and increments a bounded counter. (Corrected by
+   the #461 review: this said "a recursion guard", but std never re-enters a
+   panic hook — a nested panic aborts the process — so no guard can protect
+   anything; see §3.4.)
 5. The eight §4.9 release-evidence measurements each name a real series:
    the one that exists, or the one this plan creates, with labels,
    denominator, observation interval and an owner.
@@ -355,6 +358,17 @@ Four properties the assessment asked for by name:
 - **Bounded backtrace.** `MAX_BACKTRACE_FRAMES = 32`, captured only when
   `RUST_BACKTRACE` is set, each frame's text redacted and truncated.
 - **Recursion protection.** The thread-local guard above.
+  **Corrected by the #461 review — this bullet and the sketch's comment were
+  wrong.** std never re-enters a panic hook: a panic raised while one is
+  running is `MustAbort::PanicInHook`, which prints "panicked while processing
+  panic" and aborts the process before anything unwinds. The guard's `else`
+  branch can never run, and no `catch_unwind` anywhere can intercept the
+  abort. What actually protects the process is that the reporting path is
+  panic-free by construction (payload only downcast to `&str`/`String`, no
+  third-party `Debug`/`Display`, `char`-wise truncation, `get` instead of
+  indexing, string-only `tracing` fields). The shipped hook has no guard;
+  `panics.rs` documents each step, and
+  `a_panic_inside_the_reporting_path_aborts_the_process` pins the abort.
 - **Deliberate default-hook chaining.** `previous(info)` always runs, at
   the end, outside the guard. The process's abort/unwind behaviour does not
   change.
@@ -393,7 +407,7 @@ identifiers").
 | 1 | First frame p50/95/99 | `plurx_ttff_ms` | `method`, **+`client`** | `_count` | Exists; M5 adds `client` (the bounded class `http::network::identity` already derives) and two buckets above 30 s, because a p99 that lands in `+Inf` is not a p99 |
 | 2 | Seek to moving picture | `plurx_seek_to_picture_ms` **(new)** | `method` | `plurx_seeks_total{method}` **(new)** | Client-reported event `seek_resumed`, ms from the seek command to the first presented frame. Needs a client change on three platforms — M5 lands the server side and the metric stays at zero until clients emit it, which is honest and visible |
 | 3 | Stalled seconds per playback hour | `plurx_stalled_seconds_total` **(new)** | `kind` (the existing four) | `plurx_watched_seconds_total{method}` **(new)** | `plurx_stalls_total` counts events and stays. **Do not reuse `plurx_suspended_seconds_total`** — that is encoder ahead-window suspension (`telemetry.rs:196-203`), not a viewer stall, and conflating them would make a healthy pacing decision look like a defect |
-| 4 | Failed starts per attempt | `plurx_start_outcomes_total` **(new)** | `method`, `outcome="ok\|refused\|failed\|cancelled"` | its own `ok+refused+failed+cancelled` | Live TV keeps `plurx_live_tv_starts_total{outcome}`; this is the finite-playback twin, so the ratio is one query on either surface |
+| 4 | Failed starts per attempt | `plurx_start_outcomes_total` **(new)** | `method`, `outcome="ok\|refused\|failed\|cancelled"` | its own `ok+refused+failed+cancelled` | **Built 2026-09-26 with its own design, §7.8**, plus `plurx_start_outcomes_unpaired_total{outcome}` for its one known error. Live TV keeps `plurx_live_tv_starts_total{outcome}`; this is the finite-playback twin, so the ratio is one query on either surface |
 | 5 | Replacement failure rate | `plurx_playback_preparation_staged_total{outcome}` ÷ `plurx_playback_preparation_decisions_total` | existing | existing | **No new series.** M5's work here is to write the exact expression down, in [OPERATIONS.md](../OPERATIONS.md), so two people compute it the same way |
 | 6 | Admission wait | `plurx_admission_wait_seconds` **(new)** | `pool="vod_blocked_get\|encode_permit\|probe_gate\|image_materialize"` | `_count` | Four named pools, each an existing semaphore or wait pool. The existing gauges (`plurx_vod_blocked_gets_waiting`) say how many are waiting, never how long |
 | 7 | Actual vs reserved scratch | `plurx_scratch_bytes{kind="reserved\|actual"}` | `kind` | — | **Not built here.** The reservation accounting belongs to the seek-scratch repair effort (review §3.3.5, C16). M5 reserves the name and the two label values so that effort and this one do not invent two spellings |
@@ -495,7 +509,11 @@ setting and nothing appears in Settings → Developer.
   the panic hook reuses `redact_operator_text`'s rule set rather than
   writing a weaker second one.
 - **Recursive logging is avoided** (F-core-12: "avoid recursive logging").
-  A thread-local guard, checked before any tracing call in the hook.
+  ~~A thread-local guard, checked before any tracing call in the hook.~~
+  Corrected by the #461 review: a guard cannot do this, because std aborts
+  on a panic inside the hook instead of re-entering it. Recursion is avoided
+  by std; the process survives only if the reporting path does not panic,
+  which is how it is built (§3.4).
 - **The default hook is chained deliberately** (F-build-ops-codehealth-12).
   `previous(info)` always runs; stderr output and abort behaviour do not
   change.
@@ -601,7 +619,11 @@ node running the new build.
 2. Tests:
    `a_panic_reaches_the_log_buffer_with_its_location`;
    `a_panic_payload_containing_a_bearer_is_redacted`;
-   `a_panic_inside_the_hook_does_not_recurse` (a formatter that panics);
+   `a_panic_inside_the_hook_does_not_recurse` (a formatter that panics) —
+   shipped as `a_panic_inside_the_reporting_path_aborts_the_process`, because
+   what a panicking formatter inside the hook actually does is abort the
+   process (§3.4), plus `hostile_payloads_are_reported_without_a_second_panic`
+   for the property that keeps that from happening;
    `the_previous_hook_still_runs`;
    `the_subsystem_label_is_from_the_allowlist` (a synthetic location
    outside it reports `other`);
@@ -697,6 +719,55 @@ On media1 and lab1, with the build carrying PRs <M1..M4 numbers>:
 Report exact values. Do not restart anything except in step 4.
 ```
 
+### 6.4 What only the fleet can prove for M5 — GPT prompt
+
+```text
+On lab1 and media1, with the build carrying the C-08 M5 PR (plan/C-08-2):
+1. Families and size, on each host:
+     curl -s http://<host>:32400/metrics | grep -cE \
+       '^plurx_(ttff_ms|seek_to_picture_ms|seeks_total|stalled_seconds_total|watched_seconds_total|delivered_bytes_total|admission_wait_seconds)'
+     curl -s -o /dev/null -w 'bytes=%{size_download} time=%{time_total}\n' \
+       http://<host>:32400/metrics
+   Paste both numbers per host. Flag any scrape over 2 MB or 500 ms.
+2. Label hygiene — must print nothing on both hosts (paste output and exit
+   status):
+     curl -s http://<host>:32400/metrics | grep -E \
+       '^plurx_(ttff_ms|seek_to_picture_ms|seeks_total|stalled_seconds_total|watched_seconds_total|delivered_bytes_total|admission_wait_seconds)' \
+       | grep -vE 'method="(direct_play|remux|transcode|unknown)"|kind="(supply|decode|network|other)"|pool="(vod_blocked_get|encode_permit|image_materialize)"'
+3. Watched time, on lab1, in Chrome: save
+     curl -s http://lab1:32400/metrics | grep -E 'plurx_(watched_seconds_total|delivered_bytes_total|ttff_ms_count)'
+   then play one title for 5 minutes, pause for 1 minute, seek forward
+   10 minutes, play 2 more minutes, stop. Repeat the grep and paste both.
+   Expected: plurx_watched_seconds_total{method=<the method the stats
+   overlay shows>} rose by about 420 (not 480 — the pause and the seek do not
+   count; report the exact delta), delivered_bytes for that method rose, and
+   plurx_ttff_ms_count{method=...,client="chrome"} rose by 1.
+4. Native clients: play any title for 2 minutes on the Apple TV and 2 minutes
+   on the Android device against lab1, then paste the same grep. Expected:
+   plurx_watched_seconds_total{method="unknown"} rose by about 240 (natives
+   do not name their method yet), and plurx_ttff_ms_count gained one each
+   under client="apple" and client="android". If either landed under
+   client="other", paste that client's User-Agent from the lab1 journal.
+5. Admission wait: on lab1 start a VOD title in Chrome and seek far ahead
+   twice, then paste
+     curl -s http://lab1:32400/metrics | grep 'plurx_admission_wait_seconds_count'
+   Report the three counts; vod_blocked_get should be non-zero.
+6. Watched time across nodes (the #500 review's case): with the Android
+   device pointed at the cluster address (so its beats are not cookie-pinned),
+   save on EVERY node
+     curl -s http://<node>:32400/metrics | grep plurx_watched_seconds_total
+   play one title for 5 minutes, stop, repeat on every node, and paste all
+   of it. Expected: the deltas summed across nodes come to about 300, not
+   300 × the number of nodes that received beats. Say how many nodes'
+   counters moved.
+7. A long web stall: if a supply stall of 20 s or more happens (or can be
+   provoked, e.g. by throttling the browser to 1 Mb/s on a 4K remux), paste
+   the two `plurx_stalled_seconds_total` readings around it and the
+   `stall` / `stall_end` lines from `GET /api/v1/system/playback-events`.
+   Expected: the kind's seconds rose by the whole stall, not by 8.
+Report exact values. Restart nothing.
+```
+
 ## 7. Open questions
 
 1. **`client` as a `plurx_ttff_ms` label (row 1).** The class comes from
@@ -728,6 +799,528 @@ Report exact values. Do not restart anything except in step 4.
    different name first, this document is the one that changes, not the
    metric — and §3.5's row should be updated in the same PR.
 
+### 7.6 Decisions taken while executing, 2026-09-23
+
+This plan was written against `0f02b7ea`. Five things it says are no longer
+true at `1d21b184e`, and one thing it asked for turned out to be a hazard.
+Each is a deviation from the plan as written and is recorded here rather than
+left for a reader to discover from the diff.
+
+1. **K-04 landed a matched-route latency histogram after this plan was
+   written, so §3.1's `plurx_http_request_seconds` was not built.**
+   `http_store_attribution` (`http/mod.rs`) times `next.run(request)` by
+   bounded `route_group` and serving role and renders
+   `plurx_http_route_seconds`. That timer stops when the handler returns its
+   `Response`, which is exactly response-header latency. Adding a second
+   header-latency histogram would have been the same measurement under a
+   second name. F-core-12's distinction is still delivered, and is now the
+   distinction between `plurx_http_route_seconds` (header) and the new
+   `plurx_http_body_seconds` (delivery).
+2. **The route label is `route_group`, not the `MatchedPath` template.** §3.1
+   specified 192 template labels built from the router's own route list. Axum
+   exposes no route list at runtime, so that table would have to be maintained
+   by hand — and `http_route_group` is already this repository's one
+   exhaustive inventory of registered templates, held closed by
+   `registered_routes_reach_every_non_other_attribution_family` and by the
+   unclassified-pattern assertion in the route inventory test. A second table
+   would be a second spelling of the same fact with no test holding the two
+   in step. **The cost is real and is not hidden**: a 5xx on one item route
+   and a 5xx on another are one series, and §3.1's two reserved labels
+   (`<unmatched>`, `<fallback>`) collapse into the existing `other`. The 5xx
+   access line carries the redacted target and the request id, and that is
+   what takes an operator from a series to a request.
+3. **The 5xx access line is throttled to one per route group per second.**
+   §3.3 asked for an `on_response` that logs every 5xx at WARN. On a fenced
+   node, a learner outside its eligible routes, or a node in maintenance,
+   `cluster_capacity_gate` refuses **every** request with 503 — so "every 5xx"
+   is one ring entry per request at full request rate, and the ring is the
+   only log the product can show. That is the same eviction hazard §3.3 cites
+   as its reason for refusing an INFO access log, arriving through the door it
+   left open. The line now carries `also_suppressed`, the number of lines it
+   stands for, and the counters remain exact.
+4. **§3.7's dependency table is stale in two rows.** `uuid` is a real
+   dependency of `plurxd` at this commit, not a dev-dependency, so M2 needed
+   no manifest change for it and no hand-rolled id source. `http-body-util`
+   is still dev-only, but M1 does not need it: the body wrapper implements
+   `http_body::Body` directly so it can delegate `size_hint`, and `http-body`
+   is named as a workspace dependency instead — a crate already compiled in
+   the tree under hyper and axum, so the build gains nothing new. The one
+   genuinely new crate in the shipped binary is **`tracing-serde 0.2.0`**,
+   pulled in by `tracing-subscriber`'s `json` feature, and it is recorded in
+   `THIRD-PARTY-NOTICES.md`.
+5. **Open question 4 — does the 5xx WARN line duplicate existing error
+   logging? Partly, and it stays.** `ApiError::Internal` already logs the
+   failure detail at ERROR (`http/error.rs`), with no route, no status, no
+   latency and no request id; the access line has all four and not the detail.
+   They are complementary halves of one report, so a 500 raised through
+   `ApiError::Internal` costs two ring entries. The alternative — dropping the
+   access line for that path — would leave every 5xx that does **not** come
+   from `ApiError::Internal` (a panic turned into a 500, a typed
+   `ServiceUnavailable`, the capacity gate's refusals, hyper's own errors)
+   with no line at all. The throttle in point 3 is what bounds the cost.
+6. **Open question 3 — body accounting for range requests — is answered as
+   §7 anticipated and is written into the operator documentation.**
+   `plurx_http_body_seconds` is per **response body**, so a direct play
+   answered as ten range requests is ten observations, not one viewing.
+   `docs/OPERATIONS.md` says so where the metric is described, so nobody reads
+   it as time-to-watch.
+
+**M5 was not started.** It is the largest milestone and the plan splits it
+into three PRs of its own; two of its open questions (§7.1 the `client` label's
+vocabulary, §7.2 where `plurx_watched_seconds_total` is incremented without
+double-counting) are research this session did not do, and §7.2 says plainly
+that if no single call site can answer honestly the metric is not ready. M1's
+series exist now, which is the dependency M5 was waiting on.
+
+
+### 7.7 Decisions taken while executing M5, 2026-09-24
+
+M5 was built as **one** draft PR on `plan/C-08-2`, not the three PRs §5.5
+describes: the work board's rule 4 makes milestones logical commits inside
+one plan PR, and this session was asked for one. Every premise §3.5 rests on
+was re-read at `936157b4b` first; the branch starts at `7939a3f1e` (which
+already carries #482 and #487 through integration #493) and was merged with
+`origin/main` at `b1de09647` before it was pushed, and none of the files
+cited below changed between `936157b4b` and `b1de09647`. What changed against
+the plan is below, and each item is a deviation from the plan as written.
+
+**What was re-verified, by function name (lines at `936157b4b`).**
+`PlaybackMetrics` is still the fixed-array house pattern (`telemetry.rs:225`,
+`record` `:259`, `render` `:354`); `plurx_ttff_ms` still had eight buckets
+ending at 30 s (`:17`). ~~Every first-party client still sends a stall's
+duration in `ms` (web `recordWaitStall` in `web/player/measurements.js`,
+Android `ControllerPlaybackTelemetry.sampleStall`, Apple
+`ApplePlaybackStallLog`), so row 3's numerator needed no client change.~~
+**Corrected by the #500 review:** every client sends `ms`, but the web sends
+its only report for a long wait from `persistentWait`, at
+`PERSISTENT_STALL_MS` (8 s), with the time elapsed so far, and `endWait`
+then returned without reporting the rest; so every web stall longer than
+8 s reached row 3 as about 8 s. Android and Apple report once, on recovery,
+with the whole length. The web now closes a reported wait with a
+`stall_end` beacon carrying the time after the first report, and the server
+credits it to the same kind without counting a second stall (§7.7.8).
+`/metrics` (`http/system.rs:5290`) and `prometheus_scrape_has_no_store_operation`
+are unchanged, and nothing here touches the `format!` in that handler: every
+new family renders inside `crate::telemetry::prometheus()`. The replacement
+counters of row 5 are where §2.4 said (`playback_control.rs:14304-14373`).
+The worked example's `require_dovi_renderer` is now at `transcode.rs:15132`,
+not `:14322`, and `plurx_dovi_proofs_total` **does not exist**; OPERATIONS.md
+labels the example illustrative.
+
+1. **§7.1 — the `client` label — is answered: bounded, and taken from the
+   header.** `http::network::client_class` maps a `User-Agent` onto seven
+   literals (`chrome`, `safari`, `firefox`, `edge`, `apple`, `android`,
+   `other`) and returns nothing else; it now returns `&'static str`, the
+   vocabulary is `telemetry::CLIENT_CLASSES`, and
+   `every_client_class_is_in_the_bounded_metric_vocabulary` holds the two
+   together. The label comes from the requester's header, never from the
+   beacon's free-text `ua` field, and is derived beside — not from —
+   `network::identity`, which is `None` for an IPv6 peer. Cost: the
+   `plurx_ttff_ms` family grows from 44 lines to 364. **A query of the old
+   shape (`plurx_ttff_ms_count{method="remux"}`) now returns seven series**;
+   `sum by (method)` restores it.
+2. **§7.2 — where watched seconds are counted — is answered: the live
+   progress beat (`http::watch::progress`).** It is the one signal every
+   first-party player sends every few seconds while open, playing or paused,
+   and each beat reaches exactly one node. `telemetry::WatchLedger` compares
+   a beat with the previous beat for the same viewer and item and credits
+   the smaller of the position's advance and the wall time between them; a
+   pause, a stall, a rewind, an advance over twice the wall time plus 2 s (a
+   seek), or a gap over 120 s credits nothing. ~~So the sum is never more
+   than wall time per viewer and item per node, and a viewer who moves nodes
+   starts a fresh baseline instead of being counted twice.~~ **Corrected by
+   the #500 review:** that held for one move, not for beats that alternate
+   between nodes, which the routing contract allows for every non-HLS
+   request and which Android (no cookie jar) does; each node then credited
+   its own 20 s gaps and the cluster sum was N× wall time. "The previous
+   beat" is now cluster-wide (§7.7.9).
+   The ledger is per process (`AppState::watch_ledger`) and capped at 4,096
+   entries; a viewer arriving at a full ledger is not tracked rather than
+   evicting a live one. Offline replays (`recorded_at`) and Plex-compatible
+   `/:/timeline` clients are not counted. **The method is what the beat
+   names**: the beat gains an optional `method`, validated against the
+   playback vocabulary and never stored. The web player sends it in this PR;
+   Apple and Android do not yet, so their seconds are `unknown`. Row 3 (the
+   sum) is complete; row 8's per-method split is not, until they do.
+3. **Row 4 — failed starts per attempt — is not built** (in this PR; it is built since, by §7.8). No single server
+   site sees a finite-playback start attempt *and* its outcome: a direct play
+   has no create call (its start is a stream of range GETs the direct-play
+   registry collapses), an HLS create sees only server-side refusals, and a
+   start that fails in the client's decoder reaches the server only as a
+   client beacon (`playback_failed`, `stream_rejected`, `hls_fatal`) that is
+   not paired with an attempt the server counted. The honest build is an
+   attempt-keyed outcome — the beacons already carry `attempt` — and that is
+   a design of its own, not a counter. `plurx_start_outcomes_total{method,
+   outcome}` is reserved in OPERATIONS.md so it cannot be spelled twice, and
+   `tests/operations/test_release_evidence_metrics.py` fails the day it is
+   rendered without a reading row.
+4. **Row 6 has three pools, not four.** The probe gate's wait is already
+   `plurx_decode_facts_phase_seconds{phase="gate_wait"}` (S-13 M0,
+   `decode_facts.rs` `get_or_probe_inner`); a second series for the same
+   wait would repeat §7.6.1's mistake. The three: `vod_blocked_get`
+   (`waitpool::RegisteredWait::wait`, timed from pool admission),
+   `encode_permit` (the lifetime of an `admission::LiveWait` guard, which
+   covers the VOD encoder queue, the rolling start queue and the software
+   capacity retry), and `image_materialize` (`ArtworkCoordinator::
+   derive_permit`). One observation per wait, however it ended. (As first
+   built, `vod_blocked_get` and `image_materialize` recorded after their
+   `await` returned, so a GET aborted mid-wait — the seek-storm tail — and a
+   registration whose recheck found the segment were never recorded; the
+   #500 review found it. Both now time from `telemetry::AdmissionWaitTimer`,
+   a guard created where the wait starts that records when it is dropped,
+   as `LiveWait` always did.)
+5. **Row 2's denominator needed a definition the plan did not give.**
+   `plurx_seeks_total{method}` counts seeks that *ended*: `seek_resumed`
+   (with `ms`, which also feeds the histogram) plus `seek_abandoned`
+   (superseded, or the player stopped first). Counting only `seek_resumed`
+   would have made the denominator equal to the histogram's own `_count`.
+   Both events are a client contract no client implements yet; the families
+   render at zero until one does.
+6. **Row 8's two sources differ by at most one chunk.** HLS (rolling and
+   VOD) and progressive remux credit the delivery meter, which counts a piece
+   after the downstream has taken it; a direct play has no meter, so its
+   body counts each chunk as it is yielded to the connection. Each
+   `crate::meter::Meter` now carries its method from construction.
+7. **Row 5's expression, written exactly:**
+   `plurx_playback_preparation_staged_total{outcome="refused"}` ÷
+   `plurx_playback_preparation_decisions_total{outcome="prepare"}`. §3.5's
+   "staged ÷ decisions" would have divided by every decision including the
+   fallbacks, which never try to stage.
+8. **A web stall is reported in two parts (#500 review, P1).** The web must
+   report a long wait while the picture is frozen — that report is what
+   drives recovery and what an operator reads when the wait never ends — so
+   the first report cannot wait for the end. `persistentWait` remembers what
+   it reported (`waitReportedMs`, and the detail it used); `endWait`, on any
+   ending of a reported wait, sends `stall_end` with `ms` = the wait's whole
+   length minus that, under the same detail. The server's `stall_end` arm
+   adds `ms` to `plurx_stalled_seconds_total{kind}` and leaves
+   `plurx_stalls_total` alone, so the two reports are one stall of the full
+   length and there is nothing to double count: neither side keeps a
+   running total the other can repeat. `stall_end` is a lifecycle event,
+   kept like `stall`, never sampled away. Bounds, written into
+   OPERATIONS.md: a wait handed to a recovery ends at that hand-off (the
+   reload is the `stall_recovery` outcome's `ms`), and a wait still frozen
+   when the tab closes keeps only its first report.
+9. **Watched seconds are credited once cluster-wide (#500 review, P2).** The
+   progress handler already read the viewer's durable progress row before
+   writing (for the watched-crossing check); it now hands that row to the
+   ledger. A node's ledger remembers its last two beats per viewer and item
+   (position, monotonic instant, wall-clock ms). When the row holds neither
+   of those positions and was written no earlier than this node's last beat
+   (to the second `updated_at` is stored in), another node committed a
+   newer beat for this viewer, and this beat credits from the row — its
+   position, and the wall time since its `updated_at` — instead of from the
+   node's own older beat. Otherwise, which is always the case on a single
+   node (its own direct commits and coalesced flushes write positions it
+   saw), the exact monotonic local baseline is used. Chosen over the
+   review's other option (credit only where the delivery lives) because a
+   direct play has no single owning node either, and over a client-sent
+   interval because the native clients cannot be changed in this PR. Known
+   bounds: the cross-node comparison uses the writing node's wall clock, so
+   it assumes NTP-level agreement; two nodes committing one viewer's beats
+   in the same instant can overlap by one beat interval; and a coalesced
+   beat another node has not flushed yet is credited when it lands, not
+   before.
+
+### 7.8 Decisions taken while executing M5 row 4, 2026-09-26
+
+Row 4 (failed starts per attempt) was left unbuilt by the M5 PR because no
+single server site sees a start attempt *and* its outcome (§7.7.3). It is
+built on `plan/C-08-3` ([PR #559](http://192.168.4.7:3000/noirr/plurx/pulls/559))
+with the design below. **Each numbered point is a decision Paul can
+overturn**; the alternative is named with it. Premises were re-read at
+`abb6fe647` (`file:line` at that commit).
+
+**What was re-verified.**
+
+- `/decision` is **not** a start request. Detail pages ask it without
+  playing anything: the web's pre-play selection
+  (`web/detail/preplay-selection.js:216`), Apple's detail view for markers
+  (`clients/apple/Sources/DetailView.swift:2477`) and Android's pre-play
+  subtitle cost (`clients/android/.../ui/DetailScreen.kt:773`). An attempt
+  opened there would be an attempt nobody made. (The same reason the Trakt
+  start moved off it — `playstart.rs:92-97`.)
+- The one seam that hears every finite-playback delivery begin is
+  `playstart::note_playback_started` (`playstart.rs:143`), called by an HLS
+  create (`http/hls/create.rs:2397`), every direct-play GET
+  (`http/stream.rs:2589`) and a progressive `stream.mp4`
+  (`http/stream.rs:2859`); Library channel tunes deliberately skip it.
+- Every first-party beacon already carries the file: the web's `clientLog`
+  adds `file_id` to every report (`web/core/api.js:134`), Android's
+  `PlaybackClientLog` has `file_id` (`player/PlaybackTelemetry.kt:28`) and
+  Apple's `ttff` and failure logs do (`PlayerController.swift:211-253`,
+  `:33-45`). The server reads it at `http/system.rs:866`.
+- The client's own `attempt` field is **not** a usable key: the web's is a
+  per-page sequence (`a${++ATTEMPT_SEQ}`, `web/player/measurements.js:144`),
+  so two tabs or two devices collide, and no server request carries it.
+- The start-failure beacons, by client: web `playback_failed`
+  (`web/player/transport.js:715`), `hls_fatal` (`web/player/player.js:821`),
+  `stream_refused` (`player.js:193`, `:888`), `stream_rejected`
+  (`web/player/decode-tiers.js:466`); Android `playback_error`
+  (`player/Controller.kt:887`, `:1882`, `:2171`); Apple
+  `avplayer_item_failed` (`PlayerController.swift:33`).
+- The live progress beat already refreshes the direct-play registry per
+  viewer and item (`http/watch.rs:79`). **Only the web beats while paused**
+  (a 60 s floor, `web/player/stats.js:546`). Apple beats only while playing
+  (`clients/apple/Sources/PlayerController.swift:7133`), Android likewise
+  (`player/PlayerScreen.kt:1300`), and neither sends a `ttff` on unpause, so
+  a native pause is silence however long it lasts. (Corrected after the
+  #559 review, which found the first version of this bullet, "paused or
+  not", true of the web only.)
+- The clients' own "not yet, ask again" create answers are the
+  `create_503_not_yet` row of `tests/playback/playback-surface-contract.json`
+  (`startup_timeout`, `media_owner_transition`, `vod_index_pending`,
+  `vod_engine_unattested`, `transcode_capacity_pending`). All three clients
+  re-post the same create on a 1 s / 2 s / 4 s ladder (web
+  `openSessionRetryingNotYet`, `web/player/directed-change.js:604`; Android
+  `PlaybackPolicy.kt:241`), and the web answers `vod_index_pending` on a copy
+  create by falling back to `stream.mp4` (`web/player/decode-tiers.js:1337`).
+- Every `ttff` beacon carries the `reason` its playback attempt began for,
+  and all three clients name a player just opened `cold-start` or `resume`
+  (web `web/player/decode-tiers.js:963`, Android `player/Controller.kt:1226`,
+  Apple `PlayerController.swift:2685`); every other reason (`seek`,
+  `quality`, `audio`, `selection`, `stall-*`) is a picture inside a play.
+- `/metrics` reads a `MetricsState` sub-state (`http/system.rs:4960`) that
+  may hold no Store; the handler is `:5387`, and the new family renders from
+  `telemetry::prometheus()`, so the handler's `format!` is untouched.
+
+**The design.**
+
+1. **An attempt is keyed by (viewer, file) on the node, opened by the first
+   media request, not minted as an id.** `playstart::StartAttempts` opens an
+   attempt in `note_playback_started` and every later request for the same
+   file while it is pending joins it (a range storm; the create after a
+   decoder fallback). *Alternative:* a server-minted attempt id returned by
+   the start request and echoed on every beacon. It would be exact across
+   nodes, but it needs all three clients changed before it counts anything,
+   and the pairing it buys is already available from the authenticated user
+   and the `file_id` every beacon carries.
+2. **It resolves exactly once**, on the first of: `ttff` → `ok`; one of the
+   six start-failure beacons above → `failed`; the server answering an HLS
+   create, a `stream.mp4` or a direct-play GET for that file with an error →
+   `refused`; 180 s with none of those → `cancelled`. **Except a "not yet"**:
+   an error whose code is in the `create_503_not_yet` row does not resolve
+   the attempt. It keeps it pending (or opens one), so the client's retry of
+   the same create, or the web's `stream.mp4` fallback, joins it, and a
+   ladder of three 503s followed by a create that plays is one `ok`. If the
+   client stops asking and nothing is served before the deadline, the
+   attempt is `refused` (the server's last answer was a refusal), not
+   `cancelled`. Media served after a "not yet" clears it. (Added after the
+   #559 review, finding 1: the first version counted every rung of the
+   ladder as a `refused` start, so one start that played read as 75%
+   failed.) 180 s is above the top
+   `plurx_ttff_ms` bucket (120 s), so a start slow enough to be in that
+   bucket is still `ok`. A `cancelled` attempt is either a viewer who left
+   before the picture or a player that hung and said nothing; the family
+   cannot tell those apart, and says so in OPERATIONS.md.
+3. **The unit is the attempt, not the viewer's play.** A decoder refusal
+   followed by the client's own fallback to a transcode is one `failed` and
+   one `ok`, and each refused request is its own `refused` attempt (a create
+   the server refuses with nothing in flight is still one attempt), except
+   the "not yet" answers of point 2, which the client's retry joins. The
+   plan's row names attempts, and the viewer-level figure is recoverable
+   from the sidecar rows. *Alternative:* hold a failure open until the start
+   deadline and let a later first frame turn it into `ok`, which counts
+   viewer-visible failed plays instead.
+4. **After a first frame, the play stays one play.** A request, beacon or
+   progress beat within five minutes of the last one (`PLAY_QUIET`, the
+   Trakt dedupe window) joins it outright: a quality switch, a seek restart,
+   a web resume after any pause (the web beats while paused). A request
+   after five minutes of silence is either a native pause ending (Apple and
+   Android are silent while paused) or the same title opened again, and the
+   ledger does not guess: it holds a *possible resume*. Only an explicit
+   start signal makes that an attempt: a `ttff` whose `reason` is
+   `cold-start` or `resume` (`ok`), a start-failure beacon (`failed`) or a
+   refusal (`refused`). A `ttff` for any other reason (an Android seek right
+   after the resume) or the 180 s deadline returns it to the play,
+   uncounted. A play is forgotten only after 24 hours with no sign of its
+   viewer (`PLAY_FORGET`), so a native player paused overnight still
+   resumes into it. A failure or a refused replacement during a play is a
+   mid-play failure, not a failed start. The client's own report of a
+   refusal the server already counted is absorbed by a short tombstone
+   rather than counted twice. (Rewritten after the #559 review, finding 2:
+   the first version forgot a play after five minutes without a beat, so
+   every native pause longer than that became a phantom start, `cancelled`
+   or, after an Android seek, a second `ok`.) **Known bounds of this rule:**
+   the same title opened again within five minutes of the last sign of the
+   old play joins it and is not counted; one opened again after that and
+   abandoned before its picture is not counted either (the deadline cannot
+   tell it from a resume); and a native player that fails right after
+   resuming from a long pause counts one `failed` start.
+5. **`method`** is the method the `ttff` beacon names when it names one, else
+   the method of the request that opened the attempt; a refused HLS create
+   with nothing in flight is `unknown`, because the create had not decided
+   yet. Four methods × four outcomes = 16 series, fixed.
+6. **The scrape settles expired attempts** before rendering (an in-memory
+   sweep in the `/metrics` handler; no Store read), so an idle node still
+   reports the last abandoned start. Every other ledger operation sweeps too.
+   The ledger is capped at 4,096 (viewer, file) pairs; at the cap a new
+   attempt is not tracked, rather than evicting one still in flight.
+7. **Known bound, made visible rather than hidden.** The ledger is node-local
+   like the direct-play registry beside it. HLS is held to one node and the
+   web client's cookie pins the rest, but a client with no cookie (Android)
+   behind a cluster address can send its media request to one node and its
+   beacon to another: the first node then counts that attempt `cancelled`
+   and the second cannot pair its beacon. The second half is counted, in
+   `plurx_start_outcomes_unpaired_total{outcome="ok|failed"}`, so the size of
+   the error is on the same page as the number it distorts. *Alternative:* a
+   replicated attempt row with compare-and-set resolution — exact, but a
+   Raft write per start and a schema change, which is not the smallest
+   design that meets the row. The GPT prompt below measures how big the
+   error is before anyone pays for that.
+
+**Not counted, on purpose:** `/decision` refusals (a missing file refused at
+`/decision` never reaches a start request — the attempt is invisible here and
+the web and native error screens are the only record; a detail page asking
+`/decision` for markers would otherwise count as a refused start); Library
+channel tunes and Live TV (not finite-playback starts; Live TV has
+`plurx_live_tv_starts_total`); offline downloads; Plex-compatible clients.
+
+**Tests** (each production hunk shown failing with it reverted, in the
+execution log): `a_first_frame_beacon_settles_the_start_its_direct_play_opened`,
+`a_start_request_the_server_refuses_is_a_refused_start`,
+`a_progress_beat_keeps_a_started_play_alive`,
+`a_scrape_settles_a_start_past_its_deadline_as_cancelled`,
+`start_outcome_families_render_exactly_their_enumerated_labels`,
+`every_create_not_yet_answer_keeps_its_start_attempt_open`; the ledger's
+own rules by `a_start_attempt_resolves_once_by_its_first_terminal`,
+`a_play_is_kept_by_its_progress_beats_and_held_through_a_silent_pause`,
+`a_native_pause_with_no_beats_resumes_into_the_same_play`,
+`a_not_yet_refusal_keeps_the_start_open_for_the_retry_that_plays`,
+`start_not_yet_codes_are_the_contract_row_the_clients_retry`,
+`a_first_frame_names_the_method_its_start_is_counted_under`,
+`a_request_joining_a_pending_start_relabels_it`,
+`a_first_frame_after_a_refusal_is_unpaired` and
+`a_full_ledger_tracks_no_new_attempt_rather_than_evicting_one`.
+
+### 7.9 Client work this plan needs and does not build — GPT prompt
+
+Row 2 (seek to moving picture) renders zero until a client sends
+`seek_resumed` / `seek_abandoned`, and row 8's per-method split is `unknown`
+for every native second until Apple and Android name their method on progress
+beats. Both are client changes, for the GPT session. The server contract they
+write to is already merged (§7.7.5, §7.7.2) and is not changed here.
+
+```text
+Client follow-ups for C-08 M5 (docs/server/OBSERVABILITY-BASELINE.md §7.9).
+Server contract (already on main; do not change the server):
+  POST /api/v1/client-log  {"level":"info","event":"seek_resumed",
+       "method":"direct_play|remux|transcode","ms":<int ms from the seek
+       command to the first presented frame after it>,"file_id":<id>}
+  POST /api/v1/client-log  {"level":"info","event":"seek_abandoned",
+       "method":"...","file_id":<id>}   -- a seek that ended without a picture:
+       superseded by another seek, or the player closed/stopped first.
+  POST /api/v1/items/{id}/progress gains "method":"direct_play|remux|transcode"
+       on live beats (never on offline replays that carry recorded_at).
+  Send exactly ONE of seek_resumed/seek_abandoned per seek command, when it
+  ends. /client-log admits 240 reports per user per minute: a scrub that
+  issues many seeks reports each superseded one as seek_abandoned only if it
+  had been sent to the player; do not report per drag tick.
+
+1. Web (crates/plurxd/src/web/player/transport.js):
+   - Where a seek begins (`p.controlSeek={sequence,intentGeneration,...}`,
+     line ~131): if a previous p.controlSeek is still unpresented, send
+     seek_abandoned for it; stamp the new one with seekStartedAt =
+     performance.now().
+   - Where the seek's target is first presented (the path that sets
+     `pending.localVodPresented`, and for HLS/direct the first
+     `requestVideoFrameCallback` (fallback: first `timeupdate` with
+     !v.seeking and v.readyState>=3) after `seeked` for that same pending
+     object): send seek_resumed with ms = round(now - seekStartedAt) via
+     clientLog(Object.assign({level:"info",event:"seek_resumed",ms},
+     playbackContext())), once per pending object.
+   - Where the player is torn down with a pending unpresented seek
+     (stats.js:678 clears PLAYER.controlSeek): send seek_abandoned first.
+   - Tests: add node tests beside tests/web/progress-never-presented.test.js
+     proving one seek -> exactly one seek_resumed with ms>0; seek then seek
+     again before presentation -> seek_abandoned then seek_resumed; close
+     during a seek -> seek_abandoned. Run make web-check and the web tests.
+2. Android (clients/android/app/src/main/java/tv/plurx/app/player/):
+   - PlaybackTelemetry.kt ControllerPlaybackTelemetry.firstFrame: when
+     measurement.attempt.reason == "seek", report event "seek_resumed"
+     (same ms) instead of "ttff" -- today seek attempts reach the server as
+     ttff (Controller.kt:1385/1408 begin("seek")) and inflate plurx_ttff_ms.
+   - ControllerPlaybackTelemetry.cancel(attempt): when attempt.reason ==
+     "seek", report "seek_abandoned".
+   - data/Models.kt ProgressReq: add `val method: String? = null`; the live
+     progress call in ui/AppViewModel.kt (api().progress(itemId,
+     ProgressReq(positionMs, durationMs)), ~line 903, driven by
+     PlayerScreen.kt's delay(10_000) loop) passes the current delivery method
+     from the plan (the same value PlaybackTelemetryContext.method carries,
+     mapped to direct_play|remux|transcode); offline replays keep method null.
+   - Tests: PlaybackTelemetryTest cases for seek -> seek_resumed (not ttff),
+     cancelled seek -> seek_abandoned, cold start still ttff; a serialization
+     test that ProgressReq emits "method". Add the tests/client-fixes.toml
+     anchor for the ttff-for-seek correction. Run make android-test.
+3. Apple (clients/apple/Sources/):
+   - PlayerController.seek(toMs:) (~line 3510): stamp seekStartedAt with a
+     monotonic clock and the seek generation; a newer seek before the first
+     presented frame sends seek_abandoned for the older one.
+   - Reuse the one-shot first-progress gate (below ApplePlaybackTTFFLog,
+     ~line 258: the film clock advancing while AVPlayer reports playback) to
+     end a seek: send seek_resumed with ms, method, file_id, attempt. If a
+     seek currently produces an ApplePlaybackTTFFLog with reason "seek",
+     send seek_resumed instead, as on Android.
+   - Player dismissal with an unpresented seek sends seek_abandoned.
+   - Models.swift ProgressRequest (~line 1027): add `var method: String? =
+     nil` (encoded as "method"); AppModel.reportProgress(itemId:positionMs:
+     durationMs:) (~line 940) gains the delivery method from the player's
+     plan, mapped to direct_play|remux|transcode.
+   - Tests: PlayerController/telemetry unit tests for the three seek cases
+     and the ProgressRequest encoding; tests/client-fixes.toml anchor if a
+     seek ttff is corrected. Run make apple-test on the Mac runner.
+4. After each lands and is deployed, verify on one node (report exact values):
+     curl -s http://<node>:32400/metrics | grep -E \
+       '^plurx_(seeks_total|seek_to_picture_ms_count|watched_seconds_total)'
+   before and after: on each client seek 5 times (wait for the picture each
+   time), then seek twice quickly. Expected: seeks_total{method=<method>}
+   +7, seek_to_picture_ms_count +6 (one abandoned); and after 2 minutes of
+   play on Apple and on Android, watched_seconds_total rises under the
+   client's method, not method="unknown".
+```
+
+### 7.10 What only the fleet can prove for M5 row 4 — GPT prompt
+
+```text
+On one node (nynuc) and then the cluster address, with the build carrying
+C-08 M5 row 4 (plan/C-08-3, PR #559) deployed:
+1. Families, on each node (paste output):
+     curl -s http://<node>:32400/metrics | grep -E '^plurx_start_outcomes'
+   Expect exactly 16 plurx_start_outcomes_total series
+   (method direct_play|remux|transcode|unknown x outcome
+   ok|refused|failed|cancelled) and 2 plurx_start_outcomes_unpaired_total.
+2. ok: in Chrome against nynuc directly, save the grep, play one title to
+   its first frame, stop, repeat the grep. Expect +1 ok under the method the
+   stats overlay shows, nothing else moved.
+3. cancelled: start a title and close the tab before the picture (or pick a
+   cold 4K transcode and close within 2 s). Wait 3 minutes, grep. Expect +1
+   cancelled.
+4. refused: in a browser devtools console on nynuc, run
+     fetch('/api/v1/files/<a file id>/hls/sessions',{method:'POST',
+       headers:{'content-type':'application/json','authorization':'Bearer '+TOKEN},
+       body:JSON.stringify({playback_id:' '})})
+   Expect +1 refused{method="unknown"}.
+5. The cross-node error: point the Android device at the cluster address
+   (not a node), save the grep on EVERY node, play 5 titles to first frame
+   (stop each after 10 s), wait 4 minutes, grep every node again. Report per
+   node the deltas of ok, cancelled and unpaired{outcome="ok"}. Expected on
+   a single node: ok +5, cancelled 0, unpaired 0. Across nodes, sum(ok) +
+   sum(unpaired ok) should be 5; sum(unpaired ok) is the size of the
+   cross-node error. Report it: if it is more than one in five, say so --
+   that is the evidence for a replicated attempt row (§7.8.7).
+6. A native pause (§7.8.4): on the Apple TV and on the Android device
+   against nynuc directly, save the grep, play a direct-play title to its
+   first frame, pause it for 7 minutes, resume and let it play 30 s, stop,
+   wait 4 minutes, grep. Expect ok +1 per device and cancelled +0. Repeat on
+   Android with a 10 s seek straight after resuming: still ok +1 only.
+7. A "not yet" ladder (§7.8.2): in Chrome, open a copy-HLS title whose VOD
+   index is not built yet (Settings shows it pending; or right after adding
+   a file), so the create answers vod_index_pending and the player falls
+   back to the progressive remux. Expect ok{method="remux"} +1 and
+   refused +0 for that one start.
+Restart nothing.
+```
+
 ---
 
 ## Execution log
@@ -740,4 +1333,20 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 — RED on the matched route | [PR #461](http://192.168.4.7:3000/noirr/plurx/pulls/461) | `plurx_http_requests_total{route_group,method,status}`, `plurx_http_body_seconds{route_group}` and `plurx_http_bodies_total{route_group,outcome}`, recorded by a layer outside `cluster_capacity_gate` so its 503s are counted. Header latency was **not** re-implemented: K-04's `plurx_http_route_seconds` already is it (§7.6.1). The route label is `route_group`, not the template (§7.6.2). Six tests, each shown failing with its change reverted. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 — request ids | [PR #461](http://192.168.4.7:3000/noirr/plurx/pulls/461) | `x-request-id` adopted when it is at most 64 characters of `[A-Za-z0-9_-]` and minted otherwise, on the request, on the `http_request` span and on the response; never a metric label. Hand-written layer, no `tower-http` feature added; `uuid` was already a real dependency (§7.6.4). Three tests, one of which asserts the discarded value reaches neither the response nor the log. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — log format and ANSI | [PR #461](http://192.168.4.7:3000/noirr/plurx/pulls/461) | `PLURX_LOG_FORMAT=json\|text`; `with_ansi` set explicitly from `std::io::stdout().is_terminal()` and forced off under JSON. **Confirmed on the fleet before the change**: `docker logs plurxd` on nuc4 carries `ESC[2m` / `ESC[31m` escape bytes in every line, so the plan's §2.3 claim was not only true of the vendored source but true of a running node. The 5xx access line is throttled (§7.6.3). Four tests; the ANSI one asserts the flag is load-bearing in both directions. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 — panic hook | [PR #461](http://192.168.4.7:3000/noirr/plurx/pulls/461) | `crates/plurxd/src/panics.rs` and `crates/plurxd/src/redact.rs`; `redact_operator_text` lifted out of `http/cluster_operations.rs` unchanged and reused for panic payloads; ~~recursion guard~~ (removed by the #461 review: it could never fire — see §3.4), opt-in path-free bounded backtrace, chained previous hook, `plurx_panics_total{subsystem}` over a fixed 13-name allowlist. Five tests, one of which installs the real hook and panics for real. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 — release-evidence set | — | **Not started**, deliberately. See §7.6. (Superseded by the M5 row of 2026-09-24 below.) |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | #461 review, P1 — body outcome | [PR #461](http://192.168.4.7:3000/noirr/plurx/pulls/461) | **The M1 row's claim that `plurx_http_bodies_total` separates a finished body from an abandoned one was false for fixed-length bodies**, i.e. for every direct play range and HLS segment: hyper drops a `Content-Length` body unpolled once the declared bytes are written, and a stream body is not `is_end_stream()` until polled to `None`, so every one was counted `aborted`. `MeasuredBody` now records the declared length (the `Content-Length` header, else the exact size hint; zero for HEAD/1xx/204/304) and counts yielded data bytes, and classifies a drop as `complete` once the declared length is yielded. Pinned by `a_fully_delivered_body_counts_complete_over_a_real_connection_whatever_its_framing` (real `axum::serve` listener, raw HTTP/1.1 socket, chunked and `Content-Length` and HEAD) and `a_fixed_length_body_is_complete_at_its_declared_length_and_aborted_short_of_it`; both shown failing with the production hunk reverted. OPERATIONS.md's "a healthy node aborts bodies constantly" removed. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | #461 review, P2 — panic hook | [PR #461](http://192.168.4.7:3000/noirr/plurx/pulls/461) | The recursion guard and every claim that it protected the process are gone (§3.4 corrected in place). std aborts on a panic inside a hook; the reporting path is now documented step by step as panic-free by construction, reaches the counter and label with `get`, and has no `catch_unwind` because none could work. The stand-in `a_nested_report_is_suppressed_by_the_guard` is replaced by two child-process tests: `a_panic_inside_the_reporting_path_aborts_the_process` (the real hook behind a panicking log writer → SIGABRT and std's nested-panic message) and `hostile_payloads_are_reported_without_a_second_panic` (a payload whose `Debug` and `Display` panic, a non-string, an empty and a multi-byte payload cut at 512 characters all come out as log lines). The guard's removal changes no behaviour — it never fired — so there is no revert to show failing; the abort test pins std's behaviour, and the hostile-payload test was shown catching a byte-slicing truncation in `redact_bounded` (the child aborts, exit 134). Fix commits `7611d398` (P1) and `20700f81` (P2). |
+| | | | | | `needs:` the §6.3 fleet observations. Nothing in this branch has been deployed or scraped on a node; the exposition-size, label-hygiene, journald-ANSI-after, JSON-mode and RED-sanity steps are all unrun. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 — release-evidence set | [PR #500](http://192.168.4.7:3000/noirr/plurx/pulls/500) (draft) | Rows 1, 2, 3, 5, 6, 7 and 8 built as one PR (premises read at `936157b4b`, merged with `origin/main` at `b1de09647`); **row 4 is not built** (§7.7.3) and its name is reserved. `plurx_ttff_ms` gains `client` (seven closed values from the request's own `User-Agent`) and 60 s / 120 s buckets; `plurx_seek_to_picture_ms{method}` + `plurx_seeks_total{method}` (zero until clients send `seek_resumed` / `seek_abandoned`); `plurx_stalled_seconds_total{kind}` from the stall `ms` all three clients already send; `plurx_watched_seconds_total{method}` from live progress beats (§7.7.2), the web player now naming its method; `plurx_delivered_bytes_total{method}` from the delivery meter and the direct-play body; `plurx_admission_wait_seconds{pool}` on three pools (§7.7.4). The row-5 expression, the row-7 reservation, the per-family reading rows and the §3.6 exit-counter template are in `docs/OPERATIONS.md`, held by `tests/operations/test_release_evidence_metrics.py`. Rust tests, each shown failing with its production hunk reverted on nuc3: `a_ttff_beacon_is_labelled_by_the_requesters_client_class` (handler passes no class → the `client="firefox"` bucket never moves; and again with `record_from` ignoring the class), `ttff_is_labelled_by_client_class_and_has_buckets_above_thirty_seconds` (bucket revert → no `le="60000"`; class revert → `safari` bucket 0 ≠ 1), `release_evidence_families_render_exactly_their_enumerated_labels` (`seek_abandoned` arm removed → `seeks_total{method="unknown"}` 1 ≠ 2), `stalled_and_watched_seconds_move_together_on_a_synthetic_session` (stall-`ms` credit removed), `live_progress_beats_credit_watched_seconds_to_the_named_method` (beat call removed), `a_meter_credits_its_method_in_the_delivered_bytes_family`, `a_live_wait_is_timed_into_the_encode_permit_pool_when_it_ends`, `an_admitted_wait_is_timed_into_the_vod_blocked_get_pool`, `a_derive_permit_wait_is_timed_into_the_image_materialize_pool` (each recording call removed). `watched_time_credits_only_plausible_forward_play_and_never_more_than_wall_time` pins the ledger's rules and `every_client_class_is_in_the_bounded_metric_vocabulary` the label bound; both are new code with nothing to revert to. Web: `a beat names the delivery method it is playing through` (`tests/web/progress-never-presented.test.js`) fails with `method` dropped from the beat. |
+| | | | | | `needs:` the §6.4 M5 fleet observations (families and size, label hygiene, watched seconds against a scripted Chrome session, the two native clients landing under `unknown` with their own `client` class, a non-zero `vod_blocked_get` wait). Nothing in this branch has been deployed or scraped. Client-bound follow-ups, not this plan's code: Apple and Android naming `method` on progress beats, and all three clients emitting `seek_resumed` / `seek_abandoned`. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 — #500 review round | [PR #500](http://192.168.4.7:3000/noirr/plurx/pulls/500) (draft) | Merged `origin/main` at `f600d2823` first (one conflict, `tests/playback/rolling-producer-owners.toml`, both sides' reviews kept and the two rows re-measured: 923 and 375), then built and ran `cargo test -p plurxd` on the merge before any change (2,796 passed); main moved twice more during the round and was merged again at `44cdfccc7` (the work board, where main had appended fleet notes to this row, and the same ownership rows) and at `68c29657b` (K-09; the ownership rows only, re-measured at 940, 386 and 392). K-09 also landed its own fix for the refusal-storm test's shared access-line throttle, a flake this round hit twice in full runs. The gate results on the pushed head are in the PR's disposition comment. **The M5 row above overstated three things, now corrected:** row 3's numerator was not complete for the web (every web stall past 8 s counted as about 8 s — §7.7 preamble and §7.7.8); watched seconds were not "never counted twice" for beats alternating between nodes (§7.7.2, §7.7.9); and `vod_blocked_get` / `image_materialize` were not "one observation per wait, however it ended" (§7.7.4). Fix commit `f30eb874` (ledger `validation/regressions.d/f30eb874-release-evidence-review.toml`): the web closes a reported wait with `stall_end` carrying the remainder; the progress handler passes the durable row to the ledger; both pools time from `telemetry::AdmissionWaitTimer`. Each pinned by a test shown failing on nuc3 with its production hunk reverted: `a_stall_reported_while_frozen_is_credited_its_whole_length_once` (8.000 s, not 90.000), web-control "the close carries exactly the time after the first report" (no `stall_end`), `beats_alternating_between_nodes_are_credited_once_cluster_wide` (1,180,000 ≠ 600,000), `a_beat_after_another_nodes_write_credits_only_the_time_since_it` (1,203 ≠ 1,000 with the handler passing no row), `an_abandoned_or_unawaited_wait_is_still_timed_once` and `an_abandoned_derive_permit_wait_is_still_timed` (0 ≠ 1). Test commit `81a2b9ab`: `a_direct_play_get_credits_exactly_its_body_to_delivered_bytes` (real handler; ranged and whole GET add exactly their bodies, HEAD and 416 add nothing — 0 ≠ 10 with the body wrapper removed) and one method assertion per `Meter` construction site (progressive, VOD copy, VOD encoded, live transcode, live copy, cache hit — each `"unknown"` with its site reverted). Not provable by revert, and said so: the wrapper's non-success guard (the 416 body is empty, so removing the guard changes nothing observable) and its GET-only condition (a HEAD body is empty). OPERATIONS.md now warns that `plurx_ttff_ms` queries of the old shape return seven series, and `PLEX-FACADE-PAGING.md` and `TELEMETRY-BACKPRESSURE.md` note the new shape where they quote the old one. This round's ownership additions, measured by zeroing each row: `namespaced-time-constructor` +1, `process-capable-launch-method` +5, `process-lifecycle-method` +2, all test-only. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 — promotion merge of main | [PR #500](http://192.168.4.7:3000/noirr/plurx/pulls/500) | Merged `origin/main` at `8251d14f7` (#513, `2644096e7`). One conflict, `tests/playback/rolling-producer-owners.toml`: three rows keep main's review of the VOD successor handoff and this branch's own, each re-measured by zeroing it — `namespaced-time-constructor` 948, `process-capable-launch-method` 387, `process-lifecycle-method` 395. `/metrics` untouched by both sides. `cargo check -p plurxd --tests --locked`, `cargo fmt --check`, `make history-check`, `make validation-lint`, the validation unittests and `make operations-check` exit 0. |
+| | | | | | `needs:` §6.4 steps 6 and 7 as well (the cross-node watched-seconds sum and a long web stall). Still nothing deployed or scraped. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 row 4 — failed starts per attempt | [PR #559](http://192.168.4.7:3000/noirr/plurx/pulls/559) (draft, `plan/C-08-3`) | Built from `origin/main` at `abb6fe647` with its own design (§7.8): `playstart::StartAttempts`, one attempt per viewer and file opened by the first media request in `note_playback_started` (never `/decision`), resolved once into `plurx_start_outcomes_total{method,outcome}` (16 fixed series) by `ttff` → `ok`, a start-failure beacon → `failed`, a server error on an HLS create / `stream.mp4` / direct GET → `refused`, or 180 s with none → `cancelled`; progress beats keep a started play one play; unpaired beacons are counted in `plurx_start_outcomes_unpaired_total{outcome}`, the size of the design's one known (cross-node) error. The `/metrics` handler sweeps expired attempts in memory before rendering; its `format!` is untouched. OPERATIONS.md carries the row-4 expression and both reading rows, held by `tests/operations/test_release_evidence_metrics.py` (the name moved from reserved to rendered). Each production hunk shown failing on nuc3 with it reverted (log confirmed `Compiling plurxd … /work/hc8/…` every run): client-log pairing → `a_first_frame_beacon_settles_the_start_its_direct_play_opened` (ok 0 ≠ 1); the open in `note_playback_started` → same test (no attempt opened); HLS create refusal → `a_start_request_the_server_refuses_is_a_refused_start` (0 ≠ 1, "HLS create"); `stream.mp4` refusal → same (0 ≠ 1); direct GET `load_file` refusal → same (0 ≠ 1, "direct GET only"); direct open-failure refusal → same (1 ≠ 2); progress-beat refresh → `a_progress_beat_keeps_a_started_play_alive`; the scrape sweep → `a_scrape_settles_a_start_past_its_deadline_as_cancelled` (0 ≠ 1); the exposition push → `start_outcome_families_render_exactly_their_enumerated_labels`. The ledger is new code, pinned by `a_start_attempt_resolves_once_by_its_first_terminal`, `a_play_is_kept_by_its_progress_beats_and_forgotten_when_they_stop` and `a_full_ledger_tracks_no_new_attempt_rather_than_evicting_one`; three mutations of it were run: counting a failure during a play fails the first (1 ≠ 0), dropping the beat refresh fails the second (`Pending` ≠ `Playing`), and turning a refusal's tombstone into a play **survived** the first round — the test gained "a retry after a refusal is a new attempt", and the mutation then fails it. Gate results are in the PR body. |
+| | | | | | `needs:` §7.10 (families on a deployed node, one `ok`/`cancelled`/`refused` each, and the cross-node unpaired measurement through the Android client on the cluster address). Nothing deployed or scraped. Client work for rows 2 and 8 is §7.9's GPT prompt, unbuilt here by instruction. |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 row 4 — merge of main | [PR #559](http://192.168.4.7:3000/noirr/plurx/pulls/559) | Merged `origin/main` at `e680849fb` (S-14 M8, W-02 5.1-5.3, #539, #560) as `6a6d6fba5`. One conflict, `tests/playback/rolling-producer-owners.toml` `namespaced-time-constructor`: main's merge review and this branch's two test-only sleeps both kept, the row re-measured by zeroing it at 1015; `process-capable-launch-method` measures 396 on the merged tree. On `6a6d6fba5`, every gate exits 0: `make history-check`, `make validation-lint`, the validation unittests (247), `make operations-check`, `make spike-lock-check`, `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked -D warnings`, and `cargo test --locked --no-fail-fast -p plurxd` (2,970 passed, 0 failed, 14 ignored; the eight start-outcome tests among them, the log showing `Compiling plurxd … /work/hc8/…`). |
+| 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 row 4 — review round | [PR #559](http://192.168.4.7:3000/noirr/plurx/pulls/559) | The one adversarial review ([comment 5514](http://192.168.4.7:3000/noirr/plurx/pulls/559#issuecomment-5514)) raised two P1s and one P2; all three are fixed. First merged `origin/main` at `d4fa763c7` as `de86825f1` (conflicts: the C-08 work-board row, and two `rolling-producer-owners.toml` counts re-measured by zeroing the rows, 1031 and 397); the merge built and `cargo test -p plurxd` passed 2,999 before any change. **P1 1, not-yet retries counted as refused** (§7.8.2): a refusal whose code is in the `create_503_not_yet` row keeps the attempt pending for the retry or the web `stream.mp4` fallback to join; a client that stops asking is one `refused` at the deadline; `ApiError::code()` carries the code from all three start routes. Pinned by `a_not_yet_refusal_keeps_the_start_open_for_the_retry_that_plays` (the reviewer's ladder: three `transcode_capacity_pending` then a create that plays is `ok`=1, `refused`=0), `every_create_not_yet_answer_keeps_its_start_attempt_open` (the real `session_start_error` / `media_owner_transition` answers) and `start_not_yet_codes_are_the_contract_row_the_clients_retry` (the code list equals the contract row). **P1 2, a native pause became a phantom start** (§7.8.4, and the "paused or not" premise corrected here, in `PLAY_QUIET`'s comment and in OPERATIONS.md): a play is remembered for 24 h (`PLAY_FORGET`); a request after five quiet minutes is a possible resume that only a `cold-start`/`resume` `ttff`, a failure beacon or a refusal turns into an attempt. Pinned by `a_native_pause_with_no_beats_resumes_into_the_same_play` (no beats while paused, resume, deadline: `cancelled`=0; an Android seek `ttff` after the resume: still one `ok`) and `a_play_is_kept_by_its_progress_beats_and_held_through_a_silent_pause` (replaces the web-only `a_play_is_kept_by_its_progress_beats_and_forgotten_when_they_stop`). **P2, method rules unpinned** (§7.8.5): `a_first_frame_names_the_method_its_start_is_counted_under`, `a_request_joining_a_pending_start_relabels_it`, `a_first_frame_after_a_refusal_is_unpaired`. Revert proofs on nuc3, three builds, each log showing `Compiling plurxd … /work/hc2/…`: (A) not-yet branch off, play forgotten at `PLAY_QUIET`, beacon method ignored, tombstone unpaired dropped → exactly six tests fail: the ladder test (phase not `Pending{not_yet}`), `every_create…` (`unknown` refused 3 ≠ 0), both pause tests (phase `None` ≠ `Playing`), the method test (0 ≠ 1), the unpaired test (0 ≠ 1); (B) join relabel dropped, seek-reason arm dropped → the relabel test (0 ≠ 1), the native test ("a seek's picture is not a start", 2 ≠ 1), and the two not-yet tests through their fallback leg; (C) possible resume cancelled at the deadline, not-yet flag kept after media was served → the native test (`cancelled` 1 ≠ 0) and the ladder test (served-then-abandoned is `cancelled`, 0 ≠ 1). **Not changed:** the reviewer's reasoned, unreproduced race (a `stream.mp4` that fails after `note_playback_started` has spawned can count `refused` and then `cancelled` for one request) is left as a known bound; closing it means moving the note behind the remux spawn. **Known bounds added by P1 2**, in §7.8.4: a reopen within five minutes of the old play joins it; a reopen abandoned before its picture is not counted; a native failure just after a long pause counts one `failed`. `needs:` §7.10 steps 6 (native pause) and 7 (a `vod_index_pending` fallback). |

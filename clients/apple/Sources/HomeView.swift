@@ -97,7 +97,7 @@ struct HomeView: View {
         .tint(Palette.accent)
         .task(id: dvrObservationIdentity) {
             guard scenePhase == .active, model.phase == .ready else { return }
-            await dvr.observe(origin: model.origin, token: Session.shared.token,
+            await dvr.observe(origin: model.origin, token: Session.shared.credentials.token,
                               highFrequency: selectedTab == .liveTv || selectedTab == .recordings)
         }
         .task {
@@ -164,7 +164,7 @@ struct HomeView: View {
         .tint(Palette.accent)
         .task(id: dvrObservationIdentity) {
             guard scenePhase == .active else { return }
-            await dvr.observe(origin: model.origin, token: Session.shared.token,
+            await dvr.observe(origin: model.origin, token: Session.shared.credentials.token,
                               highFrequency: selectedTab == .liveTv || selectedTab == .recordings)
         }
         .task { if model.homeLoading { await model.loadHome() } }
@@ -181,7 +181,7 @@ struct HomeView: View {
     #endif
 
     private var dvrObservationIdentity: String {
-        "\(model.origin)|\(Session.shared.token ?? "signed-out")|\(scenePhase == .active)|\(model.phase)|\(selectedTab)"
+        "\(model.origin)|\(Session.shared.credentials.token ?? "signed-out")|\(scenePhase == .active)|\(model.phase)|\(selectedTab)"
     }
 
     private var recordingsTabLabel: String {
@@ -441,9 +441,7 @@ private struct FeaturedHero: View {
                     height: HomeHeroMetrics.compactHeight
                 )
             )
-            .frame(maxWidth: .infinity)
-            .frame(height: HomeHeroMetrics.compactHeight)
-            .clipped()
+            .modifier(IOSHomeHeroArtworkLayout())
 
             LinearGradient(
                 stops: [
@@ -624,6 +622,19 @@ enum HomeHeroMetrics {
     static let compactHeight: CGFloat = 238
     static let cornerRadius: CGFloat = 18
     static let horizontalInset = screenHPad
+}
+
+/// Aspect-fill artwork must not enlarge the stack that also positions the
+/// title and controls. Crop it inside the card's proposed width first.
+struct IOSHomeHeroArtworkLayout: ViewModifier {
+    func body(content: Content) -> some View {
+        GeometryReader { geometry in
+            content
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .clipped()
+        }
+        .frame(height: HomeHeroMetrics.compactHeight)
+    }
 }
 
 struct IOSHomeHeroCardLayout: ViewModifier {

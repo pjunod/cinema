@@ -7,8 +7,10 @@
 
 mod analysis;
 mod auth;
-pub(crate) use auth::LoginThrottle;
+mod background_jobs;
+pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
+mod chapter_thumbs;
 mod cluster;
 pub(crate) mod cluster_operations;
 pub mod comingsoon;
@@ -19,6 +21,7 @@ mod dv_disk;
 pub(crate) mod dvr;
 pub(crate) mod error;
 pub(crate) mod extract;
+pub(crate) mod file_grants;
 pub(crate) use extract::CacheOnlyAdminProofCache;
 pub(crate) mod hls;
 pub(crate) mod images;
@@ -31,7 +34,8 @@ mod items;
 mod keys;
 mod libraries;
 pub(crate) mod library_channels;
-mod live_tv;
+pub(crate) mod live_tv;
+mod live_tv_cluster;
 mod network;
 mod offline;
 pub(crate) mod peer_transport;
@@ -43,8 +47,10 @@ mod reading;
 mod scan;
 pub(crate) mod scan_identity;
 pub(crate) mod stream;
+pub(crate) mod subtitle_downloads;
 pub(crate) mod system;
 mod trakt;
+pub(crate) mod transcode_copies;
 
 /// Unmodified User-Agent strings as the shipping clients actually send them.
 /// Shared with the HTTP wire tests so the write-then-read proof and the
@@ -64,7 +70,7 @@ pub(crate) mod test_agents {
     pub(crate) const ANDROID_NATIVE_UA: &str = "okhttp/5.1.0";
 }
 
-mod users;
+pub(crate) mod users;
 mod watch;
 pub(crate) mod web;
 
@@ -277,6 +283,8 @@ fn http_route_group(path: &str) -> usize {
 
         // Item metadata, artwork, reading, analysis and DVR catalogue rows.
         "/api/v1/items/{id}"
+        | "/api/v1/files/{id}/subtitles/search"
+        | "/api/v1/files/{id}/subtitles/download"
         | "/api/v1/items/{id}/classification"
         | "/api/v1/items/{id}/photo"
         | "/api/v1/items/{id}/reanalyze"
@@ -309,7 +317,8 @@ fn http_route_group(path: &str) -> usize {
         | "/library/metadata/{key}"
         | "/library/metadata/{key}/children"
         | "/library/metadata/{key}/{kind}"
-        | "/api/v1/images/{filename}" => 3,
+        | "/api/v1/images/{filename}"
+        | "/api/v1/files/{id}/chapters/{index}/thumb" => 3,
 
         // Search only; maintenance of the search index is a settings action.
         "/api/v1/search" | "/api/v1/search/related" | "/api/v1/search/settings" | "/search" => 4,
@@ -326,6 +335,9 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/direct"
         | "/api/v1/files/{id}/download"
         | "/api/v1/files/{id}/content"
+        | "/api/v1/files/{id}/grants"
+        | "/api/v1/grants/{id}"
+        | "/api/v1/grants/{token}/content"
         | "/api/v1/files/{id}/stream.mp4"
         | "/api/v1/files/{id}/subs/{subtitle}"
         | "/api/v1/files/{id}/subs/{index}/overlay.json"
@@ -358,6 +370,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/live-tv/guide"
         | "/api/v1/live-tv/guide/readiness"
         | "/api/v1/live-tv/guide/refresh"
+        | "/api/v1/live-tv/sessions/{capability}/master.m3u8"
         | "/api/v1/live-tv/sessions/{capability}/index.m3u8"
         | "/api/v1/live-tv/sessions/{capability}/status"
         | "/api/v1/live-tv/sessions/{capability}/keepalive"
@@ -375,6 +388,7 @@ fn http_route_group(path: &str) -> usize {
         "/"
         | "/api/v1/server"
         | "/api/v1/settings"
+        | "/api/v1/subtitle-provider"
         | "/api/v1/developer/readiness"
         | "/api/v1/scan"
         | "/api/v1/scan/status"
@@ -384,6 +398,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/activity/sessions/{id}"
         | "/api/v1/activity/offline/{id}"
         | "/api/v1/activity/producer"
+        | "/api/v1/activity/processes/{pid}"
         | "/api/v1/trakt/status"
         | "/api/v1/trakt/link"
         | "/api/v1/trakt/sync"
@@ -416,6 +431,11 @@ fn http_route_group(path: &str) -> usize {
         // Cluster administration and authenticated internal transport.
         "/api/v1/cluster/nodes"
         | "/api/v1/cluster/status"
+        | "/api/v1/cluster/work/storage-domains"
+        | "/api/v1/cluster/jobs"
+        | "/api/v1/cluster/jobs/{id}"
+        | "/api/v1/cluster/jobs/{id}/cancel"
+        | "/api/v1/cluster/jobs/{id}/retry"
         | "/api/v1/cluster/backups"
         | "/api/v1/cluster/ingress"
         | "/api/v1/cluster/media"
@@ -436,10 +456,13 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/cluster/join/finalize"
         | "/api/v1/cluster/learner/join/redeem"
         | "/api/v1/cluster/learner/join/finalize"
-        | "/internal/media/fragment-index/{cache_key}" => 7,
+        | "/internal/media/cache-copy/{recipe}/{digest}/{object}"
+        | "/internal/media/fragment-index/{cache_key}"
+        | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
         internal_activity::PATH
         | cluster_operations::INTERNAL_PATH
         | internal_auth_revocation::PATH
+        | crate::subtitle_ranges::PATH
         | crate::media_pool::SNAPSHOT_PATH
         | crate::media_pool::OFFERS_PATH
         | crate::shared_cache::CANARY_PATH
@@ -447,6 +470,9 @@ fn http_route_group(path: &str) -> usize {
         | crate::live_tv::START_PATH
         | crate::live_tv::START_V2_PATH
         | crate::live_tv::ACTIVATE_PATH
+        | crate::live_tv::cluster::PLACEMENT_PATH
+        | crate::live_tv::cluster::PROCESS_PATH
+        | crate::live_tv::cluster::INGEST_PATH
         | crate::live_tv::RESOURCE_PATH
         | crate::live_tv::STOP_PATH
         | crate::live_tv::RETIRE_PATH
@@ -501,15 +527,720 @@ async fn http_store_attribution(
         state.membership.local_serving_role().await.map_err(|_| ()),
     );
     let counts = plurx_core::store::HttpStoreOperationCounts::default();
+    let watch_ack = plurx_core::store::HttpWatchWriteAck::default();
     let started_at = Instant::now();
-    let response =
-        plurx_core::store::scope_http_store_operations(counts.clone(), next.run(request)).await;
+    let mut response = plurx_core::store::scope_http_store_operations(
+        counts.clone(),
+        plurx_core::store::scope_http_watch_write_ack(watch_ack.clone(), next.run(request)),
+    )
+    .await;
     HTTP_ROUTE_METRICS.record(group, role, counts.snapshot(), started_at.elapsed());
+    // K-04 M2: offer the acknowledged watch-write position so a client can
+    // echo it as `X-Plurx-Read-After` to whichever node serves its next read,
+    // or say that a watch write's position is unknown so it drops its echo.
+    if let Some(offer) = watch_ack.offer() {
+        let value = match offer {
+            plurx_core::store::CommitIndexOffer::Index(index) => {
+                axum::http::HeaderValue::from(index)
+            }
+            plurx_core::store::CommitIndexOffer::Unknown => {
+                axum::http::HeaderValue::from_static(extract::COMMIT_INDEX_UNKNOWN)
+            }
+        };
+        response
+            .headers_mut()
+            .insert(extract::COMMIT_INDEX_HEADER, value);
+    }
     response
 }
 
 pub(crate) fn prometheus_http_store_attribution() -> String {
     HTTP_ROUTE_METRICS.render()
+}
+
+// ---------------------------------------------------------------------------
+// Plex façade request census (C-07 M0).
+//
+// C-07's board row says the M0 census decides whether the façade gets paging
+// work, and the plan's §5.0 says to read it out of the access log. There is no
+// access log — that is C-08's finding and it is accurate — and no metric
+// separates the façade from the native API either: `http_route_group` folds
+// `/library/sections/{id}/all` in with `/api/v1/libraries` under `library`,
+// and `/library/parts/{file_id}/{mtime}/{name}` in with the native media
+// routes under `playback`. So the question "is any Plex-family client using
+// this" is not answerable from what a node exposes today, and the census
+// cannot be completed by reading harder.
+//
+// This is the instrument that makes it answerable, and it is all this change
+// is: fourteen bounded handler labels times four bounded outcomes, recorded by
+// a layer over the façade sub-router so nothing native can reach it. No
+// handler is touched, no response changes, and no paging is built.
+const PLEX_HANDLERS: [&str; 14] = [
+    "root",
+    "identity",
+    "library_root",
+    "sections",
+    "section_all",
+    "metadata",
+    "children",
+    "image",
+    "part",
+    "photo_transcode",
+    "timeline",
+    "scrobble",
+    "unscrobble",
+    "search",
+];
+/// `unauthorized` is separate from `error` deliberately, and is the plan's
+/// three outcomes plus one. Every façade route but `root` and `identity`
+/// requires a plurx token presented as `X-Plex-Token`, so a Kodi or
+/// PlexKodiConnect box that is configured but not yet paired shows up here and
+/// nowhere else — and for a census "somebody tried" is the single most
+/// interesting thing that can happen.
+const PLEX_OUTCOMES: [&str; 4] = ["ok", "not_found", "unauthorized", "error"];
+
+/// The census cells, one per `(handler, outcome)`.
+///
+/// Held on `AppState` behind an `Arc`, not in a process-wide `static`, so a
+/// router counts only the requests that router served. In production that is
+/// the same thing — one state per process — but it is what lets a test assert
+/// an exact delta: a process-global counter is also moved by every other test
+/// in the binary that sends façade traffic, on libtest's parallel threads, and
+/// the adversarial review of PR #462 measured that race failing 34 runs in
+/// 400.
+pub(crate) struct PlexCensus {
+    cells: [AtomicU64; PLEX_HANDLERS.len() * PLEX_OUTCOMES.len()],
+}
+
+impl Default for PlexCensus {
+    fn default() -> Self {
+        Self {
+            cells: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
+
+/// The façade's registered templates, and nothing else.
+///
+/// `/search` and `/hubs/search` are one label because they are one handler
+/// (`plex::search`) per API.md §20. A template that is not on this list cannot
+/// reach this function: the layer is attached to the façade sub-router, so the
+/// `None` arm means axum matched a façade route this list has not been told
+/// about, which a test asserts cannot happen.
+fn plex_handler_index(template: &str) -> Option<usize> {
+    let name = match template {
+        "/identity" => "identity",
+        "/library" => "library_root",
+        "/library/sections" => "sections",
+        "/library/sections/{id}/all" => "section_all",
+        "/library/metadata/{key}" => "metadata",
+        "/library/metadata/{key}/children" => "children",
+        "/library/metadata/{key}/{kind}" => "image",
+        "/library/parts/{file_id}/{mtime}/{name}" => "part",
+        "/photo/:/transcode" => "photo_transcode",
+        "/:/timeline" => "timeline",
+        "/:/scrobble" => "scrobble",
+        "/:/unscrobble" => "unscrobble",
+        "/search" | "/hubs/search" => "search",
+        _ => return None,
+    };
+    PLEX_HANDLERS.iter().position(|known| *known == name)
+}
+
+fn plex_outcome_index(status: StatusCode) -> usize {
+    match status.as_u16() {
+        401 | 403 => 2,
+        404 => 1,
+        code if (200..400).contains(&code) => 0,
+        _ => 3,
+    }
+}
+
+impl PlexCensus {
+    pub(crate) fn record(&self, handler: usize, status: StatusCode) {
+        self.cells[handler * PLEX_OUTCOMES.len() + plex_outcome_index(status)]
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn prometheus(&self) -> String {
+        let mut out = String::from(
+            "# HELP plurx_plex_requests_total Plex-compat façade requests by handler and outcome, since this process started. The census that decides whether the façade gets further work.\n\
+             # TYPE plurx_plex_requests_total counter\n",
+        );
+        for (handler_index, handler) in PLEX_HANDLERS.iter().enumerate() {
+            for (outcome_index, outcome) in PLEX_OUTCOMES.iter().enumerate() {
+                let count = self.cells[handler_index * PLEX_OUTCOMES.len() + outcome_index]
+                    .load(Ordering::Relaxed);
+                out.push_str(&format!(
+                    "plurx_plex_requests_total{{handler=\"{handler}\",outcome=\"{outcome}\"}} {count}\n"
+                ));
+            }
+        }
+        out
+    }
+}
+
+/// Counts one façade request. Attached to the façade sub-router only, so a
+/// native `/api/v1/...` request never reaches it and cannot be mistaken for
+/// Plex traffic — which is the whole reason this is a separate layer rather
+/// than another label on `http_route_group`.
+async fn plex_facade_census(
+    State(census): State<std::sync::Arc<PlexCensus>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let handler = request
+        .extensions()
+        .get::<MatchedPath>()
+        .and_then(|path| plex_handler_index(path.as_str()));
+    let response = next.run(request).await;
+    if let Some(handler) = handler {
+        census.record(handler, response.status());
+    }
+    response
+}
+
+/// `root` is not a façade route: `/` serves the web app to a browser and the
+/// Plex capabilities container to a Plex client, from one handler. Counting it
+/// by path would count every page load as Plex traffic, so `root_dispatch`
+/// records it itself, on the branch it actually took.
+pub(crate) const PLEX_ROOT_HANDLER: usize = 0;
+
+// ---------------------------------------------------------------------------
+// Request outcome and body delivery (observability baseline, C-08 M1).
+//
+// `http_store_attribution` above already times the matched route by bounded
+// group and serving role. That timer stops when the handler returns its
+// `Response`, so it is response-header latency and nothing else. Two things
+// F-core-12 asks for are absent from it and are added here:
+//
+//   * the outcome of a request — no method and no status class exist anywhere
+//     in the exposition today, so a node answering every request with 503 and
+//     a node answering every request with 200 render identically;
+//   * how long the response body took to deliver, and whether its consumer
+//     stayed to the end. That is the "streaming-body completion" half of
+//     F-core-12's distinction, and on a media route an abandoned body is the
+//     ordinary end of a seek rather than an error, so the two endings are
+//     counted apart.
+//
+// The route label is `http_route_group`, the same bounded classification the
+// Store attribution uses, and not a per-route template. `http_route_group` is
+// this repository's one exhaustive inventory of registered `MatchedPath`
+// patterns, held by `registered_routes_reach_every_non_other_attribution_family`
+// and by the unclassified-pattern assertion in the route inventory test; a
+// second per-template table would be a second spelling of the same fact with
+// no test holding the two together, and it would have to be maintained by
+// hand because axum exposes no route list at runtime. The cost is real and is
+// stated rather than hidden: a 5xx on one item route and a 5xx on another are
+// one series here. The 5xx WARN line below carries the redacted target and the
+// request id, and that is what takes an operator from a series to a request.
+const HTTP_METHODS: [&str; 7] = ["get", "post", "put", "patch", "delete", "head", "other"];
+const HTTP_STATUS_CLASSES: [&str; 5] = ["2xx", "3xx", "4xx", "5xx", "other"];
+const HTTP_BODY_OUTCOMES: [&str; 2] = ["complete", "aborted"];
+/// Body delivery spans two orders of magnitude more than header latency — a
+/// JSON page finishes in milliseconds and a direct play runs for hours — which
+/// is the whole reason it is a separate family from `plurx_http_route_seconds`
+/// rather than more buckets on it.
+const HTTP_BODY_BUCKETS: [(u64, &str); 6] = [
+    (100_000_000, "0.1"),
+    (1_000_000_000, "1"),
+    (10_000_000_000, "10"),
+    (60_000_000_000, "60"),
+    (600_000_000_000, "600"),
+    (3_600_000_000_000, "3600"),
+];
+
+fn add_saturating(target: &AtomicU64, amount: u64) {
+    let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        (current != u64::MAX).then(|| current.saturating_add(amount))
+    });
+}
+
+/// Bounded by construction: an unlisted method is `other`, so no caller can
+/// mint a series by inventing a verb.
+fn http_method_index(method: &Method) -> usize {
+    match method.as_str() {
+        "GET" => 0,
+        "POST" => 1,
+        "PUT" => 2,
+        "PATCH" => 3,
+        "DELETE" => 4,
+        "HEAD" => 5,
+        _ => 6,
+    }
+}
+
+fn http_status_class_index(status: StatusCode) -> usize {
+    match status.as_u16() {
+        200..=299 => 0,
+        300..=399 => 1,
+        400..=499 => 2,
+        500..=599 => 3,
+        _ => 4,
+    }
+}
+
+#[derive(Default)]
+struct HttpBodyCell {
+    complete: AtomicU64,
+    aborted: AtomicU64,
+    elapsed_nanos: AtomicU64,
+    buckets: [AtomicU64; HTTP_BODY_BUCKETS.len()],
+}
+
+struct HttpRequestMetrics {
+    requests: [AtomicU64; HTTP_ROUTE_GROUPS.len() * HTTP_METHODS.len() * HTTP_STATUS_CLASSES.len()],
+    bodies: [HttpBodyCell; HTTP_ROUTE_GROUPS.len()],
+}
+
+impl Default for HttpRequestMetrics {
+    fn default() -> Self {
+        Self {
+            requests: std::array::from_fn(|_| AtomicU64::new(0)),
+            bodies: std::array::from_fn(|_| HttpBodyCell::default()),
+        }
+    }
+}
+
+impl HttpRequestMetrics {
+    fn record_request(&self, group: usize, method: usize, status: usize) {
+        add_saturating(
+            &self.requests
+                [(group * HTTP_METHODS.len() + method) * HTTP_STATUS_CLASSES.len() + status],
+            1,
+        );
+    }
+
+    fn record_body(&self, group: usize, elapsed: Duration, complete: bool) {
+        let cell = &self.bodies[group];
+        add_saturating(
+            if complete {
+                &cell.complete
+            } else {
+                &cell.aborted
+            },
+            1,
+        );
+        let elapsed_nanos = elapsed.as_nanos().min(u128::from(u64::MAX)) as u64;
+        add_saturating(&cell.elapsed_nanos, elapsed_nanos);
+        if let Some(index) = HTTP_BODY_BUCKETS
+            .iter()
+            .position(|(upper, _)| elapsed_nanos <= *upper)
+        {
+            add_saturating(&cell.buckets[index], 1);
+        }
+    }
+
+    fn render(&self) -> String {
+        use std::fmt::Write;
+
+        let mut out = String::from(
+            "# HELP plurx_http_requests_total HTTP requests by bounded route group, method and status class.\n\
+             # TYPE plurx_http_requests_total counter\n",
+        );
+        for (group_index, group) in HTTP_ROUTE_GROUPS.iter().enumerate() {
+            for (method_index, method) in HTTP_METHODS.iter().enumerate() {
+                for (status_index, status) in HTTP_STATUS_CLASSES.iter().enumerate() {
+                    let count = self.requests[(group_index * HTTP_METHODS.len() + method_index)
+                        * HTTP_STATUS_CLASSES.len()
+                        + status_index]
+                        .load(Ordering::Relaxed);
+                    let _ = writeln!(
+                        out,
+                        "plurx_http_requests_total{{route_group=\"{group}\",method=\"{method}\",status=\"{status}\"}} {count}"
+                    );
+                }
+            }
+        }
+        out.push_str(
+            "# HELP plurx_http_body_seconds Response body delivery time, from the handler's response to the body's last frame or its drop.\n\
+             # TYPE plurx_http_body_seconds histogram\n",
+        );
+        for (group_index, group) in HTTP_ROUTE_GROUPS.iter().enumerate() {
+            let cell = &self.bodies[group_index];
+            let mut cumulative = 0_u64;
+            for (bucket_index, (_, upper)) in HTTP_BODY_BUCKETS.iter().enumerate() {
+                cumulative =
+                    cumulative.saturating_add(cell.buckets[bucket_index].load(Ordering::Relaxed));
+                let _ = writeln!(
+                    out,
+                    "plurx_http_body_seconds_bucket{{route_group=\"{group}\",le=\"{upper}\"}} {cumulative}"
+                );
+            }
+            let count = cell
+                .complete
+                .load(Ordering::Relaxed)
+                .saturating_add(cell.aborted.load(Ordering::Relaxed));
+            let _ = writeln!(
+                out,
+                "plurx_http_body_seconds_bucket{{route_group=\"{group}\",le=\"+Inf\"}} {count}"
+            );
+            let seconds = cell.elapsed_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0;
+            let _ = writeln!(
+                out,
+                "plurx_http_body_seconds_sum{{route_group=\"{group}\"}} {seconds:.9}"
+            );
+            let _ = writeln!(
+                out,
+                "plurx_http_body_seconds_count{{route_group=\"{group}\"}} {count}"
+            );
+        }
+        out.push_str(
+            "# HELP plurx_http_bodies_total Response bodies by how they ended. An aborted body is a consumer that went away, which on a media route is the ordinary end of a seek and not an error.\n\
+             # TYPE plurx_http_bodies_total counter\n",
+        );
+        for (group_index, group) in HTTP_ROUTE_GROUPS.iter().enumerate() {
+            let cell = &self.bodies[group_index];
+            for outcome in HTTP_BODY_OUTCOMES {
+                let count = if outcome == "complete" {
+                    cell.complete.load(Ordering::Relaxed)
+                } else {
+                    cell.aborted.load(Ordering::Relaxed)
+                };
+                let _ = writeln!(
+                    out,
+                    "plurx_http_bodies_total{{route_group=\"{group}\",outcome=\"{outcome}\"}} {count}"
+                );
+            }
+        }
+        out
+    }
+}
+
+static HTTP_REQUEST_METRICS: LazyLock<HttpRequestMetrics> =
+    LazyLock::new(HttpRequestMetrics::default);
+
+/// At most one 5xx access line per route group per second, carrying how many
+/// it swallowed since the last one.
+///
+/// Without this the line is a hazard rather than a help. A fenced node, a
+/// learner outside its eligible routes, and a node in maintenance each refuse
+/// **every** request with 503, so at any real request rate one WARN per
+/// request would evict the whole bounded ring behind Settings → System → Logs
+/// — the very place an admin goes to find out why the node is refusing. The
+/// counters stay exact; only the prose is sampled, and the line says by how
+/// much.
+const ACCESS_LINE_INTERVAL_NANOS: u64 = 1_000_000_000;
+
+struct AccessLineThrottle {
+    /// Nanoseconds since `started_at` of the last emitted line, per group.
+    /// Zero means none has been emitted yet.
+    last_nanos: [AtomicU64; HTTP_ROUTE_GROUPS.len()],
+    suppressed: [AtomicU64; HTTP_ROUTE_GROUPS.len()],
+    started_at: Instant,
+}
+
+impl Default for AccessLineThrottle {
+    fn default() -> Self {
+        Self {
+            last_nanos: std::array::from_fn(|_| AtomicU64::new(0)),
+            suppressed: std::array::from_fn(|_| AtomicU64::new(0)),
+            started_at: Instant::now(),
+        }
+    }
+}
+
+impl AccessLineThrottle {
+    /// `Some(n)` when a line may be written, `n` being how many were suppressed
+    /// since the last one; `None` when it must not be.
+    fn admit(&self, group: usize) -> Option<u64> {
+        // `max(1)` so the first request of the process, which may land on
+        // nanosecond zero, still counts as "a line has been emitted".
+        let now = (self
+            .started_at
+            .elapsed()
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64)
+            .max(1);
+        let last = self.last_nanos[group].load(Ordering::Relaxed);
+        if last != 0 && now.saturating_sub(last) < ACCESS_LINE_INTERVAL_NANOS {
+            self.suppressed[group].fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        // Two threads can both pass the check at once. The loser writes a
+        // second line rather than a wrong one, which is the safe way to lose
+        // this race.
+        self.last_nanos[group].store(now, Ordering::Relaxed);
+        Some(self.suppressed[group].swap(0, Ordering::Relaxed))
+    }
+}
+
+static ACCESS_LINES: LazyLock<AccessLineThrottle> = LazyLock::new(AccessLineThrottle::default);
+
+/// Times one response body and classifies how it ended.
+///
+/// `size_hint` and `is_end_stream` are delegated to the inner body unchanged.
+/// That is load-bearing rather than tidy: hyper derives `Content-Length` from
+/// the size hint when the handler has not set the header itself, so a wrapper
+/// that reported an unknown length would silently move range responses onto
+/// chunked framing.
+///
+/// A body is `complete` when it handed the connection everything it promised,
+/// and there are two ways to know that because hyper ends bodies two ways:
+///
+/// - a body polled to its end (`Poll::Ready(None)`). A chunked body always
+///   ends like this: hyper has to see the end to write the terminating chunk.
+/// - a body whose response head declared a length and which has yielded that
+///   many data bytes. hyper **does not poll such a body to its end.** Once its
+///   length encoder has written the declared bytes the dispatcher drops the
+///   body unpolled (hyper 1.x `proto/h1/dispatch.rs`, the `!can_write_body()`
+///   branch), and a stream-backed body — every direct play range and every HLS
+///   segment plurx serves — reports `is_end_stream() == false` until it has
+///   been polled to `None`. Without the byte count every fully delivered media
+///   body would be counted as abandoned.
+///
+/// "Handed the connection" is not "acknowledged by the client": a connection
+/// that dies after the last bytes were yielded but before they reached the
+/// socket still counts `complete`. That is the same line the chunked case
+/// draws, and the last point at which a body can observe its own delivery.
+struct MeasuredBody {
+    inner: axum::body::Body,
+    metrics: &'static HttpRequestMetrics,
+    group: usize,
+    started_at: Instant,
+    /// The number of body bytes the response head promised, when it promised
+    /// a number (see `declared_body_length`).
+    declared: Option<u64>,
+    /// Data bytes this body has yielded to the connection so far.
+    delivered: u64,
+    recorded: bool,
+}
+
+impl MeasuredBody {
+    fn new(
+        metrics: &'static HttpRequestMetrics,
+        group: usize,
+        inner: axum::body::Body,
+        declared: Option<u64>,
+    ) -> Self {
+        Self {
+            inner,
+            metrics,
+            group,
+            started_at: Instant::now(),
+            declared,
+            delivered: 0,
+            recorded: false,
+        }
+    }
+
+    /// Whether everything this body promised has been handed over: it is at
+    /// its end, or it has yielded the length its response head declared.
+    fn delivered_everything(&self) -> bool {
+        http_body::Body::is_end_stream(&self.inner)
+            || self
+                .declared
+                .is_some_and(|declared| self.delivered >= declared)
+    }
+
+    fn finish(&mut self, complete: bool) {
+        if self.recorded {
+            return;
+        }
+        self.recorded = true;
+        self.metrics
+            .record_body(self.group, self.started_at.elapsed(), complete);
+    }
+}
+
+impl http_body::Body for MeasuredBody {
+    type Data = bytes::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        use std::task::Poll;
+
+        let this = self.get_mut();
+        let polled = std::pin::Pin::new(&mut this.inner).poll_frame(cx);
+        match &polled {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    this.delivered = this.delivered.saturating_add(data.len() as u64);
+                }
+            }
+            Poll::Ready(None) => this.finish(true),
+            // A body that ended in an error did not deliver what it promised,
+            // so it is counted beside the abandoned ones rather than as a
+            // completed delivery.
+            Poll::Ready(Some(Err(_))) => this.finish(false),
+            Poll::Pending => {}
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+impl Drop for MeasuredBody {
+    fn drop(&mut self) {
+        // A body dropped short of what it promised is a consumer that went
+        // away. One dropped after handing over everything — at its end, or
+        // with its declared length yielded, which is how hyper lets go of
+        // every fixed-length body — was delivered.
+        let complete = self.delivered_everything();
+        self.finish(complete);
+    }
+}
+
+/// The number of body bytes a response's head promised, if it promised one.
+///
+/// A response to HEAD, and a 1xx, 204 or 304, promises none whatever its
+/// `Content-Length` says: there the header describes the representation, and
+/// hyper writes no body at all. Otherwise the header wins when present,
+/// because it is what hyper frames the response by; when the handler set none,
+/// hyper derives it from the body's exact size hint, so that is the fallback.
+/// Neither means a chunked body, which is `complete` only at its end.
+fn declared_body_length(
+    head_request: bool,
+    status: StatusCode,
+    response: &Response,
+) -> Option<u64> {
+    if head_request
+        || status.is_informational()
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::NOT_MODIFIED
+    {
+        return Some(0);
+    }
+    response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .or_else(|| http_body::Body::size_hint(response.body()).exact())
+}
+
+/// Counts every request's outcome and times its body.
+///
+/// Layered outside `http_store_attribution`, and therefore outside
+/// `cluster_capacity_gate`, so the 503s the gate produces for a learner, a
+/// fenced node or a node in maintenance are counted. A refusal is a request,
+/// and a node refusing everything with an uncounted 503 is exactly the failure
+/// this family exists to show.
+async fn http_request_metrics(request: Request<axum::body::Body>, next: Next) -> Response {
+    measure_http_request(&HTTP_REQUEST_METRICS, &ACCESS_LINES, request, next).await
+}
+
+/// `http_request_metrics` over a metrics table the caller names, so a test can
+/// own one and read exact counts without racing every other router test in
+/// the binary for the process-wide cells.
+async fn measure_http_request(
+    metrics: &'static HttpRequestMetrics,
+    access_lines: &'static AccessLineThrottle,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    // `other` is the last group, and is what both ways of having no template —
+    // the web fallback and a genuinely unmatched path — resolve to.
+    let group = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or(HTTP_ROUTE_GROUPS.len() - 1, |path| {
+            http_route_group(path.as_str())
+        });
+    let method = http_method_index(request.method());
+    let head_request = request.method() == Method::HEAD;
+    let target = safe_trace_target(request.uri());
+    let request_id = request
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let started_at = Instant::now();
+    let response = next.run(request).await;
+    let status = response.status();
+    metrics.record_request(group, method, http_status_class_index(status));
+    if status.is_server_error() {
+        // Only 5xx, and at most one line per route group per second.
+        // `logbuf::LogBuffer` is a bounded ring and it is the only log the
+        // product itself can show; a line per successful request would evict
+        // everything else on a node serving one HLS segment per second per
+        // viewer, and a line per refusal would do the same on a fenced node.
+        // The counters above carry the volume, this ring carries the
+        // exceptions — and `also_suppressed` says what the sampling cost.
+        if let Some(also_suppressed) = access_lines.admit(group) {
+            tracing::warn!(
+                target: "plurxd::http",
+                route_group = HTTP_ROUTE_GROUPS[group],
+                status = status.as_u16(),
+                latency_ms = started_at.elapsed().as_millis() as u64,
+                request_id = %request_id,
+                path = %target,
+                also_suppressed,
+                "http request failed"
+            );
+        }
+    }
+    let declared = declared_body_length(head_request, status, &response);
+    response.map(|body| axum::body::Body::new(MeasuredBody::new(metrics, group, body, declared)))
+}
+
+pub(crate) fn prometheus_http_request_metrics() -> String {
+    HTTP_REQUEST_METRICS.render()
+}
+
+// ---------------------------------------------------------------------------
+// Request ids (observability baseline, C-08 M2).
+
+pub(crate) const REQUEST_ID_HEADER: &str = "x-request-id";
+const MAX_REQUEST_ID: usize = 64;
+
+/// An id a caller supplied is adopted only if it is a short, boring token.
+///
+/// Anything else is replaced rather than refused: the id is a correlation aid,
+/// and refusing a request over a malformed log field would make a log field
+/// load-bearing for service. The discarded value is never returned, logged or
+/// stored anywhere — a caller that puts a bearer token in this header must not
+/// get it written into journald or into the in-product log ring.
+fn adopt_or_mint_request_id(incoming: Option<&HeaderValue>) -> HeaderValue {
+    match incoming.and_then(|value| value.to_str().ok()) {
+        Some(value)
+            if !value.is_empty()
+                && value.len() <= MAX_REQUEST_ID
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') =>
+        {
+            HeaderValue::from_str(value).unwrap_or_else(|_| mint_request_id())
+        }
+        _ => mint_request_id(),
+    }
+}
+
+fn mint_request_id() -> HeaderValue {
+    let mut buffer = [0_u8; uuid::fmt::Simple::LENGTH];
+    let text = uuid::Uuid::new_v4().simple().encode_lower(&mut buffer);
+    HeaderValue::from_str(text).expect("lowercase hex is a legal header value")
+}
+
+/// Gives every request an id, on the request, on its span, and on the response.
+///
+/// Outermost of all the layers, because everything inside it — the 5xx access
+/// line, the `http_request` span and any handler — reads the id back out of
+/// the request headers, and only this layer is allowed to decide what that
+/// value is. The id is deliberately **not** a metric label: a per-request label
+/// is unbounded, which is the single most common way a metrics system is
+/// destroyed.
+async fn http_request_id(mut request: Request<axum::body::Body>, next: Next) -> Response {
+    let id = adopt_or_mint_request_id(request.headers().get(REQUEST_ID_HEADER));
+    request.headers_mut().insert(REQUEST_ID_HEADER, id.clone());
+    let mut response = next.run(request).await;
+    // A handler that already answered with an id of its own keeps it.
+    response
+        .headers_mut()
+        .entry(REQUEST_ID_HEADER)
+        .or_insert(id);
+    response
 }
 
 #[derive(Clone, Copy)]
@@ -586,6 +1317,7 @@ pub fn router(state: AppState) -> Router {
         .route("/server", get(system::server_info))
         .route("/me", get(auth::me))
         .route("/settings", get(system::get_settings))
+        .route("/subtitle-provider", get(subtitle_downloads::settings))
         // Advisory only. The Developer section lists what must be true
         // before each switch is safe; this is the other half — what this
         // process can currently observe. Nothing reads it to decide
@@ -613,12 +1345,22 @@ pub fn router(state: AppState) -> Router {
             "/activity/producer",
             axum::routing::delete(system::stop_producer),
         )
+        .route(
+            "/activity/processes/{pid}",
+            axum::routing::delete(system::stop_process),
+        )
         .route("/trakt/status", get(trakt::status))
         .route("/system", get(system::system_info))
         .route("/system/logs", get(system::logs))
         .route("/system/playback-events", get(system::playback_events))
         .route("/cluster/nodes", get(cluster::nodes))
         .route("/cluster/status", get(cluster_operations::aggregate))
+        .route("/cluster/jobs", get(background_jobs::list))
+        .route(
+            "/cluster/work/storage-domains",
+            get(background_jobs::storage_domains),
+        )
+        .route("/cluster/jobs/{id}", get(background_jobs::detail))
         .route("/cluster/ingress", get(cluster::ingress))
         .route("/cluster/media", get(internal_media::directory))
         // Any signed-in user can post a client-side playback error here so it
@@ -649,6 +1391,10 @@ pub fn router(state: AppState) -> Router {
         // Browse
         .route("/items/{id}", get(browse::item_detail).patch(items::edit))
         .route("/files/{id}/dv-conversion", get(dv_disk::file_status))
+        .route(
+            "/files/{id}/chapters/{index}/thumb",
+            get(chapter_thumbs::serve),
+        )
         .route("/dv-conversions", get(dv_disk::status))
         .route("/analysis/summary", get(analysis::summary))
         .route("/analysis/jobs", get(analysis::jobs))
@@ -695,6 +1441,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/files/{id}/audio-offset", put(stream::set_audio_offset))
         .route("/files/{id}/offline-options", get(offline::options))
+        .route("/files/{id}/grants", post(file_grants::mint))
+        .route("/grants/{id}", delete(file_grants::revoke))
         .route(
             "/offline/packages/{id}",
             get(offline::package_status).delete(offline::delete_package),
@@ -707,6 +1455,10 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(json_short_deadline));
 
     let json_long = Router::new()
+        .route(
+            "/files/{id}/subtitles/search",
+            get(subtitle_downloads::search),
+        )
         // These handlers legitimately coordinate cluster writes, password
         // hashing, scans, or child work. Five minutes stays above their own
         // fences while still making a wedged request finite.
@@ -724,6 +1476,14 @@ pub fn router(state: AppState) -> Router {
             delete(users::revoke_user_device),
         )
         .route("/settings", put(system::update_settings))
+        .route(
+            "/subtitle-provider",
+            put(subtitle_downloads::update_settings),
+        )
+        .route(
+            "/files/{id}/subtitles/download",
+            post(subtitle_downloads::download),
+        )
         .route(
             "/live-tv/readiness/refresh",
             post(live_tv::refresh_readiness),
@@ -755,6 +1515,12 @@ pub fn router(state: AppState) -> Router {
             post(cluster::enter_maintenance).delete(cluster::exit_maintenance),
         )
         .route("/cluster/election", post(cluster::force_election))
+        .route(
+            "/cluster/work/storage-domains",
+            put(background_jobs::replace_storage_domains),
+        )
+        .route("/cluster/jobs/{id}/cancel", post(background_jobs::cancel))
+        .route("/cluster/jobs/{id}/retry", post(background_jobs::retry))
         .route("/cluster/backups", post(crate::backup::create))
         .route("/cluster/leave", post(cluster::leave))
         .route(
@@ -833,6 +1599,10 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            "/live-tv/sessions/{capability}/master.m3u8",
+            get(live_tv::master),
+        )
+        .route(
             "/live-tv/sessions/{capability}/index.m3u8",
             get(live_tv::playlist),
         )
@@ -876,6 +1646,7 @@ pub fn router(state: AppState) -> Router {
         .route("/files/{id}/direct", get(stream::direct))
         .route("/files/{id}/download", get(stream::download))
         .route("/files/{id}/content", get(stream::book_content))
+        .route("/grants/{token}/content", get(file_grants::content))
         .route("/publication/{session}", delete(publication::close))
         .route(
             "/publication/{session}/{*resource}",
@@ -978,6 +1749,16 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             mutable_media_serving_gate,
+        ))
+        // Outside the serving gate, so a request `mutable_media_serving_gate`
+        // refuses is still counted. That is the only refusal it sees.
+        // `cluster_capacity_gate` is layered outside the whole router (below)
+        // and answers 503 before routing — maintenance, a fenced node, a
+        // learner-ineligible route — so those refusals never reach this layer
+        // and are not counted. The plan's §8.5 closing rule accounts for that.
+        .layer(axum::middleware::from_fn_with_state(
+            std::sync::Arc::clone(&state.plex_census),
+            plex_facade_census,
         ));
 
     let public_short = Router::new()
@@ -1062,6 +1843,24 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            crate::live_tv::cluster::PLACEMENT_PATH,
+            post(internal_live_tv::placement).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::cluster::PROCESS_PATH,
+            post(internal_live_tv::process).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::cluster::INGEST_PATH,
+            post(internal_live_tv::ingest).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
             crate::live_tv::RESOURCE_PATH,
             post(internal_live_tv::resource).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
@@ -1098,8 +1897,20 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            "/internal/media/cache-copy/{recipe}/{digest}/{object}",
+            get(transcode_copies::serve),
+        )
+        .route(
             "/internal/media/fragment-index/{cache_key}",
             get(internal_media::fragment_index),
+        )
+        .route(
+            crate::subtitle_ranges::PATH,
+            post(internal_media::subtitle_range).layer(DefaultBodyLimit::max(4096)),
+        )
+        .route(
+            "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}",
+            get(internal_media::subtitle_source),
         )
         .route(
             crate::media_sessions::START_PATH,
@@ -1156,6 +1967,14 @@ pub fn router(state: AppState) -> Router {
                     method = %request.method(),
                     target = %safe_trace_target(request.uri()),
                     version = ?request.version(),
+                    // Written by `http_request_id` outside this layer, so the
+                    // value here is always a short alphanumeric token this
+                    // process vouches for, never the raw header a caller sent.
+                    request_id = request
+                        .headers()
+                        .get(REQUEST_ID_HEADER)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default(),
                 )
             }),
         )
@@ -1167,6 +1986,12 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             http_store_attribution,
         ))
+        // Outside the Store attribution, and therefore outside the capacity
+        // gate, so a 503 the gate produces is still counted as a request.
+        .layer(axum::middleware::from_fn(http_request_metrics))
+        // Outermost: every layer inside reads the id back out of the request
+        // headers, so this one has to have written it first.
+        .layer(axum::middleware::from_fn(http_request_id))
         .with_state(state)
 }
 
@@ -1236,7 +2061,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
             crate::media_sessions::ABORT_PATH
                 | crate::media_sessions::RELAY_PATH
                 | crate::media_sessions::CONTROL_PATH
-                | crate::live_tv::RESOURCE_PATH
+        | crate::live_tv::RESOURCE_PATH
                 | crate::live_tv::STOP_PATH
                 // A retire is a stop plus a fence. Refusing it during
                 // maintenance refuses it precisely when a client needs it.
@@ -1332,12 +2157,24 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         && path
             .strip_prefix(crate::fragment_index_cluster::PEER_PATH_PREFIX)
             .is_some_and(|cache_key| !cache_key.is_empty() && !cache_key.contains('/'));
-    if fragment_index_read
+    let subtitle_source_read = method == Method::GET
+        && path
+            .strip_prefix("/internal/media/subtitle-source/")
+            .is_some_and(|suffix| {
+                let segments = suffix.split('/').collect::<Vec<_>>();
+                matches!(segments.as_slice(), [file_id, ordinal, "sup" | "webvtt" | "matroska"]
+                    if file_id.parse::<i64>().is_ok_and(|value| value > 0)
+                    && ordinal.parse::<i64>().is_ok_and(|value| value >= 0))
+            });
+    if (method == Method::GET && transcode_copies::route_eligible(path))
+        || fragment_index_read
+        || subtitle_source_read
         || (method == Method::GET && path == crate::media_pool::SNAPSHOT_PATH)
         || (method == Method::POST
             && matches!(
                 path,
-                crate::media_pool::OFFERS_PATH
+                crate::subtitle_ranges::PATH
+                    | crate::media_pool::OFFERS_PATH
                     | crate::shared_cache::CANARY_PATH
                     | crate::media_sessions::START_PATH
                     | crate::media_sessions::ACTIVATE_PATH
@@ -1517,10 +2354,15 @@ async fn root_dispatch(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     if plex::looks_like_plex(&headers) {
-        match plex::root(state).await {
+        let census = std::sync::Arc::clone(&state.plex_census);
+        let response = match plex::root(state).await {
             Ok(resp) => resp,
             Err(e) => e.into_response(),
-        }
+        };
+        // Only this branch. A browser loading the web app from the same path
+        // is not façade traffic and must not be counted as any.
+        census.record(PLEX_ROOT_HANDLER, response.status());
+        response
     } else {
         web::index().await.into_response()
     }
@@ -1678,11 +2520,948 @@ mod tests {
         "ok"
     }
 
+    async fn watch_write_handler(
+        axum::extract::Path(case): axum::extract::Path<String>,
+    ) -> &'static str {
+        let writes: &[Option<u64>] = match case.as_str() {
+            "two" => &[Some(41), Some(45)],
+            "unprovable" => &[Some(41), None],
+            _ => &[],
+        };
+        for write in writes {
+            plurx_core::store::validation_record_http_watch_write(*write);
+        }
+        "ok"
+    }
+
     async fn recorded_store_handler() -> &'static str {
         for class in 0..3 {
             plurx_core::store::validation_time_http_store_operation(class).await;
         }
         "ok"
+    }
+
+    // -- Plex façade census (C-07 M0) ---------------------------------------
+
+    fn plex_cell(exposition: &str, handler: &str, outcome: &str) -> u64 {
+        let prefix =
+            format!("plurx_plex_requests_total{{handler=\"{handler}\",outcome=\"{outcome}\"}} ");
+        exposition
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .expect("a fixed census cell")
+            .parse()
+            .expect("counter")
+    }
+
+    /// The census is only worth reading if its handler list covers every route
+    /// the façade actually registers. This reads the registrations out of
+    /// `router()`'s own source rather than a list somebody kept in step by
+    /// hand, so adding a façade route without a label fails here.
+    #[test]
+    fn every_registered_facade_route_has_a_census_label() {
+        let source = include_str!("mod.rs");
+        let block = source
+            .split_once("    let plex_short = Router::new()")
+            .expect("plex_short")
+            .1
+            .split_once("    let plex_routes = Router::new()")
+            .expect("plex_routes")
+            .0;
+        let templates = block
+            .match_indices(".route(\"")
+            .map(|(index, _)| {
+                let rest = &block[index + ".route(\"".len()..];
+                rest.split_once('"').expect("template").0
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            templates.len(),
+            14,
+            "the façade registers {} routes: {templates:?}",
+            templates.len()
+        );
+        for template in &templates {
+            assert!(
+                plex_handler_index(template).is_some(),
+                "registered façade route has no census label: {template}"
+            );
+        }
+        // `/search` and `/hubs/search` are one handler and share one label, so
+        // fourteen routes map onto thirteen names; `root` is the fourteenth
+        // name and is recorded by `root_dispatch` instead of by a route.
+        let mut labelled = templates
+            .iter()
+            .filter_map(|template| plex_handler_index(template))
+            .collect::<Vec<_>>();
+        labelled.sort_unstable();
+        labelled.dedup();
+        assert_eq!(labelled.len(), 13);
+        assert!(!labelled.contains(&PLEX_ROOT_HANDLER));
+        assert_eq!(PLEX_HANDLERS[PLEX_ROOT_HANDLER], "root");
+    }
+
+    #[test]
+    fn the_census_label_space_is_closed() {
+        let exposition = PlexCensus::default().prometheus();
+        assert_eq!(
+            exposition
+                .lines()
+                .filter(|line| line.starts_with("plurx_plex_requests_total{"))
+                .count(),
+            PLEX_HANDLERS.len() * PLEX_OUTCOMES.len()
+        );
+        // Nothing outside the façade's own templates can reach a label.
+        assert!(plex_handler_index("/api/v1/libraries").is_none());
+        assert!(plex_handler_index("/library/sections/1/all").is_none());
+        assert_eq!(plex_outcome_index(StatusCode::OK), 0);
+        assert_eq!(plex_outcome_index(StatusCode::NOT_FOUND), 1);
+        assert_eq!(plex_outcome_index(StatusCode::UNAUTHORIZED), 2);
+        assert_eq!(plex_outcome_index(StatusCode::FORBIDDEN), 2);
+        assert_eq!(plex_outcome_index(StatusCode::INTERNAL_SERVER_ERROR), 3);
+        assert_eq!(plex_outcome_index(StatusCode::SERVICE_UNAVAILABLE), 3);
+    }
+
+    #[tokio::test]
+    async fn an_unauthenticated_facade_request_is_counted_as_a_client_that_tried() {
+        let (app, state) = test_app_with_state();
+        let before = state.plex_census.prometheus();
+        let response = app
+            .oneshot(get("/library/sections", None))
+            .await
+            .expect("response");
+        // No `X-Plex-Token`: the façade refuses, and that refusal is the signal
+        // a census exists to see.
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let after = state.plex_census.prometheus();
+        assert_eq!(
+            plex_cell(&after, "sections", "unauthorized"),
+            plex_cell(&before, "sections", "unauthorized") + 1
+        );
+        assert_eq!(
+            plex_cell(&after, "sections", "ok"),
+            plex_cell(&before, "sections", "ok")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_public_facade_routes_are_counted_and_the_web_app_is_not() {
+        let (app, state) = test_app_with_state();
+        let root_total = |text: &str| {
+            PLEX_OUTCOMES
+                .iter()
+                .map(|outcome| plex_cell(text, "root", outcome))
+                .sum::<u64>()
+        };
+        let before = state.plex_census.prometheus();
+
+        // `/identity` takes no token and is how a Plex client finds a server.
+        let identity = app
+            .clone()
+            .oneshot(get("/identity", None))
+            .await
+            .expect("response");
+        assert_eq!(identity.status(), StatusCode::OK);
+        let after_identity = state.plex_census.prometheus();
+        assert_eq!(
+            plex_cell(&after_identity, "identity", "ok"),
+            plex_cell(&before, "identity", "ok") + 1
+        );
+
+        // `/` from a browser is the web app. `root_dispatch` serves both from
+        // one handler, so the two branches are asserted one at a time: a total
+        // alone cannot tell "the Plex branch counted" from "the web branch
+        // counted instead".
+        let web_root = app.clone().oneshot(get("/", None)).await.expect("response");
+        assert!(web_root.status().is_success());
+        let after_web = state.plex_census.prometheus();
+        assert_eq!(
+            root_total(&after_web),
+            root_total(&after_identity),
+            "a browser page load is not façade traffic"
+        );
+
+        // `/` with Plex headers is the capabilities container.
+        let plex_root = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("x-plex-product", "PlexKodiConnect")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert!(plex_root.status().is_success() || plex_root.status().is_client_error());
+        assert_eq!(
+            root_total(&state.plex_census.prometheus()),
+            root_total(&after_web) + 1,
+            "the Plex branch of root_dispatch is the one that counts"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_native_request_never_reaches_the_census() {
+        let (app, state) = test_app_with_state();
+        let before = state.plex_census.prometheus();
+        for path in ["/api/v1/libraries", "/api/v1/search", "/healthz"] {
+            let _ = app
+                .clone()
+                .oneshot(get(path, None))
+                .await
+                .expect("response");
+        }
+        assert_eq!(
+            state.plex_census.prometheus(),
+            before,
+            "a native request moved a façade counter"
+        );
+    }
+
+    /// The census tests above assert exact deltas, which is only sound if the
+    /// counter they read is moved by nothing but their own requests. With a
+    /// process-global counter every other test in this binary that sends
+    /// façade traffic (`plex_facade_requires_a_valid_token`,
+    /// `plex_facade_serves_seeded_content`, ...) moves it too, on libtest's
+    /// parallel threads. This pins the property deterministically instead of
+    /// by racing: a second router's façade traffic must not reach this one's
+    /// census, and `/metrics` must render this router's census, not another.
+    #[tokio::test]
+    async fn each_router_counts_only_its_own_facade_requests() {
+        let (app, state) = test_app_with_state();
+        let (other_app, _other_state) = test_app_with_state();
+        let before = state.plex_census.prometheus();
+        for _ in 0..3 {
+            let _ = other_app
+                .clone()
+                .oneshot(get("/library/sections", None))
+                .await
+                .expect("response");
+        }
+        assert_eq!(
+            state.plex_census.prometheus(),
+            before,
+            "another router's façade request moved this router's census"
+        );
+
+        let _ = app
+            .clone()
+            .oneshot(get("/library/sections", None))
+            .await
+            .expect("response");
+        let metrics = app.oneshot(get("/metrics", None)).await.expect("response");
+        let body = axum::body::to_bytes(metrics.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let exposition = String::from_utf8(body.to_vec()).expect("utf-8");
+        assert_eq!(
+            plex_cell(&exposition, "sections", "unauthorized"),
+            plex_cell(&before, "sections", "unauthorized") + 1,
+            "/metrics renders the census of the router that served it"
+        );
+    }
+
+    // -- observability baseline (C-08 M1/M2/M3) -----------------------------
+
+    use crate::logbuf::testwriter::CapturedWriter;
+
+    async fn streaming_test_handler() -> Response {
+        // Three frames, 100 ms apart: the response head is available at once
+        // and the body takes a third of a second, which is the whole point of
+        // measuring the two separately.
+        let frames = futures_util::stream::unfold(0_u8, |index| async move {
+            if index >= 3 {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Some((
+                Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"frame")),
+                index + 1,
+            ))
+        });
+        axum::body::Body::from_stream(frames).into_response()
+    }
+
+    /// The two observability layers over three routes with known shapes, in the
+    /// same order `router()` adds them.
+    ///
+    /// The metrics layer records into a table this test owns rather than the
+    /// process-wide one, so its counts are exact: every other router test in
+    /// this binary increments the process-wide cells in parallel, and two of
+    /// these tests share the `search` group.
+    fn observability_probe_router() -> (Router, &'static HttpRequestMetrics) {
+        let metrics: &'static HttpRequestMetrics = Box::leak(Box::default());
+        let access_lines: &'static AccessLineThrottle = Box::leak(Box::default());
+        let router = Router::new()
+            .route("/api/v1/items/{id}", axum::routing::get(|| async { "ok" }))
+            .route(
+                "/api/v1/settings",
+                axum::routing::get(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+            )
+            .route(
+                "/api/v1/cluster/status",
+                axum::routing::get(|| async { (StatusCode::SERVICE_UNAVAILABLE, "refused") }),
+            )
+            .route("/api/v1/search", axum::routing::get(streaming_test_handler))
+            .layer(axum::middleware::from_fn(
+                move |request: Request<axum::body::Body>, next: Next| {
+                    measure_http_request(metrics, access_lines, request, next)
+                },
+            ))
+            .layer(axum::middleware::from_fn(http_request_id));
+        (router, metrics)
+    }
+
+    fn request_cell(exposition: &str, group: &str, method: &str, status: &str) -> u64 {
+        let prefix = format!(
+            "plurx_http_requests_total{{route_group=\"{group}\",method=\"{method}\",status=\"{status}\"}} "
+        );
+        exposition
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .expect("a fixed request cell")
+            .parse()
+            .expect("counter")
+    }
+
+    fn body_cell(exposition: &str, group: &str, outcome: &str) -> u64 {
+        let prefix =
+            format!("plurx_http_bodies_total{{route_group=\"{group}\",outcome=\"{outcome}\"}} ");
+        exposition
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .expect("a fixed body cell")
+            .parse()
+            .expect("counter")
+    }
+
+    fn body_seconds_sum(exposition: &str, group: &str) -> f64 {
+        let prefix = format!("plurx_http_body_seconds_sum{{route_group=\"{group}\"}} ");
+        exposition
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .expect("a fixed body sum")
+            .parse()
+            .expect("seconds")
+    }
+
+    #[tokio::test]
+    async fn a_request_is_labelled_by_its_route_group_and_never_by_its_uri() {
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
+        let response = app
+            .oneshot(get("/api/v1/items/424242", None))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let after = metrics.render();
+        assert_eq!(
+            request_cell(&after, "item", "get", "2xx"),
+            request_cell(&before, "item", "get", "2xx") + 1
+        );
+        // The concrete id reached the template but must not have reached a
+        // label. `424242` is distinctive enough that a stray substring match
+        // would be a real leak rather than a coincidence.
+        assert!(
+            !after.contains("424242"),
+            "a request id reached the exposition"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unmatched_path_uses_one_shared_label_and_mints_no_series() {
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
+        let before_lines = before
+            .lines()
+            .filter(|line| line.starts_with("plurx_http_requests_total{"))
+            .count();
+        for index in 0..100 {
+            let response = app
+                .clone()
+                .oneshot(get(&format!("/nothing/here/{index}"), None))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        let after = metrics.render();
+        assert!(
+            request_cell(&after, "other", "get", "4xx")
+                >= request_cell(&before, "other", "get", "4xx") + 100
+        );
+        assert_eq!(
+            after
+                .lines()
+                .filter(|line| line.starts_with("plurx_http_requests_total{"))
+                .count(),
+            before_lines,
+            "a hundred distinct paths must not mint a single new series"
+        );
+    }
+
+    #[test]
+    fn the_request_label_space_is_closed() {
+        let exposition = prometheus_http_request_metrics();
+        assert_eq!(
+            exposition
+                .lines()
+                .filter(|line| line.starts_with("plurx_http_requests_total{"))
+                .count(),
+            HTTP_ROUTE_GROUPS.len() * HTTP_METHODS.len() * HTTP_STATUS_CLASSES.len()
+        );
+        assert_eq!(
+            exposition
+                .lines()
+                .filter(|line| line.starts_with("plurx_http_bodies_total{"))
+                .count(),
+            HTTP_ROUTE_GROUPS.len() * HTTP_BODY_OUTCOMES.len()
+        );
+        // Every label value in the exposition comes from one of the three
+        // fixed arrays, so the arrays are the whole vocabulary.
+        for line in exposition
+            .lines()
+            .filter(|line| line.starts_with("plurx_http_requests_total{"))
+        {
+            let labels = line
+                .split_once('{')
+                .expect("labels")
+                .1
+                .split_once('}')
+                .expect("labels")
+                .0;
+            let values = labels
+                .split(',')
+                .map(|pair| pair.split_once('=').expect("pair").1.trim_matches('"'))
+                .collect::<Vec<_>>();
+            assert!(HTTP_ROUTE_GROUPS.contains(&values[0]), "{line}");
+            assert!(HTTP_METHODS.contains(&values[1]), "{line}");
+            assert!(HTTP_STATUS_CLASSES.contains(&values[2]), "{line}");
+        }
+        assert_eq!(http_method_index(&Method::TRACE), 6);
+        assert_eq!(http_status_class_index(StatusCode::CONTINUE), 4);
+    }
+
+    #[tokio::test]
+    async fn header_latency_and_body_delivery_are_separate_measurements() {
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
+        let started_at = Instant::now();
+        let response = app
+            .oneshot(get("/api/v1/search", None))
+            .await
+            .expect("response");
+        // `oneshot` resolves when the handler has returned its response; the
+        // body has not been read yet.
+        let to_headers = started_at.elapsed();
+        let drained = Instant::now();
+        let body = response.into_body().collect().await.expect("body");
+        let to_last_frame = drained.elapsed();
+        assert_eq!(body.to_bytes().len(), 15);
+        assert!(
+            to_headers < Duration::from_millis(80),
+            "the response head took {to_headers:?}"
+        );
+        assert!(
+            to_last_frame >= Duration::from_millis(250),
+            "the body took {to_last_frame:?}"
+        );
+        let after = metrics.render();
+        assert_eq!(
+            body_cell(&after, "search", "complete"),
+            body_cell(&before, "search", "complete") + 1
+        );
+        // The body histogram describes delivery, not the handler: it must have
+        // grown by roughly the streaming time, which is an order of magnitude
+        // more than the response head took.
+        let delivered = body_seconds_sum(&after, "search") - body_seconds_sum(&before, "search");
+        assert!(delivered >= 0.25, "body seconds grew by {delivered}");
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_body_counts_aborted_and_not_as_an_error() {
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
+        let response = app
+            .oneshot(get("/api/v1/search", None))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        // The consumer goes away without reading a frame, exactly as a client
+        // that seeks away from a segment does.
+        drop(response);
+        let after = metrics.render();
+        assert_eq!(
+            body_cell(&after, "search", "aborted"),
+            body_cell(&before, "search", "aborted") + 1
+        );
+        assert_eq!(
+            body_cell(&after, "search", "complete"),
+            body_cell(&before, "search", "complete"),
+            "an abandoned body is not a completed one"
+        );
+        assert_eq!(
+            request_cell(&after, "search", "get", "2xx"),
+            request_cell(&before, "search", "get", "2xx") + 1,
+            "and the request itself still succeeded"
+        );
+    }
+
+    /// Four 5-byte frames from a stream, so the body cannot know it has ended
+    /// until it is polled past its last frame — the shape of every direct play
+    /// range and HLS segment plurx serves.
+    fn four_frame_stream_body() -> axum::body::Body {
+        axum::body::Body::from_stream(futures_util::stream::iter(
+            (0..4).map(|_| Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"frame"))),
+        ))
+    }
+
+    /// `/api/v1/items/length` declares `Content-Length: 20` for the stream the
+    /// way `stream.rs` and `hls.rs` do; any other id leaves hyper to frame it
+    /// chunked.
+    async fn framed_stream_handler(
+        axum::extract::Path(framing): axum::extract::Path<String>,
+    ) -> Response {
+        let mut response = four_frame_stream_body().into_response();
+        if framing == "length" {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_LENGTH, HeaderValue::from_static("20"));
+        }
+        response
+    }
+
+    /// One request on a fresh HTTP/1.1 connection, read until the server
+    /// closes it. `connection: close` makes that close the end of the
+    /// exchange, and hyper closes only after its dispatcher has let go of the
+    /// body, so the body's outcome is recorded by the time this returns.
+    async fn raw_http1_exchange(address: std::net::SocketAddr, method: &str, path: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect");
+        stream
+            .write_all(
+                format!(
+                    "{method} {path} HTTP/1.1\r\nhost: plurx.test\r\nconnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("request");
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.expect("response");
+        String::from_utf8(raw).expect("a UTF-8 response")
+    }
+
+    /// The #461 review's reproduction, kept as the regression test: through a
+    /// real hyper connection rather than `oneshot` + `collect()`, which always
+    /// polls a body to its end and so can never see how hyper lets go of a
+    /// fixed-length one.
+    #[tokio::test]
+    async fn a_fully_delivered_body_counts_complete_over_a_real_connection_whatever_its_framing() {
+        let metrics: &'static HttpRequestMetrics = Box::leak(Box::default());
+        let access_lines: &'static AccessLineThrottle = Box::leak(Box::default());
+        let app = Router::new()
+            .route(
+                "/api/v1/items/{id}",
+                axum::routing::get(framed_stream_handler),
+            )
+            .layer(axum::middleware::from_fn(
+                move |request: Request<axum::body::Body>, next: Next| {
+                    measure_http_request(metrics, access_lines, request, next)
+                },
+            ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let chunked = raw_http1_exchange(address, "GET", "/api/v1/items/chunked").await;
+        let length = raw_http1_exchange(address, "GET", "/api/v1/items/length").await;
+        assert!(
+            chunked
+                .to_ascii_lowercase()
+                .contains("transfer-encoding: chunked"),
+            "{chunked}"
+        );
+        assert!(
+            length.to_ascii_lowercase().contains("content-length: 20"),
+            "{length}"
+        );
+        for response in [&chunked, &length] {
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            assert_eq!(response.matches("frame").count(), 4, "{response}");
+        }
+        let exposition = metrics.render();
+        assert_eq!(
+            (
+                body_cell(&exposition, "item", "complete"),
+                body_cell(&exposition, "item", "aborted")
+            ),
+            (2, 0),
+            "both bodies reached the client whole, so neither was abandoned"
+        );
+
+        // HEAD: axum answers it from the GET route with the GET's headers, and
+        // hyper writes no body. Nothing was promised, so nothing was abandoned.
+        let head = raw_http1_exchange(address, "HEAD", "/api/v1/items/length").await;
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert!(!head.contains("frame"), "{head}");
+        let exposition = metrics.render();
+        assert_eq!(
+            (
+                body_cell(&exposition, "item", "complete"),
+                body_cell(&exposition, "item", "aborted")
+            ),
+            (3, 0),
+            "a HEAD response has no body to abandon"
+        );
+    }
+
+    /// The other half of the byte count: a fixed-length body let go of before
+    /// it yielded its declared length is still a consumer that went away, and
+    /// one that yielded all of it is complete without ever being polled to
+    /// `None` — which is exactly what hyper does with it.
+    #[tokio::test]
+    async fn a_fixed_length_body_is_complete_at_its_declared_length_and_aborted_short_of_it() {
+        let metrics: &'static HttpRequestMetrics = Box::leak(Box::default());
+        let group = http_route_group("/api/v1/items/{id}");
+
+        let mut short = MeasuredBody::new(metrics, group, four_frame_stream_body(), Some(20));
+        short.frame().await.expect("a frame").expect("data");
+        drop(short);
+        let exposition = metrics.render();
+        assert_eq!(
+            (
+                body_cell(&exposition, "item", "complete"),
+                body_cell(&exposition, "item", "aborted")
+            ),
+            (0, 1),
+            "5 of 20 declared bytes is an abandoned body"
+        );
+
+        let mut whole = MeasuredBody::new(metrics, group, four_frame_stream_body(), Some(20));
+        for _ in 0..4 {
+            whole.frame().await.expect("a frame").expect("data");
+        }
+        assert!(
+            !http_body::Body::is_end_stream(&whole),
+            "the stream does not know it has ended, which is the whole problem"
+        );
+        drop(whole);
+        let exposition = metrics.render();
+        assert_eq!(
+            (
+                body_cell(&exposition, "item", "complete"),
+                body_cell(&exposition, "item", "aborted")
+            ),
+            (1, 1),
+            "20 of 20 declared bytes is a delivered body"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrapping_a_body_preserves_its_exact_length() {
+        // hyper derives Content-Length from the body's size hint when the
+        // handler has not set the header, so a wrapper that reported an unknown
+        // length would silently move fixed-length responses onto chunked
+        // framing.
+        let (app, _) = observability_probe_router();
+        let response = app
+            .oneshot(get("/api/v1/items/1", None))
+            .await
+            .expect("response");
+        assert_eq!(
+            http_body::Body::size_hint(response.body()).exact(),
+            Some(2),
+            "the wrapped body must still know it is two bytes long"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_error_is_counted_as_five_hundred_and_logged_once_at_warn() {
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
+        let captured = CapturedWriter::new();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(captured.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        let failed = app
+            .clone()
+            .oneshot(get("/api/v1/settings", None))
+            .await
+            .expect("response");
+        assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let ok = app
+            .oneshot(get("/api/v1/items/1", None))
+            .await
+            .expect("response");
+        assert_eq!(ok.status(), StatusCode::OK);
+        drop(guard);
+
+        let after = metrics.render();
+        assert_eq!(
+            request_cell(&after, "settings", "get", "5xx"),
+            request_cell(&before, "settings", "get", "5xx") + 1
+        );
+
+        let logged = captured.text();
+        assert_eq!(
+            logged.matches("http request failed").count(),
+            1,
+            "exactly one access line, and only for the 5xx: {logged}"
+        );
+        assert!(logged.contains("route_group=\"settings\""), "{logged}");
+        assert!(
+            logged.contains("request_id="),
+            "the line must carry the request id: {logged}"
+        );
+        assert!(logged.contains("status=500"), "{logged}");
+        assert!(
+            logged.contains("path=/api/v1/settings"),
+            "the line must name the redacted target: {logged}"
+        );
+        // The ring this line lands in is bounded and is the only log the
+        // product itself can show, so a successful request must stay out of it.
+        assert!(
+            !logged.contains("/api/v1/items/1"),
+            "a 200 was logged: {logged}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_storm_is_counted_exactly_and_logged_at_most_once_a_second() {
+        // A fenced node refuses every request with 503. The counter must see
+        // all of them and the bounded ring must not.
+        let (app, metrics) = observability_probe_router();
+        let before = metrics.render();
+        let captured = CapturedWriter::new();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(captured.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        for _ in 0..25 {
+            let refused = app
+                .clone()
+                .oneshot(get("/api/v1/cluster/status", None))
+                .await
+                .expect("response");
+            assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+        drop(guard);
+
+        let after = metrics.render();
+        assert_eq!(
+            request_cell(&after, "cluster", "get", "5xx"),
+            request_cell(&before, "cluster", "get", "5xx") + 25,
+            "every refusal must be counted"
+        );
+        let lines = captured.text().matches("http request failed").count();
+        assert!(
+            (1..=2).contains(&lines),
+            "twenty-five refusals inside one second produced {lines} log lines"
+        );
+        assert!(
+            captured.text().contains("also_suppressed="),
+            "the line must say how many it stood for: {}",
+            captured.text()
+        );
+    }
+
+    #[test]
+    fn an_inbound_request_id_is_adopted_only_when_it_is_short_and_boring() {
+        let adopt = |value: &str| {
+            adopt_or_mint_request_id(Some(&HeaderValue::from_str(value).expect("header")))
+                .to_str()
+                .expect("ascii")
+                .to_owned()
+        };
+        for good in ["abc123", "a-b_c", &"a".repeat(MAX_REQUEST_ID)] {
+            assert_eq!(adopt(good), good);
+        }
+        for bad in [
+            "",
+            "../../etc/passwd",
+            "has space",
+            "semi;colon",
+            "Bearer abc",
+            &"a".repeat(MAX_REQUEST_ID + 1),
+        ] {
+            let minted = adopt(bad);
+            assert_ne!(minted, bad, "{bad} was adopted");
+            assert_eq!(minted.len(), 32, "a minted id is a simple uuid: {minted}");
+            assert!(minted.chars().all(|c| c.is_ascii_hexdigit()), "{minted}");
+        }
+        assert_eq!(adopt_or_mint_request_id(None).len(), 32);
+    }
+
+    #[tokio::test]
+    async fn every_response_carries_a_request_id_and_a_rejected_one_is_never_echoed() {
+        let app = test_app();
+        let minted = app
+            .clone()
+            .oneshot(get("/healthz", None))
+            .await
+            .expect("response");
+        let id = minted
+            .headers()
+            .get(REQUEST_ID_HEADER)
+            .expect("every response carries an id")
+            .to_str()
+            .expect("ascii")
+            .to_owned();
+        assert_eq!(id.len(), 32);
+
+        let adopted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .header(REQUEST_ID_HEADER, "kodi-refresh-7")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            adopted
+                .headers()
+                .get(REQUEST_ID_HEADER)
+                .expect("id")
+                .to_str()
+                .expect("ascii"),
+            "kodi-refresh-7"
+        );
+
+        let captured = CapturedWriter::new();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(captured.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        let replaced = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .header(REQUEST_ID_HEADER, "Bearer sk-live-should-never-be-logged")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        drop(guard);
+        let echoed = replaced
+            .headers()
+            .get(REQUEST_ID_HEADER)
+            .expect("id")
+            .to_str()
+            .expect("ascii");
+        assert_ne!(echoed, "Bearer sk-live-should-never-be-logged");
+        assert_eq!(echoed.len(), 32);
+        assert!(
+            !captured.text().contains("sk-live-should-never-be-logged"),
+            "the discarded id reached the log: {}",
+            captured.text()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_id_is_never_a_metric_label() {
+        let app = test_app();
+        let _ = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .header(REQUEST_ID_HEADER, "corr-9f8e7d6c5b4a")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert!(!prometheus_http_request_metrics().contains("corr-9f8e7d6c5b4a"));
+        assert!(!prometheus_http_store_attribution().contains("corr-9f8e7d6c5b4a"));
+    }
+
+    #[test]
+    fn the_metrics_layer_is_outside_the_capacity_gate_and_the_id_layer_is_outermost() {
+        // Axum applies `.layer(...)` inner-to-outer in source order, so the
+        // layer named last is the outermost. A metrics layer inside the gate
+        // would count none of the 503s the gate produces for a learner, a
+        // fenced node or a node in maintenance — the exact failure the series
+        // exists to show. The id layer has to be outside everything that reads
+        // the id back out of the request headers.
+        let source = include_str!("mod.rs");
+        let router = source
+            .split_once("pub fn router(state: AppState) -> Router {")
+            .expect("router")
+            .1
+            .split_once("\nconst LEARNER_ROUTE_INELIGIBLE_JSON")
+            .expect("end of router")
+            .0;
+        let gate = router.find("cluster_capacity_gate,").expect("gate layer");
+        let attribution = router
+            .find("http_store_attribution,")
+            .expect("attribution layer");
+        let metrics = router
+            .find("from_fn(http_request_metrics)")
+            .expect("metrics layer");
+        let id = router.find("from_fn(http_request_id)").expect("id layer");
+        assert!(gate < attribution, "gate then attribution");
+        assert!(attribution < metrics, "attribution then request metrics");
+        assert!(metrics < id, "request id is outermost");
+    }
+
+    /// K-04 M2: a request whose watch writes all reported a log index offers
+    /// the highest as `X-Plurx-Commit-Index`; one unknown index offers
+    /// `unknown`, which tells the client to drop the index it echoes (review
+    /// of #504, finding 2); no watch write at all offers nothing, and the
+    /// client keeps its echo.
+    #[tokio::test]
+    async fn commit_index_header_offers_the_acknowledged_position_or_unknown() {
+        let (_, state) = test_app_with_state();
+        let app = Router::new()
+            .route(
+                "/api/v1/items/{case}/watched",
+                axum::routing::post(watch_write_handler),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                http_store_attribution,
+            ))
+            .with_state(state);
+        let header = |response: &Response| {
+            response
+                .headers()
+                .get(extract::COMMIT_INDEX_HEADER)
+                .map(|value| value.to_str().expect("ascii").to_owned())
+        };
+        let post = |case: &str| {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/items/{case}/watched"))
+                .body(Body::empty())
+                .expect("request")
+        };
+        let response = app.clone().oneshot(post("two")).await.expect("two writes");
+        assert_eq!(header(&response).as_deref(), Some("45"));
+        let response = app
+            .clone()
+            .oneshot(post("unprovable"))
+            .await
+            .expect("unprovable write");
+        assert_eq!(header(&response).as_deref(), Some("unknown"));
+        let response = app.oneshot(post("none")).await.expect("no write");
+        assert_eq!(header(&response), None);
     }
 
     #[tokio::test]
@@ -1802,7 +3581,11 @@ mod tests {
         .await
     }
 
-    #[tokio::test]
+    // Paused time: the 10 ms deadline and the handler's 40 ms sleep are both
+    // Tokio timers, so the clock reaches the deadline first by construction.
+    // On the wall clock a loaded runner could park this thread past both, and
+    // `timeout` polls the finished handler before its own expired timer.
+    #[tokio::test(start_paused = true)]
     async fn json_short_handler_deadline_answers_503() {
         let app = Router::new()
             .route("/short", axum::routing::get(slow_test_handler))
@@ -2136,6 +3919,8 @@ mod tests {
                 Method::GET,
                 "/internal/media/fragment-index/abc123def456abc123def456abc123de",
             ),
+            (Method::GET, "/internal/media/subtitle-source/7/2/webvtt"),
+            (Method::POST, crate::subtitle_ranges::PATH),
         ] {
             assert!(learner_route_eligible(&method, path), "{method} {path}");
         }
@@ -2150,6 +3935,19 @@ mod tests {
         assert!(!learner_route_eligible(
             &Method::POST,
             "/internal/media/fragment-index/abc123def456abc123def456abc123de"
+        ));
+        for path in [
+            "/internal/media/subtitle-source/7/2",
+            "/internal/media/subtitle-source/7/2/raw",
+            "/internal/media/subtitle-source/7/2/sup/extra",
+            "/internal/media/subtitle-source/0/2/sup",
+            "/internal/media/subtitle-source/7/-1/sup",
+        ] {
+            assert!(!learner_route_eligible(&Method::GET, path), "{path}");
+        }
+        assert!(!learner_route_eligible(
+            &Method::POST,
+            "/internal/media/subtitle-source/7/2/sup"
         ));
     }
 
@@ -2221,6 +4019,9 @@ mod tests {
             (Method::GET, "/api/v1/developer/readiness"),
             (Method::POST, "/api/v1/live-tv/guide/refresh"),
             (Method::POST, crate::live_tv::SNAPSHOT_PATH),
+            (Method::POST, crate::live_tv::cluster::PLACEMENT_PATH),
+            (Method::POST, crate::live_tv::cluster::PROCESS_PATH),
+            (Method::POST, crate::live_tv::cluster::INGEST_PATH),
             (Method::POST, crate::live_tv::START_PATH),
             (Method::POST, crate::live_tv::ACTIVATE_PATH),
             (Method::POST, crate::live_tv::DRAIN_PATH),
@@ -2516,6 +4317,7 @@ mod tests {
             &[
                 "get_library",
                 "list_top_items_in_genre",
+                "watch_summary",
                 "item_max_heights",
                 "item_media_facts",
                 "child_counts",
@@ -2533,6 +4335,7 @@ mod tests {
                 "item_media_facts",
                 "files_for_item",
                 "get_file_probe_json",
+                "watch_summary",
             ],
         );
         assert_catalogue_methods(
@@ -2540,14 +4343,48 @@ mod tests {
             &[
                 "list_libraries",
                 "home_preview_pages",
+                "watch_summary",
                 "item_max_heights",
                 "child_counts",
             ],
         );
         assert_catalogue_methods(
             &compact_handler(browse, "pub async fn hubs", "pub async fn search"),
-            &["recently_added", "child_counts", "item_max_heights"],
+            &[
+                "progress_rails",
+                "recently_added",
+                "child_counts",
+                "item_max_heights",
+            ],
         );
+        // K-04 M2: every watch-state read on the browse path goes through the
+        // reader's read-your-write fence. None may reach the Store directly,
+        // where it would be neither fenced nor counted as one read.
+        let watch_helper =
+            compact_handler(browse, "async fn watch_lookup", "fn annotate_with_counts");
+        assert!(watch_helper.contains("state.catalogue.watch_map"));
+        let browse_source = browse
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or(browse);
+        let browse_compact: String = browse_source
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        for direct in [
+            "state.store.watch_map",
+            "state.store.watch_rollup",
+            "state.store.watch_rollups",
+            "state.store.watch_summary",
+            "state.store.continue_watching",
+            "state.store.next_up",
+            "state.store.progress_rails",
+        ] {
+            assert!(
+                !browse_compact.contains(direct),
+                "browse reads watch state around the fence: {direct}"
+            );
+        }
         assert_catalogue_methods(
             &compact_handler(browse, "pub async fn search", "Ok(Json(SearchResponse"),
             &["search_items"],
@@ -2647,6 +4484,10 @@ mod tests {
                 // derivatives, so a stale answer costs disk until the next
                 // pass and can never delete a live grid cache.
                 "sweep_derived_orphans:store.items_with_artwork",
+                // Retention authority for durable artwork: keep advertised
+                // holders and in-flight attempt directories during cache GC.
+                "sweep_derived_orphans:store.artwork_locations",
+                "sweep_derived_orphans:store.background_job",
                 "materialize_once:store.items_with_artwork_page",
             ],
         );
@@ -2792,6 +4633,75 @@ mod tests {
         test_app_with_state().0
     }
 
+    #[tokio::test]
+    async fn subtitle_provider_settings_are_admin_only_and_never_return_secrets() {
+        let app = test_app();
+        assert_eq!(
+            call(&app, get("/api/v1/subtitle-provider", None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let admin = setup_admin(&app).await;
+        let (status, initial) = call(&app, get("/api/v1/subtitle-provider", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(initial["configured"], false);
+        assert_eq!(initial["automatic"], false);
+        assert_eq!(
+            call(
+                &app,
+                put(
+                    "/api/v1/subtitle-provider",
+                    Some(&admin),
+                    json!({"automatic":true})
+                )
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        let (status,saved)=call(&app,put("/api/v1/subtitle-provider",Some(&admin),json!({"api_key":"fixture-api-key","username":"fixture-user","password":"fixture-password","languages":["en","fr"],"automatic":false}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(saved["configured"], true);
+        assert_eq!(saved["password_configured"], true);
+        assert!(!saved.to_string().contains("fixture-api-key"));
+        assert!(!saved.to_string().contains("fixture-password"));
+        assert_eq!(
+            call(
+                &app,
+                put(
+                    "/api/v1/subtitle-provider",
+                    Some(&admin),
+                    json!({"api_key":"","languages":["en&query=other"]})
+                )
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(&app, get("/api/v1/subtitle-provider", Some(&admin)))
+                .await
+                .1["configured"],
+            true,
+            "invalid updates are atomic"
+        );
+        call(
+            &app,
+            put(
+                "/api/v1/subtitle-provider",
+                Some(&admin),
+                json!({"api_key":"","password":"","automatic":false}),
+            ),
+        )
+        .await;
+        let (status, disabled) = call(
+            &app,
+            get("/api/v1/files/1/subtitles/search?language=en", Some(&admin)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(disabled["code"], "subtitle_provider_disabled");
+    }
+
     /// The same app, plus the state behind it — for tests that have to put the
     /// server into a condition a request cannot create, like a pre-transcode
     /// pass already running.
@@ -2808,6 +4718,24 @@ mod tests {
             Arc::new(crate::logbuf::LogBuffer::new(64)),
         );
         (router(state.clone()), state)
+    }
+
+    // HTTP scan fixtures run the production durable consumer independently.
+    // Aborting the owner at fixture teardown prevents a leaked polling loop.
+    struct ScanWorker(tokio::task::JoinHandle<()>);
+    impl Drop for ScanWorker {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    fn scan_worker(state: &AppState) -> ScanWorker {
+        ScanWorker(tokio::spawn(
+            state
+                .jobs
+                .clone()
+                .background_work_loop(state.transcode.clone()),
+        ))
     }
 
     async fn call(app: &Router, req: Request<Body>) -> (StatusCode, Value) {
@@ -3986,7 +5914,8 @@ mod tests {
     /// of the season unindexed with nothing anywhere saying so.
     #[tokio::test]
     async fn a_request_during_a_running_scan_is_queued_and_still_answered() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -4022,7 +5951,8 @@ mod tests {
     /// the answer in the response rather than a promise to look later.
     #[tokio::test]
     async fn a_scan_returns_the_report_and_what_it_placed() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -4100,7 +6030,8 @@ mod tests {
     /// the only evidence Cinema uses to relate text and audio editions.
     #[tokio::test]
     async fn a_curator_book_import_reaches_the_books_library() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -4857,6 +6788,7 @@ mod tests {
     #[tokio::test]
     async fn scans_and_notifications_are_counted_by_what_asked_for_them() {
         let (app, state) = test_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -4940,6 +6872,7 @@ mod tests {
     #[tokio::test]
     async fn an_item_that_arrives_with_an_id_is_still_queued_for_enrichment() {
         let (app, state) = test_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -4989,6 +6922,7 @@ mod tests {
     #[tokio::test]
     async fn a_series_only_id_reaches_the_show_row() {
         let (app, state) = test_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -5068,7 +7002,8 @@ mod tests {
     /// the core, because it is the one that would destroy data.
     #[tokio::test]
     async fn a_targeted_scan_leaves_the_rest_of_the_library_alone() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
+        let _worker = scan_worker(&state);
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
@@ -5485,6 +7420,46 @@ mod tests {
     /// binary, so pinning its exact value here would make this gate depend on
     /// test order. What is asserted is the shape — which is what the surface
     /// promises.
+    #[tokio::test]
+    async fn hevc_copy_override_saves_without_readiness_and_controls_admission() {
+        use plurx_core::store::keys;
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        assert!(
+            !crate::transcode::unverified_hevc_copy_enabled(state.store.as_ref())
+                .await
+                .expect("default")
+        );
+        for enabled in [true, false] {
+            let (status, body) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({"hevc_unverified_copy": enabled}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["hevc_unverified_copy"], json!(enabled));
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(keys::HEVC_UNVERIFIED_COPY)
+                    .await
+                    .expect("saved setting")
+                    .as_deref(),
+                Some(if enabled { "1" } else { "0" })
+            );
+            assert_eq!(
+                crate::transcode::unverified_hevc_copy_enabled(state.store.as_ref())
+                    .await
+                    .expect("policy"),
+                enabled
+            );
+        }
+    }
+
     #[tokio::test]
     async fn the_verified_decode_request_is_stored_and_the_node_answers_it_separately() {
         use plurx_core::store::keys;
@@ -6043,6 +8018,30 @@ mod tests {
         assert_eq!(saved["live_tv_config_generation"], 11);
         assert_eq!(saved["live_tv_transition_from_owner_node_id"], "");
         assert_eq!(saved["live_tv_transition_drain_before"], 0);
+    }
+
+    #[tokio::test]
+    async fn live_tv_placement_and_ingest_refuse_household_bearers_before_admission() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let request = json!({"expected_owner_node_id":state.node_id,"source_node_id":state.node_id,
+            "user_id":1,"user_name":"viewer","request_id":"0123456789abcdef0123456789abcdef",
+            "channel_id":"7.1","config_generation":1,"source_serving_generation":0});
+        let placed = json!({"request":request,"playback":null});
+        let process = json!({"start":placed,"worker":state.node_id,"nonce":"test"});
+        for (path, body) in [
+            (crate::live_tv::cluster::PLACEMENT_PATH, placed),
+            (crate::live_tv::cluster::PROCESS_PATH, process.clone()),
+            (crate::live_tv::cluster::INGEST_PATH, process),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(post(path, Some(&admin), body))
+                .await
+                .expect("peer response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+        assert!(state.live_tv.activities().is_empty());
     }
 
     #[tokio::test]
@@ -6609,6 +8608,255 @@ mod tests {
         assert_eq!(devices.as_array().expect("device array").len(), 2);
     }
 
+    /// A file-backed app plus a second handle on the same database, for the
+    /// one thing a request cannot do: make a token look 91 days idle.
+    fn test_app_with_fixture_store() -> (Router, AppState, SqliteStore) {
+        let base = crate::test_temp_path(format!("plurx-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).expect("test directory");
+        let db = base.join("plurx.db");
+        let store = SqliteStore::open(&db).expect("store");
+        let fixture = SqliteStore::open(&db).expect("fixture handle");
+        let state = AppState::new(
+            "test".into(),
+            Arc::new(store),
+            test_dirs(&base),
+            "test-node".into(),
+            Default::default(),
+            Default::default(),
+            Arc::new(crate::logbuf::LogBuffer::new(64)),
+        );
+        (router(state.clone()), state, fixture)
+    }
+
+    async fn login_device(app: &Router, device: &str) -> String {
+        let (status, body) = call(
+            app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "paul", "password": "supersecret", "device": device }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body["token"].as_str().expect("token").to_owned()
+    }
+
+    const EXPIRY_DAY: i64 = 86_400;
+
+    /// The distinct refusal clients land on their sign-in screen with, the
+    /// devices list that says when each device goes, and the revocation that
+    /// still works beside it.
+    #[tokio::test]
+    async fn an_idle_sign_in_is_refused_as_session_expired_and_the_devices_list_says_when() {
+        let (app, state, fixture) = test_app_with_fixture_store();
+        let admin = setup_admin(&app).await;
+        let tv = login_device(&app, "Living room").await;
+        let now = users::unix_now();
+        // The upgrade took effect 200 days ago; the default is on, 90 days.
+        users::start_token_expiry_clock(state.store.as_ref(), now - 200 * EXPIRY_DAY)
+            .await
+            .expect("start the clock");
+        let tv_digest = plurx_core::auth::hash_token(&tv);
+        assert!(fixture
+            .fixture_set_token_last_seen(&tv_digest, now - 91 * EXPIRY_DAY)
+            .await
+            .expect("age the living-room box"));
+
+        let (status, body) = call(&app, get("/api/v1/me", Some(&tv))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body["code"], "session_expired");
+        assert_eq!(body["idle_days"], 90);
+        assert!(body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("90 days of inactivity"));
+        // Every authenticated route refuses it the same way, including the
+        // query-credential form media URLs use.
+        let (status, body) = call(&app, get(&format!("/api/v1/libraries?token={tv}"), None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "session_expired");
+        // The device in use is untouched.
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(&admin))).await.0,
+            StatusCode::OK
+        );
+
+        let (status, devices) = call(&app, get("/api/v1/me/devices", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{devices}");
+        let devices = devices.as_array().expect("device array");
+        let tv_row = devices
+            .iter()
+            .find(|row| row["device"] == "Living room")
+            .expect("tv row");
+        assert_eq!(tv_row["expired"], true);
+        assert_eq!(
+            tv_row["expires_at"].as_i64(),
+            Some(now - 91 * EXPIRY_DAY + 90 * EXPIRY_DAY)
+        );
+        let admin_row = devices
+            .iter()
+            .find(|row| row["device"] != "Living room")
+            .expect("admin row");
+        assert_eq!(admin_row["expired"], false);
+        assert!(admin_row["expires_at"].as_i64().expect("expiry") >= now + 89 * EXPIRY_DAY);
+
+        // Revoking the expired device still goes through the fence.
+        let (status, body) = call(
+            &app,
+            delete(
+                &format!(
+                    "/api/v1/me/devices/{}",
+                    tv_row["token_hash_prefix"].as_str().expect("prefix")
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = call(&app, get("/api/v1/me", Some(&tv))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body["code"],
+            Value::Null,
+            "a revoked token is not an expired one"
+        );
+    }
+
+    /// Settings → Users owns the option: off never expires, switching it back
+    /// on restarts every device's clock instead of signing anyone out, and the
+    /// window is bounded.
+    #[tokio::test]
+    async fn sign_in_expiry_settings_round_trip_and_enabling_signs_nobody_out() {
+        let (app, state, fixture) = test_app_with_fixture_store();
+        let admin = setup_admin(&app).await;
+        let tv = login_device(&app, "Living room").await;
+        let tv_digest = plurx_core::auth::hash_token(&tv);
+        let now = users::unix_now();
+        users::start_token_expiry_clock(state.store.as_ref(), now - 400 * EXPIRY_DAY)
+            .await
+            .expect("start the clock");
+
+        let (status, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert_eq!(settings["auth_token_expiry"], true, "on by default");
+        assert_eq!(settings["auth_token_idle_days"], 90);
+        assert_eq!(
+            settings["auth_token_expiry_since"].as_i64(),
+            Some(now - 400 * EXPIRY_DAY)
+        );
+
+        fixture
+            .fixture_set_token_last_seen(&tv_digest, now - 150 * EXPIRY_DAY)
+            .await
+            .expect("age");
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(&tv))).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Off: today's non-expiring behaviour.
+        let (status, settings) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "auth_token_expiry": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert_eq!(settings["auth_token_expiry"], false);
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(&tv))).await.0,
+            StatusCode::OK
+        );
+        let (_, devices) = call(&app, get("/api/v1/me/devices", Some(&admin))).await;
+        assert!(devices
+            .as_array()
+            .expect("device array")
+            .iter()
+            .all(|row| row["expires_at"].is_null() && row["expired"] == false));
+
+        // Back on: the clock restarts now, so a device idle for 150 days is
+        // not signed out by the switch itself.
+        fixture
+            .fixture_set_token_last_seen(&tv_digest, now - 150 * EXPIRY_DAY)
+            .await
+            .expect("age");
+        let (status, settings) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "auth_token_expiry": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert!(settings["auth_token_expiry_since"].as_i64().expect("since") >= now);
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(&tv))).await.0,
+            StatusCode::OK
+        );
+        // On -> on does not keep pushing the clock back.
+        let since = settings["auth_token_expiry_since"].clone();
+        let (_, settings) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "auth_token_expiry": true }),
+            ),
+        )
+        .await;
+        assert_eq!(settings["auth_token_expiry_since"], since);
+
+        for days in [0, -1, 3_651] {
+            let (status, body) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({ "auth_token_idle_days": days }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{days}: {body}");
+        }
+        let (status, settings) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "auth_token_idle_days": 30 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert_eq!(settings["auth_token_idle_days"], 30);
+    }
+
+    /// The first start of a build with the option records when expiry took
+    /// effect; every later start, on any node, keeps that first value.
+    #[tokio::test]
+    async fn the_sign_in_expiry_clock_is_started_once() {
+        let (_, state) = test_app_with_state();
+        assert_eq!(
+            users::start_token_expiry_clock(state.store.as_ref(), 1_000)
+                .await
+                .expect("first start"),
+            1_000
+        );
+        assert_eq!(
+            users::start_token_expiry_clock(state.store.as_ref(), 9_000)
+                .await
+                .expect("restart"),
+            1_000,
+            "a restart must not push every device's clock forward again"
+        );
+    }
+
     #[tokio::test]
     async fn device_inventory_and_fenced_revocation_cover_self_and_admin_routes() {
         let app = test_app();
@@ -6891,6 +9139,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_job_api_is_admin_only_redacts_ownership_and_cancels_idempotently() {
+        use plurx_core::store::background_jobs::{
+            ClaimJob, EnqueueJob, JobKind, JobPayload, JobRequest,
+        };
+        let (app, state) = test_app_with_state();
+        let (status, _) = call(&app, get("/api/v1/cluster/jobs", None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let admin = setup_admin(&app).await;
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({"username":"viewer", "password":"longenough"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({"username":"viewer", "password":"longenough"}),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("viewer session");
+        let id = uuid::Uuid::new_v4().to_string();
+        let detail = format!("/api/v1/cluster/jobs/{id}");
+        let cancel = format!("{detail}/cancel");
+        let retry = format!("{detail}/retry");
+        for path in ["/api/v1/cluster/jobs", &detail] {
+            let (status, _) = call(&app, get(path, Some(viewer))).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+        let (status, _) = call(&app, post(&cancel, Some(viewer), json!({}))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = call(
+            &app,
+            post(
+                &retry,
+                Some(viewer),
+                json!({"request_id":uuid::Uuid::new_v4().to_string()}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let now_ms = crate::state::clock_ms();
+        state
+            .store
+            .enqueue_job(EnqueueJob {
+                id: id.clone(),
+                payload: JobPayload::LibraryScan {
+                    library_id: 1,
+                    generation: "private-source-marker".into(),
+                },
+                dedupe_key: "api-job".into(),
+                priority: 1,
+                not_before_ms: now_ms,
+                now_ms,
+                request: JobRequest {
+                    scope: "internal:api-test".into(),
+                    request_id: id.clone(),
+                    request_digest: "a".repeat(64),
+                    consumer_kind: "scan".into(),
+                    consumer_ref: "private-consumer-marker".into(),
+                    target_node_id: None,
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .expect("enqueue");
+        let boot = uuid::Uuid::new_v4().to_string();
+        let claim = uuid::Uuid::new_v4().to_string();
+        state
+            .store
+            .claim_job(ClaimJob {
+                job_id: id.clone(),
+                expected_revision: 0,
+                node_id: "node-a".into(),
+                boot_id: boot.clone(),
+                claim_id: claim.clone(),
+                kind: JobKind::LibraryScan,
+                payload_version: 1,
+                now_ms,
+                dispatched_at_ms: now_ms,
+            })
+            .await
+            .expect("claim");
+        for path in ["/api/v1/cluster/jobs?state=running", &detail] {
+            let (status, body) = call(&app, get(path, Some(&admin))).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let encoded = body.to_string();
+            for secret in [
+                &boot,
+                &claim,
+                "private-source-marker",
+                "private-consumer-marker",
+            ] {
+                assert!(
+                    !encoded.contains(secret),
+                    "operator projection leaked {secret}"
+                );
+            }
+        }
+        let (status, _) = call(
+            &app,
+            post(
+                &retry,
+                Some(&admin),
+                json!({"request_id":uuid::Uuid::new_v4().to_string()}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        for _ in 0..2 {
+            let (status, body) = call(&app, post(&cancel, Some(&admin), json!({}))).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["state"], "cancelling");
+        }
+        let (status, _) = call(
+            &app,
+            get("/api/v1/cluster/jobs?cursor=invalid", Some(&admin)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn user_management_lifecycle_and_lockout_guards() {
         let app = test_app();
         let admin = setup_admin(&app).await;
@@ -7017,6 +9396,8 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "durable_cluster_work",
+                "bounded_catalogue_reads",
                 "cluster_backup",
                 "windows_server",
                 // D-01 adds the Android TV display-mode card. Its one row is
@@ -7034,7 +9415,10 @@ mod tests {
                 "live_hls_recovery",
                 "pgs_overlay",
                 "subtitle_stored_sources",
+                "subtitle_cluster_sources",
+                "subtitle_backfill",
                 "subtitle_not_ready_503",
+                "chapter_thumbnails",
                 "dolby_vision_convert",
                 "source_probe_comparison"
             ],
@@ -7047,7 +9431,10 @@ mod tests {
                 let id = requirement["id"].as_str().expect("requirement id");
                 let status = requirement["status"].as_str().expect("requirement status");
                 assert!(
-                    matches!(status, "met" | "unmet" | "unobservable"),
+                    matches!(
+                        status,
+                        "met" | "unmet" | "unobservable" | "unknown" | "unavailable"
+                    ),
                     "{id} reported an unbounded status {status}"
                 );
                 let evidence = requirement["evidence"].as_str().expect("evidence");
@@ -7082,10 +9469,17 @@ mod tests {
             .filter(|id| {
                 !matches!(
                     *id,
-                    "probe_reporter_named"
+                    "durable_store"
+                        | "durable_tools"
+                        | "durable_capacity"
+                        | "durable_scratch"
+                        | "probe_reporter_named"
                         | "stored_source_self_test"
                         | "stored_source_local_cache"
                         | "stored_source_free_space"
+                        | "local_cache"
+                        | "free_space"
+                        | "chapter_thumbs_cache_space"
                 )
             })
             .collect::<Vec<_>>();
@@ -7124,14 +9518,24 @@ mod tests {
             green,
             vec![
                 "authoritative_store",
+                "backfill_bytes",
+                "backfill_enqueued",
+                "backfill_remaining",
+                // The chapter-thumbnail work counter is a statement of what
+                // ran (nothing yet); cache space depends on the host disk.
+                // The ffmpeg row is absent here because the fixture never
+                // probed a build.
+                "chapter_thumbs_work",
                 "durable_queue",
+                "durable_role",
                 "rolling_contract_built",
                 "runtime",
                 "server_preparation_is_real",
                 "source_fencing",
                 "sources_match_their_scan_whole",
                 "stored_source_producer",
-                "tuner_reserve"
+                "tuner_reserve",
+                "watch_floor"
             ]
         );
         // Order-independent because no row reachable here has a `met` branch a
@@ -7817,12 +10221,11 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert!(
-            body["error"]
-                .as_str()
-                .is_some_and(|message| message.contains("every committed voter")),
-            "legacy settings errors retain their {{error}} response contract: {body}"
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cluster_media_pool_enabled"], true);
+        assert_eq!(
+            body["cluster_media_pool_ready"], false,
+            "standalone observation stays advisory"
         );
         let (status, body) = call(
             &app,
@@ -7857,13 +10260,8 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert!(
-            body["error"]
-                .as_str()
-                .is_some_and(|message| message.contains("remote placement")),
-            "one endpoint answers refusals one way: settings keep {{error}}: {body}"
-        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cluster_session_takeover_enabled"], true);
         let (status, body) = call(
             &app,
             put(
@@ -8095,6 +10493,9 @@ mod tests {
                 "dvr",
                 "live_tv",
                 "offline",
+                // This node's own child processes, for an admin only (plan
+                // P-02 §3.2); node-local, so not a clustered-only field.
+                "processes",
                 "producing",
                 "scans",
                 "sessions",
@@ -8182,6 +10583,106 @@ mod tests {
         // And on the page that has a stop button next to it.
         let (_, page) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
         assert_eq!(page["producing"]["title"], "Willow");
+    }
+
+    /// Plan P-02 §3.2: every child is attributable from inside the product.
+    /// The Activity page lists it with its priority class, purpose and the
+    /// nice/I/O/OOM values the kernel reports; only an admin sees the list
+    /// and only an admin can stop a child from it; `/metrics` counts it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_activity_page_lists_each_child_with_its_class_and_an_admin_can_stop_it() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let (app, _state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("token").to_owned();
+
+        let mut command = tokio::process::Command::new("sleep");
+        command.arg("300").kill_on_drop(true);
+        let (mut child, _job) = crate::process_control::spawn_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::background("activity page test"),
+        )
+        .expect("spawn");
+        let pid = child.id().expect("running child");
+
+        let (status, page) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        let row = page["processes"]
+            .as_array()
+            .expect("admins get the process list")
+            .iter()
+            .find(|row| row["pid"] == pid)
+            .unwrap_or_else(|| panic!("child {pid} is listed: {page}"))
+            .clone();
+        assert_eq!(row["class"], "background");
+        assert_eq!(row["purpose"], "activity page test");
+        assert_eq!(row["program"], "sleep");
+        assert_eq!(
+            row["reason"],
+            "nobody is waiting on it, so it yields to playback"
+        );
+        assert_eq!(row["requested"]["nice"], 15);
+        assert_eq!(row["requested"]["io_level"], 7);
+        assert_eq!(row["requested"]["oom_score_adj"], 800);
+        assert!(row["observed"]["nice"].as_i64().expect("nice read back") >= 15);
+        assert_eq!(row["observed"]["io_class"], "best_effort");
+        assert_eq!(row["applied"], true);
+        assert_eq!(row["stoppable"], true);
+
+        let (_, metrics) = call_text(&app, get("/metrics", None)).await;
+        assert!(
+            metrics.contains("plurx_child_processes{class=\"background\"} ")
+                && metrics.contains("plurx_child_spawns_total{class=\"realtime\"} ")
+                && metrics.contains("plurx_child_priority_unapplied_total{class=\"background\"} "),
+            "{metrics}"
+        );
+
+        let (_, viewer_page) = call(&app, get("/api/v1/activity/detail", Some(&viewer))).await;
+        assert!(
+            viewer_page.get("processes").is_none(),
+            "machine processes are an operator view"
+        );
+        let stop = format!("/api/v1/activity/processes/{pid}");
+        let (status, _) = call(&app, delete(&stop, Some(&viewer))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = call(&app, delete(&stop, None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, body) = call(&app, delete(&stop, Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let exited = tokio::time::timeout(std::time::Duration::from_secs(10), child.wait())
+            .await
+            .expect("the stopped child exits")
+            .expect("wait");
+        assert_eq!(exited.signal(), Some(libc::SIGKILL));
+
+        drop(_job);
+        let (status, _) = call(&app, delete(&stop, Some(&admin))).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a pid the launcher no longer lists cannot be signalled"
+        );
     }
 
     #[tokio::test]
@@ -8377,6 +10878,333 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// C-08 M5 row 1 end to end: a `ttff` beacon is counted under the class
+    /// of the requester's own `User-Agent` header — not the client's `ua`
+    /// field, which is free text — and over IPv6 or no peer at all, where the
+    /// network identity is `None`.
+    #[tokio::test]
+    async fn a_ttff_beacon_is_labelled_by_the_requesters_client_class() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        let bucket = r#"plurx_ttff_ms_bucket{method="remux",client="firefox",le="120000"} "#;
+        let read = || {
+            crate::telemetry::prometheus()
+                .lines()
+                .find_map(|line| line.strip_prefix(bucket).map(str::to_owned))
+                .and_then(|value| value.parse::<u64>().ok())
+                .expect("the firefox bucket renders")
+        };
+        let before = read();
+        let mut request = post(
+            "/api/v1/client-log",
+            Some(&admin),
+            json!({ "event": "ttff", "method": "remux", "ms": 97_000, "ua": "Safari" }),
+        );
+        request.headers_mut().insert(
+            axum::http::header::USER_AGENT,
+            axum::http::HeaderValue::from_static(super::test_agents::FIREFOX_WINDOWS_UA),
+        );
+        let (status, _) = call(&app, request).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        // Recorded on the handler's spawned task.
+        for _ in 0..200 {
+            if read() > before {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(read() > before, "the ttff never reached client=\"firefox\"");
+    }
+
+    /// C-08 M5 row 4 end to end: a real direct-play GET opens the start
+    /// attempt, and the viewer's `ttff` beacon through `/client-log` settles
+    /// it `ok`; a failure report for a pending attempt settles it `failed`.
+    #[tokio::test]
+    async fn a_first_frame_beacon_settles_the_start_its_direct_play_opened() {
+        use crate::playstart::StartPhase;
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let user = state
+            .store
+            .get_user_by_username("paul")
+            .await
+            .expect("user")
+            .expect("paul")
+            .id;
+        let s = seed_content(&state).await;
+        let ledger = std::sync::Arc::clone(&state.start_attempts);
+        let response = app
+            .clone()
+            .oneshot(ranged(
+                &format!("/api/v1/files/{}/direct?token={admin}", s.file),
+                0,
+                9,
+            ))
+            .await
+            .expect("r");
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        // Opened on `note_playback_started`'s detached task.
+        for _ in 0..200 {
+            if ledger.phase(user, s.file).is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            matches!(ledger.phase(user, s.file), Some(StartPhase::Pending { .. })),
+            "the direct-play GET opened no attempt: {:?}",
+            ledger.phase(user, s.file)
+        );
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/client-log",
+                Some(&admin),
+                json!({ "event": "ttff", "method": "direct_play", "ms": 900, "file_id": s.file }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(ledger.count("direct_play", "ok"), 1);
+        assert_eq!(ledger.phase(user, s.file), Some(StartPhase::Playing));
+
+        let other_file = s.file + 1_000;
+        ledger.opened(
+            user,
+            other_file,
+            None,
+            "transcode",
+            std::time::Instant::now(),
+        );
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/client-log",
+                Some(&admin),
+                json!({ "level": "error", "event": "playback_error", "file_id": other_file }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(ledger.count("transcode", "failed"), 1);
+    }
+
+    /// C-08 M5 row 4: a start request the server answers with an error is a
+    /// refused start, on each of the three routes that begin one; a HEAD is
+    /// not a start.
+    #[tokio::test]
+    async fn a_start_request_the_server_refuses_is_a_refused_start() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let s = seed_content(&state).await;
+        let ledger = std::sync::Arc::clone(&state.start_attempts);
+
+        let (status, _) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/hls/sessions", s.file),
+                Some(&admin),
+                json!({ "playback_id": "   " }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(ledger.count("unknown", "refused"), 1, "HLS create");
+
+        let missing = s.file + 1_000;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/files/{missing}/stream.mp4?token={admin}"))
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("r");
+        assert!(response.status().is_client_error(), "{}", response.status());
+        assert_eq!(ledger.count("remux", "refused"), 1, "stream.mp4");
+
+        for method in ["HEAD", "GET"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(format!("/api/v1/files/{missing}/direct?token={admin}"))
+                        .body(Body::empty())
+                        .expect("req"),
+                )
+                .await
+                .expect("r");
+            assert!(response.status().is_client_error(), "{}", response.status());
+        }
+        assert_eq!(ledger.count("direct_play", "refused"), 1, "direct GET only");
+
+        // A catalogued file whose bytes are gone: the open fails.
+        let path = state
+            .store
+            .get_file(s.file)
+            .await
+            .expect("file")
+            .expect("seeded")
+            .path;
+        std::fs::remove_file(&path).expect("remove seeded media");
+        let response = app
+            .clone()
+            .oneshot(ranged(
+                &format!("/api/v1/files/{}/direct?token={admin}", s.file),
+                0,
+                9,
+            ))
+            .await
+            .expect("r");
+        assert!(!response.status().is_success(), "{}", response.status());
+        assert_eq!(
+            ledger.count("direct_play", "refused"),
+            2,
+            "direct open failure"
+        );
+    }
+
+    /// C-08 M5 row 4: a scrape settles an attempt past its deadline, so an
+    /// idle node still reports the last start that was abandoned.
+    #[tokio::test]
+    async fn a_scrape_settles_a_start_past_its_deadline_as_cancelled() {
+        let (app, state) = test_state();
+        let ledger = std::sync::Arc::clone(&state.start_attempts);
+        let long_ago = std::time::Instant::now()
+            .checked_sub(crate::playstart::START_DEADLINE + std::time::Duration::from_secs(1))
+            .expect("the monotonic clock is older than the start deadline");
+        ledger.opened(7, 70, None, "remux", long_ago);
+        assert_eq!(ledger.count("remux", "cancelled"), 0);
+        let (status, _) = call_text(&app, get("/metrics", None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ledger.count("remux", "cancelled"), 1);
+        assert_eq!(ledger.phase(7, 70), None);
+    }
+
+    /// C-08 M5 row 4: a live progress beat keeps the viewer's play alive, so
+    /// a request after a long pause joins it instead of opening a start.
+    #[tokio::test]
+    async fn a_progress_beat_keeps_a_started_play_alive() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let user = state
+            .store
+            .get_user_by_username("paul")
+            .await
+            .expect("user")
+            .expect("paul")
+            .id;
+        let s = seed_content(&state).await;
+        let ledger = std::sync::Arc::clone(&state.start_attempts);
+        let opened = std::time::Instant::now();
+        ledger.opened(user, s.file, Some(s.movie), "direct_play", opened);
+        ledger.client_event(user, s.file, "ttff", None, None, opened);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let (status, body) = call(
+            &app,
+            post(
+                &format!("/api/v1/items/{}/progress", s.movie),
+                Some(&admin),
+                json!({ "position_ms": 60_000, "duration_ms": 600_000 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let seen = ledger.last_seen(user, s.file).expect("play tracked");
+        assert!(
+            seen >= opened + std::time::Duration::from_millis(20),
+            "the progress beat did not refresh the play"
+        );
+    }
+
+    /// C-08 M5 row 3's denominator end to end: two live progress beats a
+    /// second apart credit the advance to the method the player names; an
+    /// offline replay (`recorded_at`) credits nothing.
+    #[tokio::test]
+    async fn live_progress_beats_credit_watched_seconds_to_the_named_method() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let uri = format!("/api/v1/items/{}/progress", seeded.movie);
+        let before = crate::telemetry::watched_ms_for_test("transcode");
+        for position in [60_000, 61_000] {
+            let (status, body) = call(
+                &app,
+                post(
+                    &uri,
+                    Some(&admin),
+                    json!({ "position_ms": position, "duration_ms": 600_000, "method": "transcode" }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        }
+        let credited = crate::telemetry::watched_ms_for_test("transcode") - before;
+        assert!(
+            (1_000..=1_100).contains(&credited),
+            "two beats one second apart credited {credited} ms"
+        );
+        let replayed = crate::telemetry::watched_ms_for_test("transcode");
+        let (status, _) = call(
+            &app,
+            post(
+                &uri,
+                Some(&admin),
+                json!({ "position_ms": 62_000, "method": "transcode", "recorded_at": 1 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(crate::telemetry::watched_ms_for_test("transcode"), replayed);
+    }
+
+    /// The progress handler hands the ledger the durable row it read before
+    /// writing, so a beat that another node already credited is not credited
+    /// again here. The other node is played by a direct store write between
+    /// this node's two beats: this node then credits only the second since
+    /// that write, not the two seconds since its own last beat.
+    #[tokio::test]
+    async fn a_beat_after_another_nodes_write_credits_only_the_time_since_it() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let user = state
+            .store
+            .get_user_by_username("paul")
+            .await
+            .expect("admin lookup")
+            .expect("admin user");
+        let uri = format!("/api/v1/items/{}/progress", seeded.movie);
+        let beat = |position: i64| {
+            post(
+                &uri,
+                Some(&admin),
+                json!({ "position_ms": position, "duration_ms": 600_000, "method": "transcode" }),
+            )
+        };
+        let before = crate::telemetry::watched_ms_on_this_thread("transcode");
+        let (status, body) = call(&app, beat(60_000)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // Another node receives the next beat and commits it.
+        state
+            .store
+            .put_progress(user.id, seeded.movie, 61_000, Some(600_000))
+            .await
+            .expect("the other node's commit");
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        let (status, body) = call(&app, beat(62_000)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            crate::telemetry::watched_ms_on_this_thread("transcode") - before,
+            1_000,
+            "only the advance since the other node's beat is this node's to credit"
+        );
     }
 
     #[tokio::test]
@@ -8634,14 +11462,15 @@ mod tests {
 
     #[tokio::test]
     async fn scan_status_requires_auth_and_reports_problems() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
+        let _worker = scan_worker(&state);
         // Unauthenticated → 401.
         let (status, _) = call(&app, get("/api/v1/scan/status", None)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
         let admin = setup_admin(&app).await;
         // Create a library pointing at a path that does not exist — the auto
-        // scan must finish with a visible problem, not a silent all-zero.
+        // work must stay available to another node and show this node's problem.
         let (status, lib) = call(
             &app,
             post(
@@ -8654,29 +11483,45 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let lib_id = lib["id"].as_i64().expect("lib id").to_string();
 
-        // Poll until the background scan finishes (missing path → instant).
+        // Eligibility does not consume an attempt or claim successful completion.
         let mut last = Value::Null;
         for _ in 0..100 {
             let (status, body) = call(&app, get("/api/v1/scan/status", Some(&admin))).await;
             assert_eq!(status, StatusCode::OK);
             last = body[&lib_id].clone();
-            if !last["running"].as_bool().unwrap_or(true) && !last.is_null() {
+            if last["error"].as_str().is_some() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        assert_eq!(last["running"], false, "scan never finished: {last}");
-        let problems = last["last_scan"]["problems"]
-            .as_array()
-            .expect("problems array")
-            .clone();
+        assert_eq!(last["running"], true, "accepted work stays pending: {last}");
+        assert_eq!(last["phase"], "queued");
+        assert!(last["last_scan"].is_null(), "no scan has executed: {last}");
         assert!(
-            problems
-                .iter()
-                .any(|p| p.as_str().unwrap_or("").contains("does not exist")),
-            "expected a missing-path problem, got: {problems:?}"
+            last["error"].as_str().is_some_and(|error| error
+                .contains("could not read library root /definitely/not/here")
+                && error.contains("Waiting for a compatible worker")),
+            "{last}"
         );
-        assert_eq!(last["last_scan"]["errors"], 1);
+        let page = state
+            .store
+            .list_jobs(plurx_core::store::background_jobs::JobQuery {
+                state: None,
+                kind: Some(plurx_core::store::background_jobs::JobKind::LibraryScan),
+                after_id: None,
+                limit: 10,
+            })
+            .await
+            .expect("durable job");
+        assert_eq!(page.jobs.len(), 1);
+        assert_eq!(
+            page.jobs[0].failed_attempts, 0,
+            "missing local mounts are not failed executions"
+        );
+        assert!(
+            page.jobs[0].token.is_none(),
+            "an unreadable node must not claim"
+        );
     }
 
     #[tokio::test]
@@ -11835,6 +14680,10 @@ mod tests {
         assert_eq!(hls["delivery"]["requires_hls"], true, "{hls}");
         assert_eq!(hls["delivered_dolby_vision_profile"], 8, "{hls}");
 
+        // A progressive HEVC copy keeps its in-band parameter sets, so it needs
+        // no header proof and no Developer override: the DV narrowing
+        // contract below holds on the default settings.
+
         for transports in [json!(["progressive"]), json!([])] {
             let (status, narrowed) = call(
                 &app,
@@ -11932,9 +14781,12 @@ mod tests {
             .expect("fixture after Unix epoch")
             .as_secs() as i64;
         let held = std::fs::File::open(&path).expect("held fixture source");
-        let raw_json = crate::ffmpeg::held_source_probe_json(&held)
-            .await
-            .expect("exact fixture probe");
+        let raw_json = crate::ffmpeg::held_source_probe_json(
+            &held,
+            crate::process_control::ChildWork::background("test fixture probe"),
+        )
+        .await
+        .expect("exact fixture probe");
         let probe = plurx_core::domain::ProbeResult {
             duration_ms: Some(8_000),
             container: Some("mkv".into()),
@@ -11983,7 +14835,7 @@ mod tests {
             .collect();
         assert_eq!(
             heights,
-            vec![720, 480, 360],
+            vec![720, 480, 360, 240, 144],
             "source-filtered, top first: {body}"
         );
         assert_eq!(body["ladder"][0]["total_kbps"], 4_160, "{body}");
@@ -12249,6 +15101,118 @@ mod tests {
         if let Some(session_id) = session["session_id"].as_str() {
             state.transcode.stop_session(session_id, "test").await;
         }
+    }
+
+    /// The `resolution` sort's order is reproducible from the rows it returns.
+    ///
+    /// A native client merging several libraries' cursors compares rows on
+    /// `(resolution ?? -1) DESC, sort_title ASC, id ASC` — the key the row
+    /// carries, not the one the SQL computed. A root photo in a Home library
+    /// is probed and has a real file height but no `resolution` on its DTO, so
+    /// the server has to rank it where an absent `resolution` puts it; ranked
+    /// by its 3024-px height it would lead a cursor the client reads as
+    /// unsorted, and the merge would have to drain every other cursor to
+    /// place it.
+    #[tokio::test]
+    async fn library_resolution_sort_is_ordered_by_the_resolution_each_row_carries() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let lib = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Home".into(),
+                kind: LibraryKind::Home,
+                paths: vec![std::path::PathBuf::from("/home-media")],
+                anime: false,
+            })
+            .await
+            .expect("lib");
+        let mut ids = std::collections::HashMap::new();
+        for (title, kind, height) in [
+            ("Pier at Dusk", ItemKind::Photo, Some(3024)),
+            ("Beach Day", ItemKind::Video, Some(720)),
+            ("Birthday", ItemKind::Video, Some(2160)),
+            ("Zebra Crossing", ItemKind::Video, None),
+        ] {
+            let id = state
+                .store
+                .insert_item(&NewItem {
+                    library_id: lib.id,
+                    kind,
+                    parent_id: None,
+                    title: title.into(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            if let Some(height) = height {
+                state
+                    .store
+                    .upsert_file(
+                        id,
+                        &format!("/home-media/{title}"),
+                        1_000,
+                        1,
+                        &ProbeResult {
+                            height: Some(height),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("file");
+            }
+            ids.insert(title, id);
+        }
+
+        let (status, body) = call(
+            &app,
+            get(
+                &format!("/api/v1/libraries/{}/items?sort=resolution", lib.id),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let rows = body["items"].as_array().expect("items");
+        let photo = rows
+            .iter()
+            .find(|row| row["id"] == ids["Pier at Dusk"])
+            .expect("the photo is on the page");
+        assert!(
+            photo.get("resolution").is_none_or(Value::is_null),
+            "a photo carries no resolution: {photo}"
+        );
+
+        // The client's comparator, applied to what the client received.
+        let key = |row: &Value| {
+            (
+                std::cmp::Reverse(row["resolution"].as_i64().unwrap_or(-1)),
+                row["sort_title"].as_str().expect("sort_title").to_owned(),
+                row["id"].as_i64().expect("id"),
+            )
+        };
+        let returned: Vec<_> = rows.iter().map(key).collect();
+        let mut reordered = returned.clone();
+        reordered.sort();
+        assert_eq!(
+            returned, reordered,
+            "the server's order is not the order of the keys it sent"
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["id"].as_i64().expect("id"))
+                .collect::<Vec<_>>(),
+            vec![
+                ids["Birthday"],
+                ids["Beach Day"],
+                ids["Pier at Dusk"],
+                ids["Zebra Crossing"],
+            ]
+        );
     }
 
     #[tokio::test]
@@ -14208,6 +17172,93 @@ mod tests {
         );
     }
 
+    /// Row 8's direct-play numerator is the body the real handler hands the
+    /// connection: a GET adds exactly the bytes its body carried, whole or
+    /// ranged, under `direct_play`; a HEAD and a 416 carry no media and add
+    /// nothing. Counted on this test's thread, so the rest of the suite
+    /// cannot make it pass.
+    #[tokio::test]
+    async fn a_direct_play_get_credits_exactly_its_body_to_delivered_bytes() {
+        use crate::telemetry::delivered_bytes_on_this_thread;
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let s = seed_content(&state).await;
+        let uri = format!("/api/v1/files/{}/direct?token={admin}", s.file);
+        let body_of = |response: axum::response::Response| async move {
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body")
+                .len() as u64
+        };
+
+        let before = delivered_bytes_on_this_thread("direct_play");
+        let ranged_response = app.clone().oneshot(ranged(&uri, 0, 9)).await.expect("r");
+        assert_eq!(ranged_response.status(), StatusCode::PARTIAL_CONTENT);
+        let ranged_len = body_of(ranged_response).await;
+        assert_eq!(ranged_len, 10);
+        assert_eq!(
+            delivered_bytes_on_this_thread("direct_play") - before,
+            ranged_len,
+            "a ranged GET credits the bytes its body carried"
+        );
+
+        let whole = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("r");
+        assert_eq!(whole.status(), StatusCode::OK);
+        let whole_len = body_of(whole).await;
+        assert!(
+            whole_len > ranged_len,
+            "the whole file is longer than the range"
+        );
+        assert_eq!(
+            delivered_bytes_on_this_thread("direct_play") - before,
+            ranged_len + whole_len,
+            "a whole GET credits the file"
+        );
+
+        let counted = delivered_bytes_on_this_thread("direct_play");
+        let head = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("r");
+        assert!(head.status().is_success(), "{}", head.status());
+        body_of(head).await;
+        let unsatisfiable = app
+            .clone()
+            .oneshot(ranged(&uri, 10_000, 20_000))
+            .await
+            .expect("r");
+        assert_eq!(unsatisfiable.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        body_of(unsatisfiable).await;
+        assert_eq!(
+            delivered_bytes_on_this_thread("direct_play"),
+            counted,
+            "neither a HEAD nor a 416 is media delivered"
+        );
+        for other in ["remux", "transcode", "unknown"] {
+            assert_eq!(
+                delivered_bytes_on_this_thread(other),
+                0,
+                "direct play credited {other}"
+            );
+        }
+    }
+
     /// Direct play is a *storm* of ranged 206s, not a connection: a seeking
     /// browser makes dozens of short requests against one file. One row per
     /// request would put a dozen phantom viewers on the activity page for one
@@ -14782,9 +17833,12 @@ mod tests {
             .expect("file");
         write_real_av_fixture(&file.path, seconds);
         let held = std::fs::File::open(&file.path).expect("held fixture source");
-        let raw_json = crate::ffmpeg::held_source_probe_json(&held)
-            .await
-            .expect("exact fixture probe");
+        let raw_json = crate::ffmpeg::held_source_probe_json(
+            &held,
+            crate::process_control::ChildWork::background("test fixture probe"),
+        )
+        .await
+        .expect("exact fixture probe");
         let metadata = std::fs::metadata(&file.path).expect("fixture metadata");
         let size = i64::try_from(metadata.len()).expect("fixture size");
         let mtime = metadata
@@ -14937,6 +17991,11 @@ mod tests {
             .await
             .expect("file");
 
+        // The player is waiting on this extraction, so it starts at the
+        // realtime class (plan P-02 §3.2.2, review of #518 finding 1).
+        let viewer = super::stream::SUBTITLE_TRACK_FOR_A_VIEWER;
+        assert_eq!(viewer.class, crate::process_control::ChildClass::Realtime);
+        let realtime_before = crate::process_control::priority::spawns_of(viewer);
         let (status, body) = body_of(
             &app,
             get_q(&format!("/api/v1/files/{file}/subs/0.vtt?token={admin}")),
@@ -14946,6 +18005,10 @@ mod tests {
         let text = String::from_utf8_lossy(&body);
         assert!(text.contains("WEBVTT"), "{text}");
         assert!(text.contains("hello plurx"), "{text}");
+        assert!(
+            crate::process_control::priority::spawns_of(viewer) > realtime_before,
+            "the /subs extraction a viewer waits on must start at the realtime class"
+        );
 
         // Exactly one entry, keyed by (file, stream, size, mtime).
         let cached = state.subs_dir.join(format!("f{file}-s0-4242-7.vtt"));
@@ -16476,7 +19539,19 @@ mod tests {
     /// the absence of `media` — is pre-S1's.
     const PRE_S1_LIST_BODY: &str = concat!(
         r#"{"items":[{"id":1,"library_id":1,"kind":"movie","parent_id":null,"#,
-        r#""title":"Neon District 2049","year":2017,"overview":null,"#,
+        r#""title":"Neon District 2049","#,
+        // A-03 landed `sort_title` on ItemDto after this golden was captured,
+        // for the same reason S3's `genres` did: it is additive on its own
+        // terms. It is always present, it is the stored key the library
+        // `ORDER BY` already sorted on rather than anything newly computed,
+        // and the native clients merge library cursors on it. The decoders on
+        // both sides of the fleet skip keys they do not know — Swift's
+        // `JSONDecoder` by default, `Net.kt`'s `Json { ignoreUnknownKeys =
+        // true }` on Android — so an older client reads this body unchanged.
+        // The baseline this test defends therefore moved by exactly one more
+        // field. Anything else appearing here is what it is still watching for.
+        r#""sort_title":"neon district 2049","#,
+        r#""year":2017,"overview":null,"#,
         r#""season_number":null,"episode_number":null,"air_date":null,"#,
         r#""runtime_ms":null,"added_at":{added},"updated_at":{updated},"#,
         // S3 landed `genres` on ItemDto after this golden was captured. It is

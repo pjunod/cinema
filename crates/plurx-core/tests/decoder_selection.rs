@@ -265,6 +265,7 @@ fn resolve_with_options(
 
 fn execution_file(path: &str) -> MediaFile {
     MediaFile {
+        downloaded_subtitles: Vec::new(),
         id: 7,
         item_id: 11,
         path: PathBuf::from(path),

@@ -313,30 +313,47 @@ test("the sampling tick resamples the wait sentence before the presenter paints"
   const render = function renderPlaybackSurface() {};
   const tick = new Function(
     "renderPlaybackSurface", "playbackWaitLiveDetail", "playbackProgressTick",
+    // The same half-second tick carries the MediaSession position (F-web-13);
+    // the plan forbids a second timer for it, so it has to be visible here.
+    "updatePlayerMediaSession",
     `${shippedSource("playbackSamplingTick")}\nreturn playbackSamplingTick;`,
   )(
     render,
     () => { order.push("sample"); return "1.5 s client loaded · 1 server HTTP wait"; },
     () => { order.push(`paint:${render.waitDetail}`); },
+    (v, p) => { order.push(["mediasession", v, p]); },
   );
-  tick({}, {});
-  assert.deepEqual(order, ["sample", "paint:1.5 s client loaded · 1 server HTTP wait"]);
+  const sampled = {}, sampledPlayer = {};
+  tick(sampled, sampledPlayer);
+  assert.deepEqual(order, ["sample", "paint:1.5 s client loaded · 1 server HTTP wait",
+    ["mediasession", sampled, sampledPlayer]],
+    "the sampling tick no longer carries the OS transport's position");
   // Both places that arm the half-second tick use it: a cold attach and a
   // prepared handoff's adoption of the successor element.
   const intervals = [];
+  let installedMediaSession = 0;
   const arm = new Function(
     "setInterval", "clearInterval", "playbackSamplingTick", "PlaybackPolicy",
+    // Arming the timers is also where the attached stream claims the OS
+    // transport, so a re-arm after a stall recovery re-installs it.
+    "installPlayerMediaSession",
     `${shippedSource("armPlaybackSampling")}\nreturn armPlaybackSampling;`,
   )(
     (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
     () => {},
     (v, p) => order.push(["sampled", v, p]),
-    { AUTO_DEFAULTS: { sampleMs: 1000 } },
+    { AUTO_DEFAULTS: { sampleMs: 5000, decisionMs: 1000 } },
+    () => { installedMediaSession += 1; },
   );
   const v = { id: "v" }, p = { id: "p" };
   arm(v, p);
+  assert.equal(installedMediaSession, 1, "arming the sampling timers did not claim the OS transport");
+  arm(v, p);
+  assert.equal(installedMediaSession, 2, "a re-arm left the OS transport pointing at the old stream");
   const half = intervals.find((entry) => entry.ms === 500);
   assert.ok(half, "armPlaybackSampling no longer arms a 500 ms tick");
+  assert.ok(intervals.find((entry) => entry.ms === 1000),
+    "Auto decides every second while its health reads remain on the slower cadence");
   half.fn();
   assert.deepEqual(order.at(-1), ["sampled", v, p]);
   assert.match(shippedSource("adoptPlaybackMediaElement"), /setInterval\(\(\)=>playbackSamplingTick\(v,p\),500\)/);
@@ -760,7 +777,7 @@ test("the rejection report carries the join, whatever the path built it", () => 
     SHIPPED_UI.indexOf('v.addEventListener("error"'),
   ).slice(0, 4000);
   for (const [name, source] of [
-    ["hls.js", shippedSource("attachHls")],
+    ["hls.js", shippedSource("onHlsError")],
     ["<video>", wire],
   ]) {
     assert.ok(
@@ -889,12 +906,12 @@ test("the VOD fetch contract stays below hls.js and beyond the producer watchdog
     "503 backoff must outlive the 30-second producer watchdog with margin",
   );
   assert.match(
-    shippedSource("attachHls"),
+    shippedSource("constructHls"),
     /fragLoadPolicy:vodClientContract\(\)\.fragLoadPolicy/,
     "every HLS response uses the VOD materialization policy",
   );
   assert.doesNotMatch(
-    shippedSource("attachHls"),
+    shippedSource("wireHlsObservers"),
     /LEVEL_LOADING[\s\S]*_keeperFires/,
     "the removed live-playlist keeper must not survive the VOD-only cutover",
   );
@@ -911,10 +928,10 @@ asyncTest("a temporary live recovery presentation remains playable", async () =>
 });
 
 test("an initial VOD refusal stays visible instead of closing the player", () => {
-  const play = shippedSource("play");
-  assert.match(play, /showSessionOpenFailure\(error,surfaceContext\)/);
+  const beginPlayAttempt = shippedSource("beginPlayAttempt");
+  assert.match(beginPlayAttempt, /showSessionOpenFailure\(error,surfaceContext\)/);
   assert.doesNotMatch(
-    play,
+    shippedSource("attachPlayRoute"),
     /openSession[\s\S]{0,500}return closePlayer\(\)/,
     "a typed VOD refusal must remain on the playback surface",
   );
@@ -1655,6 +1672,76 @@ test("a bandwidth cliff drops from 1080p to the sustainable rung in one move", (
   assert.equal(decision.emergency, true);
 });
 
+test("the two measured A-04 cliffs select encoded low rungs with peak headroom", () => {
+  const ladder = [
+    ...serverLadder,
+    { height: 240, total_kbps: 660, peak_kbps: 910 },
+    { height: 144, total_kbps: 260, peak_kbps: 310 },
+  ];
+  const first = policy.decideRung({
+    ladder,
+    currentHeight: 720,
+    estimateKbps: 8_000,
+    recentEstimateKbps: 1_100,
+    recentEstimateAtMs: 9_000,
+    runwaySeconds: 5,
+    nowMs: 10_000,
+  });
+  assert.equal(first.height, 240);
+  assert.equal(first.reason, "bandwidth cliff");
+  const second = policy.decideRung({
+    ladder,
+    currentHeight: 240,
+    estimateKbps: 1_100,
+    recentEstimateKbps: 350,
+    recentEstimateAtMs: 19_000,
+    runwaySeconds: 5,
+    nowMs: 20_000,
+  });
+  assert.equal(second.height, 144);
+  assert.equal(second.reason, "bandwidth cliff");
+});
+
+test("fresh 2.2 Mb/s cliff evidence carries the 360p peak in one move", () => {
+  const ladder = [...serverLadder,
+    { height: 240, total_kbps: 660, peak_kbps: 910 },
+    { height: 144, total_kbps: 260, peak_kbps: 310 }];
+  const decision = policy.decideRung({ladder,currentHeight:720,
+    estimateKbps:8061,recentEstimateKbps:2202,
+    recentEstimateAtMs:9000,runwaySeconds:11,nowMs:10000});
+  assert.equal(decision.height,360);
+  assert.equal(decision.reason,"bandwidth cliff");
+});
+
+test("a low-rung transfer below nominal is urgent despite a deep buffer", () => {
+  const ladder = [...serverLadder,
+    { height: 240, total_kbps: 660, peak_kbps: 910 },
+    { height: 144, total_kbps: 260, peak_kbps: 310 }];
+  const decision = policy.decideRung({ladder,currentHeight:240,
+    estimateKbps:1100,recentEstimateKbps:626,
+    recentEstimateAtMs:9000,runwaySeconds:43,
+    previousRunwaySeconds:42,nowMs:10000});
+  assert.equal(decision.height,144);
+  assert.equal(decision.reason,"bandwidth cliff");
+});
+
+test("a high-rung mixed fragment waits for a clean cliff sample", () => {
+  const ladder = [...serverLadder,
+    { height: 240, total_kbps: 660, peak_kbps: 910 },
+    { height: 144, total_kbps: 260, peak_kbps: 310 }];
+  const mixed = policy.decideRung({ladder,currentHeight:720,
+    estimateKbps:8075,recentEstimateKbps:3170,
+    recentEstimateAtMs:9000,runwaySeconds:12,
+    previousRunwaySeconds:13,nowMs:10000});
+  assert.equal(mixed.height,720);
+  const clean = policy.decideRung({ladder,currentHeight:720,
+    estimateKbps:8075,recentEstimateKbps:1095,
+    recentEstimateAtMs:10500,runwaySeconds:10,
+    previousRunwaySeconds:12,nowMs:11000});
+  assert.equal(clean.height,240);
+  assert.equal(clean.reason,"bandwidth cliff");
+});
+
 test("an active supply stall without a completed slow transfer retains quality", () => {
   const decision = policy.decideRung({
     ladder: serverLadder,
@@ -2340,17 +2427,21 @@ asyncTest("an Auto rung that did not attach says nothing", async () => {
 });
 
 // The remaining row 17 and row 18 sites live inside functions whose harness
-// would cost more than the assertion is worth — a cold-start `play()`, the
+// would cost more than the assertion is worth — the cold-start chrome setup,
 // subtitle menu, the PiP toggle, the two-second stats poll. What can still be
 // pinned from here is the thing a refactor would quietly drop: that each of
 // them leaves the player through the presenter and not through `toast`.
 test("every remaining row 17/18 site raises rather than toasts", () => {
   const sites = [
-    ["play", "degraded_notice", "That subtitle requires an SDR burn-in."],
+    ["presentPlayerChrome", "degraded_notice", "That subtitle requires an SDR burn-in."],
     ["setSub", "degraded_notice", "That subtitle requires an SDR burn-in."],
     ["togglePip", "degraded_notice", "Picture-in-picture did not start."],
     ["pollSessionHealth", "log_only", null],
   ];
+  assert.ok(
+    shippedSource("play").includes("presentPlayerChrome(attempt,decided,prepared,openIsAttached)"),
+    "play must present the new generation's chrome and its degraded notice",
+  );
   for (const [name, source, sentence] of sites) {
     const src = shippedSource(name);
     assert.ok(
@@ -2510,10 +2601,15 @@ test("healthy producer capacity evidence survives an empty-runway urgency signal
 });
 
 test("recovery holds for 45 seconds, moves up once, and respects pixel height", () => {
+  // The next 1080p rung peaks at 12,160 kb/s. Recovery needs 1.8x fresh
+  // measured peak headroom, so 16,000 kb/s cannot start the hold anymore.
+  const recoveredKbps = 24_000;
   const first = policy.decideRung({
     ladder: serverLadder,
     currentHeight: 720,
-    estimateKbps: 16_000,
+    estimateKbps: recoveredKbps,
+    recentEstimateKbps: recoveredKbps,
+    recentEstimateAtMs: 59_000,
     runwaySeconds: 20,
     nowMs: 60_000,
     lastSwitchAtMs: 0,
@@ -2524,7 +2620,9 @@ test("recovery holds for 45 seconds, moves up once, and respects pixel height", 
   const upgrade = policy.decideRung({
     ladder: serverLadder,
     currentHeight: 720,
-    estimateKbps: 16_000,
+    estimateKbps: recoveredKbps,
+    recentEstimateKbps: recoveredKbps,
+    recentEstimateAtMs: 104_000,
     runwaySeconds: 20,
     nowMs: 105_000,
     lastSwitchAtMs: 0,
@@ -2536,7 +2634,9 @@ test("recovery holds for 45 seconds, moves up once, and respects pixel height", 
   const dwell = policy.decideRung({
     ladder: serverLadder,
     currentHeight: 720,
-    estimateKbps: 16_000,
+    estimateKbps: recoveredKbps,
+    recentEstimateKbps: recoveredKbps,
+    recentEstimateAtMs: 114_000,
     runwaySeconds: 20,
     nowMs: 115_000,
     lastSwitchAtMs: 105_000,
@@ -2547,7 +2647,9 @@ test("recovery holds for 45 seconds, moves up once, and respects pixel height", 
   const capped = policy.decideRung({
     ladder: serverLadder,
     currentHeight: 480,
-    estimateKbps: 16_000,
+    estimateKbps: recoveredKbps,
+    recentEstimateKbps: recoveredKbps,
+    recentEstimateAtMs: 119_000,
     runwaySeconds: 20,
     playerHeight: 700,
     nowMs: 120_000,
@@ -2555,6 +2657,48 @@ test("recovery holds for 45 seconds, moves up once, and respects pixel height", 
     upgradeSinceMs: 70_000,
   });
   assert.equal(capped.height, 480, "the 720p rung exceeds the player");
+});
+
+test("Auto upgrade needs fresh peak headroom and successor runway", () => {
+  const ladder = [...serverLadder,
+    { height: 240, total_kbps: 660, peak_kbps: 910 },
+    { height: 144, total_kbps: 260, peak_kbps: 310 }];
+  const base = { ladder, currentHeight: 144, estimateKbps: 8_000,
+    runwaySeconds: 60, recentSpeed: 6, nowMs: 120_000,
+    lastSwitchAtMs: 0, upgradeSinceMs: 70_000 };
+  assert.equal(policy.decideRung({ ...base, recentEstimateKbps: 1_100,
+    recentEstimateAtMs: 119_000 }).height, 144,
+  "a short fragment must not promote beyond the measured link");
+  assert.equal(policy.decideRung({ ...base, recentEstimateKbps: 8_000,
+    recentEstimateAtMs: 100_000 }).height, 144,
+  "a stale transfer must not authorize recovery");
+  assert.equal(policy.decideRung({ ...base, recentEstimateKbps: 8_000,
+    recentEstimateAtMs: 119_000, runwaySeconds: 3 }).height, 144,
+  "the prepared successor cannot consume the incumbent's last runway");
+  assert.equal(policy.decideRung({ ...base, recentEstimateKbps: 8_000,
+    recentEstimateAtMs: 119_000 }).height, 240);
+  assert.equal(policy.decideRung({ ...base, recentEstimateKbps: 8_000,
+    recentEstimateAtMs: 119_000, lastCliffAtMs: 60_000 }).height, 144,
+  "a recent cliff keeps bursty transfer estimates from undoing the downshift");
+  assert.equal(policy.decideRung({ ...base, recentEstimateKbps: 8_000,
+    recentEstimateAtMs: 119_000, lastCliffAtMs: 60_000,
+    recentMediaDeliveryKbps: 1_900 }).height, 240,
+  "sustained main-fragment delivery can establish early headroom");
+  assert.equal(policy.decideRung({ ...base, recentEstimateKbps: 8_000,
+    recentEstimateAtMs: 119_000, lastCliffAtMs: 20_000 }).height, 240,
+  "the stabilization window ends so an underused low rung can explore later");
+});
+
+test("completed main fragments give a bounded delivery window without burst optimism", () => {
+  const samples = [
+    { bytes: 80_000, startedAtMs: 100_000, endedAtMs: 100_300, atMs: 100_300 },
+    { bytes: 80_000, startedAtMs: 106_000, endedAtMs: 106_300, atMs: 106_300 },
+  ];
+  assert.equal(Math.round(policy.completedMediaWindowKbps(samples, 107_000)), 203,
+  "idle time between completed fragments counts against sustained capacity");
+  assert.equal(policy.completedMediaWindowKbps(samples.slice(1), 107_000), null);
+  assert.equal(policy.completedMediaWindowKbps(samples, 121_301), null,
+  "old bytes cannot authorize an upgrade");
 });
 
 test("native element transfer errors never spend a compatibility transcode", () => {
@@ -3880,11 +4024,12 @@ test("every available diagnostic field is rendered in a named disclosure", () =>
   assert.match(markup, /<summary>Session &amp; history<\/summary>/);
 });
 
-test("missing player resolution stays explicit beside source metadata", () => {
+test("missing stream frame stays explicit beside source and player facts", () => {
   const render = new Function(`${shippedSource("esc")}\n${shippedSource("playbackInfoOverview")}\nreturn playbackInfoOverview;`)();
-  const markup = render({decode_resolution: "Not reported", source_resolution: "3840×2160", player_state: "Playing", method: "Transcode · cached"});
-  assert.match(markup, /pi-picture[^]*?Playing resolution[^]*?<strong>Not reported<\/strong>/);
-  assert.match(markup, /Original file[^]*?<strong>3840×2160<\/strong>/);
+  const markup = render({decode_resolution: "Unavailable", source_resolution: "3840×2160", stream_frame: "Unavailable", player_state: "Playing", method: "Transcode · cached"});
+  assert.match(markup, /pi-picture[^]*?Source frame[^]*?<strong>3840×2160<\/strong>/);
+  assert.match(markup, /Stream frame[^]*?<strong>Unavailable<\/strong>/);
+  assert.match(markup, /Player display size[^]*?<strong>Unavailable<\/strong>/);
   assert.match(markup, /Buffered on this device/);
 });
 
@@ -4181,7 +4326,7 @@ test("a successful playlist retry immediately clears its 503 explanation", () =>
     "the encoder exited before it produced video",
   );
   assert.match(
-    shippedSource("attachHls"),
+    shippedSource("wireHlsObservers"),
     /Hls\.Events\.LEVEL_LOADED[\s\S]*?clearStreamFailureFor\(hls\)/,
     "the shipped successful-level event must invalidate its own refusal",
   );
@@ -4240,7 +4385,7 @@ asyncTest("a burn session-open refusal reaches the surface as a refused change",
     [
       'const API="/api/v1"; let TOKEN="token", AUTH_GENERATION=0;',
       'const PLAYBACK_ID="playback-1"; let STREAM_FAILURE=null;',
-      shippedSource("api"),
+      (require("../web/shell-source.js").apiPrelude()+shippedSource("api")),
       // `openSession` attaches this browser's capabilities document; the burn
       // refusal under test does not care what is in it, only that building one
       // does not throw.
@@ -4871,6 +5016,7 @@ function carryHarness(player) {
     removeAttribute() {},
     load() {},
   });
+  const cleared = { count: 0 };
   const build = new Function(
     "document",
     "PLAYER",
@@ -4888,6 +5034,9 @@ function carryHarness(player) {
     "PLAY_OPEN_GATE",
     "cancelPendingSeek",
     "cancelHlsStartup",
+    // Closing hands the OS media keys back (F-web-13); the counter this
+    // harness keeps is what proves the call is still there.
+    "clearPlayerMediaSession",
     [
       shippedBinding("let", "PREPLAY"),
       shippedSource("prePlaySelection"),
@@ -4909,7 +5058,7 @@ function carryHarness(player) {
         " rememberPlaybackSelection, closePlayer};",
     ].join("\n"),
   );
-  return build(
+  const harness = build(
     { getElementById: stubEl },
     player,
     () => {},
@@ -4928,7 +5077,10 @@ function carryHarness(player) {
     { invalidate() {} },
     () => { player._seekPending = null; player._seekPreview = null; },
     () => {},
+    () => { cleared.count += 1; },
   );
+  harness.mediaSessionCleared = () => cleared.count;
+  return harness;
 }
 
 test("closing the player ends its track choice instead of arming the next play", () => {
@@ -4938,6 +5090,8 @@ test("closing the player ends its track choice instead of arming the next play",
   // carry a quality change depends on.
   assert.deepEqual(h.playbackSelection(player, 42), { audio: 1, subtitle: null });
   h.closePlayer();
+  assert.equal(h.mediaSessionCleared(), 1,
+    "closing left the OS media keys installed for a player that is gone");
   // loadItem() empties the pickers on the way back to the detail screen, so
   // "Default" is what the viewer now sees on both of them.
   h.clearPrePlay();
@@ -5620,6 +5774,8 @@ test("an upgrade needs encode headroom, not just a bandwidth estimate", () => {
     ladder,
     currentHeight: 720,
     estimateKbps: 200_000,
+    recentEstimateKbps: 200_000,
+    recentEstimateAtMs: 499_000,
     runwaySeconds: 40,
     previousRunwaySeconds: 40,
     nowMs: 500_000,
@@ -6178,13 +6334,13 @@ test("hls.js media recovery is fenced by the shared attach and item budgets", ()
   assert.equal(decide({ itemRecoveries: 2 }), "fallback");
   assert.equal(decide({ type: "networkError" }), "none");
 
-  const attach = shippedSource("attachHls");
-  const recovery = attach.indexOf("PlaybackPolicy.hlsMediaFatalAction");
-  const terminal = attach.indexOf('notifyPlaybackControl("failed"', recovery);
+  const handler = shippedSource("onHlsError");
+  const recovery = handler.indexOf("PlaybackPolicy.hlsMediaFatalAction");
+  const terminal = handler.indexOf('notifyPlaybackControl("failed"', recovery);
   assert.ok(recovery >= 0, "the shipped fatal handler must ask the recovery policy");
   assert.ok(terminal > recovery,
     "decoder rescue must run before the attempt is reported terminal");
-  assert.match(attach, /sourceBufferName:d\.sourceBufferName\|\|null/,
+  assert.match(handler, /sourceBufferName:d\.sourceBufferName\|\|null/,
     "the vendored hls.js 1.6.16 payload names its SourceBuffer explicitly");
 });
 
@@ -6239,6 +6395,265 @@ test("the final manifest-send gate rejects pause, stale ownership, deadline and 
   assert.equal(decide({ nowMs: 100 }), "exhaust");
   assert.equal(decide({ dispatches: 15 }), "send");
   assert.equal(decide({ dispatches: 16 }), "exhaust");
+});
+
+// ---- D-02 M6: node failover is gated on the response code -------------------
+//
+// `nodeFailoverEligible` is Kotlin. `LadderVerdictTest` (PlaybackPolicyTest.kt)
+// executes the predicate under `make android-test`; this file runs where no
+// Android toolchain may exist, so these are source assertions: weaker than
+// running the predicate, but each is the line a refactor would quietly drop,
+// and the call-site cases are the only pin on the gate in `onPlayerError`,
+// which no JVM test reaches — delete the gate and they fail here.
+const ANDROID_CONTROLLER = fs.readFileSync(
+  path.join(__dirname, "../../clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"),
+  "utf8",
+);
+
+test("the Android failover predicate reads the status and defaults to refusing", () => {
+  const body = ANDROID_POLICY.match(
+    /internal fun nodeFailoverEligible\(\s*errorCode: Int,\s*responseCode: Int\?,?\s*\): Boolean = when \{([\s\S]*?)\n\}/,
+  );
+  assert.ok(body, "PlaybackPolicy.kt no longer declares nodeFailoverEligible");
+  const branches = body[1]
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("//"));
+
+  // Order is load-bearing: the allowlist decides first, so widening the status
+  // rules can never admit a code the 2xxx family excludes.
+  assert.equal(
+    branches[0],
+    "!isTransportPlaybackError(errorCode) -> false",
+    "the transport allowlist must remain the first question",
+  );
+  assert.equal(
+    branches[1],
+    "responseCode == null -> true",
+    "a failure that never got a response is the case failover exists for",
+  );
+  assert.equal(
+    branches[2],
+    "responseCode in 500..599 -> responseCode != 501 && responseCode != 505",
+    "only 5xx is worth a peer, and not the two that state what the build is",
+  );
+  // The dangerous mutation is `else -> true`: it restores exactly the old
+  // behaviour (every 2004 walks the ingress list) while looking gated.
+  assert.equal(
+    branches[3],
+    "else -> false",
+    "anything not named above must be terminal, not a failover",
+  );
+  assert.equal(branches.length, 4, "the policy is these four branches");
+});
+
+test("the Android failover call site actually consults the status", () => {
+  assert.match(
+    ANDROID_CONTROLLER,
+    /if \(nodeFailoverEligible\(error\.errorCode, httpResponseCode\(error\)\) &&\s*\n\s*retryMediaOnNextNode\(error\)/,
+    "onPlayerError must gate the failover on the predicate AND pass it the "
+      + "status; a call that passes null would silently restore the old behaviour",
+  );
+  assert.ok(
+    !/isTransportPlaybackError\(error\.errorCode\) && retryMediaOnNextNode/.test(
+      ANDROID_CONTROLLER,
+    ),
+    "no failover may go round the status gate",
+  );
+  // One walk of the cause chain, bounded, shared by the refusal adapter and
+  // the status accessor. An unbounded walk over a cyclic chain does not return.
+  assert.match(
+    ANDROID_CONTROLLER,
+    /private fun httpResponseCode\(error: PlaybackException\): Int\? =\s*\n\s*invalidResponse\(error\)\?\.responseCode/,
+    "the status must come from the shared bounded cause-chain walk",
+  );
+  assert.match(
+    ANDROID_CONTROLLER,
+    /depth < 4/,
+    "the cause-chain walk must stay bounded",
+  );
+  assert.match(
+    ANDROID_CONTROLLER,
+    /http_status=\$\{httpResponseCode\(error\) \?: "none"\}/,
+    "playback_transport_failover must carry the status that admitted it, so a "
+      + "failover storm can be attributed after the fact",
+  );
+});
+
+test("the Android policy module stays free of ExoPlayer and Android", () => {
+  // Why `httpResponseCode` lives in Controller.kt and not beside the predicate
+  // it feeds: PlaybackPolicy.kt's own header promises these are pure functions
+  // "free of ExoPlayer and Android", which is what keeps them testable on the
+  // JVM without a device. Pulling `HttpDataSource.InvalidResponseCodeException`
+  // in to shorten one call site would cost that.
+  assert.ok(
+    !/\bandroidx\./.test(ANDROID_POLICY),
+    "PlaybackPolicy.kt must not reference androidx; the Media3-typed half of "
+      + "M6 belongs at the call site",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The shared Auto-quality policy fixture (A-04 / D1).
+//
+// `tests/playback/auto-quality-policy.json` is one file, read by three runners:
+// this one today, and a Swift and a JVM runner the build plan adds. It exists
+// so "the same policy" is a checkable claim rather than three codebases that
+// happen to spell 1.8 the same way this week.
+//
+// The rule that makes it honest: a case may carry `web_current` beside
+// `expect` when the shipped browser and the design disagree. The runner then
+// asserts `web_current` — so the suite stays green and the disagreement stays
+// on the page — and requires a `finding` saying what disagrees and who settles
+// it. A green run of this file proves the browser still behaves as recorded.
+// It does not enable anything on any platform (design section 5.4).
+// ---------------------------------------------------------------------------
+const autoQuality = require("./auto-quality-policy.json");
+
+// Keys `decideRung` actually returns. An expectation naming anything else is
+// describing a policy output that does not exist yet, which is only allowed on
+// a case that has already declared itself a disagreement.
+const AUTO_DECISION_KEYS = new Set([
+  "height", "reason", "emergency", "action", "evidence", "mildSamples",
+  "upgradeSinceMs",
+]);
+
+// Design section 3.5's table, verbatim in its first column. Pinned here and
+// not read from the fixture, because a fixture that dropped a row would
+// otherwise silently stop covering it.
+const VIEWER_STATES_SECTION_3_5 = [
+  "Original", "Manual rung", "Paused", "Background / PiP", "HDR fidelity",
+  "A stall-scoped control verdict",
+];
+
+// Design section 8.1's tick guards, in the order `autoControllerTick` applies
+// them. Pinned here rather than read from the fixture for the same reason as
+// the table above: a fixture that dropped a row would otherwise silently stop
+// pinning the guard.
+const TICK_GUARDS_SECTION_8_1 = [
+  "playbackOwnsAttachedMedia(p)", "SERVER.playback_auto_abr",
+  "qualityForce()!=='auto'", "!p.started", "v.paused", "p.abr.switching",
+  "p.autoFallbackInFlight",
+  "PLAYER!==p||p.mediaAttachment!==attachment||p.sessionId!==session||p.streamId!==stream",
+];
+
+test("the Auto-quality fixture's defaults are the browser's own constants", () => {
+  assert.equal(autoQuality.schema, 1);
+  assert.deepEqual(
+    autoQuality.defaults,
+    {...policy.AUTO_DEFAULTS},
+    "the fixture ships AUTO_DEFAULTS; tuning one without the other would hand " +
+      "the native runners a number the browser does not use",
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(policy.AUTO_DEFAULTS, "switchBudgetPerHour"),
+    false,
+    "switchBudgetPerHour is a proposal (design 3.4, open question 7.3) and " +
+      "must stay in proposed_defaults until a shaped trace justifies it",
+  );
+  assert.equal(autoQuality.proposed_defaults.switchBudgetPerHour, 6);
+});
+
+test("every evidence class and every section 3.5 row has at least one fixture case", () => {
+  for (const cause of autoQuality.causes) {
+    assert.ok(
+      autoQuality.cases.some((item) => item.name.startsWith(`${cause}: `)),
+      `design section 3.2 row "${cause}" has no case`,
+    );
+  }
+  for (const state of VIEWER_STATES_SECTION_3_5) {
+    assert.ok(
+      autoQuality.controller_gates.some((row) => row.viewer_state === state),
+      `design section 3.5 row "${state}" has no controller gate`,
+    );
+  }
+});
+
+test("the Auto-quality fixture drives decideRung, and records every disagreement", () => {
+  const names = new Set();
+  for (const item of autoQuality.cases) {
+    assert.ok(!names.has(item.name), `duplicate case name: ${item.name}`);
+    names.add(item.name);
+    const decision = policy.decideRung({
+      ...autoQuality.sample_defaults,
+      ...item.sample,
+      ladder: autoQuality.ladder,
+    });
+    if (item.web_current) {
+      assert.notDeepEqual(
+        item.web_current,
+        item.expect,
+        `${item.name}: web_current identical to expect is not a disagreement`,
+      );
+      assert.ok(
+        typeof item.finding === "string" && item.finding.length >= 200,
+        `${item.name}: a recorded disagreement needs a finding that says what ` +
+          "disagrees and who settles it",
+      );
+    }
+    const wanted = item.web_current || item.expect;
+    for (const [key, value] of Object.entries(wanted)) {
+      if (!AUTO_DECISION_KEYS.has(key)) {
+        assert.ok(
+          item.web_current,
+          `${item.name}: "${key}" is not an AutoDecision field decideRung ` +
+            "returns, so this case must declare itself a disagreement",
+        );
+        continue;
+      }
+      if (key === "evidence") {
+        for (const [field, expected] of Object.entries(value)) {
+          assert.equal(
+            decision.evidence && decision.evidence[field], expected,
+            `${item.name}: evidence.${field}`,
+          );
+        }
+        continue;
+      }
+      assert.deepEqual(decision[key], value, `${item.name}: ${key}`);
+    }
+  }
+});
+
+test("every controller gate the fixture names is still in the shipped tick", () => {
+  const tick = shippedSource("autoControllerTick");
+  // Each gate is asserted on its own side of the awaited health poll. A whole-
+  // function substring match let `if(p.autoFallbackInFlight) return;` be
+  // deleted with the suite green, because the post-poll re-check still spells
+  // the same expression.
+  const poll = "await pollSessionHealth(";
+  const at = tick.indexOf(poll);
+  assert.ok(at > 0 && tick.indexOf(poll, at + 1) < 0,
+    "autoControllerTick must await exactly one health poll");
+  const sides = { before_poll: tick.slice(0, at), after_poll: tick.slice(at) };
+  const pinned = new Set();
+  for (const row of autoQuality.controller_gates) {
+    if (!row.viewer_state) continue;
+    if (row.web_gate == null) {
+      assert.ok(
+        typeof row.finding === "string" && row.finding.length >= 200,
+        `${row.viewer_state}: a gate the browser does not have needs a finding`,
+      );
+      continue;
+    }
+    const phases = row.web_phase === "both"
+      ? ["before_poll", "after_poll"]
+      : [row.web_phase];
+    for (const phase of phases) {
+      assert.ok(Object.prototype.hasOwnProperty.call(sides, phase),
+        `${row.viewer_state}: web_phase must be before_poll, after_poll or both`);
+      assert.ok(
+        sides[phase].includes(row.web_gate),
+        `${row.viewer_state}: autoControllerTick no longer contains ${row.web_gate} ${phase.replace("_", " ")}`,
+      );
+    }
+    pinned.add(row.web_gate);
+  }
+  for (const guard of TICK_GUARDS_SECTION_8_1) {
+    assert.ok(pinned.has(guard), `design section 8.1 guard ${guard} has no fixture row`);
+  }
+  assert.equal(pinned.size, TICK_GUARDS_SECTION_8_1.length,
+    "a fixture gate row names a guard design section 8.1 does not list");
 });
 
 // Drained last, in registration order, after every synchronous case has run.

@@ -53,14 +53,21 @@ pub struct AniMatch {
 }
 
 pub struct AniListClient {
+    budget: super::budget::SharedProviderBudget,
     http: reqwest::Client,
     /// GraphQL endpoint (defaults to [`API`]); overridable for tests.
     base: String,
 }
 
 impl AniListClient {
+    pub fn with_budget(mut self, budget: super::budget::SharedProviderBudget) -> Self {
+        self.budget = budget;
+        self
+    }
+
     pub fn new() -> Self {
         AniListClient {
+            budget: None,
             http: provider_client(
                 Provider::AniList,
                 reqwest::Client::builder()
@@ -86,7 +93,9 @@ impl AniListClient {
             "query": SEARCH_QUERY,
             "variables": { "search": title },
         });
-        let response = self.http.post(&self.base).json(&body).send().await;
+        super::budget::acquire(&self.budget, Provider::AniList).await?;
+        let response =
+            super::budget::cancellable(self.http.post(&self.base).json(&body).send()).await?;
         let resp = match response {
             Ok(response) => response,
             Err(error) => {
@@ -95,6 +104,7 @@ impl AniListClient {
                 return Err(error);
             }
         };
+        super::budget::observe(&self.budget, Provider::AniList, &resp).await?;
         // AniList returns 404 with a GraphQL error when nothing matches.
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             record_provider_request(Provider::AniList, ProviderOutcome::Status);
@@ -122,7 +132,8 @@ impl AniListClient {
 
     /// Download an image from an absolute URL (AniList serves full URLs).
     pub async fn download_image(&self, url: &str) -> Result<Vec<u8>, MetadataError> {
-        let response = self.http.get(url).send().await;
+        super::budget::acquire(&self.budget, Provider::AniList).await?;
+        let response = super::budget::cancellable(self.http.get(url).send()).await?;
         let resp = match response {
             Ok(response) => response,
             Err(error) => {
@@ -131,6 +142,7 @@ impl AniListClient {
                 return Err(error);
             }
         };
+        super::budget::observe(&self.budget, Provider::AniList, &resp).await?;
         if !resp.status().is_success() {
             record_provider_request(Provider::AniList, ProviderOutcome::Status);
             return Err(MetadataError::Status(resp.status().as_u16()));

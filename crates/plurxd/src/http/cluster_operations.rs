@@ -35,6 +35,7 @@ use super::peer_transport::{
     deadline_after, exact_auth_from_headers, PeerAuthMode, PeerTransport, PeerTransportError,
 };
 use super::{ReadinessEvaluation, ReadinessFailure};
+use crate::redact::redact_operator_text;
 use crate::serving_fence::PlannedOutageFenceToken;
 use crate::state::AppState;
 
@@ -2495,30 +2496,6 @@ fn observation_error_class(state: ObservationState) -> &'static str {
         ObservationState::Unavailable => "unavailable",
         ObservationState::PeerLimit => "peer_limit",
     }
-}
-
-fn redact_operator_text(value: &str) -> String {
-    let lower = value.to_ascii_lowercase();
-    let sensitive = [
-        "authorization",
-        "bearer ",
-        "token",
-        "secret",
-        "password",
-        "signature",
-        "api_key",
-        "apikey",
-        "username",
-        "plxjoin:",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-        || value.contains('/')
-        || value.contains('\\');
-    if sensitive {
-        return "[redacted potentially sensitive operator text]".to_owned();
-    }
-    value.chars().take(512).collect()
 }
 
 fn private_no_store_headers() -> HeaderMap {

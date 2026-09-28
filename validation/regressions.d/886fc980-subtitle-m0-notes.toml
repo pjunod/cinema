@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["886fc980"]
+reason = "This documentation-only M0 experiment note records the observed ASS Matroska byte difference on nuc3 and the then-pending decision. Paul subsequently directed this session to use the plan's cue-identity allowance; no runtime behavior changed in this commit."
+ignore = true

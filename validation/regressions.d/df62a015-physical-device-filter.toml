@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["df62a015"]
+points = ["operations.packaging"]
+checks = ["operations-contract"]
+reason = "The operations contract parses and invokes ship-physical and checks its artifact and install controls. The physical-only CoreDevice filter was additionally observed in the recorded six-device install; the automated check does not simulate CoreDevice inventory."

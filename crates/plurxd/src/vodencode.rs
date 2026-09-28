@@ -9,8 +9,12 @@ use plurx_core::transcode::{
 };
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+use crate::seam_hooks::AsyncPause;
+use crate::seam_hooks::{HookFuture, HookReady};
+
 use crate::admission::{
-    Admissions, HwSlot, LiveWait, Priority, SwPermit, TranscodeResourceEstimate,
+    Admissions, HwSlot, LiveWait, PoolSnapshot, Priority, SwPermit, TranscodeResourceEstimate,
 };
 
 /// Resolved once before attachment. A restart cannot silently change encoder,
@@ -34,8 +38,70 @@ pub(crate) struct Encoding {
     pub speculative: std::sync::atomic::AtomicBool,
     pub queued: Mutex<Option<LiveWait>>,
     pub policy_retry: std::sync::atomic::AtomicBool,
-    #[cfg(test)]
-    pub admission_pause: Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Set while a refused prepared successor has asked its own viewer's
+    /// predecessor to give back an encoder permit. A speculative rendition
+    /// registers no pool waiter, so without this its driver would not retry
+    /// until the next GET arrived — after the permit it asked for had been
+    /// released, and possibly after the client's request budget had expired.
+    pub handoff_wait: std::sync::atomic::AtomicBool,
+    /// Why the most recent admission attempt was refused, for attribution.
+    pub last_refusal: Mutex<Option<PermitRefusal>>,
+    /// The pool reservation a yielding predecessor made for this successor.
+    /// Only this rendition's admission can claim it.
+    pub handoff_claim: Mutex<Option<u64>>,
+    /// The admission point a race test can pause at; production installs
+    /// [`NoopEncodingHooks`] (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
+    pub hooks: Box<dyn EncodingHooks>,
+}
+
+/// The points of an encoding's admission that a test can pause at
+/// (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
+///
+/// Every [`Encoding`] holds one of these in every build, so its layout and the
+/// await points of [`Encoding::try_permit`] are the same in the test and
+/// release binaries. The hooks are chosen where the encoding is built:
+/// production (`TranscodeManager::prepare_vod_encoding`) installs
+/// [`NoopEncodingHooks`], and the test fixtures, which build their own
+/// encodings, install `EncodingAdmissionPause`. A paused hook's timing is still
+/// a test artefact: what this makes identical is the struct and the set of
+/// await points, not scheduling.
+///
+/// `Any` is a supertrait only so a test can reach the pause it installed on an
+/// encoding it handed to a rendition.
+pub(crate) trait EncodingHooks: std::any::Any + Send + Sync {
+    /// A producer start asked for an encoder permit, before admission reads
+    /// the node's pool policy.
+    fn before_admission(&self) -> HookFuture<'_>;
+}
+
+/// What production installs: the admission point is already ready.
+pub(crate) struct NoopEncodingHooks;
+
+impl EncodingHooks for NoopEncodingHooks {
+    fn before_admission(&self) -> HookFuture<'_> {
+        Box::pin(HookReady)
+    }
+}
+
+/// What the test fixtures install: nothing pauses until a test arms the next
+/// admission with [`Encoding::pause_next_admission`]; the armed pause is taken
+/// by that one admission.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct EncodingAdmissionPause {
+    armed: Mutex<Option<Arc<AsyncPause>>>,
+}
+
+#[cfg(test)]
+impl EncodingHooks for EncodingAdmissionPause {
+    fn before_admission(&self) -> HookFuture<'_> {
+        let pause = self.armed.lock().expect("admission test pause").take();
+        Box::pin(async move {
+            if let Some(pause) = pause {
+                pause.hold().await;
+            }
+        })
+    }
 }
 
 impl std::fmt::Debug for Encoding {
@@ -49,6 +115,18 @@ impl std::fmt::Debug for Encoding {
             .field("grid", &self.grid)
             .finish_non_exhaustive()
     }
+}
+
+/// One refused encoder admission, with the pool state that refused it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PermitRefusal {
+    pub priority: Priority,
+    pub hardware_limit: usize,
+    pub software_budget: usize,
+    /// The frozen plan needs more threads than the whole software budget; no
+    /// release anywhere can admit it.
+    pub over_budget: bool,
+    pub pool: PoolSnapshot,
 }
 
 /// Kept by the pipe owner until the exact process has been reaped. The permit
@@ -85,8 +163,24 @@ impl Encoding {
             ),
             queued: Mutex::new(None),
             policy_retry: std::sync::atomic::AtomicBool::new(false),
-            admission_pause: Mutex::new(None),
+            handoff_wait: std::sync::atomic::AtomicBool::new(false),
+            last_refusal: Mutex::new(None),
+            handoff_claim: Mutex::new(None),
+            hooks: Box::new(EncodingAdmissionPause::default()),
         })
+    }
+
+    /// Arm a pause at this encoding's next admission, before it reads the pool
+    /// policy. Only test-built encodings carry the pausing hooks.
+    #[cfg(test)]
+    pub(crate) fn pause_next_admission(&self) -> Arc<AsyncPause> {
+        let hooks: &dyn std::any::Any = &*self.hooks;
+        let pauses = hooks
+            .downcast_ref::<EncodingAdmissionPause>()
+            .expect("test encodings install EncodingAdmissionPause");
+        let pause = AsyncPause::new("encoding admission");
+        *pauses.armed.lock().expect("admission test pause") = Some(Arc::clone(&pause));
+        pause
     }
 
     pub(crate) fn mark_speculative(&self) {
@@ -99,6 +193,10 @@ impl Encoding {
             .store(false, std::sync::atomic::Ordering::Release);
     }
 
+    pub(crate) fn is_speculative(&self) -> bool {
+        self.speculative.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     fn priority(&self) -> Priority {
         if self.speculative.load(std::sync::atomic::Ordering::Acquire) {
             Priority::Speculative
@@ -108,17 +206,7 @@ impl Encoding {
     }
 
     pub async fn try_permit(&self) -> Option<EncodePermit> {
-        #[cfg(test)]
-        let pause = self
-            .admission_pause
-            .lock()
-            .expect("admission test seam")
-            .take();
-        #[cfg(test)]
-        if let Some(pause) = pause {
-            pause.wait().await;
-            pause.wait().await;
-        }
+        self.hooks.before_admission().await;
         self.try_permit_after(self.store.get_setting_pair(
             plurx_core::store::keys::MAX_HW_SESSIONS,
             plurx_core::store::keys::SW_POOL_THREADS,
@@ -141,6 +229,10 @@ impl Encoding {
             tokio::time::timeout(std::time::Duration::from_secs(1), policy).await
         else {
             self.cancel_wait();
+            self.last_refusal
+                .lock()
+                .expect("VOD encoder refusal")
+                .take();
             self.policy_retry
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             return None;
@@ -158,25 +250,46 @@ impl Encoding {
         if priority == Priority::Live {
             queued.get_or_insert_with(|| self.admissions.wait_for_slot());
         }
+        let refuse = |over_budget: bool| {
+            *self.last_refusal.lock().expect("VOD encoder refusal") = Some(PermitRefusal {
+                priority,
+                hardware_limit,
+                software_budget,
+                over_budget,
+                pool: self.admissions.snapshot(),
+            });
+            None
+        };
         // The shared pool deliberately admits one oversize job when otherwise
         // idle. A frozen VOD recipe cannot shrink its thread demand on retry,
         // so an operator lowering the budget below that exact plan is an
         // explicit refusal rather than an oversize exception.
         if self.resources.cpu_threads > software_budget {
-            return None;
+            return refuse(true);
         }
-        let bundle = self.admissions.try_admit_bundle(
+        let claim = *self.handoff_claim.lock().expect("VOD handoff claim");
+        let Some(bundle) = self.admissions.try_admit_bundle_claiming(
             hardware_limit,
             software_budget,
             &self.resources,
             priority,
-        )?;
+            claim,
+        ) else {
+            return refuse(false);
+        };
         let (hardware, software) = bundle.into_parts();
         let permit = EncodePermit {
             _hardware: hardware,
             _software: software,
         };
         queued.take();
+        self.handoff_claim.lock().expect("VOD handoff claim").take();
+        self.handoff_wait
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.last_refusal
+            .lock()
+            .expect("VOD encoder refusal")
+            .take();
         Some(permit)
     }
 
@@ -184,10 +297,49 @@ impl Encoding {
         self.queued.lock().expect("VOD encoder admission").take();
         self.policy_retry
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.handoff_wait
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Some(token) = self.handoff_claim.lock().expect("VOD handoff claim").take() {
+            self.admissions.release_reservation(token);
+        }
+    }
+
+    /// Install the reservation a yielding predecessor made for this rendition,
+    /// releasing any earlier one it replaces.
+    pub(crate) fn accept_handoff_claim(&self, token: u64) {
+        if let Some(earlier) = self
+            .handoff_claim
+            .lock()
+            .expect("VOD handoff claim")
+            .replace(token)
+        {
+            self.admissions.release_reservation(earlier);
+        }
     }
 
     pub fn is_waiting(&self) -> bool {
-        self.policy_retry.load(std::sync::atomic::Ordering::Relaxed) || self.has_live_wait()
+        self.policy_retry.load(std::sync::atomic::Ordering::Relaxed)
+            || self.handoff_wait.load(std::sync::atomic::Ordering::Relaxed)
+            || self.has_live_wait()
+    }
+
+    pub(crate) fn last_refusal(&self) -> Option<PermitRefusal> {
+        *self.last_refusal.lock().expect("VOD encoder refusal")
+    }
+
+    /// Whether returning a permit of `released`'s size would let this exact
+    /// speculative plan start, under the limits its last refusal read.
+    pub(crate) fn fits_after_release(&self, released: &TranscodeResourceEstimate) -> bool {
+        let Some(refusal) = self.last_refusal() else {
+            return false;
+        };
+        !refusal.over_budget
+            && self.admissions.speculative_fits_after_release(
+                refusal.hardware_limit,
+                refusal.software_budget,
+                &self.resources,
+                released,
+            )
     }
 
     /// Whether this exact rendition has registered a foreground pool waiter.

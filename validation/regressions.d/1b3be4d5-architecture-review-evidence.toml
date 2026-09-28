@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["1b3be4d5", "adc45d60", "e0164d78", "dac3fe8e", "5479dfa2", "799b5c22"]
+reason = "These commits reconcile architecture-review status, fleet evidence, and the D-02 plan text; they change documentation only and no runtime behavior."
+ignore = true

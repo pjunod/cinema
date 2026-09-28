@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["235569df"]
+points = ["live-tv.integration"]
+checks = ["rust-gate"]
+reason = "The live source probe kept only the first audio stream and every encoded route pinned -ac to a channel count that was stereo whenever the probe had not seen the layout, so an ATSC 3.0 programme carrying an AC-3 5.1 simulcast beside its AC-4 track (VPM 157.x on a real FLEX 4K) always decoded AC-4 and encoded stereo AAC. The coverage in atsc_audio_tests pins that the copyable simulcast wins the selection and is mapped by its PID, that copied AC-3 rides MPEG-TS when the player claims that pair instead of being converted for the fMP4 init-file race, that described tracks and other languages never win, and that an encoded route carries an aformat channel-layout list under the player's ceiling with no -ac at all. Executed against the unfixed planner these assertions fail on the track ordinal and on the presence of -ac; the fixed daemon was also run against the real tuner from nuc3 (scripts/live-tv-hardware --self-host), where 157.1 came back copy/copy in MPEG-TS with the AC-3 5.1 track and 6.2 encoded with its SAR 40:33 intact."

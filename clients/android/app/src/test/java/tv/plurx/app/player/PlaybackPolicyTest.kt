@@ -118,6 +118,8 @@ class PlaybackPolicyTest {
             Rung(720, total_kbps = 4_096),
             Rung(480, total_kbps = 2_048),
             Rung(360, total_kbps = 896),
+            Rung(240, total_kbps = 660),
+            Rung(144, total_kbps = 260),
         )
         val options = qualityOptions(ladder)
 
@@ -129,11 +131,15 @@ class PlaybackPolicyTest {
                 PlaybackQuality.Q720,
                 PlaybackQuality.Q480,
                 PlaybackQuality.Q360,
+                PlaybackQuality.Q240,
+                PlaybackQuality.Q144,
             ),
             options.map { it.quality },
         )
         assertEquals("1080p · 8.2 Mbps", options[2].label)
         assertEquals("360p · 896 kbps", options[5].label)
+        assertEquals("240p · 660 kbps", options[6].label)
+        assertEquals("144p · 260 kbps", options[7].label)
     }
 
     @Test
@@ -456,5 +462,55 @@ class LadderVerdictTest {
                     isCompatibilityPlaybackError(ERROR_CODE_BEHIND_LIVE_WINDOW),
             ),
         )
+    }
+
+    // ---- node failover is gated on the status the failure carried -----------
+
+    @Test
+    fun aConnectionLevelTransportFailureTriesAnotherNode() {
+        // No response at all: refused, reset, timed out. Another ingress is
+        // exactly what this is for.
+        assertTrue(nodeFailoverEligible(2001, null))
+        assertTrue(nodeFailoverEligible(2002, null))
+        assertTrue(nodeFailoverEligible(2004, null))
+    }
+
+    @Test
+    fun aServerErrorTriesAnotherNodeExceptWhenEveryNodeWouldSayIt() {
+        assertTrue(nodeFailoverEligible(2004, 500))
+        assertTrue(nodeFailoverEligible(2004, 502))
+        assertTrue(nodeFailoverEligible(2004, 503))
+        // 501 and 505 are statements about the build and the protocol, and
+        // every node runs the same build.
+        assertFalse(nodeFailoverEligible(2004, 501))
+        assertFalse(nodeFailoverEligible(2004, 505))
+    }
+
+    @Test
+    fun aClientErrorIsTerminalAndNeverWalksTheIngressList() {
+        // The regression this closes: every one of these used to spend a full
+        // player prepare per node before the viewer saw the same error.
+        assertFalse(nodeFailoverEligible(2004, 401))
+        assertFalse(nodeFailoverEligible(2004, 403))
+        assertFalse(nodeFailoverEligible(2004, 404))
+        assertFalse(nodeFailoverEligible(2004, 409))
+        assertFalse(nodeFailoverEligible(2004, 410))
+        assertFalse(nodeFailoverEligible(2004, 416))
+    }
+
+    @Test
+    fun aNonTransportErrorIsNeverEligibleWhateverTheStatus() {
+        // The allowlist still decides first; the status only narrows it.
+        assertFalse(nodeFailoverEligible(3001, 500))
+        assertFalse(nodeFailoverEligible(4001, null))
+        assertFalse(nodeFailoverEligible(ERROR_CODE_BEHIND_LIVE_WINDOW, 503))
+    }
+
+    @Test
+    fun a2xxOr3xxStatusIsNotAFailoverEither() {
+        // Media3 raises 2004 for any non-2xx, but a status outside 5xx is the
+        // same answer everywhere, so the `else` branch owns it.
+        assertFalse(nodeFailoverEligible(2004, 304))
+        assertFalse(nodeFailoverEligible(2004, 302))
     }
 }

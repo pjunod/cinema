@@ -276,6 +276,7 @@ test("Activity detail request guard executes one current request and releases", 
      const ACTIVITY_DVR={rows:[],next:null,loaded:false,error:null};
      const DVR_PAGE={pendingId:null,selectedId:null,closedByUser:false};
      function dvrSetOverview(){} function loadDvrRecent(){} function selectDvrDetail(){}
+     function refreshDurableActivity(){}
      const matchMedia=()=>({matches:false});
      ${shippedSource("renderActivityBody")};
      return {renderActivityBody,busy:()=>ACTIVITY_DETAIL_BUSY,
@@ -852,7 +853,7 @@ test("Settings loads only the active tab manifest", () => {
     livetv: { required: ["settings"], secondary: ["developerReadiness"] },
     analysis: { required: ["settings", "analysis"], secondary: [] },
     maintenance: { required: ["settings", "dvConversions"], secondary: ["developerReadiness"] },
-    users: { required: ["users"], secondary: [] },
+    users: { required: ["settings", "users"], secondary: [] },
     system: { required: ["sys"], secondary: ["playbackEvents"] },
     cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness"] },
     integrations: { required: ["settings", "trakt"], secondary: [] },
@@ -1641,7 +1642,7 @@ test("Settings executes exact required and secondary waves for every tab", async
     livetv:{required:["/settings"],secondary:["/developer/readiness"]},
     analysis:{required:["/settings","/analysis/summary"],secondary:[]},
     maintenance:{required:["/settings","/dv-conversions"],secondary:["/developer/readiness"]},
-    users:{required:["/users"],secondary:[]},
+    users:{required:["/settings","/users"],secondary:[]},
     system:{required:["/system"],secondary:["playback-events","system-log"]},
     cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","/developer/readiness","cluster-log"]},
     integrations:{required:["/settings","/trakt/status"],secondary:[]},
@@ -1768,7 +1769,7 @@ test("stale authorization responses cannot revoke or feed a newer session", asyn
     `let API="/api/v1",TOKEN="old",AUTH_GENERATION=1,logoutCount=0;
      const PlaybackPolicy={parseStreamFailure:()=>null};
      function logout(){logoutCount++;TOKEN=null;AUTH_GENERATION++;}
-     ${shippedSource("api")};
+     ${(require("./shell-source.js").apiPrelude()+shippedSource("api"))};
      return {api,login:(token)=>{TOKEN=token;AUTH_GENERATION++;},state:()=>({TOKEN,AUTH_GENERATION,logoutCount})};`,
   )(fetch);
   const first=harness.api("/hubs"), second=harness.api("/home/previews");

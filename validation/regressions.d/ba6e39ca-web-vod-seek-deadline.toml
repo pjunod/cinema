@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["ba6e39ca", "528316c2"]
+points = ["playback.pipeline", "web.experience"]
+checks = ["web-static"]
+reason = "The shipped seekTo, playbackProgressTick, beginWait, persistentWait, and stallDiagnose paths are exercised by tests/playback/seek-control.test.js under make web-check. Its VOD cases retain the local route, the 20 s single fallback, target coverage and actual presentation without a usable frame sequence, superseded-intent fencing, coverage-loss cancellation and a due waiting timer's missing-media recheck, while preserving the 8 s rule after landing. Reverting the first commit removes the bounded VOD fallback; reverting the review correction restores an early recovery-budget spend or reopens a stream that has already presented."

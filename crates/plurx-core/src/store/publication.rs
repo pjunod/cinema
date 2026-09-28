@@ -149,7 +149,51 @@ pub struct PublicationStore<'a> {
     fence: Option<PublicationFence>,
 }
 
+struct FencedProviderBudget {
+    store: Arc<dyn Store>,
+    fence: PublicationFence,
+}
+
+#[async_trait::async_trait]
+impl crate::metadata::budget::ProviderBudget for FencedProviderBudget {
+    async fn update(
+        &self,
+        provider: crate::metadata::Provider,
+        action: super::background_jobs_provider::ProviderBudgetAction,
+    ) -> Result<super::background_jobs_provider::ProviderBudgetOutcome, StoreError> {
+        let publisher = PublicationStore::fenced(self.store.as_ref(), self.fence.clone());
+        let guard = publisher.token().await?;
+        let lease = guard
+            .as_ref()
+            .ok_or_else(|| publisher.invalidated())?
+            .clone();
+        self.store
+            .update_provider_budget(super::background_jobs_provider::ProviderBudgetRequest {
+                provider,
+                lease,
+                now_ms: unix_ms()?,
+                action,
+            })
+            .await
+    }
+}
+
 impl<'a> PublicationStore<'a> {
+    /// A client keeps the same renewable publication fence as its maintenance
+    /// pass. Each dispatched request is charged before sending; waiting does
+    /// not hold the fence's read guard or prevent lease renewal.
+    pub fn provider_budget(
+        &self,
+        store: Arc<dyn Store>,
+    ) -> crate::metadata::budget::SharedProviderBudget {
+        self.fence.as_ref().map(|fence| {
+            Arc::new(FencedProviderBudget {
+                store,
+                fence: fence.clone(),
+            }) as Arc<dyn crate::metadata::budget::ProviderBudget>
+        })
+    }
+
     pub async fn apply_identity_repair(
         &self,
         snapshot: &IdentityRepairSnapshot,
@@ -176,6 +220,46 @@ impl<'a> PublicationStore<'a> {
             store,
             fence: Some(fence),
         }
+    }
+
+    /// Keep the domain heartbeat behind this read guard while the queue binds
+    /// or completes its exact attempt. Catalogue writes use the same lock.
+    pub async fn bind_library_job(
+        &self,
+        token: super::background_jobs::JobToken,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let guard = self.token().await?;
+        let lease = guard.as_ref().ok_or_else(|| self.invalidated())?.clone();
+        self.store
+            .bind_library_job(super::background_jobs::BindLibraryJob {
+                token,
+                lease,
+                now_ms,
+            })
+            .await
+    }
+
+    /// False requires reading the request result: a previous acknowledgement
+    /// may have been lost, or either of the two owners may have changed.
+    pub async fn complete_library_work(
+        &self,
+        token: super::background_jobs::JobToken,
+        request_id: String,
+        result: super::background_jobs_library::LibraryWorkResult,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let guard = self.token().await?;
+        let lease = guard.as_ref().ok_or_else(|| self.invalidated())?.clone();
+        self.store
+            .complete_library_work(super::background_jobs::CompleteLibraryWork {
+                token,
+                lease,
+                request_id,
+                result,
+                now_ms,
+            })
+            .await
     }
 
     pub fn raw(&self) -> &'a dyn Store {
@@ -306,6 +390,24 @@ impl<'a> PublicationStore<'a> {
             Box::pin(async move {
                 self.store
                     .put_setting_fenced(key, value, &lease, &replacement)
+                    .await
+            })
+        })
+        .await
+    }
+
+    pub async fn add_downloaded_subtitle(
+        &self,
+        file_id: i64,
+        track: &crate::domain::DownloadedSubtitle,
+    ) -> Result<bool, StoreError> {
+        if self.fence.is_none() {
+            return self.store.add_downloaded_subtitle(file_id, track).await;
+        }
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .add_downloaded_subtitle_fenced(file_id, track, &lease, &replacement)
                     .await
             })
         })
@@ -553,6 +655,76 @@ impl<'a> PublicationStore<'a> {
         };
         self.store
             .link_dvr_recording_media_with_event(recording_id, item_id, file_id, now_ms, &event)
+            .await
+    }
+
+    /// Pure probe demand is tied to the current coordinator generation.
+    pub async fn enqueue_probe(
+        &self,
+        file: &crate::domain::MediaFile,
+        pipeline: &str,
+    ) -> Result<Option<String>, StoreError> {
+        use super::background_jobs::{EnqueueJob, EnqueueOutcome, JobPayload, JobRequest};
+        use super::background_jobs_probe::{generation, ProbeCoordinator};
+        if self.fence.is_none() {
+            return Ok(None);
+        }
+        let guard = self.token().await?;
+        let lease = guard.as_ref().ok_or_else(|| self.invalidated())?;
+        let coordinator = ProbeCoordinator::from_lease(lease);
+        if !coordinator.validate() {
+            return Ok(None);
+        }
+        let generation = generation(file.id, file.size, file.mtime, &coordinator, pipeline);
+        let now = unix_ms()?;
+        let result = self
+            .store
+            .enqueue_job(EnqueueJob {
+                id: uuid::Uuid::new_v4().to_string(),
+                dedupe_key: format!("probe:{generation}"),
+                priority: 1,
+                not_before_ms: now,
+                now_ms: now,
+                payload: JobPayload::MediaProbe {
+                    file_id: file.id,
+                    source_size: file.size,
+                    source_mtime: file.mtime,
+                    source_generation: generation.clone(),
+                    probe_digest: pipeline.into(),
+                    coordinator,
+                },
+                request: JobRequest {
+                    scope: "probe".into(),
+                    request_id: generation.clone(),
+                    request_digest: generation,
+                    consumer_kind: "probe".into(),
+                    consumer_ref: file.id.to_string(),
+                    target_node_id: None,
+                    deadline_ms: Some(now.saturating_add(300_000)),
+                    retain_identity: false,
+                },
+            })
+            .await?;
+        Ok(match result {
+            EnqueueOutcome::Accepted { job_id, .. }
+            | EnqueueOutcome::Existing {
+                job_id,
+                cancelled: false,
+                ..
+            } => Some(job_id),
+            _ => None,
+        })
+    }
+
+    pub async fn apply_probe(&self, job_id: &str) -> Result<bool, StoreError> {
+        let guard = self.token().await?;
+        let lease = guard.as_ref().ok_or_else(|| self.invalidated())?.clone();
+        self.store
+            .apply_probe_job(super::background_jobs_probe::ApplyProbeJob {
+                job_id: job_id.into(),
+                lease,
+                now_ms: unix_ms()?,
+            })
             .await
     }
 
@@ -968,17 +1140,68 @@ impl<'a> PublicationStore<'a> {
         .await
     }
 
-    /// Enqueue one speculative generation under the singleton candidate-pass
-    /// lease. Worker ownership is allocated later by the queue row itself.
-    pub async fn enqueue_pretranscode_job(
+    pub async fn sync_predictions(
         &self,
-        job: &NewPretranscodeJob,
-    ) -> Result<bool, StoreError> {
+        requests: Vec<super::NewAnalysisRequest>,
+        desired_files: Vec<i64>,
+    ) -> Result<(), StoreError> {
         self.fenced_call(move |lease, replacement| {
             Box::pin(async move {
                 self.store
-                    .enqueue_pretranscode_job(job, &lease, &replacement)
+                    .sync_predictions(super::background_jobs_predictions::SyncPredictions {
+                        requests,
+                        desired_files,
+                        lease,
+                        replacement,
+                        now_ms: unix_ms()?,
+                    })
                     .await
+            })
+        })
+        .await
+    }
+
+    /// Admit one hot-copy interest under the discovery lease. Worker execution
+    /// remains owned by the common queue, never by this planner lease.
+    pub async fn enqueue_hot_copy(
+        &self,
+        request: super::background_jobs::EnqueueJob,
+    ) -> Result<super::background_jobs::EnqueueOutcome, StoreError> {
+        if request.request.scope != "automatic:hot-copy"
+            || !matches!(
+                request.payload,
+                super::background_jobs::JobPayload::ArtifactHydrate { .. }
+            )
+        {
+            return Err(StoreError::Task("invalid hot copy request".into()));
+        }
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .enqueue_job_fenced(request, lease, replacement)
+                    .await
+            })
+        })
+        .await
+    }
+
+    /// Admit a speculative request through the shared durable queue while
+    /// preserving the singleton discovery publication fence.
+    pub async fn enqueue_durable_pretranscode(
+        &self,
+        job: &NewPretranscodeJob,
+    ) -> Result<bool, StoreError> {
+        let request = super::background_jobs_pretranscode::enqueue_request(job)?;
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                let outcome = self
+                    .store
+                    .enqueue_job_fenced(request, lease, replacement)
+                    .await?;
+                Ok(matches!(
+                    outcome,
+                    super::background_jobs::EnqueueOutcome::Accepted { .. }
+                ))
             })
         })
         .await

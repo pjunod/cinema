@@ -12,15 +12,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -30,7 +33,13 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.mapLatest
+import kotlinx.coroutines.withContext
 import tv.plurx.app.data.Item
 import tv.plurx.app.ui.components.ChoicePicker
 import tv.plurx.app.ui.components.RequestInitialFocus
@@ -43,8 +52,6 @@ import tv.plurx.app.ui.theme.Muted
 internal enum class WatchFilter(val label: String) {
     Everything("Everything"), Unwatched("Unwatched"), InProgress("In progress"), Watched("Watched")
 }
-
-private data class LibraryLoad(val items: List<Item> = emptyList(), val error: String? = null)
 
 @Composable
 fun LibraryScreen(
@@ -64,34 +71,27 @@ fun LibraryScreen(
     // viewer set up.
     var sort by rememberSaveable(libraryIds) { mutableStateOf(if (kind == "home") "recorded" else "title") }
     var filter by rememberSaveable(libraryIds) { mutableStateOf(WatchFilter.Everything) }
-    // Keyed on the libraries alone. Sorting is client-side (`sortMerged`), so
-    // keying it on `sort` too meant every sort change re-fetched the whole
-    // collection behind a spinner to receive the same items back.
-    val load by produceState<LibraryLoad?>(initialValue = null, libraryIds) {
-        val loaded = mutableListOf<Item>()
-        try {
-            libraryIds.forEach { id ->
-                vm.libraryPages(id) { page ->
-                    loaded += page
-                    // Paint the first page after one round trip.
-                    value = LibraryLoad(loaded.toList())
-                }
-            }
-            value = LibraryLoad(loaded.toList())
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            value = if (loaded.isEmpty()) {
-                LibraryLoad(error = e.message ?: "Couldn't load this library")
-            } else {
-                // Some of it arrived; a later page failing is not a reason to
-                // replace what the viewer is already looking at.
-                LibraryLoad(loaded.toList())
-            }
-        }
+    val pager = remember(vm, libraryIds, sort) { vm.libraryPager(libraryIds, sort) }
+    val load by pager.state.collectAsStateWithLifecycle()
+    val gridState = rememberLazyGridState()
+    var shown by remember(pager) { mutableStateOf<List<Item>>(emptyList()) }
+    LaunchedEffect(pager) { pager.ensure(40) }
+    LaunchedEffect(pager, gridState) {
+        snapshotFlow {
+            val visible = gridState.layoutInfo.visibleItemsInfo
+            val last = visible.maxOfOrNull { it.index } ?: 0
+            last + maxOf(12, visible.size)
+        }.distinctUntilChanged().collectLatest { pager.ensure(it) }
     }
-    val shown = remember(load, sort, filter) {
-        sortMerged(load?.items.orEmpty(), sort).filter { matchesFilter(it, filter) }
+    LaunchedEffect(pager, filter) {
+        pager.setDriveToCompletion(filter != WatchFilter.Everything)
+    }
+    DisposableEffect(pager) { onDispose { pager.setDriveToCompletion(false) } }
+    LaunchedEffect(pager, filter) {
+        combine(pager.state, snapshotFlow { filter }.debounce(150)) { state, selected -> state.decided to selected }
+            .mapLatest { (snapshot, selected) ->
+                withContext(Dispatchers.Default) { snapshot.filter { matchesFilter(it, selected) } }
+            }.collectLatest { shown = it }
     }
     val posterWidth = (preferences.posterSize.widthDp * formFactor.posterScale()).dp
 
@@ -110,8 +110,8 @@ fun LibraryScreen(
             }
             Column(Modifier.weight(1f)) {
                 Text(title, style = MaterialTheme.typography.titleLarge)
-                if (load != null && load?.error == null) {
-                    Text("${shown.size} of ${load?.items?.size ?: 0}", color = Muted, style = MaterialTheme.typography.labelMedium)
+                if (load.error == null) {
+                    Text("${load.loadedCount} of ${load.total} loaded · ${shown.size} match", color = Muted, style = MaterialTheme.typography.labelMedium)
                 }
             }
         }
@@ -147,14 +147,15 @@ fun LibraryScreen(
         }
 
         when {
-            load == null -> LoadingBox()
-            load?.error != null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(load?.error.orEmpty(), color = MaterialTheme.colorScheme.error)
+            load.loadedCount == 0 && !load.complete && load.error == null -> LoadingBox()
+            load.error != null && load.decided.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(load.error.orEmpty(), color = MaterialTheme.colorScheme.error)
             }
             shown.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(if (filter == WatchFilter.Everything) "This library is empty." else "No titles match this filter.", color = Muted)
+                Text(if (!load.complete) "Still loading — ${load.loadedCount} of ${load.total} titles checked" else if (filter == WatchFilter.Everything) "This library is empty." else "No titles match this filter.", color = Muted)
             }
             else -> LazyVerticalGrid(
+                state = gridState,
                 columns = GridCells.Adaptive(minSize = posterWidth),
                 contentPadding = PaddingValues(start = side, end = side, top = 8.dp, bottom = 32.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -202,27 +203,4 @@ internal fun matchesFilter(item: Item, filter: WatchFilter): Boolean {
         WatchFilter.InProgress -> inProgress
         WatchFilter.Watched -> watched
     }
-}
-
-/**
- * Re-sort the concatenation of several shares into one grid. Each share
- * arrives sorted on its own, so without this a merged category is N sorted
- * runs laid end to end — most visibly for "Recently added", which is the
- * server's `added_at` and had no decoded field to sort by at all.
- */
-internal fun sortMerged(items: List<Item>, sort: String): List<Item> = when (sort) {
-    "title" -> items.sortedBy { sortableTitle(it.title) }
-    "added" -> items.sortedWith(
-        compareByDescending<Item> { it.added_at ?: Long.MIN_VALUE }.thenBy { sortableTitle(it.title) },
-    )
-    "year" -> items.sortedWith(compareByDescending<Item> { it.year ?: Int.MIN_VALUE }.thenBy { sortableTitle(it.title) })
-    "recorded" -> items.sortedWith(compareByDescending<Item> { it.recorded_at.orEmpty() }.thenBy { sortableTitle(it.title) })
-    "resolution" -> items.sortedWith(compareByDescending<Item> { it.resolution ?: Long.MIN_VALUE }.thenBy { sortableTitle(it.title) })
-    else -> items
-}
-
-private fun sortableTitle(title: String): String {
-    val lower = title.lowercase()
-    return listOf("the ", "a ", "an ").firstOrNull { lower.startsWith(it) }
-        ?.let { lower.removePrefix(it) } ?: lower
 }

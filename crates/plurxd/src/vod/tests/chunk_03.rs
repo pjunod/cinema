@@ -28,6 +28,7 @@
                 last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
+                prepared_incarnation: None,
                 terminal_cleanup: None,
                 tombstone: None,
             },
@@ -73,6 +74,7 @@
                 last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
+                prepared_incarnation: None,
                 terminal_cleanup: None,
                 tombstone: None,
             },
@@ -169,7 +171,7 @@
         let session_id = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
         activate_control_route(store.as_ref(), &session_id, &generation).await;
-        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let serve = local_serve(base.path().to_path_buf(), store);
         let rendition = synthetic_rendition(base.path()).await;
         let before = Instant::now() - Duration::from_secs(10);
         insert_control_session(&serve, &session_id, Arc::clone(&rendition), before).await;
@@ -260,7 +262,7 @@
         let session_id = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
         activate_control_route(store.as_ref(), &session_id, &generation).await;
-        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let serve = local_serve(base.path().to_path_buf(), store);
         let rendition = synthetic_rendition(base.path()).await;
         let before = Instant::now() - Duration::from_secs(10);
         insert_control_session(&serve, &session_id, Arc::clone(&rendition), before).await;
@@ -482,7 +484,7 @@
         let session_id = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
         activate_control_route(store.as_ref(), &session_id, &generation).await;
-        let serve = VodServe::new(base.path().to_path_buf(), store.clone());
+        let serve = local_serve(base.path().to_path_buf(), store.clone());
         let rendition = synthetic_rendition(base.path()).await;
         insert_control_session(&serve, &session_id, rendition, Instant::now()).await;
 
@@ -596,7 +598,7 @@
         let session_id = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
         activate_control_route(store.as_ref(), &session_id, &generation).await;
-        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let serve = local_serve(base.path().to_path_buf(), store);
         let rendition = synthetic_rendition(base.path()).await;
         insert_control_session(&serve, &session_id, Arc::clone(&rendition), Instant::now()).await;
         let client = uuid::Uuid::new_v4().to_string();
@@ -612,13 +614,12 @@
         // Pause the session-owned task at the exact pre-detach point. Status
         // preparation is therefore free to inspect the reader registry before
         // End publishes its cleanup marker.
-        let terminal_detach_pause = Arc::new(tokio::sync::Barrier::new(2));
-        *serve
+        let terminal_detach_pause = serve.arm_terminal_detach_pause_for_test();
+        let control_applied = serve
             .shared
-            .terminal_detach_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(Arc::clone(&terminal_detach_pause));
+            .test_hooks()
+            .control_applied
+            .arm("vod control applied");
         let pending = {
             let serve = Arc::clone(&serve);
             let session_id = session_id.clone();
@@ -652,6 +653,21 @@
                     .await
             })
         };
+        // The applied point sits after the End commit published the
+        // session-owned cleanup and before that cleanup is spawned.
+        let applied = control_applied.reached().await;
+        assert!(
+            serve.shared.sessions.lock().await[&session_id]
+                .terminal_cleanup
+                .is_some(),
+            "the End commit publishes its cleanup before the applied point"
+        );
+        assert!(
+            !terminal_detach_pause.was_reached(),
+            "the terminal cleanup is spawned after the applied point"
+        );
+        assert!(rendition.readers.lock().await.contains_key(&session_id));
+        applied.release();
         let cleanup = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let cleanup = serve.shared.sessions.lock().await[&session_id]
@@ -666,7 +682,7 @@
         })
         .await
         .expect("terminal commit publishes session-owned cleanup");
-        terminal_detach_pause.wait().await;
+        let detach_held = terminal_detach_pause.reached().await;
         assert!(!cleanup.is_finished());
         pending.abort();
         let cancellation = match pending.await {
@@ -675,13 +691,11 @@
         };
         assert!(cancellation.is_cancelled());
 
-        let terminal_replay_pause = Arc::new(tokio::sync::Barrier::new(2));
-        *serve
+        let terminal_replay_pause = serve
             .shared
-            .terminal_replay_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(Arc::clone(&terminal_replay_pause));
+            .test_hooks()
+            .terminal_replay
+            .arm("vod terminal replay before the detach fence");
         let replay = {
             let serve = Arc::clone(&serve);
             let session_id = session_id.clone();
@@ -709,14 +723,14 @@
                     .await
             })
         };
-        terminal_replay_pause.wait().await;
+        let replay_held = terminal_replay_pause.reached().await;
         assert!(
             !committer.started.load(Acquire),
             "a replacement waiter at the cleanup fence cannot expose terminal settlement while detach is pinned"
         );
-        terminal_replay_pause.wait().await;
+        replay_held.release();
         assert!(rendition.readers.lock().await.contains_key(&session_id));
-        terminal_detach_pause.wait().await;
+        detach_held.release();
         tokio::time::timeout(Duration::from_secs(1), cleanup.wait())
             .await
             .expect("detached cleanup survives request cancellation");
@@ -749,7 +763,7 @@
         let base = crate::test_tempdir().expect("base");
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
         activate_control_route(store.as_ref(), VIEWER, GENERATION).await;
-        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let serve = local_serve(base.path().to_path_buf(), store);
         let rendition = synthetic_rendition(base.path()).await;
         insert_control_session(&serve, VIEWER, Arc::clone(&rendition), Instant::now()).await;
         let control = |sequence, snapshot| crate::playback_control::LocalControlRequest {
@@ -885,7 +899,7 @@
         let base = crate::test_tempdir().expect("base");
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
         activate_control_route(store.as_ref(), VIEWER, GENERATION).await;
-        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let serve = local_serve(base.path().to_path_buf(), store);
         let rendition = synthetic_rendition(base.path()).await;
         insert_control_session(&serve, VIEWER, Arc::clone(&rendition), Instant::now()).await;
         let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
@@ -896,12 +910,17 @@
         let target = entry_containing(&rendition.plan, 300.0);
         let ledger = Arc::clone(&rendition.readers.lock().await[VIEWER].marker_prewarm);
         ledger.lock().expect("ledger").enabled = true;
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *serve
+        let pause = serve
             .shared
-            .control_applied_pause
-            .lock()
-            .expect("pause lock") = Some(Arc::clone(&pause));
+            .test_hooks()
+            .control_applied
+            .arm("vod control applied");
+        // Armed across the whole exchange: only a terminal replay reaches it.
+        let terminal_replay = serve
+            .shared
+            .test_hooks()
+            .terminal_replay
+            .arm("vod terminal replay before the detach fence");
         let accepted = {
             let serve = Arc::clone(&serve);
             let snapshot = snapshot.clone();
@@ -921,7 +940,7 @@
                     .await
             })
         };
-        pause.wait().await;
+        let held = pause.reached().await;
         assert_eq!(
             rendition.readers.lock().await[VIEWER].frontier,
             target,
@@ -930,11 +949,7 @@
         assert!(!ledger.lock().expect("ledger").enabled, "accepted intent invalidates old speculation even when the later marker update is cancelled");
         accepted.abort();
         let _ = accepted.await;
-        *serve
-            .shared
-            .control_applied_pause
-            .lock()
-            .expect("pause lock") = None;
+        held.release();
         let replay = serve
             .control(crate::playback_control::LocalControlRequest {
                 session_id: VIEWER,
@@ -955,6 +970,11 @@
             crate::playback_control::ControlDisposition::Replay
         );
         assert_eq!(rendition.readers.lock().await[VIEWER].frontier, target);
+        assert!(
+            !terminal_replay.was_reached(),
+            "the terminal-replay point follows the lookup that found a terminal replay"
+        );
+        terminal_replay.release();
     }
 
     #[tokio::test]
@@ -963,8 +983,16 @@
         let serve = bare_serve(base.path());
         let rendition = synthetic_rendition(base.path()).await;
         rendition.attach_reader("viewer", 3).await;
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *serve.shared.segment_ready_pause.lock().expect("pause lock") = Some(Arc::clone(&pause));
+        let registered = serve
+            .shared
+            .test_hooks()
+            .segment_wait_registered
+            .arm("vod segment wait registered");
+        let ready = serve
+            .shared
+            .test_hooks()
+            .segment_ready
+            .arm("vod segment ready before open");
         let get = {
             let serve = Arc::clone(&serve);
             let rendition = Arc::clone(&rendition);
@@ -980,7 +1008,14 @@
                     .await
             })
         };
-        pause.wait().await;
+        registered.reached().await.release();
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !ready.was_reached(),
+            "the ready point follows the wait's answer, not its registration"
+        );
         // Publication follows the production GET's post-registration check;
         // the oneshot remembers Ready even if it precedes the next poll.
         rendition
@@ -994,7 +1029,7 @@
             .await
             .expect("publish");
         serve.shared.pool.satisfy(&rendition.key, 45);
-        pause.wait().await;
+        let ready_held = ready.reached().await;
         let windows = eviction_windows(&serve.shared, &rendition).await;
         let mut manifest = rendition.manifest.lock().await;
         rendition
@@ -1004,7 +1039,7 @@
             .expect("pressure sweep");
         assert!(manifest.state(45).expect("target").is_materialized());
         drop(manifest);
-        pause.wait().await;
+        ready_held.release();
         assert_eq!(get.await.expect("GET task").expect("response file").len, 12);
         assert!(serve.shared.pool.retained(&rendition.key).is_empty());
         let windows = eviction_windows(&serve.shared, &rendition).await;
@@ -1018,6 +1053,151 @@
             !manifest.state(45).expect("target").is_materialized(),
             "opening releases the narrow pin; old destinations do not become permanent retention"
         );
+    }
+
+    /// The ready point sits before the blocked GET opens its file: a file
+    /// unlinked while the GET is held there is not served, and the GET answers
+    /// pending instead.
+    #[tokio::test]
+    async fn segment_ready_point_precedes_the_file_open() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.attach_reader("viewer", 3).await;
+        let registered = serve
+            .shared
+            .test_hooks()
+            .segment_wait_registered
+            .arm("vod segment wait registered");
+        let ready = serve
+            .shared
+            .test_hooks()
+            .segment_ready
+            .arm("vod segment ready before open");
+        let get = {
+            let serve = Arc::clone(&serve);
+            let rendition = Arc::clone(&rendition);
+            tokio::spawn(async move {
+                serve
+                    .serve_segment(
+                        &rendition,
+                        "viewer",
+                        45,
+                        Duration::from_secs(5),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
+                    .await
+            })
+        };
+        registered.reached().await.release();
+        rendition
+            .dir
+            .materialize(
+                &mut *rendition.manifest.lock().await,
+                45,
+                b"target bytes",
+                now_ms(),
+            )
+            .await
+            .expect("publish");
+        serve.shared.pool.satisfy(&rendition.key, 45);
+        let held = ready.reached().await;
+        tokio::fs::remove_file(rendition.dir.path().join(segment_name(45)))
+            .await
+            .expect("unlink the published file behind the manifest");
+        held.release();
+        let answer = tokio::time::timeout(Duration::from_secs(5), get)
+            .await
+            .expect("the GET answers")
+            .expect("GET task");
+        assert!(
+            matches!(answer, Err(VodError::Pending { .. })),
+            "the GET opens its file after the ready point, so it finds the file gone"
+        );
+    }
+
+    /// The VOD registry built by the production constructor reads the no-op
+    /// hooks: every pause point is ready at its first poll, the route is read
+    /// from the Store, and a blocked GET crosses both of its points to a
+    /// response.
+    #[tokio::test]
+    async fn vod_shared_shipped_shape() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let hooks = serve.shared.hooks.get();
+        let installed: &dyn std::any::Any = hooks;
+        assert!(
+            installed.is::<NoopVodSharedHooks>(),
+            "the production constructor leaves the registry on the no-op hooks"
+        );
+        let waker = futures_util::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        for (point, mut hook) in [
+            ("before_terminal_replay_join", hooks.before_terminal_replay_join()),
+            ("after_control_applied", hooks.after_control_applied()),
+            ("after_segment_wait_registered", hooks.after_segment_wait_registered()),
+            ("before_segment_ready_open", hooks.before_segment_ready_open()),
+            ("before_terminal_detach", hooks.before_terminal_detach()),
+            ("after_rendition_installed", hooks.after_rendition_installed()),
+            ("after_dormant_purge_removed", hooks.after_dormant_purge_removed()),
+        ] {
+            assert!(
+                hook.as_mut().poll(&mut context).is_ready(),
+                "the production {point} point is ready at its first poll"
+            );
+        }
+        assert_eq!(hooks.terminal_route_outcome("no-route"), None);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                serve.shared.terminal_route_durably_non_live("no-route"),
+            )
+            .await
+            .expect("the route is read from the Store"),
+            "a session with no durable route is not live"
+        );
+
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.attach_reader("viewer", 3).await;
+        let get = {
+            let serve = Arc::clone(&serve);
+            let rendition = Arc::clone(&rendition);
+            tokio::spawn(async move {
+                serve
+                    .serve_segment(
+                        &rendition,
+                        "viewer",
+                        45,
+                        Duration::from_secs(5),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while serve.shared.pool.blocked_on(&rendition.key) != Some(45) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the GET registers its wait");
+        rendition
+            .dir
+            .materialize(
+                &mut *rendition.manifest.lock().await,
+                45,
+                b"target bytes",
+                now_ms(),
+            )
+            .await
+            .expect("publish");
+        serve.shared.pool.satisfy(&rendition.key, 45);
+        let ready = tokio::time::timeout(Duration::from_secs(5), get)
+            .await
+            .expect("the production segment points do not hold the GET")
+            .expect("GET task")
+            .expect("response file");
+        assert_eq!(ready.len, 12);
     }
 
     #[tokio::test]
@@ -1286,6 +1466,19 @@
         let mutable = Arc::get_mut(&mut rendition).expect("unshared rendition");
         mutable.recipe.file = file;
         mutable.recipe.encoding = Some(Arc::clone(&encoding_a));
+        park_stopped_at_horizon(&serve, &rendition, permit).await;
+        (serve, rendition, encoding_a, encoding_b)
+    }
+
+    /// Materialize a rendition through its ahead horizon, give it a fake
+    /// running producer holding `permit`, and register it, so the driver's
+    /// first pass stops the producer at the horizon.
+    #[cfg(unix)]
+    async fn park_stopped_at_horizon(
+        serve: &VodServe,
+        rendition: &Arc<Rendition>,
+        permit: crate::vodencode::EncodePermit,
+    ) {
         let horizon = ((f64::from(AHEAD_HORIZON_SECONDS) / rendition.seconds_per_segment).ceil()
             as u32)
             .max(1);
@@ -1310,8 +1503,7 @@
             .renditions
             .lock()
             .await
-            .insert(rendition.key.clone(), Arc::clone(&rendition));
-        (serve, rendition, encoding_a, encoding_b)
+            .insert(rendition.key.clone(), Arc::clone(rendition));
     }
 
     #[cfg(unix)]
@@ -1419,7 +1611,7 @@
         // before moving the paused Tokio clock. There is deliberately no
         // rendition kick here: a rolling-live waiter is outside the VOD
         // registry, so the poll is the only wake source.
-        rendition.stopped_poll_armed.notified().await;
+        RenditionTestHooks::of(&rendition).stopped_poll_armed.notified().await;
         tokio::time::advance(STOPPED_ENCODER_POLL - Duration::from_millis(1)).await;
         tokio::task::yield_now().await;
         assert!(
@@ -1427,7 +1619,7 @@
             "a rolling-live waiter sends no VOD registry kick"
         );
         tokio::time::advance(Duration::from_millis(1)).await;
-        rendition.stopped_poll_fired.notified().await;
+        RenditionTestHooks::of(&rendition).stopped_poll_fired.notified().await;
         wait_for_belief(
             &rendition,
             |belief| matches!(belief, Producer::Absent { .. }),
@@ -1451,6 +1643,107 @@
         close_test_driver(&rendition, driver).await;
     }
 
+    /// The stopped-encoder poll on a rendition built by the production
+    /// `build_rendition`, which installs the no-op hooks. With no observation
+    /// point to wait on, the test moves the paused clock one poll at a time,
+    /// and the real driver still yields its stopped child to a waiting live
+    /// start.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rendition_shipped_shape() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let (file, encoding) = encoded_fixture(base.path()).await;
+        let contender = encoding
+            .clone_with_admissions_for_test(encoding.admissions.clone())
+            .await;
+        encoding
+            .store
+            .put_setting(
+                plurx_core::store::keys::SW_POOL_THREADS,
+                &encoding.resources.cpu_threads.max(1).to_string(),
+            )
+            .await
+            .expect("one-encoder software budget");
+        let permit = encoding.try_permit().await.expect("encoder permit");
+        let index = synthetic_index(240);
+        let policy = CutPolicy::new(6, 2, 64 * 1024 * 1024, 15, 16_000);
+        let ms = index_video_ms(&index);
+        let plan = plurx_core::segplan::plan_copy(
+            &index,
+            &policy,
+            &TrackDurations {
+                video_ms: ms,
+                audio_ms: ms,
+                audio_bits_per_second: 256_000,
+            },
+        );
+        let rendition = serve
+            .shared
+            .build_rendition(
+                "shipped-shape",
+                None,
+                Recipe {
+                    file,
+                    audio_index: None,
+                    aac: true,
+                    video: CopyVideoOptions::new(false, false),
+                    source_object_version: Some(encoding.source_object_version.clone()),
+                    cluster_cache_key: None,
+                    encoding: Some(Arc::clone(&encoding)),
+                },
+                plan,
+                &settings(),
+            )
+            .await
+            .expect("a production-built encoded rendition");
+        let hooks: &dyn std::any::Any = &*rendition.hooks;
+        assert!(
+            hooks.is::<NoopRenditionHooks>(),
+            "build_rendition installs the no-op hooks"
+        );
+        park_stopped_at_horizon(&serve, &rendition, permit).await;
+        rendition.attach_reader("viewer", 0).await;
+        tokio::time::pause();
+        let driver = spawn_driver(Arc::clone(&serve.shared), Arc::clone(&rendition));
+        rendition.kick();
+        wait_for_belief(
+            &rendition,
+            |belief| matches!(belief, Producer::Stopped { .. }),
+            "the real driver to stop at the ahead horizon",
+        )
+        .await;
+        let waiting = encoding.admissions.wait_for_slot();
+        assert!(encoding.admissions.live_is_waiting());
+        let mut polls = 0;
+        while !matches!(rendition.slot.belief().await, Producer::Absent { .. }) {
+            assert!(
+                polls < 4,
+                "the stopped-encoder poll never yielded the child; belief is {:?}",
+                rendition.slot.belief().await
+            );
+            polls += 1;
+            tokio::time::advance(STOPPED_ENCODER_POLL).await;
+            for _ in 0..40 {
+                if matches!(rendition.slot.belief().await, Producer::Absent { .. }) {
+                    break;
+                }
+                tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(5)))
+                    .await
+                    .expect("wall-clock belief wait");
+            }
+        }
+        assert!(rendition.ahead_hold.load(Acquire));
+        let contender_permit = contender
+            .try_permit()
+            .await
+            .expect("the live contender takes the yielded child's permit");
+        drop(contender_permit);
+        drop(waiting);
+        close_test_driver(&rendition, driver).await;
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_yielded_encoder_does_not_take_the_permit_back_while_still_ahead() {
@@ -1469,9 +1762,9 @@
         .await;
         let waiting = encoding.admissions.wait_for_slot();
         assert!(encoding.admissions.live_is_waiting());
-        rendition.stopped_poll_armed.notified().await;
+        RenditionTestHooks::of(&rendition).stopped_poll_armed.notified().await;
         tokio::time::advance(STOPPED_ENCODER_POLL).await;
-        rendition.stopped_poll_fired.notified().await;
+        RenditionTestHooks::of(&rendition).stopped_poll_fired.notified().await;
         wait_for_belief(
             &rendition,
             |belief| matches!(belief, Producer::Absent { .. }),
@@ -1499,22 +1792,16 @@
             .expect("reader")
             .frontier = before_low_water;
 
-        // If this pass incorrectly asks for admission, the production test
-        // seam rendezvous with `try_permit` and makes the defect observable
-        // before a real ffmpeg can spawn.
-        let admission = Arc::new(tokio::sync::Barrier::new(2));
-        *encoding
-            .admission_pause
-            .lock()
-            .expect("admission test seam") = Some(Arc::clone(&admission));
-        let observer = Arc::clone(&admission);
-        let mut admission_reached = tokio::spawn(async move { observer.wait().await });
+        // If this pass incorrectly asks for admission, the encoding's
+        // admission hook holds `try_permit` at its pause and makes the defect
+        // observable before a real ffmpeg can spawn.
+        let admission = encoding.pause_next_admission();
         rendition.kick();
         for _ in 0..20 {
             tokio::task::yield_now().await;
         }
         assert!(
-            !admission_reached.is_finished(),
+            !admission.was_reached(),
             "the rendition must not re-admit above the low-water line"
         );
         assert!(matches!(
@@ -1530,16 +1817,14 @@
             .expect("reader")
             .frontier = through.saturating_sub(resume);
         rendition.kick();
-        tokio::time::timeout(Duration::from_secs(1), &mut admission_reached)
-            .await
-            .expect("low-water crossing reaches admission")
-            .expect("admission observer");
+        // The low-water crossing reaches admission.
+        let held = admission.reached().await;
 
-        // Close before releasing the second rendezvous: the assertion is the
-        // attempted re-admission at the exact boundary, not a real encoder
-        // generation beyond this lifecycle test's scope.
+        // Close before releasing the pause: the assertion is the attempted
+        // re-admission at the exact boundary, not a real encoder generation
+        // beyond this lifecycle test's scope.
         rendition.closed.store(true, Release);
-        admission.wait().await;
+        held.release();
         rendition.kick();
         driver.await.expect("test driver exits");
     }
@@ -1580,11 +1865,11 @@
             "the stopped child retains its full permit before TTL reap"
         );
 
-        rendition.stopped_poll_armed.notified().await;
+        RenditionTestHooks::of(&rendition).stopped_poll_armed.notified().await;
         // Maintenance observes the real wall-clock session TTL, detaches the
         // reader and wakes the already-armed stopped-encoder driver wait.
         serve.maintain().await;
-        rendition.stopped_poll_fired.notified().await;
+        RenditionTestHooks::of(&rendition).stopped_poll_fired.notified().await;
         assert!(!serve
             .shared
             .sessions
@@ -1692,6 +1977,506 @@
             .await
             .expect("second rendition takes yielded permit");
         drop(permit_b);
+    }
+
+    /// One viewer, one encoder permit on the node: a predecessor encoding the
+    /// rendition the viewer is watching (running, well inside its ahead
+    /// window), and the prepared successor a quality change just attached for
+    /// the same playback. The successor is speculative until the client has
+    /// seen its first frame, so it must be able to start before commit.
+    #[cfg(unix)]
+    struct HandoffFixture {
+        serve: Arc<VodServe>,
+        predecessor: Arc<Rendition>,
+        successor: Arc<Rendition>,
+        successor_encoding: Arc<crate::vodencode::Encoding>,
+        /// A test-held live permit that fills the software pool, when the
+        /// predecessor is a hardware encode.
+        _filler: Option<crate::admission::TranscodePermit>,
+    }
+
+    #[cfg(unix)]
+    const STAGED_SUCCESSOR: &str = "4b1e0a52-58a4-4d3e-9d0f-0d6c5c1a7a01";
+
+    #[cfg(unix)]
+    async fn prepared_handoff_fixture(base: &Path, predecessor_hardware: bool) -> HandoffFixture {
+        let serve = bare_serve(base);
+        let (file, source_encoding) = encoded_fixture(base).await;
+        let successor_encoding = source_encoding
+            .clone_with_admissions_for_test(source_encoding.admissions.clone())
+            .await;
+        let mut predecessor_encoding = source_encoding
+            .clone_with_admissions_for_test(source_encoding.admissions.clone())
+            .await;
+        if predecessor_hardware {
+            Arc::get_mut(&mut predecessor_encoding)
+                .expect("unshared predecessor encoding")
+                .resources = crate::admission::TranscodeResourceEstimate {
+                hardware_slot: true,
+                cpu_threads: 0,
+                decoder_threads: None,
+            };
+        }
+        let budget = successor_encoding.resources.cpu_threads.max(1);
+        source_encoding
+            .store
+            .put_setting(plurx_core::store::keys::SW_POOL_THREADS, &budget.to_string())
+            .await
+            .expect("one-encoder software budget");
+        source_encoding
+            .store
+            .put_setting(plurx_core::store::keys::MAX_HW_SESSIONS, "1")
+            .await
+            .expect("one-encoder hardware budget");
+        let permit = predecessor_encoding
+            .try_permit()
+            .await
+            .expect("the predecessor owns the node's only encoder permit");
+        // With a hardware predecessor the software pool is filled by an
+        // unrelated, non-waiting live encode, so releasing the predecessor's
+        // hardware slot would not admit the software successor.
+        let filler = predecessor_hardware.then(|| {
+            source_encoding
+                .admissions
+                .try_admit_bundle(
+                    1,
+                    budget,
+                    &successor_encoding.resources,
+                    crate::admission::Priority::Live,
+                )
+                .expect("unrelated live software encode")
+        });
+        let mut renditions = Vec::new();
+        for (name, encoding) in [
+            ("predecessor", Arc::clone(&predecessor_encoding)),
+            ("successor", Arc::clone(&successor_encoding)),
+        ] {
+            let dir = base.join(name);
+            std::fs::create_dir_all(&dir).expect("rendition base");
+            let mut rendition = synthetic_rendition(&dir).await;
+            let mutable = Arc::get_mut(&mut rendition).expect("unshared rendition");
+            mutable.key = format!("{name}-rendition");
+            mutable.recipe.file = file.clone();
+            mutable.recipe.encoding = Some(encoding);
+            serve
+                .shared
+                .renditions
+                .lock()
+                .await
+                .insert(rendition.key.clone(), Arc::clone(&rendition));
+            renditions.push(rendition);
+        }
+        let successor = renditions.pop().expect("successor");
+        let predecessor = renditions.pop().expect("predecessor");
+        successor_encoding.mark_speculative();
+        {
+            let mut manifest = predecessor.manifest.lock().await;
+            for index in 0..=3 {
+                manifest.materialize(index, 1_000, 0);
+            }
+        }
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("fake encoded predecessor");
+        predecessor
+            .slot
+            .attach_owned(child, 0, Some(Box::new(permit)))
+            .await;
+        predecessor.slot.produced(3).await;
+        insert_control_session(&serve, "old-session", Arc::clone(&predecessor), Instant::now())
+            .await;
+        insert_control_session(&serve, "new-session", Arc::clone(&successor), Instant::now())
+            .await;
+        serve
+            .mark_prepared_incarnation("new-session", STAGED_SUCCESSOR)
+            .await;
+        driver_pass(&serve.shared, &predecessor).await;
+        assert!(
+            matches!(predecessor.slot.belief().await, Producer::Running { .. }),
+            "a predecessor inside its ahead window is still producing"
+        );
+        HandoffFixture {
+            serve,
+            predecessor,
+            successor,
+            successor_encoding,
+            _filler: filler,
+        }
+    }
+
+    /// Stage `incarnation` in the predecessor's own preparation slot.
+    #[cfg(unix)]
+    async fn stage_successor(fixture: &HandoffFixture, incarnation: &str) {
+        let gate = fixture
+            .serve
+            .preparation_gate("old-session")
+            .await
+            .expect("predecessor gate");
+        assert!(
+            gate.stage_preparation(
+                incarnation.to_owned(),
+                uuid::Uuid::new_v4().to_string(),
+                i64::MAX,
+                None,
+            )
+            .await
+        );
+    }
+
+    #[cfg(unix)]
+    fn drain_kicks(rendition: &Rendition) {
+        let _ = futures_util::FutureExt::now_or_never(rendition.wake.notified());
+    }
+
+    /// Refuse the successor, then run the predecessor's pass; `true` when the
+    /// predecessor gave its process up.
+    #[cfg(unix)]
+    async fn successor_then_predecessor(fixture: &HandoffFixture) -> bool {
+        drain_kicks(&fixture.predecessor);
+        driver_pass(&fixture.serve.shared, &fixture.successor).await;
+        assert!(matches!(
+            fixture.successor.slot.belief().await,
+            Producer::Absent { .. }
+        ));
+        driver_pass(&fixture.serve.shared, &fixture.predecessor).await;
+        for _ in 0..40 {
+            if matches!(
+                fixture.predecessor.slot.belief().await,
+                Producer::Absent { .. }
+            ) {
+                return true;
+            }
+            tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(5)))
+                .await
+                .expect("wall-clock belief wait");
+        }
+        false
+    }
+
+    #[cfg(unix)]
+    async fn retire_predecessor(fixture: &HandoffFixture) {
+        let _ = perform_driver_step(
+            &fixture.serve.shared,
+            &fixture.predecessor,
+            Step::Terminate {
+                why: Termination::Idle,
+            },
+        )
+        .await;
+    }
+
+    /// Production (m6, f600d282): every quality change on a full encoder pool
+    /// logged `segment_pending` for the successor's init.mp4 and then
+    /// `producer_failed`, and no successor ever spawned. The successor asks as
+    /// `Speculative`, which registers no waiter, and a running predecessor
+    /// only ever yields to a registered live waiter — so the viewer's own
+    /// predecessor sat on the only permit until its 180 s ahead window filled.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_prepared_successor_takes_its_own_viewers_running_predecessors_permit() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture(base.path(), false).await;
+        stage_successor(&fixture, STAGED_SUCCESSOR).await;
+        drain_kicks(&fixture.successor);
+
+        assert!(
+            successor_then_predecessor(&fixture).await,
+            "the running predecessor gives its permit back"
+        );
+        assert!(
+            fixture.successor_encoding.is_waiting(),
+            "the refused successor keeps retrying from its own driver instead of \
+             waiting for the next GET"
+        );
+        tokio::time::timeout(Duration::from_secs(1), fixture.successor.wake.notified())
+            .await
+            .expect("the release wakes the successor at once");
+        assert!(fixture
+            .serve
+            .shared
+            .pool
+            .metrics_handle()
+            .prometheus()
+            .contains("plurx_vod_producer_terminations_total{why=\"yield_to_waiter\"} 1"));
+
+        // Its viewer is still attached and still wants media, but it must not
+        // take the permit back while its own successor is waiting for it.
+        let predecessor_encoding = fixture
+            .predecessor
+            .recipe
+            .encoding
+            .as_ref()
+            .expect("encoded predecessor");
+        let admission = predecessor_encoding.pause_next_admission();
+        driver_pass(&fixture.serve.shared, &fixture.predecessor).await;
+        assert!(!admission.was_reached());
+        // Disarm: a released pause passes its next admission straight through.
+        admission.release();
+
+        let permit = fixture
+            .successor_encoding
+            .try_permit()
+            .await
+            .expect("the prepared successor is admitted with the yielded permit");
+        assert!(!fixture.successor_encoding.is_waiting());
+        assert_eq!(fixture.successor_encoding.admissions.snapshot().reservations, 0);
+        drop(permit);
+    }
+
+    /// Between the predecessor's reap and the successor's retry the yielded
+    /// capacity is reserved: another live start cannot take it, and leaving
+    /// both streams without an encoder.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_handoff_reserves_the_yielded_permit_for_its_successor() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture(base.path(), false).await;
+        stage_successor(&fixture, STAGED_SUCCESSOR).await;
+        assert!(successor_then_predecessor(&fixture).await);
+
+        let intruder = fixture
+            .successor_encoding
+            .clone_with_admissions_for_test(fixture.successor_encoding.admissions.clone())
+            .await;
+        intruder.promote();
+        assert!(
+            intruder.try_permit().await.is_none(),
+            "another live start cannot take capacity reserved for the successor"
+        );
+        intruder.cancel_wait();
+        let permit = fixture
+            .successor_encoding
+            .try_permit()
+            .await
+            .expect("the successor claims its reservation");
+        drop(permit);
+    }
+
+    /// The invariants the handoff must not bend: a speculative successor never
+    /// preempts anything while another viewer is waiting for capacity, and
+    /// never touches a predecessor another viewer is also reading.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_prepared_successor_never_preempts_past_a_waiting_viewer_or_a_shared_rendition() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture(base.path(), false).await;
+        stage_successor(&fixture, STAGED_SUCCESSOR).await;
+
+        let other_viewer = fixture.successor_encoding.admissions.wait_for_slot();
+        assert!(
+            !successor_then_predecessor(&fixture).await,
+            "a waiting viewer is served first; the successor does not clear its way"
+        );
+        assert!(!fixture.predecessor.handoff_requested());
+        assert!(!fixture.successor_encoding.is_waiting());
+        drop(other_viewer);
+
+        insert_control_session(
+            &fixture.serve,
+            "someone-else",
+            Arc::clone(&fixture.predecessor),
+            Instant::now(),
+        )
+        .await;
+        fixture
+            .serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get_mut("someone-else")
+            .expect("second viewer")
+            .playback_id = "another-playback".into();
+        assert!(
+            !successor_then_predecessor(&fixture).await,
+            "a rendition another viewer is reading is never preempted for a handoff"
+        );
+        assert!(!fixture.predecessor.handoff_requested());
+        assert!(fixture.successor_encoding.try_permit().await.is_none());
+        retire_predecessor(&fixture).await;
+    }
+
+    /// No live preparation naming this successor — never staged, or aborted —
+    /// means no handoff.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_successor_without_a_live_preparation_preempts_nothing() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture(base.path(), false).await;
+        assert!(
+            !successor_then_predecessor(&fixture).await,
+            "an unstaged successor has no predecessor to take from"
+        );
+        assert!(!fixture.successor_encoding.is_waiting());
+
+        stage_successor(&fixture, STAGED_SUCCESSOR).await;
+        let gate = fixture
+            .serve
+            .preparation_gate("old-session")
+            .await
+            .expect("predecessor gate");
+        assert!(
+            gate.begin_abort_preparation_for_owner(STAGED_SUCCESSOR, 1)
+                .await
+        );
+        assert!(
+            !successor_then_predecessor(&fixture).await,
+            "an aborted preparation owes its successor nothing"
+        );
+        assert!(!fixture.predecessor.handoff_requested());
+        retire_predecessor(&fixture).await;
+    }
+
+    /// Q1 -> Q2 -> Q3: the predecessor's slot names Q3, so the stale Q2
+    /// rendition cannot take the permit Q3 will need.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stale_prepared_successor_cannot_take_the_permit_staged_for_a_newer_one() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture(base.path(), false).await;
+        stage_successor(&fixture, "9f8d6c2e-1d64-4a63-8f0f-3b3a3c5e2b03").await;
+        assert!(
+            !successor_then_predecessor(&fixture).await,
+            "a successor the predecessor did not stage preempts nothing"
+        );
+        assert!(!fixture.predecessor.handoff_requested());
+        assert!(!fixture.successor_encoding.is_waiting());
+        retire_predecessor(&fixture).await;
+    }
+
+    /// A predecessor is never killed for a release that would not admit the
+    /// successor: here it holds a hardware slot while the software successor
+    /// is blocked by an unrelated software encode.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_handoff_that_would_not_admit_the_successor_preempts_nothing() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture(base.path(), true).await;
+        stage_successor(&fixture, STAGED_SUCCESSOR).await;
+        assert!(
+            !successor_then_predecessor(&fixture).await,
+            "releasing a hardware slot cannot admit a software successor"
+        );
+        assert!(!fixture.predecessor.handoff_requested());
+        assert!(!fixture.successor_encoding.is_waiting());
+        retire_predecessor(&fixture).await;
+    }
+
+    /// An abort ends the predecessor's parking immediately and wakes it, so its
+    /// viewer is produced for without waiting on a GET retry or the expiry.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_aborted_preparation_releases_its_parked_predecessor_at_once() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture(base.path(), false).await;
+        stage_successor(&fixture, STAGED_SUCCESSOR).await;
+        assert!(successor_then_predecessor(&fixture).await);
+        assert!(fixture.predecessor.handoff_requested());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drain_kicks(&fixture.predecessor);
+
+        let gate = fixture
+            .serve
+            .preparation_gate("old-session")
+            .await
+            .expect("predecessor gate");
+        assert!(
+            gate.begin_abort_preparation_for_owner(STAGED_SUCCESSOR, 1)
+                .await
+        );
+        assert!(!fixture.predecessor.handoff_requested());
+        tokio::time::timeout(Duration::from_millis(100), fixture.predecessor.wake.notified())
+            .await
+            .expect("the abort wakes the parked predecessor");
+
+        // The successor still holds its claim; release it as its driver would.
+        fixture.successor_encoding.cancel_wait();
+        let predecessor_encoding = fixture
+            .predecessor
+            .recipe
+            .encoding
+            .as_ref()
+            .expect("encoded predecessor");
+        let admission = predecessor_encoding.pause_next_admission();
+        let pass = tokio::spawn({
+            let shared = Arc::clone(&fixture.serve.shared);
+            let predecessor = Arc::clone(&fixture.predecessor);
+            async move { driver_pass(&shared, &predecessor).await }
+        });
+        // The released predecessor reaches admission on its next pass.
+        let held = admission.reached().await;
+        // Stop before a real generation: after admission the pass re-reads
+        // `closed` and returns, dropping whatever permit it took.
+        fixture.predecessor.closed.store(true, Release);
+        held.release();
+        pass.await.expect("predecessor pass");
+    }
+
+    /// A parked predecessor whose handoff simply lapses (the successor stopped
+    /// asking) wakes itself instead of waiting for its viewer's next GET.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_parked_predecessor_wakes_when_its_handoff_lapses() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture(base.path(), false).await;
+        stage_successor(&fixture, STAGED_SUCCESSOR).await;
+        assert!(successor_then_predecessor(&fixture).await);
+        // The parked pass: its viewer wants media, the handoff still stands.
+        driver_pass(&fixture.serve.shared, &fixture.predecessor).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drain_kicks(&fixture.predecessor);
+        assert!(fixture.predecessor.handoff_requested());
+        tokio::time::timeout(
+            HANDOFF_REQUEST_TTL + Duration::from_secs(2),
+            fixture.predecessor.wake.notified(),
+        )
+        .await
+        .expect("the lapse wakes the parked predecessor");
+        assert!(!fixture.predecessor.handoff_requested());
+    }
+
+    /// A successor that closes or fails stops polling for a handoff and gives
+    /// back any reservation made for it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_closed_or_failed_successor_stops_waiting_for_a_handoff() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        for failed in [false, true] {
+            let base = crate::test_tempdir().expect("base");
+            let fixture = prepared_handoff_fixture(base.path(), false).await;
+            stage_successor(&fixture, STAGED_SUCCESSOR).await;
+            assert!(successor_then_predecessor(&fixture).await);
+            assert!(fixture.successor_encoding.is_waiting());
+            assert_eq!(fixture.successor_encoding.admissions.snapshot().reservations, 1);
+            if failed {
+                *fixture.successor.failed.lock().expect("failed lock") = Some(RenditionFailure {
+                    decision: crate::playback_control::ProducerDecisionReason::ProcessExit,
+                    cause: "fixture failure".into(),
+                });
+            } else {
+                fixture.successor.closed.store(true, Release);
+            }
+            driver_pass(&fixture.serve.shared, &fixture.successor).await;
+            assert!(
+                !fixture.successor_encoding.is_waiting(),
+                "failed={failed}: no handoff poll outlives the successor"
+            );
+            assert_eq!(
+                fixture.successor_encoding.admissions.snapshot().reservations,
+                0,
+                "failed={failed}: its reservation is returned"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -2044,6 +2829,7 @@
                 last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
+                prepared_incarnation: None,
                 terminal_cleanup: None,
                 tombstone: None,
             },
@@ -2243,7 +3029,7 @@
         // audio tail is derived from.
         let (store, _) = store_with_index(&media_file_at(source.clone(), 9_000)).await;
         let file = media_file_at(source, 12_000);
-        let serve = VodServe::new(temp.path().join("renditions"), store);
+        let serve = local_serve(temp.path().join("renditions"), store);
 
         // Seek into the tail (video ends ~9 s).
         serve
@@ -2293,7 +3079,7 @@
         let base = crate::test_tempdir().expect("base");
         let file = fixture_file();
         let (store, _) = store_with_index(&file).await;
-        let first = VodServe::new(base.path().to_path_buf(), Arc::clone(&store));
+        let first = local_serve(base.path().to_path_buf(), Arc::clone(&store));
         create(&first, &file, "sess-a", "play-a", &settings()).await;
         let len = plan_len(&first, "sess-a").await;
         for segment in 0..len {
@@ -2311,7 +3097,7 @@
             .await
             .expect("take the init away");
 
-        let second = VodServe::new(base.path().to_path_buf(), store);
+        let second = local_serve(base.path().to_path_buf(), store);
         create(&second, &file, "sess-b", "play-b", &settings()).await;
         let adopted = rendition_of(&second, "sess-b").await;
         assert_eq!(
@@ -2347,7 +3133,7 @@
         let base = crate::test_tempdir().expect("base");
         let file = fixture_file();
         let (store, _) = store_with_index(&file).await;
-        let first = VodServe::new(base.path().to_path_buf(), Arc::clone(&store));
+        let first = local_serve(base.path().to_path_buf(), Arc::clone(&store));
         create(&first, &file, "sess-a", "play-a", &settings()).await;
         fetch(&first, "sess-a", "seg00000.m4s").await;
         let rendition = rendition_of(&first, "sess-a").await;
@@ -2372,7 +3158,7 @@
             .await
             .expect("take the init away");
 
-        let second = VodServe::new(base.path().to_path_buf(), store);
+        let second = local_serve(base.path().to_path_buf(), store);
         create(&second, &file, "sess-b", "play-b", &settings()).await;
         let adopted = rendition_of(&second, "sess-b").await;
         assert_eq!(

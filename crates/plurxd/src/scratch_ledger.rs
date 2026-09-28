@@ -190,6 +190,10 @@ struct Entry {
     owner_dropped: bool,
     /// Why the last conversion attempt kept the conservative charge.
     conservative_reason: Option<&'static str>,
+    /// Writers waiting for a grant the budget refused. While any is waiting
+    /// the producer is blocked on a write it cannot make, and the flow
+    /// controller must hold it rather than read the wait as a stall.
+    starved_writers: usize,
     barrier: Arc<tokio::sync::Notify>,
 }
 
@@ -317,6 +321,7 @@ impl ScratchLedger {
                 writers_fenced: false,
                 owner_dropped: false,
                 conservative_reason: None,
+                starved_writers: 0,
                 barrier: Arc::new(tokio::sync::Notify::new()),
             },
         );
@@ -428,15 +433,80 @@ impl ScratchLedger {
     /// Record a measurement taken while the producer is still running. It can
     /// only raise the charge — a periodic scan is not evidence that future
     /// capacity is no longer needed.
+    #[cfg(test)]
     pub(crate) fn observe_used(&self, key: ScratchKey, bytes: i64) {
+        self.observe_walk(key, bytes, i64::MAX);
+    }
+
+    /// Bytes landed since the last complete measurement. Read before a walk
+    /// starts and handed back to [`Self::observe_walk`].
+    pub(crate) fn written_of(&self, key: ScratchKey) -> i64 {
+        self.lock()
+            .entries
+            .get(&key)
+            .map_or(0, |entry| entry.written_bytes)
+    }
+
+    /// Record a complete directory walk.
+    ///
+    /// `written_before` is what [`Self::written_of`] said as the walk began.
+    /// Only those bytes are subsumed by the walk: a write that landed while
+    /// the walk was running may or may not be in its number, so it stays
+    /// charged as written until the next walk. Zeroing the whole figure let
+    /// every write that landed mid-walk be authorized again.
+    pub(crate) fn observe_walk(&self, key: ScratchKey, bytes: i64, written_before: i64) {
         let mut state = self.lock();
         if let Some(entry) = state.entries.get_mut(&key) {
             entry.used_bytes = bytes.max(0);
-            // The walk saw the directory as it is now, so everything that had
-            // landed is in that number. Writes still in flight are not.
-            entry.written_bytes = 0;
+            entry.written_bytes = entry
+                .written_bytes
+                .saturating_sub(written_before.max(0))
+                .max(0);
         }
         state.touch();
+    }
+
+    /// Record that named objects were unlinked, without a walk. Writes that
+    /// landed since the last walk are not in `used`, and stay charged.
+    pub(crate) fn observe_unlinked(&self, key: ScratchKey, used: i64) {
+        let mut state = self.lock();
+        if let Some(entry) = state.entries.get_mut(&key) {
+            entry.used_bytes = used.max(0);
+        }
+        state.touch();
+    }
+
+    /// Count one writer as waiting for a refused grant. True when this made
+    /// the allocation starved.
+    pub(crate) fn starve(&self, key: ScratchKey) -> bool {
+        let mut state = self.lock();
+        let Some(entry) = state.entries.get_mut(&key) else {
+            return false;
+        };
+        entry.starved_writers = entry.starved_writers.saturating_add(1);
+        let became = entry.starved_writers == 1;
+        state.touch();
+        became
+    }
+
+    /// The writer stopped waiting. True when no writer is starved any more.
+    pub(crate) fn unstarve(&self, key: ScratchKey) -> bool {
+        let mut state = self.lock();
+        let Some(entry) = state.entries.get_mut(&key) else {
+            return false;
+        };
+        let was = entry.starved_writers > 0;
+        entry.starved_writers = entry.starved_writers.saturating_sub(1);
+        let cleared = was && entry.starved_writers == 0;
+        state.touch();
+        cleared
+    }
+
+    pub(crate) fn starved(&self, key: ScratchKey) -> bool {
+        self.lock()
+            .entries
+            .get(&key)
+            .is_some_and(|entry| entry.starved_writers > 0)
     }
 
     /// Collapse future capacity onto a complete final inventory.
@@ -1456,5 +1526,44 @@ mod tests {
             snapshot.total
         );
         drop((incumbent, successor, retired));
+    }
+}
+
+#[cfg(test)]
+mod walk_tests {
+    use super::*;
+
+    /// A walk subsumes only what had landed before it began. Zeroing the
+    /// whole landed figure let every write that landed while the walk was
+    /// running be authorized a second time, and the segment GC, which is
+    /// not a walk at all, did the same on every deletion.
+    #[test]
+    fn scratch_charge_a_walk_subsumes_only_what_landed_before_it() {
+        let ledger = ScratchLedger::new();
+        let permit = ledger.reserve(1_000, 1_000).expect("admission");
+        let key = permit.key();
+        ledger
+            .authorize_write(key, 300, 1_000, 0)
+            .expect("before the walk")
+            .landed(300);
+        let before = ledger.written_of(key);
+        ledger
+            .authorize_write(key, 600, 1_000, 0)
+            .expect("during the walk")
+            .landed(600);
+        // The walk found the first write only.
+        ledger.observe_walk(key, 300, before);
+        assert!(
+            ledger.authorize_write(key, 200, 1_000, 0).is_none(),
+            "300 measured + 600 still landed leaves 100, not 700"
+        );
+        // Unlinking without a walk moves the measurement, not the landed bytes.
+        ledger.observe_unlinked(key, 0);
+        let held = ledger
+            .authorize_write(key, 400, 1_000, 0)
+            .expect("the unlinked bytes are free again");
+        assert!(ledger.authorize_write(key, 100, 1_000, 0).is_none());
+        drop(held);
+        drop(permit);
     }
 }

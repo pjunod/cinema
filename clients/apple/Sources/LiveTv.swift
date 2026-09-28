@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 struct LiveTvChannel: Codable, Identifiable, Equatable, Sendable {
@@ -251,7 +252,20 @@ struct LiveTvPlaybackEnvelope: Encodable {
     let maxBitrateBps: Int?
     let compatibility: LiveTvCompatibility?
 
+    /// Channels the active audio route can carry, between stereo and 5.1 (the
+    /// most the server encodes). A fixed `2` here is what folded every 5.1
+    /// broadcast into stereo before it reached the receiver.
+    static func aacChannelCeiling(routeChannels: Int) -> Int {
+        min(6, max(2, routeChannels))
+    }
+
     static func current(compatibility: LiveTvCompatibility? = nil) -> Self {
+        current(compatibility: compatibility,
+                aacChannels: aacChannelCeiling(
+                    routeChannels: AVAudioSession.sharedInstance().maximumOutputNumberOfChannels))
+    }
+
+    static func current(compatibility: LiveTvCompatibility?, aacChannels: Int) -> Self {
         let caps = Caps.capsDocument()
         let liveAudio = caps.audio.filter { ["aac", "ac3", "eac3"].contains($0) }
         var formats = [LiveTvHlsFormat(container: "mpegts", video: "h264", audio: "aac")]
@@ -276,7 +290,7 @@ struct LiveTvPlaybackEnvelope: Encodable {
                 return parts.count == 3 ? LiveTvHlsFormat(container: parts[0], video: parts[1], audio: parts[2]) : nil
             },
             videoLimits: limits,
-            audioLimits: liveAudio.map { LiveTvAudioLimit(codec: $0, maxChannels: $0 == "aac" ? 2 : 8) },
+            audioLimits: liveAudio.map { LiveTvAudioLimit(codec: $0, maxChannels: $0 == "aac" ? aacChannels : 8) },
             maxHeight: nil,
             maxBitrateBps: nil,
             compatibility: compatibility
@@ -296,11 +310,29 @@ struct LiveTvDeliveryOutput: Decodable, Sendable {
     let audioChannels: Int
 }
 
+struct LiveTvDeliverySource: Decodable, Sendable {
+    let width: Int?
+    let height: Int?
+    let videoCodec: String?
+    let fieldOrder: String?
+    let frameRate: LiveTvRational?
+    let sampleAspectRatio: String?
+}
+
+struct LiveTvDeliveryReason: Decodable, Sendable {
+    let code: String?
+    let explanation: String?
+}
+
 struct LiveTvDelivery: Decodable, Sendable {
     let output: LiveTvDeliveryOutput
     let videoAction: String
     let audioAction: String
     let packaging: String
+    var source: LiveTvDeliverySource? = nil
+    var reasons: [LiveTvDeliveryReason]? = nil
+    var deinterlace: Bool? = nil
+    var deinterlaceOutput: String? = nil
 
     var playbackMethod: String {
         switch (videoAction, audioAction) {
@@ -313,7 +345,14 @@ struct LiveTvDelivery: Decodable, Sendable {
     }
 
     var videoDescription: String {
-        "\(Self.actionDescription(videoAction)) · \(output.videoCodec.uppercased()) · \(output.width)×\(output.height)"
+        let scan = deinterlace == true ? "Progressive planned" :
+            (videoAction == "copy" && ["tt", "bb", "tb", "bt"].contains(source?.fieldOrder ?? "") ? "Interlaced" : nil)
+        let cadence = output.frameRate.flatMap { rate -> String? in
+            guard rate.num > 0, rate.den > 0 else { return nil }
+            return String(format: "%.2f frames/s (planned)", Double(rate.num) / Double(rate.den))
+        }
+        return ([Self.actionDescription(videoAction), output.videoCodec.uppercased(), scan, cadence]
+            .compactMap { $0 }).joined(separator: " · ")
     }
 
     var audioDescription: String {
@@ -331,8 +370,88 @@ struct LiveTvDelivery: Decodable, Sendable {
     }
 }
 
+/// Pure formatting of one attached delivery. Presentation size is supplied
+/// separately because AVPlayerItem does not report encoded frame dimensions.
+struct LiveTvPictureInfo {
+    let sourceFrame: String
+    let sourceNote: String
+    let streamFrame: String
+    let streamNote: String
+    let sourcePixelAspect: String
+    let sourceDisplayAspect: String
+    let frameComparison: String
+    let reason: String
+
+    static func frame(_ width: Int?, _ height: Int?) -> String {
+        let w = width.flatMap { (1...16_384).contains($0) ? $0 : nil }
+        let h = height.flatMap { (1...16_384).contains($0) ? $0 : nil }
+        if let w, let h { return "\(w)×\(h)" }
+        if let h { return "Height \(h)" }
+        return "Unavailable"
+    }
+
+    static func ratio(_ text: String?) -> (Int, Int)? {
+        guard let text, text.range(of: #"^[1-9][0-9]*:[1-9][0-9]*$"#, options: .regularExpression) != nil else { return nil }
+        let parts = text.split(separator: ":")
+        guard parts.count == 2, let n = Int(parts[0]), let d = Int(parts[1]), n > 0, d > 0 else { return nil }
+        let divisor = gcd(n, d)
+        return (n / divisor, d / divisor)
+    }
+
+    private static func gcd(_ lhs: Int, _ rhs: Int) -> Int {
+        var a = lhs, b = rhs
+        while b != 0 { (a, b) = (b, a % b) }
+        return a
+    }
+
+    init(delivery: LiveTvDelivery?, channel: LiveTvChannel?) {
+        let source = delivery?.source
+        if source != nil {
+            sourceFrame = Self.frame(source?.width, source?.height)
+            sourceNote = "Source probe"
+        } else if let observation = channel?.sourceFormat,
+                  observation.observedAt + 1_200 > Int64(Date().timeIntervalSince1970) {
+            sourceFrame = Self.frame(observation.videoWidth, observation.videoHeight)
+            sourceNote = "Last observed broadcast"
+        } else {
+            sourceFrame = "Unavailable"
+            sourceNote = "Unavailable"
+        }
+        streamFrame = Self.frame(delivery?.output.width, delivery?.output.height)
+        streamNote = delivery == nil ? "Unavailable" : "Planned output"
+        let sar = Self.ratio(source?.sampleAspectRatio)
+        sourcePixelAspect = sar.map { "\($0.0):\($0.1)" } ?? "Unavailable"
+        if let source, let sar, let width = source.width, let height = source.height,
+           (1...16_384).contains(width), (1...16_384).contains(height) {
+            let (n, overflowN) = width.multipliedReportingOverflow(by: sar.0)
+            let (d, overflowD) = height.multipliedReportingOverflow(by: sar.1)
+            if !overflowN && !overflowD {
+                let divisor = Self.gcd(n, d)
+                sourceDisplayAspect = "\(n / divisor):\(d / divisor)"
+            } else { sourceDisplayAspect = "Unavailable" }
+        } else { sourceDisplayAspect = "Unavailable" }
+        if let source, let delivery, let sw = source.width, let sh = source.height,
+           (1...16_384).contains(sw), (1...16_384).contains(sh),
+           (1...16_384).contains(delivery.output.width), (1...16_384).contains(delivery.output.height) {
+            let dw = delivery.output.width - sw, dh = delivery.output.height - sh
+            if dw == 0 && dh == 0 { frameComparison = "No resize planned" }
+            else if dw <= 0 && dh <= 0 { frameComparison = "Resolution reduction planned" }
+            else if dw >= 0 && dh >= 0 { frameComparison = "Larger frame dimensions planned" }
+            else { frameComparison = "Frame dimensions change planned" }
+        } else { frameComparison = "Unavailable" }
+        var seen = Set<String>()
+        let explanations = (delivery?.reasons ?? []).compactMap { item -> String? in
+            guard let value = item.explanation?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+            let key = "\(item.code ?? "")\u{0}\(value)"
+            return seen.insert(key).inserted ? value : nil
+        }
+        reason = explanations.isEmpty ? "The server did not provide a conversion reason." : explanations.joined(separator: " · ")
+    }
+}
+
 struct LiveTvStarted: Decodable, Sendable {
     let sessionId: String
+    let playlistUrl: String
     let channel: LiveTvChannel
     let live: Bool
     var delivery: LiveTvDelivery? = nil
@@ -543,18 +662,24 @@ struct LiveTvFailure: Error, LocalizedError, Sendable {
     /// Empty for every refusal but a capacity one, and for a capacity refusal
     /// from a server that has no recordings running.
     var holders: [LiveTvTunerHolder] = []
+    var watchable: [LiveTvTunerHolder] = []
 
     var errorDescription: String? {
         switch code {
         case "live_tv_disabled": return "Live TV is off. An administrator can enable it in Settings → Developer."
         case "live_tv_protocol_unready": return "Live TV is waiting for every serving node to run a compatible version."
         case "tuner_capacity":
-            guard !holders.isEmpty else {
-                return "All Live TV slots are busy. Close another session and try again."
+            var copy = "All Live TV slots are busy."
+            if !holders.isEmpty {
+                copy += " " + holders.map(\.summary).joined(separator: " · ")
+                    + ". Stop one in Recordings, or try again later."
+            } else {
+                copy += " Close another session and try again."
             }
-            return "All Live TV slots are busy. "
-                + holders.map(\.summary).joined(separator: " · ")
-                + ". Stop one in Recordings, or try again later."
+            if !watchable.isEmpty {
+                copy += " " + watchable.map { "Watch \($0.guideNumber) instead" }.joined(separator: " · ") + "."
+            }
+            return copy
         case "tuner_unavailable": return "The tuner cannot start this channel. Check reception and other tuner clients."
         case "channel_not_found": return "This channel is no longer available. Refresh the lineup."
         case "drm_unsupported": return "DRM-protected television is not supported."
@@ -658,13 +783,24 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
     }
 
     static func pathComponent(_ value: String) -> String {
-        value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        // RFC 3986 unreserved characters keep the server's capability spelling:
+        // real session ids contain dots and UUID hyphens. Escaping those made
+        // playlistURL reject the server-issued master before AVPlayer attached.
+        let unreserved = CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? ""
     }
 
-    func playlistURL(_ capability: String) throws -> URL {
-        guard !capability.isEmpty, capability.utf8.count <= 1024,
-              let base = Session.canonicalOrigin(origin),
-              let url = URL(string: base + "/api/v1/live-tv/sessions/" + Self.pathComponent(capability) + "/index.m3u8")
+    func playlistURL(_ playlistUrl: String, sessionId: String) throws -> URL {
+        guard !sessionId.isEmpty, sessionId.utf8.count <= 1024,
+              playlistUrl.utf8.count <= 2048,
+              let base = Session.canonicalOrigin(origin)
+        else { throw LiveTvFailure(code: "capability_expired") }
+        let sessionPath = "/api/v1/live-tv/sessions/" + Self.pathComponent(sessionId)
+        // Both start and recovery supply the caption-advertising master.
+        // Accept only that exact node-relative capability for this session.
+        guard playlistUrl == sessionPath + "/master.m3u8",
+              let url = URL(string: base + playlistUrl)
         else { throw LiveTvFailure(code: "capability_expired") }
         return url
     }
@@ -691,6 +827,7 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
                 let retry: String?
                 let ownerDecided: Bool?
                 let holders: [LiveTvTunerHolder]?
+                let watchable: [LiveTvTunerHolder]?
             }
             let failures = JSONDecoder()
             failures.keyDecodingStrategy = .convertFromSnakeCase
@@ -698,7 +835,8 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
                 throw LiveTvFailure(code: failure.code, retry: failure.retry,
                                     ownerDecided: failure.ownerDecided ?? false,
                                     status: response.statusCode,
-                                    holders: failure.holders ?? [])
+                                    holders: failure.holders ?? [],
+                                    watchable: failure.watchable ?? [])
             }
             if method == "DELETE", response.statusCode == 404 || response.statusCode == 410 { return Data() }
             if response.statusCode == 401 || response.statusCode == 403 {

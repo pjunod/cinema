@@ -51,7 +51,7 @@ function apiHarness(responses) {
       "  const answer=responses[path];",
       "  if(!answer) throw new Error('no fixture for '+path);",
       "  return Promise.resolve(answer);}",
-      shippedSource("api"),
+      (require("./shell-source.js").apiPrelude()+shippedSource("api")),
       "return api;",
     ].join("\n"),
   );

@@ -1,7 +1,14 @@
 //! Shared application state and the background job manager.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+#[path = "cache_preparation.rs"]
+mod cache_preparation;
+#[path = "library_work.rs"]
+mod library_work;
+#[path = "subtitle_work.rs"]
+mod subtitle_work;
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -13,7 +20,7 @@ use plurx_core::cluster::coordination::{ClusterJobAuthority, StoreCoordinator};
 use plurx_core::domain::ArtworkAttempt;
 use plurx_core::domain::{
     BookMetadataPatch, BookMetadataSource, Item, ItemKind, Library, LibraryKind, MediaFile,
-    MetadataPatch, NewPretranscodeJob, OfflinePackageStats, PlaybackEvent, PretranscodeJob,
+    MetadataPatch, NewPretranscodeJob, OfflinePackageStats, PlaybackEvent,
     PretranscodeRequirements,
 };
 use plurx_core::error::StoreError;
@@ -26,10 +33,10 @@ use plurx_core::secrets::CredentialKey;
 use plurx_core::store::{
     cluster_fragment_index_blob_sha256, cluster_fragment_index_generation_key,
     cluster_fragment_index_key, encode_cluster_fragment_index_blob, keys, AnalysisRequest,
-    ArtworkRepairFence, CatalogueReader, ClusterFragmentIndexArtifact,
-    ClusterFragmentIndexLocation, DvConversionMode, DvConversionQueueBatch, DvConversionState,
-    DvRecoveryGuardState, NewAnalysisRequest, NewClusterFragmentIndexJob, PrometheusStoreSnapshot,
-    PublicationStore, QueueDvConversionOutcome, SeriesHintOutcome, Store,
+    ArtworkRepairFence, CatalogueReader, ClusterFragmentIndexArtifact, DvConversionMode,
+    DvConversionQueueBatch, DvConversionState, DvRecoveryGuardState, NewAnalysisRequest,
+    NewClusterFragmentIndexJob, PrometheusStoreSnapshot, PublicationStore,
+    QueueDvConversionOutcome, SeriesHintOutcome, Store, SubtitleSourceStamp,
     DV_CONVERSION_QUEUE_BATCH_MAX,
 };
 use plurx_core::transcode::EncoderCaps;
@@ -43,7 +50,7 @@ use crate::logbuf::{LogBuffer, LogBuffers};
 use crate::offline::OfflineManager;
 use crate::schedule::{due_jobs, DueJob, GlobalSchedule};
 use crate::trakt::TraktManager;
-use crate::transcode::{PretranscodeFence, PretranscodeProduceOutcome, TranscodeManager};
+use crate::transcode::{PretranscodeProduceOutcome, TranscodeManager};
 
 const FRAGMENT_INDEX_VALIDATION_PAGE: u32 = 64;
 const FRAGMENT_INDEX_VALIDATION_INTERVAL: Duration = Duration::from_secs(30);
@@ -148,6 +155,14 @@ pub struct SystemInfo {
     pub dv_disk: crate::dv_disk::DvDiskCapabilities,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SubtitleBackfillStatus {
+    pub(crate) lease_holder: Option<String>,
+    pub(crate) enqueued_process: u64,
+    pub(crate) remaining_files: i64,
+    pub(crate) remaining_bytes: i64,
+}
+
 /// The daemon's managed directories across the configured storage roots.
 ///
 /// Grouped rather than passed loose because the distinction between them
@@ -196,6 +211,10 @@ struct StoreMetricsAtomics {
     outbox_pending: AtomicI64,
     outbox_ok: AtomicI64,
     outbox_failed: AtomicI64,
+    background_job_counts: [AtomicI64; plurx_core::store::background_jobs::JOB_METRIC_SLOTS],
+    background_job_oldest_age: [AtomicI64; plurx_core::store::background_jobs::JOB_METRIC_SLOTS],
+    background_source_io: AtomicI64,
+    background_legacy_pending: AtomicI64,
     analysis_queue_depth: [AtomicI64; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
     analysis_queue_oldest_age_seconds: [AtomicI64; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
     analysis_lifecycle_counts: [AtomicI64; plurx_core::store::ANALYSIS_LIFECYCLE_METRIC_SLOTS],
@@ -240,6 +259,10 @@ impl Default for StoreMetricsAtomics {
             outbox_pending: AtomicI64::new(0),
             outbox_ok: AtomicI64::new(0),
             outbox_failed: AtomicI64::new(0),
+            background_job_counts: std::array::from_fn(|_| AtomicI64::new(0)),
+            background_job_oldest_age: std::array::from_fn(|_| AtomicI64::new(0)),
+            background_source_io: AtomicI64::new(0),
+            background_legacy_pending: AtomicI64::new(0),
             analysis_queue_depth: std::array::from_fn(|_| AtomicI64::new(0)),
             analysis_queue_oldest_age_seconds: std::array::from_fn(|_| AtomicI64::new(0)),
             analysis_lifecycle_counts: std::array::from_fn(|_| AtomicI64::new(0)),
@@ -387,6 +410,16 @@ impl StoreMetricsCache {
                     self.inner.outbox_ok.load(Ordering::Relaxed),
                     self.inner.outbox_failed.load(Ordering::Relaxed),
                 ),
+                background_jobs: plurx_core::store::background_jobs::BackgroundJobMetrics {
+                    counts: std::array::from_fn(|slot| {
+                        self.inner.background_job_counts[slot].load(Ordering::Relaxed)
+                    }),
+                    oldest_age_seconds: std::array::from_fn(|slot| {
+                        self.inner.background_job_oldest_age[slot].load(Ordering::Relaxed)
+                    }),
+                    source_io_reservations: self.inner.background_source_io.load(Ordering::Relaxed),
+                    legacy_pending: self.inner.background_legacy_pending.load(Ordering::Relaxed),
+                },
                 analysis: plurx_core::store::AnalysisStoreMetrics {
                     queue_depth: std::array::from_fn(|slot| {
                         self.inner.analysis_queue_depth[slot].load(Ordering::Relaxed)
@@ -561,6 +594,29 @@ impl StoreMetricsCache {
         {
             target.store(value, Ordering::Relaxed);
         }
+        for (target, value) in self
+            .inner
+            .background_job_counts
+            .iter()
+            .zip(sample.background_jobs.counts)
+        {
+            target.store(value, Ordering::Relaxed);
+        }
+        for (target, value) in self
+            .inner
+            .background_job_oldest_age
+            .iter()
+            .zip(sample.background_jobs.oldest_age_seconds)
+        {
+            target.store(value, Ordering::Relaxed);
+        }
+        self.inner.background_source_io.store(
+            sample.background_jobs.source_io_reservations,
+            Ordering::Relaxed,
+        );
+        self.inner
+            .background_legacy_pending
+            .store(sample.background_jobs.legacy_pending, Ordering::Relaxed);
         let health = sample.analysis.health;
         self.inner
             .analysis_ready_24h
@@ -641,6 +697,13 @@ pub struct AppState {
     /// so a hostile request cannot turn authentication pressure into Raft
     /// writes or a replicated account lockout.
     pub(crate) login_throttle: crate::http::LoginThrottle,
+    /// Argon2 admission (workers and queue). Per state, like the throttle:
+    /// one per process in production, one per router in tests (see
+    /// `http::PasswordCapacity`).
+    pub(crate) password_capacity: crate::http::PasswordCapacity,
+    /// C-07's façade census. Per state rather than process-global so each
+    /// router counts only its own requests (see `http::PlexCensus`).
+    pub(crate) plex_census: Arc<crate::http::PlexCensus>,
     /// Node-local network boundary for security-sensitive forwarding headers.
     pub(crate) trusted_proxies: Arc<Vec<ipnet::IpNet>>,
     /// Named Authority/BoundedReplica boundary for eligible catalogue reads.
@@ -667,6 +730,11 @@ pub struct AppState {
     pub(crate) media_sessions: Arc<crate::media_sessions::MediaSessionCoordinator>,
     /// Always-compiled HDHomeRun configuration, readiness, and lineup owner.
     pub(crate) live_tv: Arc<crate::live_tv::LiveTvManager>,
+    /// One HTTP client for every Live TV ingress-to-owner exchange, plus a
+    /// five-second memory of the owner's address. Signing, expected-node
+    /// binding and response verification stay per request inside the
+    /// transport; nothing about a credential is held here.
+    pub(crate) live_tv_peers: Arc<crate::http::live_tv::LiveTvPeers>,
     pub server_name: String,
     /// Stable identity of the node that owns local transcode/offline bytes.
     pub node_id: String,
@@ -724,6 +792,8 @@ pub struct AppState {
     /// is real rather than once a decision has been made.
     pub availability: Arc<crate::playstart::AvailabilityCache>,
     pub starts: Arc<crate::playstart::StartNotifier>,
+    /// Finite-playback start attempts and how each ended (C-08 M5 row 4).
+    pub start_attempts: Arc<crate::playstart::StartAttempts>,
     /// Live telemetry for progressive `/stream.mp4` remuxes, which are not
     /// transcode sessions and so have nowhere else to report from.
     pub streams: Arc<crate::progressive::Streams>,
@@ -732,6 +802,10 @@ pub struct AppState {
     /// lifetimes, so this holds only what would otherwise be invisible; see
     /// [`crate::delivery`].
     pub direct_plays: Arc<crate::delivery::DirectPlays>,
+    /// Last progress beat per viewer and item, for
+    /// `plurx_watched_seconds_total` (C-08 M5). One per process, like the
+    /// direct-play registry beside it.
+    pub watch_ledger: Arc<crate::telemetry::WatchLedger>,
     /// Store-backed gauges sampled away from the Prometheus request path.
     pub store_metrics: StoreMetricsCache,
     /// Application-initiated graceful drain. Signals still use the process
@@ -816,6 +890,20 @@ impl AppState {
             &self.runtime_cache_dir,
         )
         .on_node(Some(&self.node_id))
+        .with_membership(self.membership.clone())
+        .with_jobs(Arc::clone(&self.jobs))
+    }
+
+    pub(crate) async fn subtitle_backfill_status(
+        &self,
+    ) -> Result<SubtitleBackfillStatus, StoreError> {
+        let diagnostics = self.store.subtitle_backfill_diagnostics(clock_ms()).await?;
+        Ok(SubtitleBackfillStatus {
+            lease_holder: diagnostics.lease_holder,
+            enqueued_process: self.jobs.subtitle_backfill_enqueued_process(),
+            remaining_files: diagnostics.remaining_files,
+            remaining_bytes: diagnostics.remaining_bytes,
+        })
     }
 
     /// `node_id` is this server's stable id — the `node_id` a cache location
@@ -970,6 +1058,7 @@ impl AppState {
                 node_id.clone(),
                 Some(membership.clone()),
             )
+            .with_subtitle_jobs(Arc::clone(&jobs))
             .with_serving_authority(serving.authority())
             .with_shared_cache(Arc::clone(&shared_cache)),
         );
@@ -996,6 +1085,7 @@ impl AppState {
         );
         let cache_only_admin_proofs =
             crate::http::CacheOnlyAdminProofCache::new(membership.is_replicated());
+        let live_tv_peers = crate::http::live_tv::LiveTvPeers::new(membership.clone());
         let live_tv = crate::live_tv::LiveTvManager::new(
             Arc::clone(&store),
             Arc::clone(&system),
@@ -1009,6 +1099,8 @@ impl AppState {
             store,
             cache_only_admin_proofs,
             login_throttle: Default::default(),
+            password_capacity: Default::default(),
+            plex_census: Default::default(),
             trusted_proxies: Arc::new(trusted_proxies),
             catalogue,
             replication,
@@ -1022,6 +1114,7 @@ impl AppState {
             media_pool,
             media_sessions,
             live_tv,
+            live_tv_peers,
             server_name,
             node_id,
             cluster_advertisement,
@@ -1047,8 +1140,10 @@ impl AppState {
             storage: Arc::new(tokio::sync::RwLock::new(Default::default())),
             availability: Arc::new(crate::playstart::AvailabilityCache::new()),
             starts: Arc::new(crate::playstart::StartNotifier::new()),
+            start_attempts: Arc::new(crate::playstart::StartAttempts::new()),
             streams: crate::progressive::Streams::new(),
             direct_plays: crate::delivery::DirectPlays::new(),
+            watch_ledger: Arc::new(crate::telemetry::WatchLedger::default()),
             store_metrics: StoreMetricsCache::default(),
             shutdown: tokio_util::sync::CancellationToken::new(),
             #[cfg(test)]
@@ -1360,15 +1455,12 @@ pub struct JobManager {
     statuses: Mutex<HashMap<i64, ScanStatus>>,
     /// Live counters for in-flight scans, sampled by `all_statuses`.
     live: Mutex<HashMap<i64, Arc<ScanProgress>>>,
-    /// Targeted scans waiting for a library's running scan to finish,
-    /// per library. See [`JobManager::request_scan`].
-    pending: Mutex<HashMap<i64, Vec<ScanRequest>>>,
-    /// At most one delayed remote-lease retry per library. Without this,
-    /// several integration requests arriving during the same remote scan
-    /// would each perpetuate its own two-second retry task.
-    pending_retries: Mutex<HashSet<i64>>,
-    /// Recent targeted-scan requests and their outcomes, newest last.
-    requests: Mutex<VecDeque<ScanRequestRecord>>,
+    /// Wake durable library consumers promptly after local admission.
+    library_wake: tokio::sync::Notify,
+    library_readiness: crate::background_jobs::LibraryReadiness,
+    /// Shared with TranscodeManager when attached; standalone managers have
+    /// no other encoder pool. Foreground subtitles reserve one CPU thread.
+    subtitle_admissions: std::sync::Mutex<crate::admission::Admissions>,
     metrics: Arc<IntegrationMetrics>,
     /// A pre-transcode pass is running. Not a mutex, because the answer wanted
     /// is "is one going" rather than "wait for it": a second pass would fight
@@ -1381,6 +1473,7 @@ pub struct JobManager {
     /// Queue execution is independent of discovery cadence. This guard keeps
     /// minute scheduler ticks from stacking drain loops on the same node.
     cluster_index_working: std::sync::atomic::AtomicBool,
+    background_upkeep_running: std::sync::atomic::AtomicBool,
     /// Permanent-media conversion is a bounded queue, but one slow disc may
     /// outlive many scheduler ticks. Keep exactly one local drain loop.
     dv_disk_working: std::sync::atomic::AtomicBool,
@@ -1427,6 +1520,8 @@ pub struct JobManager {
     /// The subtitle-source store's own sweep cursor: `f<id>` of the last
     /// directory examined, or empty once a walk has wrapped.
     subtitle_source_sweep_cursor: Mutex<Option<String>>,
+    /// Process-local discovery count shown in the Developer backfill item.
+    subtitle_backfill_enqueued_process: AtomicU64,
     /// A genre-backfill pass is running. Same reasoning as `producing`: the
     /// question is "may another one start", not "wait for this one" — two
     /// passes would read the same cursor, fetch the same titles and double
@@ -1479,6 +1574,9 @@ pub struct AnalysisProgress {
     /// the field.
     #[serde(default)]
     pub pgs_tracks: usize,
+    /// Text tracks (including styled text) this subtitle-source pass maps.
+    #[serde(default)]
+    pub text_tracks: usize,
     /// Bytes the ride-along has written so far.
     #[serde(default)]
     pub pgs_bytes_written: u64,
@@ -1508,6 +1606,7 @@ impl AnalysisProgress {
             total_media_ms: 2,
             fragments_indexed: 1,
             pgs_tracks: 0,
+            text_tracks: 0,
             pgs_bytes_written: 0,
             started_at_ms: 1,
             updated_at_ms: 1,
@@ -1519,9 +1618,10 @@ impl AnalysisProgress {
     }
 }
 
-const ANALYSIS_STAGES: [&str; 6] = [
+const ANALYSIS_STAGES: [&str; 7] = [
     "probing",
     "fragment_index",
+    "subtitle_source",
     "fingerprints",
     "marker_correlation",
     "persisting",
@@ -2070,6 +2170,15 @@ impl Drop for IndexingGuard {
     }
 }
 
+struct BackgroundUpkeepGuard(Arc<JobManager>);
+impl Drop for BackgroundUpkeepGuard {
+    fn drop(&mut self) {
+        self.0
+            .background_upkeep_running
+            .store(false, Ordering::Release);
+    }
+}
+
 struct ClusterIndexWorkingGuard(Arc<JobManager>);
 
 impl Drop for ClusterIndexWorkingGuard {
@@ -2104,15 +2213,9 @@ impl Drop for ProducingGuard {
     }
 }
 
-/// How many rows to take off each rail, per user. A rail is a prediction and
-/// the tail of one is a weak prediction; the head is where the value is.
-const PRODUCE_RAIL: i64 = 5;
-
 /// Ceiling on what one pass will attempt, across every user and rail.
 const PRODUCE_MAX_PER_PASS: usize = 12;
-/// Hard fan-out bounds for one singleton discovery pass. The rotating user
-/// cursor gives every account a turn without an all-users allocation.
-const PRODUCE_USER_PAGE: i64 = 64;
+/// Hard fan-out bound after the shared demand snapshot has been ranked.
 const PRODUCE_DISCOVERY_ITEMS: usize = 64;
 
 /// How long one pass may spend. A bound rather than "until the list is done"
@@ -2135,32 +2238,9 @@ fn needs_artwork_retry(item: &Item) -> bool {
         ) && item.backdrop_path.is_none())
 }
 
-/// Ids the caller already knows, so plurx does not have to guess.
-///
-/// Without these, matching is title+year parsed off a filename — the step
-/// that puts the wrong poster on a remake. The caller grabbed a specific
-/// TMDB id; telling plurx costs nothing and ends the ambiguity.
-#[derive(Clone, Debug, Default)]
-pub struct IdHints {
-    pub tmdb: Option<i64>,
-    pub imdb: Option<String>,
-    /// For an episode, the SHOW's id — an episode's own id is not what
-    /// identifies the series it belongs to.
-    pub series_tmdb: Option<i64>,
-    /// The ids belong to an ancestor (a show), not to the placed item.
-    pub episodeish: bool,
-}
-
-/// Validated Curator facts carried by one targeted book scan.
-#[derive(Clone, Debug)]
-pub struct BookHints {
-    pub title: Option<String>,
-    pub author: Option<String>,
-    pub medium: ItemKind,
-    pub work_id: String,
-    pub edition_id: String,
-    pub cover_url: Option<String>,
-}
+pub use plurx_core::store::background_jobs_library::{
+    LibraryBookHints as BookHints, LibraryIdHints as IdHints,
+};
 
 fn curator_pairing_can_advance(
     current_edition: Option<&str>,
@@ -2169,12 +2249,6 @@ fn curator_pairing_can_advance(
     replacement_cover_ready: bool,
 ) -> bool {
     !current_provider_cover || current_edition == Some(requested_edition) || replacement_cover_ready
-}
-
-impl IdHints {
-    fn is_empty(&self) -> bool {
-        self.tmdb.is_none() && self.imdb.is_none() && self.series_tmdb.is_none()
-    }
 }
 
 /// One "scan exactly this" ask.
@@ -2274,18 +2348,12 @@ fn parse_dv_disk_parallel(raw: Option<&str>) -> usize {
         .clamp(1, 8)
 }
 
-/// How many request records are kept. A debugging surface — "what happened
-/// last night" — not an audit log, and deliberately in memory: persisting it
-/// would mean a schema, a retention policy and a growth problem, for data
-/// whose value expires in hours.
-const MAX_REQUESTS: usize = 256;
-/// One library can attract a burst of integration callbacks while another
-/// node owns its scan. Bound retained waiter state independently of the
-/// request-history ring; overflow is terminal and visible to the caller.
-const MAX_PENDING_PER_LIBRARY: usize = 256;
+/// Bounded observation page; durable receipts outlive this page for seven days.
+const MAX_REQUESTS: usize = plurx_core::store::background_jobs_library::MAX_LIBRARY_REQUESTS;
+/// Independent requests admitted for one library before callers retry later.
+const MAX_PENDING_PER_LIBRARY: usize =
+    plurx_core::store::background_jobs_library::MAX_LIBRARY_REQUESTS;
 
-const PRETRANSCODE_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
-const PRETRANSCODE_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(10);
 const PRETRANSCODE_REFUSAL_TTL_MS: i64 = 10 * 60 * 1_000;
 // The store admits at most 4,096 active queue rows. Retaining that entire
 // bounded universe avoids rotating one unreadable high-priority row back into
@@ -2295,26 +2363,6 @@ const MAX_PRETRANSCODE_REFUSALS: usize = 4_096 + PRODUCE_MAX_PER_PASS;
 fn lease_time_remaining(expires_at_unix_ms: i64) -> std::time::Duration {
     let now_unix_ms = clock_ms();
     std::time::Duration::from_millis(expires_at_unix_ms.saturating_sub(now_unix_ms).max(0) as u64)
-}
-
-/// Proof that a job's lease heartbeat has been retired.
-///
-/// Every fragment-index outcome write takes one, so a path that settles a row
-/// while its heartbeat is still beating does not compile. The ordering matters
-/// because a tick landing between the write and the cancel renews a row the
-/// write has already settled, reads back `Ok(false)`, and reports a lease loss
-/// that never happened.
-#[must_use]
-pub(crate) struct HeartbeatRetired;
-
-/// Retire a spawned heartbeat and hand back the proof.
-async fn retire_heartbeat(
-    stop: tokio_util::sync::CancellationToken,
-    heartbeat: tokio::task::JoinHandle<()>,
-) -> HeartbeatRetired {
-    stop.cancel();
-    let _ = heartbeat.await;
-    HeartbeatRetired
 }
 
 /// Report a terminal fragment-index write that did not land.
@@ -2566,8 +2614,29 @@ pub(crate) async fn enqueue_copy_preparation(
     file: &MediaFile,
     video: plurx_core::transcode::CopyVideoOptions,
 ) -> Result<AnalysisRequest, StoreError> {
+    enqueue_copy_preparation_for_object(store, node_id, file, video, None).await
+}
+
+pub(crate) async fn enqueue_copy_preparation_for_object(
+    store: &dyn Store,
+    node_id: &str,
+    file: &MediaFile,
+    video: plurx_core::transcode::CopyVideoOptions,
+    object_version: Option<&str>,
+) -> Result<AnalysisRequest, StoreError> {
     let pipeline_version = crate::ffmpeg::fragment_index_engine_digest().await;
     let video_identity = crate::fragindex::identity_for(file, video).argv_fingerprint;
+    let base = analysis_request_generation(
+        file,
+        "fragment_index",
+        &pipeline_version,
+        &video_identity,
+        false,
+    );
+    let requested_generation = match object_version {
+        Some(version) => plurx_core::segplan::argv_fingerprint(&[base, version.to_owned()]),
+        None => base,
+    };
     let now = clock_ms();
     store
         .enqueue_analysis_request(&NewAnalysisRequest {
@@ -2576,13 +2645,7 @@ pub(crate) async fn enqueue_copy_preparation(
             source_size: file.size,
             source_mtime: file.mtime,
             component: "fragment_index".to_owned(),
-            requested_generation: analysis_request_generation(
-                file,
-                "fragment_index",
-                &pipeline_version,
-                &video_identity,
-                false,
-            ),
+            requested_generation,
             pipeline_version,
             video_identity,
             priority: "normal".to_owned(),
@@ -2600,6 +2663,179 @@ pub(crate) fn clock_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(i64::MAX)
+}
+
+pub(crate) async fn subtitle_source_pipeline_version() -> String {
+    format!(
+        "subtitle-source:{}:{}",
+        crate::subtitle_source::MANIFEST_VERSION,
+        crate::ffmpeg::fragment_index_engine_digest().await
+    )
+}
+
+fn subtitle_source_argv(
+    input: &str,
+    plan: &crate::subtitle_ride_along::RideAlongPlan,
+) -> Vec<String> {
+    let mut args = vec![
+        "-hide_banner".to_owned(),
+        "-loglevel".to_owned(),
+        "error".to_owned(),
+        "-copyts".to_owned(),
+        "-threads".to_owned(),
+        "1".to_owned(),
+        "-i".to_owned(),
+        input.to_owned(),
+    ];
+    args.extend(plan.args());
+    args
+}
+
+fn subtitle_source_covered(
+    tracks: &[crate::subtitle_ride_along::ProbedTrack],
+    rows: &[plurx_core::store::SubtitleSourcePublication],
+) -> bool {
+    tracks
+        .iter()
+        .all(|track| crate::subtitle_source::extracted_ordinal_covered(rows, track.ordinal))
+}
+
+/// The subtitle worker has no index pipe: the tee's null slave is its sole
+/// stdout destination. A job-owned child and a separate stderr reader ensure
+/// even a noisy decoder cannot deadlock a lease holder.
+async fn run_subtitle_source_pass(
+    plan: crate::subtitle_ride_along::RideAlongPlan,
+    source: &std::fs::File,
+    runtime_cache: &Path,
+    lost: &CancellationToken,
+    preempt_when_busy: Option<&TranscodeManager>,
+    progress: &(dyn Fn() + Sync),
+) -> Result<crate::subtitle_ride_along::PendingRideAlong, AnalysisResolutionError> {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
+
+    if preempt_when_busy.is_some_and(|manager| !manager.pretranscode_worker_idle()) {
+        return Err(AnalysisResolutionError::Retry {
+            code: "foreground_preempted",
+            charge_attempt: false,
+        });
+    }
+
+    #[cfg(unix)]
+    let input = "/dev/fd/3".to_owned();
+    #[cfg(windows)]
+    let input = crate::ffmpeg::windows_source_path(source)
+        .map_err(|_| AnalysisResolutionError::Terminal("source_unavailable"))?
+        .to_string_lossy()
+        .into_owned();
+    let args = subtitle_source_argv(&input, &plan);
+    let mut command = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin());
+    crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let source_fd = source.as_raw_fd();
+        unsafe {
+            command.pre_exec(move || {
+                let duplicate = libc::fcntl(source_fd, libc::F_DUPFD_CLOEXEC, 10);
+                if duplicate == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::dup2(duplicate, 3) == -1 {
+                    libc::close(duplicate);
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::close(duplicate);
+                let flags = libc::fcntl(3, libc::F_GETFD);
+                if flags == -1 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(windows)]
+    crate::ffmpeg::verify_windows_source_path(source, Path::new(&input))
+        .map_err(|_| AnalysisResolutionError::Terminal("source_unavailable"))?;
+    command
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::background("subtitle source extraction"),
+    )
+    .map_err(|_| AnalysisResolutionError::Retry {
+        code: "source_process_failed",
+        charge_attempt: true,
+    })?;
+    let mut stderr = child.stderr.take().ok_or(AnalysisResolutionError::Retry {
+        code: "source_process_failed",
+        charge_attempt: true,
+    })?;
+    let mut scan = plan.stderr_scan();
+    let stderr_task = tokio::spawn(async move {
+        let mut chunk = [0_u8; 8192];
+        loop {
+            match stderr.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(read) => scan.feed(&chunk[..read]),
+                Err(_) => return None,
+            }
+        }
+        scan.finish();
+        Some(scan)
+    });
+    let deadline = tokio::time::sleep(Duration::from_secs(30 * 60));
+    tokio::pin!(deadline);
+    let status = loop {
+        tokio::select! {
+            () = lost.cancelled() => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                stderr_task.abort();
+                return Err(AnalysisResolutionError::ClaimLost);
+            }
+            () = &mut deadline => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                stderr_task.abort();
+                return Err(AnalysisResolutionError::Retry {
+                    code: "source_pass_timeout",
+                    charge_attempt: true,
+                });
+            }
+            status = child.wait() => break status.map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_process_failed",
+                charge_attempt: true,
+            })?,
+            () = tokio::time::sleep(Duration::from_millis(500)) => {
+                progress();
+                if preempt_when_busy.is_some_and(|manager| !manager.pretranscode_worker_idle()) {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    stderr_task.abort();
+                    return Err(AnalysisResolutionError::Retry {
+                        code: "foreground_preempted",
+                        charge_attempt: false,
+                    });
+                }
+            }
+        }
+    };
+    progress();
+    let scan = stderr_task.await.ok().flatten();
+    if !status.success() {
+        return Err(AnalysisResolutionError::Retry {
+            code: "source_process_failed",
+            charge_attempt: true,
+        });
+    }
+    Ok(crate::subtitle_ride_along::PendingRideAlong::new(
+        plan, scan,
+    ))
 }
 
 pub(crate) async fn wait_analysis_deadline(duration: Duration) {
@@ -2703,163 +2939,6 @@ async fn fragment_index_requested_video_options(
         .unwrap_or_else(|| plurx_core::transcode::CopyVideoOptions::new(have_dovi, false)))
 }
 
-/// Heartbeat and self-fence for one distributed queue row.
-struct ActivePretranscodeJob {
-    fence: PretranscodeFence,
-    cancel: tokio_util::sync::CancellationToken,
-    lost: tokio_util::sync::CancellationToken,
-    heartbeat: Option<tokio::task::JoinHandle<Result<(), StoreError>>>,
-}
-
-impl ActivePretranscodeJob {
-    fn start(store: Arc<dyn Store>, job: PretranscodeJob) -> Self {
-        let fence = PretranscodeFence::new(job);
-        let heartbeat_fence = fence.clone();
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let heartbeat_cancel = cancel.clone();
-        let lost = tokio_util::sync::CancellationToken::new();
-        let heartbeat_lost = lost.clone();
-        let heartbeat = tokio::spawn(async move {
-            let mut heartbeat_error = None;
-            let mut ticker = tokio::time::interval(PRETRANSCODE_HEARTBEAT);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            ticker.tick().await;
-            loop {
-                tokio::select! {
-                    _ = heartbeat_cancel.cancelled() => break,
-                    _ = ticker.tick() => {}
-                }
-                let Some(current) = heartbeat_fence.snapshot().await else {
-                    heartbeat_lost.cancel();
-                    break;
-                };
-                let now_unix_ms = clock_ms();
-                if now_unix_ms >= current.lease_expires_ms {
-                    let _ = heartbeat_fence.invalidate(&current).await;
-                    heartbeat_lost.cancel();
-                    tracing::warn!(
-                        job = current.id,
-                        fence = current.fence,
-                        "pre-transcode queue heartbeat missed its lease deadline"
-                    );
-                    break;
-                }
-                let expires_at =
-                    now_unix_ms.saturating_add(
-                        PRETRANSCODE_LEASE_TTL.as_millis().min(i64::MAX as u128) as i64,
-                    );
-                let renewal = heartbeat_fence.renew(store.as_ref(), now_unix_ms, expires_at);
-                tokio::pin!(renewal);
-                let expiry = tokio::time::sleep(lease_time_remaining(current.lease_expires_ms));
-                tokio::pin!(expiry);
-                let mut stop_after_renewal = false;
-                let renewed = tokio::select! {
-                    _ = heartbeat_cancel.cancelled() => {
-                        // A renewal may already have crossed the backend
-                        // boundary. Drain it before retirement so an
-                        // acknowledged replacement cannot be stranded.
-                        stop_after_renewal = true;
-                        renewal.await
-                    }
-                    _ = &mut expiry => {
-                        stop_after_renewal = true;
-                        heartbeat_fence.revoke();
-                        heartbeat_lost.cancel();
-                        let result = renewal.await;
-                        tracing::warn!(
-                            job = current.id,
-                            fence = current.fence,
-                            "pre-transcode queue renewal exceeded its lease deadline and self-fenced"
-                        );
-                        result
-                    }
-                    result = &mut renewal => result,
-                };
-                match renewed {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        heartbeat_lost.cancel();
-                        tracing::warn!(
-                            job = current.id,
-                            fence = current.fence,
-                            "pre-transcode queue job lost its fence"
-                        );
-                        break;
-                    }
-                    Err(error) => {
-                        heartbeat_lost.cancel();
-                        tracing::warn!(
-                            job = current.id,
-                            fence = current.fence,
-                            %error,
-                            "pre-transcode queue renewal failed and self-fenced"
-                        );
-                        heartbeat_error = Some(error);
-                        break;
-                    }
-                }
-                if stop_after_renewal {
-                    break;
-                }
-            }
-            heartbeat_fence.revoke();
-            if let Err(error) = heartbeat_fence.retire(store.as_ref()).await {
-                tracing::warn!(%error, "pre-transcode queue retirement was ambiguous");
-                if heartbeat_error.is_none() {
-                    heartbeat_error = Some(error);
-                }
-            }
-            match heartbeat_error {
-                Some(error) => Err(error),
-                None => Ok(()),
-            }
-        });
-        Self {
-            fence,
-            cancel,
-            lost,
-            heartbeat: Some(heartbeat),
-        }
-    }
-
-    fn fence(&self) -> PretranscodeFence {
-        self.fence.clone()
-    }
-
-    fn loss_token(&self) -> tokio_util::sync::CancellationToken {
-        self.lost.clone()
-    }
-
-    async fn finish(mut self) {
-        self.fence.revoke();
-        self.lost.cancel();
-        self.cancel.cancel();
-        if let Some(heartbeat) = self.heartbeat.take() {
-            match heartbeat.await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "pre-transcode cleanup was ambiguous after settlement");
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "pre-transcode heartbeat task failed during settlement");
-                }
-            }
-        }
-    }
-}
-
-impl Drop for ActivePretranscodeJob {
-    fn drop(&mut self) {
-        self.fence.revoke();
-        self.cancel.cancel();
-        self.lost.cancel();
-        // Dropping a JoinHandle detaches the task. Cancellation makes it
-        // drain any dispatched renewal and retire the final acknowledged
-        // token; aborting here would recreate the late-write race.
-        let _ = self.heartbeat.take();
-    }
-}
-
 impl JobManager {
     /// Revalidate one bounded node-local page every interval. This deliberately
     /// does not take cluster job authority: both SQLite and hiqlite route the
@@ -2912,6 +2991,11 @@ impl JobManager {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_new(store: Arc<dyn Store>, artwork_dir: PathBuf) -> Arc<Self> {
+        Arc::new(Self::new(store, artwork_dir))
+    }
+
     fn new_with_scan_prune_percent(
         store: Arc<dyn Store>,
         artwork_dir: PathBuf,
@@ -2933,13 +3017,14 @@ impl JobManager {
             tmdb_base: None,
             statuses: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
-            pending: Mutex::new(HashMap::new()),
-            pending_retries: Mutex::new(HashSet::new()),
-            requests: Mutex::new(VecDeque::new()),
+            library_wake: tokio::sync::Notify::new(),
+            library_readiness: Default::default(),
+            subtitle_admissions: std::sync::Mutex::new(crate::admission::Admissions::new()),
             metrics: Arc::new(IntegrationMetrics::default()),
             producing: std::sync::atomic::AtomicBool::new(false),
             indexing: std::sync::atomic::AtomicBool::new(false),
             cluster_index_working: std::sync::atomic::AtomicBool::new(false),
+            background_upkeep_running: std::sync::atomic::AtomicBool::new(false),
             dv_disk_working: std::sync::atomic::AtomicBool::new(false),
             dv_disk_capabilities: crate::dv_disk::DvDiskCapabilities::default(),
             last_analysis_prune_ms: AtomicI64::new(0),
@@ -2955,6 +3040,7 @@ impl JobManager {
             last_pretranscode_cache_sweep_ms: AtomicI64::new(0),
             fragment_index_sweep_cursor: Mutex::new(None),
             subtitle_source_sweep_cursor: Mutex::new(None),
+            subtitle_backfill_enqueued_process: AtomicU64::new(0),
             backfilling_genres: std::sync::atomic::AtomicBool::new(false),
             retrying_artwork: std::sync::atomic::AtomicBool::new(false),
             book_cover_workers: metadata::book::CoverMaterializationWorkers::default(),
@@ -2983,6 +3069,24 @@ impl JobManager {
         resource: String,
     ) -> Result<Option<ActiveJobLease>, StoreError> {
         acquire_cluster_job(&self.coordinator, self.job_authority.as_ref(), resource).await
+    }
+
+    /// [`Self::acquire_job`] with an explicit TTL and heartbeat: the same gate
+    /// and the same lease, for a job whose failover test shortens them.
+    pub(crate) async fn acquire_job_with_policy(
+        &self,
+        resource: String,
+        ttl: std::time::Duration,
+        heartbeat: std::time::Duration,
+    ) -> Result<Option<ActiveJobLease>, StoreError> {
+        crate::job_lease::acquire_cluster_job_with_policy(
+            &self.coordinator,
+            self.job_authority.as_ref(),
+            resource,
+            ttl,
+            heartbeat,
+        )
+        .await
     }
 
     pub(crate) async fn apply_identity_repair(
@@ -4121,13 +4225,50 @@ impl JobManager {
         trigger: &str,
         video_identity: &str,
     ) -> Result<(AnalysisRequest, bool), StoreError> {
-        if !matches!(component, "fragment_index" | "skip_markers") {
+        if !matches!(
+            component,
+            "fragment_index" | "skip_markers" | "subtitle_source"
+        ) {
             return Err(StoreError::Task(
                 "unsupported analysis component".to_owned(),
             ));
         }
-        if !matches!(trigger, "admin" | "background") {
+        if !matches!(trigger, "admin" | "background" | "playback") {
             return Err(StoreError::Task("unsupported analysis trigger".to_owned()));
+        }
+        if component == "subtitle_source" {
+            if force_rebuild || !video_identity.is_empty() {
+                return Err(StoreError::Task(
+                    "subtitle_source has no forced or video-specific generation".to_owned(),
+                ));
+            }
+            let file = self
+                .store
+                .get_file(file_id)
+                .await?
+                .ok_or_else(|| StoreError::Task("analysis file does not exist".to_owned()))?;
+            let stamp = SubtitleSourceStamp {
+                file_id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                pipeline_version: subtitle_source_pipeline_version().await,
+            };
+            let request = self
+                .store
+                .enqueue_or_promote_subtitle_source(
+                    &stamp,
+                    if trigger == "playback" {
+                        "foreground"
+                    } else {
+                        "normal"
+                    },
+                    clock_ms(),
+                )
+                .await?
+                .ok_or_else(|| {
+                    StoreError::Task("subtitle_source repair limit exhausted".to_owned())
+                })?;
+            return Ok((request, true));
         }
         let file = self
             .store
@@ -4179,6 +4320,23 @@ impl JobManager {
         self.cluster_fragment_index_enabled().await
     }
 
+    /// The queue switch is an operator choice. Developer readiness facts are
+    /// advisory; none of them silently overrides an enabled switch.
+    pub(crate) async fn subtitle_source_queue_enabled(&self) -> bool {
+        self.cluster_fragment_index_enabled().await
+            && setting_enabled(
+                self.store
+                    .get_setting(keys::SUBTITLE_CLUSTER_SOURCES)
+                    .await
+                    .unwrap_or(None),
+            )
+    }
+
+    pub(crate) fn subtitle_backfill_enqueued_process(&self) -> u64 {
+        self.subtitle_backfill_enqueued_process
+            .load(Ordering::Relaxed)
+    }
+
     fn start_analysis_progress(
         self: &Arc<Self>,
         identity: (&str, &str),
@@ -4225,6 +4383,7 @@ impl JobManager {
                 total_media_ms: total_media_ms.max(0),
                 fragments_indexed: 0,
                 pgs_tracks: 0,
+                text_tracks: 0,
                 pgs_bytes_written: 0,
                 started_at_ms: now,
                 updated_at_ms: now,
@@ -4325,6 +4484,25 @@ impl JobManager {
         if let Some(value) = progress.get_mut(&(job_id.to_owned(), target_node_id.to_owned())) {
             value.pgs_tracks = pgs_tracks;
             value.pgs_bytes_written = pgs_bytes_written;
+        }
+    }
+
+    fn update_analysis_subtitle_tracks(
+        &self,
+        job_id: &str,
+        target_node_id: &str,
+        pgs_tracks: usize,
+        text_tracks: usize,
+        bytes_written: u64,
+    ) {
+        let mut progress = self
+            .analysis_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(value) = progress.get_mut(&(job_id.to_owned(), target_node_id.to_owned())) {
+            value.pgs_tracks = pgs_tracks;
+            value.text_tracks = text_tracks;
+            value.pgs_bytes_written = bytes_written;
         }
     }
 
@@ -4439,7 +4617,13 @@ impl JobManager {
     /// to any scan currently running.
     pub async fn all_statuses(&self) -> HashMap<i64, ScanStatus> {
         let mut map = self.statuses.lock().await.clone();
+        let durable = self.durable_library_statuses().await;
         let live = self.live.lock().await;
+        for (library, status) in durable {
+            if !live.contains_key(&library) {
+                map.insert(library, status);
+            }
+        }
         for (id, progress) in live.iter() {
             if let Some(status) = map.get_mut(id) {
                 if status.running {
@@ -4450,8 +4634,8 @@ impl JobManager {
         map
     }
 
-    /// Kick off a scan for `library_id` unless one is already running. Returns
-    /// `true` if a scan was started, `false` if one was already in flight.
+    /// Durably admit a library scan, joining compatible work already queued.
+    /// `true` means accepted; an eligible worker may execute on another node.
     pub async fn trigger_scan(self: &Arc<Self>, library_id: i64) -> bool {
         self.trigger_scan_as(library_id, ScanTrigger::Manual).await
     }
@@ -4482,157 +4666,12 @@ impl JobManager {
         self.trigger(library_id, true, why).await
     }
 
-    async fn trigger(
-        self: &Arc<Self>,
-        library_id: i64,
-        force_metadata: bool,
-        why: ScanTrigger,
-    ) -> bool {
-        let resource = format!("scan:library:{library_id}");
-        let lease = match self.acquire_job(resource).await {
-            Ok(Some(lease)) => lease,
-            Ok(None) => return false,
-            Err(error) => {
-                tracing::warn!(
-                    library = library_id,
-                    stage = "acquire_lease",
-                    error = %error,
-                    "acquiring scan lease failed"
-                );
-                return false;
-            }
-        };
-        {
-            let mut statuses = self.statuses.lock().await;
-            let entry = statuses.entry(library_id).or_default();
-            if entry.running {
-                drop(statuses);
-                let _ = lease.release().await;
-                return false;
-            }
-            self.metrics.count_scan(why);
-            *entry = ScanStatus {
-                running: true,
-                phase: Some("scanning".to_owned()),
-                started_at: Some(now()),
-                ..Default::default()
-            };
-        }
-        let progress = Arc::new(ScanProgress::default());
-        self.live
-            .lock()
-            .await
-            .insert(library_id, Arc::clone(&progress));
-
-        let manager = Arc::clone(self);
-        tokio::spawn(async move {
-            let lost = lease.loss_token();
-            tokio::select! {
-                () = manager.run_scan(library_id, progress, force_metadata, &lease) => {}
-                () = lost.cancelled() => {
-                    tracing::warn!(
-                        library = library_id,
-                        stage = "lease",
-                        "library scan failed because its cluster lease was lost"
-                    );
-                    let mut status = manager
-                        .statuses
-                        .lock()
-                        .await
-                        .get(&library_id)
-                        .cloned()
-                        .unwrap_or_default();
-                    status.error = Some("cluster scan lease was lost".to_owned());
-                    manager.finish(library_id, status).await;
-                }
-            }
-            let _ = lease.release().await;
-            // Whatever queued up while this ran is work someone was
-            // promised. A full scan covers the same files a targeted one
-            // would have, but the CALLER is still owed its answer — the
-            // item ids it asked for — so the queue drains rather than
-            // being discarded as redundant.
-            manager.drain_pending(library_id).await;
-        });
-        true
-    }
-
-    /// Ask for a targeted scan of one path.
-    ///
-    /// Returns `Ok(Some(scan))` when it ran now, or `Ok(None)` when the
-    /// library was already scanning and the request was queued — the caller
-    /// polls `scan_request` for the outcome.
-    ///
-    /// **Requests are queued, never dropped.** `trigger` returns false
-    /// while a scan runs, which is right for "the user pressed Scan twice"
-    /// and wrong here: importing a season fires one request per episode
-    /// within seconds, and dropping N−1 of them would leave most of the
-    /// season unindexed with nothing anywhere saying so. Duplicates by path
-    /// collapse (scanning the same folder twice is the same work), and the
-    /// rest are drained when the running scan finishes.
-    pub async fn request_scan(
-        self: &Arc<Self>,
-        req: ScanRequest,
-    ) -> Result<Option<TargetedScan>, TargetError> {
-        self.record_request(&req, "running", None, None).await;
-
-        let busy = {
-            let statuses = self.statuses.lock().await;
-            statuses.get(&req.library_id).is_some_and(|s| s.running)
-        };
-        if busy {
-            if let Err(error) = self.queue_targeted(req.clone()).await {
-                self.record_request(&req, "failed", None, Some(error.to_string()))
-                    .await;
-                return Err(error);
-            }
-            self.set_request_status(&req.id, "queued").await;
-            return Ok(None);
-        }
-
-        let lease = match self
-            .acquire_job(format!("scan:library:{}", req.library_id))
-            .await
-            .map_err(TargetError::Store)?
-        {
-            Some(lease) => lease,
-            None => {
-                if let Err(error) = self.queue_targeted(req.clone()).await {
-                    self.record_request(&req, "failed", None, Some(error.to_string()))
-                        .await;
-                    return Err(error);
-                }
-                self.set_request_status(&req.id, "queued").await;
-                self.schedule_pending_retry(req.library_id).await;
-                return Ok(None);
-            }
-        };
-        let lost = lease.loss_token();
-        let publisher = lease.publisher(self.store.as_ref());
-        let out = tokio::select! {
-            out = self.run_targeted(std::slice::from_ref(&req), &publisher) => out,
-            () = lost.cancelled() => Err(TargetError::Store(StoreError::Task(
-                "cluster scan lease was lost".to_owned(),
-            ))),
-        };
-        let _ = lease.release().await;
-        match &out {
-            Ok(scan) => {
-                self.record_request(&req, "done", Some(scan), None).await;
-            }
-            Err(e) => {
-                self.record_request(&req, "failed", None, Some(e.to_string()))
-                    .await;
-            }
-        }
-        out.map(Some)
-    }
-
     async fn run_targeted(
         &self,
         requests: &[ScanRequest],
         publisher: &PublicationStore<'_>,
     ) -> Result<TargetedScan, TargetError> {
+        library_work::check_active()?;
         let req = requests.first().ok_or_else(|| {
             TargetError::Store(StoreError::Task(
                 "targeted scan group contained no waiters".to_owned(),
@@ -4660,6 +4699,7 @@ impl JobManager {
         );
         let mut out = scan::scan_path_with_publication(publisher, &library, &req.path).await?;
         for request in requests {
+            library_work::check_active()?;
             for problem in self.apply_ids(request, &out.items, publisher).await {
                 out.report.add_problem(problem);
             }
@@ -4711,6 +4751,7 @@ impl JobManager {
         } else {
             placed.clone()
         };
+        library_work::check_active()?;
         let outcome = self
             .enrich(
                 publisher,
@@ -4722,6 +4763,7 @@ impl JobManager {
             )
             .await;
         for request in requests {
+            library_work::check_active()?;
             self.apply_book_hints(request, &out.items, publisher).await;
         }
         tracing::info!(
@@ -4732,6 +4774,7 @@ impl JobManager {
             correlation_id = req.correlation_id.as_deref().unwrap_or("-"),
             "targeted scan enriched what it placed"
         );
+        library_work::check_active()?;
         Ok(out)
     }
 
@@ -4844,7 +4887,8 @@ impl JobManager {
                 .await,
             );
         } else if library.anime {
-            let client = AniListClient::new();
+            let client = AniListClient::new()
+                .with_budget(publisher.provider_budget(Arc::clone(&self.store)));
             outcome.enrich = Some(
                 metadata::enrich_anime_library_with_publication(
                     publisher,
@@ -4860,7 +4904,9 @@ impl JobManager {
         } else {
             match self.store.get_setting(keys::TMDB_API_KEY).await {
                 Ok(Some(key)) if !key.is_empty() => {
-                    let tmdb = self.tmdb_client(key);
+                    let tmdb = self
+                        .tmdb_client(key)
+                        .with_budget(publisher.provider_budget(Arc::clone(&self.store)));
                     outcome.enrich = Some(
                         metadata::enrich_library_for_targets_with_publication(
                             publisher,
@@ -5302,188 +5348,13 @@ impl JobManager {
         Some(current.id)
     }
 
-    async fn queue_targeted(&self, req: ScanRequest) -> Result<(), TargetError> {
-        let mut pending = self.pending.lock().await;
-        // The path is only the physical scan target. Request ids, caller ids,
-        // curator book hints, correlation ids, and terminal status are all
-        // per waiter; discarding a same-path request would strand its record
-        // in `queued` forever and silently lose its metadata payload.
-        let queue = pending.entry(req.library_id).or_default();
-        if queue.len() >= MAX_PENDING_PER_LIBRARY {
-            return Err(TargetError::Store(StoreError::Task(format!(
-                "targeted scan queue for library {} is full ({MAX_PENDING_PER_LIBRARY} waiters)",
-                req.library_id
-            ))));
-        }
-        queue.push(req);
-        Ok(())
-    }
-
-    async fn schedule_pending_retry(self: &Arc<Self>, library_id: i64) {
-        if !self.pending_retries.lock().await.insert(library_id) {
-            return;
-        }
-        let manager = Arc::clone(self);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                if manager.drain_pending_once(library_id).await {
-                    continue;
-                }
-                // Close the empty-observation/removal race with request_scan:
-                // it queues while holding `pending`, then tries
-                // `pending_retries`. Holding the first lock while removing
-                // from the second makes an enqueue land wholly before this
-                // check (and loop again) or wholly after removal (and install
-                // a new retry task).
-                let pending = manager.pending.lock().await;
-                if pending
-                    .get(&library_id)
-                    .is_some_and(|queue| !queue.is_empty())
-                {
-                    continue;
-                }
-                manager.pending_retries.lock().await.remove(&library_id);
-                break;
-            }
-        });
-    }
-
-    /// Run whatever queued up while a library was scanning. Called once a
-    /// scan finishes; the work a caller was promised must not be forgotten
-    /// just because it arrived at a busy moment.
-    async fn drain_pending(self: &Arc<Self>, library_id: i64) {
-        if self.drain_pending_once(library_id).await {
-            self.schedule_pending_retry(library_id).await;
-        }
-    }
-
-    /// Attempt one drain. `true` asks the caller's single-flight retry loop to
-    /// try again after the remote owner has had time to make progress.
-    async fn drain_pending_once(self: &Arc<Self>, library_id: i64) -> bool {
-        let queued = {
-            let mut pending = self.pending.lock().await;
-            pending.remove(&library_id).unwrap_or_default()
-        };
-        if queued.is_empty() {
-            return false;
-        }
-        let lease = match self.acquire_job(format!("scan:library:{library_id}")).await {
-            Ok(Some(lease)) => lease,
-            Ok(None) => {
-                for req in queued {
-                    if let Err(error) = self.queue_targeted(req.clone()).await {
-                        self.record_request(&req, "failed", None, Some(error.to_string()))
-                            .await;
-                    }
-                }
-                return true;
-            }
-            Err(error) => {
-                tracing::warn!(library = library_id, error = %error, "targeted scan lease retry failed");
-                for req in queued {
-                    if let Err(error) = self.queue_targeted(req.clone()).await {
-                        self.record_request(&req, "failed", None, Some(error.to_string()))
-                            .await;
-                    }
-                }
-                return true;
-            }
-        };
-        let lost = lease.loss_token();
-        let publisher = lease.publisher(self.store.as_ref());
-        let mut groups: BTreeMap<PathBuf, Vec<ScanRequest>> = BTreeMap::new();
-        for req in queued {
-            let normalized = req.path.canonicalize().unwrap_or_else(|_| req.path.clone());
-            groups.entry(normalized).or_default().push(req);
-        }
-        for requests in groups.into_values() {
-            let out = tokio::select! {
-                out = self.run_targeted(&requests, &publisher) => out,
-                () = lost.cancelled() => Err(TargetError::Store(StoreError::Task(
-                    "cluster scan lease was lost".to_owned(),
-                ))),
-            };
-            for req in requests {
-                match &out {
-                    Ok(scan) => self.record_request(&req, "done", Some(scan), None).await,
-                    Err(e) => {
-                        self.record_request(&req, "failed", None, Some(e.to_string()))
-                            .await
-                    }
-                }
-            }
-        }
-        drop(publisher);
-        let _ = lease.release().await;
-        false
-    }
-
-    /// The recent request ring, newest last.
-    pub async fn scan_requests(&self) -> Vec<ScanRequestRecord> {
-        self.requests.lock().await.iter().cloned().collect()
-    }
-
-    pub async fn scan_request(&self, id: &str) -> Option<ScanRequestRecord> {
-        self.requests
-            .lock()
-            .await
-            .iter()
-            .find(|r| r.request_id == id)
-            .cloned()
-    }
-
-    async fn record_request(
-        &self,
-        req: &ScanRequest,
-        status: &str,
-        scan: Option<&TargetedScan>,
-        error: Option<String>,
-    ) {
-        let mut ring = self.requests.lock().await;
-        if let Some(existing) = ring.iter_mut().find(|r| r.request_id == req.id) {
-            existing.status = status.to_owned();
-            existing.report = scan.map(|s| s.report.clone());
-            existing.items = scan.map(|s| s.items.clone());
-            existing.error = error;
-            return;
-        }
-        if ring.len() == MAX_REQUESTS {
-            ring.pop_front();
-        }
-        ring.push_back(ScanRequestRecord {
-            request_id: req.id.clone(),
-            at: now(),
-            library_id: req.library_id,
-            path: req.path.display().to_string(),
-            correlation_id: req.correlation_id.clone(),
-            source: req.source.clone(),
-            status: status.to_owned(),
-            report: scan.map(|s| s.report.clone()),
-            items: scan.map(|s| s.items.clone()),
-            error,
-        });
-    }
-
-    async fn set_request_status(&self, id: &str, status: &str) {
-        if let Some(r) = self
-            .requests
-            .lock()
-            .await
-            .iter_mut()
-            .find(|r| r.request_id == id)
-        {
-            r.status = status.to_owned();
-        }
-    }
-
     async fn run_scan(
         &self,
         library_id: i64,
         progress: Arc<ScanProgress>,
         force_metadata: bool,
         lease: &ActiveJobLease,
-    ) {
+    ) -> Result<TargetedScan, StoreError> {
         let mut status = ScanStatus {
             running: true,
             started_at: Some(now()),
@@ -5495,7 +5366,7 @@ impl JobManager {
             Ok(None) => {
                 self.finish(library_id, error_status("library not found"))
                     .await;
-                return;
+                return Err(StoreError::Task("library not found".into()));
             }
             Err(e) => {
                 tracing::warn!(
@@ -5505,7 +5376,7 @@ impl JobManager {
                     "library scan failed"
                 );
                 self.finish(library_id, error_status(&e.to_string())).await;
-                return;
+                return Err(e);
             }
         };
 
@@ -5527,7 +5398,7 @@ impl JobManager {
                     "library scan failed"
                 );
                 self.finish(library_id, error_status(&e.to_string())).await;
-                return;
+                return Err(e);
             }
         }
 
@@ -5566,9 +5437,16 @@ impl JobManager {
                 stage = "stamp_completion",
                 "recording the library scan completion time failed"
             );
+            self.finish(library_id, error_status(&e.to_string())).await;
+            return Err(e);
         }
         crate::http::library_channels::notify_catalogue_mutation();
+        let result = TargetedScan {
+            report: status.last_scan.clone().unwrap_or_default(),
+            items: Vec::new(),
+        };
         self.finish(library_id, status).await;
+        Ok(result)
     }
 
     /// The scheduler: ask [`crate::schedule::due_jobs`] once a minute, dispatch
@@ -5619,6 +5497,12 @@ impl JobManager {
             tracing::debug!("skipping a scheduler tick: this node is not a committed voter");
             return false;
         }
+        if let Err(error) = self.prepare_predictions().await {
+            tracing::warn!(%error, "predictive preparation deferred");
+        }
+        if let Err(error) = self.prepare_hot_copies().await {
+            tracing::warn!(%error, "hot artifact placement deferred");
+        }
         if let Err(e) = self.run_due_jobs(transcode).await {
             tracing::warn!(error = %e, "scheduler tick failed");
         }
@@ -5662,10 +5546,100 @@ impl JobManager {
         }
     }
 
+    /// Independent durable consumers: discovery keeps its existing cadence,
+    /// while admitted work is retried with bounded, jittered read-only polling.
+    pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
+        use plurx_core::store::background_jobs::JobKind;
+        let preparation = async {
+            let mut pacing = crate::background_jobs::IdlePoll::new();
+            loop {
+                let kinds = [JobKind::TranscodePrepare];
+                let before = crate::background_jobs::accepted_claims(&kinds);
+                if self
+                    .job_authority
+                    .may_execute_job(JobKind::TranscodePrepare)
+                    .await
+                    && self.job_interval(keys::JOB_CACHE_PRODUCE_MINS).await > 0
+                {
+                    Arc::clone(&self)
+                        .work_pretranscode_queue(Arc::clone(&transcode))
+                        .await;
+                }
+                let progressed = crate::background_jobs::accepted_claims(&kinds) != before;
+                tokio::time::sleep(pacing.delay(progressed)).await;
+            }
+        };
+        let fragments = async {
+            let mut pacing = crate::background_jobs::IdlePoll::new();
+            loop {
+                let kinds = [JobKind::FragmentIndexBuild, JobKind::ArtifactHydrate];
+                let before = crate::background_jobs::accepted_claims(&kinds);
+                if self
+                    .job_authority
+                    .may_execute_job(JobKind::FragmentIndexBuild)
+                    .await
+                    && self.cluster_fragment_index_enabled().await
+                    && !self.cluster_index_working.swap(true, Ordering::AcqRel)
+                {
+                    let _guard = ClusterIndexWorkingGuard(Arc::clone(&self));
+                    // Outbox admission is still voter-owned; learners only
+                    // consume already-authorized immutable work for a target.
+                    if self.may_run_cluster_jobs().await {
+                        self.enqueue_artifact_deliveries().await;
+                    }
+                    self.drain_cluster_fragment_index_slot(Arc::clone(&transcode))
+                        .await;
+                }
+                let progressed = crate::background_jobs::accepted_claims(&kinds) != before;
+                tokio::time::sleep(pacing.delay(progressed)).await;
+            }
+        };
+        let libraries = async {
+            let mut pacing = crate::background_jobs::IdlePoll::new();
+            loop {
+                let progressed = self.work_library_queue(&transcode, None).await;
+                tokio::select! {
+                    () = self.library_wake.notified() => {},
+                    () = tokio::time::sleep(pacing.delay(progressed)) => {},
+                }
+            }
+        };
+        let subtitles = async {
+            let mut pacing = crate::background_jobs::IdlePoll::new();
+            loop {
+                let progressed = self.work_subtitle_queue(&transcode).await;
+                tokio::time::sleep(pacing.delay(progressed)).await;
+            }
+        };
+        tokio::join!(preparation, fragments, libraries, subtitles);
+    }
+
+    async fn maintain_background_queue(self: Arc<Self>) {
+        if self.background_upkeep_running.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let _guard = BackgroundUpkeepGuard(Arc::clone(&self));
+        if !self.may_run_cluster_jobs().await {
+            return;
+        }
+        if let Err(error) = self.store.maintain_jobs(clock_ms()).await {
+            tracing::warn!(%error, "durable queue upkeep unavailable");
+        }
+        if let Err(error) = self.store.import_legacy_jobs(clock_ms()).await {
+            tracing::warn!(%error, "durable queue legacy import unavailable");
+        }
+    }
+
     async fn run_due_jobs(
         self: &Arc<Self>,
         transcode: &Arc<TranscodeManager>,
     ) -> Result<(), plurx_core::error::StoreError> {
+        // Receipt expiry and cancelled-owner cleanup continue even when every
+        // background feature preference is off. The Store skips idle writes.
+        let upkeep = Arc::clone(self);
+        tokio::spawn(async move {
+            upkeep.maintain_background_queue().await;
+        });
         let libraries = self.store.list_libraries().await?;
         let global = GlobalSchedule {
             probe_retry_mins: self.job_interval(keys::JOB_PROBE_RETRY_MINS).await,
@@ -5813,9 +5787,9 @@ impl JobManager {
             }
         }
 
-        // Execution has no interval of its own. Every node asks once per
-        // scheduler tick while speculative production is enabled, and the
-        // process-local guard keeps a long title from stacking worker loops.
+        // Discovery's tick also acts as a local wake hint. The independent
+        // durable consumer handles restart/retry latency between these ticks;
+        // both paths share the same physical worker guard.
         if global.cache_produce_mins > 0 {
             let state = Arc::clone(self);
             let transcode = Arc::clone(transcode);
@@ -5989,14 +5963,18 @@ impl JobManager {
         // enrich from AniList, which needs none, and those titles are exactly
         // as entitled to genres as the rest.
         let tmdb = match self.store.get_setting(keys::TMDB_API_KEY).await {
-            Ok(Some(key)) if !key.is_empty() => Some(TmdbClient::new(key)),
+            Ok(Some(key)) if !key.is_empty() => Some(
+                TmdbClient::new(key)
+                    .with_budget(publisher.provider_budget(Arc::clone(&self.store))),
+            ),
             Ok(_) => None,
             Err(e) => {
                 tracing::warn!(error = %e, "genre backfill: reading TMDB key");
                 None
             }
         };
-        let anilist = AniListClient::new();
+        let anilist =
+            AniListClient::new().with_budget(publisher.provider_budget(Arc::clone(&self.store)));
         let report = tokio::select! {
             report = metadata::genres::backfill_pass_with_publication(
                 &publisher,
@@ -6034,97 +6012,28 @@ impl JobManager {
         self.stamp(keys::JOB_LAST_CACHE_PRODUCE, &publisher).await;
         let lost = lease.loss_token();
         use crate::produce;
-        let user_cursor = publisher
-            .get_setting(keys::CACHE_PRETRANSCODE_USER_CURSOR)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|value| value.parse::<i64>().ok())
-            .filter(|value| *value >= 0)
-            .unwrap_or(0);
-        let mut users = match self
-            .store
-            .list_users_page(user_cursor, PRODUCE_USER_PAGE)
-            .await
-        {
-            Ok(users) => users,
-            Err(e) => {
-                tracing::warn!(error = %e, "candidate generator cannot page users");
+        let discoveries = match self.prediction_discoveries().await {
+            Ok(discoveries) => discoveries,
+            Err(error) => {
+                tracing::warn!(%error, "candidate generator could not read demand");
                 drop(publisher);
                 let _ = lease.release().await;
                 return;
             }
         };
-        if users.is_empty() && user_cursor > 0 {
-            users = self
-                .store
-                .list_users_page(0, PRODUCE_USER_PAGE)
-                .await
-                .unwrap_or_default();
-        }
-        let next_user_cursor = if users.len() < PRODUCE_USER_PAGE as usize {
-            0
-        } else {
-            users.last().map_or(0, |user| user.id)
-        };
-        if let Err(error) = publisher
-            .put_setting(
-                keys::CACHE_PRETRANSCODE_USER_CURSOR,
-                &next_user_cursor.to_string(),
-            )
-            .await
-        {
-            tracing::warn!(%error, "candidate generator could not advance its user cursor");
-        }
-        let mut rails: Vec<Vec<produce::DiscoveryCandidate>> = Vec::new();
-        let mut in_progress = Vec::new();
-        let mut next_up = Vec::new();
-        for user in &users {
-            if let Ok(rows) = self.store.continue_watching(user.id, PRODUCE_RAIL).await {
-                in_progress.extend(rows.into_iter().map(|r| (r.item.id, r.item.title)));
-            }
-            if let Ok(rows) = self.store.next_up(user.id, PRODUCE_RAIL).await {
-                next_up.extend(rows.into_iter().map(|r| (r.item.id, r.item.title)));
-            }
-        }
-        // The fallback rail, and the only one a brand-new server has: nobody
-        // has watch history on day one, but a 4K film that landed yesterday is
-        // still the most likely thing to be played tonight.
-        let recent: Vec<(i64, String)> = self
-            .store
-            .recently_added(None, PRODUCE_RAIL)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|r| (r.item.id, r.item.title))
-            .collect();
-
-        for (reason, items) in [
-            (produce::REASON_IN_PROGRESS, in_progress),
-            (produce::REASON_NEXT_UP, next_up),
-            (produce::REASON_RECENT, recent),
-        ] {
-            let mut rail = Vec::new();
-            for (item_id, title) in items {
-                rail.push(produce::DiscoveryCandidate {
-                    item_id,
-                    title,
-                    reason,
-                });
-            }
-            rails.push(rail);
-        }
-
-        // Dedupe/rank cheap item ids first, then perform at most one bounded
-        // file lookup per globally selected item. This is O(1) store fan-out
-        // as users/history grow: 64 users, 129 rail reads, and 64 file reads.
-        let discoveries = produce::rank_discovery(&rails, PRODUCE_DISCOVERY_ITEMS);
         let mut candidates = Vec::with_capacity(PRODUCE_MAX_PER_PASS);
-        for discovery in discoveries {
-            let Ok(files) = self.store.files_for_item(discovery.item_id).await else {
-                continue;
+        for prediction in discoveries {
+            let discovery = prediction.discovery;
+            let file = if let Some(file_id) = prediction.file_id {
+                self.store.get_file(file_id).await.ok().flatten()
+            } else {
+                self.store
+                    .files_for_item(discovery.item_id)
+                    .await
+                    .ok()
+                    .and_then(|files| files.into_iter().next())
             };
-            let Some(file) = files.into_iter().next() else {
+            let Some(file) = file else {
                 continue;
             };
             if !produce::worth_producing(&file) {
@@ -6254,7 +6163,7 @@ impl JobManager {
                 not_before_ms: created_at_ms,
                 created_at_ms,
             };
-            match publisher.enqueue_pretranscode_job(&job).await {
+            match publisher.enqueue_durable_pretranscode(&job).await {
                 Ok(true) => {
                     enqueued += 1;
                     tracing::info!(
@@ -6858,6 +6767,7 @@ impl JobManager {
         let cursor = self.subtitle_source_sweep_cursor.lock().await.clone();
         match crate::subtitle_source::sweep(
             self.store.as_ref(),
+            self.coordinator.node_id(),
             &root,
             cursor.as_deref(),
             crate::subtitle_source::SWEEP_PAGE,
@@ -6950,13 +6860,76 @@ impl JobManager {
             record_discard(Discard::SwitchOff);
             return None;
         }
+        // The publication row must carry a portable sampled digest. The
+        // object version used by the fragment-index source memo includes this
+        // host's device and inode, so it cannot identify bytes on a peer.
+        let memo = match crate::fragment_index_cluster::inspect_source(file).await {
+            Ok(version) => self
+                .store
+                .fragment_index_source(self.coordinator.node_id(), file.id, &version)
+                .await
+                .ok()
+                .flatten(),
+            Err(_) => None,
+        };
+        let attested = match crate::fragment_index_cluster::attest_source(
+            self.coordinator.node_id(),
+            file,
+            memo.as_ref(),
+            &|_| {},
+        )
+        .await
+        {
+            Ok(attested) => attested,
+            Err(reason) => {
+                tracing::warn!(file_id, %reason, "attesting subtitle ride-along source");
+                record_discard(Discard::SourceMoved);
+                return None;
+            }
+        };
+        if !crate::fragment_index_cluster::source_still_matches(
+            &attested.handle,
+            &attested.observation,
+        )
+        .unwrap_or(false)
+            || crate::fragment_index_cluster::inspect_source(file)
+                .await
+                .ok()
+                .as_deref()
+                != Some(attested.observation.object_version.as_str())
+        {
+            record_discard(Discard::SourceMoved);
+            return None;
+        }
         let harvest = pending.judge().await;
         let verdicts: Vec<_> = harvest
             .outcomes()
             .iter()
             .map(|outcome| (outcome.ordinal, outcome.verdict))
             .collect();
-        match harvest.publish().await {
+        if !crate::fragment_index_cluster::source_still_matches(
+            &attested.handle,
+            &attested.observation,
+        )
+        .unwrap_or(false)
+            || crate::fragment_index_cluster::inspect_source(file)
+                .await
+                .ok()
+                .as_deref()
+                != Some(attested.observation.object_version.as_str())
+        {
+            record_discard(Discard::SourceMoved);
+            return None;
+        }
+        match harvest
+            .publish_with_cluster(
+                self.store.as_ref(),
+                self.coordinator.node_id(),
+                &attested.observation.source_sha256,
+                None,
+            )
+            .await
+        {
             Ok(manifest) => {
                 tracing::info!(file_id, ?verdicts, "published the pass's PGS tracks");
                 Some(manifest)
@@ -6994,6 +6967,7 @@ impl JobManager {
             };
         if cluster_cache_enabled {
             if self.may_run_cluster_jobs().await {
+                self.discover_subtitle_sources(Arc::clone(&transcode)).await;
                 self.discover_cluster_fragment_indexes(transcode).await;
             }
             return;
@@ -7093,8 +7067,29 @@ impl JobManager {
                 }
                 let identity = crate::fragindex::identity_for(&file, video);
                 match self.store.fragment_index(file_id, &identity).await {
-                    // Already current for this file and this pipeline.
-                    Ok(Some(_)) => continue,
+                    Ok(Some(index)) => {
+                        if !matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
+                            continue;
+                        }
+                        // Size/mtime alone miss inode/ctime-only replacement.
+                        // The local pass must refresh such proofs even when
+                        // the cluster request resolver is disabled. A current
+                        // refusal is already analyzed and must not rescan.
+                        match crate::fragment_index_cluster::inspect_source(&file).await {
+                            Ok(object)
+                                if index.promotion.hevc_configuration.as_ref().is_some_and(
+                                    |proof| proof.current_on_node(&object, &node_id),
+                                ) =>
+                            {
+                                continue
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                tracing::debug!(file_id, %error, "local HEVC index source unavailable");
+                                break;
+                            }
+                        }
+                    }
                     Ok(None) => {}
                     Err(error) => {
                         // The sidecar is failing reads. Give up on the whole
@@ -7128,7 +7123,7 @@ impl JobManager {
                 // Asked per pass, so the switch turning off stops the next
                 // pass from riding without a restart.
                 let ride_along = crate::subtitle_ride_along::RideAlongGate::open(
-                    self.store.as_ref(),
+                    Arc::clone(&self.store),
                     &runtime_cache,
                 )
                 .await;
@@ -7159,7 +7154,13 @@ impl JobManager {
                 )
                 .await;
                 let refusal = match outcome {
-                    crate::fragindex::IndexOutcome::Built(index) => {
+                    crate::fragindex::IndexOutcome::Built(mut index) => {
+                        if !source_unchanged {
+                            continue;
+                        }
+                        if let Some(proof) = index.promotion.hevc_configuration.as_mut() {
+                            proof.source_node_id = node_id.clone();
+                        }
                         if let Err(error) = self.store.put_fragment_index(file_id, &index).await {
                             tracing::warn!(file_id, error = %error, "storing a fragment index");
                         } else {
@@ -7268,6 +7269,107 @@ impl JobManager {
                 built,
                 built_files = ?built_file_ids,
                 "fragment indexing pass finished"
+            );
+        }
+    }
+
+    /// Fill cold subtitle sources only while this node is idle. The cluster
+    /// lease fences competing discovery passes; the request store still owns
+    /// exact per-stamp de-duplication with a viewer's foreground enqueue.
+    pub(crate) async fn discover_subtitle_sources(
+        self: &Arc<Self>,
+        transcode: Arc<TranscodeManager>,
+    ) {
+        const BACKFILL_PER_TICK: i64 = 8;
+        if !self.subtitle_source_queue_enabled().await
+            || !setting_enabled(
+                self.store
+                    .get_setting(keys::SUBTITLE_BACKFILL)
+                    .await
+                    .unwrap_or(None),
+            )
+            || !transcode.pretranscode_worker_idle()
+            || !self.may_run_cluster_jobs().await
+        {
+            return;
+        }
+        let lease = match self
+            .acquire_job("media:subtitle-source:backfill".to_owned())
+            .await
+        {
+            Ok(Some(lease)) => lease,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "acquiring subtitle-source backfill lease");
+                return;
+            }
+        };
+        let lost = lease.loss_token();
+        let now = clock_ms();
+        let candidates = self
+            .store
+            .subtitle_backfill_candidates(i64::MAX, i64::MAX, now, BACKFILL_PER_TICK)
+            .await;
+        let pipeline_version = subtitle_source_pipeline_version().await;
+        let mut enqueued = 0_i64;
+        let mut considered = 0_i64;
+        match candidates {
+            Ok(candidates) => {
+                for candidate in candidates {
+                    if lost.is_cancelled() || !transcode.pretranscode_worker_idle() {
+                        break;
+                    }
+                    considered += 1;
+                    let file = match self.store.get_file(candidate.file_id).await {
+                        Ok(Some(file))
+                            if file.size == candidate.source_size
+                                && file.mtime == candidate.source_mtime =>
+                        {
+                            file
+                        }
+                        _ => continue,
+                    };
+                    if crate::subtitle_source::is_mpegts_container(&file) {
+                        continue;
+                    }
+                    let stamp = SubtitleSourceStamp {
+                        file_id: file.id,
+                        source_size: file.size,
+                        source_mtime: file.mtime,
+                        pipeline_version: pipeline_version.clone(),
+                    };
+                    match self
+                        .store
+                        .enqueue_or_promote_subtitle_source(&stamp, "normal", clock_ms())
+                        .await
+                    {
+                        Ok(Some(request)) if request.state == "queued" => {
+                            enqueued += 1;
+                            self.subtitle_backfill_enqueued_process
+                                .fetch_add(1, Ordering::Relaxed);
+                            crate::telemetry::record_subtitle_source(
+                                crate::telemetry::SubtitleSourceMetric::RequestBackground,
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => tracing::warn!(
+                            file_id = file.id,
+                            %error,
+                            "enqueuing subtitle-source backfill"
+                        ),
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(%error, "discovering subtitle-source backfill"),
+        }
+        if let Err(error) = lease.release().await {
+            tracing::warn!(%error, "releasing subtitle-source backfill lease");
+        }
+        if considered > 0 {
+            tracing::info!(
+                considered,
+                enqueued,
+                "subtitle-source backfill pass finished"
             );
         }
     }
@@ -7470,8 +7572,6 @@ impl JobManager {
         self: Arc<Self>,
         transcode: Arc<TranscodeManager>,
     ) {
-        const GLOBAL_SLOTS: usize = 2;
-
         if self.cluster_index_working.swap(true, Ordering::Relaxed) {
             return;
         }
@@ -7515,49 +7615,46 @@ impl JobManager {
             return;
         }
 
-        let mut slots = tokio::task::JoinSet::new();
-        for slot in 0..GLOBAL_SLOTS {
-            let lease = match self
-                .acquire_job(format!("media:fragment-index:{slot}"))
-                .await
-            {
-                Ok(Some(lease)) => lease,
-                Ok(None) => continue,
-                Err(error) => {
-                    tracing::warn!(slot, %error, "acquiring cluster fragment-index media slot");
-                    continue;
-                }
-            };
-            let state = Arc::clone(&self);
-            let transcode = Arc::clone(&transcode);
-            slots.spawn(async move {
-                let permit_lost = lease.loss_token();
-                let built = state
-                    .drain_cluster_fragment_index_slot(transcode, permit_lost)
-                    .await;
-                if let Err(error) = lease.release().await {
-                    tracing::warn!(slot, %error, "releasing cluster fragment-index media slot");
-                }
-                built
-            });
-        }
-        let mut built = 0_usize;
-        while let Some(result) = slots.join_next().await {
-            match result {
-                Ok(count) => built += count,
-                Err(error) => tracing::warn!(%error, "cluster fragment-index slot panicked"),
-            }
-        }
+        self.enqueue_artifact_deliveries().await;
+        let built = self.drain_cluster_fragment_index_slot(transcode).await;
         if built > 0 {
             tracing::info!(built, "cluster fragment-index queue pass finished");
         }
     }
 
+    pub(crate) fn execution_authority(&self) -> Arc<dyn ClusterJobAuthority> {
+        Arc::clone(&self.job_authority)
+    }
+
+    pub(crate) async fn enqueue_artifact_deliveries(&self) {
+        match self.store.artifact_repairs(true).await {
+            Ok(repairs) => {
+                for repair in repairs.into_iter().take(16) {
+                    if let Err(error) = self.store.enqueue_artifact_repair(repair, clock_ms()).await
+                    {
+                        tracing::warn!(%error, "admitting finite artifact repair");
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(%error, "reading artifact repair plans"),
+        }
+        match self.store.delivery_intents(clock_ms()).await {
+            Ok(intents) => {
+                for intent in intents {
+                    if let Err(error) = self.store.enqueue_delivery(intent, clock_ms()).await {
+                        tracing::warn!(%error, "admitting artifact delivery");
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(%error, "reading artifact delivery obligations"),
+        }
+    }
+
     async fn resolve_analysis_requests(self: &Arc<Self>, transcode: Arc<TranscodeManager>) {
         const MAX_REQUESTS_PER_PASS: usize = 2;
-        /// A deadline on a hung mount, not a bound on file size. Attestation
-        /// samples at most 64 MiB whatever the source weighs, so ten minutes
-        /// is reached only when the filesystem has stopped answering.
+        /// Hard background I/O budget. HEVC copy proof hashes the full source;
+        /// other consumers still sample. Large/slow files may exhaust this
+        /// budget and remain unverified, with bounded charged retries.
         const ATTEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
         if !self.cluster_fragment_index_enabled().await || !transcode.pretranscode_worker_idle() {
@@ -7741,6 +7838,429 @@ impl JobManager {
     }
 
     #[allow(clippy::too_many_arguments)]
+    async fn resolve_subtitle_source_request(
+        &self,
+        request: &AnalysisRequest,
+        node_id: &str,
+        file: &MediaFile,
+        runtime_cache: &Path,
+        preempt_when_busy: Option<&TranscodeManager>,
+        fence: &crate::background_jobs::JobFence,
+        lost: &CancellationToken,
+    ) -> Result<(), AnalysisResolutionError> {
+        if !request.video_identity.is_empty()
+            || !request.target_node_id.is_empty()
+            || request.pipeline_version != subtitle_source_pipeline_version().await
+        {
+            return Err(AnalysisResolutionError::Terminal(
+                "pipeline_version_unavailable",
+            ));
+        }
+        if !self.subtitle_source_queue_enabled().await
+            || !crate::subtitle_source::enabled(self.store.as_ref()).await
+        {
+            return Err(AnalysisResolutionError::Retry {
+                code: "pipeline_version_unavailable",
+                charge_attempt: false,
+            });
+        }
+        if crate::subtitle_source::is_mpegts_container(file) {
+            return Err(AnalysisResolutionError::Terminal("stored_probe_invalid"));
+        }
+        if lost.is_cancelled() {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        self.update_analysis_progress(
+            &request.request_id,
+            &request.target_node_id,
+            "hashing",
+            0,
+            0,
+            0,
+        );
+        if !self
+            .store
+            .record_analysis_request_phase(request, "hashing", None, clock_ms())
+            .await
+            .unwrap_or(false)
+        {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        let memo = match crate::fragment_index_cluster::inspect_source(file).await {
+            Ok(version) => self
+                .store
+                .fragment_index_source(node_id, file.id, &version)
+                .await
+                .ok()
+                .flatten(),
+            Err(_) => None,
+        };
+        let progress = |bytes| {
+            self.update_analysis_progress(
+                &request.request_id,
+                &request.target_node_id,
+                "hashing",
+                bytes,
+                0,
+                0,
+            );
+        };
+        let attested = tokio::select! {
+            () = lost.cancelled() => return Err(AnalysisResolutionError::ClaimLost),
+            result = tokio::time::timeout(
+                Duration::from_secs(10 * 60),
+                crate::fragment_index_cluster::attest_source(node_id, file, memo.as_ref(), &progress)
+            ) => match result {
+                Ok(Ok(attested)) => attested,
+                Ok(Err(_)) => return Err(AnalysisResolutionError::Retry {
+                    code: "source_attestation_failed",
+                    charge_attempt: true,
+                }),
+                Err(_) => return Err(AnalysisResolutionError::Retry {
+                    code: "source_attestation_timeout",
+                    charge_attempt: true,
+                }),
+            },
+        };
+        if !crate::fragment_index_cluster::source_still_matches(
+            &attested.handle,
+            &attested.observation,
+        )
+        .unwrap_or(false)
+            || crate::fragment_index_cluster::inspect_source(file)
+                .await
+                .ok()
+                .as_deref()
+                != Some(attested.observation.object_version.as_str())
+        {
+            return Err(AnalysisResolutionError::Terminal("source_superseded"));
+        }
+        let raw = crate::ffmpeg::held_source_index_probe_json(
+            &attested.handle,
+            Duration::from_secs(30),
+            Some(lost),
+        )
+        .await;
+        if lost.is_cancelled() {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        let raw = raw.map_err(|_| AnalysisResolutionError::Terminal("stored_probe_invalid"))?;
+        let tracks = crate::subtitle_ride_along::eligible_tracks_from_probe(&raw);
+        let rows = self
+            .store
+            .list_subtitle_source_publications(file.id, file.size, file.mtime)
+            .await
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_catalog_read_failed",
+                charge_attempt: true,
+            })?;
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|row| row.source_attestation == attested.observation.source_sha256)
+            .collect();
+        let result_key = format!(
+            "subtitle-source:{}:{}:{}:{}",
+            file.id, file.size, file.mtime, request.pipeline_version
+        );
+        if subtitle_source_covered(&tracks, &rows) {
+            tracing::info!(
+                file_id = file.id,
+                "subtitle_source request already covered; no source read"
+            );
+            self.complete_subtitle_source_request(request, &result_key, fence)
+                .await?;
+            return Ok(());
+        }
+        let gate =
+            crate::subtitle_ride_along::RideAlongGate::open(Arc::clone(&self.store), runtime_cache)
+                .await
+                .ok_or(AnalysisResolutionError::Retry {
+                    code: "source_unavailable",
+                    charge_attempt: true,
+                })?;
+        let plan =
+            crate::subtitle_ride_along::plan_tracks(&gate, file.id, &attested.handle, &tracks)
+                .await;
+        let Some(plan) = plan else {
+            if tracks.is_empty() {
+                self.complete_subtitle_source_request(request, &result_key, fence)
+                    .await?;
+                return Ok(());
+            }
+            // A local pass may have committed its manifest before the
+            // replicated publication writes, or a migration may introduce
+            // the publication table after that manifest. Reassert only
+            // verified, locally extracted rows instead of rereading media.
+            let root = crate::subtitle_source::store_root(runtime_cache);
+            let _ = crate::subtitle_ride_along::publish_existing_manifest_rows(
+                self.store.as_ref(),
+                node_id,
+                &root,
+                file.id,
+                &attested.handle,
+                &attested.observation.source_sha256,
+                Some((fence, request)),
+            )
+            .await;
+            if let Ok(rows) = self
+                .store
+                .list_subtitle_source_publications(file.id, file.size, file.mtime)
+                .await
+            {
+                let rows: Vec<_> = rows
+                    .into_iter()
+                    .filter(|row| row.source_attestation == attested.observation.source_sha256)
+                    .collect();
+                if subtitle_source_covered(&tracks, &rows) {
+                    self.complete_subtitle_source_request(request, &result_key, fence)
+                        .await?;
+                    return Ok(());
+                }
+            }
+            // A concurrently running local pass may hold the file claim;
+            // retry after its ordinary backoff. An old failed ride latch or
+            // an unreadable manifest is also possible, so charge the attempt
+            // rather than keeping an immortal queued row.
+            return Err(AnalysisResolutionError::Retry {
+                code: "queue_full_or_busy",
+                charge_attempt: false,
+            });
+        };
+        let stage = plan.stage().to_owned();
+        let track_count = plan.tracks().len();
+        let pgs_count = tracks
+            .iter()
+            .filter(|track| {
+                plan.tracks().contains(&track.ordinal)
+                    && track.kind == crate::subtitle_ride_along::ProbedKind::Pgs
+            })
+            .count();
+        let text_count = track_count.saturating_sub(pgs_count);
+        self.update_analysis_subtitle_tracks(
+            &request.request_id,
+            &request.target_node_id,
+            pgs_count,
+            text_count,
+            0,
+        );
+        self.update_analysis_progress(
+            &request.request_id,
+            &request.target_node_id,
+            "subtitle_source",
+            0,
+            0,
+            0,
+        );
+        if !self
+            .store
+            .record_analysis_request_phase(request, "staged", None, clock_ms())
+            .await
+            .unwrap_or(false)
+        {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        let meter = || {
+            self.update_analysis_subtitle_tracks(
+                &request.request_id,
+                &request.target_node_id,
+                pgs_count,
+                text_count,
+                crate::subtitle_ride_along::stage_bytes(&stage),
+            );
+        };
+        let started = Instant::now();
+        tracing::info!(
+            file_id = file.id,
+            node_id,
+            pgs_count,
+            text_count,
+            "subtitle_source job reading source"
+        );
+        let pending = run_subtitle_source_pass(
+            plan,
+            &attested.handle,
+            runtime_cache,
+            lost,
+            if request.priority == "foreground" {
+                None
+            } else {
+                preempt_when_busy
+            },
+            &meter,
+        )
+        .await?;
+        crate::telemetry::record_subtitle_source(crate::telemetry::SubtitleSourceMetric::JobBytes(
+            file.size.max(0) as u64,
+        ));
+        if lost.is_cancelled() {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        if !crate::fragment_index_cluster::source_still_matches(
+            &attested.handle,
+            &attested.observation,
+        )
+        .unwrap_or(false)
+            || crate::fragment_index_cluster::inspect_source(file)
+                .await
+                .ok()
+                .as_deref()
+                != Some(attested.observation.object_version.as_str())
+        {
+            return Err(AnalysisResolutionError::Terminal("source_superseded"));
+        }
+        let current = self
+            .store
+            .get_file(file.id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|current| current.size == file.size && current.mtime == file.mtime);
+        if !current {
+            return Err(AnalysisResolutionError::Terminal("source_superseded"));
+        }
+        if !self
+            .store
+            .record_analysis_request_phase(request, "publishing", None, clock_ms())
+            .await
+            .unwrap_or(false)
+        {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        let harvest = pending.judge().await;
+        let mut representation_count = 0_usize;
+        for outcome in harvest.outcomes() {
+            for representation in &outcome.representations {
+                representation_count += 1;
+                let event = match representation.verdict {
+                    crate::subtitle_source::Verdict::Kept => {
+                        crate::telemetry::SubtitleSourceMetric::VerdictKept
+                    }
+                    crate::subtitle_source::Verdict::Empty => {
+                        crate::telemetry::SubtitleSourceMetric::VerdictEmpty
+                    }
+                    crate::subtitle_source::Verdict::Malformed => {
+                        crate::telemetry::SubtitleSourceMetric::VerdictMalformed
+                    }
+                    crate::subtitle_source::Verdict::Transient => {
+                        crate::telemetry::SubtitleSourceMetric::VerdictTransient
+                    }
+                };
+                crate::telemetry::record_subtitle_source(event);
+            }
+        }
+        if lost.is_cancelled() {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        if !crate::fragment_index_cluster::source_still_matches(
+            &attested.handle,
+            &attested.observation,
+        )
+        .unwrap_or(false)
+            || crate::fragment_index_cluster::inspect_source(file)
+                .await
+                .ok()
+                .as_deref()
+                != Some(attested.observation.object_version.as_str())
+        {
+            return Err(AnalysisResolutionError::Terminal("source_superseded"));
+        }
+        let published = harvest
+            .publish_guarded_worker(
+                self.store.as_ref(),
+                node_id,
+                &attested.observation.source_sha256,
+                lost,
+                request,
+                fence,
+            )
+            .await;
+        let receipt = match published {
+            Ok(receipt) => receipt,
+            Err(_) if lost.is_cancelled() => return Err(AnalysisResolutionError::ClaimLost),
+            Err(_) => {
+                return Err(AnalysisResolutionError::Retry {
+                    code: "queue_write_failed",
+                    charge_attempt: true,
+                });
+            }
+        };
+        if lost.is_cancelled() {
+            if let Err(error) = receipt.rollback(self.store.as_ref()).await {
+                tracing::error!(file_id = file.id, %error, "compensating lost subtitle-source publication");
+            }
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        if !self
+            .store
+            .record_analysis_request_phase(request, "publishing", None, clock_ms())
+            .await
+            .unwrap_or(false)
+        {
+            if let Err(error) = receipt.rollback(self.store.as_ref()).await {
+                tracing::error!(file_id = file.id, %error, "compensating lost subtitle-source publication");
+            }
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        tracing::info!(
+            file_id = file.id,
+            node_id,
+            pgs_count,
+            text_count,
+            representation_count,
+            bytes_read = file.size.max(0),
+            elapsed_ms = started.elapsed().as_millis(),
+            "subtitle_source job published"
+        );
+        match self
+            .complete_subtitle_source_request(request, &result_key, fence)
+            .await
+        {
+            Ok(()) => {
+                receipt.commit().await;
+                Ok(())
+            }
+            Err(error) => {
+                if let Err(rollback_error) = receipt.rollback(self.store.as_ref()).await {
+                    tracing::error!(file_id = file.id, %rollback_error, "compensating unsettled subtitle-source publication");
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn complete_subtitle_source_request(
+        &self,
+        request: &AnalysisRequest,
+        result_key: &str,
+        fence: &crate::background_jobs::JobFence,
+    ) -> Result<(), AnalysisResolutionError> {
+        if !fence
+            .write_subtitle(
+                request,
+                plurx_core::store::background_jobs_subtitle::SubtitleJobWrite::Complete {
+                    result_key: result_key.to_owned(),
+                },
+            )
+            .await
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "queue_write_failed",
+                charge_attempt: true,
+            })?
+        {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        self.analysis_metrics.publication("subtitle_source", false);
+        crate::store_result::observe(
+            crate::store_result::Operation::RecordPublishedAnalysisPhase,
+            crate::store_result::Discard::BestEffort,
+            self.store
+                .record_analysis_request_phase(request, "published", None, clock_ms())
+                .await,
+        );
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn resolve_analysis_request(
         &self,
         request: &AnalysisRequest,
@@ -7780,6 +8300,9 @@ impl JobManager {
             file.size.max(0) as u64,
             file.duration_ms.unwrap_or_default(),
         );
+        if request.component == "subtitle_source" {
+            return Err(AnalysisResolutionError::ClaimLost); // Common workers own this component.
+        }
         if request.component == "skip_markers" {
             if request.pipeline_version != crate::http::stream::CHAPTER_ANNOTATION_VERSION {
                 return Err(AnalysisResolutionError::Terminal(
@@ -7928,7 +8451,7 @@ impl JobManager {
                 })
             }
         };
-        let object_version = crate::fragment_index_cluster::inspect_source(&file)
+        let object_version = crate::fragment_index_cluster::inspect_copy_source(&file)
             .await
             .map_err(|_| AnalysisResolutionError::Retry {
                 code: "source_unavailable",
@@ -7958,15 +8481,12 @@ impl JobManager {
             0,
             0,
         );
-        // Verification reads a bounded sample, not the file, so the bar and
-        // the ETA have to be denominated in what it will actually read.
-        // Otherwise a 43 GB source shows a tenth of a percent and a
-        // twenty-minute estimate for an operation that finishes in two
-        // seconds. The build stage sets the totals back to the whole file.
+        // HEVC copy reads every source byte; other codecs retain sampling.
+        // Progress and ETA must describe the selected attestation regime.
         self.set_analysis_progress_totals(
             &request.request_id,
             &request.target_node_id,
-            crate::fragment_index_cluster::attestation_read_bytes(file.size.max(0) as u64),
+            crate::fragment_index_cluster::copy_attestation_read_bytes(&file),
             file.duration_ms.unwrap_or_default(),
         );
         // Bound to a local rather than passed inline: the callback outlives
@@ -7982,7 +8502,7 @@ impl JobManager {
             );
         };
         let attested = tokio::select! {
-            result = crate::fragment_index_cluster::attest_source(
+            result = crate::fragment_index_cluster::attest_copy_source(
                 node_id,
                 &file,
                 memo.as_ref(),
@@ -8003,17 +8523,8 @@ impl JobManager {
                 });
             }
             () = wait_analysis_deadline(attest_timeout) => {
-                // Charged, and deliberately so. Before sampling, this deadline
-                // measured file size and turned large-but-healthy sources into
-                // permanent failures; now the read it bounds is 64 MiB, so
-                // reaching it means the mount has stopped answering, which is
-                // a real fault worth an attempt. Charging is also what bounds
-                // the retry: an uncharged retry is *refunded* (`attempts - 1`),
-                // which pins `attempts` at one, and the backoff shifts by
-                // `attempts - 1` — so a refunded timeout would re-queue at the
-                // base delay forever, never escalate, never go terminal, and
-                // quietly fill the 4,096-row active-request budget that every
-                // other file needs in order to be enqueued at all.
+                // Charge timeout attempts so large/slow or unavailable sources
+                // back off and eventually stop instead of retrying forever.
                 return Err(AnalysisResolutionError::Retry {
                     code: "source_attestation_timeout",
                     charge_attempt: true,
@@ -8151,7 +8662,6 @@ impl JobManager {
     async fn drain_cluster_fragment_index_slot(
         self: &Arc<Self>,
         transcode: Arc<TranscodeManager>,
-        permit_lost: tokio_util::sync::CancellationToken,
     ) -> usize {
         const MAX_JOBS_PER_SLOT: usize = 4;
         const MAX_REFUSALS: usize = 4_096;
@@ -8166,8 +8676,7 @@ impl JobManager {
         };
         let mut built = 0_usize;
         for _ in 0..MAX_JOBS_PER_SLOT {
-            if permit_lost.is_cancelled()
-                || !transcode.pretranscode_worker_idle()
+            if !transcode.pretranscode_worker_idle()
                 || !self.cluster_fragment_index_enabled().await
                 || !crate::ffmpeg::fragment_index_engine_is_current().await
             {
@@ -8183,20 +8692,24 @@ impl JobManager {
                     .cloned()
                     .collect::<Vec<_>>()
             };
-            let job = match self
-                .store
-                .claim_cluster_fragment_index(
-                    &node_id,
-                    &excluded,
-                    now,
-                    now.saturating_add(worker.retry_policy.lease_ms),
-                )
-                .await
+            let (job, active, admission) = match crate::background_jobs::claim_fragment(
+                Arc::clone(&self.store),
+                Arc::clone(&self.job_authority),
+                &transcode,
+                &node_id,
+                &excluded,
+                &crate::background_jobs::FragmentPipeline {
+                    engine_sha256: &worker.engine_sha256,
+                    have_dovi: worker.have_dovi,
+                    convert_dolby_vision: worker.convert_dolby_vision,
+                },
+            )
+            .await
             {
-                Ok(Some(job)) => job,
+                Ok(Some(claimed)) => claimed,
                 Ok(None) => break,
                 Err(error) => {
-                    tracing::warn!(%error, "claiming a cluster fragment-index job");
+                    tracing::warn!(%error, "claiming durable fragment work");
                     break;
                 }
             };
@@ -8205,12 +8718,15 @@ impl JobManager {
                     Arc::clone(&transcode),
                     job,
                     worker.clone(),
-                    permit_lost.clone(),
+                    active.fence(),
+                    &admission,
                 )
                 .await
             {
                 built += 1;
             }
+            active.finish().await;
+            drop(admission);
         }
         built
     }
@@ -8249,6 +8765,26 @@ impl JobManager {
         }
     }
 
+    async fn wait_for_fragment_worker_stop(
+        &self,
+        transcode: &TranscodeManager,
+        admission: &crate::transcode::FragmentAdmission,
+        lost: &tokio_util::sync::CancellationToken,
+    ) {
+        loop {
+            if lost.is_cancelled()
+                || !transcode.fragment_worker_idle(admission)
+                || !self.cluster_fragment_index_enabled().await
+            {
+                return;
+            }
+            tokio::select! {
+                () = lost.cancelled() => return,
+                () = tokio::time::sleep(Duration::from_millis(500)) => {}
+            }
+        }
+    }
+
     async fn remember_fragment_index_refusal(&self, cache_key: &str, retry_at_ms: i64) {
         const MAX_REFUSALS: usize = 4_096;
         let mut refusals = self.fragment_index_refusals.lock().await;
@@ -8265,17 +8801,8 @@ impl JobManager {
         refusals.insert(cache_key.to_owned(), retry_at_ms);
     }
 
-    /// Report a terminal write that did not land.
-    ///
-    /// `fail`, `yield` and `complete` all answer `Ok(false)` when the row moved
-    /// under the worker, and `Err` when the store refused the statement
-    /// outright. Eighteen call sites discarded both with `let _ = …`, which is
-    /// most of why a queue that failed every job it claimed for seventy-two
-    /// hours produced no log line saying so. The row is not repaired here —
-    /// the sweep owns that — but the loss is now visible.
     fn record_job_outcome(
         &self,
-        _retired: &HeartbeatRetired,
         job: &plurx_core::store::ClusterFragmentIndexJob,
         action: &str,
         code: &str,
@@ -8284,62 +8811,42 @@ impl JobManager {
         record_analysis_outcome(&self.analysis_metrics, job, action, code, result)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn fail_fragment_index_job(
         &self,
-        retired: &HeartbeatRetired,
+        fence: &crate::background_jobs::JobFence,
         job: &plurx_core::store::ClusterFragmentIndexJob,
-        node_id: &str,
         code: &str,
         retryable: bool,
-        now_ms: i64,
         retry_at_ms: i64,
     ) -> bool {
-        let written = self
-            .store
-            .fail_cluster_fragment_index(
-                &job.cache_key,
-                &job.target_node_id,
-                node_id,
-                job.fence,
-                code,
-                retryable,
-                now_ms,
-                retry_at_ms,
-            )
-            .await;
-        self.record_job_outcome(retired, job, "fail", code, written)
+        use plurx_core::store::background_jobs::JobSettlement;
+        let settlement = if retryable {
+            JobSettlement::Retry {
+                error_code: code.into(),
+                not_before_ms: retry_at_ms,
+            }
+        } else {
+            JobSettlement::Fail {
+                error_code: code.into(),
+            }
+        };
+        self.record_job_outcome(job, "fail", code, fence.settle(settlement).await)
     }
 
-    /// Hand an untargeted job back to the cluster.
-    ///
-    /// A yield writes no durable code — the row goes back to `queued` and
-    /// keeps whatever it had — so `code` here is only ever *reported*: it is
-    /// what the lost-write log says this yield was for. That still matters,
-    /// because "this node refused the source" and "the mount stopped
-    /// answering" are the two reasons a yield happens and they send an
-    /// operator to different places.
     async fn yield_fragment_index_job(
         &self,
-        retired: &HeartbeatRetired,
+        fence: &crate::background_jobs::JobFence,
         job: &plurx_core::store::ClusterFragmentIndexJob,
-        node_id: &str,
         code: &str,
-        now_ms: i64,
         retry_at_ms: i64,
     ) -> bool {
-        let written = self
-            .store
-            .yield_cluster_fragment_index(
-                &job.cache_key,
-                &job.target_node_id,
-                node_id,
-                job.fence,
-                now_ms,
-                retry_at_ms,
-            )
+        let result = fence
+            .settle(plurx_core::store::background_jobs::JobSettlement::Yield {
+                checkpoint: None,
+                not_before_ms: retry_at_ms,
+            })
             .await;
-        self.record_job_outcome(retired, job, "yield", code, written)
+        self.record_job_outcome(job, "yield", code, result)
     }
 
     /// Record a cluster worker's refusal in this node's own outcome table too.
@@ -8405,15 +8912,13 @@ impl JobManager {
         transcode: Arc<TranscodeManager>,
         job: plurx_core::store::ClusterFragmentIndexJob,
         worker: ClusterFragmentIndexWorker,
-        permit_lost: tokio_util::sync::CancellationToken,
+        fence: crate::background_jobs::JobFence,
+        admission: &crate::transcode::FragmentAdmission,
     ) -> bool {
-        // Long enough for a node to walk the entire enforced 4,096-job active
-        // queue at eight refusals per minute. Discovery removes an exclusion
-        // immediately when the exact source becomes readable again.
-        const LOCAL_REFUSAL_MS: i64 = 24 * 60 * 60_000;
-        /// A deadline on a hung mount, not a bound on file size. Attestation
-        /// samples at most 64 MiB whatever the source weighs, so ten minutes
-        /// is reached only when the filesystem has stopped answering.
+        const LOCAL_REFUSAL_MS: i64 = 30_000;
+        /// Hard background I/O budget. HEVC copy proof hashes the full source;
+        /// other consumers still sample. Large/slow files may exhaust this
+        /// budget and remain unverified, with bounded charged retries.
         const ATTEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
         let _progress = self.start_analysis_progress(
@@ -8425,61 +8930,105 @@ impl JobManager {
             0,
         );
         let node_id = self.coordinator.node_id().to_owned();
-        let stop = tokio_util::sync::CancellationToken::new();
-        let lost = tokio_util::sync::CancellationToken::new();
+        let lost = fence.loss_token();
         let retry_identity = format!("{}:{}", job.cache_key, job.target_node_id);
         let retry_ms = worker
             .retry_policy
             .backoff_ms(&retry_identity, job.attempts.max(1));
-        let heartbeat = {
-            let store = Arc::clone(&self.store);
-            let cache_key = job.cache_key.clone();
-            let target_node_id = job.target_node_id.clone();
-            let node_id = node_id.clone();
-            let metrics = Arc::clone(&self.analysis_metrics);
-            let stop = stop.clone();
-            let lost = lost.clone();
-            let fence = job.fence;
-            let heartbeat = LeaseHeartbeat {
-                queue: "fragment-index",
-                row: format!("{}:{}", job.cache_key, job.target_node_id),
-                fence: job.fence,
-                attempts: job.attempts,
-                known_expiry_ms: job.lease_expires_ms,
-                lease_ms: worker.retry_policy.lease_ms,
-                renew_every: worker.retry_policy.renew_every(),
-                metrics,
-                stop,
-                lost,
+        let published = self
+            .store
+            .cluster_fragment_index_artifact(&job.cache_key)
+            .await
+            .ok()
+            .flatten();
+        if let Some(artifact) = &published {
+            let hydrated = tokio::select! {
+                result = crate::fragment_index_cluster::hydrate_for_job(self.store.as_ref(), self.membership.as_ref(),
+                    &node_id, &worker.cache_root, artifact) => matches!(result, Ok(Some(_))),
+                () = lost.cancelled() => false,
             };
-            tokio::spawn(async move {
-                heartbeat
-                    .run(move |now, expires_at| {
-                        let store = Arc::clone(&store);
-                        let cache_key = cache_key.clone();
-                        let target_node_id = target_node_id.clone();
-                        let node_id = node_id.clone();
-                        async move {
-                            store
-                                .renew_cluster_fragment_index(
-                                    &cache_key,
-                                    &target_node_id,
-                                    &node_id,
-                                    fence,
-                                    now,
-                                    expires_at,
-                                )
-                                .await
-                        }
+            if hydrated {
+                let result = fence.publish_fragment(artifact.clone()).await;
+                return self.record_job_outcome(&job, "hydrate", "", result);
+            }
+        }
+        if !job.target_node_id.is_empty() {
+            let now = clock_ms();
+            // Hydration never silently becomes another full-file build on
+            // the receiving node. A source-readable worker owns one canonical
+            // repair, while this delivery yields its local/global permits.
+            if published.is_some() {
+                use plurx_core::store::background_jobs::{
+                    EnqueueFragmentJob, EnqueueOutcome, JobState,
+                };
+                let repair = self
+                    .store
+                    .enqueue_fragment_job(EnqueueFragmentJob {
+                        job: plurx_core::store::NewClusterFragmentIndexJob {
+                            cache_key: job.cache_key.clone(),
+                            file_id: job.file_id,
+                            source_size: job.source_size,
+                            source_mtime: job.source_mtime,
+                            source_sha256: job.source_sha256.clone(),
+                            pipeline_sha256: job.pipeline_sha256.clone(),
+                            priority: job.priority.clone(),
+                            trigger: "background".into(),
+                            target_node_id: String::new(),
+                            not_before_ms: now,
+                            created_at_ms: now,
+                        },
+                        analysis_request: None,
+                        repair: true,
+                        now_ms: now,
                     })
                     .await;
-            })
-        };
-
-        // Retirement happens *before* the outcome write, not after it. A tick
-        // that lands between the write and the cancel renews a row the write
-        // has already settled, and reads back `Ok(false)` — a lost lease that
-        // never happened.
+                let waiting = match repair {
+                    Ok(
+                        EnqueueOutcome::Accepted { .. }
+                        | EnqueueOutcome::QueueFull
+                        | EnqueueOutcome::JobCancelling { .. },
+                    ) => true,
+                    Ok(EnqueueOutcome::Existing {
+                        job_id,
+                        cancelled: false,
+                        ..
+                    }) => self
+                        .store
+                        .background_job(&job_id)
+                        .await
+                        .map(|row| {
+                            row.is_some_and(|job| {
+                                matches!(job.state, JobState::Queued | JobState::Running)
+                            })
+                        })
+                        .unwrap_or(true),
+                    Err(error) => {
+                        tracing::debug!(%error, "fragment repair admission unavailable");
+                        true
+                    }
+                    _ => false,
+                };
+                if waiting {
+                    self.yield_fragment_index_job(
+                        &fence,
+                        &job,
+                        "awaiting_artifact_repair",
+                        now.saturating_add(30_000),
+                    )
+                    .await;
+                    return false;
+                }
+            }
+            self.fail_fragment_index_job(
+                &fence,
+                &job,
+                "artifact_unavailable",
+                true,
+                now.saturating_add(retry_ms),
+            )
+            .await;
+            return false;
+        }
 
         let file = match classify_fragment_source_read(
             self.store.get_file(job.file_id).await,
@@ -8488,19 +9037,16 @@ impl JobManager {
         ) {
             Ok(file) => file,
             Err(failure) => {
-                let retired = retire_heartbeat(stop, heartbeat).await;
                 let now = clock_ms();
                 let (code, retryable) = match failure {
                     FragmentSourceReadFailure::Stale => ("source_superseded", false),
                     FragmentSourceReadFailure::Transient => ("source_catalog_read_failed", true),
                 };
                 self.fail_fragment_index_job(
-                    &retired,
+                    &fence,
                     &job,
-                    &node_id,
                     code,
                     retryable,
-                    now,
                     now.saturating_add(retry_ms),
                 )
                 .await;
@@ -8524,26 +9070,24 @@ impl JobManager {
             Ok(videos) => videos,
             Err(error) => {
                 tracing::warn!(file_id = file.id, %error, "reading probe for claimed fragment index");
-                let retired = retire_heartbeat(stop, heartbeat).await;
+
                 let now = clock_ms();
                 self.fail_fragment_index_job(
-                    &retired,
+                    &fence,
                     &job,
-                    &node_id,
                     "source_catalog_read_failed",
                     true,
-                    now,
                     now.saturating_add(retry_ms),
                 )
                 .await;
                 return false;
             }
         };
-        let object_version = match crate::fragment_index_cluster::inspect_source(&file).await {
+        let object_version = match crate::fragment_index_cluster::inspect_copy_source(&file).await {
             Ok(version) => version,
             Err(error) => {
                 tracing::debug!(file_id = file.id, %error, "claimed index source is not local");
-                let retired = retire_heartbeat(stop, heartbeat).await;
+
                 let now = clock_ms();
                 if job.target_node_id.is_empty() {
                     self.remember_fragment_index_refusal(
@@ -8551,23 +9095,14 @@ impl JobManager {
                         now.saturating_add(LOCAL_REFUSAL_MS),
                     )
                     .await;
-                    self.yield_fragment_index_job(
-                        &retired,
-                        &job,
-                        &node_id,
-                        "node_local_refusal",
-                        now,
-                        now,
-                    )
-                    .await;
+                    self.yield_fragment_index_job(&fence, &job, "node_local_refusal", now)
+                        .await;
                 } else {
                     self.fail_fragment_index_job(
-                        &retired,
+                        &fence,
                         &job,
-                        &node_id,
                         "source_unavailable",
                         true,
-                        now,
                         now.saturating_add(retry_ms),
                     )
                     .await;
@@ -8586,7 +9121,7 @@ impl JobManager {
         self.set_analysis_progress_totals(
             &job.cache_key,
             &job.target_node_id,
-            crate::fragment_index_cluster::attestation_read_bytes(file.size.max(0) as u64),
+            crate::fragment_index_cluster::copy_attestation_read_bytes(&file),
             file.duration_ms.unwrap_or_default(),
         );
         let report_progress = |bytes: u64| {
@@ -8600,29 +9135,26 @@ impl JobManager {
             );
         };
         let attestation = tokio::select! {
-            result = crate::fragment_index_cluster::attest_source(
+            result = crate::fragment_index_cluster::attest_copy_source(
                 &node_id,
                 &file,
                 memo.as_ref(),
                 &report_progress,
             ) => Some(result.map_err(AttestationFailure::Refused)),
-            () = self.wait_for_cluster_fragment_index_stop(
-                transcode.as_ref(),
-                &permit_lost,
+            () = self.wait_for_fragment_worker_stop(
+                transcode.as_ref(), admission,
+                &lost,
             ) => None,
             () = tokio::time::sleep(ATTEST_TIMEOUT) => {
                 Some(Err(AttestationFailure::TimedOut))
             }
         };
         let Some(attestation) = attestation else {
-            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
             self.yield_fragment_index_job(
-                &retired,
+                &fence,
                 &job,
-                &node_id,
                 "node_local_refusal",
-                now,
                 now.saturating_add(retry_ms),
             )
             .await;
@@ -8647,12 +9179,12 @@ impl JobManager {
                         "fragment-index source attestation refused"
                     );
                 }
-                let retired = retire_heartbeat(stop, heartbeat).await;
+
                 let now = clock_ms();
                 if job.target_node_id.is_empty() {
                     // An untargeted job is yielded back to the cluster rather
                     // than failed, so its code has nowhere durable to go. A
-                    // refusal earns a day-long local exclusion: this node has
+                    // refusal earns a bounded local exclusion: this node has
                     // proved it cannot serve that source. A timeout has proved
                     // nothing of the kind — the mount was unreachable for ten
                     // minutes, which is a condition and not a verdict, and
@@ -8671,15 +9203,13 @@ impl JobManager {
                         .await;
                     }
                     self.yield_fragment_index_job(
-                        &retired,
+                        &fence,
                         &job,
-                        &node_id,
                         // A yield writes no durable code, but the lost-write
                         // log is the one place this distinction can still be
                         // read, and it is the distinction the code above
                         // exists to make.
                         code,
-                        now,
                         if timed_out {
                             now.saturating_add(retry_ms)
                         } else {
@@ -8689,12 +9219,10 @@ impl JobManager {
                     .await;
                 } else {
                     self.fail_fragment_index_job(
-                        &retired,
+                        &fence,
                         &job,
-                        &node_id,
                         code,
                         true,
-                        now,
                         now.saturating_add(retry_ms),
                     )
                     .await;
@@ -8711,181 +9239,60 @@ impl JobManager {
                 .record_fragment_index_source(&attested.observation)
                 .await,
         );
-        // The job names one pipeline by digest; this node offers one identity
-        // per copy pipeline the file can be asked for. Claim the job only if
-        // one of them still produces the bytes the job was queued for — a job
-        // whose pipeline this build no longer emits is superseded exactly as
-        // it was when there was only ever one identity to compare.
+        // Recheck after source attestation: local capabilities may change
+        // after preflight. Another worker may still implement this identity.
         let Some(video) = videos.into_iter().find(|video| {
             crate::fragment_index_cluster::pipeline_digest(&file, &worker.engine_sha256, *video)
                 == job.pipeline_sha256
         }) else {
-            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
-            self.fail_fragment_index_job(
-                &retired,
-                &job,
-                &node_id,
-                "pipeline_superseded",
-                false,
-                now,
-                now.saturating_add(retry_ms),
+            self.remember_fragment_index_refusal(
+                &job.cache_key,
+                now.saturating_add(LOCAL_REFUSAL_MS),
             )
             .await;
+            self.yield_fragment_index_job(&fence, &job, "node_local_refusal", now)
+                .await;
             return false;
         };
-
-        // Before building: has anybody already built exactly this?
-        //
-        // Discovery on each voter targets itself, so four voters queue four
-        // jobs for one `cache_key`, and on a healthy queue that is four full
-        // passes over the same file to produce one artifact. Once any of them
-        // has published it, the rest need the bytes and a location row, not a
-        // decode. `hydrate` reads the local cache first and then asks holders
-        // over the peer transport; a miss just falls through to the build.
-        //
-        // Settling from inside the claimed job is what makes this safe, and is
-        // what the older comment above `submit_fragment_index_analysis` could
-        // not do from the request side: the fence, the lease and the source
-        // identity are all still checked by the store, and the artifact row
-        // itself is never rewritten.
-        //
-        // The hydrate itself runs with the heartbeat still beating, because a
-        // peer fetch takes seconds and the lease has to survive it. Retiring
-        // comes first only for the *write*, which is the invariant every other
-        // terminal path in this function keeps.
-        let hydrated = match self
-            .store
-            .cluster_fragment_index_artifact(&job.cache_key)
-            .await
-        {
-            Ok(Some(published)) => matches!(
-                crate::fragment_index_cluster::hydrate(
-                    self.store.as_ref(),
-                    self.membership.as_ref(),
-                    &node_id,
-                    &worker.cache_root,
-                    &published,
-                )
-                .await,
-                Ok(Some(_))
-            )
-            .then_some(published),
-            _ => None,
-        };
-        if let Some(published) = hydrated {
-            let retired = retire_heartbeat(stop, heartbeat).await;
-            let now = clock_ms();
-            let location = plurx_core::store::ClusterFragmentIndexLocation {
-                cache_key: job.cache_key.clone(),
-                node_id: node_id.clone(),
-                bytes: published.bytes,
-                verified_at_ms: now,
-                last_seen_at_ms: now,
-            };
-            match self
-                .store
-                .complete_cluster_fragment_index_by_hydration(&job, &published, &location, now)
-                .await
-            {
-                Ok(true) => {
-                    // Best-effort maintenance: hydration is already durable
-                    // and the next pass retries settlement of pending requests.
-                    crate::store_result::observe(
-                        crate::store_result::Operation::SettleAnalysisAfterHydration,
-                        crate::store_result::Discard::BestEffort,
-                        self.store.settle_analysis_requests(now).await,
-                    );
-                    tracing::info!(
-                        cache_key = %job.cache_key,
-                        built_by = %published.built_by_node_id,
-                        "settled a fragment-index job from an artifact another node built"
-                    );
-                    return true;
-                }
-                // The claim moved, or the source did. Not a build worth
-                // starting on a lease this node no longer holds.
-                Ok(false) => {
-                    self.yield_fragment_index_job(
-                        &retired,
-                        &job,
-                        &node_id,
-                        "lease_expired",
-                        now,
-                        now.saturating_add(retry_ms),
-                    )
-                    .await;
-                    return false;
-                }
-                Err(error) => {
-                    // The bytes on disk are not the artifact they claim to be.
-                    // Keeping them would fail every later hydration of this
-                    // key the same way, and keeping the location row would
-                    // send peers here for them, so drop both and hand the job
-                    // back. The next claim hydrates from a real holder or
-                    // builds.
-                    tracing::warn!(
-                        cache_key = %job.cache_key,
-                        %error,
-                        "hydrated fragment index did not match its artifact; discarding the local copy"
-                    );
-                    crate::fragment_index_cluster::discard_local_blob(
-                        self.store.as_ref(),
-                        &node_id,
-                        &worker.cache_root,
-                        &job.cache_key,
-                    )
-                    .await;
-                    self.yield_fragment_index_job(
-                        &retired,
-                        &job,
-                        &node_id,
-                        "queue_write_failed",
-                        now,
-                        now.saturating_add(retry_ms),
-                    )
-                    .await;
-                    return false;
-                }
-            }
-        }
 
         let report_progress = self.index_pass_reporter(&job.cache_key, &job.target_node_id);
         // Asked per job: the switch, the self-test and the filesystem, now.
         let ride_along = crate::subtitle_ride_along::RideAlongGate::open(
-            self.store.as_ref(),
+            Arc::clone(&self.store),
             transcode.runtime_cache_dir(),
         )
         .await;
-        // A dropped build future — `foreground_preempted`, or the lease lost
-        // — drops the pass's ride-along plan with it, and the plan's guard
-        // removes its stage.
+        let cancel = lost.child_token();
+        let build = crate::fragindex::build_from_attested_file_with_progress(
+            &file,
+            &attested.handle,
+            &attested.observation.object_version,
+            video,
+            transcode.runtime_cache_dir(),
+            index_file_budget(file.duration_ms),
+            move |progress: &crate::fragindex::PassProgress| report_progress(progress),
+            ride_along.as_ref(),
+            &cancel,
+        );
+        tokio::pin!(build);
         let (outcome, preempted) = tokio::select! {
-            built = crate::fragindex::build_from_attested_file_with_progress(
-                &file,
-                &attested.handle,
-                &attested.observation.object_version,
-                video,
-                transcode.runtime_cache_dir(),
-                index_file_budget(file.duration_ms),
-                move |progress: &crate::fragindex::PassProgress| report_progress(progress),
-                ride_along.as_ref(),
-            ) => (Some(built), false),
-            () = lost.cancelled() => (None, false),
-            () = self.wait_for_cluster_fragment_index_stop(
-                transcode.as_ref(),
-                &permit_lost,
-            ) => (None, true),
+            built = &mut build => (Some(built), false),
+            () = self.wait_for_fragment_worker_stop(transcode.as_ref(), admission, &lost) => {
+                cancel.cancel();
+                let _ = build.await;
+                (None, !lost.is_cancelled())
+            }
         };
+        if lost.is_cancelled() {
+            return false;
+        }
         if preempted {
-            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
             self.yield_fragment_index_job(
-                &retired,
+                &fence,
                 &job,
-                &node_id,
                 "foreground_preempted",
-                now,
                 now.saturating_add(retry_ms),
             )
             .await;
@@ -8900,7 +9307,7 @@ impl JobManager {
             // The lease was lost mid-build. The row stays `running` until a
             // sweep reclaims it; writing an outcome on a claim we no longer
             // hold is exactly what the fence forbids.
-            let _retired = retire_heartbeat(stop, heartbeat).await;
+
             return false;
         };
         // Every outcome is a statement about the held source, including a
@@ -8913,15 +9320,12 @@ impl JobManager {
         )
         .unwrap_or(false)
         {
-            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
             self.fail_fragment_index_job(
-                &retired,
+                &fence,
                 &job,
-                &node_id,
                 "source_changed",
                 false,
-                now,
                 now.saturating_add(retry_ms),
             )
             .await;
@@ -8935,15 +9339,12 @@ impl JobManager {
             .flatten()
             .is_some_and(|current| current.size == file.size && current.mtime == file.mtime);
         if !still_current {
-            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
             self.fail_fragment_index_job(
-                &retired,
+                &fence,
                 &job,
-                &node_id,
                 "source_superseded",
                 false,
-                now,
                 now.saturating_add(retry_ms),
             )
             .await;
@@ -8958,7 +9359,7 @@ impl JobManager {
             // already for a source that moved.
             self.settle_ride_along(&file, pending, true).await;
         }
-        let index = match outcome {
+        let mut index = match outcome {
             crate::fragindex::IndexOutcome::Built(index) => index,
             // The node-local row is recorded here too, so a clustered node's
             // own operator surface and its background pass both know what this
@@ -8973,15 +9374,13 @@ impl JobManager {
                     &reason,
                 )
                 .await;
-                let retired = retire_heartbeat(stop, heartbeat).await;
+
                 let now = clock_ms();
                 self.fail_fragment_index_job(
-                    &retired,
+                    &fence,
                     &job,
-                    &node_id,
                     "unsupported",
                     false,
-                    now,
                     now.saturating_add(retry_ms),
                 )
                 .await;
@@ -9002,25 +9401,16 @@ impl JobManager {
                     worker.retry_policy.max_attempts,
                 )
                 .await;
-                let retired = retire_heartbeat(stop, heartbeat).await;
-                let now = clock_ms();
+
                 let code = failure.code.as_str().to_owned();
-                let written = self
-                    .store
-                    .fail_cluster_fragment_index_typed(
-                        &plurx_core::store::ClusterFragmentIndexFailure {
-                            cache_key: job.cache_key.clone(),
-                            target_node_id: job.target_node_id.clone(),
-                            node_id: node_id.clone(),
-                            fence: job.fence,
-                            code: failure.code,
-                            transient_allowlisted: failure.transient_allowlisted,
-                            diagnostic: failure.diagnostic,
-                            now_ms: now,
-                        },
+                let written = fence
+                    .fail_fragment(
+                        failure.code,
+                        failure.transient_allowlisted,
+                        failure.diagnostic,
                     )
                     .await;
-                self.record_job_outcome(&retired, &job, "fail", &code, written);
+                self.record_job_outcome(&job, "fail", &code, written);
                 return false;
             }
         };
@@ -9032,6 +9422,14 @@ impl JobManager {
             file.duration_ms.unwrap_or_default(),
             index.rows.len(),
         );
+        if let Some(proof) = index.promotion.hevc_configuration.as_mut() {
+            proof.source_node_id = node_id.clone();
+            proof.source_object_version = crate::fragment_index_cluster::local_object_version(
+                &attested.observation.object_version,
+            )
+            .to_owned();
+            proof.source_sha256 = Some(attested.observation.source_sha256.clone());
+        }
         let blob = match encode_cluster_fragment_index_blob(
             &index,
             &job.source_sha256,
@@ -9040,15 +9438,13 @@ impl JobManager {
             Ok(blob) => blob,
             Err(error) => {
                 tracing::warn!(file_id = file.id, %error, "encoding cluster fragment index");
-                let retired = retire_heartbeat(stop, heartbeat).await;
+
                 let now = clock_ms();
                 self.fail_fragment_index_job(
-                    &retired,
+                    &fence,
                     &job,
-                    &node_id,
                     "encode_failed",
                     false,
-                    now,
                     now.saturating_add(retry_ms),
                 )
                 .await;
@@ -9068,20 +9464,27 @@ impl JobManager {
             built_by_node_id: node_id.clone(),
             built_at_ms,
         };
+        // Rebuilding missing bytes preserves the immutable generation's original
+        // provenance. A different byte digest remains a publication conflict.
+        let artifact = match published {
+            Some(original)
+                if original.blob_sha256 == artifact.blob_sha256
+                    && original.bytes == artifact.bytes =>
+            {
+                original
+            }
+            _ => artifact,
+        };
         if lost.is_cancelled()
-            || permit_lost.is_cancelled()
-            || !transcode.pretranscode_worker_idle()
+            || !transcode.fragment_worker_idle(admission)
             || !self.cluster_fragment_index_enabled().await
             || !crate::ffmpeg::fragment_index_engine_is_current().await
         {
-            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
             self.yield_fragment_index_job(
-                &retired,
+                &fence,
                 &job,
-                &node_id,
                 "foreground_preempted",
-                now,
                 now.saturating_add(retry_ms),
             )
             .await;
@@ -9092,53 +9495,35 @@ impl JobManager {
                 .await
         {
             tracing::warn!(file_id = file.id, %error, "publishing local fragment-index blob");
-            let retired = retire_heartbeat(stop, heartbeat).await;
+
             let now = clock_ms();
             self.fail_fragment_index_job(
-                &retired,
+                &fence,
                 &job,
-                &node_id,
                 "local_publish_failed",
                 true,
-                now,
                 now.saturating_add(retry_ms),
             )
             .await;
             return false;
         }
         if lost.is_cancelled()
-            || permit_lost.is_cancelled()
-            || !transcode.pretranscode_worker_idle()
+            || !transcode.fragment_worker_idle(admission)
             || !self.cluster_fragment_index_enabled().await
             || !crate::ffmpeg::fragment_index_engine_is_current().await
         {
-            let retired = retire_heartbeat(stop, heartbeat).await;
             let now = clock_ms();
             self.yield_fragment_index_job(
-                &retired,
+                &fence,
                 &job,
-                &node_id,
                 "foreground_preempted",
-                now,
                 now.saturating_add(retry_ms),
             )
             .await;
             return false;
         }
-        let completed_at_ms = clock_ms();
-        let location = ClusterFragmentIndexLocation {
-            cache_key: job.cache_key.clone(),
-            node_id: node_id.clone(),
-            bytes: artifact.bytes,
-            verified_at_ms: completed_at_ms,
-            last_seen_at_ms: completed_at_ms,
-        };
-        let retired = retire_heartbeat(stop, heartbeat).await;
-        let settled = self
-            .store
-            .complete_cluster_fragment_index(&job, &artifact, &location, completed_at_ms)
-            .await;
-        let completed = self.record_job_outcome(&retired, &job, "complete", "", settled);
+        let settled = fence.publish_fragment(artifact).await;
+        let completed = self.record_job_outcome(&job, "complete", "", settled);
         if completed {
             if let Err(error) = self.store.put_fragment_index(file.id, &index).await {
                 tracing::warn!(file_id = file.id, %error, "installing built fragment index");
@@ -9193,29 +9578,10 @@ impl JobManager {
         let mut produced = 0_u64;
         let mut skipped = 0_u64;
         let mut reasons = std::collections::BTreeMap::<&'static str, u64>::new();
-        let has_refusals = !self.pretranscode_refusals.lock().await.is_empty();
-        if has_refusals {
-            let active_job_ids = match self.store.active_pretranscode_job_ids().await {
-                Ok(ids) if ids.len() <= 4_096 => ids.into_iter().collect::<HashSet<_>>(),
-                Ok(_) => {
-                    tracing::error!("active speculative queue exceeded its hard row bound");
-                    *reasons.entry("active_queue_bound_exceeded").or_default() += 1;
-                    self.emit_producer_pass(produced, skipped, serde_json::json!(reasons));
-                    return;
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "could not prune stale node-local queue refusals");
-                    *reasons.entry("refusal_prune_failed").or_default() += 1;
-                    self.emit_producer_pass(produced, skipped, serde_json::json!(reasons));
-                    return;
-                }
-            };
-            let now_unix_ms = clock_ms();
-            self.pretranscode_refusals
-                .lock()
-                .await
-                .retain(|id, retry_at| *retry_at > now_unix_ms && active_job_ids.contains(id));
-        }
+        self.pretranscode_refusals
+            .lock()
+            .await
+            .retain(|_, retry_at| *retry_at > clock_ms());
         for index in 0..PRODUCE_MAX_PER_PASS {
             if self.stop_producing.load(Ordering::Relaxed) || std::time::Instant::now() >= deadline
             {
@@ -9263,8 +9629,6 @@ impl JobManager {
                 break;
             }
             let now_unix_ms = clock_ms();
-            let expires_at = now_unix_ms
-                .saturating_add(PRETRANSCODE_LEASE_TTL.as_millis().min(i64::MAX as u128) as i64);
             let excluded_job_ids = {
                 let mut refusals = self.pretranscode_refusals.lock().await;
                 refusals.retain(|_, retry_at| *retry_at > now_unix_ms);
@@ -9274,18 +9638,17 @@ impl JobManager {
                     .cloned()
                     .collect::<Vec<_>>()
             };
-            let job = match self
-                .store
-                .claim_pretranscode_job(
-                    node,
-                    &capabilities,
-                    &excluded_job_ids,
-                    now_unix_ms,
-                    expires_at,
-                )
-                .await
+            let (job, active, fence) = match crate::background_jobs::claim_pretranscode(
+                Arc::clone(&self.store),
+                Arc::clone(&self.job_authority),
+                &transcode,
+                node,
+                &capabilities,
+                &excluded_job_ids,
+            )
+            .await
             {
-                Ok(Some(job)) => job,
+                Ok(Some(claim)) => claim,
                 Ok(None) => break,
                 Err(error) => {
                     tracing::warn!(%error, "could not claim speculative-transcode work");
@@ -9293,9 +9656,7 @@ impl JobManager {
                     break;
                 }
             };
-            let active = ActivePretranscodeJob::start(Arc::clone(&self.store), job.clone());
-            let fence = active.fence();
-            let lost = active.loss_token();
+            let lost = active.fence().loss_token();
             let file = match self.store.get_file(job.file_id).await {
                 Ok(Some(file))
                     if file.size == job.source_size && file.mtime == job.source_mtime =>
@@ -9303,9 +9664,13 @@ impl JobManager {
                     file
                 }
                 Ok(Some(_)) | Ok(None) => {
-                    let _ = fence
-                        .cancel_job(self.store.as_ref(), "source_changed", clock_ms())
-                        .await;
+                    crate::store_result::observe(
+                        crate::store_result::Operation::CancelTranscodeSourceChanged,
+                        crate::store_result::Discard::Cancelled,
+                        fence
+                            .cancel_job(self.store.as_ref(), "source_changed", clock_ms())
+                            .await,
+                    );
                     active.finish().await;
                     skipped += 1;
                     *reasons.entry("source_changed").or_default() += 1;
@@ -9441,17 +9806,25 @@ impl JobManager {
                 }
                 Ok(PretranscodeProduceOutcome::PolicyChanged) => {
                     let now_unix_ms = clock_ms();
-                    let _ = fence
-                        .cancel_job(self.store.as_ref(), "policy_changed", now_unix_ms)
-                        .await;
+                    crate::store_result::observe(
+                        crate::store_result::Operation::CancelTranscodePolicyChanged,
+                        crate::store_result::Discard::Cancelled,
+                        fence
+                            .cancel_job(self.store.as_ref(), "policy_changed", now_unix_ms)
+                            .await,
+                    );
                     skipped += 1;
                     *reasons.entry("policy_changed").or_default() += 1;
                 }
                 Ok(PretranscodeProduceOutcome::SourceChanged) => {
                     let now_unix_ms = clock_ms();
-                    let _ = fence
-                        .cancel_job(self.store.as_ref(), "source_changed", now_unix_ms)
-                        .await;
+                    crate::store_result::observe(
+                        crate::store_result::Operation::CancelTranscodeSourceChanged,
+                        crate::store_result::Discard::Cancelled,
+                        fence
+                            .cancel_job(self.store.as_ref(), "source_changed", now_unix_ms)
+                            .await,
+                    );
                     skipped += 1;
                     *reasons.entry("source_changed").or_default() += 1;
                 }
@@ -9462,9 +9835,13 @@ impl JobManager {
                     // refused receipt, so a job that retried this would
                     // re-encode the title on every discovery pass forever.
                     let now_unix_ms = clock_ms();
-                    let _ = fence
-                        .cancel_job(self.store.as_ref(), "health_refused", now_unix_ms)
-                        .await;
+                    crate::store_result::observe(
+                        crate::store_result::Operation::CancelTranscodeHealthRefused,
+                        crate::store_result::Discard::Cancelled,
+                        fence
+                            .cancel_job(self.store.as_ref(), "health_refused", now_unix_ms)
+                            .await,
+                    );
                     skipped += 1;
                     *reasons.entry("health_refused").or_default() += 1;
                 }
@@ -9482,10 +9859,7 @@ impl JobManager {
                 }
                 Err(error) => {
                     let now_unix_ms = clock_ms();
-                    let exponent = u32::try_from(job.attempts.clamp(0, 7)).unwrap_or(0);
-                    let backoff_ms = 30_000_i64
-                        .saturating_mul(1_i64 << exponent)
-                        .min(60 * 60 * 1_000);
+                    let backoff_ms = crate::background_jobs::retry_delay_ms(&job.id, job.attempts);
                     let _ = fence
                         .fail_job(
                             self.store.as_ref(),
@@ -9761,6 +10135,70 @@ mod tests {
     };
 
     #[test]
+    fn subtitle_source_job_argv_has_no_index_pipe_and_ends_in_null_sentinel() {
+        let temp = tempfile::tempdir().expect("stage root");
+        let source = temp.path().join("movie.mkv");
+        std::fs::write(&source, b"source").expect("source");
+        let stamp = crate::fragment_index_cluster::source_stamp(
+            &std::fs::metadata(&source).expect("metadata"),
+        );
+        let plan =
+            crate::subtitle_ride_along::RideAlongPlan::standalone(temp.path(), 7, stamp, vec![0])
+                .expect("plan");
+        let argv = subtitle_source_argv("/dev/fd/3", &plan);
+        assert!(argv.iter().all(|arg| arg != "pipe:1"));
+        assert!(argv.last().is_some_and(|arg| arg.ends_with("[f=null]-")));
+        assert!(argv.windows(2).any(|pair| pair == ["-i", "/dev/fd/3"]));
+    }
+
+    #[test]
+    fn subtitle_source_full_extracted_coverage_is_a_no_op_before_spawning() {
+        use plurx_core::store::SubtitleSourcePublication;
+        let tracks = [
+            crate::subtitle_ride_along::ProbedTrack {
+                ordinal: 0,
+                kind: crate::subtitle_ride_along::ProbedKind::Text,
+                stream_index: 1,
+            },
+            crate::subtitle_ride_along::ProbedTrack {
+                ordinal: 1,
+                kind: crate::subtitle_ride_along::ProbedKind::Pgs,
+                stream_index: 2,
+            },
+        ];
+        let mut row = SubtitleSourcePublication {
+            file_id: 7,
+            source_size: 10,
+            source_mtime: 1,
+            source_attestation: "a".repeat(64),
+            node_id: "peer".to_owned(),
+            ordinal: 0,
+            kind: "text".to_owned(),
+            format: "webvtt".to_owned(),
+            verdict: "kept".to_owned(),
+            attempts: 1,
+            origin: "hydrated".to_owned(),
+            sha256: "b".repeat(64),
+            bytes: 5,
+            published_at_ms: 1,
+        };
+        assert!(!subtitle_source_covered(&tracks, &[row.clone()]));
+        row.origin = "extracted".to_owned();
+        let text_row = row.clone();
+        row.ordinal = 1;
+        row.kind = "pgs".to_owned();
+        row.format = "sup".to_owned();
+        row.verdict = "transient".to_owned();
+        row.attempts = i64::from(crate::subtitle_source::TRANSIENT_ATTEMPTS) - 1;
+        assert!(!subtitle_source_covered(
+            &tracks,
+            &[text_row.clone(), row.clone()]
+        ));
+        row.attempts += 1;
+        assert!(subtitle_source_covered(&tracks, &[text_row, row]));
+    }
+
+    #[test]
     fn field_order_backfill_recovers_selected_video_and_marks_missing_or_invalid_unknown() {
         let stored = r#"{
             "streams": [
@@ -9850,6 +10288,23 @@ mod tests {
         let other = enqueue_copy_preparation(&store, "node-a", &file, strip)
             .await
             .expect("different recipe");
+        let bound =
+            enqueue_copy_preparation_for_object(&store, "node-a", &file, convert, Some("object-a"))
+                .await
+                .expect("bound request");
+        let repeated =
+            enqueue_copy_preparation_for_object(&store, "node-a", &file, convert, Some("object-a"))
+                .await
+                .expect("joined bound request");
+        let moved =
+            enqueue_copy_preparation_for_object(&store, "node-a", &file, convert, Some("object-b"))
+                .await
+                .expect("new object request");
+        assert_eq!(bound.request_id, repeated.request_id);
+        assert_ne!(
+            bound.request_id, moved.request_id,
+            "same catalog size/mtime cannot hide an object change"
+        );
         assert_eq!(first.request_id, retry.request_id);
         assert_ne!(first.request_id, other.request_id);
         assert_eq!(first.state, "queued");
@@ -9862,7 +10317,7 @@ mod tests {
         assert!(!first.force_rebuild);
         assert_eq!(
             store.analysis_requests(10).await.expect("requests").len(),
-            2
+            4
         );
         assert_eq!(
             store
@@ -10228,8 +10683,8 @@ mod tests {
         ));
     }
     use plurx_core::store::{
-        DvConversionMode, DvConversionStore, LibraryStore, MediaStore, PlaybackTelemetryStore,
-        SettingsStore, SqliteStore,
+        ClusterFragmentIndexStore, DvConversionMode, DvConversionStore, LibraryStore, MediaStore,
+        PlaybackTelemetryStore, SettingsStore, SqliteStore,
     };
     use plurx_core::transcode::Pipeline;
     use serde_json::json;
@@ -10252,6 +10707,12 @@ mod tests {
                 pinned_bytes: value,
             },
             watched_outbox: (value, value, value),
+            background_jobs: plurx_core::store::background_jobs::BackgroundJobMetrics {
+                counts: [value; plurx_core::store::background_jobs::JOB_METRIC_SLOTS],
+                oldest_age_seconds: [value; plurx_core::store::background_jobs::JOB_METRIC_SLOTS],
+                source_io_reservations: value,
+                legacy_pending: value,
+            },
             analysis: plurx_core::store::AnalysisStoreMetrics {
                 queue_depth: [value; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
                 queue_oldest_age_seconds: [value; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
@@ -10364,8 +10825,488 @@ mod tests {
         );
     }
 
+    async fn drain_library(jobs: &Arc<JobManager>, library_id: i64) {
+        let scratch = crate::test_tempdir().expect("library worker scratch");
+        let transcode = TranscodeManager::new(
+            Arc::clone(&jobs.store),
+            scratch.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        assert!(
+            jobs.work_library_queue(&transcode, Some(library_id)).await,
+            "durable worker claimed library"
+        );
+    }
+
+    async fn completed_scan(
+        jobs: &Arc<JobManager>,
+        request: ScanRequest,
+    ) -> Result<Option<TargetedScan>, TargetError> {
+        let result = jobs.request_scan(request.clone()).await?;
+        if result.is_some() {
+            return Ok(result);
+        }
+        drain_library(jobs, request.library_id).await;
+        jobs.request_scan(request).await
+    }
+
     fn manager(store: Arc<dyn Store>, artwork: &std::path::Path) -> Arc<JobManager> {
         Arc::new(JobManager::new(store, artwork.to_path_buf()))
+    }
+
+    async fn seed_subtitle_backfill(store: &SqliteStore, media: &Path, count: usize) -> Vec<i64> {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Subtitle backfill".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: vec![media.to_owned()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let mut ids = Vec::new();
+        for n in 0..count {
+            let item = store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: format!("Subtitle movie {n}"),
+                    year: Some(2026),
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            let source = media.join(format!("movie-{n}.mkv"));
+            std::fs::write(&source, b"source").expect("source");
+            let id = store
+                .upsert_file(
+                    item,
+                    source.to_str().expect("path"),
+                    6,
+                    1,
+                    &ProbeResult {
+                        container: Some("mkv".to_owned()),
+                        subtitle_streams: vec![plurx_core::domain::SubtitleStream {
+                            index: 0,
+                            codec: "subrip".to_owned(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("file");
+            ids.push(id);
+        }
+        ids
+    }
+
+    async fn enable_subtitle_backfill(store: &SqliteStore) {
+        for key in [
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::SUBTITLE_CLUSTER_SOURCES,
+            keys::SUBTITLE_BACKFILL,
+        ] {
+            store.put_setting(key, "1").await.expect("setting");
+        }
+    }
+
+    #[tokio::test]
+    async fn busy_workers_allow_one_foreground_self_claim_and_one_subtitle_producer() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+
+        let fixture = fixture(7, &[Sub::Srt]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("work");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Foreground subtitles".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: vec![fixture.dir.path().to_owned()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Cold subtitle".to_owned(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let file_id = store
+            .upsert_file(
+                item,
+                fixture.source.to_str().expect("source path"),
+                fixture.file.size,
+                fixture.file.mtime,
+                &ProbeResult {
+                    container: Some("mkv".to_owned()),
+                    subtitle_streams: vec![plurx_core::domain::SubtitleStream {
+                        index: 0,
+                        codec: "subrip".to_owned(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("catalog file");
+        for key in [
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::SUBTITLE_CLUSTER_SOURCES,
+        ] {
+            store.put_setting(key, "1").await.expect("setting");
+        }
+        let jobs = manager(store.clone(), artwork.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            work.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let _busy = transcode.test_mark_live_waiting();
+        let (request, _) = jobs
+            .request_file_analysis(file_id, false, "subtitle_source", "playback")
+            .await
+            .expect("one durable foreground request");
+        assert_eq!(request.priority, "foreground");
+        let (first, second) = tokio::join!(
+            jobs.self_claim_subtitle_source(&request.request_id, work.path()),
+            jobs.self_claim_subtitle_source(&request.request_id, work.path())
+        );
+        assert_eq!((first as u8) + (second as u8), 1, "one owner runs");
+        let rows = store.analysis_requests(20).await.expect("requests");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, "ready");
+        let publications = store
+            .list_subtitle_source_publications(file_id, fixture.file.size, fixture.file.mtime)
+            .await
+            .expect("publications");
+        assert!(publications.iter().any(|row| {
+            row.origin == "extracted" && row.ordinal == 0 && row.format == "webvtt"
+        }));
+        let directory = crate::subtitle_source::file_dir(
+            &crate::subtitle_source::store_root(work.path()),
+            file_id,
+        );
+        assert!(directory
+            .join(crate::subtitle_source::MANIFEST_NAME)
+            .is_file());
+        let finished = jobs
+            .finished_analysis_rows
+            .lock()
+            .expect("finished progress");
+        let progress = finished
+            .iter()
+            .find(|row| row.job_id == request.request_id)
+            .expect("subtitle progress");
+        assert_eq!((progress.text_tracks, progress.pgs_tracks), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn unready_learner_cannot_claim_a_foreground_subtitle_source_request() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = tempfile::tempdir().expect("media");
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("work");
+        let file_id = seed_subtitle_backfill(store.as_ref(), media.path(), 1).await[0];
+        for key in [
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::SUBTITLE_CLUSTER_SOURCES,
+        ] {
+            store.put_setting(key, "1").await.expect("setting");
+        }
+        let jobs = Arc::new(JobManager::new_with_scan_prune_percent(
+            store.clone(),
+            artwork.path().to_owned(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "learner".to_owned(),
+            MovableJobAuthority::learner(),
+        ));
+        let (request, _) = jobs
+            .request_file_analysis(file_id, false, "subtitle_source", "playback")
+            .await
+            .expect("request");
+        assert!(
+            !jobs
+                .self_claim_subtitle_source(&request.request_id, work.path())
+                .await
+        );
+        let rows = store.analysis_requests(10).await.expect("requests");
+        assert_eq!(rows[0].state, "queued");
+    }
+
+    #[tokio::test]
+    async fn full_subtitle_coverage_settles_ready_without_spawning_a_pass() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+        use plurx_core::store::SubtitleSourcePublication;
+
+        let fixture = fixture(10, &[Sub::Srt]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file = catalogued_fixture(&store, &fixture).await;
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("work");
+        let attestation =
+            crate::fragment_index_cluster::attest_source("test-node", &file, None, &|_| {})
+                .await
+                .expect("sampled source digest")
+                .observation
+                .source_sha256;
+        for key in [
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::SUBTITLE_CLUSTER_SOURCES,
+        ] {
+            store.put_setting(key, "1").await.expect("setting");
+        }
+        store
+            .upsert_subtitle_source_publication(&SubtitleSourcePublication {
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                source_attestation: attestation,
+                node_id: "peer".to_owned(),
+                ordinal: 0,
+                kind: "text".to_owned(),
+                format: "webvtt".to_owned(),
+                verdict: "empty".to_owned(),
+                attempts: 1,
+                origin: "extracted".to_owned(),
+                sha256: String::new(),
+                bytes: 0,
+                published_at_ms: clock_ms(),
+            })
+            .await
+            .expect("coverage");
+        let jobs = manager(store.clone(), artwork.path());
+        let (request, _) = jobs
+            .request_file_analysis(file.id, false, "subtitle_source", "playback")
+            .await
+            .expect("request");
+        assert!(
+            jobs.self_claim_subtitle_source(&request.request_id, work.path())
+                .await
+        );
+        assert_eq!(
+            store.analysis_requests(10).await.expect("requests")[0].state,
+            "ready"
+        );
+        assert!(
+            !crate::subtitle_source::store_root(work.path()).exists(),
+            "the no-op never opens a stage or ffmpeg child"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_original_complete_publisher_and_request_third_ordinal_recovers_through_repair()
+    {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+
+        let fixture = fixture(9, &[Sub::Srt, Sub::Srt, Sub::Srt]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file = catalogued_fixture(&store, &fixture).await;
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("work");
+        for key in [
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::SUBTITLE_CLUSTER_SOURCES,
+        ] {
+            store.put_setting(key, "1").await.expect("setting");
+        }
+        let jobs = manager(store.clone(), artwork.path());
+        let (initial, _) = jobs
+            .request_file_analysis(file.id, false, "subtitle_source", "playback")
+            .await
+            .expect("initial request");
+        assert!(
+            jobs.self_claim_subtitle_source(&initial.request_id, work.path())
+                .await
+        );
+        let stamp = SubtitleSourceStamp {
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            pipeline_version: subtitle_source_pipeline_version().await,
+        };
+        let before = store
+            .list_subtitle_source_publications(file.id, file.size, file.mtime)
+            .await
+            .expect("original publications");
+        assert!(before
+            .iter()
+            .any(|row| row.ordinal == 2 && row.origin == "extracted"));
+        store
+            .delete_subtitle_source_publications(file.id, jobs.coordinator.node_id())
+            .await
+            .expect("publisher removed");
+        let dir = crate::subtitle_source::file_dir(
+            &crate::subtitle_source::store_root(work.path()),
+            file.id,
+        );
+        std::fs::remove_dir_all(dir).expect("publisher files removed");
+        assert!(store
+            .retire_subtitle_source_ready(&stamp, clock_ms())
+            .await
+            .expect("retire lost publication"));
+        let (repair, _) = jobs
+            .request_file_analysis(file.id, false, "subtitle_source", "playback")
+            .await
+            .expect("repair request for missing third ordinal");
+        assert_ne!(repair.request_id, initial.request_id);
+        assert!(
+            jobs.self_claim_subtitle_source(&repair.request_id, work.path())
+                .await
+        );
+        let after = store
+            .list_subtitle_source_publications(file.id, file.size, file.mtime)
+            .await
+            .expect("repaired publications");
+        assert!(after
+            .iter()
+            .any(|row| row.ordinal == 2 && row.origin == "extracted"));
+    }
+
+    #[tokio::test]
+    async fn normal_subtitle_job_yields_uncharged_to_playback_but_foreground_is_not_preempted() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+
+        let fixture = fixture(8, &[Sub::Pgs]);
+        let source = std::fs::File::open(&fixture.source).expect("source");
+        let stamp =
+            crate::fragment_index_cluster::source_stamp(&source.metadata().expect("metadata"));
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = tempfile::tempdir().expect("work");
+        let transcode = TranscodeManager::new(
+            store,
+            work.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let _busy = transcode.test_mark_live_waiting();
+        let lost = CancellationToken::new();
+        for _ in 0..3 {
+            let plan = crate::subtitle_ride_along::RideAlongPlan::standalone(
+                work.path(),
+                8,
+                stamp,
+                vec![0],
+            )
+            .expect("normal plan");
+            assert!(matches!(
+                run_subtitle_source_pass(
+                    plan,
+                    &source,
+                    work.path(),
+                    &lost,
+                    Some(&transcode),
+                    &|| {},
+                )
+                .await,
+                Err(AnalysisResolutionError::Retry {
+                    code: "foreground_preempted",
+                    charge_attempt: false,
+                })
+            ));
+        }
+        let plan =
+            crate::subtitle_ride_along::RideAlongPlan::standalone(work.path(), 8, stamp, vec![0])
+                .expect("foreground plan");
+        assert!(
+            run_subtitle_source_pass(plan, &source, work.path(), &lost, None, &|| {})
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn subtitle_backfill_enqueues_nothing_when_worker_is_busy() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = tempfile::tempdir().expect("media");
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("work");
+        seed_subtitle_backfill(store.as_ref(), media.path(), 1).await;
+        enable_subtitle_backfill(store.as_ref()).await;
+        let jobs = manager(store.clone(), artwork.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            work.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let _busy = transcode.test_mark_live_waiting();
+        jobs.discover_subtitle_sources(transcode).await;
+        assert!(store
+            .analysis_requests(20)
+            .await
+            .expect("requests")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn subtitle_backfill_lease_is_exclusive_and_pass_enqueues_at_most_eight() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = tempfile::tempdir().expect("media");
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("work");
+        let ids = seed_subtitle_backfill(store.as_ref(), media.path(), 10).await;
+        enable_subtitle_backfill(store.as_ref()).await;
+        let first = Arc::new(JobManager::new_with_scan_prune_percent(
+            store.clone(),
+            artwork.path().to_owned(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "first".to_owned(),
+            Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
+        ));
+        let second = Arc::new(JobManager::new_with_scan_prune_percent(
+            store.clone(),
+            artwork.path().to_owned(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "second".to_owned(),
+            Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
+        ));
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            work.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let lease = first
+            .acquire_job("media:subtitle-source:backfill".to_owned())
+            .await
+            .expect("lease")
+            .expect("first holder");
+        second
+            .discover_subtitle_sources(Arc::clone(&transcode))
+            .await;
+        assert!(store
+            .analysis_requests(20)
+            .await
+            .expect("requests")
+            .is_empty());
+        lease.release().await.expect("release");
+        second.discover_subtitle_sources(transcode).await;
+        let requests = store.analysis_requests(20).await.expect("requests");
+        assert_eq!(requests.len(), 8, "one pass admits at most eight sources");
+        let newest: std::collections::HashSet<_> = ids.into_iter().rev().take(8).collect();
+        assert!(requests
+            .iter()
+            .all(|request| newest.contains(&request.file_id)));
+        assert!(requests.iter().all(|request| {
+            request.component == "subtitle_source"
+                && request.priority == "normal"
+                && request.trigger == "background"
+                && !request.force_rebuild
+                && request.target_node_id.is_empty()
+        }));
     }
 
     #[test]
@@ -11025,6 +11966,8 @@ mod tests {
         "scan:library:1",
         "repair:probe",
         "candidate:pretranscode",
+        "watched:outbox",
+        "metadata-classification",
     ];
 
     /// Leases that are singletons but not *cluster* singletons, named so this
@@ -11784,6 +12727,7 @@ mod tests {
                 std::time::Duration::from_secs(60),
                 |_: &crate::fragindex::PassProgress| {},
                 Some(&gate),
+                &tokio_util::sync::CancellationToken::new(),
             )
             .await
             .ride_along
@@ -11903,6 +12847,124 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn local_hevc_index_refreshes_object_proof_without_cluster_queue() {
+        use plurx_core::store::FragmentIndexStore as _;
+        let media = crate::test_tempdir().expect("media");
+        let source = media.path().join("source.mp4");
+        std::fs::copy(plurx_core::testfixtures::source("closed-gop"), &source)
+            .expect("copy HEVC fixture");
+        let metadata = std::fs::metadata(&source).expect("stat");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store
+            .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "0")
+            .await
+            .expect("local indexing");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "HEVC proof refresh".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![media.path().to_owned()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "HEVC".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let probe = ProbeResult {
+            video_codec: Some("hevc".into()),
+            duration_ms: Some(12000),
+            ..Default::default()
+        };
+        let id = store
+            .upsert_file(
+                item,
+                &source.to_string_lossy(),
+                metadata.len() as i64,
+                metadata
+                    .modified()
+                    .expect("mtime")
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("epoch")
+                    .as_secs() as i64,
+                &probe,
+            )
+            .await
+            .expect("file");
+        let file = store.get_file(id).await.expect("read").expect("file");
+        let identity = crate::fragindex::identity_for(
+            &file,
+            plurx_core::transcode::CopyVideoOptions::new(false, false),
+        );
+        let work = crate::test_tempdir().expect("work");
+        let jobs = manager(store.clone(), work.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            work.path().join("transcode"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        jobs.clone().build_fragment_indexes(transcode.clone()).await;
+        let mut index = store
+            .fragment_index(id, &identity)
+            .await
+            .expect("read")
+            .expect("initial index");
+        let object = crate::fragment_index_cluster::inspect_source(&file)
+            .await
+            .expect("object");
+        let proof = index
+            .promotion
+            .hevc_configuration
+            .as_mut()
+            .expect("original proof");
+        assert!(proof.current_on_node(&object, jobs.coordinator.node_id()));
+        // Model a prior object's proof with the same catalog size/mtime.
+        proof.source_object_version = "stale-same-size-and-mtime".into();
+        store
+            .put_fragment_index(id, &index)
+            .await
+            .expect("stale row");
+        jobs.clone().build_fragment_indexes(transcode.clone()).await;
+        let mut rebuilt = store
+            .fragment_index(id, &identity)
+            .await
+            .expect("read")
+            .expect("rebuilt index");
+        assert!(rebuilt
+            .promotion
+            .hevc_configuration
+            .as_ref()
+            .expect("refreshed proof")
+            .current_on_node(&object, jobs.coordinator.node_id()));
+        // A completed refusal on this exact object must remain untouched.
+        rebuilt
+            .promotion
+            .hevc_configuration
+            .as_mut()
+            .expect("proof")
+            .refusal = Some("completed unsupported configuration".into());
+        store
+            .put_fragment_index(id, &rebuilt)
+            .await
+            .expect("refused row");
+        jobs.clone().build_fragment_indexes(transcode.clone()).await;
+        assert_eq!(
+            store.fragment_index(id, &identity).await.expect("read"),
+            Some(rebuilt)
+        );
+    }
+
     /// The row a finished pass over `file_id` left behind, as it stood when
     /// the pass ended.
     fn finished_row_of(jobs: &JobManager, file_id: i64) -> AnalysisProgress {
@@ -11992,6 +13054,7 @@ mod tests {
             std::time::Duration::from_secs(60),
             |_: &crate::fragindex::PassProgress| {},
             Some(&gate),
+            &tokio_util::sync::CancellationToken::new(),
         )
         .await
         .ride_along
@@ -12047,12 +13110,20 @@ mod tests {
         // A peer that predates the fields still parses, as not riding.
         let mut value = serde_json::to_value(row(&jobs)).expect("json");
         value.as_object_mut().expect("object").remove("pgs_tracks");
+        value.as_object_mut().expect("object").remove("text_tracks");
         value
             .as_object_mut()
             .expect("object")
             .remove("pgs_bytes_written");
         let parsed: AnalysisProgress = serde_json::from_value(value).expect("old row");
-        assert_eq!((parsed.pgs_tracks, parsed.pgs_bytes_written), (0, 0));
+        assert_eq!(
+            (
+                parsed.pgs_tracks,
+                parsed.text_tracks,
+                parsed.pgs_bytes_written
+            ),
+            (0, 0, 0)
+        );
     }
 
     /// A file the indexer cannot index is asked once, not once per pass.
@@ -12251,87 +13322,53 @@ mod tests {
     async fn targeted_request_failures_queue_every_waiter_and_stay_bounded() {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let artwork = crate::test_tempdir().expect("artwork");
+        let media = crate::test_tempdir().expect("media");
         let jobs = manager(Arc::clone(&store), artwork.path());
-
-        let missing = scan_request_fixture("missing", 404);
-        assert!(jobs.request_scan(missing).await.is_err());
-        let failed = jobs.scan_request("missing").await.expect("failed record");
-        assert_eq!(failed.status, "failed");
-        assert!(failed
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("not under any root")));
-
-        jobs.statuses.lock().await.insert(
-            405,
-            ScanStatus {
-                running: true,
-                ..Default::default()
-            },
-        );
         assert!(jobs
-            .request_scan(scan_request_fixture("queued-1", 405))
+            .request_scan(scan_request_fixture("missing", 404))
             .await
-            .expect("queue first")
-            .is_none());
-        assert!(jobs
-            .request_scan(scan_request_fixture("queued-2", 405))
-            .await
-            .expect("queue duplicate path waiter")
-            .is_none());
-        assert_eq!(
-            jobs.pending.lock().await.get(&405).expect("pending").len(),
-            2
-        );
-        assert_eq!(
-            jobs.scan_request("queued-1")
-                .await
-                .expect("queued record")
-                .status,
-            "queued"
-        );
-        assert_eq!(
-            jobs.scan_request("queued-2")
-                .await
-                .expect("coalesced record")
-                .status,
-            "queued"
-        );
-        jobs.drain_pending(405).await;
-        assert_eq!(
-            jobs.scan_request("queued-1")
-                .await
-                .expect("drained record")
-                .status,
-            "failed"
-        );
-        assert_eq!(
-            jobs.scan_request("queued-2")
-                .await
-                .expect("second drained record")
-                .status,
-            "failed"
-        );
-
-        for index in 0..=MAX_REQUESTS {
-            let request = scan_request_fixture(format!("ring-{index}"), 1);
-            jobs.record_request(&request, "queued", None, None).await;
-        }
-        let records = jobs.scan_requests().await;
-        assert_eq!(records.len(), MAX_REQUESTS);
+            .is_err());
         assert!(
-            jobs.scan_request("ring-0").await.is_none(),
-            "oldest record was evicted"
+            jobs.scan_request("missing").await.is_none(),
+            "rejected work has no acceptance receipt"
         );
-        let newest = scan_request_fixture(format!("ring-{MAX_REQUESTS}"), 1);
-        jobs.record_request(&newest, "done", None, None).await;
-        assert_eq!(
-            jobs.scan_request(&format!("ring-{MAX_REQUESTS}"))
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Durable".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![media.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        for id in ["queued-1", "queued-2"] {
+            assert!(jobs
+                .request_scan(scan_request_fixture(id, library.id))
                 .await
-                .expect("updated newest")
-                .status,
-            "done"
-        );
+                .expect("durable admission")
+                .is_none());
+        }
+        // Reconstruct the manager with no process-local request ring.
+        let restarted = manager(store, artwork.path());
+        for id in ["queued-1", "queued-2"] {
+            assert_eq!(
+                restarted
+                    .scan_request(id)
+                    .await
+                    .expect("survived restart")
+                    .status,
+                "queued"
+            );
+        }
+        drain_library(&restarted, library.id).await;
+        for id in ["queued-1", "queued-2"] {
+            let record = restarted.scan_request(id).await.expect("durable result");
+            assert_eq!(record.status, "failed");
+            assert!(record
+                .error
+                .expect("path error")
+                .contains("not under any root"));
+        }
     }
 
     #[tokio::test]
@@ -12389,7 +13426,7 @@ mod tests {
             .expect("queue second")
             .is_none());
         jobs.statuses.lock().await.remove(&library.id);
-        jobs.drain_pending(library.id).await;
+        drain_library(&jobs, library.id).await;
 
         for request_id in ["same-path-first", "same-path-second"] {
             assert_eq!(
@@ -12493,7 +13530,7 @@ mod tests {
             .expect("queue request")
             .is_none());
         jobs.statuses.lock().await.remove(&library.id);
-        jobs.drain_pending(library.id).await;
+        drain_library(&jobs, library.id).await;
 
         let request = jobs
             .scan_request("scan-identity-queued")
@@ -12687,8 +13724,9 @@ mod tests {
         std::fs::create_dir_all(&season_two).expect("season two");
         std::fs::write(season_two.join("Beacon Field S02E01.mkv"), b"video").expect("episode two");
         let jobs = manager(store.clone(), artwork.path());
-        let scan = jobs
-            .request_scan(ScanRequest {
+        let scan = completed_scan(
+            &jobs,
+            ScanRequest {
                 id: "scan-identity-hint-conflict".into(),
                 library_id: library.id,
                 path: season_two,
@@ -12700,10 +13738,11 @@ mod tests {
                 book: None,
                 correlation_id: Some("hint-conflict".into()),
                 source: Some("fixture".into()),
-            })
-            .await
-            .expect("targeted scan")
-            .expect("ran immediately");
+            },
+        )
+        .await
+        .expect("targeted scan")
+        .expect("ran immediately");
 
         assert_eq!(
             scan.items.len(),
@@ -12771,7 +13810,7 @@ mod tests {
                 .is_none());
         }
         jobs.statuses.lock().await.remove(&library.id);
-        jobs.drain_pending(library.id).await;
+        drain_library(&jobs, library.id).await;
 
         let second = jobs
             .scan_request("ordered-second")
@@ -12813,44 +13852,44 @@ mod tests {
     async fn targeted_waiter_queue_is_bounded_and_overflow_is_terminal() {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let artwork = crate::test_tempdir().expect("artwork");
-        let jobs = manager(store, artwork.path());
-        let library_id = 406;
-        jobs.statuses.lock().await.insert(
-            library_id,
-            ScanStatus {
-                running: true,
-                ..Default::default()
-            },
-        );
+        let media = crate::test_tempdir().expect("media");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Bounded".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![media.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let jobs = manager(store.clone(), artwork.path());
         for index in 0..MAX_PENDING_PER_LIBRARY {
             assert!(jobs
-                .request_scan(scan_request_fixture(format!("bounded-{index}"), library_id))
+                .request_scan(scan_request_fixture(format!("bounded-{index}"), library.id))
                 .await
-                .expect("waiter within bound")
+                .expect("within bound")
                 .is_none());
         }
-        let overflow = scan_request_fixture("bounded-overflow", library_id);
         let error = jobs
-            .request_scan(overflow)
+            .request_scan(scan_request_fixture("bounded-overflow", library.id))
             .await
-            .expect_err("overflow is explicit");
-        assert!(error.to_string().contains("queue for library 406 is full"));
-        assert_eq!(
-            jobs.pending
-                .lock()
-                .await
-                .get(&library_id)
-                .expect("bounded queue")
-                .len(),
-            MAX_PENDING_PER_LIBRARY
+            .expect_err("overflow explicit");
+        assert!(error.to_string().contains("QueueFull"));
+        assert!(
+            jobs.scan_request("bounded-overflow").await.is_none(),
+            "rejection must not claim durable acceptance"
         );
-        assert_eq!(
-            jobs.scan_request("bounded-overflow")
-                .await
-                .expect("overflow record")
-                .status,
-            "failed"
-        );
+        let rows = store
+            .library_work_requests(
+                plurx_core::store::background_jobs_library::LibraryWorkQuery {
+                    limit: MAX_PENDING_PER_LIBRARY,
+                    pending_only: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("durable pending requests");
+        assert_eq!(rows.len(), MAX_PENDING_PER_LIBRARY);
     }
 
     #[tokio::test]
@@ -12858,27 +13897,10 @@ mod tests {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let artwork = crate::test_tempdir().expect("artwork");
         let jobs = manager(store, artwork.path());
-        assert!(jobs.trigger_refresh_as(999, ScanTrigger::Scheduled).await);
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                let status = jobs.all_statuses().await.remove(&999);
-                if status.as_ref().is_some_and(|status| !status.running) {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("missing library scan finished");
-        let status = jobs.all_statuses().await.remove(&999).expect("status");
-        assert_eq!(status.error.as_deref(), Some("library not found"));
-        let (counts, _) = jobs.metrics().snapshot();
-        assert_eq!(
-            counts
-                .into_iter()
-                .find(|(trigger, _)| *trigger == "scheduled")
-                .map(|(_, count)| count),
-            Some(1)
+        assert!(!jobs.trigger_refresh_as(999, ScanTrigger::Scheduled).await);
+        assert!(
+            jobs.scan_requests().await.is_empty(),
+            "missing library was never accepted"
         );
     }
 
@@ -12917,6 +13939,7 @@ mod tests {
         startup.await.expect("startup task");
 
         tokio::time::resume();
+        drain_library(&jobs, library.id).await;
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 if jobs
@@ -12976,7 +13999,15 @@ mod tests {
             Pipeline::Cpu,
         ));
 
-        let scheduler = tokio::spawn(Arc::clone(&jobs).schedule_loop(transcode));
+        let scheduler = tokio::spawn(Arc::clone(&jobs).schedule_loop(Arc::clone(&transcode)));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while jobs.scan_requests().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("scheduler durably admitted scan");
+        assert!(jobs.work_library_queue(&transcode, Some(library.id)).await);
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 if jobs
@@ -13043,6 +14074,7 @@ mod tests {
         ));
 
         jobs.run_due_jobs(&transcode).await.expect("scheduler tick");
+        assert!(jobs.work_library_queue(&transcode, Some(library.id)).await);
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 if jobs
@@ -13125,8 +14157,9 @@ mod tests {
             .expect("lib");
 
         let jobs = manager(store.clone(), artwork.path());
-        let scan = jobs
-            .request_scan(ScanRequest {
+        let scan = completed_scan(
+            &jobs,
+            ScanRequest {
                 id: "req-1".into(),
                 library_id: lib.id,
                 path: media.path().join("Holiday"),
@@ -13134,10 +14167,11 @@ mod tests {
                 book: None,
                 correlation_id: None,
                 source: Some("monarr".into()),
-            })
-            .await
-            .expect("scan ran")
-            .expect("not queued");
+            },
+        )
+        .await
+        .expect("scan ran")
+        .expect("not queued");
         assert_eq!(scan.items.len(), 1, "the clip was placed");
 
         let clip = store
@@ -13206,8 +14240,9 @@ mod tests {
             ..Default::default()
         });
 
-        let first = jobs
-            .request_scan(ScanRequest {
+        let first = completed_scan(
+            &jobs,
+            ScanRequest {
                 id: "s1".into(),
                 library_id: lib.id,
                 path: season_one,
@@ -13215,10 +14250,11 @@ mod tests {
                 book: None,
                 correlation_id: None,
                 source: Some("monarr".into()),
-            })
-            .await
-            .expect("first scan")
-            .expect("first ran");
+            },
+        )
+        .await
+        .expect("first scan")
+        .expect("first ran");
         let first_episode = store
             .get_item(first.items[0].item_id)
             .await
@@ -13243,8 +14279,9 @@ mod tests {
         let season_two = show.join("Season 02");
         std::fs::create_dir_all(&season_two).expect("mkdir s2");
         std::fs::write(season_two.join("Severance.S02E01.mkv"), b"video").expect("episode 2");
-        let second = jobs
-            .request_scan(ScanRequest {
+        let second = completed_scan(
+            &jobs,
+            ScanRequest {
                 id: "s2".into(),
                 library_id: lib.id,
                 path: season_two,
@@ -13252,10 +14289,11 @@ mod tests {
                 book: None,
                 correlation_id: None,
                 source: Some("monarr".into()),
-            })
-            .await
-            .expect("second scan")
-            .expect("second ran");
+            },
+        )
+        .await
+        .expect("second scan")
+        .expect("second ran");
         let second_episode = store
             .get_item(second.items[0].item_id)
             .await

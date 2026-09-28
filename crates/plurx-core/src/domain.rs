@@ -149,6 +149,20 @@ impl ItemKind {
             _ => None,
         }
     }
+
+    /// Whether an item of this kind carries a `resolution` — the best file
+    /// height, which the grid badges and the `resolution` sort ranks by.
+    ///
+    /// Movies and home videos only. A photo is probed and has a real height,
+    /// but a pixel count on a still is not the playback resolution the badge
+    /// and the sort are about, and no client badges one. The library
+    /// `ORDER BY` (`store::item_sort_order_by`) ranks every other kind at -1,
+    /// the same key a client merging on the DTO reads from an absent
+    /// `resolution`; the two must name the same kinds, and a unit test beside
+    /// the clause holds them together.
+    pub fn carries_resolution(self) -> bool {
+        matches!(self, ItemKind::Movie | ItemKind::Video)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -431,7 +445,7 @@ pub struct SubtitleStream {
 /// default. A file scanned before these columns existed, or one whose ffprobe
 /// emitted no DOVI record, has to be distinguishable from one that genuinely
 /// reported zero.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DolbyVisionFacts {
     /// 4, 5, 7, 8, 9 or 10. The number a client's `dv_profiles` list is
     /// matched against.
@@ -549,6 +563,10 @@ pub struct MediaFile {
     pub bitrate: Option<i64>,
     pub audio_streams: Vec<AudioStream>,
     pub subtitle_streams: Vec<SubtitleStream>,
+    /// Durable acquired captions, appended after the embedded stream ordinals.
+    /// Caption bodies are not part of public media metadata.
+    #[serde(skip)]
+    pub downloaded_subtitles: Vec<DownloadedSubtitle>,
     pub scanned_at: i64,
     /// Manual A/V sync correction, milliseconds; positive delays audio.
     /// Applied server-side at stream time (forces remux for direct-play
@@ -562,8 +580,56 @@ pub struct MediaFile {
     pub probed: bool,
 }
 
+/// A provider subtitle belongs to one exact catalog source revision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadedSubtitle {
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub provider_file_id: i64,
+    pub language: String,
+    pub title: String,
+    pub hearing_impaired: bool,
+    pub forced: bool,
+    pub vtt: String,
+}
+
+impl MediaFile {
+    /// Called once by storage decoders. Embedded ordinals remain unchanged.
+    pub(crate) fn with_downloaded_subtitles(
+        mut self,
+        raw: &str,
+    ) -> Result<Self, serde_json::Error> {
+        let tracks: Vec<DownloadedSubtitle> = serde_json::from_str(raw)?;
+        self.downloaded_subtitles = tracks
+            .into_iter()
+            .filter(|track| track.source_size == self.size && track.source_mtime == self.mtime)
+            .collect();
+        for track in &self.downloaded_subtitles {
+            self.subtitle_streams.push(SubtitleStream {
+                index: self.subtitle_streams.len() as i64,
+                codec: "webvtt".into(),
+                language: Some(track.language.clone()),
+                title: Some(track.title.clone()),
+                default: false,
+                forced: track.forced,
+                hearing_impaired: track.hearing_impaired,
+            });
+        }
+        Ok(self)
+    }
+
+    pub fn downloaded_subtitle(&self, index: i64) -> Option<&DownloadedSubtitle> {
+        let index = usize::try_from(index).ok()?;
+        let embedded = self
+            .subtitle_streams
+            .len()
+            .checked_sub(self.downloaded_subtitles.len())?;
+        self.downloaded_subtitles.get(index.checked_sub(embedded)?)
+    }
+}
+
 /// Everything the prober learned about one file.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProbeResult {
     pub duration_ms: Option<i64>,
     pub container: Option<String>,
@@ -829,23 +895,6 @@ pub struct CacheOwnershipInventory {
     pub complete: bool,
 }
 
-/// One exact generation cursor advance after a bounded integrity-scrub page.
-/// Backends apply a page of these in one transaction so routine maintenance
-/// costs one consensus write rather than one write per cache location.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CacheManifestCheck {
-    pub recipe_hash: String,
-    pub node_id: String,
-    pub storage_class: String,
-    pub relative_dir: String,
-    pub manifest_digest: String,
-    pub next_object_index: i64,
-    /// Descriptor-bound presence observation. A location that performed deep
-    /// verification is placed one second later than presence-only peers so
-    /// oldest-first pages durably rotate the deep-I/O starting point.
-    pub observed_at: i64,
-}
-
 /// One immutable candidate inserted by the cluster-wide speculative scheduler.
 ///
 /// The source snapshot is part of the row rather than looked up when a worker
@@ -870,10 +919,9 @@ pub struct NewPretranscodeJob {
     pub created_at_ms: i64,
 }
 
-/// A claimed distributed speculative-transcode job.
-///
-/// `fence` advances on every takeover. Renewals keep the same fence and move
-/// only the expiry; every settlement checks id + owner + fence + live expiry.
+/// Media-facing projection of a durable whole-title preparation job.
+/// Ownership fields are observations; only the common queue's complete
+/// JobToken can authorize renewal, settlement or publication.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PretranscodeJob {
     pub id: String,

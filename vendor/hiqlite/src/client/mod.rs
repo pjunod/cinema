@@ -18,6 +18,8 @@ mod create;
 pub mod dlock;
 #[cfg(feature = "sqlite")]
 mod execute;
+#[cfg(feature = "sqlite")]
+pub use execute::WriteAck;
 mod helpers;
 #[cfg(feature = "listen_notify_local")]
 mod listen_notify;

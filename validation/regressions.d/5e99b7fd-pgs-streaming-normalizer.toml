@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["5e99b7fd"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The plurx-pgs regression streamed_output_bounds_each_composition_without_rejecting_a_long_track proves two display sets whose cumulative RGBA exceeds the aggregate cap can be emitted one at a time, while one composition over the same cap is still refused. The plurxd PGS tests preserve manifest publication and failure handling; the pinned Rust gate runs both suites."

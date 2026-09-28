@@ -10,6 +10,7 @@ use axum::http::request::Parts;
 use plurx_core::auth;
 use plurx_core::domain::ApiKey;
 use plurx_core::domain::User;
+use plurx_core::store::TokenAuthentication;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -708,9 +709,13 @@ impl FromRequestParts<AppState> for AuthUser {
         let token = token_from_parts(parts).ok_or(ApiError::Unauthorized)?;
         let hash = auth::hash_token(&token);
         let ticket = state.cache_only_admin_proofs.authentication_ticket();
-        let user = match state.store.user_for_token(&hash).await? {
-            Some(user) => user,
-            None => {
+        let user = match state.store.authenticate_token(&hash).await? {
+            TokenAuthentication::Authenticated(user) => user,
+            TokenAuthentication::Expired { idle_days } => {
+                state.cache_only_admin_proofs.invalidate_digest(&hash);
+                return Err(session_expired(idle_days));
+            }
+            TokenAuthentication::Unknown => {
                 state.cache_only_admin_proofs.invalidate_digest(&hash);
                 return Err(ApiError::Unauthorized);
             }
@@ -719,6 +724,73 @@ impl FromRequestParts<AppState> for AuthUser {
             .cache_only_admin_proofs
             .record_authenticated(ticket, hash, &user);
         Ok(AuthUser(user))
+    }
+}
+
+/// Stable code every client matches to land on its sign-in screen with the
+/// reason, rather than a generic "your session ended".
+pub(crate) const SESSION_EXPIRED_CODE: &str = "session_expired";
+
+/// The 401 for a login token that sat unused for the whole idle window. The
+/// status stays 401 so every client that predates the code still signs out;
+/// the code and `idle_days` let a current client say why.
+pub(crate) fn session_expired(idle_days: i64) -> ApiError {
+    let unit = if idle_days == 1 { "day" } else { "days" };
+    ApiError::typed_detail(
+        axum::http::StatusCode::UNAUTHORIZED,
+        SESSION_EXPIRED_CODE,
+        format!("Signed out after {idle_days} {unit} of inactivity. Sign in again to continue."),
+        serde_json::json!({ "idle_days": idle_days }),
+    )
+}
+
+/// Response header on every request that made a watch write (K-04 M2): the
+/// highest Raft log index of those writes when every one reported it, or
+/// [`COMMIT_INDEX_UNKNOWN`] when any did not. Absent when the request made
+/// no watch write.
+pub const COMMIT_INDEX_HEADER: &str = "x-plurx-commit-index";
+/// [`COMMIT_INDEX_HEADER`]'s value for a request with a watch write whose
+/// position is unknown. A client that sees it drops the index it echoes:
+/// keeping an older one would name a floor below a write it was just told
+/// succeeded.
+pub const COMMIT_INDEX_UNKNOWN: &str = "unknown";
+/// Request header by which a client echoes the newest numeric
+/// [`COMMIT_INDEX_HEADER`] it has seen, for 60 seconds after seeing it, and
+/// stops echoing on [`COMMIT_INDEX_UNKNOWN`].
+pub const READ_AFTER_HEADER: &str = "x-plurx-read-after";
+
+/// The client's `X-Plurx-Read-After` fence, if it sent exactly one
+/// well-formed positive index. Anything else is `None`, which makes watch
+/// reads go to Authority: a malformed fence can only cost latency. A
+/// well-formed but stale index could skip a write, which is why a response
+/// whose watch write has no known position says [`COMMIT_INDEX_UNKNOWN`]
+/// and the client drops its echo.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReadAfter(pub Option<u64>);
+
+impl ReadAfter {
+    #[must_use]
+    pub fn from_headers(headers: &axum::http::HeaderMap) -> Self {
+        let mut values = headers.get_all(READ_AFTER_HEADER).iter();
+        let (Some(value), None) = (values.next(), values.next()) else {
+            return Self(None);
+        };
+        let index = value
+            .to_str()
+            .ok()
+            .filter(|text| !text.is_empty() && text.len() <= 20)
+            .filter(|text| text.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|text| text.parse::<u64>().ok())
+            .filter(|index| *index > 0);
+        Self(index)
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for ReadAfter {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self::from_headers(&parts.headers))
     }
 }
 
@@ -839,6 +911,45 @@ fn cache_only_admin_unavailable() -> ApiError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn read_after_accepts_exactly_one_positive_decimal_index() {
+        use super::{ReadAfter, READ_AFTER_HEADER};
+        use axum::http::{HeaderMap, HeaderValue};
+
+        let parse = |values: &[&str]| {
+            let mut headers = HeaderMap::new();
+            for value in values {
+                headers.append(
+                    READ_AFTER_HEADER,
+                    HeaderValue::from_str(value).expect("header value"),
+                );
+            }
+            ReadAfter::from_headers(&headers).0
+        };
+        assert_eq!(parse(&[]), None);
+        assert_eq!(parse(&["41"]), Some(41));
+        assert_eq!(parse(&["18446744073709551615"]), Some(u64::MAX));
+        // Anything else is no fence at all, which sends watch reads to
+        // Authority: a bad header can cost latency, never skip a write.
+        for bad in [
+            "0",
+            "",
+            "-1",
+            "+41",
+            " 41",
+            "41 ",
+            "4.1",
+            "0x29",
+            "18446744073709551616",
+            // A client that echoed the invalidation verbatim instead of
+            // dropping its echo still reaches Authority.
+            super::COMMIT_INDEX_UNKNOWN,
+        ] {
+            assert_eq!(parse(&[bad]), None, "{bad:?}");
+        }
+        assert_eq!(parse(&["41", "42"]), None, "two fences are ambiguous");
+    }
+
     use super::{
         key_activity_refresh_due, percent_decode, CacheOnlyAdminProofCache,
         CACHE_ONLY_ADMIN_PROOF_TTL,
@@ -1196,7 +1307,9 @@ mod tests {
             extractor
                 .find("authentication_ticket()")
                 .expect("auth ticket")
-                < extractor.find("user_for_token(&hash)").expect("Store auth")
+                < extractor
+                    .find("authenticate_token(&hash)")
+                    .expect("Store auth")
         );
         assert!(extractor.contains("record_authenticated(ticket, hash, &user)"));
 

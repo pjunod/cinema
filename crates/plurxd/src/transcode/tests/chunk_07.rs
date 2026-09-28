@@ -1,4 +1,6 @@
 
+#[cfg(test)]
+use crate::queue_fixture::QueueFixture;
     #[tokio::test]
     async fn cancelled_copy_registration_rejection_keeps_exact_cleanup_ownership() {
         use plurx_core::store::SqliteStore;
@@ -344,6 +346,23 @@
         (mgr, work, cache)
     }
 
+    #[tokio::test]
+    async fn heavy_background_admission_is_shared_and_released_with_its_guard() {
+        let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let (manager, _work, _cache) = cached_manager(&store);
+        // Model a different heavy worker that needs no software threads.
+        let heavy = Arc::clone(&manager.background_heavy).try_acquire_owned().expect("heavy slot");
+        assert_eq!(manager.admissions.software_in_use(), 0);
+        assert!(manager.admit_fragment().await.is_none());
+        drop(heavy);
+        let first = manager.admit_fragment().await.expect("index admission");
+        assert!(Arc::clone(&manager.background_heavy).try_acquire_owned().is_err());
+        assert!(manager.admit_fragment().await.is_none());
+        drop(first);
+        assert_eq!(manager.admissions.software_in_use(), 0);
+        assert!(manager.admit_fragment().await.is_some());
+    }
+
     async fn recipe_hash_for_options(
         mgr: &TranscodeManager,
         file: &plurx_core::domain::MediaFile,
@@ -379,7 +398,7 @@
             prepared,
             &plan,
             pacing,
-            dir,
+            &dir.to_string_lossy(),
             fingerprint,
             mgr.admissions.software_pool(),
             mgr.software_budget().await,
@@ -511,7 +530,7 @@
             prepared_again,
             &failed_plan,
             Pacing::unpaced(),
-            dir.path(),
+            &dir.path().to_string_lossy(),
             "alternative-plan-key",
             mgr.admissions.software_pool(),
             mgr.software_budget().await,
@@ -687,7 +706,7 @@
         })
         .expect("requirements");
         assert!(store
-            .enqueue_pretranscode_job(
+            .fixture_enqueue_pretranscode_job(
                 &NewPretranscodeJob {
                     id: job_id.to_owned(),
                     dedupe_key: "transcode-manifest-session".to_owned(),
@@ -710,7 +729,7 @@
             .await
             .expect("enqueue manifest session"));
         let claimed = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 NODE,
                 &PretranscodeWorkerCapabilities {
                     version: PretranscodeRequirements::VERSION,
@@ -730,7 +749,7 @@
             .expect("claim manifest session")
             .expect("manifest session job");
         assert!(store
-            .complete_pretranscode_job(
+            .fixture_complete_pretranscode_job(
                 &claimed,
                 recipe,
                 CACHE_RECIPE_VERSION,
@@ -1154,6 +1173,13 @@
             .await
             .expect("complete");
         let hit = look().await.expect("a finished entry serves");
+        assert_eq!(
+            mgr.sessions.lock().await[hit.session_id.as_str()]
+                .delivery
+                .method(),
+            "transcode",
+            "a cache hit serves an encoded rendition: transcode bytes"
+        );
         assert!(
             hit.vod,
             "the whole stream exists; the player may seek freely"
@@ -2312,6 +2338,13 @@
             .expect("start");
         assert_eq!(info.encoder, "software (x264)");
         assert_eq!(mgr.active_sessions().await, 1);
+        assert_eq!(
+            mgr.sessions.lock().await[info.session_id.as_str()]
+                .delivery
+                .method(),
+            "transcode",
+            "a live transcode's bytes are transcode bytes"
+        );
         let sessions = mgr.list_deliveries().await;
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].0.user_name, "paul");
@@ -2320,6 +2353,12 @@
         assert_eq!(mgr.active_sessions().await, 0);
 
         // The copy-video path likewise creates and tears down a session.
+        // This fixture tests lifecycle after admission; unverified HEVC copy
+        // requires the explicit Developer override.
+        store
+            .put_setting(keys::HEVC_UNVERIFIED_COPY, "1")
+            .await
+            .expect("allow unverified copy for lifecycle coverage");
         let info = mgr
             .start_copy(
                 file_id,
@@ -2336,6 +2375,13 @@
             .await
             .expect("start_copy");
         assert_eq!(info.encoder, "copy");
+        assert_eq!(
+            mgr.sessions.lock().await[info.session_id.as_str()]
+                .delivery
+                .method(),
+            "remux",
+            "a live copy-video session's bytes are remux bytes"
+        );
         // The two HLS kinds share a struct and are told apart structurally,
         // never by the encoder label: that label goes to "cached" on a cache
         // hit and is rewritten by the hardware→software fallback, either of
@@ -2407,6 +2453,10 @@
 
         // The copy path supersedes too, and across paths: a transcode fallback
         // after a copy attempt must not leave the copy remux reading the disk.
+        store
+            .put_setting(keys::HEVC_UNVERIFIED_COPY, "1")
+            .await
+            .expect("allow unverified copy for supersession coverage");
         let copy = mgr
             .start_copy(
                 file_id,

@@ -76,7 +76,7 @@ function settingsPanel(tab,d){
   if(tab==="livetv")       return liveTvPanel(d.settings,d.developerReadiness);
   if(tab==="analysis")     return analysisSettingsPanel(d.settings,d.analysis);
   if(tab==="maintenance")  return maintenancePanel(d.settings,d.dvConversions,d.developerReadiness);
-  if(tab==="users")        return usersPanel(d.users);
+  if(tab==="users")        return usersPanel(d.users,d.settings);
   if(tab==="system")       return systemPanel(d.sys,d.playbackEvents);
   if(tab==="cluster")      return clusterPanel(d);
   if(tab==="integrations") return integrationsPanel(d.settings,d.trakt);
@@ -187,14 +187,14 @@ function subtitleStorePanel(settings){
   const d=settings.subtitle_store||{};
   const on=settings.subtitle_stored_sources!==false;
   const gate=d.gate||{open:true};
-  const blocked=on&&gate.open===false;
+  const concern=on&&gate.open===false;
   const fp=d.footprint;
   const plural=(n,word)=>`${n} ${word}${n===1?"":"s"}`;
   const size=fp?`${fmtBytes(fp.bytes)||"0 B"} · ${plural(fp.directories,"file")}`:"not measured yet";
   const pill=!on?`<span class="pill">off</span>`
-    :blocked?`<span class="pill bad">not keeping tracks</span>`
+    :concern?`<span class="pill warn">readiness concern</span>`
     :`<span class="pill ok">${esc(size)}</span>`;
-  const why=blocked?`<div class="setwarn">⚠ <b>The index pass on this node keeps no PGS tracks:</b> ${esc(gate.reason||"a requirement is not met")}. Each requirement is checked on ${SUBSRC_SWITCH_LINK}.</div>`:"";
+  const why=concern?`<div class="setwarn">⚠ <b>Review stored-track readiness:</b> ${esc(gate.reason||"a requirement is not met")}. The observations are advisory on ${SUBSRC_SWITCH_LINK}.</div>`:"";
   const ago=d.footprint_age_ms!=null?` (measured ${fmtDur(d.footprint_age_ms)||"just now"}${d.footprint_age_ms>=1000?" ago":""})`:"";
   const measured=fp
     ? `<p class="hint">On this node the store holds <b>${esc(size)}</b>${esc(ago)}, of a ${fmtBytes(d.cap_bytes)||"—"} cap; the least recently used files go first.</p>`
@@ -496,7 +496,37 @@ function metadataPanel(settings,readiness){
 // calendar seam; both are the opposite direction of the Metadata providers,
 // which is why they no longer share a page with them.
 function integrationsPanel(settings,trakt){
-  return `${setHead("Integrations","Other services plurx talks to.")}${traktCardHtml(trakt)}${monarrCardHtml()}`;
+  return `${setHead("Integrations","Other services plurx talks to.")}${traktCardHtml(trakt)}${monarrCardHtml()}<div class="card">${cardHead("OpenSubtitles","Find and download missing movie and episode subtitles.")}<div style="padding:16px"><button class="sm" onclick="openSubtitleProvider(this)">Configure OpenSubtitles</button><div id="subtitle-provider-form"></div></div></div>`;
+}
+
+async function openSubtitleProvider(button){
+  const panel=document.getElementById("subtitle-provider-form");
+  button.disabled=true;
+  try{
+    const settings=await api("/subtitle-provider");
+    if(!panel.isConnected)return;
+    panel.innerHTML=`<p>${settings.configured?"OpenSubtitles is configured. Leave secrets blank to keep them.":"Add an OpenSubtitles API key to enable subtitle downloads."} <a href="https://www.opensubtitles.com/consumers" target="_blank" rel="noopener">Create an API key</a>.</p>
+      <label for="os-key">API key</label><input id="os-key" type="password" autocomplete="off">
+      <label for="os-user">Account username (optional)</label><input id="os-user" autocomplete="off" value="${esc(settings.username||"")}">
+      <label for="os-password">Account password (optional)</label><input id="os-password" type="password" autocomplete="new-password">
+      <label><input id="os-auto" type="checkbox"${settings.automatic?" checked":""}> Automatically download missing subtitles when the file matches</label>
+      <label for="os-languages">Automatic languages (up to three codes, separated by commas)</label><input id="os-languages" value="${esc((settings.languages||["en"]).join(", "))}" placeholder="en, fr">
+      <p class="muted">Downloads use the provider’s allowance. An account can provide a higher allowance.</p>
+      <button class="sm" onclick="saveSubtitleProvider(false)">Save</button>
+      <button class="ghost sm" onclick="saveSubtitleProvider(true)">Disable and clear credentials</button><div id="os-status" role="status"></div>`;
+  }catch(e){if(panel.isConnected)panel.textContent=e.message||"Could not load OpenSubtitles settings.";}
+  finally{button.disabled=false;}
+}
+
+async function saveSubtitleProvider(clear){
+  const status=document.getElementById("os-status");
+  const key=document.getElementById("os-key"),password=document.getElementById("os-password");
+  const body=clear?{api_key:"",username:"",password:"",automatic:false}:{username:document.getElementById("os-user").value.trim(),automatic:document.getElementById("os-auto").checked,languages:document.getElementById("os-languages").value.split(",").map(v=>v.trim()).filter(Boolean)};
+  if(!clear&&key.value.trim())body.api_key=key.value.trim();
+  if(!clear&&password.value)body.password=password.value;
+  status.textContent="Saving…";
+  try{await api("/subtitle-provider",{method:"PUT",body});key.value="";password.value="";status.textContent=clear?"OpenSubtitles disabled.":"Saved.";}
+  catch(e){status.textContent=e.message||"Could not save OpenSubtitles settings.";}
 }
 function presetOpts(pairs, cur, label){
   cur=(cur==null?"":String(cur));
@@ -543,7 +573,6 @@ function playbackPanel(settings,readiness){
       ${setCardFoot("savePlaybackDefaults")}`);
   const streaming=setCard(`${cardHead("Streaming","Server delivery · Changes apply to new sessions. Existing playback keeps its current settings.",active)}
       ${togRow("pvod","VOD HLS — a fixed, seekable timeline","Preferred. Needs the file's analysis index; schedules and queue health are in Analysis.",settings.vod_presentation)}
-      ${togRow("pabr","Adjust Auto quality while playing","Off keeps the server's first Auto choice and the full manual quality menu, but makes no client-side rung changes or supply-stall restart. Enable it to let Auto respond to changing playback conditions.",settings.playback_auto_abr)}
       <div class="setfields">
         <div><label for="pvws">VOD working set</label><select id="pvws" style="min-width:190px">${presetOpts([[String(2*1024**3),"2 GB"],[String(4*1024**3),"4 GB"],[String(8*1024**3),"8 GB — recommended"],[String(16*1024**3),"16 GB"],[String(32*1024**3),"32 GB"]],vodWorking)}</select></div>
         <div><label for="pvmb">Producer deadline</label><select id="pvmb" style="min-width:190px">${presetOpts([["30","30 seconds — recommended"],["45","45 seconds"],["60","60 seconds"]],vodMaterialize,v=>`${v} seconds`)}</select></div>

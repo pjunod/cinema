@@ -47,6 +47,20 @@ pub(super) fn atomic_renewal_statement(
           WHERE resource = $4 AND owner_node_id = $5
             AND fence = $6 AND revision = $7 AND expires_at_ms = $8
             AND expires_at_ms > $9
+            AND NOT EXISTS (SELECT 1 FROM background_job_domain_leases binding
+                WHERE binding.resource = job_leases.resource AND binding.domain_fence = job_leases.fence
+                AND NOT EXISTS (SELECT 1 FROM background_jobs job WHERE job.id = binding.job_id
+                    AND job.fence = binding.job_fence AND job.owner_node_id = binding.node_id
+                    AND job.owner_boot_id = binding.boot_id AND job.claim_id = binding.claim_id
+                    AND job.state = 'running' AND job.lease_expires_ms > $9
+            AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
+                WHERE required.job_id = job.id AND NOT EXISTS (
+                    SELECT 1 FROM background_job_reservations held
+                    WHERE held.job_id = job.id AND held.fence = job.fence
+                        AND held.resource_key = required.resource_key
+                        AND held.expires_at_ms >= job.lease_expires_ms))
+                    AND NOT EXISTS (SELECT 1 FROM settings WHERE key =
+                        'internal.cluster_job_owner_removed.' || job.owner_node_id)))
           RETURNING resource, owner_node_id, fence, revision, expires_at_ms"
             .to_owned(),
         params!(
@@ -278,6 +292,39 @@ impl HiqliteAuthStore {
 
 #[async_trait]
 impl FencedPublicationStore for HiqliteAuthStore {
+    async fn add_downloaded_subtitle_fenced(
+        &self,
+        file_id: i64,
+        track: &crate::domain::DownloadedSubtitle,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError> {
+        let raw = super::downloaded_subtitles::encode(track)?;
+        use super::downloaded_subtitles::ADD_DOWNLOADED_SUBTITLE;
+        let sql = format!("{ADD_DOWNLOADED_SUBTITLE} AND EXISTS (SELECT 1 FROM job_leases WHERE resource=$6 AND owner_node_id=$7 AND fence=$8 AND revision=$9 AND expires_at_ms=$10)");
+        let counts = self
+            .atomic_publication(
+                lease,
+                replacement,
+                vec![(
+                    sql,
+                    params!(
+                        file_id,
+                        track.source_size,
+                        track.source_mtime,
+                        raw,
+                        track.provider_file_id,
+                        lease.resource.as_str(),
+                        lease.owner_node_id.as_str(),
+                        lease_i64("fence", lease.fence)?,
+                        lease_i64("revision", lease.revision)?,
+                        lease.expires_at_unix_ms
+                    ),
+                )],
+            )
+            .await?;
+        Ok(counts.first().copied() == Some(1))
+    }
     async fn apply_identity_repair_fenced(
         &self,
         snapshot: &IdentityRepairSnapshot,

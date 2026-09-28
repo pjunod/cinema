@@ -1,0 +1,33 @@
+version = 1
+
+[[coverage]]
+commits = ["a22a668f"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+The daemon's startup open-file raise asked for rlim_cur = rlim_max on every
+platform. launchd gives a macOS LaunchAgent 256 soft against an unlimited
+hard limit, and macOS enforces kern.maxfilesperproc whatever the hard limit
+says. setrlimit(2) documents EINVAL for an infinite soft RLIMIT_NOFILE, and
+macOS 27.0 accepts it but still stops the process at 122877 descriptors. So
+the daemon either stayed at 256 or logged a soft limit it did not have.
+
+In crates/plurx-core/src/process/rlimit.rs:
+`process::rlimit::tests::an_unlimited_hard_limit_is_clamped_to_the_platform_ceiling`
+pins the pure `raised_soft_limit` on every host. 256 soft under
+RLIM_INFINITY hard with a 24576 ceiling targets 24576. A hard limit below
+the ceiling is the target. A soft limit already at the ceiling makes no
+call. With the clamp reverted to `hard` it fails on Linux with
+`left: Some(18446744073709551615), right: Some(24576)`; that revert was run
+on nuc3 on 2026-09-24.
+`the_raise_targets_the_hard_limit_where_no_platform_ceiling_applies` pins
+the unchanged Linux target (1024 -> 524288, and no call at equality or
+infinity).
+`the_soft_limit_is_raised_as_far_as_the_platform_allows` re-execs the test
+binary, lowers soft to 256 and asserts that both the reported and the
+getrlimit-observed soft limit equal min(hard, `sysctl -n
+kern.maxfilesperproc`) on macOS, or the hard limit elsewhere, and that hard
+is unchanged. On the lab Mac mba, with the Apple ceiling removed, it fails
+with `left: 9223372036854775807, right: 122880`.
+Run `cargo test -p plurx-core process::rlimit`.
+"""

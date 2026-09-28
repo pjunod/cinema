@@ -4,6 +4,20 @@
 //! modes. With `hiqlite-contract-tests`, the same scenarios also run through a
 //! remote client backed by three separate voter processes.
 
+// A test, never a daemon child: the launcher rule in clippy.toml is for
+// production code.
+#![allow(clippy::disallowed_methods)]
+#[path = "support/queue_fixture.rs"]
+mod queue_fixture;
+#[path = "support/subtitle_jobs.rs"]
+mod subtitle_jobs_fixture;
+use subtitle_jobs_fixture::SubtitleFixture;
+
+use queue_fixture::QueueFixture;
+
+#[path = "store_contract/background_jobs.rs"]
+mod background_jobs;
+
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -35,15 +49,15 @@ use plurx_core::cluster::migration::{
 use plurx_core::config::Config;
 use plurx_core::domain::{
     scopes, ArtworkAttempt, BookMetadataPatch, BookMetadataSource, CacheConsumerKind,
-    CacheConsumerPin, CacheManifestCheck, CacheStorageMember, CredentialGeneration,
-    DolbyVisionFacts, ItemEdit, ItemKind, ItemSort, LibraryKind, MediaSessionActivation,
-    MediaSessionActivationSettlement, MediaSessionEnd, MediaSessionProjectionCompletion,
-    MediaSessionRenewal, MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover,
-    MediaSessionTakeoverCursor, MediaSessionTerminalAck, MetadataPatch, NetworkPriorObservation,
-    NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome,
-    OfflineLeaseOutcome, PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements,
-    PretranscodeWorkerCapabilities, ProbeResult, ReadingStateWrite, TraktAuth,
-    MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS, MEDIA_SESSION_PUBLICATION_BLOCKED,
+    CacheConsumerPin, CacheStorageMember, CredentialGeneration, DolbyVisionFacts, ItemEdit,
+    ItemKind, ItemSort, LibraryKind, MediaSessionActivation, MediaSessionActivationSettlement,
+    MediaSessionEnd, MediaSessionProjectionCompletion, MediaSessionRenewal,
+    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaSessionTakeoverCursor,
+    MediaSessionTerminalAck, MetadataPatch, NetworkPriorObservation, NewItem, NewLibrary,
+    NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome, OfflineLeaseOutcome,
+    PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements, PretranscodeWorkerCapabilities,
+    ProbeResult, ReadingStateWrite, TraktAuth, MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
+    MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
 use plurx_core::dvr::{
     DvrInsertOutcome, DvrOrigin, DvrRecording, DvrReminder, DvrReminderState, DvrState,
@@ -61,8 +75,9 @@ use plurx_core::store::{
     analysis_backoff_ms, cluster_fragment_index_generation_key, cluster_fragment_index_key,
     requeue_cluster_fragment_index_after_no_holder, AnalysisHistoryCursor, AnalysisHistoryFilter,
     AnalysisHistoryQuery, ArtworkRepairFence, ClusterFragmentIndexArtifact,
-    ClusterFragmentIndexJob, ClusterFragmentIndexLocation, DvConversionMode, DvConversionState,
-    DvRecoveryGuardState, IdentityRepairOutcome, LibraryStore, MediaStore, NewAnalysisRequest,
+    ClusterFragmentIndexJob, ClusterFragmentIndexLocation, ClusterFragmentIndexStore,
+    DvConversionMode, DvConversionState, DvRecoveryGuardState, FileGrantStore,
+    IdentityRepairOutcome, LibraryStore, MediaStore, NewAnalysisRequest,
     NewClusterFragmentIndexJob, OutboxEntry, PublicationStore, QueueDvConversionOutcome,
     ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome, SqliteStore, Store,
     ANALYSIS_LIFECYCLE_METRICS, ANALYSIS_METRIC_COMPONENTS, ANALYSIS_METRIC_PRIORITIES,
@@ -71,9 +86,8 @@ use plurx_core::store::{
 };
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::store::{
-    ApiKeyStore, ClusterFragmentIndexStore, CoordinationStore, DvConversionStore,
-    FencedPublicationStore, HiqliteAuthStore, MediaSessionStore, OfflinePackageStore,
-    PlaybackTelemetryStore, PretranscodeJobStore, ReadingStore, SettingsStore,
+    ApiKeyStore, CoordinationStore, DvConversionStore, FencedPublicationStore, HiqliteAuthStore,
+    MediaSessionStore, OfflinePackageStore, PlaybackTelemetryStore, ReadingStore, SettingsStore,
     TimelineAnnotationStore, TraktStore, TranscodeCacheStore, UserStore, WatchStore,
     AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
@@ -207,6 +221,7 @@ const SETTINGS_METHODS: &[&str] = &[
     "get_setting",
     "get_or_init_setting",
     "get_setting_pair",
+    "get_settings",
     "settings_snapshot",
     "put_setting",
     "put_setting_if_absent",
@@ -264,6 +279,7 @@ const USER_METHODS: &[&str] = &[
     "delete_tokens_for_user",
     "create_token",
     "create_token_if_password_matches",
+    "authenticate_token",
     "user_for_token",
     "delete_token",
     "delete_token_with_cache_admin_claim",
@@ -336,8 +352,14 @@ const LIBRARY_CHANNEL_METHODS: &[&str] = &[
     "complete_library_channel_build_without_publication",
     "read_library_channel_generation",
 ];
-const CLASSIFICATION_METHODS: &[&str] = &["classification_page", "write_classification"];
+const CLASSIFICATION_METHODS: &[&str] = &[
+    "classification_page",
+    "write_classification",
+    "classification_hint",
+];
 const MEDIA_METHODS: &[&str] = &[
+    "add_downloaded_subtitle",
+    "subtitle_candidate_file_ids",
     "item_by_external_id",
     "find_movie",
     "find_movies_by_directory",
@@ -397,6 +419,7 @@ const MEDIA_METHODS: &[&str] = &[
     "get_file_probe_json",
     "get_file_probe_chapters_json",
     "merge_file_probe_chapters",
+    "merge_file_probe_hevc_parameter_sets",
     "files_missing_probe",
     "library_file_paths",
     "ensure_library_root_fingerprint",
@@ -418,6 +441,8 @@ const WATCH_METHODS: &[&str] = &[
     "watch_rollups",
     "continue_watching",
     "next_up",
+    "watch_summary",
+    "progress_rails",
     "apply_remote_watch",
 ];
 const READING_METHODS: &[&str] = &[
@@ -449,6 +474,7 @@ const OUTBOX_METHODS: &[&str] = &[
     "due_watched",
     "settle_watched",
     "watched_outbox_counts",
+    "watched_outbox_hint",
 ];
 const CACHE_METHODS: &[&str] = &[
     "cache_hit",
@@ -457,8 +483,6 @@ const CACHE_METHODS: &[&str] = &[
     "complete_cache_entry",
     "touch_cache_entry",
     "cache_by_age",
-    "cache_manifest_candidates",
-    "mark_cache_manifests_checked",
     "stale_cache_claims",
     "all_cache_rows",
     "cache_ownership_inventory",
@@ -486,18 +510,67 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "retire_shared_cache_generation",
     "finalize_retired_shared_cache_generation",
 ];
-const PRETRANSCODE_METHODS: &[&str] = &[
-    "pretranscode_job",
-    "enqueue_pretranscode_job",
-    "claim_pretranscode_job",
-    "pretranscode_staging_jobs",
-    "active_pretranscode_job_ids",
-    "renew_pretranscode_job",
-    "yield_pretranscode_job",
-    "fail_pretranscode_job",
-    "cancel_pretranscode_job",
-    "complete_pretranscode_job",
+const BACKGROUND_JOB_METHODS: &[&str] = &[
+    "sync_predictions",
+    "embedding_for",
+    "publish_embedding_job",
+    "publish_probe_job",
+    "apply_probe_job",
+    "transcode_verification_candidates",
+    "verify_transcode_job",
+    "artwork_verification_candidates",
+    "verify_artwork_job",
+    "artifact_repairs",
+    "enqueue_artifact_repair",
+    "pending_predictions",
+    "preparation_demands",
+    "hot_artifacts",
+    "bind_library_job",
+    "update_provider_budget",
+    "subtitle_job_intents",
+    "enqueue_subtitle_job",
+    "write_subtitle_job",
+    "artwork_locations",
+    "transcode_copy_sources",
+    "artwork_variant",
+    "enqueue_artwork_demand",
+    "publish_artwork_job",
+    "storage_domains",
+    "replace_storage_domains",
+    "enqueue_library_work",
+    "library_work_requests",
+    "complete_library_work",
+    "bind_transcode_job_recipe",
+    "join_offline_job",
+    "import_legacy_jobs",
+    "job_migration_status",
+    "enqueue_fragment_job",
+    "job_waiters",
+    "delivery_intents",
+    "enqueue_delivery",
+    "background_job",
+    "background_staging_jobs",
+    "enqueue_job",
+    "enqueue_job_fenced",
+    "retry_background_job",
+    "claim_job",
+    "claim_artifact_job",
+    "resolve_claim",
+    "job_labels",
+    "job_counts",
+    "job_attempts",
+    "list_jobs",
+    "job_candidates",
+    "renew_jobs",
+    "settle_job",
+    "fail_fragment_job",
+    "cancel_job",
+    "cancel_waiter",
+    "maintain_jobs",
+    "publish_transcode_job",
+    "publish_fragment_job",
 ];
+const PRETRANSCODE_METHODS: &[&str] = &["pretranscode_job", "pretranscode_staging_jobs"];
 const OFFLINE_METHODS: &[&str] = &[
     "create_offline_package",
     "offline_package_for_user",
@@ -506,6 +579,7 @@ const OFFLINE_METHODS: &[&str] = &[
     "offline_package_stats",
     "reset_interrupted_offline_packages",
     "claim_next_offline_package",
+    "offline_queue_hint",
     "offline_package_claim_is_current",
     "requeue_offline_package",
     "set_offline_package_recipe",
@@ -521,6 +595,7 @@ const OFFLINE_METHODS: &[&str] = &[
     "disable_offline_packages",
     "delete_offline_package",
     "expire_offline_packages",
+    "offline_expiry_hint",
     // Node removal (`CLUSTERING-PLAN.md` §6.7). Cluster-only behavior: the
     // SQLite backend implements these inertly because a single-node install
     // has no node to remove, so the real contract lives in the replicated
@@ -592,7 +667,12 @@ const NETWORK_PRIOR_METHODS: &[&str] = &[
     "network_prior",
     "prune_network_priors",
 ];
-const COORDINATION_METHODS: &[&str] = &["acquire_lease", "renew_lease", "release_lease"];
+const COORDINATION_METHODS: &[&str] = &[
+    "acquire_lease",
+    "renew_lease",
+    "release_lease",
+    "lease_expiry_hint",
+];
 const MEDIA_SESSION_METHODS: &[&str] = &[
     "record_desired_selection",
     "desired_selection",
@@ -634,6 +714,7 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "validation_corrupt_recovery_restriction",
 ];
 const FENCED_PUBLICATION_METHODS: &[&str] = &[
+    "add_downloaded_subtitle_fenced",
     "put_setting_fenced",
     "put_setting_if_absent_fenced",
     "put_setting_if_absent_if_artwork_repair_current_fenced",
@@ -8088,7 +8169,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             .expect("contract clock after epoch")
             .as_millis()
             .min(i64::MAX as u128) as i64;
-        let queue_time = |tick: i64| queue_clock.saturating_add(tick.saturating_mul(1_000));
+        let queue_time = |tick: i64| queue_clock.saturating_add(tick.saturating_mul(100));
         let first_candidate_lease = acquired(
             store
                 .acquire_lease(
@@ -8132,7 +8213,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         let stale_candidate_replacement = publication_successor(&first_candidate_lease);
         assert!(matches!(
             store
-                .enqueue_pretranscode_job(
+                .fixture_enqueue_pretranscode_job(
                     &jobs[0],
                     &first_candidate_lease,
                     &stale_candidate_replacement,
@@ -8155,7 +8236,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             "{backend}: an active dedupe key must be unique"
         );
         let mut active_ids = store
-            .active_pretranscode_job_ids()
+            .fixture_active_pretranscode_job_ids()
             .await
             .unwrap_or_else(|error| panic!("{backend}: active job inventory: {error}"));
         active_ids.sort_unstable();
@@ -8166,7 +8247,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
         assert!(
             store
-                .claim_pretranscode_job(
+                .fixture_claim_pretranscode_job(
                     "node-x",
                     &incompatible,
                     &[],
@@ -8181,7 +8262,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         assert!(
             matches!(
                 store
-                    .claim_pretranscode_job(
+                    .fixture_claim_pretranscode_job(
                         "node-newer",
                         &newer_protocol,
                         &[],
@@ -8195,20 +8276,36 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
 
         let (claim_a, claim_b, claim_c) = tokio::join!(
-            store.claim_pretranscode_job("node-a", &capable, &[], queue_time(200), queue_time(500)),
-            store.claim_pretranscode_job("node-b", &capable, &[], queue_time(200), queue_time(500)),
-            store.claim_pretranscode_job("node-c", &capable, &[], queue_time(200), queue_time(500)),
+            store.fixture_claim_pretranscode_job(
+                "node-a",
+                &capable,
+                &[],
+                queue_time(200),
+                queue_time(500)
+            ),
+            store.fixture_claim_pretranscode_job(
+                "node-b",
+                &capable,
+                &[],
+                queue_time(200),
+                queue_time(500)
+            ),
+            store.fixture_claim_pretranscode_job(
+                "node-c",
+                &capable,
+                &[],
+                queue_time(200),
+                queue_time(500)
+            ),
         );
-        let claimed = [
+        let mut claimed = [
             ("node-a", claim_a),
             ("node-b", claim_b),
             ("node-c", claim_c),
         ]
         .into_iter()
-        .map(|(node, result)| {
-            result
-                .unwrap_or_else(|error| panic!("{backend}: claim for {node}: {error}"))
-                .unwrap_or_else(|| panic!("{backend}: no job for {node}"))
+        .filter_map(|(node, result)| {
+            result.unwrap_or_else(|error| panic!("{backend}: claim for {node}: {error}"))
         })
         .collect::<Vec<_>>();
         assert_eq!(
@@ -8217,8 +8314,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 .map(|job| job.id.as_str())
                 .collect::<BTreeSet<_>>()
                 .len(),
-            3,
-            "{backend}: workers must claim distinct rows"
+            2,
+            "{backend}: distinct claims must respect the two shared source-I/O slots"
         );
         for job in &claimed {
             let staging = store
@@ -8232,7 +8329,10 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         }
         assert!(
             store
-                .cache_hit("contract-recipe-a", "node-a")
+                .cache_hit(
+                    "359cf2152e3ccdf96d41a0e108bdcf728469888ed79b7de4075a65b180a8568f",
+                    "node-a"
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: pre-publication cache lookup: {error}"))
                 .is_none(),
@@ -8240,14 +8340,14 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
 
         let renewed_a = store
-            .renew_pretranscode_job(&claimed[0], queue_time(250), queue_time(700))
+            .fixture_renew_pretranscode_job(&claimed[0], queue_time(250), queue_time(700))
             .await
             .unwrap_or_else(|error| panic!("{backend}: renew worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: worker claim did not renew"));
         assert!(store
-            .complete_pretranscode_job(
+            .fixture_complete_pretranscode_job(
                 &claimed[1],
-                "contract-recipe-b",
+                "e881e043708591eb06d15977455356b7f060fbc35b1f988ec4f816753fb635a2",
                 1,
                 "contract/pretranscode/b",
                 4_096,
@@ -8259,9 +8359,9 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: complete second job: {error}")));
         assert!(
             !store
-                .complete_pretranscode_job(
+                .fixture_complete_pretranscode_job(
                     &claimed[1],
-                    "contract-recipe-b",
+                    "e881e043708591eb06d15977455356b7f060fbc35b1f988ec4f816753fb635a2",
                     1,
                     "contract/pretranscode/b",
                     4_096,
@@ -8273,6 +8373,27 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: replay completion: {error}")),
             "{backend}: a terminal queue token replayed successfully"
         );
+        claimed.push(
+            store
+                .fixture_claim_pretranscode_job(
+                    "node-third",
+                    &capable,
+                    &[],
+                    queue_time(262),
+                    queue_time(562),
+                )
+                .await
+                .expect("claim after one producer completes")
+                .expect("released source-I/O slot"),
+        );
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|job| &job.id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            3
+        );
         assert_eq!(
             store
                 .delete_files(&[claimed[2].file_id])
@@ -8283,9 +8404,9 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
         assert!(
             !store
-                .complete_pretranscode_job(
+                .fixture_complete_pretranscode_job(
                     &claimed[2],
-                    "contract-recipe-c",
+                    "f26b73dec7d37c4bd8099a2db575c5a0991a9e3557d9680d62146d1bfc144179",
                     1,
                     "contract/pretranscode/c",
                     4_096,
@@ -8299,7 +8420,13 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
 
         let successor = store
-            .claim_pretranscode_job("node-d", &capable, &[], queue_time(701), queue_time(1_000))
+            .fixture_claim_pretranscode_job(
+                "node-d",
+                &capable,
+                &[],
+                queue_time(701),
+                queue_time(1_000),
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: expired takeover: {error}"))
             .unwrap_or_else(|| panic!("{backend}: expired job was not restarted"));
@@ -8323,9 +8450,9 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
         assert!(
             !store
-                .complete_pretranscode_job(
+                .fixture_complete_pretranscode_job(
                     &renewed_a,
-                    "contract-recipe-a",
+                    "359cf2152e3ccdf96d41a0e108bdcf728469888ed79b7de4075a65b180a8568f",
                     1,
                     "contract/pretranscode/stale-a",
                     8_192,
@@ -8339,7 +8466,10 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
         assert!(
             store
-                .cache_hit("contract-recipe-a", "node-a")
+                .cache_hit(
+                    "359cf2152e3ccdf96d41a0e108bdcf728469888ed79b7de4075a65b180a8568f",
+                    "node-a"
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: stale cache lookup: {error}"))
                 .is_none(),
@@ -8347,9 +8477,9 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
         assert!(
             store
-                .complete_pretranscode_job(
+                .fixture_complete_pretranscode_job(
                     &successor,
-                    "contract-recipe-a",
+                    "359cf2152e3ccdf96d41a0e108bdcf728469888ed79b7de4075a65b180a8568f",
                     1,
                     "contract/pretranscode/d",
                     8_192,
@@ -8362,7 +8492,10 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             "{backend}: current worker could not publish"
         );
         let ready = store
-            .cache_hit("contract-recipe-a", "node-d")
+            .cache_hit(
+                "359cf2152e3ccdf96d41a0e108bdcf728469888ed79b7de4075a65b180a8568f",
+                "node-d",
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: atomic cache lookup: {error}"))
             .unwrap_or_else(|| panic!("{backend}: ready job has no cache location"));
@@ -8375,7 +8508,11 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
 
         store
-            .forget_cache_entry("contract-recipe-a", "node-d", "local")
+            .forget_cache_entry(
+                "359cf2152e3ccdf96d41a0e108bdcf728469888ed79b7de4075a65b180a8568f",
+                "node-d",
+                "local",
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: evict ready cache: {error}"));
         let retry = NewPretranscodeJob {
@@ -8399,18 +8536,24 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             "{backend}: eviction must make the generation eligible again"
         );
         let refused = store
-            .claim_pretranscode_job("node-e", &capable, &[], queue_time(705), queue_time(1_005))
+            .fixture_claim_pretranscode_job(
+                "node-e",
+                &capable,
+                &[],
+                queue_time(705),
+                queue_time(1_005),
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim re-enqueued job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: re-enqueued job was not claimable"));
         assert_eq!(refused.dedupe_key, retry.dedupe_key, "{backend}");
         assert!(store
-            .yield_pretranscode_job(&refused, queue_time(706), queue_time(706))
+            .fixture_yield_pretranscode_job(&refused, queue_time(706), queue_time(706))
             .await
             .unwrap_or_else(|error| panic!("{backend}: unreadable-node yield: {error}")));
         assert!(
             store
-                .claim_pretranscode_job(
+                .fixture_claim_pretranscode_job(
                     "node-e",
                     &capable,
                     std::slice::from_ref(&refused.id),
@@ -8423,7 +8566,13 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             "{backend}: a node immediately reclaimed the source it had refused"
         );
         let reclaimed = store
-            .claim_pretranscode_job("node-f", &capable, &[], queue_time(706), queue_time(1_006))
+            .fixture_claim_pretranscode_job(
+                "node-f",
+                &capable,
+                &[],
+                queue_time(706),
+                queue_time(1_006),
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: mounted peer claim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: local refusal blocked a mounted peer"));
@@ -8438,14 +8587,19 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             let failed_at = queue_time(710 + attempt * 2);
             assert!(
                 store
-                    .fail_pretranscode_job(&failing, "contract_failure", failed_at, failed_at)
+                    .fixture_fail_pretranscode_job(
+                        &failing,
+                        "contract_failure",
+                        failed_at,
+                        failed_at
+                    )
                     .await
                     .unwrap_or_else(|error| panic!("{backend}: fail attempt {attempt}: {error}")),
                 "{backend}: current failure settlement was rejected"
             );
             if attempt < 5 {
                 failing = store
-                    .claim_pretranscode_job(
+                    .fixture_claim_pretranscode_job(
                         "node-e",
                         &capable,
                         &[],
@@ -8507,7 +8661,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             );
         }
         let paged_claim = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 "node-pagination",
                 &capable,
                 &[],
@@ -8522,7 +8676,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             "{backend}: claim did not preserve highest-compatible ordering across pages"
         );
 
-        let legacy_recipe = "contract-legacy-cache-reuse";
+        let legacy_recipe = "1bd16d960c43953936740e772bc422612303862b77966f2e0a884bc581064078";
         assert!(store
             .claim_cache_entry(
                 legacy_recipe,
@@ -8566,7 +8720,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: enqueue legacy reuse: {error}"))
         );
         let legacy_claim = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 "node-legacy",
                 &capable,
                 &[],
@@ -8578,7 +8732,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             .unwrap_or_else(|| panic!("{backend}: legacy reuse was not claimable"));
         let adopted_digest = "e".repeat(64);
         assert!(store
-            .complete_pretranscode_job(
+            .fixture_complete_pretranscode_job(
                 &legacy_claim,
                 legacy_recipe,
                 1,
@@ -8612,37 +8766,61 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         assert_eq!(compact_ready.state, "ready", "{backend}");
         assert!(compact_ready.owner_node_id.is_empty(), "{backend}");
         assert_eq!(compact_ready.lease_expires_ms, 0, "{backend}");
-        assert!(compact_ready.policy_generation.is_empty(), "{backend}");
-        assert_eq!(compact_ready.requirements_json, "{}", "{backend}");
+        assert_eq!(
+            compact_ready.policy_generation, "legacy-upgrade-v1",
+            "{backend}"
+        );
+        assert_eq!(
+            compact_ready.requirements_json, requirements,
+            "{backend}: terminal payload remains available for audited retry"
+        );
 
         let wrong_digest = "f".repeat(64);
-        let wrong_check = CacheManifestCheck {
+        let verification_now = queue_time(963);
+        let location = store
+            .transcode_verification_candidates("node-legacy", None)
+            .await
+            .expect("verification candidates")
+            .into_iter()
+            .find(|location| location.recipe_hash == legacy_recipe)
+            .expect("legacy candidate");
+        let token = background_jobs::integrity_verify_claim_on(
+            &store,
+            &format!("transcode:{legacy_recipe}:{adopted_digest}"),
+            verification_now,
+            "node-legacy",
+        )
+        .await;
+        let exact_check = plurx_core::store::background_jobs_integrity::VerifyTranscode {
+            token,
             recipe_hash: legacy_recipe.to_owned(),
-            node_id: "node-legacy".to_owned(),
-            storage_class: "local".to_owned(),
-            relative_dir: "contract/pretranscode/legacy".to_owned(),
-            manifest_digest: wrong_digest.clone(),
-            next_object_index: 8,
-            observed_at: 123,
-        };
-        assert_eq!(
-            store
-                .mark_cache_manifests_checked(std::slice::from_ref(&wrong_check))
-                .await
-                .unwrap_or_else(|error| panic!("{backend}: stale scrub cursor: {error}")),
-            0,
-            "{backend}: stale manifest identity advanced a replacement cursor"
-        );
-        let exact_check = CacheManifestCheck {
+            relative_dir: location.relative_dir,
             manifest_digest: adopted_digest.clone(),
-            ..wrong_check
+            publication_generation: location.publication_generation,
+            valid: true,
+            next_object_index: 8,
+            now_ms: verification_now + 1,
         };
-        assert_eq!(
-            store
-                .mark_cache_manifests_checked(std::slice::from_ref(&exact_check))
-                .await
-                .unwrap_or_else(|error| panic!("{backend}: exact scrub cursor: {error}")),
-            1,
+        let mut wrong_check = exact_check.clone();
+        wrong_check.manifest_digest = wrong_digest.clone();
+        assert!(
+            matches!(
+                store
+                    .verify_transcode_job(wrong_check)
+                    .await
+                    .expect("stale scrub cursor"),
+                plurx_core::store::background_jobs::JobPublishOutcome::LostOwnership
+            ),
+            "{backend}: stale manifest advanced a replacement cursor"
+        );
+        assert!(
+            matches!(
+                store
+                    .verify_transcode_job(exact_check)
+                    .await
+                    .expect("exact scrub cursor"),
+                plurx_core::store::background_jobs::JobPublishOutcome::Published { .. }
+            ),
             "{backend}: exact manifest cursor did not advance"
         );
         assert_eq!(
@@ -8695,7 +8873,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: invalidated cache lookup: {error}"))
             .is_none());
 
-        let conflicting_recipe = "contract-recipe-identity-collision";
+        let conflicting_recipe = "8492b189aab437a50afc38df0390ed3211702f18794b2fcfa9f7dbb0bc239823";
         assert!(store
             .claim_cache_entry(
                 conflicting_recipe,
@@ -8713,7 +8891,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: enqueue collision job: {error}"))
         );
         let collision_claim = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 "node-collision",
                 &capable,
                 &[],
@@ -8726,7 +8904,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         assert_eq!(collision_claim.id, collision_job.id, "{backend}");
         assert!(
             !store
-                .complete_pretranscode_job(
+                .fixture_complete_pretranscode_job(
                     &collision_claim,
                     conflicting_recipe,
                     1,
@@ -8896,7 +9074,7 @@ async fn enqueue_with_successor(
 ) -> Result<bool, StoreError> {
     let replacement = publication_successor(lease);
     let result = store
-        .enqueue_pretranscode_job(job, lease, &replacement)
+        .fixture_enqueue_pretranscode_job(job, lease, &replacement)
         .await;
     if result.is_ok() {
         *lease = replacement;
@@ -9004,7 +9182,13 @@ async fn assert_distinct_pretranscode_claims_from_separate_handles(
             async move {
                 start.wait().await;
                 store
-                    .claim_pretranscode_job(&node, &capabilities, &[], 200 + round, 500 + round)
+                    .fixture_claim_pretranscode_job(
+                        &node,
+                        &capabilities,
+                        &[],
+                        200 + round,
+                        500 + round,
+                    )
                     .await
             }
         };
@@ -9021,20 +9205,31 @@ async fn assert_distinct_pretranscode_claims_from_separate_handles(
             ),
             claim(Arc::clone(&stores[2]), format!("separate-c-{round}"), start),
         );
-        for result in [a, b, c] {
-            let id = result
-                .unwrap_or_else(|error| panic!("{backend}: separate claim: {error}"))
-                .unwrap_or_else(|| panic!("{backend}: separate claimant found no work"))
-                .id;
+        let claims = [a, b, c]
+            .into_iter()
+            .filter_map(|result| {
+                result.unwrap_or_else(|error| panic!("{backend}: separate claim: {error}"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            claims.len(),
+            2,
+            "{backend}: shared I/O cap across independent handles"
+        );
+        for job in claims {
             assert!(
-                ids.insert(id),
+                ids.insert(job.id.clone()),
                 "{backend}: separate clients duplicated a claim"
             );
+            assert!(seed
+                .fixture_cancel_pretranscode_job(&job, "fixture_done", 201 + round)
+                .await
+                .expect("release fixture source-I/O reservation"));
         }
     }
     assert_eq!(
         ids.len(),
-        (ROUNDS * 3) as usize,
+        (ROUNDS * 2) as usize,
         "{backend}: separate clients duplicated a claim"
     );
 }
@@ -9190,7 +9385,7 @@ async fn contract_cache_touch_times(
 
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
+async fn manifest_verification_publication_costs_one_consensus_entry() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let store = open_contract_hiqlite_store(&cluster).await;
@@ -9269,13 +9464,13 @@ async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
     let fixtures = [
         (
             "00000000-0000-4000-8000-000000000501",
-            "manifest-cursor-a",
+            "57df5e2c8acdaaf2af123892af4313ae46f5def616aa10db950abb9176f2d32f",
             "ma/manifest-cursor-a",
             "a".repeat(64),
         ),
         (
             "00000000-0000-4000-8000-000000000502",
-            "manifest-cursor-b",
+            "7371917bda373a76b04d82d9a7be032f925c7b8c1259d86e2b00493a8946e2ff",
             "mb/manifest-cursor-b",
             "b".repeat(64),
         ),
@@ -9299,28 +9494,18 @@ async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
             .await
             .expect("enqueue manifest cursor job"));
         let claimed = store
-            .claim_pretranscode_job("manifest-node", &capabilities, &[], 120, 1_000)
+            .fixture_claim_pretranscode_job("manifest-node", &capabilities, &[], 120, 1_000)
             .await
             .expect("claim manifest cursor job")
             .expect("manifest cursor job");
         assert_eq!(claimed.id, *job_id);
         assert!(store
-            .complete_pretranscode_job(&claimed, recipe, 1, relative, 100, None, digest, 130)
+            .fixture_complete_pretranscode_job(
+                &claimed, recipe, 1, relative, 100, None, digest, 130
+            )
             .await
             .expect("complete manifest cursor job"));
     }
-    let checks = fixtures
-        .iter()
-        .map(|(_, recipe, relative, digest)| CacheManifestCheck {
-            recipe_hash: (*recipe).to_owned(),
-            node_id: "manifest-node".to_owned(),
-            storage_class: "local".to_owned(),
-            relative_dir: (*relative).to_owned(),
-            manifest_digest: digest.clone(),
-            next_object_index: 8,
-            observed_at: 123,
-        })
-        .collect::<Vec<_>>();
     let observer = Client::remote(
         cluster.addresses.clone(),
         true,
@@ -9331,19 +9516,48 @@ async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
     )
     .await
     .expect("connect manifest cursor observer");
-    let before = contract_leader_point(&observer).await;
-    assert_eq!(
-        store
-            .mark_cache_manifests_checked(&checks)
+    let store: Arc<dyn Store> = Arc::new(store);
+    for (_, recipe, _, digest) in &fixtures {
+        let location = store
+            .transcode_verification_candidates("manifest-node", None)
             .await
-            .expect("advance manifest cursors"),
-        2
-    );
-    assert_eq!(
-        contract_stable_leader_delta(before, contract_leader_point(&observer).await),
-        1,
-        "one scrub page must be one consensus transaction"
-    );
+            .expect("candidates")
+            .into_iter()
+            .find(|location| location.recipe_hash == *recipe)
+            .expect("candidate");
+        let token = background_jobs::integrity_verify_claim_on(
+            &store,
+            &format!("transcode:{recipe}:{digest}"),
+            queue_clock,
+            "manifest-node",
+        )
+        .await;
+        let before = contract_leader_point(&observer).await;
+        let result = store
+            .verify_transcode_job(
+                plurx_core::store::background_jobs_integrity::VerifyTranscode {
+                    token,
+                    recipe_hash: (*recipe).to_owned(),
+                    manifest_digest: digest.clone(),
+                    relative_dir: location.relative_dir,
+                    publication_generation: location.publication_generation,
+                    valid: true,
+                    next_object_index: 8,
+                    now_ms: queue_clock + 1,
+                },
+            )
+            .await
+            .expect("publish verification");
+        assert!(matches!(
+            result,
+            plurx_core::store::background_jobs::JobPublishOutcome::Published { .. }
+        ));
+        assert_eq!(
+            contract_stable_leader_delta(before, contract_leader_point(&observer).await),
+            1,
+            "one verification publication must be one consensus transaction"
+        );
+    }
     for (_, recipe, _, _) in fixtures {
         assert_eq!(
             store
@@ -9828,7 +10042,7 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
     let replacement = publication_successor(&lease);
     assert!(store
         .claim_cache_entry_fenced(
-            "fenced-cache-clock-recipe",
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
             file_id,
             1,
             "clock-node",
@@ -9843,7 +10057,11 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
         .execute(
             "UPDATE transcode_cache_locations SET last_used_at = $1, last_seen_at = $1 \
              WHERE recipe_hash = $2 AND node_id = $3",
-            hiqlite::params!(9_000_i64, "fenced-cache-clock-recipe", "clock-node"),
+            hiqlite::params!(
+                9_000_i64,
+                "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
+                "clock-node"
+            ),
         )
         .await
         .expect("advance cache timestamps ahead of the store clock");
@@ -9851,7 +10069,7 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
     let replacement = publication_successor(&lease);
     assert!(store
         .claim_cache_entry_fenced(
-            "fenced-cache-clock-recipe",
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
             file_id,
             1,
             "clock-node",
@@ -9863,7 +10081,12 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
         .expect("repeat fenced cache claim after clock rollback"));
     lease = replacement;
     assert_eq!(
-        contract_cache_touch_times(&client, "fenced-cache-clock-recipe", "clock-node").await,
+        contract_cache_touch_times(
+            &client,
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
+            "clock-node"
+        )
+        .await,
         CacheTouchTimes {
             last_used_at: 9_000,
             last_seen_at: 9_000,
@@ -9874,7 +10097,7 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
     let replacement = publication_successor(&lease);
     store
         .touch_cache_claim_fenced(
-            "fenced-cache-clock-recipe",
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
             "clock-node",
             &lease,
             &replacement,
@@ -9885,7 +10108,7 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
     let replacement = publication_successor(&lease);
     store
         .complete_cache_entry_fenced(
-            "fenced-cache-clock-recipe",
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
             "clock-node",
             "fc/fenced-cache-clock-recipe",
             4_096,
@@ -9897,7 +10120,12 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
         .expect("complete fenced cache entry after clock rollback");
     lease = replacement;
     assert_eq!(
-        contract_cache_touch_times(&client, "fenced-cache-clock-recipe", "clock-node").await,
+        contract_cache_touch_times(
+            &client,
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
+            "clock-node"
+        )
+        .await,
         CacheTouchTimes {
             last_used_at: 9_000,
             last_seen_at: 9_000,
@@ -9943,14 +10171,14 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
         scratch_bytes: 2,
     };
     let claimed = store
-        .claim_pretranscode_job("clock-node", &capabilities, &[], 1_000, 10_000)
+        .fixture_claim_pretranscode_job("clock-node", &capabilities, &[], 1_000, 10_000)
         .await
         .expect("claim fixed-clock pretranscode publication")
         .expect("fixed-clock pretranscode job");
     assert!(store
-        .complete_pretranscode_job(
+        .fixture_complete_pretranscode_job(
             &claimed,
-            "fenced-cache-clock-recipe",
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
             1,
             "fc/fenced-cache-clock-recipe",
             4_096,
@@ -9961,7 +10189,12 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
         .await
         .expect("complete fixed-clock pretranscode publication"));
     assert_eq!(
-        contract_cache_touch_times(&client, "fenced-cache-clock-recipe", "clock-node").await,
+        contract_cache_touch_times(
+            &client,
+            "be1f4eb664ef59de7afc75fefd29d8a370cab10409c729ba7375e6f387767651",
+            "clock-node"
+        )
+        .await,
         CacheTouchTimes {
             last_used_at: 9_000,
             last_seen_at: 9_000,
@@ -10158,6 +10391,191 @@ async fn token_activity_refresh_burst_is_bounded_by_independent_store_count() {
     assert_eq!(
         timestamps[0].value, 1_000,
         "all accepted touches converge on one durable timestamp change"
+    );
+}
+
+/// A fixed-clock store whose client prefers voter `ordinal`: one serving
+/// process on one node at one moment.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn contract_store_on_voter_at(
+    cluster: &ContractCluster,
+    ordinal: usize,
+    now: i64,
+    name: &str,
+) -> HiqliteAuthStore {
+    let mut addresses = cluster.addresses.clone();
+    let voters = addresses.len();
+    addresses.rotate_left(ordinal % voters);
+    let client = Client::remote(
+        addresses,
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect voter-preferring contract client");
+    let telemetry = cluster._root.path().join(format!("{name}-telemetry.db"));
+    bootstrap_contract_hiqlite_store_at(client, &telemetry, now).await
+}
+
+/// Sign-in expiry on the replicated backend: the policy one process commits
+/// is the policy every other voter judges by, the clock never starts before
+/// expiry took effect, use inside the window slides it with one coalesced
+/// Raft entry, an expired token appends nothing and is not revived, off never
+/// expires, and the ordinary revocation still removes the row.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sign_in_expiry_is_judged_on_every_voter_against_the_replicated_policy() {
+    use plurx_core::store::{keys, TokenAuthentication};
+    const DAY: i64 = 86_400;
+    const T0: i64 = 1_000 * DAY;
+    const TOKEN: &str = "sign-in-expiry-token";
+    fn verdict(outcome: TokenAuthentication) -> Result<i64, Option<i64>> {
+        match outcome {
+            TokenAuthentication::Authenticated(user) => Ok(user.id),
+            TokenAuthentication::Expired { idle_days } => Err(Some(idle_days)),
+            TokenAuthentication::Unknown => Err(None),
+        }
+    }
+    async fn last_seen(client: &Client) -> i64 {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(
+                "SELECT last_seen_at AS value FROM tokens WHERE token_hash = $1",
+                hiqlite::params!(TOKEN),
+            )
+            .await
+            .expect("read token activity");
+        assert_eq!(rows.len(), 1);
+        rows[0].value
+    }
+
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect measurement client");
+    let writer = contract_store_on_voter_at(&cluster, 0, T0, "expiry-writer").await;
+    writer
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated expiry state");
+    let user = writer
+        .create_user("sign-in-expiry", "hash", false)
+        .await
+        .expect("create expiry user");
+    writer
+        .create_token(TOKEN, user.id, Some("Living room"))
+        .await
+        .expect("create expiry token");
+    // Last used long before expiry existed, as an upgraded household's
+    // living-room box would be.
+    client
+        .execute(
+            "UPDATE tokens SET last_seen_at = $1 WHERE token_hash = $2",
+            hiqlite::params!(T0 - 500 * DAY, TOKEN),
+        )
+        .await
+        .expect("age the token");
+    writer
+        .put_settings(&[
+            (keys::AUTH_TOKEN_EXPIRY_ENABLED, "1"),
+            (keys::AUTH_TOKEN_IDLE_DAYS, "90"),
+            (keys::AUTH_TOKEN_EXPIRY_SINCE, &T0.to_string()),
+        ])
+        .await
+        .expect("commit the expiry policy");
+
+    // Another voter, 89 days after expiry took effect: the clock started at
+    // T0, not at the ancient last use, so the device is still signed in. Its
+    // thirty requests append exactly one coalesced activity entry.
+    let day_89 = contract_store_on_voter_at(&cluster, 1, T0 + 89 * DAY, "expiry-day-89").await;
+    let before = contract_leader_point(&client).await;
+    for _ in 0..30 {
+        assert_eq!(
+            verdict(day_89.authenticate_token(TOKEN).await.expect("auth")),
+            Ok(user.id)
+        );
+    }
+    assert_eq!(
+        contract_stable_leader_delta(before, contract_leader_point(&client).await),
+        1,
+        "thirty authentications inside the window must append one activity entry"
+    );
+    assert_eq!(last_seen(&client).await, T0 + 89 * DAY);
+
+    // The third voter, 89 days later still: the use on day 89 slid the
+    // window, so this is inside it too.
+    let day_178 = contract_store_on_voter_at(&cluster, 2, T0 + 178 * DAY, "expiry-day-178").await;
+    assert_eq!(
+        verdict(day_178.authenticate_token(TOKEN).await.expect("auth")),
+        Ok(user.id)
+    );
+    assert_eq!(last_seen(&client).await, T0 + 178 * DAY);
+
+    // Ninety idle days after that last use: expired on every voter, with the
+    // window it was judged by, and no request appends anything or moves the
+    // timestamp that would revive it.
+    let mut expired_stores = Vec::new();
+    for ordinal in 0..3 {
+        expired_stores.push(
+            contract_store_on_voter_at(
+                &cluster,
+                ordinal,
+                T0 + 268 * DAY,
+                &format!("expiry-day-268-{ordinal}"),
+            )
+            .await,
+        );
+    }
+    let before = contract_leader_point(&client).await;
+    for expired in &expired_stores {
+        for _ in 0..10 {
+            assert_eq!(
+                verdict(expired.authenticate_token(TOKEN).await.expect("auth")),
+                Err(Some(90))
+            );
+        }
+        assert!(expired
+            .user_for_token(TOKEN)
+            .await
+            .expect("resolve")
+            .is_none());
+    }
+    assert_eq!(
+        contract_stable_leader_delta(before, contract_leader_point(&client).await),
+        0,
+        "an expired token must append no activity entry"
+    );
+    assert_eq!(last_seen(&client).await, T0 + 178 * DAY);
+
+    // Off is today's behaviour: nothing expires.
+    writer
+        .put_setting(keys::AUTH_TOKEN_EXPIRY_ENABLED, "0")
+        .await
+        .expect("switch expiry off");
+    let off = contract_store_on_voter_at(&cluster, 1, T0 + 5_000 * DAY, "expiry-off").await;
+    assert_eq!(
+        verdict(off.authenticate_token(TOKEN).await.expect("auth")),
+        Ok(user.id)
+    );
+
+    // Revocation is unchanged.
+    assert!(writer
+        .delete_token_with_cache_admin_claim(TOKEN, None)
+        .await
+        .expect("revoke"));
+    assert_eq!(
+        verdict(off.authenticate_token(TOKEN).await.expect("auth")),
+        Err(None)
     );
 }
 
@@ -10430,7 +10848,7 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
     );
 }
 
-/// v44 through v40, newest first, for the downgrade helpers below. Each of
+/// v45 through v40, newest first, for the downgrade helpers below. Each of
 /// these migrations is an `ADD COLUMN` or an unconditional `CREATE`, so
 /// replaying it over a fixture that still carries its result fails; v42 also
 /// rebuilt the active-request index over `video_identity`, which must be back
@@ -10440,6 +10858,7 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
 #[cfg(feature = "hiqlite-contract-tests")]
 fn post_v39_downgrade_statements() -> Vec<(&'static str, hiqlite::Params)> {
     [
+        "ALTER TABLE files DROP COLUMN downloaded_subtitles",
         "ALTER TABLE files DROP COLUMN luminance_source",
         "ALTER TABLE files DROP COLUMN mastering_max_luminance",
         "ALTER TABLE files DROP COLUMN max_fall",
@@ -10824,6 +11243,534 @@ async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
         assert_eq!(rows.len(), 1, "{sql}");
         assert_eq!(rows[0].value, expected, "{sql}");
     }
+}
+
+/// Bootstrap stamps `AUTH_SCHEMA_VERSION` without running the migration
+/// chain, so it has to install every step's objects itself: the migrator
+/// never reruns a step the stamped version says has happened. v47's
+/// subtitle-source step was once missing from bootstrap, so every fresh
+/// cluster (a SQLite activation, a new install, each contract cluster) was
+/// stamped 47 with no publication ledger, no repair epochs, and an
+/// `analysis_requests` whose CHECK refused `subtitle_source`.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect fresh-bootstrap schema client");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("fresh-bootstrap-subtitle-source-telemetry.db");
+    let checks: [(&str, i64); 6] = [
+        (
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            AUTH_SCHEMA_VERSION,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name IN ('subtitle_source_publications', 'subtitle_source_repair_epochs')",
+            2,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
+             AND name IN ('subtitle_source_publications_stamp', \
+                          'subtitle_source_publications_node')",
+            2,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'trigger' \
+             AND name IN ('subtitle_source_publications_delete_source', \
+                          'subtitle_source_publications_supersede_source', \
+                          'subtitle_source_repair_epochs_advance', \
+                          'subtitle_source_repair_epochs_delete_source', \
+                          'subtitle_source_repair_epochs_supersede_source')",
+            5,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name = 'analysis_requests' AND sql LIKE '%''subtitle_source''%'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name IN ('analysis_attempts_v47_backup', 'analysis_requests_v46')",
+            0,
+        ),
+    ];
+    // Twice: the second bootstrap is the retry a cancelled client future
+    // makes, and it must neither fail nor replay the table rebuild.
+    for round in ["first", "retried"] {
+        let store = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+            .await
+            .unwrap_or_else(|error| panic!("{round} bootstrap: {error}"));
+        drop(store);
+        for (sql, expected) in checks {
+            let rows: Vec<I64Value> = client
+                .query_consistent_map(sql, hiqlite::params!())
+                .await
+                .expect("inspect bootstrapped schema");
+            assert_eq!(rows.len(), 1, "{round}: {sql}");
+            assert_eq!(rows[0].value, expected, "{round}: {sql}");
+        }
+    }
+}
+
+/// The replicated schema exactly as `HiqliteAuthStore::bootstrap` left it at
+/// schema 42 (commit `c448d2165`), captured once and never regenerated. It is
+/// the base the migration-chain comparison below starts from, so it must
+/// stay independent of today's bootstrap: rebuilding it from the current
+/// code would make that comparison compare bootstrap with itself.
+#[cfg(feature = "hiqlite-contract-tests")]
+const FROZEN_V42_SCHEMA: &str = include_str!("fixtures/hiqlite-schema-v42.sql");
+
+/// The version `FROZEN_V42_SCHEMA` is stamped at. Pinned separately so a
+/// fixture quietly re-captured at a newer version (which would leave the
+/// chain nothing to run) fails loudly instead of passing vacuously.
+#[cfg(feature = "hiqlite-contract-tests")]
+const FROZEN_V42_SCHEMA_VERSION: i64 = 42;
+
+/// Objects `cluster::membership` installs into the same replicated database
+/// through its own schema (`MEMBERSHIP_SCHEMA`), outside the Store's
+/// bootstrap and outside the Store's migration chain. The contract clusters
+/// run no membership layer, so neither side of the comparison holds them;
+/// they are excluded by name so the comparison stays about the Store's own
+/// schema if either side ever does.
+#[cfg(feature = "hiqlite-contract-tests")]
+const OUTSIDE_STORE_BOOTSTRAP: &[&str] = &[
+    "cluster_artwork_repairs",
+    "cluster_cache_admin_revocation_lease_intents",
+    "cluster_cache_admin_revocation_lease_releases",
+    "cluster_cache_admin_revocation_leases",
+    "cluster_cache_admin_revocation_release_watermark",
+    "cluster_join_tokens",
+    "cluster_learner_join_intents",
+    "cluster_live_tv_activation",
+    "cluster_live_tv_join_intents",
+    "cluster_membership_meta",
+    "cluster_node_activity_keys",
+    "cluster_node_capabilities",
+    "cluster_node_heartbeat_intents",
+    "cluster_node_hostnames",
+    "cluster_node_http",
+    "cluster_node_http_claims",
+    "cluster_node_join_staging",
+    "cluster_node_maintenance",
+    "cluster_node_maintenance_heartbeat_intents",
+    "cluster_node_progress",
+    "cluster_node_promotions",
+    "cluster_node_removal_attempts",
+    "cluster_node_removal_intents",
+    "cluster_node_removals",
+    "cluster_nodes",
+    "cluster_operation_lease_intents",
+    "cluster_operation_lease_releases",
+    "cluster_operation_leases",
+    "cluster_cache_admin_lease_delete_intent_guard",
+    "cluster_cache_admin_lease_heartbeat_expiry",
+    "cluster_cache_admin_lease_insert_intent_guard",
+    "cluster_cache_admin_lease_join_reservation_guard",
+    "cluster_cache_admin_lease_join_staging_guard",
+    "cluster_cache_admin_lease_operation_guard",
+    "cluster_cache_admin_lease_promotion_guard",
+    "cluster_cache_admin_lease_removal_guard",
+    "cluster_cache_admin_lease_update_intent_guard",
+    "cluster_cache_admin_v1_insert_retired",
+    "cluster_cache_admin_v1_update_retired",
+    "cluster_cache_admin_v2_insert_retired",
+    "cluster_cache_admin_v2_update_retired",
+    "cluster_credential_token_delete_guard",
+    "cluster_credential_token_insert_guard",
+    "cluster_credential_user_delete_guard",
+    "cluster_credential_user_update_guard",
+    "cluster_learner_join_v1_guard",
+    "cluster_live_tv_activation_delete_mirror",
+    "cluster_live_tv_activation_insert_mirror",
+    "cluster_live_tv_activation_update_mirror",
+    "cluster_live_tv_join_reservation_guard",
+    "cluster_live_tv_join_staging_guard",
+    "cluster_node_maintenance_heartbeat_guard",
+    "cluster_node_removal_attempt_delete_guard",
+    "cluster_node_removal_insert_guard",
+    "cluster_node_removal_legacy_finalize_guard",
+    "cluster_node_removal_legacy_heartbeat_guard",
+    "cluster_node_removal_legacy_insert_guard",
+    "cluster_node_removal_owner_delete_guard",
+    "cluster_operation_lease_delete_intent_guard",
+    "cluster_operation_lease_heartbeat_expiry",
+    "cluster_operation_lease_insert_intent_guard",
+    "cluster_operation_lease_join_reservation_guard",
+    "cluster_operation_lease_join_staging_guard",
+    "cluster_operation_lease_promotion_guard",
+    "cluster_operation_lease_removal_guard",
+    "cluster_operation_lease_update_intent_guard",
+    "job_leases_removed_owner_insert",
+    "job_leases_removed_owner_update",
+];
+
+#[cfg(feature = "hiqlite-contract-tests")]
+struct SchemaText {
+    value: String,
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+impl From<&mut Row<'_>> for SchemaText {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            value: row.get("value"),
+        }
+    }
+}
+
+/// Canonical text for one schema statement: comments dropped, identifier
+/// quotes dropped, keywords and names lowercased, whitespace collapsed and
+/// removed wherever it does not separate two words. String literals are kept
+/// byte for byte, because a CHECK's admitted values are exactly what a
+/// missing step changes.
+#[cfg(feature = "hiqlite-contract-tests")]
+fn canonical_schema_sql(sql: &str) -> String {
+    fn wordish(c: char) -> bool {
+        c.is_alphanumeric() || c == '_' || c == '\''
+    }
+    let mut out = String::new();
+    let mut space = false;
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '-' && chars.peek() == Some(&'-') {
+            for d in chars.by_ref() {
+                if d == '\n' {
+                    break;
+                }
+            }
+            space = true;
+            continue;
+        }
+        if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            let mut previous = ' ';
+            for d in chars.by_ref() {
+                if previous == '*' && d == '/' {
+                    break;
+                }
+                previous = d;
+            }
+            space = true;
+            continue;
+        }
+        if c.is_whitespace() {
+            space = true;
+            continue;
+        }
+        if c == '"' || c == '`' {
+            continue;
+        }
+        if space && out.chars().next_back().is_some_and(wordish) && wordish(c) {
+            out.push(' ');
+        }
+        space = false;
+        if c == '\'' {
+            out.push('\'');
+            while let Some(d) = chars.next() {
+                out.push(d);
+                if d == '\'' {
+                    if chars.peek() == Some(&'\'') {
+                        out.push('\'');
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.extend(c.to_lowercase());
+    }
+    out.trim_end_matches(';').to_owned()
+}
+
+/// A table's definition as the set of its top-level column and constraint
+/// definitions plus its trailing options (`strict`, `without rowid`).
+/// `ALTER TABLE ... ADD COLUMN` appends to the stored text and a fresh
+/// install declares the column inline, so order is not compared; every
+/// definition's full text, CHECK clauses included, is.
+#[cfg(feature = "hiqlite-contract-tests")]
+fn table_definition_items(canonical: &str) -> (BTreeSet<String>, String) {
+    let Some(open) = canonical.find('(') else {
+        return (BTreeSet::from([canonical.to_owned()]), String::new());
+    };
+    let mut items = BTreeSet::new();
+    let mut depth = 0usize;
+    let mut literal = false;
+    let mut start = open + 1;
+    let mut close = canonical.len();
+    for (index, c) in canonical.char_indices().skip_while(|(i, _)| *i <= open) {
+        if literal {
+            if c == '\'' {
+                literal = false;
+            }
+            continue;
+        }
+        match c {
+            '\'' => literal = true,
+            '(' => depth += 1,
+            ')' if depth == 0 => {
+                close = index;
+                break;
+            }
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                items.insert(canonical[start..index].to_owned());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    items.insert(canonical[start..close].to_owned());
+    let options = canonical.get(close + 1..).unwrap_or_default().to_owned();
+    (items, options)
+}
+
+/// Every Store-owned schema object in a replicated database, keyed by
+/// `(type, name)`, with a canonical description of its shape: for a table,
+/// its definitions, options, `pragma_table_xinfo` columns and foreign keys;
+/// for an index, trigger or view, its canonical SQL.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn store_schema_snapshot(
+    client: &Client,
+) -> std::collections::BTreeMap<(String, String), Vec<String>> {
+    const SEP: char = '\u{1f}';
+    let rows: Vec<SchemaText> = client
+        .query_consistent_map(
+            "SELECT type || char(31) || name || char(31) || tbl_name || char(31) || \
+                    COALESCE(sql, '') AS value \
+             FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read sqlite_master");
+    let columns: Vec<SchemaText> = client
+        .query_consistent_map(
+            "SELECT m.name || char(31) || 'column ' || p.name || ' type=' || p.type || \
+                    ' notnull=' || p.\"notnull\" || ' default=' || \
+                    COALESCE(p.dflt_value, '<none>') || ' pk=' || p.pk || \
+                    ' hidden=' || p.hidden AS value \
+             FROM sqlite_master m, pragma_table_xinfo(m.name) p \
+             WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read table columns");
+    let foreign_keys: Vec<SchemaText> = client
+        .query_consistent_map(
+            "SELECT m.name || char(31) || 'foreign key ' || f.seq || ' ' || f.\"from\" || \
+                    ' -> ' || f.\"table\" || '(' || COALESCE(f.\"to\", '<pk>') || ')' || \
+                    ' on update ' || f.on_update || ' on delete ' || f.on_delete || \
+                    ' match ' || f.\"match\" AS value \
+             FROM sqlite_master m, pragma_foreign_key_list(m.name) f \
+             WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read foreign keys");
+
+    let mut snapshot = std::collections::BTreeMap::new();
+    for row in rows {
+        let mut parts = row.value.splitn(4, SEP);
+        let (kind, name, table, sql) = (
+            parts.next().unwrap_or_default().to_owned(),
+            parts.next().unwrap_or_default().to_owned(),
+            parts.next().unwrap_or_default().to_owned(),
+            parts.next().unwrap_or_default(),
+        );
+        if OUTSIDE_STORE_BOOTSTRAP.contains(&name.as_str()) {
+            continue;
+        }
+        let canonical = canonical_schema_sql(sql);
+        let mut shape = vec![format!("on {table}")];
+        if kind == "table" {
+            let (items, options) = table_definition_items(&canonical);
+            shape.extend(items.into_iter().map(|item| format!("definition {item}")));
+            shape.push(format!("options {options}"));
+        } else {
+            shape.push(format!("sql {canonical}"));
+        }
+        snapshot.insert((kind, name), shape);
+    }
+    for row in columns.into_iter().chain(foreign_keys) {
+        let Some((table, fact)) = row.value.split_once(SEP) else {
+            continue;
+        };
+        if let Some(shape) = snapshot.get_mut(&("table".to_owned(), table.to_owned())) {
+            shape.push(fact.to_owned());
+        }
+    }
+    for shape in snapshot.values_mut() {
+        shape.sort();
+    }
+    snapshot
+}
+
+/// Every difference between two snapshots, one line each.
+#[cfg(feature = "hiqlite-contract-tests")]
+fn schema_differences(
+    bootstrapped: &std::collections::BTreeMap<(String, String), Vec<String>>,
+    migrated: &std::collections::BTreeMap<(String, String), Vec<String>>,
+) -> Vec<String> {
+    let mut differences = Vec::new();
+    for (key, migrated_shape) in migrated {
+        match bootstrapped.get(key) {
+            None => differences.push(format!(
+                "{} {} exists after the migration chain but not after a fresh bootstrap",
+                key.0, key.1
+            )),
+            Some(bootstrapped_shape) => {
+                for fact in migrated_shape {
+                    if !bootstrapped_shape.contains(fact) {
+                        differences.push(format!(
+                            "{} {}: migrated has, bootstrap lacks: {fact}",
+                            key.0, key.1
+                        ));
+                    }
+                }
+                for fact in bootstrapped_shape {
+                    if !migrated_shape.contains(fact) {
+                        differences.push(format!(
+                            "{} {}: bootstrap has, migrated lacks: {fact}",
+                            key.0, key.1
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    for key in bootstrapped.keys() {
+        if !migrated.contains_key(key) {
+            differences.push(format!(
+                "{} {} exists after a fresh bootstrap but not after the migration chain",
+                key.0, key.1
+            ));
+        }
+    }
+    differences
+}
+
+/// Bootstrap installs every schema object directly and stamps
+/// `AUTH_SCHEMA_VERSION`; the daemon's `open_or_migrate` never reruns a step
+/// the stamp says has happened. So bootstrap is a second copy of the
+/// migration chain, and a step added to the chain but not to bootstrap
+/// leaves every fresh cluster stamped past a schema it never got (v47's
+/// subtitle-source step once did exactly that).
+///
+/// This compares the two copies object for object. One cluster is
+/// bootstrapped fresh; the other is loaded from a frozen schema-42 tree and
+/// brought current by the real chain. Tables, columns (type, not-null,
+/// default, key, hidden), CHECK and other constraints, foreign keys,
+/// indexes, triggers and views must all agree. A new `MigrateFrom` arm
+/// without its bootstrap counterpart (or the reverse) fails here, in
+/// `make cluster-store-check`, whether or not any contract writes to it.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree() {
+    let _case = HIQLITE_CASE.lock().await;
+
+    let bootstrapped = {
+        let cluster = ContractCluster::start().await;
+        let client = Client::remote(
+            cluster.addresses.clone(),
+            true,
+            true,
+            CONTRACT_API_SECRET.to_owned(),
+            false,
+            None,
+        )
+        .await
+        .expect("connect fresh-bootstrap client");
+        let telemetry = cluster
+            ._root
+            .path()
+            .join("schema-parity-fresh-telemetry.db");
+        let store = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+            .await
+            .expect("bootstrap current schema");
+        drop(store);
+        store_schema_snapshot(&client).await
+    };
+
+    let migrated = {
+        let cluster = ContractCluster::start().await;
+        let client = Client::remote(
+            cluster.addresses.clone(),
+            true,
+            true,
+            CONTRACT_API_SECRET.to_owned(),
+            false,
+            None,
+        )
+        .await
+        .expect("connect frozen-base client");
+        for result in client
+            .batch(FROZEN_V42_SCHEMA)
+            .await
+            .expect("submit frozen schema-42 tree")
+        {
+            result.expect("load frozen schema-42 tree");
+        }
+        let stamped: Vec<I64Value> = client
+            .query_consistent_map(
+                "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("read frozen marker");
+        assert_eq!(
+            stamped.iter().map(|row| row.value).collect::<Vec<_>>(),
+            vec![FROZEN_V42_SCHEMA_VERSION],
+            "the frozen base must be the schema-42 tree it claims to be"
+        );
+        const { assert!(FROZEN_V42_SCHEMA_VERSION < AUTH_SCHEMA_VERSION) };
+        let telemetry = cluster
+            ._root
+            .path()
+            .join("schema-parity-chain-telemetry.db");
+        let store = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+            .await
+            .expect("migrate frozen schema-42 tree through the chain");
+        drop(store);
+        let reached: Vec<I64Value> = client
+            .query_consistent_map(
+                "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("read migrated marker");
+        assert_eq!(
+            reached.iter().map(|row| row.value).collect::<Vec<_>>(),
+            vec![AUTH_SCHEMA_VERSION]
+        );
+        store_schema_snapshot(&client).await
+    };
+
+    assert!(
+        bootstrapped.len() > 100,
+        "snapshot saw only {} objects; the comparison would be vacuous",
+        bootstrapped.len()
+    );
+    let differences = schema_differences(&bootstrapped, &migrated);
+    assert!(
+        differences.is_empty(),
+        "a fresh bootstrap and the migration chain disagree on {} schema facts:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -14310,6 +15257,10 @@ fn populated_current_import_fixture(data_dir: &std::path::Path) -> PathBuf {
                   refresh_interval_mins, last_scan_at, last_refresh_at)
                  VALUES (9, 'Imported Shows', 'shows', '[\"/fixture/shows\"]', 0,
                          108, 30, 60, 109, 110);
+             INSERT INTO background_storage_domains (library_id, root_path, domain_id)
+                 VALUES (9, '/fixture/shows', 'fixture-nas');
+             INSERT INTO background_provider_budgets (provider, next_dispatch_ms, interval_ms)
+                 VALUES ('tmdb', 42000, 100), ('ani_list', 63000, 2100);
              INSERT INTO items
                  (id, library_id, kind, parent_id, title, sort_title, year, overview,
                   added_at, updated_at, tags, genres)
@@ -14656,6 +15607,7 @@ fn make_trakt_fixture_row_cleartext(path: &std::path::Path) {
 fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     let path = populated_current_import_fixture(data_dir);
     let connection = rusqlite::Connection::open(&path).expect("open current SQLite fixture");
+    queue_fixture::remove_common_queue_schema(&connection);
     // Recreate the exact post-v14 schema differences so this is also a valid
     // input to ordinary SQLite startup migration, not merely a current-schema
     // database carrying an older user_version. The activation coordinator now
@@ -14680,6 +15632,14 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP INDEX IF EXISTS analysis_requests_one_active_source;
              DROP TRIGGER IF EXISTS analysis_index_repairs_delete_source;
              DROP TABLE IF EXISTS analysis_index_repairs;
+             DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_advance;
+             DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_delete_source;
+             DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_supersede_source;
+             DROP TABLE IF EXISTS subtitle_source_repair_epochs;
+             DROP TRIGGER IF EXISTS subtitle_source_publications_delete_source;
+             DROP TRIGGER IF EXISTS subtitle_source_publications_supersede_source;
+             DROP TABLE IF EXISTS subtitle_source_publications;
+             DROP TABLE IF EXISTS file_grants;
              DROP TRIGGER IF EXISTS classification_source_changed;
              DROP TRIGGER IF EXISTS classification_au;
              DROP TRIGGER IF EXISTS classification_ad;
@@ -14743,6 +15703,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              ALTER TABLE files DROP COLUMN dv_bl_compat_id;
              ALTER TABLE files DROP COLUMN dv_level;
              ALTER TABLE files DROP COLUMN dv_profile;
+             ALTER TABLE files DROP COLUMN downloaded_subtitles;
              ALTER TABLE files DROP COLUMN luminance_source;
              ALTER TABLE files DROP COLUMN mastering_max_luminance;
              ALTER TABLE files DROP COLUMN max_fall;
@@ -14845,13 +15806,15 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    // 52 with the current durable tables, including the Library channel
+    // 53 with the current durable tables, including the Library channel
     // entities, media classifications, channel subject jobs and decisions,
-    // and the three DVR tables. A v14 source has no rows for newer tables — each one's
-    // `minimum_schema` is later — but every table is still reported, because
-    // the digest inventory is over what the import *plans*, not over what the
-    // source happened to hold.
-    assert_eq!(report.tables.len(), 52);
+    // the three DVR tables, and the scoped book file grants (SQLite v68). A
+    // v14 source has no rows for newer tables — each one's `minimum_schema` is
+    // later — but every table is still reported, because the digest inventory
+    // is over what the import *plans*, not over what the source happened to
+    // hold. The subtitle-source ledgers are node-held facts about local files
+    // and are deliberately not imported, so they are not counted here.
+    assert_eq!(report.tables.len(), 53);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -14982,6 +15945,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
+    use plurx_core::store::background_jobs::BackgroundJobStore;
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let store = open_contract_hiqlite_store(&cluster).await;
@@ -14991,7 +15955,36 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
         .expect("reset replicated current-schema import target");
 
     let source = tempfile::tempdir().expect("current SQLite import fixture directory");
-    populated_current_import_fixture(source.path());
+    let source_path = populated_current_import_fixture(source.path());
+    // This shared fixture seeds the old domain rows with SQL. Run the actual
+    // v71 upgrade before calling it a current backup, so live work has the
+    // same sealed mapping and common queue rows a real upgraded daemon has.
+    let connection = rusqlite::Connection::open(&source_path).expect("open upgrade fixture");
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row
+                .get::<_, i64>(0))
+            .expect("empty common queue fixture"),
+        0
+    );
+    connection
+        .execute_batch("DELETE FROM background_job_migration; PRAGMA user_version = 70;")
+        .expect("stage pre-queue fixture");
+    drop(connection);
+    let upgraded = SqliteStore::open(&source_path).expect("apply common queue migration");
+    assert!(upgraded
+        .import_legacy_jobs(1_000)
+        .await
+        .expect("materialize upgraded work"));
+    assert_eq!(
+        upgraded
+            .job_migration_status()
+            .await
+            .expect("source migration status")
+            .materialized,
+        2
+    );
+    drop(upgraded);
     let prepared = prepare_sqlite_import(source.path()).expect("prepare current import backup");
     assert_eq!(
         prepared.schema_version,
@@ -15017,6 +16010,41 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
         .await
         .expect("import populated current backup");
     assert_eq!(report.search_rows, 2);
+    assert_eq!(
+        store
+            .storage_domains()
+            .await
+            .expect("imported storage domains")[0]
+            .domain_id,
+        "fixture-nas"
+    );
+    assert_eq!(
+        report
+            .tables
+            .iter()
+            .find(|table| table.table == "background_provider_budgets")
+            .expect("provider budget parity")
+            .row_count,
+        2
+    );
+
+    for table in [
+        "background_jobs",
+        "background_job_waiters",
+        "background_job_legacy",
+    ] {
+        assert_eq!(
+            report
+                .tables
+                .iter()
+                .find(|digest| digest.table == table)
+                .expect("common queue import digest")
+                .row_count,
+            2,
+            "{table} must survive the current backup with exact parity"
+        );
+    }
+
     assert_eq!(
         report
             .tables
@@ -15100,7 +16128,13 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
         scratch_bytes: 2_048,
     };
     let imported_claim = store
-        .claim_pretranscode_job("import-worker", &imported_capabilities, &[], 1_000, 2_000)
+        .fixture_claim_pretranscode_job(
+            "import-worker",
+            &imported_capabilities,
+            &[],
+            32_000,
+            62_000,
+        )
         .await
         .expect("claim imported queue work")
         .expect("an imported due job must remain runnable");
@@ -16457,6 +17491,16 @@ fn contract_inventory_matches_every_store_method() {
         .lines()
         .chain(include_str!("../src/store/dv_conversion.rs").lines())
         .chain(include_str!("../src/store/classification.rs").lines())
+        .chain(
+            include_str!("../src/store/background_jobs.rs")
+                .split_once("pub trait BackgroundJobStore:")
+                .expect("queue trait")
+                .1
+                .split_once("\n}")
+                .expect("queue trait end")
+                .0
+                .lines(),
+        )
         .filter_map(|line| line.strip_prefix("    async fn "))
         .filter_map(|line| line.split_once('(').map(|(name, _)| name))
         .collect::<BTreeSet<_>>();
@@ -16477,6 +17521,7 @@ fn contract_inventory_matches_every_store_method() {
         CACHE_METHODS,
         SHARED_CACHE_METHODS,
         PRETRANSCODE_METHODS,
+        BACKGROUND_JOB_METHODS,
         OFFLINE_METHODS,
         TELEMETRY_METHODS,
         NETWORK_PRIOR_METHODS,
@@ -16530,7 +17575,51 @@ fn contract_inventory_matches_every_store_method() {
     // in `FRAGMENT_INDEX_METHODS` above; no new trait and no new supertrait of
     // `Store`. Its sibling `fragment_index_builders_held_by` is on the cluster
     // trait, which this inventory does not walk.
-    assert_eq!(declared.len(), 384, "review the Store method count");
+    //
+    // 384 -> 385 for the one `UserStore` method the sign-in expiry option
+    // adds, `authenticate_token`, which judges a token under the replicated
+    // expiry policy read in the same snapshot as its row. `user_for_token`
+    // stays, now a provided method over it so every older caller honours
+    // expiry. Named in `USER_METHODS` above; no new trait or supertrait.
+    // 385 -> 388: acquired-caption publication, its fenced form, and the
+    // bounded candidate cursor. The downloaded-subtitle contract covers all three.
+    //
+    // 388 -> 390 for K-04 M3's two `WatchStore` reads, `watch_summary` and
+    // `progress_rails`: each answers two existing reads from one read of the
+    // same state. Named in `WATCH_METHODS` above and pinned against the
+    // separate reads on both backends by
+    // `watch_summary_and_progress_rails_match_the_separate_reads_on_every_backend`;
+    // no new trait or supertrait.
+    //
+    // 390 -> 392 for K-03's two local hints, `watched_outbox_hint` on
+    // `WatchedOutboxStore` and `lease_expiry_hint` on `CoordinationStore`.
+    // Both are non-consensus reads that decide only whether to ask the
+    // authority; `watched_outbox_and_lease_hints_follow_the_authority_locally`
+    // covers them on both backends. No new trait or supertrait of `Store`.
+    //
+    // 392 -> 393 for the one `MediaStore` method the HEVC parameter-set
+    // census adds, `merge_file_probe_hevc_parameter_sets`, a fenced graft onto
+    // the stored probe beside `merge_file_probe_chapters`. Named in
+    // `MEDIA_METHODS` above and exercised on every backend by the media
+    // lifecycle scenario; no new trait or supertrait.
+    // 393 -> 395 for K-10's two local hints, `offline_queue_hint` on
+    // `OfflinePackageStore` and `classification_hint` on
+    // `ClassificationStore`. Both are non-consensus reads that decide only
+    // whether to ask the authority; `offline_queue_hint_follows_the_authority_locally`
+    // and `classification_hint_fires_for_exactly_what_a_pass_acts_on` cover
+    // them on both backends. No new trait or supertrait of `Store`.
+    // 395 -> 396 for K-10 M4's local hint, `offline_expiry_hint` on
+    // `OfflinePackageStore`: a non-consensus read of the expiry sweep's own
+    // predicate that decides only whether to run the replicated sweep;
+    // `offline_expiry_hint_matches_the_sweep_and_nothing_expires_early_or_late`
+    // covers it on both backends. No new trait or supertrait of `Store`.
+    // Shared queue replaces legacy execution and adds 20 net Store methods.
+    // E0 adds the catalogue/queue dual-owner binding.
+    // Three library admission/query/completion operations preserve each caller.
+    // +2: replicated root-domain observation and atomic replacement.
+    // E1 adds a bounded named-settings snapshot for playback preferences.
+    // E2 removes two unfenced legacy scrub methods.
+    assert_eq!(declared.len(), 445, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -17376,13 +18465,13 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
             code: &'static str,
         ) {
             let claimed = store
-                .claim_cluster_fragment_index("history-node", &[], at, at + 1_000)
+                .fixture_claim_cluster_fragment_index("history-node", &[], at, at + 1_000)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: claim for {code}: {error}"))
                 .unwrap_or_else(|| panic!("{backend}: the job is claimable for {code}"));
             assert!(
                 store
-                    .fail_cluster_fragment_index(
+                    .fixture_fail_cluster_fragment_index(
                         cache_key,
                         target,
                         &claimed.owner_node_id,
@@ -17422,13 +18511,13 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
 
         // An uncharged yield refunds its attempt, so it must not appear.
         let preempted = store
-            .claim_cluster_fragment_index("history-node", &[], now, now + 1_000)
+            .fixture_claim_cluster_fragment_index("history-node", &[], now, now + 1_000)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim for yield: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the job is claimable for yield"));
         assert!(
             store
-                .yield_cluster_fragment_index(
+                .fixture_yield_cluster_fragment_index(
                     &cache_key,
                     &job.target_node_id,
                     &preempted.owner_node_id,
@@ -17443,20 +18532,37 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
         now += 10_000;
 
         // The third charged attempt is a lease that lapses while the budget
-        // still has room: the claim sweep reclaims it back to `queued` and
-        // appends `lease_expired`. That is the branch the outage produced
+        // still has room: takeover charges the abandoned attempt, and an
+        // uncharged yield returns it to `queued` with `lease_expired` retained.
+        // That is the abandoned-owner branch the outage produced
         // 9,915 times, so it is the one most worth pinning.
         let lapsing = store
-            .claim_cluster_fragment_index("history-node", &[], now, now + 1)
+            .fixture_claim_cluster_fragment_index("history-node", &[], now, now + 1)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim for reclaim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the job is claimable for reclaim"));
         assert_eq!(lapsing.attempts, 3, "backend {backend}");
-        now += 10_000;
-        let _ = store
-            .claim_cluster_fragment_index("sweeping-node", &[], now, now + 1_000)
+        now += plurx_core::store::background_jobs::JOB_LEASE_MS + 1;
+        let takeover = store
+            .fixture_claim_cluster_fragment_index("sweeping-node", &[], now, now + 1_000)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: reclaim sweep: {error}"));
+            .unwrap_or_else(|error| panic!("{backend}: reclaim sweep: {error}"))
+            .expect("successor claims the expired owner");
+        assert_eq!(
+            takeover.attempts, 4,
+            "three charged attempts plus the live successor"
+        );
+        assert!(store
+            .fixture_yield_cluster_fragment_index(
+                &cache_key,
+                &target,
+                &takeover.owner_node_id,
+                takeover.fence,
+                now + 1,
+                now + 2
+            )
+            .await
+            .expect("yield successor"));
         let reclaimed = store
             .cluster_fragment_index_job(&cache_key, &target)
             .await
@@ -17484,17 +18590,18 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
         // the sweep retires the row instead of reclaiming it — a different
         // branch of the same statement, appending the same code.
         let lapsed = store
-            .claim_cluster_fragment_index("history-node", &[], now, now + 1)
+            .fixture_claim_cluster_fragment_index("history-node", &[], now, now + 1)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim for lapse: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the job is claimable for lapse"));
         assert_eq!(lapsed.attempts, 5, "backend {backend}");
-        now += 10_000;
-        // Sweeping is a side effect of the next claim on any node.
-        let _ = store
-            .claim_cluster_fragment_index("sweeping-node", &[], now, now + 1_000)
+        now += plurx_core::store::background_jobs::JOB_LEASE_MS + 1;
+        // Upkeep is independent of claims, so exhaustion settles even when
+        // execution is disabled or no worker has compatible capabilities.
+        assert!(store
+            .maintain_jobs(now)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: sweep claim: {error}"));
+            .expect("reap exhausted owner"));
 
         let dead = store
             .cluster_fragment_index_job(&cache_key, &job.target_node_id)
@@ -17555,8 +18662,7 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
             "backend {backend}: an exhausted budget keeps its history"
         );
 
-        // A row the sweep expires *is* reopened, and a fresh budget starts a
-        // fresh history.
+        // Demand expiry releases work but preserves its receipt and charged history.
         let expiring_pipeline = "c".repeat(64);
         let expiring_key =
             cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &expiring_pipeline)
@@ -17582,21 +18688,17 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
             "source_unavailable",
         )
         .await;
-        // Seven hours on, the claim sweep expires a row that never got a slot.
-        let expired_at = now + 7 * 60 * 60 * 1_000;
-        let _ = store
-            .claim_cluster_fragment_index("sweeping-node", &[], expired_at, expired_at + 1_000)
+        let expired_at = now + 24 * 60 * 60 * 1_000;
+        store
+            .maintain_jobs(expired_at)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: expiry sweep: {error}"));
+            .expect("expire inactive demand");
         let expired = store
             .cluster_fragment_index_job(&expiring_key, &job.target_node_id)
             .await
             .unwrap_or_else(|error| panic!("{backend}: read expired job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the expiring row exists"));
-        assert_eq!(
-            expired.last_error_code, "queue_expired",
-            "backend {backend}"
-        );
+        assert_eq!(expired.state, "cancelled", "backend {backend}");
         assert_eq!(
             expired.attempt_errors, "source_unavailable",
             "backend {backend}: expiry is not a charged attempt, so it appends nothing"
@@ -17606,7 +18708,7 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
         reopened.not_before_ms = expired_at;
         reopened.created_at_ms = expired_at;
         assert!(
-            store
+            !store
                 .enqueue_cluster_fragment_index(&reopened)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: reopen expired: {error}")),
@@ -17617,35 +18719,23 @@ async fn fragment_index_attempt_history_survives_every_charged_attempt() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: read reopened job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the reopened row exists"));
-        assert_eq!(fresh.attempts, 0, "backend {backend}");
+        assert_eq!(fresh.attempts, 1, "backend {backend}");
         assert_eq!(
-            fresh.attempt_errors, "",
-            "backend {backend}: a fresh budget starts a fresh history"
+            fresh.attempt_errors, "source_unavailable",
+            "backend {backend}: an expired demand cannot reset the retained retry budget"
         );
     })
     .await;
 }
 
-/// Every reopen that resets the retry budget resets the history with it.
-///
-/// Three statements reset `attempts`, and each one had to learn about the
-/// history separately: the request hand-off (a forced rebuild), the ordinary
-/// enqueue, and the artifact requeue. A reset that misses one leaves a job
-/// carrying the codes of a budget it no longer has, which is worse than no
-/// history at all — it is a history that disagrees with the count beside it.
+/// Reopened domain projections reflect their new durable interest's budget.
+/// The common queue owns retry counts and histories; independent interests
+/// cannot inherit a previous interest's exhausted budget.
 #[tokio::test]
 async fn fragment_index_attempt_history_resets_wherever_the_budget_does() {
     for_each_backend(|store, backend| async move {
         let (_, file_id) = seed_file(&store, "history-reset").await;
         let source_sha256 = "a".repeat(64);
-
-        // The forced hand-off's reset is not reachable from here: it only
-        // applies to a *generation* cache key, which only
-        // `submit_fragment_index_analysis` can create, and reaching it twice
-        // needs two forced requests for one identity — which
-        // `analysis_requests_one_active_forced_successor` exists to forbid.
-        // `every_attempts_reset_resets_the_attempt_history` pins that
-        // statement's shape instead.
 
         // 2. The artifact requeue. It reopens a `ready` row whose holders
         //    could not supply the blob, and that is a fresh budget too.
@@ -17673,13 +18763,13 @@ async fn fragment_index_attempt_history_resets_wherever_the_budget_does() {
             "backend {backend}"
         );
         let first = store
-            .claim_cluster_fragment_index("reset-node", &[], 40, 1_040)
+            .fixture_claim_cluster_fragment_index("reset-node", &[], 40, 1_040)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim ready job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the ready job is claimable"));
         assert!(
             store
-                .fail_cluster_fragment_index(
+                .fixture_fail_cluster_fragment_index(
                     &ready_key,
                     "reset-node",
                     &first.owner_node_id,
@@ -17694,7 +18784,7 @@ async fn fragment_index_attempt_history_resets_wherever_the_budget_does() {
             "backend {backend}"
         );
         let second = store
-            .claim_cluster_fragment_index("reset-node", &[], 50, 1_050)
+            .fixture_claim_cluster_fragment_index("reset-node", &[], 50, 1_050)
             .await
             .unwrap_or_else(|error| panic!("{backend}: reclaim ready job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the ready job is claimable again"));
@@ -17719,7 +18809,7 @@ async fn fragment_index_attempt_history_resets_wherever_the_budget_does() {
         };
         assert!(
             store
-                .complete_cluster_fragment_index(&second, &artifact, &location, 51)
+                .fixture_complete_cluster_fragment_index(&second, &artifact, &location, 51)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: complete ready job: {error}")),
             "backend {backend}"
@@ -17807,7 +18897,7 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
         );
 
         let claimed = store
-            .claim_cluster_fragment_index("lease-node", &[], 10, 1_010)
+            .fixture_claim_cluster_fragment_index("lease-node", &[], 10, 1_010)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the queued job is claimable"));
@@ -17817,7 +18907,7 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
         // The renewal the heartbeat sends on its very first tick.
         assert!(
             store
-                .renew_cluster_fragment_index(
+                .fixture_renew_cluster_fragment_index(
                     &cache_key,
                     &claimed.target_node_id,
                     &claimed.owner_node_id,
@@ -17830,13 +18920,13 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
             "backend {backend}: the owner's renewal must move the lease"
         );
         let renewed = read_lease_job(&store, &cache_key, &job.target_node_id, backend).await;
-        assert_eq!(renewed.lease_expires_ms, 2_020, "backend {backend}");
+        assert_eq!(renewed.lease_expires_ms, 30_020, "backend {backend}");
         assert_eq!(renewed.state, "running", "backend {backend}");
         assert_eq!(renewed.attempts, 1, "backend {backend}");
 
-        // The reorder must not have loosened any predicate: a stale fence, a
-        // different owner, a different target and an expired lease each still
-        // refuse.
+        // Delivery target is now an independent waiter identity. Stale
+        // execution fences, other owners and expired leases still refuse;
+        // full boot/claim/revision fencing is covered by the queue contracts.
         for (label, target, owner, fence, now) in [
             (
                 "stale fence",
@@ -17853,23 +18943,16 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
                 21,
             ),
             (
-                "other target",
-                "other-target",
-                claimed.owner_node_id.as_str(),
-                claimed.fence,
-                21,
-            ),
-            (
                 "expired lease",
                 claimed.target_node_id.as_str(),
                 claimed.owner_node_id.as_str(),
                 claimed.fence,
-                3_000,
+                30_021,
             ),
         ] {
             assert!(
                 !store
-                    .renew_cluster_fragment_index(
+                    .fixture_renew_cluster_fragment_index(
                         &cache_key,
                         target,
                         owner,
@@ -17886,7 +18969,7 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
         // A node-local refusal returns the claim and refunds its attempt.
         assert!(
             store
-                .yield_cluster_fragment_index(
+                .fixture_yield_cluster_fragment_index(
                     &cache_key,
                     &claimed.target_node_id,
                     &claimed.owner_node_id,
@@ -17902,14 +18985,14 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
         assert_eq!(yielded.state, "queued", "backend {backend}");
         assert_eq!(yielded.attempts, 0, "backend {backend}");
         assert_eq!(yielded.owner_node_id, "", "backend {backend}");
-        assert_eq!(
-            yielded.last_error_code, "node_local_refusal",
-            "backend {backend}"
+        assert!(
+            yielded.last_error_code.is_empty(),
+            "{backend}: a yield does not invent a failure"
         );
         assert_eq!(yielded.not_before_ms, 40, "backend {backend}");
 
         let reclaimed = store
-            .claim_cluster_fragment_index("lease-node", &[], 40, 1_040)
+            .fixture_claim_cluster_fragment_index("lease-node", &[], 40, 1_040)
             .await
             .unwrap_or_else(|error| panic!("{backend}: reclaim job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the yielded job is claimable again"));
@@ -17919,7 +19002,7 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
         );
         assert!(
             store
-                .renew_cluster_fragment_index(
+                .fixture_renew_cluster_fragment_index(
                     &cache_key,
                     &reclaimed.target_node_id,
                     &reclaimed.owner_node_id,
@@ -17953,7 +19036,7 @@ async fn fragment_index_lease_renew_and_yield_run_through_dyn_store() {
         };
         assert!(
             store
-                .complete_cluster_fragment_index(&reclaimed, &artifact, &location, 60)
+                .fixture_complete_cluster_fragment_index(&reclaimed, &artifact, &location, 60)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: complete the job: {error}")),
             "backend {backend}: a renewed lease can still complete"
@@ -18037,7 +19120,7 @@ async fn analysis_history_contract_runs_through_dyn_store() {
             "backend {backend}"
         );
         let worker = store
-            .claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: worker claim"));
@@ -18062,7 +19145,7 @@ async fn analysis_history_contract_runs_through_dyn_store() {
         };
         assert!(
             store
-                .complete_cluster_fragment_index(&worker, &artifact, &location, 12)
+                .fixture_complete_cluster_fragment_index(&worker, &artifact, &location, 12)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: complete worker: {error}")),
             "backend {backend}"
@@ -18072,7 +19155,7 @@ async fn analysis_history_contract_runs_through_dyn_store() {
                 .settle_analysis_requests(13)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: settle old generation: {error}")),
-            1,
+            0,
             "backend {backend}"
         );
 
@@ -18218,12 +19301,12 @@ async fn fragment_location_retention_is_bounded_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue retained failure: {error}")));
         let retained_claim = store
-            .claim_cluster_fragment_index("retained-node", &[], 1, 1_000)
+            .fixture_claim_cluster_fragment_index("retained-node", &[], 1, 1_000)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim retained failure: {error}"))
             .unwrap_or_else(|| panic!("{backend}: retained failure claim"));
         assert!(store
-            .fail_cluster_fragment_index(
+            .fixture_fail_cluster_fragment_index(
                 &retained_claim.cache_key,
                 &retained_claim.target_node_id,
                 &retained_claim.owner_node_id,
@@ -18272,7 +19355,7 @@ async fn fragment_location_retention_is_bounded_through_dyn_store() {
                 )));
         }
         let claim = store
-            .claim_cluster_fragment_index("analysis-node", &[], 1, 1_000)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 1, 1_000)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim retention fixture: {error}"))
             .unwrap_or_else(|| panic!("{backend}: retention fixture claim"));
@@ -18296,7 +19379,7 @@ async fn fragment_location_retention_is_bounded_through_dyn_store() {
             last_seen_at_ms: 1,
         };
         assert!(store
-            .complete_cluster_fragment_index(&claim, &artifact, &first_location, 10)
+            .fixture_complete_cluster_fragment_index(&claim, &artifact, &first_location, 10)
             .await
             .unwrap_or_else(|error| panic!("{backend}: complete retention fixture: {error}")));
         for index in 1..3 {
@@ -18305,8 +19388,8 @@ async fn fragment_location_retention_is_bounded_through_dyn_store() {
                     cache_key: cache_key.clone(),
                     node_id: format!("node-{index}"),
                     bytes: 128,
-                    verified_at_ms: index + 1,
-                    last_seen_at_ms: index + 1,
+                    verified_at_ms: index + 11,
+                    last_seen_at_ms: index + 11,
                 })
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: seed stale location {index}: {error}"));
@@ -19301,7 +20384,7 @@ async fn analysis_priority_ages_fairly_and_survives_worker_handoff_through_dyn_s
                 .map(|(_, cache_key)| cache_key)
                 .expect("staged priority cache key");
             let worker = store
-                .claim_cluster_fragment_index("analysis-node", &[], 600_010, 700_010)
+                .fixture_claim_cluster_fragment_index("analysis-node", &[], 600_010, 700_010)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: claim {expected_name} worker: {error}"))
                 .unwrap_or_else(|| panic!("{backend}: missing {expected_name} worker"));
@@ -19309,6 +20392,17 @@ async fn analysis_priority_ages_fairly_and_survives_worker_handoff_through_dyn_s
                 &worker.cache_key, expected_cache_key,
                 "{backend}: request priority survives the structural worker handoff"
             );
+            assert!(store
+                .fixture_yield_cluster_fragment_index(
+                    &worker.cache_key,
+                    &worker.target_node_id,
+                    &worker.owner_node_id,
+                    worker.fence,
+                    600_011,
+                    700_000,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: release priority fixture: {error}")));
         }
     })
     .await;
@@ -19429,7 +20523,7 @@ async fn foreground_demand_promotes_an_existing_structural_job_through_dyn_store
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue competing job: {error}")));
         let claimed = store
-            .claim_cluster_fragment_index("analysis-node", &[], 600, 1_600)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 600, 1_600)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim promoted job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: foreground claim"));
@@ -19515,7 +20609,7 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
         );
 
         let first_claim = store
-            .claim_cluster_fragment_index("analysis-node", &[], 12, 1_012)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 12, 1_012)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim metrics worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: metrics worker claim"));
@@ -19535,7 +20629,7 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
         );
 
         assert!(store
-            .fail_cluster_fragment_index(
+            .fixture_fail_cluster_fragment_index(
                 &first_claim.cache_key,
                 &first_claim.target_node_id,
                 &first_claim.owner_node_id,
@@ -19565,12 +20659,12 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
         );
 
         let current_claim = store
-            .claim_cluster_fragment_index("analysis-node", &[], 14, 1_014)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 14, 1_014)
             .await
             .unwrap_or_else(|error| panic!("{backend}: reclaim metrics worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: reclaimed metrics worker"));
         assert!(store
-            .fail_cluster_fragment_index(
+            .fixture_fail_cluster_fragment_index(
                 &current_claim.cache_key,
                 &current_claim.target_node_id,
                 &current_claim.owner_node_id,
@@ -19593,7 +20687,7 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
             "{backend}: repeated retries are durable events"
         );
         let current_claim = store
-            .claim_cluster_fragment_index("analysis-node", &[], 16, 1_016)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 16, 1_016)
             .await
             .unwrap_or_else(|error| panic!("{backend}: second reclaim metrics worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: twice-reclaimed metrics worker"));
@@ -19617,7 +20711,7 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
             last_seen_at_ms: 17,
         };
         assert!(store
-            .complete_cluster_fragment_index(&current_claim, &artifact, &location, 17)
+            .fixture_complete_cluster_fragment_index(&current_claim, &artifact, &location, 17)
             .await
             .unwrap_or_else(|error| panic!("{backend}: publish metrics worker: {error}")));
         assert_eq!(
@@ -19625,7 +20719,7 @@ async fn attached_structural_job_is_the_canonical_analysis_metric_row_through_dy
                 .settle_analysis_requests(18)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: settle metrics request: {error}")),
-            1,
+            0,
             "backend {backend}"
         );
         let published = store
@@ -19692,7 +20786,7 @@ async fn a_hydrated_job_settles_from_another_nodes_artifact_through_dyn_store() 
 
         // Node A builds it.
         let built = store
-            .claim_cluster_fragment_index("node-a", &[], 20, 1_020)
+            .fixture_claim_cluster_fragment_index("node-a", &[], 20, 1_020)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim for node-a: {error}"))
             .unwrap_or_else(|| panic!("{backend}: a queued job for node-a"));
@@ -19709,7 +20803,7 @@ async fn a_hydrated_job_settles_from_another_nodes_artifact_through_dyn_store() 
             built_at_ms: 30,
         };
         assert!(store
-            .complete_cluster_fragment_index(
+            .fixture_complete_cluster_fragment_index(
                 &built,
                 &artifact,
                 &ClusterFragmentIndexLocation {
@@ -19726,13 +20820,13 @@ async fn a_hydrated_job_settles_from_another_nodes_artifact_through_dyn_store() 
 
         // Node B claims its own job and settles from A's artifact.
         let hydrating = store
-            .claim_cluster_fragment_index("node-b", &[], 40, 1_040)
+            .fixture_claim_cluster_fragment_index("node-b", &[], 40, 1_040)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim for node-b: {error}"))
             .unwrap_or_else(|| panic!("{backend}: a queued job for node-b"));
         assert_eq!(hydrating.target_node_id, "node-b", "{backend}");
         assert!(store
-            .complete_cluster_fragment_index_by_hydration(
+            .fixture_complete_cluster_fragment_index_by_hydration(
                 &hydrating,
                 &artifact,
                 &ClusterFragmentIndexLocation {
@@ -19814,7 +20908,7 @@ async fn hydration_refuses_a_stale_claim_and_a_mismatched_blob() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}")));
         let claim = store
-            .claim_cluster_fragment_index("node-b", &[], 20, 1_020)
+            .fixture_claim_cluster_fragment_index("node-b", &[], 20, 1_020)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: a queued job"));
@@ -19841,7 +20935,7 @@ async fn hydration_refuses_a_stale_claim_and_a_mismatched_blob() {
         // Nothing published yet: there is no artifact to hydrate from, so the
         // job must not settle. Hydration never writes an artifact row.
         let unpublished = store
-            .complete_cluster_fragment_index_by_hydration(&claim, &artifact, &location, 40)
+            .fixture_complete_cluster_fragment_index_by_hydration(&claim, &artifact, &location, 40)
             .await;
         assert!(
             !matches!(unpublished, Ok(true)),
@@ -19861,7 +20955,9 @@ async fn hydration_refuses_a_stale_claim_and_a_mismatched_blob() {
         stale.fence -= 1;
         assert!(
             !store
-                .complete_cluster_fragment_index_by_hydration(&stale, &artifact, &location, 45)
+                .fixture_complete_cluster_fragment_index_by_hydration(
+                    &stale, &artifact, &location, 45
+                )
                 .await
                 .unwrap_or(false),
             "{backend}: a stale fence must not settle a job"
@@ -19935,7 +21031,7 @@ async fn the_prometheus_snapshot_answers_what_the_queue_verdict_asks() {
         );
 
         let claim = store
-            .claim_cluster_fragment_index("health-node", &[], NOW_MS, NOW_MS + 60_000)
+            .fixture_claim_cluster_fragment_index("health-node", &[], NOW_MS, NOW_MS + 60_000)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim health job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: health job claim"));
@@ -19990,7 +21086,7 @@ async fn the_prometheus_snapshot_answers_what_the_queue_verdict_asks() {
             last_seen_at_ms: NOW_MS + 1_000,
         };
         assert!(store
-            .complete_cluster_fragment_index(&claim, &artifact, &location, NOW_MS + 1_000)
+            .fixture_complete_cluster_fragment_index(&claim, &artifact, &location, NOW_MS + 1_000)
             .await
             .unwrap_or_else(|error| panic!("{backend}: complete health job: {error}")));
         let produced = store
@@ -20156,12 +21252,12 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue terminal worker: {error}")));
         let terminal_claim = store
-            .claim_cluster_fragment_index("analysis-node", &[], 30, 1_030)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 30, 1_030)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim terminal worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: terminal worker claim"));
         assert!(store
-            .fail_cluster_fragment_index(
+            .fixture_fail_cluster_fragment_index(
                 &terminal_claim.cache_key,
                 &terminal_claim.target_node_id,
                 &terminal_claim.owner_node_id,
@@ -20221,12 +21317,12 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue transient worker: {error}")));
         let transient_claim = store
-            .claim_cluster_fragment_index("analysis-node", &[], 110, 1_110)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 110, 1_110)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim transient worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: transient worker claim"));
         assert!(store
-            .fail_cluster_fragment_index(
+            .fixture_fail_cluster_fragment_index(
                 &transient_claim.cache_key,
                 &transient_claim.target_node_id,
                 &transient_claim.owner_node_id,
@@ -20239,13 +21335,13 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
             .await
             .unwrap_or_else(|error| panic!("{backend}: retry transient worker: {error}")));
         assert!(store
-            .claim_cluster_fragment_index("analysis-node", &[], 120, 1_120)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 120, 1_120)
             .await
             .unwrap_or_else(|error| panic!("{backend}: early transient claim: {error}"))
             .is_none());
         assert_eq!(
             store
-                .claim_cluster_fragment_index("analysis-node", &[], 121, 1_121)
+                .fixture_claim_cluster_fragment_index("analysis-node", &[], 121, 1_121)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: due transient claim: {error}"))
                 .unwrap_or_else(|| panic!("{backend}: due transient worker"))
@@ -20258,7 +21354,7 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
 }
 
 #[tokio::test]
-async fn expired_structural_analysis_lease_uses_stable_backoff_through_dyn_store() {
+async fn expired_structural_analysis_lease_allows_fenced_takeover_through_dyn_store() {
     for_each_backend(|store, backend| async move {
         let (_, file_id) = seed_file(&store, "analysis-structural-lease-backoff").await;
         let source_sha256 = "e".repeat(64);
@@ -20288,31 +21384,28 @@ async fn expired_structural_analysis_lease_uses_stable_backoff_through_dyn_store
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue structural lease job: {error}")));
         let expired = store
-            .claim_cluster_fragment_index("analysis-node-a", &[], 10, 20)
+            .fixture_claim_cluster_fragment_index("analysis-node-a", &[], 10, 20)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim structural lease job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: structural lease claim"));
+        let retry_at = expired.lease_expires_ms;
         assert!(store
-            .claim_cluster_fragment_index("analysis-node-b", &[], 20, 30)
+            .fixture_claim_cluster_fragment_index(
+                "analysis-node-b",
+                &[],
+                retry_at - 1,
+                retry_at + 1_000,
+            )
             .await
-            .unwrap_or_else(|error| panic!("{backend}: expire structural lease: {error}"))
-            .is_none());
-        let retry_seed = format!("{}:{}", job.cache_key, job.target_node_id);
-        let retry_at = 20 + analysis_backoff_ms(&retry_seed, 1, 5_000, 300_000);
-        let queued = store
-            .cluster_fragment_index_job(&job.cache_key, &job.target_node_id)
-            .await
-            .unwrap_or_else(|error| panic!("{backend}: read queued structural retry: {error}"))
-            .unwrap_or_else(|| panic!("{backend}: retained structural retry"));
-        assert_eq!(queued.state, "queued", "backend {backend}");
-        assert_eq!(queued.not_before_ms, retry_at, "backend {backend}");
-        assert!(store
-            .claim_cluster_fragment_index("analysis-node-b", &[], retry_at - 1, retry_at + 9,)
-            .await
-            .unwrap_or_else(|error| panic!("{backend}: early structural retry: {error}"))
+            .expect("early takeover query")
             .is_none());
         let successor = store
-            .claim_cluster_fragment_index("analysis-node-b", &[], retry_at, retry_at + 1_000)
+            .fixture_claim_cluster_fragment_index(
+                "analysis-node-b",
+                &[],
+                retry_at,
+                retry_at + 1_000,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: due structural retry: {error}"))
             .unwrap_or_else(|| panic!("{backend}: successor structural claim"));
@@ -20357,15 +21450,14 @@ async fn exhausted_structural_lease_counts_loss_and_failure_through_dyn_store() 
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue exhausted lease job: {error}")));
         store
-            .claim_cluster_fragment_index("analysis-node-a", &[], 10, 20)
+            .fixture_claim_cluster_fragment_index("analysis-node-a", &[], 10, 20)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim exhausted lease job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: exhausted lease claim"));
-        assert!(store
-            .claim_cluster_fragment_index("analysis-node-b", &[], 20, 30)
+        store
+            .maintain_jobs(30_010)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: expire exhausted lease: {error}"))
-            .is_none());
+            .expect("expire exhausted lease");
 
         let failed = store
             .cluster_fragment_index_job(&job.cache_key, &job.target_node_id)
@@ -20375,7 +21467,7 @@ async fn exhausted_structural_lease_counts_loss_and_failure_through_dyn_store() 
         assert_eq!(failed.state, "failed", "backend {backend}");
         assert_eq!(failed.last_error_code, "attempt_limit", "backend {backend}");
         let metrics = store
-            .prometheus_store_snapshot("analysis-node-b", 20)
+            .prometheus_store_snapshot("analysis-node-b", 30_010)
             .await
             .unwrap_or_else(|error| panic!("{backend}: exhausted lease metrics: {error}"));
         assert_eq!(
@@ -20428,7 +21520,7 @@ async fn requeue_through_the_no_holder_arm_preserves_exhausted_lease_terminality
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue repair seed: {error}")));
         let repair_claim = store
-            .claim_cluster_fragment_index("analysis-node-a", &[], 1, 5)
+            .fixture_claim_cluster_fragment_index("analysis-node-a", &[], 1, 5)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim repair seed: {error}"))
             .unwrap_or_else(|| panic!("{backend}: repair seed claim"));
@@ -20452,7 +21544,12 @@ async fn requeue_through_the_no_holder_arm_preserves_exhausted_lease_terminality
             last_seen_at_ms: 2,
         };
         assert!(store
-            .complete_cluster_fragment_index(&repair_claim, &repair_artifact, &repair_location, 2,)
+            .fixture_complete_cluster_fragment_index(
+                &repair_claim,
+                &repair_artifact,
+                &repair_location,
+                2,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: publish repair seed: {error}")));
 
@@ -20480,13 +21577,17 @@ async fn requeue_through_the_no_holder_arm_preserves_exhausted_lease_terminality
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue cleanup victim: {error}")));
         store
-            .claim_cluster_fragment_index("analysis-node-b", &[], 10, 20)
+            .fixture_claim_cluster_fragment_index("analysis-node-b", &[], 10, 20)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim cleanup victim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: cleanup victim claim"));
+        store
+            .maintain_jobs(30_010)
+            .await
+            .expect("expire repair victim lease");
         let repair_requeue = NewClusterFragmentIndexJob {
-            not_before_ms: 20,
-            created_at_ms: 20,
+            not_before_ms: 30_010,
+            created_at_ms: 30_010,
             ..repair
         };
         assert!(
@@ -20510,7 +21611,7 @@ async fn requeue_through_the_no_holder_arm_preserves_exhausted_lease_terminality
             "{backend}: attempt-limit cleanup cannot be reopened as queue expiry"
         );
         let metrics = store
-            .prometheus_store_snapshot("analysis-node-b", 20)
+            .prometheus_store_snapshot("analysis-node-b", 30_010)
             .await
             .unwrap_or_else(|error| panic!("{backend}: repair cleanup metrics: {error}"));
         assert_eq!(
@@ -20657,12 +21758,12 @@ async fn analysis_admin_retry_queues_only_its_forced_generation_through_dyn_stor
             .await
             .unwrap_or_else(|error| panic!("{backend}: submit retry original: {error}")));
         let original_worker = store
-            .claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim retry original worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: retry original worker"));
         assert!(store
-            .fail_cluster_fragment_index(
+            .fixture_fail_cluster_fragment_index(
                 &original_worker.cache_key,
                 &original_worker.target_node_id,
                 &original_worker.owner_node_id,
@@ -20679,7 +21780,7 @@ async fn analysis_admin_retry_queues_only_its_forced_generation_through_dyn_stor
                 .settle_analysis_requests(13)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: settle retry original: {error}")),
-            1,
+            0,
             "{backend}"
         );
 
@@ -20732,7 +21833,7 @@ async fn analysis_admin_retry_queues_only_its_forced_generation_through_dyn_stor
             .unwrap_or_else(|error| panic!("{backend}: submit forced retry: {error}")));
         assert_eq!(
             store
-                .claim_cluster_fragment_index("analysis-node", &[], 21, 1_021)
+                .fixture_claim_cluster_fragment_index("analysis-node", &[], 21, 1_021)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: claim only retry worker: {error}"))
                 .unwrap_or_else(|| panic!("{backend}: forced retry worker"))
@@ -20944,7 +22045,7 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             .await
             .unwrap_or_else(|error| panic!("{backend}: submit normal generation: {error}")));
         let normal_worker = store
-            .claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim normal worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: normal worker"));
@@ -20967,23 +22068,21 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             verified_at_ms: 12,
             last_seen_at_ms: 12,
         };
-        assert!(
-            store
-                .complete_cluster_fragment_index(
-                    &normal_worker,
-                    &normal_artifact,
-                    &normal_location,
-                    12,
-                )
-                .await
-                .unwrap_or_else(|error| panic!("{backend}: publish normal generation: {error}"))
-        );
+        assert!(store
+            .fixture_complete_cluster_fragment_index(
+                &normal_worker,
+                &normal_artifact,
+                &normal_location,
+                12,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: publish normal generation: {error}")));
         assert_eq!(
             store
                 .settle_analysis_requests(13)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: settle normal generation: {error}")),
-            1,
+            0,
             "backend {backend}"
         );
 
@@ -21029,18 +22128,13 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             .await
             .unwrap_or_else(|error| panic!("{backend}: submit forced generation: {error}")));
         let forced_worker = store
-            .claim_cluster_fragment_index("analysis-node", &[], 21, 30)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 21, 30)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim forced worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: forced worker"));
-        assert!(store
-            .claim_cluster_fragment_index("analysis-node-next", &[], 30, 1_030)
-            .await
-            .unwrap_or_else(|error| panic!("{backend}: expire forced worker: {error}"))
-            .is_none());
-        let retry_at = 30 + analysis_backoff_ms(&generation_key, 1, 5_000, 300_000);
+        let retry_at = forced_worker.lease_expires_ms;
         let current_forced_worker = store
-            .claim_cluster_fragment_index("analysis-node", &[], retry_at, retry_at + 1_000)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], retry_at, retry_at + 1_000)
             .await
             .unwrap_or_else(|error| panic!("{backend}: reclaim forced worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: reclaimed forced worker"));
@@ -21062,7 +22156,7 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
         };
         assert!(
             !store
-                .complete_cluster_fragment_index(
+                .fixture_complete_cluster_fragment_index(
                     &forced_worker,
                     &stale_artifact,
                     &stale_location,
@@ -21112,7 +22206,7 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             ..stale_location
         };
         assert!(store
-            .complete_cluster_fragment_index(
+            .fixture_complete_cluster_fragment_index(
                 &current_forced_worker,
                 &forced_artifact,
                 &forced_location,
@@ -21125,7 +22219,7 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
                 .settle_analysis_requests(retry_at + 2)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: settle forced generation: {error}")),
-            1,
+            0,
             "backend {backend}"
         );
         assert_eq!(
@@ -21155,7 +22249,12 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             .await
             .unwrap_or_else(|error| panic!("{backend}: requeue forced generation: {error}")));
         let repair_claim = store
-            .claim_cluster_fragment_index("repair-node", &[], retry_at + 10, retry_at + 1_010)
+            .fixture_claim_cluster_fragment_index(
+                "repair-node",
+                &[],
+                retry_at + 10,
+                retry_at + 1_010,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim forced repair: {error}"))
             .unwrap_or_else(|| panic!("{backend}: forced repair claim"));
@@ -21170,8 +22269,25 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
             last_seen_at_ms: retry_at + 11,
             ..forced_location
         };
+        assert!(
+            !store
+                .fixture_complete_cluster_fragment_index(
+                    &repair_claim,
+                    &rebuilt_artifact,
+                    &rebuilt_location,
+                    retry_at + 11,
+                )
+                .await
+                .expect("reject changed provenance"),
+            "{backend}: repair cannot replace immutable builder provenance"
+        );
+        let rebuilt_artifact = store
+            .cluster_fragment_index_artifact(&generation_key)
+            .await
+            .expect("read immutable repair provenance")
+            .expect("original immutable artifact");
         assert!(store
-            .complete_cluster_fragment_index(
+            .fixture_complete_cluster_fragment_index(
                 &repair_claim,
                 &rebuilt_artifact,
                 &rebuilt_location,
@@ -21219,12 +22335,12 @@ async fn content_analysis_retry_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}")));
         let claimed = store
-            .claim_cluster_fragment_index("node-a", &[], 10, 1_000)
+            .fixture_claim_cluster_fragment_index("node-a", &[], 10, 1_000)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: initial claim"));
         assert!(store
-            .fail_cluster_fragment_index_typed(&plurx_core::store::ClusterFragmentIndexFailure {
+            .fixture_fail_cluster_fragment_index_typed(&queue_fixture::FragmentFailureFixture {
                 cache_key: claimed.cache_key.clone(),
                 target_node_id: claimed.target_node_id.clone(),
                 node_id: "node-a".to_owned(),
@@ -21250,7 +22366,7 @@ async fn content_analysis_retry_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: foreground rediscovery: {error}")));
         assert!(
             store
-                .claim_cluster_fragment_index("node-a", &[], 31, 1_031)
+                .fixture_claim_cluster_fragment_index("node-a", &[], 31, 1_031)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: early claim: {error}"))
                 .is_none(),
@@ -21260,7 +22376,7 @@ async fn content_analysis_retry_contract_runs_through_dyn_store() {
         let six_hours = 6 * 60 * 60 * 1_000;
         let retry_deadline = 20 + plurx_core::content_analysis::INDEX_RETRY_WINDOW_MS;
         let retried = store
-            .claim_cluster_fragment_index("node-a", &[], six_hours, retry_deadline + 1_000)
+            .fixture_claim_cluster_fragment_index("node-a", &[], six_hours, retry_deadline + 1_000)
             .await
             .unwrap_or_else(|error| panic!("{backend}: six-hour claim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: retry was incorrectly queue-expired"));
@@ -21270,8 +22386,9 @@ async fn content_analysis_retry_contract_runs_through_dyn_store() {
             "{backend}: rediscovery must retain the original retry deadline"
         );
         assert_eq!(
-            retried.lease_expires_ms, retry_deadline,
-            "{backend}: an initial claim cannot lease work past its retry deadline"
+            retried.lease_expires_ms,
+            six_hours + plurx_core::store::background_jobs::JOB_LEASE_MS,
+            "{backend}: a retry receives the common bounded lease"
         );
         let artifact = ClusterFragmentIndexArtifact {
             cache_key: retried.cache_key.clone(),
@@ -21294,7 +22411,12 @@ async fn content_analysis_retry_contract_runs_through_dyn_store() {
         };
         assert!(
             !store
-                .complete_cluster_fragment_index(&retried, &artifact, &location, retry_deadline,)
+                .fixture_complete_cluster_fragment_index(
+                    &retried,
+                    &artifact,
+                    &location,
+                    retry_deadline,
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: expired completion: {error}")),
             "{backend}: completion at the retry deadline must be rejected"
@@ -21415,12 +22537,12 @@ async fn content_analysis_repair_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: submit predecessor: {error}")));
         let worker = store
-            .claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim predecessor: {error}"))
             .unwrap_or_else(|| panic!("{backend}: predecessor worker"));
         assert!(store
-            .fail_cluster_fragment_index(
+            .fixture_fail_cluster_fragment_index(
                 &worker.cache_key,
                 &worker.target_node_id,
                 &worker.owner_node_id,
@@ -21437,7 +22559,7 @@ async fn content_analysis_repair_contract_runs_through_dyn_store() {
                 .settle_analysis_requests(13)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: settle predecessor: {error}")),
-            1,
+            0,
             "{backend}"
         );
 
@@ -22120,6 +23242,31 @@ async fn settings_contract_runs_through_dyn_store() {
             (Some("L".to_owned()), Some("R".to_owned())),
             "backend {backend}"
         );
+        let selected = store
+            .get_settings(&[
+                "contract.right",
+                "contract.left",
+                "missing",
+                "contract.left",
+            ])
+            .await
+            .expect("selected settings snapshot");
+        assert_eq!(
+            selected.len(),
+            2,
+            "{backend}: return only selected present keys, once"
+        );
+        assert_eq!(selected.get("contract.left").map(String::as_str), Some("L"));
+        assert_eq!(
+            selected.get("contract.right").map(String::as_str),
+            Some("R")
+        );
+        assert!(store
+            .get_settings(&[])
+            .await
+            .expect("empty selection")
+            .is_empty());
+        assert!(store.get_settings(&["contract.left"; 33]).await.is_err());
         let settings = store.settings_snapshot().await.expect("settings snapshot");
         assert_eq!(
             settings.get("contract.key").map(String::as_str),
@@ -22590,6 +23737,33 @@ async fn bounded_catalogue_reader_matches_authority_and_falls_back_exactly_once(
         .await
         .expect("Authority fallback value");
 
+    let preference_reader = CatalogueReader::validation_replicated(
+        Arc::clone(&authority_store),
+        Arc::clone(&store),
+        PassiveRaftMetrics::validation_bounded_ready(),
+        64,
+    );
+    for (saved, expected_authority) in [("0", 1), ("1", 0)] {
+        store
+            .put_setting(plurx_core::store::keys::BOUNDED_REPLICA_READS, saved)
+            .await
+            .expect("save preference without readiness gating");
+        store.validation_reset_operation_counts();
+        let actual = preference_reader
+            .get_item(20)
+            .await
+            .expect("live preference");
+        assert_eq!(
+            serde_json::to_value(actual).expect("result"),
+            serde_json::to_value(&expected).expect("expected")
+        );
+        assert_eq!(
+            store.validation_operation_counts().consistent_query_calls,
+            expected_authority,
+            "saved preference must apply without constructing another reader"
+        );
+    }
+
     store.validation_reset_operation_counts();
     store.validation_fail_next_non_consistent_query();
     let query_error_reader = CatalogueReader::validation_replicated(
@@ -22627,7 +23801,7 @@ async fn bounded_catalogue_reader_matches_authority_and_falls_back_exactly_once(
         serde_json::to_value(&expected).expect("serialize expected item")
     );
     let counts = store.validation_operation_counts();
-    assert_eq!(counts.non_consistent_query_calls, 1);
+    assert_eq!(counts.non_consistent_query_calls, 2); // preference + discarded catalogue query
     assert_eq!(counts.consistent_query_calls, 1);
 
     store.validation_reset_operation_counts();
@@ -24495,6 +25669,59 @@ async fn media_contract_runs_through_dyn_store() {
             .merge_file_probe_chapters(movie_file, r#"[{"start_time":"0.0","end_time":"10.0"}]"#)
             .await
             .expect("merge chapters");
+        // The HEVC census graft is fenced to the revision it measured.
+        let measured = store
+            .get_file(movie_file)
+            .await
+            .expect("census file")
+            .expect("census file");
+        let census =
+            r#"{"revision":1,"verdict":"varying","size":0,"mtime":0,"samples":7,"differing":7}"#;
+        assert!(!store
+            .merge_file_probe_hevc_parameter_sets(
+                movie_file,
+                measured.size + 1,
+                measured.mtime,
+                census,
+            )
+            .await
+            .expect("fenced census"));
+        assert!(!store
+            .merge_file_probe_hevc_parameter_sets(
+                movie_file,
+                measured.size,
+                measured.mtime + 1,
+                census,
+            )
+            .await
+            .expect("mtime-fenced census"));
+        assert!(!store
+            .get_file_probe_json(movie_file)
+            .await
+            .expect("probe JSON")
+            .expect("probe JSON")
+            .contains("plurx_hevc_parameter_sets"));
+        assert!(store
+            .merge_file_probe_hevc_parameter_sets(movie_file, measured.size, measured.mtime, census)
+            .await
+            .expect("census"));
+        let grafted: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(movie_file)
+                .await
+                .expect("probe JSON")
+                .expect("probe JSON"),
+        )
+        .expect("probe JSON parses");
+        assert_eq!(grafted["plurx_hevc_parameter_sets"]["verdict"], "varying");
+        assert!(
+            grafted.get("chapters").is_some(),
+            "the graft keeps the rest of the probe"
+        );
+        assert!(!store
+            .merge_file_probe_hevc_parameter_sets(empty_file, 2_000, 20, census)
+            .await
+            .expect("unprobed census"));
         assert!(store
             .get_file_probe_json(movie_file)
             .await
@@ -26598,6 +27825,222 @@ async fn seed_file(store: &Arc<dyn Store>, prefix: &str) -> (i64, i64) {
         .await
         .expect("seed file");
     (user.id, file)
+}
+
+#[tokio::test]
+async fn downloaded_subtitles_survive_rescan_and_reject_stale_or_duplicate_writes() {
+    for_each_backend(|store, backend| async move {
+        let (_, id) = seed_file(&store, "downloaded-subtitle").await;
+        let original = store
+            .get_file(id)
+            .await
+            .expect("subtitle contract fixture")
+            .expect("subtitle contract fixture");
+        let track = plurx_core::domain::DownloadedSubtitle {
+            source_size: original.size,
+            source_mtime: original.mtime,
+            provider_file_id: 123,
+            language: "en".into(),
+            title: "OpenSubtitles · Example".into(),
+            hearing_impaired: true,
+            forced: false,
+            vtt: "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nA missing caption.\n".into(),
+        };
+        assert!(!original.probed, "fixture starts before its first probe");
+        assert!(!store
+            .add_downloaded_subtitle(id, &track)
+            .await
+            .expect("reject unprobed caption"));
+        let embedded = plurx_core::domain::SubtitleStream {
+            index: 0,
+            codec: "subrip".into(),
+            language: Some("en".into()),
+            ..Default::default()
+        };
+        store
+            .upsert_file(
+                original.item_id,
+                original.path.to_str().expect("path"),
+                original.size,
+                original.mtime,
+                &ProbeResult {
+                    raw_json: Some("{}".into()),
+                    video_codec: Some("h264".into()),
+                    subtitle_streams: vec![embedded.clone()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("first successful probe");
+        assert_eq!(
+            store
+                .subtitle_candidate_file_ids(0, 16)
+                .await
+                .expect("caption candidates"),
+            vec![id]
+        );
+        assert!(store
+            .subtitle_candidate_file_ids(id, 16)
+            .await
+            .expect("candidate cursor")
+            .is_empty());
+        let clock = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("subtitle contract fixture")
+            .as_millis() as i64;
+        let lease = acquired(
+            store
+                .acquire_lease("subtitles:contract", "node-a", clock, clock + 90_000)
+                .await
+                .expect("subtitle contract fixture"),
+            backend,
+        );
+        let replacement = publication_successor(&lease);
+        assert!(
+            store
+                .add_downloaded_subtitle_fenced(id, &track, &lease, &replacement)
+                .await
+                .expect("subtitle contract fixture"),
+            "{backend}"
+        );
+        let mut stale_track = track.clone();
+        stale_track.provider_file_id = 999;
+        assert!(
+            store
+                .add_downloaded_subtitle_fenced(id, &stale_track, &lease, &replacement)
+                .await
+                .is_err(),
+            "{backend}: a stale job cannot publish"
+        );
+        assert!(
+            !store
+                .add_downloaded_subtitle(id, &track)
+                .await
+                .expect("subtitle contract fixture"),
+            "{backend}: duplicate"
+        );
+        let loaded = store
+            .get_file(id)
+            .await
+            .expect("subtitle contract fixture")
+            .expect("subtitle contract fixture");
+        assert_eq!(loaded.subtitle_streams.len(), 2, "{backend}");
+        assert_eq!(loaded.subtitle_streams[0].index, 0);
+        assert_eq!(loaded.subtitle_streams[0].codec, "subrip");
+        assert!(loaded.downloaded_subtitle(0).is_none());
+        assert_eq!(
+            loaded
+                .downloaded_subtitle(1)
+                .expect("subtitle contract fixture")
+                .vtt,
+            track.vtt
+        );
+        assert!(serde_json::to_value(&loaded)
+            .expect("subtitle contract fixture")
+            .get("downloaded_subtitles")
+            .is_none());
+        let probe = ProbeResult {
+            raw_json: Some("{}".into()),
+            duration_ms: Some(7_200_000),
+            container: Some("mkv".into()),
+            ..Default::default()
+        };
+        store
+            .upsert_file(
+                original.item_id,
+                original.path.to_str().expect("subtitle contract fixture"),
+                original.size,
+                original.mtime,
+                &probe,
+            )
+            .await
+            .expect("subtitle contract fixture");
+        assert_eq!(
+            store
+                .get_file(id)
+                .await
+                .expect("subtitle contract fixture")
+                .expect("subtitle contract fixture")
+                .downloaded_subtitles
+                .len(),
+            1,
+            "{backend}: rescan preserves captions"
+        );
+        let mut second = track.clone();
+        second.provider_file_id = 124;
+        second.language = "fr".into();
+        let mut third = track.clone();
+        third.provider_file_id = 125;
+        third.language = "de".into();
+        let (a, b) = tokio::join!(
+            store.add_downloaded_subtitle(id, &second),
+            store.add_downloaded_subtitle(id, &third)
+        );
+        assert!(
+            a.expect("subtitle contract fixture") && b.expect("subtitle contract fixture"),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .get_file(id)
+                .await
+                .expect("subtitle contract fixture")
+                .expect("subtitle contract fixture")
+                .downloaded_subtitles
+                .len(),
+            3,
+            "{backend}: concurrent additions preserved"
+        );
+        store
+            .upsert_file(
+                original.item_id,
+                original.path.to_str().expect("subtitle contract fixture"),
+                original.size + 1,
+                original.mtime + 1,
+                &probe,
+            )
+            .await
+            .expect("subtitle contract fixture");
+        let changed = store
+            .get_file(id)
+            .await
+            .expect("subtitle contract fixture")
+            .expect("subtitle contract fixture");
+        assert!(
+            changed.downloaded_subtitles.is_empty(),
+            "{backend}: source revision"
+        );
+        assert!(changed.subtitle_streams.is_empty());
+        assert!(
+            !store
+                .add_downloaded_subtitle(id, &second)
+                .await
+                .expect("subtitle contract fixture"),
+            "{backend}: stale write"
+        );
+        second.source_size += 1;
+        second.source_mtime += 1;
+        assert!(
+            store
+                .add_downloaded_subtitle(id, &second)
+                .await
+                .expect("subtitle contract fixture"),
+            "{backend}: fresh revision replaces stale list"
+        );
+        assert_eq!(
+            store
+                .get_file(id)
+                .await
+                .expect("subtitle contract fixture")
+                .expect("subtitle contract fixture")
+                .downloaded_subtitles
+                .len(),
+            1
+        );
+        second.vtt = "<html>wrong</html>".into();
+        assert!(store.add_downloaded_subtitle(id, &second).await.is_err());
+    })
+    .await;
 }
 
 fn unix_seconds() -> i64 {
@@ -29888,6 +31331,231 @@ async fn classification_search_fences_and_corrections() {
     .await;
 }
 
+/// One item of `tests/contracts/library-sort-cases.json`.
+#[derive(serde::Deserialize)]
+struct LibrarySortItem {
+    index: i64,
+    title: String,
+    sort_title: String,
+    year: Option<i32>,
+    recorded_at: Option<String>,
+    resolution: Option<i64>,
+    /// Absent means `movie`. Every item is inserted at the library root.
+    #[serde(default)]
+    kind: Option<String>,
+    /// The probed height of the item's file when it is not also the merge
+    /// key — a root photo has one and carries no `resolution`.
+    #[serde(default)]
+    file_height: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+struct LibrarySortFixture {
+    page_size: i64,
+    items: Vec<LibrarySortItem>,
+    expected_order: std::collections::BTreeMap<String, Vec<i64>>,
+}
+
+/// The library grid's five sort keys, replayed on every backend, whole and
+/// across a page boundary.
+///
+/// What it pins: which columns each sort orders by and in which direction,
+/// that NULL years and NULL capture dates go last, that an item with no file
+/// reads as -1 and sorts after every probed one, that `sort_title` is the
+/// stored `sort_title_for` output rather than anything the DTO recomputes, and
+/// that the `resolution` a row carries is the key the SQL ranked it by. That
+/// last one is why the fixture has root photos: a photo is probed and has a
+/// real file height, but no photo carries a `resolution`, so the SQL must rank
+/// it at -1 too — rank it by height and a client merging on the key it was
+/// given sees a cursor that is not sorted under its own comparator.
+///
+/// The paged walk checks the client's walk, not the order: advancing `offset`
+/// by the rows returned and stopping on a short or empty page yields the same
+/// sequence as one request. With one `ORDER BY` for both, paged and whole can
+/// only disagree through ties, and the guard against ties is not this test —
+/// it is `store::item_sort_order_tests::every_sort_ends_in_a_unique_key`,
+/// which requires every clause to end in `id` rather than observing what
+/// SQLite happens to do with tied rows today.
+///
+/// Items 32 (a photo) and 33 (a movie) tie on every visible key of four of
+/// the sorts, and the photo was inserted first. Today the grid query reads
+/// through `idx_items_library_kind`, which yields the movie first, so dropping
+/// the `id` tie-break does fail this replay — but that is a fact about
+/// today's query plan, not a promise, which is why the unit test above stays
+/// the guard.
+///
+/// The same fixture is what the Apple and Android `LibraryMerge` must
+/// reproduce from k per-library cursors, so an `ORDER BY` edit that this test
+/// still accepts is one the clients will be checked against too.
+#[tokio::test]
+async fn library_sort_fixture_matches_order() {
+    let fixture: LibrarySortFixture = serde_json::from_str(include_str!(
+        "../../../tests/contracts/library-sort-cases.json"
+    ))
+    .expect("library sort fixture parses");
+    let fixture = Arc::new(fixture);
+
+    for_each_backend(move |store, backend| {
+        let fixture = Arc::clone(&fixture);
+        async move {
+            let library = store
+                .create_library(&NewLibrary {
+                    name: format!("Library sort {backend}"),
+                    kind: LibraryKind::Movies,
+                    paths: Vec::new(),
+                    anime: false,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: create sort library: {error}"));
+
+            // index -> the id the store actually assigned. The fixture's
+            // `index` is insertion order and nothing more; assuming it is also
+            // the row id would make this test pass or fail on an unrelated
+            // sequence rather than on the ordering it is about.
+            let mut ids: std::collections::BTreeMap<i64, i64> = std::collections::BTreeMap::new();
+            for item in &fixture.items {
+                let kind = item
+                    .kind
+                    .as_deref()
+                    .map(|kind| {
+                        ItemKind::parse(kind)
+                            .unwrap_or_else(|| panic!("fixture kind {kind:?} is not an item kind"))
+                    })
+                    .unwrap_or(ItemKind::Movie);
+                let id = store
+                    .insert_item(&NewItem {
+                        library_id: library.id,
+                        kind,
+                        parent_id: None,
+                        title: item.title.clone(),
+                        year: item.year,
+                        season_number: None,
+                        episode_number: None,
+                    })
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: insert {:?}: {error}", item.title));
+                ids.insert(item.index, id);
+
+                // The key the clients will merge on has to be the key the SQL
+                // sorts on. This is the one place both are visible at once.
+                let stored = store
+                    .get_item(id)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: get {id}: {error}"))
+                    .unwrap_or_else(|| panic!("{backend}: item {id} vanished"));
+                assert_eq!(
+                    stored.sort_title, item.sort_title,
+                    "{backend}: sort_title for {:?}",
+                    item.title
+                );
+
+                if let Some(height) = item.file_height.or(item.resolution) {
+                    let extension = if kind == ItemKind::Photo {
+                        "jpg"
+                    } else {
+                        "mkv"
+                    };
+                    store
+                        .upsert_file(
+                            id,
+                            &format!("/contract/sort/{}.{extension}", item.index),
+                            1_000 + item.index,
+                            item.index,
+                            &ProbeResult {
+                                height: Some(height),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap_or_else(|error| panic!("{backend}: file for {id}: {error}"));
+                }
+                // The fixture's `resolution` is the key a client merges on, so
+                // it has to be what the DTO carries: the best file height for
+                // a kind that carries one, and nothing for any other kind.
+                let heights = store
+                    .item_max_heights(&[id])
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: heights for {id}: {error}"));
+                let carried = kind
+                    .carries_resolution()
+                    .then(|| heights.get(&id).copied())
+                    .flatten();
+                assert_eq!(
+                    carried, item.resolution,
+                    "{backend}: the resolution {:?} carries",
+                    item.title
+                );
+                if let Some(recorded_at) = item.recorded_at.clone() {
+                    store
+                        .apply_metadata(
+                            id,
+                            &MetadataPatch {
+                                recorded_at: Some(recorded_at),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap_or_else(|error| panic!("{backend}: recorded for {id}: {error}"));
+                }
+            }
+
+            for (name, sort) in [
+                ("title", ItemSort::Title),
+                ("added", ItemSort::Added),
+                ("year", ItemSort::Year),
+                ("resolution", ItemSort::Resolution),
+                ("recorded", ItemSort::Recorded),
+            ] {
+                let expected: Vec<i64> = fixture
+                    .expected_order
+                    .get(name)
+                    .unwrap_or_else(|| panic!("fixture has no expected order for {name}"))
+                    .iter()
+                    .map(|index| ids[index])
+                    .collect();
+
+                let whole = store
+                    .list_top_items_in_genre(library.id, sort, 0, fixture.items.len() as i64, None)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: {name} page: {error}"));
+                assert_eq!(
+                    whole.total,
+                    fixture.items.len() as i64,
+                    "{backend}: {name} total"
+                );
+                assert_eq!(
+                    whole.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+                    expected,
+                    "{backend}: {name} in one request"
+                );
+
+                // The same order, walked the way a client walks it: advance by
+                // the rows returned, stop on a short or empty page.
+                let mut paged: Vec<i64> = Vec::new();
+                let mut offset = 0_i64;
+                loop {
+                    let page = store
+                        .list_top_items_in_genre(library.id, sort, offset, fixture.page_size, None)
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("{backend}: {name} page at {offset}: {error}")
+                        });
+                    if page.items.is_empty() {
+                        break;
+                    }
+                    offset += page.items.len() as i64;
+                    paged.extend(page.items.iter().map(|item| item.id));
+                    if page.items.len() < fixture.page_size as usize || offset >= page.total {
+                        break;
+                    }
+                }
+                assert_eq!(paged, expected, "{backend}: {name} across page boundaries");
+            }
+        }
+    })
+    .await;
+}
+
 /// `fragment_index_builders_held_by` answers the same on every backend: the
 /// node that built an index names itself, a node that only holds a location
 /// for it names the builder, and another node or another source holds none.
@@ -29922,7 +31590,7 @@ async fn fragment_index_builders_held_by_names_the_builder_on_every_backend() {
             "backend {backend}"
         );
         let claimed = store
-            .claim_cluster_fragment_index("builder-node", &[], 10, 1_010)
+            .fixture_claim_cluster_fragment_index("builder-node", &[], 10, 1_010)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the job is claimable"));
@@ -29947,7 +31615,7 @@ async fn fragment_index_builders_held_by_names_the_builder_on_every_backend() {
         };
         assert!(
             store
-                .complete_cluster_fragment_index(
+                .fixture_complete_cluster_fragment_index(
                     &claimed,
                     &artifact,
                     &location("builder-node", 11),
@@ -29991,4 +31659,3226 @@ async fn fragment_index_builders_held_by_names_the_builder_on_every_backend() {
         );
     })
     .await;
+}
+
+/// The show/season/episode and movie shapes K-04's watch-state reads
+/// exercise, with every rail ordering key distinct so the combined and the
+/// separate reads have exactly one correct order to agree on.
+struct WatchFenceFixture {
+    user: i64,
+    movie: i64,
+    other_movie: i64,
+    show: i64,
+    season: i64,
+    episodes: Vec<i64>,
+    second_show_episodes: Vec<i64>,
+}
+
+async fn seed_watch_fence_fixture(store: &Arc<dyn Store>, prefix: &str) -> WatchFenceFixture {
+    let user = store
+        .create_user(&format!("{prefix}-watcher"), "hash", false)
+        .await
+        .expect("seed watcher");
+    let movies = store
+        .create_library(&NewLibrary {
+            name: format!("{prefix} Movies"),
+            kind: LibraryKind::Movies,
+            paths: vec![PathBuf::from(format!("/{prefix}/movies"))],
+            anime: false,
+        })
+        .await
+        .expect("seed movie library");
+    let shows = store
+        .create_library(&NewLibrary {
+            name: format!("{prefix} Shows"),
+            kind: LibraryKind::Shows,
+            paths: vec![PathBuf::from(format!("/{prefix}/shows"))],
+            anime: false,
+        })
+        .await
+        .expect("seed show library");
+    let item = |library_id: i64,
+                kind: ItemKind,
+                parent_id: Option<i64>,
+                title: String,
+                season_number: Option<i32>,
+                episode_number: Option<i32>| NewItem {
+        library_id,
+        kind,
+        parent_id,
+        title,
+        year: None,
+        season_number,
+        episode_number,
+    };
+    let movie = store
+        .insert_item(&item(
+            movies.id,
+            ItemKind::Movie,
+            None,
+            format!("{prefix} Alpha"),
+            None,
+            None,
+        ))
+        .await
+        .expect("seed movie");
+    let other_movie = store
+        .insert_item(&item(
+            movies.id,
+            ItemKind::Movie,
+            None,
+            format!("{prefix} Beta"),
+            None,
+            None,
+        ))
+        .await
+        .expect("seed second movie");
+    let mut series = Vec::new();
+    for title in ["Arcadia", "Borealis"] {
+        let show = store
+            .insert_item(&item(
+                shows.id,
+                ItemKind::Show,
+                None,
+                format!("{prefix} {title}"),
+                None,
+                None,
+            ))
+            .await
+            .expect("seed show");
+        let season = store
+            .insert_item(&item(
+                shows.id,
+                ItemKind::Season,
+                Some(show),
+                "Season 1".to_owned(),
+                Some(1),
+                None,
+            ))
+            .await
+            .expect("seed season");
+        let mut episodes = Vec::new();
+        for number in 1..=3 {
+            episodes.push(
+                store
+                    .insert_item(&item(
+                        shows.id,
+                        ItemKind::Episode,
+                        Some(season),
+                        format!("Episode {number}"),
+                        Some(1),
+                        Some(number),
+                    ))
+                    .await
+                    .expect("seed episode"),
+            );
+        }
+        series.push((show, season, episodes));
+    }
+    let (second_show, _, second_show_episodes) = series.pop().expect("second show");
+    let _ = second_show;
+    let (show, season, episodes) = series.pop().expect("first show");
+    WatchFenceFixture {
+        user: user.id,
+        movie,
+        other_movie,
+        show,
+        season,
+        episodes,
+        second_show_episodes,
+    }
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+fn watch_fence_reader(store: &Arc<HiqliteAuthStore>, applied_index: u64) -> CatalogueReader {
+    use plurx_core::cluster::migration::status::PassiveRaftMetrics;
+
+    let authority: Arc<dyn Store> = store.clone();
+    CatalogueReader::validation_replicated(
+        authority,
+        Arc::clone(store),
+        PassiveRaftMetrics::validation_bounded_ready_applied(applied_index),
+        64,
+    )
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+fn assert_watch_read_path(store: &HiqliteAuthStore, local: bool, label: &str) {
+    let counts = store.validation_operation_counts();
+    assert_eq!(
+        (
+            counts.consistent_query_calls,
+            counts.non_consistent_query_calls
+        ),
+        if local { (0, 1) } else { (1, 0) },
+        "{label}: expected {} watch read",
+        if local { "one local" } else { "one Authority" }
+    );
+}
+
+/// K-04 M2. A watch write committed through the leader stream reports its
+/// Raft log index. No node serves the user's watch state locally without the
+/// client's `X-Plurx-Read-After`, not even the node that acknowledged the
+/// write; with it, a node serves locally only once it has applied the larger
+/// of the echoed index and its own latest write for the user.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watch_fence_serves_watch_state_locally_only_behind_the_acknowledged_write() {
+    use plurx_core::store::{scope_http_watch_write_ack, HttpWatchWriteAck};
+
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let writer = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    writer
+        .validation_reset_contract_state()
+        .await
+        .expect("reset watch-fence state");
+    let dynamic: Arc<dyn Store> = writer.clone();
+    let fixture = seed_watch_fence_fixture(&dynamic, "fence").await;
+
+    // The contract client is a remote client, so both writes travel the API
+    // stream and the index comes back through the negotiated acked variant.
+    let progress_ack = HttpWatchWriteAck::default();
+    scope_http_watch_write_ack(
+        progress_ack.clone(),
+        dynamic.put_progress(fixture.user, fixture.movie, 10_000, Some(100_000)),
+    )
+    .await
+    .expect("record progress");
+    let progress_index = progress_ack
+        .commit_index()
+        .expect("the leader reports a streamed progress write's log index");
+    let watched_ack = HttpWatchWriteAck::default();
+    scope_http_watch_write_ack(
+        watched_ack.clone(),
+        dynamic.set_watched(fixture.user, fixture.episodes[0], true),
+    )
+    .await
+    .expect("mark watched");
+    let commit = watched_ack
+        .commit_index()
+        .expect("the leader reports a streamed watched write's log index");
+    assert!(
+        commit > progress_index,
+        "a later write commits at a later index"
+    );
+
+    let ids = vec![fixture.movie, fixture.episodes[0], fixture.episodes[1]];
+    let expected = serde_json::to_value(
+        dynamic
+            .watch_map(fixture.user, &ids)
+            .await
+            .expect("Authority watch map"),
+    )
+    .expect("serialize expected watch map");
+    assert!(
+        expected.as_array().is_some_and(|rows| rows.len() == 2),
+        "the fence must be exercised over the two rows just written"
+    );
+
+    // Node A, the writer, applied past its own write but asked without the
+    // header: Authority. Its record cannot prove the user wrote nothing
+    // through a peer since.
+    writer.validation_reset_operation_counts();
+    let actual = watch_fence_reader(&writer, commit + 1_000)
+        .watch_map(fixture.user, &ids, None)
+        .await
+        .expect("writer without header");
+    assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
+    assert_watch_read_path(&writer, false, "writer without X-Plurx-Read-After");
+
+    // Node A with a client floor older than its own write, one entry short
+    // of that write: its record raises the floor, so Authority, even though
+    // the bounded lag proof and the client's floor alone would allow a local
+    // read.
+    writer.validation_reset_operation_counts();
+    let actual = watch_fence_reader(&writer, commit - 1)
+        .watch_map(fixture.user, &ids, Some(progress_index))
+        .await
+        .expect("writer below its fence");
+    assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
+    assert_watch_read_path(&writer, false, "writer below its own write");
+
+    // Node A once it has applied the write, for the client that echoed it:
+    // local, and it sees the write.
+    writer.validation_reset_operation_counts();
+    let actual = watch_fence_reader(&writer, commit)
+        .watch_map(fixture.user, &ids, Some(commit))
+        .await
+        .expect("writer at its fence");
+    assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
+    assert_watch_read_path(&writer, true, "writer at its own write");
+
+    // Node B holds no write record for this user. Without the header it
+    // cannot tell "wrote nothing" from "wrote through a peer": Authority,
+    // however far ahead it is.
+    let peer = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    peer.validation_reset_operation_counts();
+    let actual = watch_fence_reader(&peer, commit + 1_000)
+        .watch_map(fixture.user, &ids, None)
+        .await
+        .expect("peer without header");
+    assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
+    assert_watch_read_path(&peer, false, "peer without X-Plurx-Read-After");
+
+    // With the writer's index echoed and applied past it: local.
+    peer.validation_reset_operation_counts();
+    let actual = watch_fence_reader(&peer, commit)
+        .watch_map(fixture.user, &ids, Some(commit))
+        .await
+        .expect("peer with header, applied");
+    assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
+    assert_watch_read_path(&peer, true, "peer applied past X-Plurx-Read-After");
+
+    // With the header but not yet applied: Authority.
+    peer.validation_reset_operation_counts();
+    watch_fence_reader(&peer, commit - 1)
+        .watch_map(fixture.user, &ids, Some(commit))
+        .await
+        .expect("peer with header, behind");
+    assert_watch_read_path(&peer, false, "peer behind X-Plurx-Read-After");
+
+    // Every reader method takes the same fence, not only the watch map.
+    let containers = vec![fixture.show, fixture.season];
+    peer.validation_reset_operation_counts();
+    watch_fence_reader(&peer, commit + 1_000)
+        .watch_summary(fixture.user, &ids, &containers, None)
+        .await
+        .expect("peer summary without header");
+    assert_watch_read_path(&peer, false, "summary without header");
+    peer.validation_reset_operation_counts();
+    watch_fence_reader(&peer, commit + 1_000)
+        .progress_rails(fixture.user, 20, None)
+        .await
+        .expect("peer rails without header");
+    assert_watch_read_path(&peer, false, "rails without header");
+    peer.validation_reset_operation_counts();
+    watch_fence_reader(&peer, commit + 1_000)
+        .watch_rollup(fixture.user, fixture.show, None)
+        .await
+        .expect("peer rollup without header");
+    assert_watch_read_path(&peer, false, "rollup without header");
+    peer.validation_reset_operation_counts();
+    watch_fence_reader(&peer, commit)
+        .watch_rollup(fixture.user, fixture.show, Some(commit))
+        .await
+        .expect("peer rollup with header");
+    assert_watch_read_path(&peer, true, "rollup with header");
+}
+
+/// Review of #504, finding 1. A node's own older write record is no proof
+/// of the user's latest watch write. The TV writes progress through node B,
+/// the phone then marks an episode watched through node A at a later index,
+/// and the TV loads Home on B — applied past B's own record, inside the lag
+/// budget, but short of A's write, and with no `X-Plurx-Read-After` because
+/// no client sends one yet. B must answer from Authority, whatever it has
+/// applied; only the client that echoes A's index gets a local read on B.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watch_fence_a_peers_older_record_does_not_prove_a_write_through_another_node() {
+    use plurx_core::store::{scope_http_watch_write_ack, HttpWatchWriteAck};
+
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let node_b = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    node_b
+        .validation_reset_contract_state()
+        .await
+        .expect("reset watch-fence state");
+    let node_a = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    let on_b: Arc<dyn Store> = node_b.clone();
+    let on_a: Arc<dyn Store> = node_a.clone();
+    let fixture = seed_watch_fence_fixture(&on_b, "peer-record").await;
+
+    // The TV, on B: progress. B records its index for the user.
+    let tv_ack = HttpWatchWriteAck::default();
+    scope_http_watch_write_ack(
+        tv_ack.clone(),
+        on_b.put_progress(fixture.user, fixture.movie, 10_000, Some(100_000)),
+    )
+    .await
+    .expect("progress through B");
+    let tv_index = tv_ack
+        .commit_index()
+        .expect("B's write reports its log index");
+    // The phone, on A: the next episode watched, at a later index B never
+    // sees.
+    let phone_ack = HttpWatchWriteAck::default();
+    scope_http_watch_write_ack(
+        phone_ack.clone(),
+        on_a.set_watched(fixture.user, fixture.episodes[0], true),
+    )
+    .await
+    .expect("watched through A");
+    let phone_index = phone_ack
+        .commit_index()
+        .expect("A's write reports its log index");
+    assert!(
+        phone_index > tv_index,
+        "the phone's write commits after the TV's"
+    );
+
+    let ids = vec![fixture.movie, fixture.episodes[0]];
+    let expected = serde_json::to_value(
+        on_b.watch_map(fixture.user, &ids)
+            .await
+            .expect("Authority watch map"),
+    )
+    .expect("serialize expected watch map");
+    assert!(
+        expected.as_array().is_some_and(|rows| rows.len() == 2),
+        "Authority sees both writes"
+    );
+
+    // The TV loads Home on B: applied past B's record, short of A's write,
+    // no header. Authority, for every watch read the reader offers.
+    let applied = phone_index - 1;
+    assert!(applied >= tv_index, "B has applied its own write");
+    node_b.validation_reset_operation_counts();
+    let actual = watch_fence_reader(&node_b, applied)
+        .watch_map(fixture.user, &ids, None)
+        .await
+        .expect("B without header");
+    assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
+    assert_watch_read_path(&node_b, false, "B's own older record, no header");
+    let containers = vec![fixture.show, fixture.season];
+    node_b.validation_reset_operation_counts();
+    watch_fence_reader(&node_b, applied)
+        .watch_summary(fixture.user, &ids, &containers, None)
+        .await
+        .expect("B summary without header");
+    assert_watch_read_path(&node_b, false, "B summary, no header");
+    node_b.validation_reset_operation_counts();
+    watch_fence_reader(&node_b, applied)
+        .progress_rails(fixture.user, 20, None)
+        .await
+        .expect("B rails without header");
+    assert_watch_read_path(&node_b, false, "B rails, no header");
+    node_b.validation_reset_operation_counts();
+    watch_fence_reader(&node_b, applied)
+        .watch_rollup(fixture.user, fixture.show, None)
+        .await
+        .expect("B rollup without header");
+    assert_watch_read_path(&node_b, false, "B rollup, no header");
+
+    // A client floor older than B's own write is raised by B's record.
+    node_b.validation_reset_operation_counts();
+    watch_fence_reader(&node_b, tv_index - 1)
+        .watch_map(fixture.user, &ids, Some(1))
+        .await
+        .expect("B below its own write");
+    assert_watch_read_path(&node_b, false, "B below its own record");
+
+    // The phone's index, echoed and applied on B: local, and it shows the
+    // episode watched.
+    node_b.validation_reset_operation_counts();
+    let actual = watch_fence_reader(&node_b, phone_index)
+        .watch_map(fixture.user, &ids, Some(phone_index))
+        .await
+        .expect("B with the phone's index");
+    assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
+    assert_watch_read_path(&node_b, true, "B applied past the echoed write");
+}
+
+/// K-04 M3. `watch_summary` and `progress_rails` are each one consistent
+/// read on the replicated store, and each returns exactly what the separate
+/// reads they replace return, on the Authority path and the local one.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watch_summary_and_progress_rails_are_one_read_matching_the_separate_reads() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset watch-summary state");
+    let dynamic: Arc<dyn Store> = store.clone();
+    let fixture = seed_watch_fence_fixture(&dynamic, "summary").await;
+
+    // Two in-progress movies with distinct recorded times, one finished
+    // episode per show (so each show has a next-up), and a watched episode
+    // under the first show's season so its rollups are non-trivial.
+    dynamic
+        .put_progress_at(
+            fixture.user,
+            fixture.movie,
+            10_000,
+            Some(100_000),
+            Some(1_000),
+        )
+        .await
+        .expect("first in-progress");
+    dynamic
+        .put_progress_at(
+            fixture.user,
+            fixture.other_movie,
+            20_000,
+            Some(100_000),
+            Some(2_000),
+        )
+        .await
+        .expect("second in-progress");
+    dynamic
+        .set_watched(fixture.user, fixture.episodes[0], true)
+        .await
+        .expect("watch first show's opener");
+    let ack = plurx_core::store::HttpWatchWriteAck::default();
+    plurx_core::store::scope_http_watch_write_ack(
+        ack.clone(),
+        dynamic.set_watched(fixture.user, fixture.second_show_episodes[0], true),
+    )
+    .await
+    .expect("watch second show's opener");
+    let commit = ack.commit_index().expect("last write's log index");
+
+    let item_ids = vec![
+        fixture.movie,
+        fixture.other_movie,
+        fixture.episodes[0],
+        fixture.episodes[1],
+        fixture.second_show_episodes[0],
+    ];
+    let container_ids = vec![fixture.show, fixture.season, fixture.movie];
+    let mut expected_watch = dynamic
+        .watch_map(fixture.user, &item_ids)
+        .await
+        .expect("separate watch map");
+    expected_watch.sort_by_key(|(id, _)| *id);
+    let expected_rollups = dynamic
+        .watch_rollups(fixture.user, &container_ids)
+        .await
+        .expect("separate rollups");
+    assert_eq!(expected_watch.len(), 4, "four rows were written");
+    assert_eq!(expected_rollups[&fixture.show].watched, 1);
+    let expected_rails = serde_json::json!({
+        "continue_watching": dynamic
+            .continue_watching(fixture.user, 20)
+            .await
+            .expect("separate continue watching"),
+        "next_up": dynamic.next_up(fixture.user, 20).await.expect("separate next up"),
+    });
+    assert_eq!(
+        expected_rails["continue_watching"].as_array().map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(expected_rails["next_up"].as_array().map(Vec::len), Some(2));
+
+    let check_summary = |mut summary: plurx_core::store::WatchSummary, label: &str| {
+        summary.watch.sort_by_key(|(id, _)| *id);
+        assert_eq!(summary.watch, expected_watch, "{label} watch half");
+        assert_eq!(summary.rollups, expected_rollups, "{label} rollup half");
+    };
+
+    // The per-request watch-read counter the HTTP layer asserts on counts
+    // exactly these statements: one each.
+    store.validation_reset_operation_counts();
+    let request = plurx_core::store::HttpStoreOperationCounts::default();
+    let summary = plurx_core::store::scope_http_store_operations(
+        request.clone(),
+        dynamic.watch_summary(fixture.user, &item_ids, &container_ids),
+    )
+    .await
+    .expect("Authority summary");
+    check_summary(summary, "Authority");
+    assert_watch_read_path(&store, false, "Authority summary is one consistent read");
+    assert_eq!(request.watch_reads(), 1, "summary: one counted watch read");
+
+    store.validation_reset_operation_counts();
+    let request = plurx_core::store::HttpStoreOperationCounts::default();
+    let rails = plurx_core::store::scope_http_store_operations(
+        request.clone(),
+        dynamic.progress_rails(fixture.user, 20),
+    )
+    .await
+    .expect("Authority rails");
+    assert_eq!(
+        serde_json::to_value(rails).expect("serialize rails"),
+        expected_rails,
+        "Authority rails"
+    );
+    assert_watch_read_path(&store, false, "Authority rails are one consistent read");
+    assert_eq!(request.watch_reads(), 1, "rails: one counted watch read");
+
+    store.validation_reset_operation_counts();
+    let summary = watch_fence_reader(&store, commit)
+        .watch_summary(fixture.user, &item_ids, &container_ids, Some(commit))
+        .await
+        .expect("local summary");
+    check_summary(summary, "local");
+    assert_watch_read_path(&store, true, "local summary is one local read");
+
+    store.validation_reset_operation_counts();
+    let rails = watch_fence_reader(&store, commit)
+        .progress_rails(fixture.user, 20, Some(commit))
+        .await
+        .expect("local rails");
+    assert_eq!(
+        serde_json::to_value(rails).expect("serialize rails"),
+        expected_rails,
+        "local rails"
+    );
+    assert_watch_read_path(&store, true, "local rails are one local read");
+
+    // Empty inputs issue no statement at all, exactly like the methods they
+    // replace.
+    store.validation_reset_operation_counts();
+    let empty = dynamic
+        .watch_summary(fixture.user, &[], &[])
+        .await
+        .expect("empty summary");
+    assert!(empty.watch.is_empty() && empty.rollups.is_empty());
+    let counts = store.validation_operation_counts();
+    assert_eq!(
+        counts.consistent_query_calls + counts.non_consistent_query_calls,
+        0
+    );
+}
+
+/// K-04 M3: the combined watch reads return exactly what the reads they
+/// replace return, on SQLite and on three voters.
+#[tokio::test]
+async fn watch_summary_and_progress_rails_match_the_separate_reads_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let fixture = seed_watch_fence_fixture(&store, &format!("combined-{backend}")).await;
+        store
+            .put_progress_at(
+                fixture.user,
+                fixture.movie,
+                10_000,
+                Some(100_000),
+                Some(1_000),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first in-progress: {error}"));
+        store
+            .put_progress_at(
+                fixture.user,
+                fixture.other_movie,
+                20_000,
+                Some(100_000),
+                Some(2_000),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second in-progress: {error}"));
+        store
+            .set_watched(fixture.user, fixture.episodes[0], true)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first opener: {error}"));
+        store
+            .set_watched(fixture.user, fixture.second_show_episodes[0], true)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second opener: {error}"));
+
+        let item_ids = vec![
+            fixture.movie,
+            fixture.other_movie,
+            fixture.episodes[0],
+            fixture.episodes[1],
+            fixture.second_show_episodes[0],
+        ];
+        let container_ids = vec![fixture.show, fixture.season, fixture.movie];
+        let mut separate = store
+            .watch_map(fixture.user, &item_ids)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: watch map: {error}"));
+        separate.sort_by_key(|(id, _)| *id);
+        let rollups = store
+            .watch_rollups(fixture.user, &container_ids)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: rollups: {error}"));
+        assert_eq!(separate.len(), 4, "{backend}: four watch rows");
+        assert_eq!(rollups[&fixture.show].leaves, 3, "{backend}: show leaves");
+        assert_eq!(rollups[&fixture.show].watched, 1, "{backend}: show watched");
+
+        let mut summary = store
+            .watch_summary(fixture.user, &item_ids, &container_ids)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: summary: {error}"));
+        summary.watch.sort_by_key(|(id, _)| *id);
+        assert_eq!(summary.watch, separate, "{backend}: summary watch half");
+        assert_eq!(summary.rollups, rollups, "{backend}: summary rollup half");
+        let containers_only = store
+            .watch_summary(fixture.user, &[], &container_ids)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: containers-only summary: {error}"));
+        assert!(
+            containers_only.watch.is_empty(),
+            "{backend}: no items asked"
+        );
+        assert_eq!(
+            containers_only.rollups, rollups,
+            "{backend}: containers only"
+        );
+
+        let continue_watching = store
+            .continue_watching(fixture.user, 20)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: continue watching: {error}"));
+        let next_up = store
+            .next_up(fixture.user, 20)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: next up: {error}"));
+        assert_eq!(
+            continue_watching
+                .iter()
+                .map(|row| row.item.id)
+                .collect::<Vec<_>>(),
+            vec![fixture.other_movie, fixture.movie],
+            "{backend}: most recent progress first"
+        );
+        assert_eq!(
+            next_up.iter().map(|row| row.item.id).collect::<Vec<_>>(),
+            vec![fixture.episodes[1], fixture.second_show_episodes[1]],
+            "{backend}: one next episode per show, by show title"
+        );
+        let rails = store
+            .progress_rails(fixture.user, 20)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: rails: {error}"));
+        assert_eq!(
+            serde_json::to_value(&rails.continue_watching).expect("serialize"),
+            serde_json::to_value(&continue_watching).expect("serialize"),
+            "{backend}: continue-watching rail"
+        );
+        assert_eq!(
+            serde_json::to_value(&rails.next_up).expect("serialize"),
+            serde_json::to_value(&next_up).expect("serialize"),
+            "{backend}: next-up rail"
+        );
+        // Each rail keeps its own limit.
+        let limited = store
+            .progress_rails(fixture.user, 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: limited rails: {error}"));
+        assert_eq!(
+            limited
+                .continue_watching
+                .iter()
+                .map(|row| row.item.id)
+                .collect::<Vec<_>>(),
+            vec![fixture.other_movie],
+            "{backend}: limited continue-watching"
+        );
+        assert_eq!(
+            limited
+                .next_up
+                .iter()
+                .map(|row| row.item.id)
+                .collect::<Vec<_>>(),
+            vec![fixture.episodes[1]],
+            "{backend}: limited next-up"
+        );
+    })
+    .await;
+}
+
+/// The calls K-05's query-plan protocol measures, shared with the
+/// `query_plans` example so both backends are planned for the same requests.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "../examples/query_plans/calls.rs"]
+mod k05_query_plan_calls;
+
+/// K-05 M0 (plan section 3.4 step 5): capture the replicated statements the
+/// measured calls execute, and the state machine's schema as a bootstrapped
+/// three-voter cluster created it, for `query_plans build-hiqlite`/`measure`.
+/// A measurement tool, not a contract, so it is ignored by default:
+///
+/// `K05_HIQLITE_CAPTURE=hiqlite.json cargo test -p plurx-core --features
+/// cluster-read-cost-validation,hiqlite-contract-tests --test store_contract
+/// -- --ignored k05_capture_hiqlite_statements`
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test]
+#[ignore = "K-05 measurement capture: writes the file named by K05_HIQLITE_CAPTURE"]
+async fn k05_capture_hiqlite_statements() {
+    let out = std::env::var_os("K05_HIQLITE_CAPTURE").expect("set K05_HIQLITE_CAPTURE");
+    let capture = k05_query_plan_calls::StatementCapture::default();
+    tracing::subscriber::set_global_default(capture.clone()).expect("capture subscriber");
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    let statements = k05_query_plan_calls::drive(&store, "hiqlite", &capture).await;
+    assert!(!statements.is_empty(), "no replicated statement events");
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect schema client");
+    let schema = client
+        .query_raw(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master \
+             WHERE sql IS NOT NULL ORDER BY rowid",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read state-machine schema")
+        .into_iter()
+        .map(|mut row| {
+            serde_json::json!({
+                "kind": row.get::<String>("type"),
+                "name": row.get::<String>("name"),
+                "table": row.get::<String>("tbl_name"),
+                "sql": row.get::<String>("sql"),
+            })
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(
+        out,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "backend": "hiqlite",
+            "schema": schema,
+            "statements": statements,
+        }))
+        .expect("encode capture"),
+    )
+    .expect("write capture");
+}
+
+/// The catalogue-wide Recently Added rail leaves out Recordings libraries on
+/// every backend, as the standalone store and the replicated local read
+/// always have; a Recordings library's own rail still lists its recordings.
+/// The replicated Authority read (the consistent path the bounded reader
+/// falls back to) used to include them, so the Home rail changed with the
+/// read path that served it.
+#[tokio::test]
+async fn catalogue_recently_added_leaves_out_recordings_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let mut ids = Vec::new();
+        for (kind, item_kind) in [
+            (LibraryKind::Movies, ItemKind::Movie),
+            (LibraryKind::Recordings, ItemKind::Video),
+        ] {
+            let library = store
+                .create_library(&NewLibrary {
+                    name: format!("{kind:?}"),
+                    kind,
+                    paths: vec![],
+                    anime: false,
+                })
+                .await
+                .expect("library");
+            let item = store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: item_kind,
+                    parent_id: None,
+                    title: format!("{kind:?} item"),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            ids.push((library.id, item));
+        }
+        let [(_, movie), (recordings, recording)] = ids[..] else {
+            unreachable!("two libraries")
+        };
+        let rail = |library_id: Option<i64>| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .recently_added(library_id, 20)
+                    .await
+                    .expect("recently added")
+                    .into_iter()
+                    .map(|card| card.item.id)
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(rail(None).await, [movie], "{backend}: catalogue-wide rail");
+        assert_eq!(
+            rail(Some(recordings)).await,
+            [recording],
+            "{backend}: the Recordings library's own rail"
+        );
+    })
+    .await;
+}
+
+/// K-05 M3 (plan section 3.6): search hides an item's `items_fts` hit only
+/// while it has a *current* classification index entry, which is membership
+/// of `classification_fts`, never existence of a `media_classifications`
+/// row. A rename deletes the item's `classification_fts` row through
+/// `classification_source_changed` and keeps the classification for the
+/// classifier to regenerate, so the renamed title must be found by its new
+/// title (through `items_fts`), not by its old one, while the classification
+/// row survives. The withdrawn `NOT EXISTS (… media_classifications …)`
+/// predicate would hide the renamed title from both branches.
+#[tokio::test]
+async fn search_renamed_title_is_found_by_its_new_title_only() {
+    use plurx_core::metadata::classification::classify;
+    use plurx_core::store::classification::Record;
+
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let movie = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Harbor Lights".into(),
+                year: Some(1999),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("movie");
+        let entry = store
+            .classification_page(0, 10)
+            .await
+            .expect("classification inventory")
+            .into_iter()
+            .find(|entry| entry.input().expect("input").id == movie)
+            .expect("the movie is in the classification inventory");
+        let record = Record {
+            classification: classify(
+                &entry.input().expect("input").metadata(),
+                vec!["lighthouse keeper".into()],
+            ),
+            source_json: entry.source_json,
+            overrides: Default::default(),
+            revision: 0,
+        };
+        assert!(store
+            .write_classification(movie, &record)
+            .await
+            .expect("classify"));
+        let found = |query: &'static str| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .search_items(query, 10)
+                    .await
+                    .expect("search")
+                    .into_iter()
+                    .map(|hit| hit.item.id)
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(
+            found("harbor lights").await,
+            [movie],
+            "{backend}: classified title"
+        );
+        assert_eq!(
+            found("lighthouse").await,
+            [movie],
+            "{backend}: classification terms"
+        );
+
+        store
+            .apply_metadata(
+                movie,
+                &MetadataPatch {
+                    title: Some("Night Tide".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("rename");
+        assert_eq!(found("night tide").await, [movie], "{backend}: new title");
+        assert!(
+            found("harbor lights").await.is_empty(),
+            "{backend}: the old title must not find the renamed item"
+        );
+        assert!(
+            found("lighthouse").await.is_empty(),
+            "{backend}: stale classification terms are not searchable"
+        );
+        let entry = store
+            .classification_page(0, 10)
+            .await
+            .expect("classification inventory")
+            .into_iter()
+            .find(|entry| entry.input().expect("input").id == movie)
+            .expect("renamed movie still inventoried");
+        assert!(
+            entry.record.is_some(),
+            "{backend}: the classification row survives the rename for regeneration"
+        );
+    })
+    .await;
+}
+
+fn subtitle_source_stamp(file_id: i64) -> plurx_core::store::SubtitleSourceStamp {
+    plurx_core::store::SubtitleSourceStamp {
+        file_id,
+        source_size: 10_000,
+        source_mtime: 1,
+        pipeline_version: "subtitle-source-v1".to_owned(),
+    }
+}
+
+async fn seed_backfill_file(store: &Arc<dyn Store>, prefix: &str, codecs: &[&str]) -> i64 {
+    let (_, id) = seed_file(store, prefix).await;
+    let file = store
+        .get_file(id)
+        .await
+        .expect("read seeded file")
+        .expect("file");
+    let subtitle_streams = codecs
+        .iter()
+        .enumerate()
+        .map(|(index, codec)| plurx_core::domain::SubtitleStream {
+            index: index as i64,
+            codec: (*codec).to_owned(),
+            ..Default::default()
+        })
+        .collect();
+    store
+        .upsert_file(
+            file.item_id,
+            file.path.to_str().expect("fixture path"),
+            file.size,
+            file.mtime,
+            &ProbeResult {
+                container: Some("mkv".to_owned()),
+                subtitle_streams,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("scan subtitle file");
+    id
+}
+
+fn backfill_publication(
+    file_id: i64,
+    ordinal: i64,
+    origin: &str,
+) -> plurx_core::store::SubtitleSourcePublication {
+    plurx_core::store::SubtitleSourcePublication {
+        file_id,
+        source_size: 10_000,
+        source_mtime: 1,
+        source_attestation: "a".repeat(64),
+        node_id: "node-a".to_owned(),
+        ordinal,
+        kind: "pgs".to_owned(),
+        format: "sup".to_owned(),
+        verdict: "kept".to_owned(),
+        attempts: 1,
+        origin: origin.to_owned(),
+        sha256: "b".repeat(64),
+        bytes: 20,
+        published_at_ms: 10,
+    }
+}
+
+#[tokio::test]
+async fn subtitle_backfill_never_selects_full_coverage() {
+    for_each_backend(|store, backend| async move {
+        let covered = seed_backfill_file(&store, "backfill-covered", &["subrip"]).await;
+        let mut extracted_text = backfill_publication(covered, 0, "extracted");
+        extracted_text.kind = "text".to_owned();
+        extracted_text.format = "webvtt".to_owned();
+        store
+            .upsert_subtitle_source_publication(&extracted_text)
+            .await
+            .expect("coverage");
+        let candidates = store
+            .subtitle_backfill_candidates(i64::MAX, i64::MAX, 13, 8)
+            .await
+            .expect("backfill candidates");
+        assert!(
+            candidates.is_empty(),
+            "{backend}: fully covered file selected: {candidates:?}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_backfill_never_selects_active_or_unexpired_terminal_request() {
+    for_each_backend(|store, backend| async move {
+        let active = seed_backfill_file(&store, "backfill-active", &["ass"]).await;
+        store
+            .enqueue_or_promote_subtitle_source(&subtitle_source_stamp(active), "normal", 10)
+            .await
+            .expect("active enqueue")
+            .expect("request");
+        let terminal = seed_backfill_file(&store, "backfill-terminal", &["mov_text"]).await;
+        let queued = store
+            .enqueue_or_promote_subtitle_source(&subtitle_source_stamp(terminal), "foreground", 10)
+            .await
+            .expect("terminal enqueue")
+            .expect("request");
+        let running = store
+            .claim_subtitle_fixture(&queued.request_id, "node-a", 11, 1000)
+            .await
+            .expect("claim")
+            .expect("running");
+        assert!(store
+            .complete_subtitle_fixture(&running, "stamp", 12)
+            .await
+            .expect("complete"));
+        let candidates = store
+            .subtitle_backfill_candidates(i64::MAX, i64::MAX, 13, 8)
+            .await
+            .expect("backfill candidates");
+        assert!(
+            candidates.is_empty(),
+            "{backend}: active and fresh terminal excluded: {candidates:?}"
+        );
+        let expired = store
+            .subtitle_backfill_candidates(i64::MAX, i64::MAX, 120_013, 8)
+            .await
+            .expect("expired terminal");
+        assert_eq!(
+            expired.iter().map(|row| row.file_id).collect::<Vec<_>>(),
+            vec![terminal],
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_backfill_pgs_only_coverage_still_selects_uncovered_text_ordinal() {
+    for_each_backend(|store, backend| async move {
+        let id =
+            seed_backfill_file(&store, "backfill-partial", &["hdmv_pgs_subtitle", "subrip"]).await;
+        store
+            .upsert_subtitle_source_publication(&backfill_publication(id, 0, "extracted"))
+            .await
+            .expect("PGS publication");
+        let mut hydrated_text = backfill_publication(id, 1, "hydrated");
+        hydrated_text.kind = "text".to_owned();
+        hydrated_text.format = "webvtt".to_owned();
+        store
+            .upsert_subtitle_source_publication(&hydrated_text)
+            .await
+            .expect("hydrated text publication");
+        let candidates = store
+            .subtitle_backfill_candidates(i64::MAX, i64::MAX, 10, 8)
+            .await
+            .expect("backfill candidates");
+        assert_eq!(candidates.len(), 1, "{backend}");
+        assert_eq!(candidates[0].file_id, id, "{backend}");
+        assert_eq!(candidates[0].uncovered_ordinals, 1, "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_backfill_selects_newest_first_with_bounded_page() {
+    for_each_backend(|store, backend| async move {
+        let old = seed_backfill_file(&store, "backfill-old", &["subrip"]).await;
+        let middle = seed_backfill_file(&store, "backfill-middle", &["ass"]).await;
+        let newest = seed_backfill_file(&store, "backfill-newest", &["hdmv_pgs_subtitle"]).await;
+        let first = store
+            .subtitle_backfill_candidates(i64::MAX, i64::MAX, 10, 2)
+            .await
+            .expect("first page");
+        assert_eq!(
+            first.iter().map(|row| row.file_id).collect::<Vec<_>>(),
+            vec![newest, middle],
+            "{backend}"
+        );
+        let last = first.last().expect("page row");
+        let second = store
+            .subtitle_backfill_candidates(last.scanned_at, last.file_id, 10, 2)
+            .await
+            .expect("second page");
+        assert_eq!(
+            second.iter().map(|row| row.file_id).collect::<Vec<_>>(),
+            vec![old],
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_backfill_diagnostics_show_real_lease_holder_and_uncovered_bytes_even_while_request_active(
+) {
+    for_each_backend(|store, backend| async move {
+        let covered = seed_backfill_file(&store, "backfill-diagnostic-covered", &["subrip"]).await;
+        let mut publication = backfill_publication(covered, 0, "extracted");
+        publication.kind = "text".to_owned();
+        publication.format = "webvtt".to_owned();
+        store
+            .upsert_subtitle_source_publication(&publication)
+            .await
+            .expect("cover first file");
+        let pending = seed_backfill_file(&store, "backfill-diagnostic-pending", &["ass"]).await;
+        store
+            .enqueue_or_promote_subtitle_source(&subtitle_source_stamp(pending), "normal", 100)
+            .await
+            .expect("active backfill")
+            .expect("request");
+        let lease = store
+            .acquire_lease("media:subtitle-source:backfill", "node-a", 100, 200)
+            .await
+            .expect("backfill lease");
+        assert!(matches!(lease, LeaseClaim::Acquired(_)), "{backend}");
+        let active = store
+            .subtitle_backfill_diagnostics(150)
+            .await
+            .expect("diagnostics");
+        assert_eq!(active.lease_holder.as_deref(), Some("node-a"), "{backend}");
+        assert_eq!(active.remaining_files, 1, "{backend}");
+        assert_eq!(active.remaining_bytes, 10_000, "{backend}");
+        let expired = store
+            .subtitle_backfill_diagnostics(200)
+            .await
+            .expect("expired lease");
+        assert_eq!(expired.lease_holder, None, "{backend}");
+        assert_eq!(
+            expired.remaining_files, 1,
+            "{backend}: active request must not hide remaining work"
+        );
+        let mut complete = backfill_publication(pending, 0, "extracted");
+        complete.kind = "text_styled".to_owned();
+        complete.format = "webvtt".to_owned();
+        store
+            .upsert_subtitle_source_publication(&complete)
+            .await
+            .expect("cover pending file");
+        let done = store
+            .subtitle_backfill_diagnostics(201)
+            .await
+            .expect("done diagnostics");
+        assert_eq!(
+            (done.remaining_files, done.remaining_bytes),
+            (0, 0),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_three_simultaneous_enqueues_plus_one_backfill_row_yield_one_active_row() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "subtitle-m2-concurrent").await;
+        let stamp = subtitle_source_stamp(file_id);
+        let backfill = store
+            .enqueue_or_promote_subtitle_source(&stamp, "normal", 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: backfill: {error}"))
+            .expect("backfill row");
+        let mut tasks = Vec::new();
+        for _ in 0..3 {
+            let store = Arc::clone(&store);
+            let stamp = stamp.clone();
+            tasks.push(tokio::spawn(async move {
+                store
+                    .enqueue_or_promote_subtitle_source(&stamp, "foreground", 11)
+                    .await
+            }));
+        }
+        for task in tasks {
+            let joined = task
+                .await
+                .expect("join task")
+                .expect("enqueue")
+                .expect("active request");
+            assert_eq!(joined.request_id, backfill.request_id, "{backend}");
+            assert_eq!(
+                joined.requested_generation,
+                stamp.generation(0),
+                "{backend}"
+            );
+        }
+        let promoted = store
+            .analysis_request(&backfill.request_id)
+            .await
+            .expect("read request")
+            .expect("request retained");
+        assert_eq!(promoted.priority, "foreground", "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_foreground_join_promotes_queued_normal_in_place_and_leaves_running_untouched(
+) {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "subtitle-m2-promotion").await;
+        let stamp = subtitle_source_stamp(file_id);
+        let queued = store
+            .enqueue_or_promote_subtitle_source(&stamp, "normal", 10)
+            .await
+            .expect("enqueue")
+            .expect("queued");
+        let promoted = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 11)
+            .await
+            .expect("promote")
+            .expect("promoted");
+        assert_eq!(promoted.request_id, queued.request_id, "{backend}");
+        assert_eq!(promoted.priority, "foreground", "{backend}");
+        let running = store
+            .claim_subtitle_fixture(&queued.request_id, "node-a", 12, 1000)
+            .await
+            .expect("self claim")
+            .expect("running");
+        let joined = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 13)
+            .await
+            .expect("join running")
+            .expect("same running");
+        assert_eq!(joined.request_id, running.request_id, "{backend}");
+        assert_eq!(joined.state, "running", "{backend}");
+        assert_eq!(joined.fence, running.fence, "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_promoted_row_uses_common_claim_and_leaves_legacy_order_intact() {
+    for_each_backend(|store, backend| async move {
+        let (_, subtitle_file) = seed_file(&store, "subtitle-m2-order-subtitle").await;
+        let (_, forced_file) = seed_file(&store, "subtitle-m2-order-forced").await;
+        let (_, normal_file) = seed_file(&store, "subtitle-m2-order-normal").await;
+        for (file_id, priority, force) in [
+            (normal_file, "normal", false),
+            (forced_file, "forced", true),
+        ] {
+            store
+                .enqueue_analysis_request(&NewAnalysisRequest {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    file_id,
+                    source_size: 10_000,
+                    source_mtime: 1,
+                    component: "fragment_index".to_owned(),
+                    pipeline_version: "m2-order-v1".to_owned(),
+                    video_identity: String::new(),
+                    requested_generation: uuid::Uuid::new_v4().to_string(),
+                    priority: priority.to_owned(),
+                    trigger: "admin".to_owned(),
+                    force_rebuild: force,
+                    target_node_id: "analysis-node".to_owned(),
+                    not_before_ms: 0,
+                    created_at_ms: 0,
+                })
+                .await
+                .expect("enqueue comparison request");
+        }
+        let stamp = subtitle_source_stamp(subtitle_file);
+        store
+            .enqueue_or_promote_subtitle_source(&stamp, "normal", 1)
+            .await
+            .expect("backfill");
+        store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 2)
+            .await
+            .expect("promote");
+        let first = store
+            .claim_subtitle_fixture(&stamp.generation(0), "analysis-node", 3, 1000)
+            .await
+            .expect("claim first")
+            .expect("first");
+        assert_eq!(first.component, "subtitle_source", "{backend}");
+        let second = store
+            .claim_analysis_request("analysis-node", 4, 1001)
+            .await
+            .expect("claim second")
+            .expect("second");
+        assert_eq!(second.priority, "forced", "{backend}");
+        let third = store
+            .claim_analysis_request("analysis-node", 5, 1002)
+            .await
+            .expect("claim third")
+            .expect("third");
+        assert_eq!(third.priority, "normal", "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_force_rebuild_one_is_refused() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "subtitle-m2-force-rebuild").await;
+        let stamp = subtitle_source_stamp(file_id);
+        let rejected = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: stamp.generation(0),
+                file_id,
+                source_size: stamp.source_size,
+                source_mtime: stamp.source_mtime,
+                component: "subtitle_source".to_owned(),
+                pipeline_version: stamp.pipeline_version.clone(),
+                video_identity: String::new(),
+                requested_generation: stamp.generation(0),
+                priority: "forced".to_owned(),
+                trigger: "playback".to_owned(),
+                force_rebuild: true,
+                target_node_id: String::new(),
+                not_before_ms: 0,
+                created_at_ms: 0,
+            })
+            .await;
+        assert!(
+            rejected.is_err(),
+            "{backend}: force rebuild must be refused"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_retiring_ready_reenqueues_new_generation_and_fourth_repair_in_day_is_refused(
+) {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "subtitle-m2-repair").await;
+        let stamp = subtitle_source_stamp(file_id);
+        for epoch in 0..3 {
+            let queued = store
+                .enqueue_or_promote_subtitle_source(&stamp, "foreground", 10 + epoch * 10)
+                .await
+                .expect("enqueue")
+                .expect("queued");
+            assert_eq!(
+                queued.requested_generation,
+                stamp.generation(epoch),
+                "{backend}"
+            );
+            let running = store
+                .claim_subtitle_fixture(
+                    &queued.request_id,
+                    "node-a",
+                    11 + epoch * 10,
+                    1000 + epoch * 10,
+                )
+                .await
+                .expect("self claim")
+                .expect("running");
+            assert!(
+                store
+                    .complete_subtitle_fixture(&running, "stamp", 12 + epoch * 10)
+                    .await
+                    .expect("complete"),
+                "{backend}"
+            );
+            assert!(
+                store
+                    .retire_subtitle_source_ready(&stamp, 13 + epoch * 10)
+                    .await
+                    .expect("retire"),
+                "{backend}"
+            );
+        }
+        let exhausted = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 41)
+            .await
+            .expect("bounded enqueue");
+        assert!(
+            exhausted.is_none(),
+            "{backend}: fourth repair must be refused"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_partial_ready_uncovered_ordinal_gets_foreground_repair_without_losing_covered_ordinal(
+) {
+    for_each_backend(|store, backend| async move {
+        let file_id = seed_backfill_file(
+            &store,
+            "subtitle-partial-ready-foreground",
+            &["hdmv_pgs_subtitle", "subrip"],
+        )
+        .await;
+        let stamp = subtitle_source_stamp(file_id);
+        let initial = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 10)
+            .await
+            .expect("initial enqueue")
+            .expect("initial request");
+        let running = store
+            .claim_subtitle_fixture(&initial.request_id, "node-a", 11, 1_000)
+            .await
+            .expect("initial claim")
+            .expect("running");
+        store
+            .upsert_subtitle_source_publication(&backfill_publication(file_id, 0, "extracted"))
+            .await
+            .expect("PGS publication");
+        assert!(store
+            .complete_subtitle_fixture(&running, "stamp", 12)
+            .await
+            .expect("complete partial request"));
+
+        let successor = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 13)
+            .await
+            .expect("foreground repair")
+            .expect("successor");
+        assert_eq!(successor.state, "queued", "{backend}");
+        assert_eq!(
+            successor.requested_generation,
+            stamp.generation(1),
+            "{backend}"
+        );
+        let retired = store
+            .analysis_request(&initial.request_id)
+            .await
+            .expect("read retired")
+            .expect("retired request");
+        assert_eq!(retired.state, "cancelled", "{backend}");
+        assert_eq!(retired.last_error_code, "coverage_incomplete", "{backend}");
+        let rows = store
+            .list_subtitle_source_publications(file_id, stamp.source_size, stamp.source_mtime)
+            .await
+            .expect("retained rows");
+        assert!(
+            rows.iter()
+                .any(|row| row.ordinal == 0 && row.origin == "extracted"),
+            "{backend}"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.ordinal == 1 && row.origin == "extracted"),
+            "{backend}"
+        );
+        let joined = store
+            .enqueue_or_promote_subtitle_source(&stamp, "normal", 14)
+            .await
+            .expect("backfill joins foreground")
+            .expect("active successor");
+        assert_eq!(joined.request_id, successor.request_id, "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_live_foreground_ordinal_absent_from_scanner_repairs_partial_ready() {
+    for_each_backend(|store, backend| async move {
+        let file_id =
+            seed_backfill_file(&store, "subtitle-stale-scanner-foreground", &["subrip"]).await;
+        let stamp = subtitle_source_stamp(file_id);
+        let initial = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 10)
+            .await
+            .expect("initial enqueue")
+            .expect("request");
+        let running = store
+            .claim_subtitle_fixture(&initial.request_id, "node-a", 11, 1_000)
+            .await
+            .expect("claim")
+            .expect("running");
+        let mut scanner_track = backfill_publication(file_id, 0, "extracted");
+        scanner_track.kind = "text".to_owned();
+        scanner_track.format = "webvtt".to_owned();
+        store
+            .upsert_subtitle_source_publication(&scanner_track)
+            .await
+            .expect("scanner track publication");
+        assert!(store
+            .complete_subtitle_fixture(&running, "stamp", 12)
+            .await
+            .expect("complete"));
+        let ready = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 13)
+            .await
+            .expect("full scanner coverage")
+            .expect("ready row");
+        assert_eq!(ready.state, "ready", "{backend}");
+        assert!(!store
+            .retire_subtitle_source_ready_for_ordinal(&stamp, 0, &"a".repeat(64), 14)
+            .await
+            .expect("covered ordinal cannot retire"));
+        assert!(store
+            .retire_subtitle_source_ready_for_ordinal(&stamp, 7, &"a".repeat(64), 15)
+            .await
+            .expect("live ordinal repair"));
+        let successor = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 16)
+            .await
+            .expect("successor enqueue")
+            .expect("successor");
+        assert_eq!(successor.state, "queued", "{backend}");
+        assert_eq!(
+            successor.requested_generation,
+            stamp.generation(1),
+            "{backend}"
+        );
+        let rows = store
+            .list_subtitle_source_publications(file_id, stamp.source_size, stamp.source_mtime)
+            .await
+            .expect("retained scanner publication");
+        assert!(
+            rows.iter()
+                .any(|row| row.ordinal == 0 && row.origin == "extracted"),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_foreground_repair_ignores_stale_digest_at_same_size_and_mtime() {
+    for_each_backend(|store, backend| async move {
+        let file_id =
+            seed_backfill_file(&store, "subtitle-stale-digest-foreground", &["subrip"]).await;
+        let stamp = subtitle_source_stamp(file_id);
+        let initial = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 10)
+            .await
+            .expect("initial enqueue")
+            .expect("request");
+        let running = store
+            .claim_subtitle_fixture(&initial.request_id, "node-a", 11, 1_000)
+            .await
+            .expect("claim")
+            .expect("running");
+        let mut stale = backfill_publication(file_id, 0, "extracted");
+        stale.kind = "text".to_owned();
+        stale.format = "webvtt".to_owned();
+        store
+            .upsert_subtitle_source_publication(&stale)
+            .await
+            .expect("stale publication");
+        assert!(store
+            .complete_subtitle_fixture(&running, "stamp", 12)
+            .await
+            .expect("complete"));
+        assert!(store
+            .retire_subtitle_source_ready_for_ordinal(&stamp, 0, &"c".repeat(64), 13)
+            .await
+            .expect("different sampled source bytes"));
+        let successor = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 14)
+            .await
+            .expect("successor enqueue")
+            .expect("successor");
+        assert_eq!(successor.state, "queued", "{backend}");
+        assert_eq!(
+            successor.requested_generation,
+            stamp.generation(1),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_repair_epoch_stays_monotonic_after_daily_allowance_resets() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "subtitle-repair-window-epoch").await;
+        let stamp = subtitle_source_stamp(file_id);
+        let first = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 10)
+            .await
+            .expect("first enqueue")
+            .expect("first request");
+        let running = store
+            .claim_subtitle_fixture(&first.request_id, "node-a", 11, 1_000)
+            .await
+            .expect("first claim")
+            .expect("running");
+        assert!(store
+            .complete_subtitle_fixture(&running, "stamp", 12)
+            .await
+            .expect("first complete"));
+        assert!(store
+            .retire_subtitle_source_ready(&stamp, 13)
+            .await
+            .expect("first lost publication"));
+        let next_day = 13 + plurx_core::store::SUBTITLE_SOURCE_REPAIR_WINDOW_MS + 1;
+        let second = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", next_day)
+            .await
+            .expect("new day enqueue")
+            .expect("second request");
+        assert_eq!(second.state, "queued", "{backend}");
+        assert_eq!(
+            second.requested_generation,
+            stamp.generation(1),
+            "{backend}"
+        );
+        assert_ne!(second.request_id, first.request_id, "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_repair_epoch_and_daily_budget_survive_terminal_history_pruning() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "subtitle-repair-pruned-history").await;
+        let stamp = subtitle_source_stamp(file_id);
+        let mut first_id = String::new();
+        for epoch in 0..3_i64 {
+            let queued = store
+                .enqueue_or_promote_subtitle_source(&stamp, "foreground", 10 + epoch * 10)
+                .await
+                .expect("enqueue")
+                .expect("request");
+            assert_eq!(
+                queued.requested_generation,
+                stamp.generation(epoch),
+                "{backend}"
+            );
+            if epoch == 0 {
+                first_id = queued.request_id.clone();
+            }
+            let running = store
+                .claim_subtitle_fixture(
+                    &queued.request_id,
+                    "node-a",
+                    11 + epoch * 10,
+                    1_000 + epoch * 10,
+                )
+                .await
+                .expect("claim")
+                .expect("running");
+            assert!(store
+                .complete_subtitle_fixture(&running, "stamp", 12 + epoch * 10)
+                .await
+                .expect("complete"));
+            assert!(store
+                .retire_subtitle_source_ready(&stamp, 13 + epoch * 10)
+                .await
+                .expect("retire"));
+        }
+        let pruned = store
+            .prune_analysis_requests(1_000, 100)
+            .await
+            .expect("prune terminal history");
+        assert!(pruned >= 2, "{backend}: expected old generations pruned");
+        assert!(
+            store
+                .analysis_request(&first_id)
+                .await
+                .expect("read first generation")
+                .is_none(),
+            "{backend}"
+        );
+        assert!(
+            store
+                .enqueue_or_promote_subtitle_source(&stamp, "foreground", 40)
+                .await
+                .expect("daily cap")
+                .is_none(),
+            "{backend}: pruning must not reset daily repair cap"
+        );
+        let next_day = plurx_core::store::SUBTITLE_SOURCE_REPAIR_WINDOW_MS + 1_000;
+        let successor = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", next_day)
+            .await
+            .expect("new day enqueue")
+            .expect("successor");
+        assert_eq!(successor.state, "queued", "{backend}");
+        assert_eq!(
+            successor.requested_generation,
+            stamp.generation(3),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_transient_ready_is_repaired_by_later_backfill_until_settled() {
+    for_each_backend(|store, backend| async move {
+        let file_id =
+            seed_backfill_file(&store, "subtitle-transient-ready-backfill", &["subrip"]).await;
+        let stamp = subtitle_source_stamp(file_id);
+        for epoch in 0..3_i64 {
+            let queued = store
+                .enqueue_or_promote_subtitle_source(&stamp, "normal", 10 + epoch * 130_000)
+                .await
+                .expect("backfill enqueue")
+                .expect("request");
+            assert_eq!(
+                queued.requested_generation,
+                stamp.generation(epoch),
+                "{backend}"
+            );
+            let running = store
+                .claim_subtitle_fixture(
+                    &queued.request_id,
+                    "node-a",
+                    11 + epoch * 130_000,
+                    1_000 + epoch * 130_000,
+                )
+                .await
+                .expect("worker claim")
+                .expect("running");
+            assert_eq!(running.request_id, queued.request_id, "{backend}");
+            let mut publication = backfill_publication(file_id, 0, "extracted");
+            publication.kind = "text".to_owned();
+            publication.format = "webvtt".to_owned();
+            publication.verdict = "transient".to_owned();
+            publication.sha256.clear();
+            publication.bytes = 0;
+            publication.attempts = epoch + 1;
+            store
+                .upsert_subtitle_source_publication(&publication)
+                .await
+                .expect("transient publication");
+            assert!(store
+                .complete_subtitle_fixture(&running, "stamp", 12 + epoch * 130_000)
+                .await
+                .expect("complete request"));
+            let candidates = store
+                .subtitle_backfill_candidates(i64::MAX, i64::MAX, 130_013 + epoch * 130_000, 8)
+                .await
+                .expect("backfill candidates");
+            assert_eq!(
+                candidates
+                    .iter()
+                    .any(|candidate| candidate.file_id == file_id),
+                epoch < 2,
+                "{backend}: transient coverage at attempt {}",
+                epoch + 1
+            );
+        }
+        let ready = store
+            .enqueue_or_promote_subtitle_source(&stamp, "foreground", 390_010)
+            .await
+            .expect("covered foreground request")
+            .expect("ready request");
+        assert_eq!(ready.state, "ready", "{backend}");
+        assert_eq!(ready.requested_generation, stamp.generation(2), "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subtitle_source_publication_crud_is_per_stamp_holder_and_representation() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "subtitle-m2-publication").await;
+        let row = plurx_core::store::SubtitleSourcePublication {
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_attestation: "a".repeat(64),
+            node_id: "node-a".to_owned(),
+            ordinal: 1,
+            kind: "text".to_owned(),
+            format: "webvtt".to_owned(),
+            verdict: "kept".to_owned(),
+            attempts: 1,
+            origin: "extracted".to_owned(),
+            sha256: "b".repeat(64),
+            bytes: 20,
+            published_at_ms: 10,
+        };
+        store
+            .upsert_subtitle_source_publication(&row)
+            .await
+            .expect("publish");
+        let mut styled = row.clone();
+        styled.format = "matroska".to_owned();
+        styled.kind = "text_styled".to_owned();
+        store
+            .upsert_subtitle_source_publication(&styled)
+            .await
+            .expect("publish styled");
+        let rows = store
+            .list_subtitle_source_publications(file_id, 10_000, 1)
+            .await
+            .expect("list");
+        assert_eq!(rows.len(), 2, "{backend}: representation rows merge");
+        store
+            .delete_subtitle_source_publication(file_id, 10_000, 1, "node-a", 1, "webvtt")
+            .await
+            .expect("delete exact row");
+        let rows = store
+            .list_subtitle_source_publications(file_id, 10_000, 1)
+            .await
+            .expect("list again");
+        assert_eq!(rows, vec![styled], "{backend}: sibling survives");
+    })
+    .await;
+}
+
+/// The K-05 M5 read indexes, by name.
+const ITEM_READ_INDEXES: [&str; 3] = [
+    "idx_items_tmdb",
+    "idx_items_imdb",
+    "idx_items_top_level_title",
+];
+
+/// One enriched movie in a fresh Movies library, for the read-index
+/// migration tests on both backends: `(library_id, movie_id)`.
+async fn seed_read_index_movie<S>(store: &S) -> (i64, i64)
+where
+    S: LibraryStore + MediaStore + ?Sized,
+{
+    let library = store
+        .create_library(&NewLibrary {
+            name: "M5 Movies".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![],
+            anime: false,
+        })
+        .await
+        .expect("read-index library");
+    let movie = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "Dune".into(),
+            year: Some(2021),
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("read-index movie");
+    store
+        .apply_metadata(
+            movie,
+            &MetadataPatch {
+                tmdb_id: Some(438_631),
+                imdb_id: Some("tt1160419".into()),
+                enriched: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("read-index metadata");
+    (library.id, movie)
+}
+
+/// The migrated store answers from the indexes it just gained: both external
+/// id arms and the Title page.
+async fn assert_read_index_movie<S>(store: &S, backend: &str, library_id: i64, movie: i64)
+where
+    S: MediaStore + ?Sized,
+{
+    for (tmdb, imdb) in [(Some(438_631), None), (None, Some("TT1160419"))] {
+        assert_eq!(
+            store
+                .item_by_external_id(ItemKind::Movie, tmdb, imdb)
+                .await
+                .expect("external id lookup")
+                .map(|item| item.id),
+            Some(movie),
+            "{backend}: tmdb {tmdb:?}, imdb {imdb:?}"
+        );
+    }
+    let page = store
+        .list_top_items(library_id, ItemSort::Title, 0, 50)
+        .await
+        .expect("title page");
+    assert_eq!(page.total, 1, "{backend}");
+    assert_eq!(
+        page.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+        vec![movie],
+        "{backend}"
+    );
+}
+
+/// K-05 M5: an existing v69 SQLite database gains the three read indexes on
+/// open, keeps its rows, and a v70 database opens without replaying them.
+#[tokio::test]
+async fn sqlite_v70_migration_adds_the_read_indexes_and_keeps_the_catalogue() {
+    let directory = tempfile::tempdir().expect("v69 migration fixture");
+    let path = directory.path().join("v69.db");
+    let store = SqliteStore::open(&path).expect("open fixture");
+    let (library_id, movie) = seed_read_index_movie(&store).await;
+    drop(store);
+
+    let count_indexes = |conn: &rusqlite::Connection| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'items'
+               AND name IN ('idx_items_tmdb', 'idx_items_imdb', 'idx_items_top_level_title')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count read indexes")
+    };
+    let conn = rusqlite::Connection::open(&path).expect("open downgrade fixture");
+    queue_fixture::remove_common_queue_schema(&conn);
+    assert_eq!(
+        count_indexes(&conn),
+        3,
+        "a fresh database is created with them"
+    );
+    for index in ITEM_READ_INDEXES {
+        conn.execute_batch(&format!("DROP INDEX {index};"))
+            .expect("remove v70-only shape");
+    }
+    conn.pragma_update(None, "user_version", 69)
+        .expect("mark the v69 predecessor");
+    drop(conn);
+
+    let migrated = SqliteStore::open(&path).expect("migrate v69 to v70");
+    assert_read_index_movie(&migrated, "sqlite v69 -> v70", library_id, movie).await;
+    drop(migrated);
+    let conn = rusqlite::Connection::open(&path).expect("inspect migrated fixture");
+    assert_eq!(count_indexes(&conn), 3, "v70 adds all three");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("user_version");
+    assert_eq!(version, plurx_core::store::SQLITE_SCHEMA_VERSION);
+    assert!(
+        version >= 70,
+        "the read-index migration and every later step ran"
+    );
+    drop(conn);
+    SqliteStore::open(&path).expect("a current database reopens without replaying v70");
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_read_index_count(client: &Client) -> i64 {
+    let rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT COUNT(*) AS value FROM sqlite_master
+              WHERE type = 'index' AND tbl_name = 'items'
+                AND name IN ('idx_items_tmdb', 'idx_items_imdb', 'idx_items_top_level_title')",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("count read indexes");
+    rows[0].value
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn replicated_schema_marker(client: &Client) -> i64 {
+    let rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read the marker");
+    rows[0].value
+}
+
+/// K-05 M5: a replicated v47 cluster gains the three read indexes through the
+/// daemon's migration step, keeps its rows, and forgives a replayed step
+/// (the loser of a two-voter race finds the indexes already there).
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect v47 read-index migration client");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("schema-v47-read-index-migration-telemetry.db");
+    let current = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current read-index schema");
+    let (library_id, movie) = seed_read_index_movie(&current).await;
+    drop(current);
+
+    assert_eq!(
+        replicated_read_index_count(&client).await,
+        3,
+        "a fresh cluster is created with them"
+    );
+
+    let mut rewind = ITEM_READ_INDEXES
+        .iter()
+        .map(|index| (format!("DROP INDEX {index}"), hiqlite::params!()))
+        .collect::<Vec<_>>();
+    rewind.push((
+        "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1".to_owned(),
+        hiqlite::params!(47_i64),
+    ));
+    client
+        .txn(rewind)
+        .await
+        .expect("construct v47 fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit v47 fixture");
+    assert_eq!(replicated_read_index_count(&client).await, 0);
+
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("daemon v47 through v48 read-index migration");
+    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
+    assert_eq!(
+        replicated_read_index_count(&client).await,
+        3,
+        "v48 adds all three"
+    );
+    assert_read_index_movie(&migrated, "hiqlite v47 -> v48", library_id, movie).await;
+
+    // The indexes present with the marker behind: the step is `IF NOT
+    // EXISTS` throughout, so a repeated attempt moves the marker instead of
+    // refusing.
+    client
+        .txn([(
+            "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+            hiqlite::params!(47_i64),
+        )])
+        .await
+        .expect("rewind the marker under the migrated shape");
+    let reopened = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("an idempotent step forgives a repeated attempt");
+    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
+    assert_eq!(replicated_read_index_count(&client).await, 3);
+    assert_read_index_movie(&reopened, "hiqlite replayed v48", library_id, movie).await;
+}
+
+#[tokio::test]
+async fn sqlite_v69_migration_from_v68_preserves_file_grants_and_live_analysis_requests() {
+    let directory = tempfile::tempdir().expect("v68 migration fixture");
+    let path = directory.path().join("v68.db");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&path).expect("open fixture"));
+    let (user_id, file_id) = seed_file(&store, "subtitle-m2-migration").await;
+    store
+        .create_file_grant(plurx_core::store::NewFileGrant {
+            id: "v68-reader-grant".to_owned(),
+            token_hash: "v68-reader-hash".to_owned(),
+            file_id,
+            user_id,
+            source_token_hash: "v68-source-hash".to_owned(),
+            created_at: 10,
+            expires_at: 100,
+        })
+        .await
+        .expect("seed v68 file grant");
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let live = store
+        .enqueue_analysis_request(&NewAnalysisRequest {
+            request_id: request_id.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".to_owned(),
+            pipeline_version: "v68-live".to_owned(),
+            video_identity: String::new(),
+            requested_generation: "v68-generation".to_owned(),
+            priority: "normal".to_owned(),
+            trigger: "admin".to_owned(),
+            force_rebuild: false,
+            target_node_id: "analysis-node".to_owned(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        })
+        .await
+        .expect("seed v68 live request");
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&path).expect("open downgrade fixture");
+    queue_fixture::remove_common_queue_schema(&conn);
+    let current_table: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='analysis_requests'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("current request DDL");
+    let attempts_table: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='analysis_attempts'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("current attempt DDL");
+    let v68_table = current_table
+        .replace(
+            "'fragment_index','skip_markers','subtitle_source'",
+            "'fragment_index','skip_markers'",
+        )
+        .replace("'normal','forced','foreground'", "'normal','forced'")
+        .replace("'admin','background','playback'", "'admin','background'");
+    assert_ne!(
+        v68_table, current_table,
+        "fixture must restore v68 CHECK constraints"
+    );
+    conn.execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_advance; DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_delete_source; DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_supersede_source; DROP TABLE subtitle_source_repair_epochs; DROP TRIGGER IF EXISTS subtitle_source_publications_delete_source; DROP TRIGGER IF EXISTS subtitle_source_publications_supersede_source; DROP TABLE subtitle_source_publications; DROP TRIGGER IF EXISTS analysis_requests_cancel_source; DROP TRIGGER IF EXISTS analysis_requests_supersede_source; DROP TRIGGER IF EXISTS analysis_requests_bound_terminal_history; DROP TRIGGER IF EXISTS analysis_requests_lifecycle_counters; DROP TABLE analysis_attempts; ALTER TABLE analysis_requests RENAME TO analysis_requests_v69_fixture;")
+        .expect("remove v69-only shape");
+    conn.execute_batch(&v68_table)
+        .expect("restore v68 request table");
+    conn.execute_batch("INSERT INTO analysis_requests SELECT * FROM analysis_requests_v69_fixture; DROP TABLE analysis_requests_v69_fixture;")
+        .expect("preserve v68 live row");
+    conn.execute_batch(&attempts_table)
+        .expect("restore v68 attempt table");
+    // A literal, not `SQLITE_SCHEMA_VERSION - 1`: the fixture is the v68
+    // shape, and later migrations (v70's indexes) must replay after v69.
+    conn.pragma_update(None, "user_version", 68)
+        .expect("mark true v68 predecessor");
+    drop(conn);
+
+    let migrated = SqliteStore::open(&path).expect("migrate v68 to v69");
+    let grant = migrated
+        .file_grant_by_hash("v68-reader-hash")
+        .await
+        .expect("read file grant")
+        .expect("v68 file grant survived");
+    assert_eq!(grant.id, "v68-reader-grant");
+    assert_eq!(grant.file_id, file_id);
+    assert_eq!(grant.user_id, user_id);
+    let preserved = migrated
+        .analysis_request(&request_id)
+        .await
+        .expect("read live row")
+        .expect("live row survived");
+    assert_eq!(preserved, live);
+    let stamp = subtitle_source_stamp(file_id);
+    let fresh = migrated
+        .enqueue_or_promote_subtitle_source(&stamp, "foreground", 20)
+        .await
+        .expect("v69 accepts subtitle source")
+        .expect("new request");
+    assert_eq!(fresh.component, "subtitle_source");
+}
+
+#[tokio::test]
+async fn hevc_full_attestation_survives_sampled_memos_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let mut observation = plurx_core::store::FragmentIndexSourceObservation {
+            node_id: "proof-node".into(),
+            file_id: 41,
+            object_version: "hevc-full-v1:s1:object-a".into(),
+            source_size: 100,
+            source_mtime: 1,
+            source_sha256: "a".repeat(64),
+            observed_at_ms: 1,
+        };
+        store
+            .record_fragment_index_source(&observation)
+            .await
+            .expect(backend);
+        observation.object_version = "s1:object-a".into();
+        observation.source_sha256 = "b".repeat(64);
+        store
+            .record_fragment_index_source(&observation)
+            .await
+            .expect(backend);
+        let retained = store
+            .fragment_index_source("proof-node", 41, "hevc-full-v1:s1:object-a")
+            .await
+            .expect(backend)
+            .expect("full proof memo survives sample of identical object");
+        assert_eq!(retained.source_sha256, "a".repeat(64), "{backend}");
+        observation.object_version = "s1:object-b".into();
+        store
+            .record_fragment_index_source(&observation)
+            .await
+            .expect(backend);
+        assert!(store
+            .fragment_index_source("proof-node", 41, "s1:object-b")
+            .await
+            .expect(backend)
+            .is_some());
+        observation.object_version = "hevc-full-v1:s1:object-b".into();
+        store
+            .record_fragment_index_source(&observation)
+            .await
+            .expect(backend);
+        assert!(store
+            .fragment_index_source("proof-node", 41, &observation.object_version)
+            .await
+            .expect(backend)
+            .is_some());
+    })
+    .await;
+}
+
+/// The outbox hint and the lease-expiry hint are local reads that agree with
+/// the authority once it has applied, on both backends.
+///
+/// The replicated backend's answer comes from whichever replica the client
+/// reads, so the positive cases wait (boundedly) for the write to apply
+/// rather than assuming read-your-writes; that lag is exactly why the drain
+/// treats both as hints and still claims on the authority.
+#[tokio::test]
+async fn watched_outbox_and_lease_hints_follow_the_authority_locally() {
+    async fn eventually(
+        backend: &str,
+        what: &str,
+        mut probe: impl FnMut() -> std::pin::Pin<Box<dyn Future<Output = bool> + Send>>,
+    ) {
+        for _ in 0..200 {
+            if probe().await {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("{backend}: {what} never became visible to the local hint");
+    }
+
+    for_each_backend(|store, backend| async move {
+        assert!(
+            !store
+                .watched_outbox_hint()
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: empty hint: {error}")),
+            "{backend}: an empty outbox must not hint"
+        );
+        store
+            .enqueue_watched("{}")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}"));
+        let hinted = Arc::clone(&store);
+        eventually(backend, "an enqueued row", move || {
+            let store = Arc::clone(&hinted);
+            Box::pin(async move { store.watched_outbox_hint().await.unwrap_or(false) })
+        })
+        .await;
+        let claimed = store
+            .due_watched(10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"));
+        assert_eq!(claimed.len(), 1, "{backend}");
+        let quiet = Arc::clone(&store);
+        eventually(backend, "a claimed row leaving the hint", move || {
+            let store = Arc::clone(&quiet);
+            Box::pin(async move { !store.watched_outbox_hint().await.unwrap_or(true) })
+        })
+        .await;
+
+        assert_eq!(
+            store
+                .lease_expiry_hint("watched:outbox")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: absent lease hint: {error}")),
+            None,
+            "{backend}"
+        );
+        let now = 1_000_000;
+        let LeaseClaim::Acquired(lease) = store
+            .acquire_lease("watched:outbox", "node-a", now, now + 90_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: acquire: {error}"))
+        else {
+            panic!("{backend}: an absent lease must be acquired");
+        };
+        let leased = Arc::clone(&store);
+        eventually(backend, "an acquired lease", move || {
+            let store = Arc::clone(&leased);
+            let expected = lease.expires_at_unix_ms;
+            Box::pin(async move {
+                store
+                    .lease_expiry_hint("watched:outbox")
+                    .await
+                    .ok()
+                    .flatten()
+                    == Some(expected)
+            })
+        })
+        .await;
+    })
+    .await;
+}
+
+/// K-03 M1 on three real voters: an idle drain proposes only its forced
+/// claims.
+///
+/// Sixty one-second passes over an empty outbox with a configured Curator.
+/// Before the hint, every pass was a replicated `UPDATE … RETURNING` — sixty
+/// proposals a minute per voter. Now the first pass claims (a fresh drain
+/// trusts no hint) and the next forced claim is owed at 30 s, so exactly two
+/// proposals reach Raft; the settings pair is read once, and every pass pays
+/// one local read. A drain that ignores its hint fails the write count.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn an_idle_watched_drain_proposes_only_its_forced_claims_on_three_voters() {
+    use plurx_core::store::watched_drain::{TickOutcome, WatchedDrain, HINT_FORCE_INTERVAL};
+    use plurx_core::store::WatchedOutboxStore;
+
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated contract state");
+    let mut drain = WatchedDrain::new();
+    let start = std::time::Instant::now();
+
+    // Unconfigured (the fleet default): an idle minute claims nothing at
+    // all, not even the forced claim, and reads the settings pair once.
+    store.validation_reset_operation_counts();
+    for second in 0..60 {
+        let pass = drain
+            .pass(&store, start + std::time::Duration::from_secs(second), 20)
+            .await
+            .expect("unconfigured pass");
+        assert_eq!(pass.outcome, TickOutcome::SkippedUnconfigured);
+    }
+    let counts = store.validation_operation_counts();
+    assert_eq!(
+        counts.write_calls, 0,
+        "an unconfigured Curator claims nothing"
+    );
+    assert_eq!(counts.consistent_query_calls, 1);
+
+    store
+        .put_setting(
+            plurx_core::store::keys::MONARR_URL,
+            "http://curator.invalid",
+        )
+        .await
+        .expect("curator url");
+    store
+        .put_setting(plurx_core::store::keys::MONARR_API_KEY, "key")
+        .await
+        .expect("curator key");
+    drain.settings_changed();
+
+    let start = start + std::time::Duration::from_secs(60);
+    let mut outcomes = Vec::new();
+    store.validation_reset_operation_counts();
+    for second in 0..60 {
+        let pass = drain
+            .pass(&store, start + std::time::Duration::from_secs(second), 20)
+            .await
+            .expect("idle pass");
+        assert!(pass.rows.is_empty());
+        outcomes.push(pass.outcome);
+    }
+    let counts = store.validation_operation_counts();
+    assert_eq!(
+        counts.write_calls,
+        60 / HINT_FORCE_INTERVAL.as_secs(),
+        "an idle minute may propose only the forced claims at 0 s and 30 s: {outcomes:?}"
+    );
+    assert_eq!(
+        counts.consistent_query_calls, 1,
+        "the Curator settings pair is read once per refresh interval"
+    );
+    assert_eq!(
+        counts.non_consistent_query_calls, 60,
+        "one local hint per pass"
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == TickOutcome::EmptyClaim)
+            .count(),
+        2
+    );
+
+    // Work still flows: a local enqueue wakes the drain, and the very next
+    // pass claims the row on the authority whatever the replica shows.
+    store.enqueue_watched("{}").await.expect("enqueue");
+    drain.wake();
+    store.validation_reset_operation_counts();
+    let pass = drain
+        .pass(&store, start + std::time::Duration::from_secs(61), 20)
+        .await
+        .expect("woken pass");
+    assert_eq!(pass.outcome, TickOutcome::Claimed);
+    assert_eq!(pass.rows.len(), 1);
+    assert_eq!(store.validation_operation_counts().write_calls, 1);
+}
+
+/// K-03 M2's non-owner check is a local read: asking whether the drain's
+/// singleton lease is visibly live proposes nothing on three voters, where a
+/// blind `acquire_lease` against a held lease is still one proposal.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn a_lease_expiry_hint_proposes_nothing_on_three_voters() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated contract state");
+    let now = 1_000_000;
+    let LeaseClaim::Acquired(_) = store
+        .acquire_lease("watched:outbox", "node-a", now, now + 90_000)
+        .await
+        .expect("acquire")
+    else {
+        panic!("an absent lease must be acquired");
+    };
+
+    store.validation_reset_operation_counts();
+    for _ in 0..15 {
+        let _ = store
+            .lease_expiry_hint("watched:outbox")
+            .await
+            .expect("hint");
+    }
+    let counts = store.validation_operation_counts();
+    assert_eq!(counts.write_calls, 0, "a local lease read must not propose");
+    assert_eq!(counts.consistent_query_calls, 0);
+    assert_eq!(counts.non_consistent_query_calls, 15);
+
+    store.validation_reset_operation_counts();
+    let held = store
+        .acquire_lease("watched:outbox", "node-b", now + 1, now + 90_001)
+        .await
+        .expect("contested acquire");
+    assert!(matches!(held, LeaseClaim::Held { .. }));
+    assert_eq!(
+        store.validation_operation_counts().write_calls,
+        1,
+        "the acquire it replaces is a proposal even when the lease is held"
+    );
+}
+
+/// Wait (boundedly) until a local hint agrees with the authority. The
+/// replicated backend answers from whichever replica the client reads, so a
+/// write is not assumed visible to it at once; that lag is exactly why every
+/// caller treats these reads as hints.
+async fn k10_eventually(
+    backend: &str,
+    what: &str,
+    mut probe: impl FnMut() -> std::pin::Pin<Box<dyn Future<Output = bool> + Send>>,
+) {
+    for _ in 0..200 {
+        if probe().await {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("{backend}: {what} never became visible to the local hint");
+}
+
+async fn k10_classification_hint_is(
+    store: &Arc<dyn Store>,
+    backend: &str,
+    now_unix: i64,
+    expected: bool,
+    what: &str,
+) {
+    let probed = Arc::clone(store);
+    k10_eventually(backend, what, move || {
+        let store = Arc::clone(&probed);
+        Box::pin(async move {
+            store
+                .classification_hint(now_unix)
+                .await
+                .is_ok_and(|due| due == expected)
+        })
+    })
+    .await;
+}
+
+/// Classify every item the way the worker does with no provider configured,
+/// optionally stamping the provider fields, and return how many were written.
+async fn k10_classify_all(
+    store: &Arc<dyn Store>,
+    stamp: impl Fn(&mut plurx_core::metadata::classification::Classification),
+) -> usize {
+    use plurx_core::{metadata::classification, store::classification::Record};
+    let mut written = 0;
+    for entry in store.classification_page(0, 256).await.expect("page") {
+        let input = entry.input().expect("input");
+        let mut result = classification::classify(&input.metadata(), Vec::new());
+        stamp(&mut result);
+        let record = Record {
+            source_json: entry.source_json.clone(),
+            classification: result,
+            overrides: Default::default(),
+            revision: entry.record.as_ref().map_or(0, |r| r.revision),
+        };
+        if store
+            .write_classification(input.id, &record)
+            .await
+            .expect("write")
+        {
+            written += 1;
+        }
+    }
+    written
+}
+
+async fn k10_seed_items(store: &Arc<dyn Store>, name: &str, count: usize) -> Vec<i64> {
+    let library = store
+        .create_library(&NewLibrary {
+            name: name.into(),
+            kind: LibraryKind::Movies,
+            paths: vec![],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    let mut ids = Vec::new();
+    for index in 0..count {
+        ids.push(
+            store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: format!("{name} {index}"),
+                    year: Some(2000),
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item"),
+        );
+    }
+    ids
+}
+
+/// K-10 §3.1: the offline queue hint is a local read that agrees with the
+/// authority once it has applied, on both backends, and only for the node
+/// the package is queued on.
+#[tokio::test]
+async fn offline_queue_hint_follows_the_authority_locally() {
+    for_each_backend(|store, backend| async move {
+        assert!(
+            !store
+                .offline_queue_hint("offline-node")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: empty hint: {error}")),
+            "{backend}: an empty queue must not hint"
+        );
+        let (user_id, file_id) = seed_file(&store, "k10-offline-hint").await;
+        let OfflineCreateOutcome::Created(_) = store
+            .create_offline_package(
+                &offline_request("k10-package", "k10-request", user_id, file_id),
+                10,
+                100_000,
+                100_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create: {error}"))
+        else {
+            panic!("{backend}: the package must be created");
+        };
+        let hinted = Arc::clone(&store);
+        k10_eventually(backend, "a queued package", move || {
+            let store = Arc::clone(&hinted);
+            Box::pin(async move {
+                store
+                    .offline_queue_hint("offline-node")
+                    .await
+                    .unwrap_or(false)
+            })
+        })
+        .await;
+        assert!(
+            !store
+                .offline_queue_hint("another-node")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: other node: {error}")),
+            "{backend}: a package queued for one node must not hint another"
+        );
+        let claimed = store
+            .claim_next_offline_package("offline-node")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"));
+        assert!(claimed.is_some(), "{backend}");
+        let quiet = Arc::clone(&store);
+        k10_eventually(backend, "a claimed package leaving the hint", move || {
+            let store = Arc::clone(&quiet);
+            Box::pin(async move {
+                !store
+                    .offline_queue_hint("offline-node")
+                    .await
+                    .unwrap_or(true)
+            })
+        })
+        .await;
+    })
+    .await;
+}
+
+/// K-10 §3.4 (M4): the offline expiry hint is a local read of the sweep's own
+/// predicate, and the policy that trusts it keeps every package until its
+/// expiry and no longer than one sweep tick past it, on both backends.
+///
+/// The passes run on a virtual clock at the daemon's cadence. A package is
+/// asserted present at every pass before its `expires_at` and absent at every
+/// pass from it on, so a hint that is ignored (the forced sweep alone would
+/// keep the first package ten minutes), a hint that never fires, or a sweep
+/// that runs early each fail it.
+#[tokio::test]
+async fn offline_expiry_hint_matches_the_sweep_and_nothing_expires_early_or_late() {
+    use plurx_core::store::offline_expiry::{OfflineExpiryPolicy, SweepOutcome, SWEEP_TICK};
+
+    for_each_backend(|store, backend| async move {
+        let base: i64 = 1_000_000;
+        let packages = [
+            ("k10-expiry-late", base + 1_000),
+            ("k10-expiry-early", base + 90),
+        ];
+        assert!(
+            !store
+                .offline_expiry_hint(base + 10_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: empty hint: {error}")),
+            "{backend}: no package, no lapse"
+        );
+        let (user_id, file_id) = seed_file(&store, "k10-expiry").await;
+        for (id, expires_at) in packages {
+            let mut request = offline_request(id, &format!("{id}-request"), user_id, file_id);
+            request.expires_at = expires_at;
+            let OfflineCreateOutcome::Created(_) = store
+                .create_offline_package(&request, 10, 100_000, 100_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: create {id}: {error}"))
+            else {
+                panic!("{backend}: {id} must be created");
+            };
+            // Created later-expiring first, so each wait sees its own row.
+            let hinted = Arc::clone(&store);
+            k10_eventually(backend, "a package's expiry", move || {
+                let store = Arc::clone(&hinted);
+                Box::pin(
+                    async move { store.offline_expiry_hint(expires_at).await.unwrap_or(false) },
+                )
+            })
+            .await;
+        }
+        // The hint's boundary is the sweep's: `expires_at <= now`.
+        let (_, early_at) = packages[1];
+        assert!(
+            !store
+                .offline_expiry_hint(early_at - 1)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: hint: {error}")),
+            "{backend}: nothing has lapsed a second before the first expiry"
+        );
+        assert_eq!(
+            store
+                .expire_offline_packages(early_at - 1)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: sweep: {error}")),
+            0,
+            "{backend}: and the sweep agrees"
+        );
+
+        let mut policy = OfflineExpiryPolicy::new();
+        let start = std::time::Instant::now();
+        let mut expired_total = 0;
+        let mut outcomes = Vec::new();
+        for tick in 0..=20u32 {
+            let now_unix = base + i64::from(tick) * SWEEP_TICK.as_secs() as i64;
+            let (outcome, expired) = policy
+                .pass(store.as_ref(), now_unix, start + SWEEP_TICK * tick)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: pass {tick}: {error}"));
+            outcomes.push(outcome);
+            expired_total += expired;
+            for (id, expires_at) in packages {
+                let exists = store
+                    .offline_package_for_user(id, user_id)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: lookup {id}: {error}"))
+                    .is_some();
+                if now_unix < expires_at {
+                    assert!(
+                        exists,
+                        "{backend}: {id} expired early, at {now_unix} < {expires_at}"
+                    );
+                } else {
+                    assert!(
+                        !exists,
+                        "{backend}: {id} (expires {expires_at}) outlived its expiry at {now_unix}"
+                    );
+                }
+            }
+        }
+        assert_eq!(expired_total, 2, "{backend}: {outcomes:?}");
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == SweepOutcome::Swept)
+                .count(),
+            2,
+            "{backend}: one sweep per lapse: {outcomes:?}"
+        );
+    })
+    .await;
+}
+
+/// K-10 §3.2: the classification hint fires for exactly the entries the
+/// worker's pass would write or re-check, on both backends.
+///
+/// Each condition in the worker's `unchanged` test and its provider rule is
+/// taken in turn — no record, unindexed, a changed source, an older rules
+/// version, a provider check due after success and after an error — and the
+/// hint must fire for it and fall silent once the entry is current. A
+/// condition added to the worker and not to `hint_sql` would leave an entry
+/// waiting for the forced pass; this is where that shows.
+#[tokio::test]
+async fn classification_hint_fires_for_exactly_what_a_pass_acts_on() {
+    use plurx_core::metadata::classification::VERSION;
+    use plurx_core::store::classification::{PROVIDER_REFRESH_SECS, PROVIDER_RETRY_SECS};
+    const NOW: i64 = 2_000_000_000;
+    for_each_backend(|store, backend| async move {
+        k10_classification_hint_is(&store, backend, NOW, false, "an empty library").await;
+        let ids = k10_seed_items(&store, "K10 hint", 2).await;
+        k10_classification_hint_is(&store, backend, NOW, true, "an unclassified item").await;
+        assert_eq!(k10_classify_all(&store, |_| {}).await, 2, "{backend}");
+        k10_classification_hint_is(&store, backend, NOW, false, "a classified library").await;
+
+        // A changed source.
+        store
+            .apply_metadata(
+                ids[0],
+                &MetadataPatch {
+                    overview: Some("Changed".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("edit");
+        k10_classification_hint_is(&store, backend, NOW, true, "a changed source").await;
+        assert_eq!(k10_classify_all(&store, |_| {}).await, 2, "{backend}");
+        k10_classification_hint_is(&store, backend, NOW, false, "a reclassified item").await;
+
+        // Unindexed alone: an edit and its revert leave the source equal to
+        // the record's but drop the search row, which only a pass restores.
+        for overview in ["Temporary", "Changed"] {
+            store
+                .apply_metadata(
+                    ids[0],
+                    &MetadataPatch {
+                        overview: Some(overview.into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("edit and revert");
+        }
+        k10_classification_hint_is(&store, backend, NOW, true, "an unindexed item").await;
+        assert_eq!(k10_classify_all(&store, |_| {}).await, 2, "{backend}");
+        k10_classification_hint_is(&store, backend, NOW, false, "a reindexed item").await;
+
+        // An older rules version.
+        k10_classify_all(&store, |c| c.version = "metadata-rules-v0".into()).await;
+        k10_classification_hint_is(&store, backend, NOW, true, "an older rules version").await;
+        k10_classify_all(&store, |c| c.version = VERSION.into()).await;
+        k10_classification_hint_is(&store, backend, NOW, false, "the current version").await;
+
+        // Provider checks: only with a key, only for an identified movie or
+        // show, and only once the refresh (or, after an error, retry) age
+        // has passed.
+        store
+            .apply_metadata(
+                ids[1],
+                &MetadataPatch {
+                    tmdb_id: Some(42),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("identify");
+        k10_classify_all(&store, |c| {
+            c.provider_checked_at = NOW - PROVIDER_REFRESH_SECS - 1
+        })
+        .await;
+        k10_classification_hint_is(&store, backend, NOW, false, "no provider key").await;
+        store
+            .put_setting(plurx_core::store::keys::TMDB_API_KEY, "key")
+            .await
+            .expect("key");
+        k10_classification_hint_is(&store, backend, NOW, true, "a stale provider check").await;
+        k10_classify_all(&store, |c| c.provider_checked_at = NOW - 60).await;
+        k10_classification_hint_is(&store, backend, NOW, false, "a fresh provider check").await;
+        k10_classify_all(&store, |c| {
+            c.provider_checked_at = NOW - PROVIDER_RETRY_SECS - 1;
+            c.provider_error = Some("unreachable".into());
+        })
+        .await;
+        k10_classification_hint_is(&store, backend, NOW, true, "a failed check to retry").await;
+        k10_classify_all(&store, |c| {
+            c.provider_checked_at = NOW - 60;
+            c.provider_error = Some("unreachable".into());
+        })
+        .await;
+        k10_classification_hint_is(&store, backend, NOW, false, "a recent failed check").await;
+        store
+            .put_setting(plurx_core::store::keys::TMDB_API_KEY, "")
+            .await
+            .expect("clear key");
+    })
+    .await;
+}
+
+/// K-10 M1 on three real voters: an idle offline worker proposes only its
+/// forced claims.
+///
+/// The minute before is measured, not recalled: the worker's old loop made
+/// the replicated claim every 2 s whatever the queue held, and thirty of them
+/// are thirty proposals. The policy's minute over the same empty queue makes
+/// the forced claims at 0 s and 30 s and nothing else, reads nothing on the
+/// authority, and pays one local read per pass. A worker that ignores its
+/// hint fails the write count.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn an_idle_offline_worker_proposes_only_its_forced_claims_on_three_voters() {
+    use plurx_core::store::offline_claim::{ClaimOutcome, OfflineClaimPolicy, HINT_FORCE_INTERVAL};
+
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated contract state");
+
+    // Before: the old loop's minute, one blind claim every 2 s.
+    store.validation_reset_operation_counts();
+    for _ in 0..30 {
+        assert!(store
+            .claim_next_offline_package("offline-node")
+            .await
+            .expect("blind claim")
+            .is_none());
+    }
+    let before = store.validation_operation_counts();
+    assert_eq!(before.write_calls, 30, "the old idle minute");
+
+    // After: the policy's minute, driven at the delays it chooses.
+    let mut policy = OfflineClaimPolicy::new();
+    let start = std::time::Instant::now();
+    let mut offset = std::time::Duration::ZERO;
+    let mut outcomes = Vec::new();
+    store.validation_reset_operation_counts();
+    while offset < std::time::Duration::from_secs(60) {
+        let (outcome, package) = policy
+            .pass(&store, "offline-node", start + offset)
+            .await
+            .expect("idle pass");
+        assert!(package.is_none());
+        outcomes.push(outcome);
+        offset += policy.delay();
+    }
+    let after = store.validation_operation_counts();
+    assert_eq!(
+        after.write_calls,
+        60 / HINT_FORCE_INTERVAL.as_secs(),
+        "an idle minute may propose only the forced claims at 0 s and 30 s: {outcomes:?}"
+    );
+    assert_eq!(
+        after.consistent_query_calls, 0,
+        "nothing read on the authority"
+    );
+    assert_eq!(
+        after.non_consistent_query_calls,
+        outcomes.len() as u64,
+        "one local hint per pass"
+    );
+    eprintln!(
+        "K-10 offline idle minute on three voters: before {} proposals, after {} ({} passes)",
+        before.write_calls,
+        after.write_calls,
+        outcomes.len()
+    );
+
+    // Work still flows: a local enqueue wakes the worker, and the very next
+    // pass claims the package on the authority whatever the replica shows.
+    let store: Arc<dyn Store> = Arc::new(store);
+    let (user_id, file_id) = seed_file(&store, "k10-offline-wake").await;
+    let OfflineCreateOutcome::Created(_) = store
+        .create_offline_package(
+            &offline_request("k10-woken", "k10-woken-request", user_id, file_id),
+            10,
+            100_000,
+            100_000,
+        )
+        .await
+        .expect("create")
+    else {
+        panic!("the package must be created");
+    };
+    policy.wake();
+    let (outcome, package) = policy
+        .pass(store.as_ref(), "offline-node", start + offset)
+        .await
+        .expect("woken pass");
+    assert_eq!(outcome, ClaimOutcome::Claimed);
+    assert_eq!(package.expect("claimed").id, "k10-woken");
+}
+
+/// K-10 M4 on three real voters: an idle offline expiry sweep proposes only
+/// its forced sweeps.
+///
+/// The half hour before is measured, not recalled: the old loop ran the
+/// replicated sweep `txn` once a minute whatever had lapsed, and thirty of
+/// them are thirty proposals. The policy's half hour over the same empty
+/// table sweeps at 0, 10 and 20 minutes and nothing else, reads nothing on
+/// the authority, and pays one local read per other pass. A sweep that
+/// ignores its hint fails the write count; then a lapse is swept on the very
+/// next pass.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn an_idle_offline_expiry_sweep_proposes_only_its_forced_sweeps_on_three_voters() {
+    use plurx_core::store::offline_expiry::{
+        OfflineExpiryPolicy, SweepOutcome, FORCED_SWEEP_INTERVAL, SWEEP_TICK,
+    };
+
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated contract state");
+    let base: i64 = 1_000_000;
+    let minutes: u32 = 30;
+    let unix_at = |tick: u32| base + i64::from(tick) * SWEEP_TICK.as_secs() as i64;
+
+    // Before: the old loop's half hour, one blind sweep a minute.
+    store.validation_reset_operation_counts();
+    for tick in 0..minutes {
+        assert_eq!(
+            store
+                .expire_offline_packages(unix_at(tick))
+                .await
+                .expect("blind sweep"),
+            0
+        );
+    }
+    let before = store.validation_operation_counts();
+    assert_eq!(
+        before.write_calls,
+        u64::from(minutes),
+        "the old idle half hour"
+    );
+
+    // After: the policy's half hour, at the same cadence.
+    let mut policy = OfflineExpiryPolicy::new();
+    let start = std::time::Instant::now();
+    let mut outcomes = Vec::new();
+    store.validation_reset_operation_counts();
+    for tick in 0..minutes {
+        let (outcome, expired) = policy
+            .pass(&store, unix_at(tick), start + SWEEP_TICK * tick)
+            .await
+            .expect("idle pass");
+        assert_eq!(expired, 0);
+        outcomes.push(outcome);
+    }
+    let after = store.validation_operation_counts();
+    let forced = u64::from(minutes) * SWEEP_TICK.as_secs() / FORCED_SWEEP_INTERVAL.as_secs();
+    assert_eq!(
+        after.write_calls, forced,
+        "an idle half hour may propose only the forced sweeps at 0, 10 and 20 minutes: {outcomes:?}"
+    );
+    assert_eq!(
+        after.consistent_query_calls, 0,
+        "nothing read on the authority"
+    );
+    assert_eq!(
+        after.non_consistent_query_calls,
+        u64::from(minutes) - forced,
+        "one local hint per unforced pass"
+    );
+    eprintln!(
+        "K-10 M4 offline expiry idle half hour on three voters: before {} proposals, after {} ({} passes)",
+        before.write_calls,
+        after.write_calls,
+        outcomes.len()
+    );
+
+    // A lapse is still swept on the next pass, well before the next forced
+    // sweep: the pass at 30 minutes is forced; the package lapses 50 s later
+    // and the unforced pass at 31 minutes expires it.
+    let (forced_outcome, _) = policy
+        .pass(&store, unix_at(minutes), start + SWEEP_TICK * minutes)
+        .await
+        .expect("forced pass");
+    assert_eq!(forced_outcome, SweepOutcome::EmptySweep);
+    let store: Arc<dyn Store> = Arc::new(store);
+    let (user_id, file_id) = seed_file(&store, "k10-expiry-voters").await;
+    let expires_at = unix_at(minutes) + 50;
+    let mut request = offline_request("k10-lapsing", "k10-lapsing-request", user_id, file_id);
+    request.expires_at = expires_at;
+    let OfflineCreateOutcome::Created(_) = store
+        .create_offline_package(&request, 10, 100_000, 100_000)
+        .await
+        .expect("create")
+    else {
+        panic!("the package must be created");
+    };
+    let hinted = Arc::clone(&store);
+    k10_eventually("hiqlite-3-voter", "the lapsing package", move || {
+        let store = Arc::clone(&hinted);
+        Box::pin(async move { store.offline_expiry_hint(expires_at).await.unwrap_or(false) })
+    })
+    .await;
+    let (outcome, expired) = policy
+        .pass(
+            store.as_ref(),
+            unix_at(minutes + 1),
+            start + SWEEP_TICK * (minutes + 1),
+        )
+        .await
+        .expect("hinted pass");
+    assert_eq!((outcome, expired), (SweepOutcome::Swept, 1));
+    assert!(store
+        .offline_package_for_user("k10-lapsing", user_id)
+        .await
+        .expect("lookup")
+        .is_none());
+}
+
+/// K-10 M2 on three real voters: the classification lease is no longer a
+/// once-a-second proposal loop.
+///
+/// Before is measured with the old worker's per-second body (acquire the
+/// lease, read one page, release it) over an idle, fully classified library:
+/// two proposals a second from the winner. After, the schedule over the same
+/// library, once a pass has run, proposes nothing in a minute and reads
+/// nothing on the authority — two local reads per decision. A node facing a
+/// lease a peer holds reads the lease row locally every 15 s where a blind
+/// contest is a proposal per try. A schedule that ignores either hint fails
+/// the write count.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn an_idle_classification_schedule_proposes_nothing_on_three_voters() {
+    use plurx_core::store::classification_schedule::{
+        ClassificationSchedule, Decision, ScheduleOutcome, LEASE_RETRY, RESOURCE,
+    };
+
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let hiqlite = open_contract_hiqlite_store(&cluster).await;
+    hiqlite
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated contract state");
+    let hiqlite = Arc::new(hiqlite);
+    let store: Arc<dyn Store> = hiqlite.clone();
+    k10_seed_items(&store, "K10 idle", 40).await;
+    assert_eq!(k10_classify_all(&store, |_| {}).await, 40);
+    k10_classification_hint_is(
+        &store,
+        "hiqlite-3-voter",
+        10_000,
+        false,
+        "a classified library",
+    )
+    .await;
+
+    let mut now: i64 = 10_000_000;
+    let schedule_start = now;
+
+    // Before: the old worker's idle minute, one page per second under a lease
+    // taken and released around it.
+    hiqlite.validation_reset_operation_counts();
+    for _ in 0..60 {
+        let LeaseClaim::Acquired(lease) = store
+            .acquire_lease(RESOURCE, "legacy-worker", now, now + 120_000)
+            .await
+            .expect("legacy acquire")
+        else {
+            panic!("an idle, released lease must be acquired");
+        };
+        let _ = store.classification_page(0, 32).await.expect("legacy page");
+        assert!(store.release_lease(&lease, now).await.expect("release"));
+        now += 1_000;
+    }
+    let before = hiqlite.validation_operation_counts();
+    assert_eq!(before.write_calls, 120, "the old idle minute");
+
+    // A pass has just run and released the lease (its row now records when).
+    let LeaseClaim::Acquired(pass) = store
+        .acquire_lease(RESOURCE, "node-a", now, now + 90_000)
+        .await
+        .expect("pass acquire")
+    else {
+        panic!("the pass lease");
+    };
+    now += 5_000;
+    assert!(store.release_lease(&pass, now).await.expect("pass release"));
+    let released_at = now;
+    let leased = Arc::clone(&store);
+    k10_eventually("hiqlite-3-voter", "the released lease row", move || {
+        let store = Arc::clone(&leased);
+        Box::pin(async move {
+            store.lease_expiry_hint(RESOURCE).await.ok().flatten() == Some(released_at)
+        })
+    })
+    .await;
+
+    // After: every node's schedule over the next minute.
+    let mut schedule = ClassificationSchedule::new(schedule_start);
+    let mut decisions = Vec::new();
+    let end = now + 60_000;
+    hiqlite.validation_reset_operation_counts();
+    while now < end {
+        let decision = schedule.decide(store.as_ref(), now).await;
+        let Decision::Wait(wait, outcome) = decision else {
+            panic!("an idle library must not start a pass: {decision:?}");
+        };
+        decisions.push(outcome);
+        now += i64::try_from(wait.as_millis()).expect("wait");
+    }
+    let after = hiqlite.validation_operation_counts();
+    assert_eq!(
+        after.write_calls, 0,
+        "an idle minute proposes nothing: {decisions:?}"
+    );
+    assert_eq!(after.consistent_query_calls, 0);
+    assert_eq!(
+        after.non_consistent_query_calls,
+        2 * decisions.len() as u64,
+        "a lease read and a pass hint per decision"
+    );
+    eprintln!(
+        "K-10 classification idle minute on three voters: before {} proposals, after {} ({} decisions)",
+        before.write_calls,
+        after.write_calls,
+        decisions.len()
+    );
+
+    // A peer holds the lease for a pass: this node reads the row locally
+    // every LEASE_RETRY and proposes nothing, where a blind contest is one
+    // proposal per try.
+    let LeaseClaim::Acquired(_held) = store
+        .acquire_lease(RESOURCE, "node-a", now, now + 3_600_000)
+        .await
+        .expect("peer acquire")
+    else {
+        panic!("the peer's lease");
+    };
+    let held_until = now + 3_600_000;
+    let leased = Arc::clone(&store);
+    k10_eventually("hiqlite-3-voter", "the peer's live lease", move || {
+        let store = Arc::clone(&leased);
+        Box::pin(async move {
+            store.lease_expiry_hint(RESOURCE).await.ok().flatten() == Some(held_until)
+        })
+    })
+    .await;
+    let mut peer = ClassificationSchedule::new(now);
+    let end = now + 60_000;
+    let mut looks = 0;
+    hiqlite.validation_reset_operation_counts();
+    while now < end {
+        assert_eq!(
+            peer.decide(store.as_ref(), now).await,
+            Decision::Wait(LEASE_RETRY, ScheduleOutcome::NotOwner)
+        );
+        looks += 1;
+        now += i64::try_from(LEASE_RETRY.as_millis()).expect("retry");
+    }
+    let facing = hiqlite.validation_operation_counts();
+    assert_eq!(facing.write_calls, 0, "a held lease is not contested");
+    assert_eq!(facing.non_consistent_query_calls, looks);
+    hiqlite.validation_reset_operation_counts();
+    assert!(matches!(
+        store
+            .acquire_lease(RESOURCE, "node-b", now, now + 90_000)
+            .await
+            .expect("blind contest"),
+        LeaseClaim::Held { .. }
+    ));
+    assert_eq!(
+        hiqlite.validation_operation_counts().write_calls,
+        1,
+        "the contest it replaces is a proposal even when it loses"
+    );
 }

@@ -504,6 +504,20 @@ impl OfflinePackageStore for SqliteStore {
         .await
     }
 
+    async fn offline_queue_hint(&self, node_id: &str) -> Result<bool, StoreError> {
+        let node = node_id.to_owned();
+        self.with_read(move |conn| {
+            let queued: i64 = conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM offline_packages \
+                 WHERE node_id = ?1 AND state = 'queued')",
+                [node],
+                |row| row.get(0),
+            )?;
+            Ok(queued != 0)
+        })
+        .await
+    }
+
     async fn requeue_offline_package(
         &self,
         package_id: &str,
@@ -972,6 +986,18 @@ impl OfflinePackageStore for SqliteStore {
             )?;
             tx.commit()?;
             Ok(changed == 1)
+        })
+        .await
+    }
+
+    async fn offline_expiry_hint(&self, now: i64) -> Result<bool, StoreError> {
+        self.with_read(move |conn| {
+            let lapsed: i64 = conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM offline_packages WHERE expires_at <= ?1)",
+                [now],
+                |row| row.get(0),
+            )?;
+            Ok(lapsed != 0)
         })
         .await
     }

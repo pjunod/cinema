@@ -140,7 +140,7 @@ id = "web-static"
 title = "Embedded JavaScript and theme contrast"
 command = "make web-check"
 profiles = ["commit", "ci", "full", "nightly"]
-requires = ["node", "python3"]
+requires = ["node", "npm", "python3"]
 missing = "fail"
 timeout_seconds = 120
 
@@ -242,7 +242,7 @@ timeout_seconds = 3600
 
 [[checks]]
 id = "container-runtime"
-title = "Release container startup, health, and restart smoke"
+title = "Release container startup, health, restart, and backup/restore smoke"
 command = "mkdir -p target/validation/buildx && BUILDX_CONFIG=target/validation/buildx make container-smoke"
 profiles = ["full", "nightly"]
 platforms = ["darwin", "linux"]
@@ -412,6 +412,10 @@ paths = [
   # adds a newly-required column breaks it, so it belongs with the model whose
   # persistence it reproduces.
   "crates/plurx-core/examples/catalogue_fixture.rs",
+  # K-05's query-plan tool over that fixture: it drives the real stores'
+  # hot catalogue reads, captures the statements they trace, and records
+  # each plan and its cold and warm timings on both backends' schemas.
+  "crates/plurx-core/examples/query_plans/{main,calls,bench}.rs",
   "crates/plurx-core/src/{cluster,config,domain,error,fs_secure,fs_secure_windows,lib,testfixtures}.rs",
   "crates/plurx-core/src/content_analysis.rs",
   "crates/plurx-core/src/store/mod.rs",
@@ -423,6 +427,10 @@ paths = [
   "crates/plurx-core/src/store/sqlite/dv_conversion.rs",
   "crates/plurx-core/src/store/sqlite/{cache,pretranscode}.rs",
   "crates/plurx-core/src/store/hiqlite_pretranscode.rs",
+  "crates/plurx-core/src/store/background_jobs{,_tests,_maintenance,_publication,_pretranscode,_fragment,_delivery,_fragment_admission,_observation,_migration,_offline,_domain,_library,_resources,_provider,_subtitle,_artwork,_transcode,_preparation,_predictions,_embeddings,_probe,_integrity}.rs",
+  "crates/plurx-core/src/store/background_jobs{_schema,_domain,_library,_resources,_provider,_subtitle,_artwork,_transcode,_predictions,_embeddings,_probe,_integrity}.sql",
+  "crates/plurx-core/src/store/hiqlite_background_jobs.rs",
+  "crates/plurx-core/src/store/sqlite/background_jobs.rs",
   "crates/plurx-core/src/store/hiqlite_sessions.rs",
   "crates/plurx-core/src/store/hiqlite_shared_cache.rs",
   "crates/plurx-core/src/store/sqlite/reading.rs",
@@ -440,6 +448,9 @@ paths = [
   "crates/plurx-core/src/store/timeline_annotations.rs",
   "crates/plurx-core/src/store/renditionplan.rs",
   "crates/plurx-core/tests/store_contract.rs",
+  "crates/plurx-core/tests/store_contract/background_jobs.rs",
+  "crates/plurx-core/tests/support/queue_fixture.rs",
+  "crates/plurx-core/tests/support/subtitle_jobs.rs",
   "spikes/hiqlite-m0/{Cargo.toml,Cargo.lock,src/lib.rs,tests/hiqlite_m0.rs}",
   "rust-toolchain.toml",
 ]
@@ -453,6 +464,9 @@ paths = [
   "crates/plurx-core/src/cluster/migration.rs",
   "crates/plurx-core/src/store/hiqlite_import.rs",
   "crates/plurx-core/src/store/sqlite/mod.rs",
+  # K-05 section 3.9: poisoned-connection recovery and the boot integrity
+  # check that refuses a corrupt database before migration touches it.
+  "crates/plurx-core/src/store/sqlite/housekeeping.rs",
   "crates/plurxd/tests/cluster_activation.rs",
 ]
 checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "cluster-auth"]
@@ -461,7 +475,7 @@ depends_on = ["core.media"]
 [[points]]
 id = "cluster.auth"
 title = "Replicated durable state"
-contract = "The shared Store suite passes on SQLite and three voters; backend-neutral cluster leases have one fenced winner, monotone revisions, exact stale-token rejection, and expiry takeover across both stores; live media-session requests are bounded and idempotent, owners activate only after a worker starts, exact owner epochs renew or self-fence, missing, ended, and expired routes enter a bounded single-flight cache only as negative answers, activation immediately supersedes a cached miss, and any previously validated media route stops authorizing within its one-second monotonic TTL, and membership removal refuses nodes that still own sessions; singleton scan, repair, provider, genre, and candidate passes admit one owner across simultaneous scheduler ticks, renew or self-fence, and validate every durable scan/metadata publication in the mutation transaction; the real-process harness compiles the production lease heartbeat, stops a follower owner past the authoritative TTL, makes both survivors contest takeover without changing leader or term, admits exactly one higher-fence successor while the loser observes that fence, makes exactly two provider calls, rejects the resumed token through the atomic successor-generation transaction independently of wall-clock expiry, and includes that rejection in an eight-entry post-baseline budget even if the resumed follower legitimately starts an election; a distinct serving process retains its proxy boundary across two cut/recovery cycles, fences readiness and every media path from a monotonic quorum generation, reaps old and newly admitted children without Store access or response-body polling, and observes the majority write from every voter's local replica; separate compatible clients claim distinct whole-title queue rows, bounded keyset pages pass incompatible work, takeover advances a row-local fence and staging owner, stale workers cannot publish, and ready state plus a node-local cache location and authoritative manifest digest commit atomically; queue history has hard active/total bounds and prunes evicted ready generations plus old terminal tombstones; exact v8-to-v9 migration and populated current imports cover queue/cache parity; manifest scrub cursor batches consume one transaction/consensus entry, exact location invalidation rejects stale identity, offline integrity transitions only the exact ready recipe, and unsafe generation paths cannot name filesystem deletion targets; membership removal atomically invalidates the departing node's job tokens and permanently refuses that identity new leases; populated v14 and current SQLite backups reach exact imported-table parity; replicated path metadata retains its named owner while bytes and playback telemetry stay node-local; local FTS rebuilds from replicated items; identity/state guards survive follower and leader loss; quorum loss fails readiness; incompatible candidates are refused; the production progress coalescer's deterministic five-second/ten-second load stays within 64 physical commits per stream and 512 compacted bytes per incoming beat after production-threshold compaction, while an uncoalesced control violates both budgets."
+contract = "The shared Store suite passes on SQLite and three voters; backend-neutral cluster leases have one fenced winner, monotone revisions, exact stale-token rejection, and expiry takeover across both stores; live media-session requests are bounded and idempotent, owners activate only after a worker starts, exact owner epochs renew or self-fence, missing, ended, and expired routes enter a bounded single-flight cache only as negative answers, activation immediately supersedes a cached miss, and any previously validated media route stops authorizing within its one-second monotonic TTL, and membership removal refuses nodes that still own sessions; singleton scan, repair, provider, genre, and candidate passes admit one owner across simultaneous scheduler ticks, renew or self-fence, and validate every durable scan/metadata publication in the mutation transaction; the real-process harness compiles the production lease heartbeat, stops a follower owner past the authoritative TTL, makes both survivors contest takeover without changing leader or term, admits exactly one higher-fence successor while the loser observes that fence, makes exactly two provider calls, rejects the resumed token through the atomic successor-generation transaction independently of wall-clock expiry, and includes that rejection in an eight-entry post-baseline budget even if the resumed follower legitimately starts an election; a distinct serving process retains its proxy boundary across two cut/recovery cycles, fences readiness and every media path from a monotonic quorum generation, reaps old and newly admitted children without Store access or response-body polling, and observes the majority write from every voter's local replica; separate compatible clients claim distinct whole-title queue rows, bounded keyset pages pass incompatible work, takeover advances a row-local fence and staging owner, stale workers cannot publish, and ready state plus a node-local cache location and authoritative manifest digest commit atomically; queue history has hard active/total bounds and prunes evicted ready generations plus old terminal tombstones; exact v8-to-v9 migration and populated current imports cover queue/cache parity; manifest scrub cursor batches consume one transaction/consensus entry, exact location invalidation rejects stale identity, offline integrity transitions only the exact ready recipe, and unsafe generation paths cannot name filesystem deletion targets; membership removal atomically invalidates the departing node's job tokens and permanently refuses that identity new leases; populated v14 and current SQLite backups reach exact imported-table parity; replicated path metadata retains its named owner while bytes and playback telemetry stay node-local; local FTS rebuilds from replicated items; identity/state guards survive follower and leader loss; quorum loss fails readiness; incompatible candidates are refused; the production progress coalescer's deterministic five-second/ten-second load stays within 64 physical commits per stream and 512 compacted bytes per incoming beat after production-threshold compaction, while an uncoalesced control violates both budgets; and a fresh three-voter bootstrap agrees object for object (tables, columns, constraints, foreign keys, indexes, triggers and views) with a frozen schema-42 tree brought current by the real replicated migration chain."
 paths = [
   "Dockerfile.store-shard",
   "benchmarks/cluster-named-runner.Dockerfile",
@@ -478,6 +492,7 @@ paths = [
   "crates/plurx-core/src/scan/**",
   "crates/plurx-core/src/store/hiqlite.rs",
   "crates/plurx-core/src/store/mod.rs",
+  "crates/plurx-core/src/store/file_grants.rs",
   "crates/plurx-core/src/store/hiqlite_catalog.rs",
   "crates/plurx-core/src/store/hiqlite_classification.rs",
   "crates/plurx-core/src/store/hiqlite_coordination.rs",
@@ -488,15 +503,21 @@ paths = [
   "crates/plurx-core/src/store/hiqlite_media.rs",
   "crates/plurx-core/src/store/hiqlite_publication.rs",
   "crates/plurx-core/src/store/hiqlite_pretranscode.rs",
+  "crates/plurx-core/src/store/background_jobs{,_tests,_maintenance,_publication,_pretranscode,_fragment,_delivery,_fragment_admission,_observation,_migration,_offline,_domain,_library,_resources,_provider,_subtitle,_artwork,_transcode,_preparation,_predictions,_embeddings,_probe,_integrity}.rs",
+  "crates/plurx-core/src/store/background_jobs{_schema,_domain,_library,_resources,_provider,_subtitle,_artwork,_transcode,_predictions,_embeddings,_probe,_integrity}.sql",
+  "crates/plurx-core/src/store/hiqlite_background_jobs.rs",
+  "crates/plurx-core/src/store/sqlite/background_jobs.rs",
   "crates/plurx-core/src/store/hiqlite_reading.rs",
   "crates/plurx-core/src/store/hiqlite_sessions.rs",
   "crates/plurx-core/src/store/sqlite/classification.rs",
   "crates/plurx-core/src/store/sqlite/coordination.rs",
   "crates/plurx-core/src/store/sqlite/dvr.rs",
+  "crates/plurx-core/src/store/sqlite/file_grants.rs",
   "crates/plurx-core/src/store/sqlite/library.rs",
   "crates/plurx-core/src/store/sqlite/library_channels.rs",
   "crates/plurx-core/src/store/sqlite/outbox.rs",
   "crates/plurx-core/src/store/sqlite/publication.rs",
+  "crates/plurx-core/src/store/watched_drain.rs",
   "crates/plurx-core/src/store/sqlite/pretranscode.rs",
   "crates/plurx-core/src/store/sqlite/sessions.rs",
   "crates/plurx-core/src/store/sqlite/trakt.rs",
@@ -506,15 +527,21 @@ paths = [
   "crates/plurx-core/src/store/sql_source.rs",
   "crates/plurx-core/src/transcode/{encoder,manifest}.rs",
   "crates/plurx-core/tests/hiqlite_tls_provider.rs",
+  "crates/plurx-core/tests/rustls_single_provider.rs",
   "crates/plurx-core/tests/store_contract.rs",
+  "crates/plurx-core/tests/store_contract/background_jobs.rs",
+  "crates/plurx-core/tests/support/queue_fixture.rs",
+  "crates/plurx-core/tests/support/subtitle_jobs.rs",
+  "crates/plurx-core/tests/fixtures/hiqlite-schema-v42.sql",
   "tests/validation/test_store_shard.py",
   "validation/store_shard.py",
   "crates/plurxd/src/{cachekeep,job_lease,main,manifest_cache,serving_fence,state,transcode}.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/shared_cache.rs",
   "crates/plurxd/src/store_result.rs",
-  "crates/plurxd/src/http/{cluster,internal_media_sessions,peer_transport}.rs",
+  "crates/plurxd/src/http/{cluster,background_jobs,internal_media_sessions,peer_transport}.rs",
   "crates/plurxd/src/http/{auth,extract,internal_auth_revocation,users}.rs",
+  "crates/plurxd/src/http/file_grants.rs",
   "crates/plurxd/src/http/items.rs",
   "scripts/vendor-audit-lock",
   "scripts/cluster-named-runner",
@@ -534,10 +561,12 @@ title = "Cluster membership lifecycle and node health"
 contract = "An admin issues an encrypted single-use join token whose cleartext is absent from status, logs, configuration, and redemption/finalization requests; those requests carry only its SHA-256 digest, and stable refusal codes distinguish expired, reused, reserved, and invalid or tampered tokens. A fresh daemon refuses an existing SQLite install, resumes its own staged join, ignores a foreign token on a healthy voter, and joins as a voter without changing instance.id, growing one voter to three. Never-joined voters keep cluster listeners on loopback; an opted-in sole voter crash-safely commits its advertised address from a metadata-reset snapshot, while remote listeners use TLS and refuse later host or port drift. Node activity snapshots use cluster-scoped authentication, expose privacy-safe fields only, preserve a live-voter query on every admitted legacy request, bound cold-key and verified-sender admission independently, publish process-only refusal counters, and return bounded typed peer outcomes that distinguish a missing Activity origin, authentication refusal, HTTP failure, transport failure, timeout, and invalid content. Follower removal preserves quorum or refuses a leader and a quorum-losing change; graceful local leave observes a surviving leader from odd voter sets and lets an even-set leader commit its own delta before draining, including four-to-three removal with one survivor down. Two voters remain degraded reconfiguration rather than healthy HA. Membership changes fail closed during rolling upgrades: a replicated attempt-intent guard rejects legacy coordinators before proposal, leader-side deltas serialize with join promotion, concurrent and ambiguous attempts retain shared fences, and the roster exposes a pending removal until an operator finishes upgrading and retries. Removing a node resolves the offline work it owns before the membership change commits: a queued or preparing package is requeued only on a survivor that answered a source probe by actually reading the snapshotted bytes, and anything else — including every ready package, whose bytes lived only on the departing node — fails with the stable node_removed code and releases its reservation. Silent reassignment stays forbidden, the old producer is fenced out of work a survivor has taken over, and removal still refuses an in-flight transfer with an operator-visible reason. Planned maintenance is a single-node replicated and restart-persistent fence: every active binary must prove capability, a leader hands off before the row commits, the target acknowledges only after local HTTP and singleton-job admission is fenced, media placement refuses it, existing sessions drain, readiness is false, two-voter rolling maintenance is refused, and resume requires a fresh zero-lag target. Force election requires a reachable majority, a caught-up voter, and no lifecycle operation; it can recover a leaderless quorum but never bypass lost quorum. Status explicitly distinguishes leaderless quorum from lost-majority recovery, and permanent-majority force reconfiguration remains unsupported. Replicated node records expose only node identity, actual short hostname, advertised host without its listener port (localhost for loopback), leadership, role, reachability, last-seen, pending-removal and maintenance state, active media-session count, and apply lag, remain readable during quorum loss, preserve removed-node tombstones, and consume the canonical replication projection for lag. Membership, Hiqlite, and Raft detail has its own bounded admin log ring instead of evicting general diagnostics, while cluster warnings and errors remain on the console. SQLite reports membership unavailable."
 paths = [
   "crates/plurx-core/src/cluster/membership.rs",
+  "crates/plurx-core/src/cluster/membership/**",
   "crates/plurxd/src/http/cluster.rs",
   "crates/plurxd/src/http/mod.rs",
   "crates/plurxd/src/http/internal_activity.rs",
   "crates/plurxd/src/http/internal_media.rs",
+  "crates/plurxd/src/http/transcode_copies.rs",
   "crates/plurxd/src/http/peer_transport.rs",
   "crates/plurxd/src/media_pool.rs",
   "crates/plurxd/src/playstart.rs",
@@ -550,11 +579,14 @@ depends_on = ["cluster.auth", "identity.access"]
 [[points]]
 id = "cluster.operations"
 title = "Cluster operations status, guarded restart, and offline WAL evidence"
-contract = "The admin status surface starts from committed membership and directly authenticates one bounded local observation from every committed member under a shared deadline — learners answer that read and originate it, and only membership mutation is voter-scoped — distinguishes a node that answered and refused the proof or returned another error status from one that could not be reached at all, rejects identity mismatches and stale or incomplete evidence, reports live serving, Raft, WAL, snapshot, media, protocol, and build facts, and authorizes at most one drained non-leader restart candidate only when every conservative quorum and durability invariant holds. Restart preparation is bound to the exact responding backend, linearizes new mutable-media admission against one expiring process-local drain, leaves existing work serving, never changes membership or invokes a supervisor, and emits commands only after owned sessions and in-flight admissions reach zero. Support bundles are size-bounded, create-only, credential/path redacted, and checksummed. Offline WAL status and verification prove the real advisory lock and bounded physical invariants without opening the store; backup is additive, private, checksummed, size/space bounded, and outside the source; recovery plans bind a named action to stable node/Raft identity and source fingerprints, while no CLI, API, or web route applies a plan, deletes a lock, truncates a WAL, restores a peer, or forces membership. Portable cluster backup is the admin-only POST route and the scheduled publisher beside it on a running voter: it refuses a node that has no activated replicated store or is behind its observed Raft log, holds the cluster-wide `backup:cluster` job lease so exactly one voter and never a learner publishes a UTC day's artefact, triggers a database snapshot and waits for that applied index to publish, reads a size-bounded single-component snapshot pointer and opens that generation before any other work, builds the archive off the runtime on a blocking thread, and advances its UTC-day fence only on publication, so a failed attempt stays retriable within its own minute while retention pruning and its setting read are post-publication maintenance that may warn but can never retry a published artefact. Backup metrics are fixed-label outcome totals plus last-success time and last artefact size. The archive format itself, its verification, and the stopped-daemon restore that consumes it are persistence.upgrades; no surface here restores anything."
+contract = "The admin status surface starts from committed membership and directly authenticates one bounded local observation from every committed member under a shared deadline — learners answer that read and originate it, and only membership mutation is voter-scoped — distinguishes a node that answered and refused the proof or returned another error status from one that could not be reached at all, rejects identity mismatches and stale or incomplete evidence, reports live serving, Raft, WAL, snapshot, media, protocol, and build facts, and authorizes at most one drained non-leader restart candidate only when every conservative quorum and durability invariant holds. Restart preparation is bound to the exact responding backend, linearizes new mutable-media admission against one expiring process-local drain, leaves existing work serving, never changes membership or invokes a supervisor, and emits commands only after owned sessions and in-flight admissions reach zero. Support bundles are size-bounded, create-only, credential/path redacted, and checksummed. Offline WAL status and verification prove the real advisory lock and bounded physical invariants without opening the store; backup is additive, private, checksummed, size/space bounded, and outside the source; recovery plans bind a named action to stable node/Raft identity and source fingerprints, while no CLI, API, or web route applies a plan, deletes a lock, truncates a WAL, restores a peer, or forces membership. Portable cluster backup is the admin-only POST route and the scheduled publisher beside it on a running voter: it refuses a node that has no activated replicated store or is behind its observed Raft log, holds the cluster-wide `backup:cluster` job lease so exactly one voter and never a learner publishes a UTC day's artefact, triggers a database snapshot and waits for that applied index to publish, reads a size-bounded single-component snapshot pointer and opens that generation before any other work, builds the archive off the runtime on a blocking thread, and advances its UTC-day fence only on publication, so a failed attempt stays retriable within its own minute while retention pruning and its setting read are post-publication maintenance that may warn but can never retry a published artefact. Backup metrics are fixed-label outcome totals plus last-success time and last artefact size. The archive format itself, its verification, and the stopped-daemon restore that consumes it are persistence.upgrades; no surface here restores anything. The replicated-write capture tooling is read-only: its sampler only issues unauthenticated GET /metrics to the voters and its evaluator only reads a samples file or a copied WAL, applying the sampler's own idle-window rules at the 12-hour gate."
 paths = [
   "crates/plurxd/src/backup.rs",
   "crates/plurxd/src/http/cluster_operations.rs",
   "crates/plurxd/src/wal_cli.rs",
+  "scripts/replicated-write-capture",
+  "scripts/replicated-write-capture-sampler",
+  "tests/operations/test_replicated_write_capture.py",
 ]
 checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "cluster-transport-recovery", "security-boundaries", "web-membership", "operations-contract"]
 depends_on = ["cluster.membership", "cluster.auth", "identity.access"]
@@ -567,12 +599,21 @@ paths = [
   "crates/plurxd/src/admission.rs",
   "crates/plurxd/src/http/internal_activity.rs",
   "crates/plurxd/src/http/internal_media.rs",
+  "crates/plurxd/src/http/transcode_copies.rs",
   "crates/plurxd/src/http/mod.rs",
   "crates/plurxd/src/http/peer_transport.rs",
   "crates/plurxd/src/main.rs",
   "crates/plurxd/src/media_pool.rs",
   "crates/plurxd/src/playstart.rs",
   "crates/plurxd/src/state.rs",
+  "crates/plurxd/src/cache_preparation.rs",
+  "crates/plurxd/src/background_jobs.rs",
+  "crates/plurxd/src/library_work.rs",
+  "crates/plurxd/src/source_probe.rs",
+  "crates/plurxd/src/artifact_integrity.rs",
+  "crates/plurxd/src/subtitle_work.rs",
+  "crates/plurxd/src/background_job_metrics.rs",
+  "crates/plurxd/src/background_job_faults.rs",
   "crates/plurxd/src/transcode.rs",
   "crates/plurxd/src/transcode/**",
 ]
@@ -582,7 +623,7 @@ depends_on = ["cluster.membership", "cluster.auth", "identity.access"]
 [[points]]
 id = "cluster.page-reads"
 title = "Clustered page reads and page-outcome evidence"
-contract = "The settings_snapshot and cache_bytes Store primitives consumed by GET /settings keep authoritative semantics while using one replicated settings snapshot plus one cache aggregate when configured; the offline_activity_packages primitive joins Activity display fields in one store query whose call count is independent of package cardinality; Home preserves the established ordering of its two progress-derived reads while overlapping independent recently-added work, and home_preview_pages returns every populated library's fixed-size preview in one authority-consistent query independent of library cardinality. Clustered Activity overlaps local work with one bounded authenticated peer round, shares one process-wide physical fanout across concurrent summary/detail callers, enforces a one-second start floor and successful-result reuse window, refreshes the wire-start floor after delayed directory resolution so owner cancellation cannot release it, attributes every answered delivery to its node, preserves the exact native sessions array, keeps the admin hostname projection per request, and exposes typed missing-node state instead of silently shortening the result; SQLite and peerless responses retain their exact legacy shape. Its process-only fanout, reuse, directory-error, and peer-outcome counters use fixed labels and a metrics scrape acquires neither the Activity gate nor the Store. The three-voter gate measures the Settings, Activity, and Home Store primitives as attempted Hiqlite client-call families, not complete HTTP pages or network RTTs, and its counters compile out of production builds. Home, Activity, and Settings expose generation-fenced shell, content, and settled phases; the credential-safe named runner records raw phase and normalized body-complete API timings against an attributable deployed build, explicitly classifies /api/v1/home/previews, brackets every sample with target role, voter membership, Raft-stability, and bounded fault-scenario checks, and enforces the reviewed named-runner budgets without retaining browser credentials, network identity, or dynamic response text. Browser request concurrency, failure isolation, and overlapping-timer behavior remain separate web-static contracts."
+contract = "The settings_snapshot and cache_bytes Store primitives consumed by GET /settings keep authoritative semantics while using one replicated settings snapshot plus one cache aggregate when configured; the offline_activity_packages primitive joins Activity display fields in one store query whose call count is independent of package cardinality; Home reads its two progress-derived rails from one read of the same watch state, each rail in its established order and limit, while overlapping independent recently-added work; library grids, item pages and Home previews read watch rows and container rollups as one watch_summary; every browse watch-state read goes through CatalogueReader, which serves it from the local replica only when the bounded permit holds and the node has applied the client-echoed X-Plurx-Read-After index, raised to the latest watch write this process acknowledged for the user, and otherwise answers from Authority; a request without that header is always Authority, because a node's own older write record cannot prove a later write through a peer; a request whose watch writes all reported a Raft log index returns the highest as X-Plurx-Commit-Index, and one with a watch write of unknown position returns X-Plurx-Commit-Index: unknown so the client drops its echo; the Store counts every watch-state read per request on both backends, and Home previews, library grids and item pages each perform one; a source census pins the consistent-read call sites per replicated slice, counting each call that passes a consistent read kind to a shared dispatch helper as a site, and refuses growth without a stated authority reason; and home_preview_pages returns every populated library's fixed-size preview in one authority-consistent query independent of library cardinality. Clustered Activity overlaps local work with one bounded authenticated peer round, shares one process-wide physical fanout across concurrent summary/detail callers, enforces a one-second start floor and successful-result reuse window, refreshes the wire-start floor after delayed directory resolution so owner cancellation cannot release it, attributes every answered delivery to its node, preserves the exact native sessions array, keeps the admin hostname projection per request, and exposes typed missing-node state instead of silently shortening the result; SQLite and peerless responses retain their exact legacy shape. Its process-only fanout, reuse, directory-error, and peer-outcome counters use fixed labels and a metrics scrape acquires neither the Activity gate nor the Store. The three-voter gate measures the Settings, Activity, and Home Store primitives as attempted Hiqlite client-call families, not complete HTTP pages or network RTTs, and its counters compile out of production builds. Home, Activity, and Settings expose generation-fenced shell, content, and settled phases; the credential-safe named runner records raw phase and normalized body-complete API timings against an attributable deployed build, explicitly classifies /api/v1/home/previews, brackets every sample with target role, voter membership, Raft-stability, and bounded fault-scenario checks, and enforces the reviewed named-runner budgets without retaining browser credentials, network identity, or dynamic response text. Browser request concurrency, failure isolation, and overlapping-timer behavior remain separate web-static contracts."
 paths = [
   "benchmarks/cluster-page-latency.schema.json",
   "crates/plurx-core/Cargo.toml",
@@ -591,13 +632,23 @@ paths = [
   "crates/plurx-core/src/store/hiqlite.rs",
   "crates/plurx-core/src/store/hiqlite_durable.rs",
   "crates/plurx-core/src/store/hiqlite_media.rs",
+  "crates/plurx-core/src/store/watch_fence.rs",
+  "crates/plurx-core/src/store/consistent_read_census.rs",
+  "crates/plurx-core/src/store/placeholder_census.rs",
+  "crates/plurx-core/src/store/sql_source.rs",
+  "crates/plurx-core/src/store/sqlite/watch.rs",
+  "crates/plurx-core/src/cluster/migration.rs",
   "crates/plurx-core/src/store/sqlite/mod.rs",
   "crates/plurx-core/src/store/sqlite/media.rs",
   "crates/plurx-core/src/store/sqlite/offline.rs",
   "crates/plurx-core/tests/store_contract.rs",
+  "crates/plurx-core/tests/store_contract/background_jobs.rs",
+  "crates/plurx-core/tests/support/queue_fixture.rs",
+  "crates/plurx-core/tests/support/subtitle_jobs.rs",
   "crates/plurx-cluster-check/tests/page_latency_schema.rs",
   "crates/plurxd/tests/cluster_activity.rs",
   "crates/plurxd/src/http/browse.rs",
+  "crates/plurxd/src/http/extract.rs",
   "crates/plurxd/src/http/mod.rs",
   "crates/plurxd/src/http/system.rs",
   "scripts/cluster-page-latency",
@@ -612,14 +663,17 @@ title = "Native server API and runtime"
 contract = "The single server binary exposes stable native endpoints, coordinates background work safely, carries authenticated cluster media control without widening household credentials, and publishes a permanent Dolby Vision replacement only after exact media verification and a final source-identity fence."
 paths = [
   "crates/plurxd/Cargo.toml",
-  "crates/plurxd/src/{cachekeep,logbuf,main,schedule,state,storeprobe,telemetry}.rs",
+  "crates/plurxd/src/{cachekeep,logbuf,main,panics,redact,schedule,state,storeprobe,telemetry}.rs",
   "crates/plurxd/src/dv_disk.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/reader_formats.rs",
   "crates/plurxd/src/http/{analysis,developer,dto,error,extract,mod,network,publication,reading,system}.rs",
   "crates/plurxd/src/http/scan_identity.rs",
   "crates/plurxd/src/http/dv_disk.rs",
-  "crates/plurxd/src/http/{cluster,internal_media_sessions,peer_transport}.rs",
+  # On-request chapter thumbnails: one bounded ffmpeg per chapter, node-local
+  # cache, counted for the Developer card. Runtime work with no producer.
+  "crates/plurxd/src/http/chapter_thumbs.rs",
+  "crates/plurxd/src/http/{cluster,background_jobs,internal_media_sessions,peer_transport}.rs",
   "plurx.example.toml",
 ]
 checks = ["rust-gate", "rust-gate-ci", "api-wire", "user-journey", "resource-bounds"]
@@ -631,6 +685,10 @@ title = "Shared native API wire contract"
 contract = "The server, Apple clients, and Android clients decode the same representative JSON without field-name or type drift."
 paths = [
   "tests/contracts/native-api.json",
+  # The library grid's ORDER BY, pinned from outside the server. The Rust
+  # store replays it; the Apple and Android merges must reproduce it from
+  # per-library cursors, so a change here is a change to all three at once.
+  "tests/contracts/library-sort-cases.json",
   "crates/plurxd/src/http/{dto,mod}.rs",
   "clients/apple/Sources/{PlurxAPI,Models}.swift",
   "clients/android/app/src/main/java/tv/plurx/app/data/**",
@@ -647,7 +705,7 @@ paths = [
   "crates/plurx-core/src/scan/**",
   "crates/plurx-core/src/store/sqlite/library.rs",
   "crates/plurx-core/src/store/sqlite/media.rs",
-  "crates/plurxd/src/http/{browse,comingsoon,images,items,libraries,photos,scan}.rs",
+  "crates/plurxd/src/http/{browse,comingsoon,images,images_worker,items,libraries,photos,scan}.rs",
   "docs/FEATURES.md",
   "docs/REQUIREMENTS.md",
 ]
@@ -661,6 +719,7 @@ contract = "Catalogue text and explicit channel rules work without an inference 
 paths = [
   "crates/plurx-core/src/metadata/classification.rs",
   "crates/plurx-core/src/store/classification.rs",
+  "crates/plurx-core/src/store/classification_schedule.rs",
   "crates/plurx-core/src/store/hiqlite_classification.rs",
   "crates/plurx-core/src/store/sqlite/classification.rs",
   "crates/plurxd/src/library_search.rs",
@@ -703,9 +762,10 @@ depends_on = ["core.media", "server.api"]
 [[points]]
 id = "playback.pipeline"
 title = "Playback decision, delivery, and presentation"
-contract = "Every supported source reaches a client through the intended direct, remux, copy, or transcode path, follows its durable cluster owner through a streamed relay, and keeps presenting media; a rolling writer advertises only cumulative playback consumption plus its bounded reserve, preserves the segment covering the viewer's protected back buffer, and cannot turn a faster producer into a forward position discontinuity; a seek storm leaves one playback with at most one live subtitle-window extraction, carrying the destination the client settled on, with abandoned windows publishing nothing and remembering nothing."
+contract = "Every supported source reaches a client through the intended direct, remux, copy, or transcode path, follows its durable cluster owner through a streamed relay, and keeps presenting media; a rolling writer advertises only cumulative playback consumption plus its bounded reserve, preserves the segment covering the viewer's protected back buffer, and cannot turn a faster producer into a forward position discontinuity; a seek storm leaves one playback with one local subtitle-window owner carrying the settled destination and at most two bounded speculative peer ranges, with abandoned requester futures publishing nothing and remembering nothing."
 paths = [
   "crates/plurx-core/src/fmp4.rs",
+  "crates/plurx-core/src/hevc_configuration.rs",
   "crates/plurx-core/src/mediafacts.rs",
   "crates/plurx-core/src/process/**",
   "crates/plurx-core/src/playback/**",
@@ -715,9 +775,16 @@ paths = [
   "crates/plurx-core/tests/decoder_selection.rs",
   "crates/plurx-pgs/**",
   "fuzz/**",
-  "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fragindex,fragment_index_cluster,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,producer_spawn,progressive,renditiondir,scratch_ledger,subtitle_ride_along,subtitle_source,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
+  "scripts/fuzz-campaign",
+  "scripts/fuzz-seeds",
+  "vendor/dolby_vision/**",
+  "vendor/bitvec_helpers/**",
+  "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fontenv,fontenv_tests,fragindex,fragment_index_cluster,hevc_census,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,producer_spawn,progressive,renditiondir,scratch_ledger,scratch_put,seam_hooks,subtitle_ride_along,subtitle_ranges,subtitle_source,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
   "crates/plurxd/src/transcode/**",
   "crates/plurxd/src/vod/**",
+  "crates/plurxd/src/online_subtitles.rs",
+  "crates/plurxd/src/http/subtitle_downloads.rs",
+  "crates/plurx-core/src/store/downloaded_subtitles.rs",
   "crates/plurxd/src/manifest_cache.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/http/internal_media_sessions.rs",
@@ -730,10 +797,12 @@ paths = [
   "docs/playback-control/**",
   "docs/streaming/PLAYBACK-CAPS-V2-*.md",
   "docs/streaming/STUTTER-4K.md",
+  "docs/streaming/HEVC-IN-BAND-PARAMETER-SETS.md",
   "docs/streaming/SEEK-SCRATCH-RESERVATIONS-*.md",
   "docs/streaming/SEEK-SCRATCH-RESERVATIONS-STATUS.html",
   "docs/streaming/APPLE-TV-FORWARD-SKIPS-STATUS.md",
   "docs/evidence/seek-scratch-reservations-*.md",
+  "docs/evidence/ffmpeg-hls-write-boundary-*.md",
   "docs/streaming/WEB-HLS-STARTUP-RECOVERY-STATUS.md",
   "scripts/dv-evidence",
   "scripts/decoder-media-baseline",
@@ -759,6 +828,7 @@ title = "Watch state and external history sync"
 contract = "Native and Plex progress routes share one bounded coalescer; manual and timestamped activity outranks delayed flushes; watched state and Trakt synchronization converge without losing newer user activity."
 paths = [
   "crates/plurx-core/src/store/sqlite/{outbox,trakt,watch}.rs",
+  "crates/plurx-core/src/store/watched_drain.rs",
   "crates/plurx-core/src/trakt.rs",
   "crates/plurxd/src/{progress,trakt,watched}.rs",
   "crates/plurxd/src/http/mod.rs",
@@ -777,14 +847,17 @@ paths = [
   "crates/plurxd/src/live_tv/guide.rs",
   "crates/plurxd/src/live_tv/videotoolbox_tests.rs",
   "crates/plurxd/src/live_tv/atsc_audio_tests.rs",
+  "crates/plurxd/src/live_tv/caption_audit_tests.rs",
   "crates/plurxd/src/http/live_tv.rs",
   "crates/plurxd/src/http/internal_live_tv.rs",
+  "crates/plurxd/src/http/live_tv_cluster.rs",
   "crates/plurxd/src/web/live-tv.js",
   "tests/web/live-tv.test.js",
   "scripts/live-tv-browser",
   "scripts/live-tv-endless",
   "crates/plurxd/tests/live_tv_two_node.rs",
   "scripts/live-tv-hardware",
+  "scripts/live-tv-caption-audit",
   "docs/features/HDHOMERUN-LIVE-TV-*.md",
   "docs/features/LIVE-TV-GUIDE-AND-UI-PLAN.md",
   "docs/features/LIVE-TV-NATIVE-LAYOUTS-*.md",
@@ -827,6 +900,7 @@ paths = [
   "crates/plurx-core/src/store/sqlite/dvr.rs",
   "crates/plurxd/src/http/dvr.rs",
   "crates/plurxd/src/live_tv/dvr.rs",
+  "crates/plurxd/src/live_tv/cluster.rs",
   "crates/plurxd/src/live_tv/schedule.rs",
   "crates/plurxd/src/live_tv/webhook.rs",
   "docs/features/LIVE-TV-DVR-AND-REMINDERS-OPTIONS.md",
@@ -855,6 +929,8 @@ id = "offline.viewing"
 title = "App-managed offline viewing"
 contract = "Authenticated users can prepare one portable VOD package, transfer it through a stable scoped lease, and play only app-owned local bytes while disconnected."
 paths = [
+  "crates/plurx-core/src/store/offline_claim.rs",
+  "crates/plurx-core/src/store/offline_expiry.rs",
   "crates/plurx-core/src/store/sqlite/offline.rs",
   "crates/plurxd/src/offline.rs",
   "crates/plurxd/src/http/offline.rs",
@@ -913,6 +989,8 @@ paths = [
   "scripts/web-hls-startup-browser-check",
   "scripts/subtitle-readiness-browser-check",
   "scripts/js-check",
+  "scripts/web-jsconfig",
+  "scripts/web-types",
   "scripts/reader-browser",
   "scripts/themes-proposed.json",
   "scripts/ui-baseline",
@@ -922,6 +1000,9 @@ paths = [
   # (THIRD-PARTY-NOTICES §7).
   "tests/vendor/**",
   "tests/web/**",
+  # TypeScript, pinned by lockfile for scripts/web-types and installed by it;
+  # dev-only, never served or shipped (THIRD-PARTY-NOTICES §7).
+  "tools/web-types/**",
 ]
 checks = ["rust-gate", "rust-gate-ci", "web-static", "player-input-fence", "playback-surface-fence", "web-membership", "reader-browser", "web-layout", "playback-smoke", "playback-exhaustive"]
 depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichment", "playback.pipeline"]
@@ -968,7 +1049,7 @@ depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichm
 [[points]]
 id = "operations.packaging"
 title = "Build, deploy, and release artifacts"
-contract = "Every supported installation path builds the same stamped server and keeps its runtime configuration explicit."
+contract = "Every supported installation path builds the same stamped server and keeps its runtime configuration explicit, from base images pinned by digest rather than by a moving tag, with pin drift reported on a schedule and gating nothing."
 paths = [
   ".dockerignore",
   ".github/actions/**",
@@ -983,18 +1064,23 @@ paths = [
   "scripts/ci-execution-mode",
   "scripts/ci-cargo-cache-prepare",
   "scripts/ci-cargo-cache-refresh",
+  "scripts/image-base-drift",
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
+  "scripts/k08-build-measure",
   "scripts/ci-require-disk",
   "scripts/ci-runner-cache-audit",
   "scripts/release-package-candidate",
   "scripts/package-windows",
   "scripts/{bench,dv-evidence,gop-census,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-n2-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
   "scripts/container-smoke",
+  "scripts/container-restore-smoke",
   "scripts/windows-smoke.ps1",
   "scripts/decoder-diagnostic-qualification",
   "scripts/validate-docker-startup-budget",
   "scripts/registry-push",
+  "scripts/release-cut",
+  "scripts/sign-android-release",
   "tests/operations/**",
 ]
 checks = ["rust-gate", "rust-gate-ci", "operations-contract", "container-runtime", "resource-bounds"]

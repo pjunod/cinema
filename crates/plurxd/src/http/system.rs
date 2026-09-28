@@ -114,7 +114,7 @@ pub async fn setup(
         return Err(ApiError::BadRequest("username required".into()));
     }
     super::auth::validate_new_password(&req.password)?;
-    let hash = super::auth::hash_password_bounded(req.password).await?;
+    let hash = super::auth::hash_password_bounded(&state.password_capacity, req.password).await?;
     let user = state
         .store
         .create_user(req.username.trim(), &hash, true)
@@ -864,8 +864,26 @@ pub async fn client_log(
     }
 
     let event = client_playback_event(&ev, user.id);
+    // A first frame or a failure report settles the start attempt this
+    // node opened for the viewer and file (C-08 M5 row 4); any other beacon
+    // about a play in progress keeps that play alive. The beacon's own
+    // `file_id`: the session join below may replace it with the session's.
+    if let Some(file_id) = event.file_id {
+        state.start_attempts.client_event(
+            user.id,
+            file_id,
+            &event.event,
+            event.method.as_deref(),
+            event.reason.as_deref(),
+            std::time::Instant::now(),
+        );
+    }
     // Deliberately not `ev.ua`: the class must come from the same input the
     // read paths use, or the prior is written under a key nothing reads.
+    // The same derivation labels `plurx_ttff_ms{client}`, and it is taken
+    // here rather than from the identity below because that one is `None`
+    // for an IPv6 peer, and a start time is a start time on any address.
+    let client = super::network::client_class(&headers);
     let mut network = super::network::identity(&headers, remote);
     if let Some(ref mut id) = network {
         id.user_id = Some(user.id);
@@ -918,7 +936,7 @@ pub async fn client_log(
             Some(session_id) => transcode.session_status(session_id).await,
             None => None,
         };
-        emit_client_playback_event(store, event, info.as_ref(), network);
+        emit_client_playback_event(store, event, info.as_ref(), network, Some(client));
     });
     StatusCode::NO_CONTENT
 }
@@ -1027,6 +1045,7 @@ fn emit_client_playback_event(
     mut event: PlaybackEvent,
     info: Option<&crate::transcode::SessionInfo>,
     network: Option<crate::telemetry::NetworkIdentity>,
+    client: Option<&'static str>,
 ) {
     normalize_client_marker_prewarm(&mut event);
     if let Some(info) = info {
@@ -1036,7 +1055,7 @@ fn emit_client_playback_event(
         .session_id
         .as_deref()
         .map(crate::transcode::session_log_id);
-    crate::telemetry::emit_with_network(store, event, network);
+    crate::telemetry::emit_with_network(store, event, network, client);
 }
 
 fn normalize_client_marker_prewarm(event: &mut PlaybackEvent) {
@@ -1691,6 +1710,10 @@ pub struct SettingsDto {
     /// request would tell an operator their node is enforcing something it is
     /// not.
     pub decoder_health_qualified_artifacts: bool,
+    /// Explicit operator override, applied to new copy starts.
+    pub hevc_unverified_copy: bool,
+    /// Advisory engine observation, never used to authorize a settings save.
+    pub hevc_header_trace_available: Option<bool>,
     /// What this node measured about itself, and the identity it therefore
     /// plans into. Read-only.
     pub decoder_health_qualification: DecoderHealthQualification,
@@ -1719,6 +1742,7 @@ pub struct SettingsDto {
     /// Default-off content-addressed cluster queue and peer hydration for VOD
     /// indexes. The cadence above remains the operator's I/O budget.
     pub vod_index_cluster_cache: bool,
+    pub bounded_replica_reads: bool,
     /// Durable analysis claim/retry policy. These remain operator-visible and
     /// bounded because slow storage may need more time without permitting an
     /// unsupported source to retry forever.
@@ -1737,6 +1761,15 @@ pub struct SettingsDto {
     /// store kept instead of the whole source. On by default; off makes both
     /// ignore the store entirely.
     pub subtitle_stored_sources: bool,
+    /// Let a store miss join the cluster subtitle-source queue and hydrate a
+    /// peer's verified track. The Developer readiness report is advisory.
+    pub subtitle_cluster_sources: bool,
+    /// Fill uncovered subtitle sources while the analysis pool is idle.
+    pub subtitle_backfill: bool,
+    /// Make a chapter thumbnail the first time a watch page asks for one.
+    /// On by default; off answers the thumbnail route 404 and runs no
+    /// ffmpeg. The Developer tab's readiness rows are advisory.
+    pub chapter_thumbnails: bool,
     /// What the subtitle-source store occupies on this node and what its
     /// producer is doing: the footprint its last sweep measured, its cap, the
     /// ride-alongs running now and the verdicts since this process started.
@@ -1744,8 +1777,7 @@ pub struct SettingsDto {
     /// turns the whole thing off.
     pub subtitle_store: crate::subtitle_source::StoreDiagnostics,
     /// Cluster-wide opt-in for placing new HLS workers on another voter. The
-    /// readiness bit is true only while the replicated flag is enabled and
-    /// every committed voter publishes the current media protocol.
+    /// readiness bit reports fleet protocol observations as advisory only.
     pub cluster_media_pool_enabled: bool,
     pub cluster_media_pool_ready: bool,
     /// Opt-in replacement of expired HLS owners. This remains independently
@@ -1818,6 +1850,14 @@ pub struct SettingsDto {
     /// (see migration v13), and an upgrade that started that on its own is
     /// the failure v9 documents.
     pub genre_backfill: bool,
+    /// "Sign-ins expire" (Settings → Users). On by default: a device that
+    /// goes unused for `auth_token_idle_days` is signed out; one in regular
+    /// use never is. Off keeps login tokens valid until revoked.
+    pub auth_token_expiry: bool,
+    pub auth_token_idle_days: i64,
+    /// When expiry last took effect (Unix seconds). No device's idle window
+    /// starts earlier. `None` until the server has started the clock.
+    pub auth_token_expiry_since: Option<i64>,
     /// What the last backfill pass did, or `None` if none has run since boot.
     /// Reported here rather than in the per-library scan status because the
     /// backfill walks item ids, not libraries — and because this page is
@@ -2006,8 +2046,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     let genre_backfill = setting(keys::GENRE_BACKFILL).is_some_and(|v| v.trim() == "1");
     let cluster_media_pool_enabled =
         setting(keys::CLUSTER_MEDIA_POOL_ENABLED).as_deref() == Some("1");
-    let cluster_media_pool_ready =
-        cluster_media_pool_enabled && state.media_pool.remote_rollout_ready().await;
+    let cluster_media_pool_ready = state.media_pool.remote_rollout_ready().await;
     let cluster_session_takeover_enabled =
         setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED).as_deref() == Some("1");
     let analysis_max_attempts = plurx_core::store::bounded_analysis_max_attempts(
@@ -2101,6 +2140,11 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             false,
         ),
         decoder_health_qualified_artifacts: decoder_health_requested,
+        hevc_unverified_copy: plurx_core::store::stored_switch(
+            setting(keys::HEVC_UNVERIFIED_COPY).as_deref(),
+            false,
+        ),
+        hevc_header_trace_available: crate::ffmpeg::hevc_header_trace_available().await,
         decoder_health_qualification: DecoderHealthQualification::of(
             &state.transcode.published_artifact_qualification(),
             decoder_health_requested,
@@ -2120,6 +2164,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         vod_index_mins: setting(keys::VOD_INDEX_MINS).map_or(15, |value| mins(Some(value))),
         vod_index_cluster_cache: setting(keys::VOD_INDEX_CLUSTER_CACHE)
             .is_some_and(|value| value.trim() == "1"),
+        bounded_replica_reads: plurx_core::store::stored_switch(
+            setting(keys::BOUNDED_REPLICA_READS).as_deref(),
+            state.catalogue.bounded_reads_default(),
+        ),
         analysis_max_attempts,
         analysis_lease_secs,
         analysis_backoff_base_secs,
@@ -2131,6 +2179,18 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         ),
         subtitle_stored_sources: plurx_core::store::stored_switch(
             setting(keys::SUBTITLE_STORED_SOURCES).as_deref(),
+            true,
+        ),
+        subtitle_cluster_sources: plurx_core::store::stored_switch(
+            setting(keys::SUBTITLE_CLUSTER_SOURCES).as_deref(),
+            false,
+        ),
+        subtitle_backfill: plurx_core::store::stored_switch(
+            setting(keys::SUBTITLE_BACKFILL).as_deref(),
+            false,
+        ),
+        chapter_thumbnails: plurx_core::store::stored_switch(
+            setting(keys::CHAPTER_THUMBNAILS).as_deref(),
             true,
         ),
         subtitle_store: subtitle_store_diagnostics(
@@ -2171,6 +2231,15 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             .unwrap_or(14)
             .clamp(1, 365),
         genre_backfill,
+        auth_token_expiry: plurx_core::store::stored_switch(
+            setting(keys::AUTH_TOKEN_EXPIRY_ENABLED).as_deref(),
+            true,
+        ),
+        auth_token_idle_days: plurx_core::auth::token_idle_days(
+            setting(keys::AUTH_TOKEN_IDLE_DAYS).as_deref(),
+        ),
+        auth_token_expiry_since: setting(keys::AUTH_TOKEN_EXPIRY_SINCE)
+            .and_then(|value| value.trim().parse().ok()),
         genre_backfill_last: state.jobs.last_genre_backfill().await,
     })
 }
@@ -2357,6 +2426,7 @@ pub struct UpdateSettings {
     pub prepared_quality_handoff: Option<bool>,
     pub automatic_decoder_recovery: Option<bool>,
     pub decoder_health_qualified_artifacts: Option<bool>,
+    pub hevc_unverified_copy: Option<bool>,
     pub pgs_overlay: Option<bool>,
     pub dolby_vision_convert: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
@@ -2365,6 +2435,7 @@ pub struct UpdateSettings {
     pub vod_blocked_get_cap: Option<String>,
     pub vod_index_mins: Option<i64>,
     pub vod_index_cluster_cache: Option<bool>,
+    pub bounded_replica_reads: Option<bool>,
     pub analysis_max_attempts: Option<i64>,
     pub analysis_lease_secs: Option<i64>,
     pub analysis_backoff_base_secs: Option<i64>,
@@ -2372,6 +2443,9 @@ pub struct UpdateSettings {
     pub subtitle_window_secs: Option<i64>,
     pub subtitle_not_ready_503: Option<bool>,
     pub subtitle_stored_sources: Option<bool>,
+    pub subtitle_cluster_sources: Option<bool>,
+    pub subtitle_backfill: Option<bool>,
+    pub chapter_thumbnails: Option<bool>,
     /// Playback language defaults. ISO 639 codes ("eng"); mode is
     /// "auto" | "always" | "off".
     pub default_audio_lang: Option<String>,
@@ -2434,6 +2508,11 @@ pub struct UpdateSettings {
     pub dv_disk_convert_parallel: Option<i64>,
     /// Arm or disarm the one-off genre backfill.
     pub genre_backfill: Option<bool>,
+    /// "Sign-ins expire". Switching it on (from off) restarts the idle clock
+    /// at that moment, so enabling it never signs a device out on the spot.
+    pub auth_token_expiry: Option<bool>,
+    /// The idle window in whole days, 1..=3650.
+    pub auth_token_idle_days: Option<i64>,
 }
 
 struct PreparedLiveTvUpdate {
@@ -2513,6 +2592,7 @@ impl UpdateSettings {
             || self.prepared_quality_handoff.is_some()
             || self.automatic_decoder_recovery.is_some()
             || self.decoder_health_qualified_artifacts.is_some()
+            || self.hevc_unverified_copy.is_some()
             || self.pgs_overlay.is_some()
             || self.dolby_vision_convert.is_some()
             || self.vod_working_set_bytes.is_some()
@@ -2520,6 +2600,7 @@ impl UpdateSettings {
             || self.vod_materialize_budget_secs.is_some()
             || self.vod_index_mins.is_some()
             || self.vod_index_cluster_cache.is_some()
+            || self.bounded_replica_reads.is_some()
             || self.analysis_max_attempts.is_some()
             || self.analysis_lease_secs.is_some()
             || self.analysis_backoff_base_secs.is_some()
@@ -2527,6 +2608,9 @@ impl UpdateSettings {
             || self.subtitle_window_secs.is_some()
             || self.subtitle_not_ready_503.is_some()
             || self.subtitle_stored_sources.is_some()
+            || self.subtitle_cluster_sources.is_some()
+            || self.subtitle_backfill.is_some()
+            || self.chapter_thumbnails.is_some()
             || self.live_tv_deinterlace_output.is_some()
             || self.default_audio_lang.is_some()
             || self.default_sub_lang.is_some()
@@ -2561,6 +2645,8 @@ impl UpdateSettings {
             || self.dv_disk_keep_original.is_some()
             || self.dv_disk_convert_parallel.is_some()
             || self.genre_backfill.is_some()
+            || self.auth_token_expiry.is_some()
+            || self.auth_token_idle_days.is_some()
             // The DVR settings are their own transaction boundary for the same
             // reason the Live TV tuple is: mixing them would let one commit
             // while the other's CAS reports 409.
@@ -2597,6 +2683,17 @@ pub async fn update_settings(
     // write, so a later bad field cannot leave an earlier policy change in
     // force despite returning 400/409. This matters especially for destructive
     // policies such as `dv_disk_keep_original = false`.
+    if let Some(days) = req.auth_token_idle_days {
+        if !(plurx_core::auth::TOKEN_IDLE_DAYS_MIN..=plurx_core::auth::TOKEN_IDLE_DAYS_MAX)
+            .contains(&days)
+        {
+            return Err(ApiError::BadRequest(format!(
+                "sign-in expiry must be between {} and {} days",
+                plurx_core::auth::TOKEN_IDLE_DAYS_MIN,
+                plurx_core::auth::TOKEN_IDLE_DAYS_MAX
+            )));
+        }
+    }
     let live_tv_requested = req.live_tv_enabled.is_some()
         || req.live_tv_device_ipv4.is_some()
         || req.live_tv_owner_node_id.is_some()
@@ -3180,33 +3277,7 @@ pub async fn update_settings(
         ));
     }
 
-    // Dynamic preconditions are reads/probes, not persistence. Complete them
-    // after syntax/range validation and before any of this aggregate is stored.
-    if req.cluster_media_pool_enabled == Some(true)
-        && !state.media_pool.remote_rollout_ready().await
-    {
-        return Err(ApiError::Conflict(
-            "cluster media placement cannot be enabled until every committed voter is reachable and publishing the current media protocol".into(),
-        ));
-    }
-    if req.cluster_session_takeover_enabled == Some(true) {
-        let media_pool_enabled = match req.cluster_media_pool_enabled {
-            Some(enabled) => enabled,
-            None => {
-                state
-                    .store
-                    .get_setting(keys::CLUSTER_MEDIA_POOL_ENABLED)
-                    .await?
-                    .as_deref()
-                    == Some("1")
-            }
-        };
-        if !media_pool_enabled || !state.media_pool.remote_rollout_ready().await {
-            return Err(ApiError::Conflict(
-                "cluster media session takeover requires remote placement to be enabled and every committed voter to publish the current media protocol".into(),
-            ));
-        }
-    }
+    // Cluster enable preferences always persist; fleet readiness is advisory.
     // The behavior probe may persist the effective encoder mode. Run it before
     // every ordinary store write so Busy/probe refusal also leaves the rest of
     // this request untouched.
@@ -3308,6 +3379,24 @@ pub async fn update_settings(
             .put_setting(keys::SUBTITLE_STORED_SOURCES, if on { "1" } else { "0" })
             .await?;
     }
+    if let Some(on) = req.subtitle_cluster_sources {
+        state
+            .store
+            .put_setting(keys::SUBTITLE_CLUSTER_SOURCES, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.subtitle_backfill {
+        state
+            .store
+            .put_setting(keys::SUBTITLE_BACKFILL, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.chapter_thumbnails {
+        state
+            .store
+            .put_setting(keys::CHAPTER_THUMBNAILS, if on { "1" } else { "0" })
+            .await?;
+    }
     if let Some(name) = server_name {
         state.store.put_setting(keys::SERVER_NAME, name).await?;
     }
@@ -3337,6 +3426,12 @@ pub async fn update_settings(
             };
             state.store.put_setting(key, &value).await?;
         }
+    }
+    if req.monarr_url.is_some() || req.monarr_api_key.is_some() {
+        // The drain caches the pair for 60 s. A write here is seen at once
+        // only if this node holds the `watched:outbox` lease; the owner, when
+        // it is another node, sees it within its 60 s refresh.
+        state.watched.settings_changed();
     }
     if let Some(on) = req.monarr_watched_sync {
         state
@@ -3531,6 +3626,14 @@ pub async fn update_settings(
             .await?;
         state.transcode.set_automatic_decoder_recovery(on);
     }
+    if let Some(on) = req.hevc_unverified_copy {
+        // The saved preference is authoritative. No readiness condition is
+        // consulted here, including on a node without trace_headers.
+        state
+            .store
+            .put_setting(keys::HEVC_UNVERIFIED_COPY, if on { "1" } else { "0" })
+            .await?;
+    }
     if let Some(on) = req.decoder_health_qualified_artifacts {
         state
             .store
@@ -3562,6 +3665,12 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::LIVE_TV_DEINTERLACE_OUTPUT, output.as_str())
+            .await?;
+    }
+    if let Some(on) = req.bounded_replica_reads {
+        state
+            .store
+            .put_setting(keys::BOUNDED_REPLICA_READS, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(on) = req.vod_index_cluster_cache {
@@ -3620,6 +3729,12 @@ pub async fn update_settings(
                 if on { "1" } else { "0" },
             )
             .await?;
+    }
+    if req.cluster_media_pool_enabled.is_some() || req.cluster_session_takeover_enabled.is_some() {
+        // The takeover loop caches an "off" for 60 s; drop it and wake the
+        // loop now. An "on" is never cached, so turning takeover off is seen
+        // on the next 2 s tick here and on every other node.
+        crate::media_sessions::takeover_settings_changed();
     }
     if let Some(mode) = &req.sub_mode {
         // Normalize through the parser so only valid modes are stored.
@@ -3734,6 +3849,41 @@ pub async fn update_settings(
             .store
             .put_setting(keys::JOB_SCAN_ON_STARTUP, if on { "1" } else { "0" })
             .await?;
+    }
+    if req.auth_token_expiry.is_some() || req.auth_token_idle_days.is_some() {
+        let mut values: Vec<(&str, String)> = Vec::new();
+        if let Some(days) = req.auth_token_idle_days {
+            values.push((keys::AUTH_TOKEN_IDLE_DAYS, days.to_string()));
+        }
+        if let Some(on) = req.auth_token_expiry {
+            // Off -> on restarts the clock in the same write that flips the
+            // switch: every device's idle window then starts now, so turning
+            // expiry on signs nobody out on the spot. On -> on leaves it.
+            let settings = state.store.settings_snapshot().await?;
+            let was_on = plurx_core::store::stored_switch(
+                settings
+                    .get(keys::AUTH_TOKEN_EXPIRY_ENABLED)
+                    .map(String::as_str),
+                true,
+            );
+            let clock_started = settings.contains_key(keys::AUTH_TOKEN_EXPIRY_SINCE);
+            if on && (!was_on || !clock_started) {
+                values.push((
+                    keys::AUTH_TOKEN_EXPIRY_SINCE,
+                    super::users::unix_now().to_string(),
+                ));
+            }
+            values.push((
+                keys::AUTH_TOKEN_EXPIRY_ENABLED,
+                if on { "1" } else { "0" }.to_owned(),
+            ));
+            tracing::info!(on, "sign-in expiry");
+        }
+        let borrowed = values
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect::<Vec<_>>();
+        state.store.put_settings(&borrowed).await?;
     }
     if let Some(on) = req.genre_backfill {
         // Arming rewinds the cursor. A pass that finished left it at 0 and
@@ -4686,7 +4836,39 @@ pub async fn activity_detail(
             }
         };
     }
+    // Every child process this node is running, with its priority class, what
+    // it is for and whether the kernel honoured the class (plan P-02 §3.2):
+    // hardware in use is visible here with a stop beside it. Operator-only,
+    // like the analysis block, and this node's own children only.
+    if user.0.is_admin {
+        response["processes"] = serde_json::to_value(plurx_core::process::priority::running())
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+    }
     Ok(Json(response))
+}
+
+/// DELETE /api/v1/activity/processes/{pid} (admin) — kill one child process
+/// the Activity page lists.
+///
+/// Only a pid the launcher registered can be named, and the kill goes
+/// through the pidfd taken at spawn, so a number that has since been reused
+/// by an unrelated process cannot be hit. The child's owner sees an ordinary
+/// exit: a playback producer's session reports it as it reports a crashed
+/// encoder, a background probe records a failed probe.
+pub async fn stop_process(
+    _admin: AdminUser,
+    axum::extract::Path(pid): axum::extract::Path<u32>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    match plurx_core::process::priority::stop(pid) {
+        Ok(true) => Ok(Json(
+            serde_json::json!({ "ok": true, "note": "stopped; its owner sees the process exit" }),
+        )),
+        Ok(false) => Err(ApiError::NotFound("process")),
+        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+            Err(ApiError::Conflict(error.to_string()))
+        }
+        Err(error) => Err(ApiError::Internal(error.to_string())),
+    }
 }
 
 /// DELETE /api/v1/activity/producer (admin) — stop the pre-transcode pass.
@@ -4786,7 +4968,10 @@ pub(crate) struct MetricsState {
     passive_membership: plurx_core::cluster::membership::PassiveMembershipMetrics,
     blocked_gets: Arc<crate::waitpool::BlockedGetMetrics>,
     live_tv: Arc<crate::live_tv::LiveTvMetrics>,
+    live_tv_peers: Arc<crate::http::live_tv::LiveTvPeerMetrics>,
     backup: Arc<crate::backup::BackupMetrics>,
+    plex_census: Arc<super::PlexCensus>,
+    start_attempts: Arc<crate::playstart::StartAttempts>,
 }
 
 impl FromRef<AppState> for MetricsState {
@@ -4805,7 +4990,10 @@ impl FromRef<AppState> for MetricsState {
             // this node is actually serving from.
             blocked_gets: state.transcode.blocked_get_metrics_handle(),
             live_tv: state.live_tv.metrics_handle(),
+            live_tv_peers: state.live_tv_peers.metrics_handle(),
             backup: state.backup.metrics(),
+            plex_census: Arc::clone(&state.plex_census),
+            start_attempts: Arc::clone(&state.start_attempts),
         }
     }
 }
@@ -5076,6 +5264,31 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
         offline.active_leases,
         offline.pinned_bytes,
     ));
+    use plurx_core::store::background_jobs::{JOB_METRIC_KINDS, JOB_METRIC_STATES};
+    out.push_str("# HELP plurx_background_jobs Retained durable computations by kind and state.\n\
+        # TYPE plurx_background_jobs gauge\n\
+        # HELP plurx_background_job_oldest_age_seconds Age of the oldest retained computation in each class.\n\
+        # TYPE plurx_background_job_oldest_age_seconds gauge\n");
+    for (kind_index, kind) in JOB_METRIC_KINDS.iter().enumerate() {
+        for (state_index, state) in JOB_METRIC_STATES.iter().enumerate() {
+            let slot = kind_index * JOB_METRIC_STATES.len() + state_index;
+            out.push_str(&format!(
+                "plurx_background_jobs{{kind=\"{kind}\",state=\"{state}\"}} {}\n\
+                 plurx_background_job_oldest_age_seconds{{kind=\"{kind}\",state=\"{state}\"}} {}\n",
+                sample.background_jobs.counts[slot],
+                sample.background_jobs.oldest_age_seconds[slot]
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "# HELP plurx_background_resource_reservations Unexpired shared admission reservations.\n\
+         # TYPE plurx_background_resource_reservations gauge\n\
+         plurx_background_resource_reservations{{resource_class=\"source_io\"}} {}\n\
+         # HELP plurx_background_legacy_pending Sealed legacy interests awaiting bounded import.\n\
+         # TYPE plurx_background_legacy_pending gauge\n\
+         plurx_background_legacy_pending {}\n",
+        sample.background_jobs.source_io_reservations, sample.background_jobs.legacy_pending,
+    ));
     let analysis = sample.analysis;
     out.push_str(
         "# HELP plurx_analysis_queue_depth Durable analysis jobs by state, component, priority, and trigger.\n\
@@ -5201,6 +5414,10 @@ pub(crate) async fn metrics(
     State(state): State<MetricsState>,
 ) -> impl axum::response::IntoResponse {
     let uptime = state.started_at.elapsed().as_secs();
+    // Settle every start attempt past its deadline before the counters are
+    // read, so an idle node still reports the last one that was abandoned
+    // (C-08 M5 row 4). In memory only: no Store read on a scrape.
+    state.start_attempts.sweep(Instant::now());
     let (sessions, active_cache_entries) = state.transcode.snapshot();
     let decode_fact_metrics = state.transcode.decode_facts_prometheus();
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
@@ -5209,9 +5426,15 @@ pub(crate) async fn metrics(
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
-         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}{}",
+         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         state.offline.prometheus(),
+        crate::watched::prometheus(),
+        crate::library_search::prometheus(),
+        // Every child by priority class (plan P-02 §3.2): what this node's
+        // hardware is being spent on, and whether the kernel honoured it.
+        plurx_core::process::priority::prometheus(),
         plurx_core::store::prometheus_store_operations(),
+        plurx_core::store::prometheus_sqlite_health(),
         crate::store_result::prometheus(),
         plurx_core::scan::prometheus_scan_walk(),
         plurx_core::metadata::prometheus_provider_requests(),
@@ -5225,11 +5448,14 @@ pub(crate) async fn metrics(
         super::prometheus_handler_deadlines(),
         crate::ffmpeg::engine_attestation_prometheus(),
         super::prometheus_http_store_attribution(),
+        state.plex_census.prometheus(),
+        super::prometheus_http_request_metrics(),
+        crate::panics::prometheus_panics(),
         crate::state::fragment_index_validation_prometheus(),
-        crate::subtitle_source::prometheus(),
+        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
-    let live_tv_metrics = state.live_tv.prometheus();
+    let live_tv_metrics = state.live_tv.prometheus() + &state.live_tv_peers.prometheus();
     let backup_metrics = state.backup.prometheus();
     let codec_qualification_metrics = state.transcode.codec_qualification_prometheus();
 
@@ -5589,17 +5815,41 @@ mod tests {
     #[test]
     fn the_roster_reader_has_exactly_these_callers() {
         let http = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/http");
-        let mut found: Vec<(String, String)> = Vec::new();
-        for entry in std::fs::read_dir(&http).expect("the http module directory") {
-            let path = entry.expect("a directory entry").path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
-                continue;
+        // Every module under `http/`, child modules included: a split moves a
+        // route into `http/<parent>/<child>.rs`, and a scan of the top level
+        // alone would stop seeing it without failing. Test children
+        // (`tests.rs`, `tests/`) quote call sites as literals and are skipped
+        // for the same reason the inline test module is split off below.
+        let mut modules = Vec::new();
+        let mut directories = vec![http.clone()];
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(&directory).expect("an http module directory") {
+                let path = entry.expect("a directory entry").path();
+                let stem = path.file_stem().and_then(|stem| stem.to_str());
+                if stem == Some("tests") {
+                    continue;
+                }
+                if path.is_dir() {
+                    directories.push(path);
+                } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                    modules.push(path);
+                }
             }
+        }
+        assert!(
+            modules
+                .iter()
+                .any(|path| path.parent() != Some(http.as_path())),
+            "the walk no longer reaches the child modules under http/"
+        );
+        let mut found: Vec<(String, String)> = Vec::new();
+        for path in modules {
             let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .expect("a file name")
-                .to_owned();
+                .strip_prefix(&http)
+                .expect("a module under http/")
+                .to_str()
+                .expect("a UTF-8 module path")
+                .replace('\\', "/");
             let source = std::fs::read_to_string(&path).expect("a readable module");
             // Production halves only: the test modules quote these call sites
             // as string literals, and a test is not a route. Split on the test
@@ -5780,6 +6030,11 @@ mod tests {
         });
         assert!(stale.contains("plurx_store_metrics_sample_valid 0"));
         assert!(stale.contains("plurx_store_metrics_sample_age_seconds 121"));
+        assert!(
+            stale.contains("plurx_background_jobs{kind=\"transcode_prepare\",state=\"queued\"} 0")
+        );
+        assert!(stale
+            .contains("plurx_background_resource_reservations{resource_class=\"source_io\"} 0"));
         assert!(stale.contains("plurx_libraries_total 3"));
         assert!(stale.contains("plurx_users_total 4"));
         // The whole verdict family is absent, not zero, until a sample lands.
@@ -6569,7 +6824,7 @@ mod tests {
             suspended: true,
             suspend_count: 1,
         };
-        emit_client_playback_event(Arc::clone(&store), event, Some(&info), None);
+        emit_client_playback_event(Arc::clone(&store), event, Some(&info), None, None);
         let row = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if let Some(row) = store

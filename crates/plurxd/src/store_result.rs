@@ -55,7 +55,9 @@ macro_rules! operations {
 }
 
 operations! {
-    ForgetIndexAfterLocalRemoval => "forget_index_after_local_removal",
+    CancelTranscodeSourceChanged => "cancel_transcode_source_changed",
+    CancelTranscodePolicyChanged => "cancel_transcode_policy_changed",
+    CancelTranscodeHealthRefused => "cancel_transcode_health_refused",
     ForgetCorruptLocalIndex => "forget_corrupt_local_index",
     ForgetMissingPeerIndex => "forget_missing_peer_index",
     ForgetCorruptPeerIndex => "forget_corrupt_peer_index",
@@ -73,8 +75,8 @@ operations! {
     RecordPublishedAnalysisPhase => "record_published_analysis_phase",
     SettleAnalysisAfterQueueAdmission => "settle_analysis_after_queue_admission",
     RecordFragmentIndexSource => "record_fragment_index_source",
-    SettleAnalysisAfterHydration => "settle_analysis_after_hydration",
     RequeueFragmentIndexNoHolder => "requeue_fragment_index_no_holder",
+    CancelStaleSubtitleIntent => "cancel_stale_subtitle_intent",
     TouchApiKey => "touch_api_key",
     ForgetMissingInternalIndex => "forget_missing_internal_index",
     ForgetCorruptInternalIndex => "forget_corrupt_internal_index",
@@ -414,7 +416,7 @@ mod tests {
 
     #[test]
     fn every_classified_failure_has_a_bounded_metric_row() {
-        assert_eq!(Operation::ALL.len(), 42, "one fixed label per audited site");
+        assert_eq!(Operation::ALL.len(), 44, "one fixed label per audited site");
         let metrics = Metrics::default();
         for operation in Operation::ALL {
             for severity in Discard::ALL {

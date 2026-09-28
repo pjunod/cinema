@@ -70,6 +70,10 @@ async fn try_connect_stream(
             fastwebsockets::handshake::generate_key(),
         )
         .header("Sec-WebSocket-Version", "13")
+        .header(
+            crate::network::api::WRITE_ACK_LOG_INDEX_HEADER,
+            crate::network::api::WRITE_ACK_LOG_INDEX_V1,
+        )
         .body(Empty::<Bytes>::new())
         .map_err(|err| {
             error!("Error connecting to {uri}: {err:?}");

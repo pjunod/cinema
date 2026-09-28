@@ -157,7 +157,6 @@
     #[tokio::test]
     async fn source_change_refuses_bound_plan() {
         use plurx_core::store::SqliteStore;
-        use std::os::unix::fs::PermissionsExt as _;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let media = crate::test_tempdir().expect("media");
@@ -171,16 +170,11 @@
             .expect("media file");
 
         let probe_path = media.path().join("ffprobe-source-change");
-        std::fs::write(
+        crate::write_test_executable(
             &probe_path,
             "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then printf '%s\\n' 'ffprobe version source-change'; exit 0; fi\nprintf '%s\\n' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"h264\",\"profile\":\"High\",\"pix_fmt\":\"yuv420p\",\"width\":160,\"height\":120,\"avg_frame_rate\":\"24/1\",\"r_frame_rate\":\"24/1\",\"color_transfer\":\"bt709\",\"disposition\":{\"attached_pic\":0}}]}'\n",
-        )
-        .expect("probe fixture");
-        let mut permissions = std::fs::metadata(&probe_path)
-            .expect("probe metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&probe_path, permissions).expect("executable probe");
+            0o755,
+        );
         let probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(
             probe_path.to_str().expect("probe path"),
         )
@@ -212,7 +206,7 @@
                 &file,
                 &options,
                 Encoder::Software,
-                crate::decode_facts::DecodeFactSource::new(
+                BoundPlanCaller::Vod.decode_fact_source(
                     Arc::new(std::fs::File::open(&source_path).expect("open held source")),
                     Arc::new(tokio::sync::Semaphore::new(1)),
                 ),
@@ -245,6 +239,106 @@
             .contains("plurx_decode_plan_fallbacks_total{reason=\"refused_source_changed\"} 1"));
     }
 
+    /// A decode-fact probe takes the class of the caller waiting on it (plan
+    /// P-02 §3.2.2, review of #518 finding 1). The VOD start waits for it for
+    /// up to `DECODE_PLAN_PROBE_BUDGET` with a viewer in front of it, so its
+    /// probes are realtime; the pre-transcode pass has nobody waiting, so its
+    /// probes are background. Before the fix one constant made both
+    /// background.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn decode_fact_probes_take_the_class_of_the_caller_waiting_on_them() {
+        use crate::process_control::{priority::spawns_of, ChildClass};
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = crate::test_tempdir().expect("media");
+        let source_path = media.path().join("caller-class.mkv");
+        std::fs::write(&source_path, b"held source for the class test").expect("source fixture");
+        let file_id = seed_real_file(&store, &source_path).await;
+        let mut file = store
+            .get_file(file_id)
+            .await
+            .expect("get file")
+            .expect("media file");
+        let source_metadata = std::fs::metadata(&source_path).expect("source metadata");
+        file.size = source_metadata.len() as i64;
+        file.mtime = source_metadata
+            .modified()
+            .expect("source modified time")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("source after epoch")
+            .as_secs() as i64;
+
+        let probe_path = media.path().join("ffprobe-caller-class");
+        crate::write_test_executable(
+            &probe_path,
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then printf '%s\\n' 'ffprobe version caller-class'; exit 0; fi\nprintf '%s\\n' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"h264\",\"profile\":\"High\",\"pix_fmt\":\"yuv420p\",\"width\":160,\"height\":120,\"avg_frame_rate\":\"24/1\",\"r_frame_rate\":\"24/1\",\"color_transfer\":\"bt709\",\"disposition\":{\"attached_pic\":0}}]}'\n",
+            0o755,
+        );
+        let discover = || {
+            crate::decode_facts::DecodeProbeIdentity::discover_fixture(
+                probe_path.to_str().expect("probe path"),
+            )
+        };
+
+        let vod = BoundPlanCaller::Vod.decode_fact_work();
+        let pretranscode = BoundPlanCaller::Pretranscode.decode_fact_work();
+        assert_eq!(vod.class, ChildClass::Realtime);
+        assert_eq!(pretranscode.class, ChildClass::Background);
+
+        // The VOD start's seam, through its own manager so no cached fact
+        // stands in for a probe.
+        let (manager, _work, _cache) = cached_manager(&store);
+        let manager = manager.with_decode_probe(Some(discover().await.expect("probe identity")));
+        let options = manager.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            120,
+            0.0,
+            None,
+            None,
+            Some(1),
+            ToneMap::None,
+            OutputGrade::Sdr,
+        );
+        let before = spawns_of(vod);
+        let _ = manager
+            .resolve_vod_movie_plan(
+                &file,
+                &options,
+                Encoder::Software,
+                Arc::new(std::fs::File::open(&source_path).expect("open held source")),
+            )
+            .await;
+        assert!(
+            spawns_of(vod) > before,
+            "the VOD start's decode-fact probe did not run at the realtime class"
+        );
+
+        // The pre-transcode pass's seam.
+        let (manager, _work, _cache) = cached_manager(&store);
+        let manager = manager.with_decode_probe(Some(discover().await.expect("probe identity")));
+        let bound_source = pretranscode_source_snapshot(&file, &[media.path().to_path_buf()])
+            .await
+            .expect("bound source");
+        let before = spawns_of(pretranscode);
+        let _ = manager
+            .resolve_bound_movie_plan(
+                &file,
+                &options,
+                Encoder::Software,
+                &Arc::new(bound_source),
+                Instant::now() + Duration::from_secs(5),
+                None,
+            )
+            .await;
+        assert!(
+            spawns_of(pretranscode) > before,
+            "the pre-transcode pass's decode-fact probe did not run at the background class"
+        );
+    }
+
     #[tokio::test]
     async fn channel_playback_repair_installs_normalized_native_hls_retry() {
         let file = execution_file_for_retry();
@@ -275,7 +369,7 @@
         assert!(!joined.contains("remove_types=32-34"), "{joined}");
 
         let (control, mut registration) =
-            crate::playback_control::RollingControlHandle::spawn_prepublication_producer(
+            crate::playback_control::RollingControlHandle::spawn_prepublication_producer_for_test(
                 "channel-repair-test",
             );
         registration
@@ -450,7 +544,6 @@
     #[tokio::test]
     async fn prepared_plan_is_not_reprobed_during_producer_execution() {
         use plurx_core::store::SqliteStore;
-        use std::os::unix::fs::PermissionsExt as _;
 
         super::require_ffmpeg();
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
@@ -473,16 +566,11 @@
             .as_secs() as i64;
 
         let probe = media.path().join("slow-ffprobe");
-        std::fs::write(
+        crate::write_test_executable(
             &probe,
             "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\n  printf '%s\\n' 'ffprobe version neutral-timeout'\n  exit 0\nfi\nsleep 5\nprintf '%s\\n' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"h264\"}]}'\n",
-        )
-        .expect("write slow probe");
-        let mut permissions = std::fs::metadata(&probe)
-            .expect("probe metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&probe, permissions).expect("executable probe");
+            0o755,
+        );
         let probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(
             probe.to_str().expect("probe path"),
         )
@@ -546,7 +634,6 @@
     #[tokio::test]
     async fn prepared_plan_keeps_producer_execution_out_of_the_probe_lane() {
         use plurx_core::store::SqliteStore;
-        use std::os::unix::fs::PermissionsExt as _;
 
         super::require_ffmpeg();
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
@@ -569,16 +656,11 @@
             .as_secs() as i64;
 
         let probe = media.path().join("fast-ffprobe");
-        std::fs::write(
+        crate::write_test_executable(
             &probe,
             "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\n  printf '%s\\n' 'ffprobe version final-observation-timeout'\n  exit 0\nfi\nprintf '%s\\n' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"h264\"}]}'\n",
-        )
-        .expect("write fast probe");
-        let mut permissions = std::fs::metadata(&probe)
-            .expect("probe metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&probe, permissions).expect("executable probe");
+            0o755,
+        );
         let probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(
             probe.to_str().expect("probe path"),
         )
@@ -1278,11 +1360,20 @@
         )
         .await;
         let client = uuid::Uuid::new_v4().to_string();
-        let request = |sequence, demand| {
+        let request = |sequence, demand, position_ms: i64| {
             let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
                 crate::playback_control::ClientPlatform::Web,
             );
             snapshot.demand = demand;
+            // The started fixture has produced 64 s and published 48 s, one
+            // whole batch staged. Held on time additionally requires the
+            // producer to have reached what the next publication will ask
+            // for: the clock's desired end (position + 48 s initial runway)
+            // plus the 10 s guard, capped at its allowed end (+64 s). From
+            // position 0 that is 58 s, which 64 s of produced media covers;
+            // from position 10 s it is 68 s, which it does not.
+            snapshot.position_ms = position_ms;
+            snapshot.buffered_from_ms = Some(position_ms);
             if demand != crate::playback_control::PlaybackDemand::Active {
                 snapshot.playback_rate = 0.0;
                 snapshot.render_state = crate::playback_control::RenderState::Waiting;
@@ -1303,7 +1394,11 @@
         let hold = fixture
             .state
             .transcode
-            .hls_session_control(request(1, crate::playback_control::PlaybackDemand::Hold))
+            .hls_session_control(request(
+                1,
+                crate::playback_control::PlaybackDemand::Hold,
+                0,
+            ))
             .await
             .expect("local worker")
             .expect("hold accepted");
@@ -1323,7 +1418,11 @@
         let active = fixture
             .state
             .transcode
-            .hls_session_control(request(2, crate::playback_control::PlaybackDemand::Active))
+            .hls_session_control(request(
+                2,
+                crate::playback_control::PlaybackDemand::Active,
+                0,
+            ))
             .await
             .expect("local worker")
             .expect("active accepted");
@@ -1380,6 +1479,56 @@
         assert_eq!(extra["production_policy"], "explicit_demand");
         assert_eq!(extra["production_target_seconds"], 0);
         assert_eq!(extra["producer_control"]["observation_only"], true);
+
+        // The same staged batch no longer holds a viewer ten seconds further
+        // on: the next publication needs media the producer has not made yet,
+        // so active demand resumes it instead of trapping publication at one
+        // segment per cycle.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let behind = fixture
+            .state
+            .transcode
+            .hls_session_control(request(
+                3,
+                crate::playback_control::PlaybackDemand::Active,
+                10_000,
+            ))
+            .await
+            .expect("local worker")
+            .expect("active accepted");
+        let HlsSessionInfo::Live(behind_status) = behind.status else {
+            panic!("rolling active returned VOD status");
+        };
+        assert!(
+            !behind_status.suspended,
+            "a producer short of the next publication must resume"
+        );
+        assert_eq!(behind_status.hold_reason, None);
+        assert_eq!(behind_status.control_demand, Some("active"));
+        let events = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let events = fixture
+                    .store
+                    .playback_events(&plurx_core::domain::PlaybackEventQuery {
+                        event: None,
+                        limit: 20,
+                        ..plurx_core::domain::PlaybackEventQuery::default()
+                    })
+                    .await
+                    .expect("flow events");
+                if events.iter().any(|event| event.event == "resume") {
+                    return events;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("resume event persisted");
+        let resume = events
+            .iter()
+            .find(|event| event.event == "resume")
+            .expect("resume event");
+        assert_eq!(resume.hold_reason.as_deref(), Some("time"));
     }
 
     #[tokio::test]
@@ -1871,6 +2020,7 @@
 
     fn profile5_file() -> plurx_core::domain::MediaFile {
         plurx_core::domain::MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 5,
             item_id: 1,
             path: PathBuf::from("/media/profile5.mkv"),
@@ -2318,7 +2468,7 @@
         );
         let file = profile5_file();
         assert!(manager
-            .encoder_for_file(&file)
+            .encoder_for_file(&file, crate::process_control::ChildClass::Background)
             .await
             .expect_err("an unproved renderer must refuse before spawn")
             .contains("did not prove"));
@@ -2331,7 +2481,10 @@
             .lock()
             .expect("proof cache")
             .insert(TranscodeManager::dovi_proof_key(&file), true);
-        let encoder = manager.encoder_for_file(&file).await.expect("proved route");
+        let encoder = manager
+            .encoder_for_file(&file, crate::process_control::ChildClass::Background)
+            .await
+            .expect("proved route");
         assert_eq!(encoder, Encoder::Software);
         let opts = manager.options_for_tone_map(
             encoder,

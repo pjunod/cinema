@@ -1,0 +1,50 @@
+version = 1
+
+[[coverage]]
+commits = ["dbcb1168"]
+points = ["server.api"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+`plurxd` never set `TCP_NODELAY`, so every HTTP connection it served ran \
+with Nagle's algorithm on. A media body is a run of large writes that \
+usually ends in a short one, and with Nagle on the kernel holds that short \
+write back while earlier data is unacknowledged, which lasts until the \
+peer's delayed ACK (40 ms minimum on Linux). The S-02 §5.1.1 measurement \
+(`docs/streaming/MEDIA-BODY-BUFFERS.md`) saw it as an HLS p50 that doubled \
+with the larger media read, 24-25 ms at 4 KiB against 48-50 ms at 128 and \
+256 KiB, while p99 improved, because most ~5 MB segment fetches landed in \
+a ~50 ms mode that the 4 KiB build only reached in its tail. The \
+hypothesis was then tested with the same harness before this commit \
+(§5.1.2 and `docs/evidence/media-body-buffers-m1-measurement-2026-09-24.md`): \
+two 128 KiB builds that differed only in this change, three rotated \
+trials, gave HLS p50/p95/p99 of 49-51 / 52-58 / 52-58 ms with 353 of 600 \
+timed GETs at 40 ms or more with Nagle on, and 15-16 / 18 / 19-20 ms with \
+none at 40 ms with it off. Direct-play throughput, group A and group B \
+memory and peak thread counts did not move beyond run-to-run spread. \
+This commit sets the option in the `TcpListener` implementation of \
+`HttpAcceptor` (`crates/plurxd/src/main.rs`, `disable_nagle`), so every \
+connection `serve_http` accepts on the public listener has it; failing to \
+set it is logged at debug and does not refuse the connection.
+
+`startup_tests::accepted_http_connections_have_nagle_disabled` is added \
+here. It binds a loopback `TcpListener`, connects to it, accepts through \
+`HttpAcceptor::accept` -- the production acceptor, not a test double -- \
+and asserts that the accepted stream reports `nodelay() == true`. With the \
+`disable_nagle(&stream, remote)` call removed from the acceptor it fails \
+(the kernel default is `false`); that revert was run on this branch. The \
+neighbouring `startup_tests::accept_error_backs_off_then_serves_the_next_connection` \
+still passes and keeps the accept loop's error path covered. Both are \
+`crates/plurxd` unit tests in the `plurxd` binary target, run by \
+`make rust-check` under `rust-gate` and by `make ci-rust-gate` under \
+`rust-gate-ci`.
+
+Not covered by these checks: the latency effect itself, which depends on \
+the peer's ACK timing and is a measurement (loopback on nuc3), not a unit \
+test. Whether the same p50 shift existed on a real client link, and how much \
+this changes it there, is not measured. Nor is the packet cost: the HLS \
+pump flushes each 4 KiB acknowledgement piece as its own write, and with \
+the option each write is sent at once. On loopback that was 8.7x the data \
+packets per segment at MTU 65536 and no difference at MTU 1500; on a real \
+1500-MTU link it is at most about 6% (plan §5.1.2, the packet cost; §6 \
+watches it after deploy).
+"""

@@ -17,7 +17,13 @@
 
 pub mod classification;
 pub use classification::ClassificationStore;
+mod downloaded_subtitles;
 mod dv_conversion;
+mod file_grants;
+pub use downloaded_subtitles::{
+    valid_downloaded_vtt, MAX_DOWNLOADED_SUBTITLES, MAX_DOWNLOADED_SUBTITLE_BYTES,
+};
+pub use file_grants::{FileGrant, FileGrantStore, NewFileGrant, FILE_GRANTS_SCHEMA};
 mod fragindex;
 mod fragment_index_cluster;
 #[cfg(feature = "hiqlite-store")]
@@ -44,6 +50,8 @@ mod hiqlite;
 #[cfg(feature = "hiqlite-store")]
 #[doc(hidden)]
 pub use hiqlite::validation_time_http_store_operation;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_background_jobs;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_catalog;
 #[cfg(feature = "hiqlite-store")]
@@ -74,6 +82,8 @@ mod hiqlite_sessions;
 mod hiqlite_shared_cache;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_timeline_annotations;
+#[cfg(feature = "hiqlite-store")]
+mod watch_fence;
 
 /// The placeholder-order census over every replicated slice above. It is a
 /// test module rather than a lint because the rule it enforces is the one
@@ -81,7 +91,41 @@ mod hiqlite_timeline_annotations;
 #[cfg(all(test, feature = "hiqlite-store"))]
 mod placeholder_census;
 
+/// K-04 M3: a source census of consistent reads per replicated slice. Not a
+/// latency or request-rate measurement; see the module documentation.
+#[cfg(all(test, feature = "hiqlite-store"))]
+mod consistent_read_census;
+
+pub mod background_jobs;
+pub use background_jobs::BackgroundJobStore;
+pub mod background_jobs_artwork;
+mod background_jobs_delivery;
+pub mod background_jobs_domain;
+pub mod background_jobs_embeddings;
+mod background_jobs_fragment;
+pub mod background_jobs_fragment_admission;
+pub mod background_jobs_integrity;
+pub mod background_jobs_library;
+mod background_jobs_maintenance;
+mod background_jobs_migration;
+mod background_jobs_observation;
+mod background_jobs_offline;
+pub mod background_jobs_predictions;
+pub mod background_jobs_preparation;
+pub mod background_jobs_pretranscode;
+pub mod background_jobs_probe;
+pub mod background_jobs_provider;
+mod background_jobs_publication;
+pub mod background_jobs_resources;
+pub mod background_jobs_subtitle;
+#[cfg(test)]
+mod background_jobs_tests;
+pub mod background_jobs_transcode;
+pub mod classification_schedule;
+pub mod offline_claim;
+pub mod offline_expiry;
 pub mod replicated;
+pub mod watched_drain;
 
 pub use dv_conversion::{
     DvConversion, DvConversionCandidate, DvConversionMode, DvConversionProgress,
@@ -166,6 +210,17 @@ pub struct TokenSummary {
     pub device: Option<String>,
     pub created_at: i64,
     pub last_seen_at: i64,
+}
+
+/// What a login-token lookup found. `Expired` is distinct from `Unknown` so
+/// the HTTP layer can tell a client "you were signed out after N idle days"
+/// instead of a bare 401; an expired token's activity is never refreshed, so
+/// presenting it cannot slide it back to life.
+#[derive(Clone, Debug)]
+pub enum TokenAuthentication {
+    Authenticated(User),
+    Expired { idle_days: i64 },
+    Unknown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -864,34 +919,35 @@ pub use fragment_index_cluster::{
     AnalysisAttempt, AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter,
     AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisIndexRepairCandidate,
     AnalysisIndexRepairResult, AnalysisRequest, AnalysisStatusSummary,
-    ClusterFragmentIndexArtifact, ClusterFragmentIndexFailure, ClusterFragmentIndexJob,
-    ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
-    NewAnalysisRequest, NewClusterFragmentIndexJob, CONTENT_ANALYSIS_REPAIR_HEADROOM,
+    ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
+    ClusterFragmentIndexStore, FragmentIndexSourceObservation, NewAnalysisRequest,
+    NewClusterFragmentIndexJob, SubtitleBackfillCandidate, SubtitleBackfillDiagnostics,
+    SubtitleSourcePublication, SubtitleSourceStamp, CONTENT_ANALYSIS_REPAIR_HEADROOM,
     CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES, CONTENT_ANALYSIS_REPAIR_REVISION,
     DEFAULT_ANALYSIS_BACKOFF_BASE_SECS, DEFAULT_ANALYSIS_BACKOFF_MAX_SECS,
     DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS, DEFAULT_SUBTITLE_WINDOW_SECS,
     MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS,
     MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
-    MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS,
+    MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT,
+    SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
 };
 pub use publication::{PublicationFence, PublicationStore};
-pub use sqlite::{SqliteStore, SQLITE_SCHEMA_VERSION};
+pub use sqlite::{prometheus_sqlite_health, SqliteStore, SQLITE_SCHEMA_VERSION};
 
 use async_trait::async_trait;
 
 use crate::cluster::coordination::{Lease, LeaseClaim};
 use crate::domain::{
-    BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheManifestCheck, CacheStorageMember,
-    CachedTranscode, DolbyVisionFacts, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind,
-    ItemPage, ItemSort, Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome,
+    BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheStorageMember, CachedTranscode,
+    DolbyVisionFacts, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind, ItemPage,
+    ItemSort, Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome,
     MediaSessionActivationSettlement, MediaSessionProjectionCompletion, MediaSessionRenewal,
     MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch,
     NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
-    NewPretranscodeJob, OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome,
-    OfflinePackage, OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport,
-    OwnedMediaSessionLease, PlaybackEvent, PlaybackEventQuery, PretranscodeJob,
-    PretranscodeWorkerCapabilities, ProbeResult, ReadingState, ReadingStateWrite, RecentItem,
-    SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
+    OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage,
+    OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease,
+    PlaybackEvent, PlaybackEventQuery, PretranscodeJob, ProbeResult, ReadingState,
+    ReadingStateWrite, RecentItem, SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
@@ -1037,9 +1093,11 @@ pub struct PrometheusStoreSnapshot {
     pub offline: OfflinePackageStats,
     pub watched_outbox: (i64, i64, i64),
     pub analysis: AnalysisStoreMetrics,
+    pub background_jobs: background_jobs::BackgroundJobMetrics,
 }
 
-pub const ANALYSIS_METRIC_COMPONENTS: [&str; 2] = ["fragment_index", "skip_markers"];
+pub const ANALYSIS_METRIC_COMPONENTS: [&str; 3] =
+    ["fragment_index", "skip_markers", "subtitle_source"];
 pub const ANALYSIS_METRIC_STATES: [&str; 8] = [
     "queued",
     "claimed",
@@ -1051,7 +1109,7 @@ pub const ANALYSIS_METRIC_STATES: [&str; 8] = [
     "stale",
 ];
 pub const ANALYSIS_METRIC_PRIORITIES: [&str; 3] = ["normal", "forced", "foreground"];
-pub const ANALYSIS_METRIC_TRIGGERS: [&str; 3] = ["admin", "background", "foreground"];
+pub const ANALYSIS_METRIC_TRIGGERS: [&str; 4] = ["admin", "background", "foreground", "playback"];
 pub const ANALYSIS_MARKER_KINDS: [&str; 4] = ["intro", "recap", "credits", "preview"];
 pub const ANALYSIS_MARKER_PROVENANCE: [&str; 4] = ["estimated", "detected", "authored", "manual"];
 pub const ANALYSIS_MARKER_CONFIDENCE: [&str; 3] = ["low", "medium", "high"];
@@ -1646,6 +1704,18 @@ pub mod keys {
     /// Human-visible name of the logical server. Configuration supplies only
     /// the first value; thereafter this replicated key is authoritative.
     pub const SERVER_NAME: &str = "server.name";
+    /// "Sign-ins expire": whether a login token that goes unused for
+    /// `AUTH_TOKEN_IDLE_DAYS` stops authenticating. Absent is ON — the
+    /// product default — and `0` restores non-expiring tokens.
+    pub const AUTH_TOKEN_EXPIRY_ENABLED: &str = "auth.token_expiry_enabled";
+    /// The sliding idle window in whole days (1..=3650). Absent is 90.
+    pub const AUTH_TOKEN_IDLE_DAYS: &str = "auth.token_idle_days";
+    /// Unix seconds at which expiry last took effect: seeded once at startup
+    /// and rewritten whenever an administrator switches expiry back on. No
+    /// token's idle clock starts before it, so turning expiry on — including
+    /// the default taking effect on upgrade — never signs anyone out at once.
+    /// Absent means the clock has not started and nothing can expire.
+    pub const AUTH_TOKEN_EXPIRY_SINCE: &str = "auth.token_expiry_since";
     /// TMDB API key (set by the admin; empty/absent disables the agent).
     pub const TMDB_API_KEY: &str = "tmdb.api_key";
     /// OMDb API key — powers review-site ratings (Rotten Tomatoes / Metacritic /
@@ -1803,6 +1873,7 @@ pub mod keys {
     /// Content-addressed cluster coordination for VOD indexes. Missing/zero is
     /// off so an upgrade never starts full-library reads without the operator's
     /// topology measurement and explicit opt-in.
+    pub const BOUNDED_REPLICA_READS: &str = "cluster.bounded_replica_reads";
     pub const VOD_INDEX_CLUSTER_CACHE: &str = "playback.vod_index_cluster_cache";
     /// Durable analysis retry budget. The settings API constrains this to a
     /// small positive range so an operator can tune slow media without making
@@ -1831,6 +1902,11 @@ pub mod keys {
     /// so a wrong artifact a producer published is taken out of service with
     /// one switch and no redeploy.
     pub const SUBTITLE_STORED_SOURCES: &str = "subtitles.stored_sources";
+    pub const SUBTITLE_CLUSTER_SOURCES: &str = "subtitles.cluster_sources";
+    pub const SUBTITLE_BACKFILL: &str = "subtitles.backfill";
+    /// Make a chapter thumbnail on request and keep it in the runtime
+    /// cache. On by default; off answers the route 404 and extracts nothing.
+    pub const CHAPTER_THUMBNAILS: &str = "playback.chapter_thumbnails";
     /// VOD availability kill switch. Absent/on accepts immutable VOD session
     /// creation; `0` refuses it. It never selects the removed live HLS path.
     pub const VOD_PRESENTATION: &str = "playback.vod_presentation";
@@ -1851,6 +1927,9 @@ pub mod keys {
     /// request: missing diagnostic contracts are reported as advisory facts
     /// and never override an explicit enable.
     pub const AUTOMATIC_DECODER_RECOVERY: &str = "playback.automatic_decoder_recovery";
+    /// Operator override for HEVC copy without configuration/source proof.
+    /// Off by default. Readiness is advisory and never prevents saving it.
+    pub const HEVC_UNVERIFIED_COPY: &str = "playback.hevc_unverified_copy";
     /// Ask this node to plan into the health-qualified artifact identity, so a
     /// transcode may only be reused when its producer's own receipt says the
     /// decode was clean.
@@ -2021,6 +2100,8 @@ pub trait SettingsStore: Send + Sync + 'static {
         first: &str,
         second: &str,
     ) -> Result<(Option<String>, Option<String>), StoreError>;
+    /// Read at most 32 named settings from one snapshot. Missing keys are absent.
+    async fn get_settings(&self, keys: &[&str]) -> Result<BTreeMap<String, String>, StoreError>;
     /// Read the complete settings table from one database snapshot.
     ///
     /// Administrative views render many independent settings at once. A
@@ -2065,6 +2146,15 @@ pub trait SettingsStore: Send + Sync + 'static {
     ) -> Result<bool, StoreError>;
     /// The stable unique id of this logical server.
     async fn instance_id(&self) -> Result<String, StoreError>;
+}
+
+pub(crate) fn selected_settings_json(keys: &[&str]) -> Result<String, StoreError> {
+    if keys.len() > 32 || keys.iter().any(|key| key.is_empty() || key.len() > 256) {
+        return Err(StoreError::Task(
+            "settings read requires at most 32 nonempty bounded keys".into(),
+        ));
+    }
+    serde_json::to_string(keys).map_err(|error| StoreError::Task(error.to_string()))
 }
 
 pub(crate) fn validate_generated_settings(
@@ -2166,8 +2256,21 @@ pub trait UserStore: Send + Sync + 'static {
         device: Option<&str>,
         expected_password_hash: &str,
     ) -> Result<bool, StoreError>;
-    /// Resolve a token hash to its user (touching `last_seen_at`).
-    async fn user_for_token(&self, token_hash: &str) -> Result<Option<User>, StoreError>;
+    /// Resolve a token hash under the server's sign-in expiry policy, read in
+    /// the same snapshot as the token row. A live token's coalesced
+    /// `last_seen_at` is refreshed exactly as before; an expired one is
+    /// reported and left untouched.
+    async fn authenticate_token(&self, token_hash: &str)
+        -> Result<TokenAuthentication, StoreError>;
+    /// Resolve a token hash to its user (touching `last_seen_at`). An expired
+    /// token resolves to nobody, so every caller that predates expiry — the
+    /// Plex facade, recovery reads — honours the policy without knowing it.
+    async fn user_for_token(&self, token_hash: &str) -> Result<Option<User>, StoreError> {
+        Ok(match self.authenticate_token(token_hash).await? {
+            TokenAuthentication::Authenticated(user) => Some(user),
+            TokenAuthentication::Expired { .. } | TokenAuthentication::Unknown => None,
+        })
+    }
     async fn delete_token(&self, token_hash: &str) -> Result<bool, StoreError>;
     /// Delete a login token only while the exact clustered cache-revocation
     /// exclusion claim is still live. Standalone SQLite passes no claim.
@@ -2904,6 +3007,18 @@ pub trait MediaStore: Send + Sync + 'static {
         probe: &ProbeResult,
     ) -> Result<i64, StoreError>;
     async fn get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError>;
+    /// False means duplicate, full, or a source revision replaced during download.
+    async fn add_downloaded_subtitle(
+        &self,
+        file_id: i64,
+        track: &crate::domain::DownloadedSubtitle,
+    ) -> Result<bool, StoreError>;
+    /// Bounded, ordered catalog walk for optional subtitle acquisition.
+    async fn subtitle_candidate_file_ids(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<i64>, StoreError>;
     /// A census of what the libraries actually hold, in transcoder terms.
     ///
     /// Aggregated in SQL rather than by walking files: a library of a few
@@ -3032,6 +3147,20 @@ pub trait MediaStore: Send + Sync + 'static {
         file_id: i64,
         chapters_json: &str,
     ) -> Result<(), StoreError>;
+    /// Graft the HEVC parameter-set census (`transcode::hevc_census`) onto a
+    /// file's stored probe JSON, under its `PROBE_KEY`.
+    ///
+    /// Fenced to the source revision measured: the row must still have that
+    /// size and mtime, and a probe to graft onto, or nothing is written and
+    /// the answer is `false`. A rescan that replaced the file replaces the
+    /// probe too, so a census can never outlive the bytes it described.
+    async fn merge_file_probe_hevc_parameter_sets(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        census_json: &str,
+    ) -> Result<bool, StoreError>;
     /// Files whose probe never succeeded (`probe_json IS NULL`), oldest scan
     /// first. `library_id` narrows to one library; `None` is server-wide. These
     /// are the records the retry job and the scan's repair pass exist for —
@@ -3077,6 +3206,49 @@ pub trait MediaStore: Send + Sync + 'static {
 pub(crate) const TOP_LEVEL_ITEM_PREDICATE: &str =
     "(kind IN ('movie','show','book','audiobook') OR \
      (kind IN ('folder','video','photo') AND parent_id IS NULL))";
+
+/// The `ORDER BY` for a library grid page, for every backend and every sort.
+///
+/// **Every clause ends in `id`, and that is the point.** `sort_title` is not
+/// unique — "Harbor Lights" the 1947 film and "Harbor Lights" the 1971 film
+/// reduce to the same key — and neither are `year`, a resolution or a capture
+/// date. Without a unique final key SQLite is free to return equal rows in
+/// any order it likes, and it does not have to pick the same one twice. A
+/// client paging by `offset` then asks for rows 0..199 and rows 200..399 of
+/// two different orderings, so an item on the seam is shown twice and its
+/// neighbour is never shown at all. That is invisible on a small library and
+/// certain on a large one, and it is why a client cannot be asked to merge
+/// several of these pages into one grid until the order is total.
+///
+/// `Added` already ended in `id DESC` and keeps it: giving it `id ASC` for
+/// symmetry would reorder equal-`added_at` rows that viewers see today, for
+/// nothing. The four that gain `id ASC` had no tie-break at all.
+///
+/// One function rather than one per backend because the SQLite and Hiqlite
+/// media stores each spelled this out, three copies in total, and a merge
+/// order that differs between backends is a bug no single-backend test can
+/// see. Native clients merge library cursors against this exact order, so it
+/// is also pinned from the outside by `tests/contracts/library-sort-cases.json`.
+pub(crate) fn item_sort_order_by(sort: ItemSort) -> &'static str {
+    match sort {
+        ItemSort::Title => "sort_title ASC, id ASC",
+        ItemSort::Added => "added_at DESC, id DESC",
+        ItemSort::Year => "year IS NULL, year DESC, sort_title ASC, id ASC",
+        // Best (max) file height per item, highest first; no-height items
+        // last. Only the kinds that carry a `resolution` on the DTO
+        // (`ItemKind::carries_resolution`) are ranked by height: a root photo
+        // has a real file height but no `resolution`, and ranking it by one
+        // would hand a merging client a cursor that is not sorted under the
+        // key it was given.
+        ItemSort::Resolution => {
+            "CASE WHEN kind IN ('movie','video') \
+             THEN COALESCE((SELECT MAX(f.height) FROM files f WHERE f.item_id = items.id), -1) \
+             ELSE -1 END DESC, \
+             sort_title ASC, id ASC"
+        }
+        ItemSort::Recorded => "(recorded_at IS NULL), recorded_at DESC, sort_title ASC, id ASC",
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RootFingerprintStatus {
@@ -3222,6 +3394,20 @@ pub trait WatchStore: Send + Sync + 'static {
     /// unwatched, not-in-progress episode after the last watched one. Pairs
     /// with continue-watching (resume) — this is "start the next episode".
     async fn next_up(&self, user_id: i64, limit: i64) -> Result<Vec<RecentItem>, StoreError>;
+    /// [`WatchStore::watch_map`] over `item_ids` and
+    /// [`WatchStore::watch_rollups`] over `container_ids`, answered from one
+    /// read of the same state: one replicated statement, or one SQLite read
+    /// transaction. Same per-half contracts as the two methods it replaces.
+    async fn watch_summary(
+        &self,
+        user_id: i64,
+        item_ids: &[i64],
+        container_ids: &[i64],
+    ) -> Result<WatchSummary, StoreError>;
+    /// [`WatchStore::continue_watching`] and [`WatchStore::next_up`] from one
+    /// read of the same progress state, each rail in its own established
+    /// order and limit.
+    async fn progress_rails(&self, user_id: i64, limit: i64) -> Result<ProgressRails, StoreError>;
     /// Write a watch fact that arrived from an external source (Trakt sync):
     /// unlike [`put_progress`] the caller controls `updated_at`, so remote
     /// timestamps land verbatim and later merges compare correctly.
@@ -3372,6 +3558,16 @@ pub trait WatchedOutboxStore: Send + Sync + 'static {
     async fn settle_watched(&self, entry: &OutboxEntry) -> Result<(), StoreError>;
     /// `(pending, ok, failed)` — for the settings page and `/metrics`.
     async fn watched_outbox_counts(&self) -> Result<(i64, i64, i64), StoreError>;
+    /// Whether any row *may* be due now, read from this node's local replica
+    /// without consensus and without a Raft proposal.
+    ///
+    /// A hint in both directions and never an authorization: `false` can be
+    /// a follower that has not applied a recent enqueue yet, `true` can be a
+    /// row a peer has since settled. The drain uses it only to decide whether
+    /// to ask the authority at all; [`due_watched`](Self::due_watched)'s
+    /// replicated claim stays the only thing that selects a row
+    /// (docs/cluster/REPLICATED-WRITE-RATE-HYGIENE.md §3.1).
+    async fn watched_outbox_hint(&self) -> Result<bool, StoreError>;
 }
 
 /// The pre-transcode cache: what has been produced, and where a copy is.
@@ -3454,24 +3650,6 @@ pub trait TranscodeCacheStore: Send + Sync + 'static {
         node_id: &str,
         limit: i64,
     ) -> Result<Vec<CachedTranscode>, StoreError>;
-
-    /// Bounded set of manifest-fenced local generations for background
-    /// integrity scrubbing. Unlike the eviction view this includes pinned
-    /// offline locations: pinning protects valid bytes from LRU, not corrupt
-    /// bytes from invalidation.
-    async fn cache_manifest_candidates(
-        &self,
-        node_id: &str,
-        limit: i64,
-    ) -> Result<Vec<CachedTranscode>, StoreError>;
-
-    /// Advance the scrub cursor only if the checked immutable publication is
-    /// still current. Reusing `last_seen_at` rotates a bounded oldest-first
-    /// scan without changing the playback LRU clock.
-    async fn mark_cache_manifests_checked(
-        &self,
-        checks: &[CacheManifestCheck],
-    ) -> Result<usize, StoreError>;
 
     /// Claims older than `older_than_unix` that never completed — a producer
     /// that died. Their directories are garbage and their rows are lies.
@@ -3690,98 +3868,14 @@ pub trait SharedCacheStore: Send + Sync + 'static {
     ) -> Result<Option<Lease>, StoreError>;
 }
 
-/// Durable distributed work for speculative whole-title transcodes.
-///
-/// Candidate generation is a singleton, but execution is deliberately not:
-/// every compatible node competes for rows through this boundary. Ownership
-/// is a queue-row fence rather than a generic scheduler lease so a worker can
-/// renew, yield, and settle independently of the next candidate pass.
+/// Domain history and staging retention for whole-title preparation.
+/// Execution ownership belongs exclusively to [`BackgroundJobStore`].
 #[async_trait]
 pub trait PretranscodeJobStore: Send + Sync + 'static {
-    /// Read one row for bounded diagnostics and lifecycle verification.
+    /// Common execution view, or sealed legacy history before import.
     async fn pretranscode_job(&self, id: &str) -> Result<Option<PretranscodeJob>, StoreError>;
-
-    /// Insert one active generation unless an equivalent active/terminal job
-    /// or still-verifiable ready location already satisfies it. A ready row
-    /// whose last location was evicted is deliberately eligible again.
-    async fn enqueue_pretranscode_job(
-        &self,
-        job: &NewPretranscodeJob,
-        lease: &Lease,
-        replacement: &Lease,
-    ) -> Result<bool, StoreError>;
-
-    /// Claim the highest-priority compatible due row. Expired running rows are
-    /// eligible for takeover and advance their monotone fence.
-    async fn claim_pretranscode_job(
-        &self,
-        node_id: &str,
-        capabilities: &PretranscodeWorkerCapabilities,
-        // Bounded process-local refusals (for example, sources this node
-        // cannot mount). Other nodes remain eligible immediately.
-        excluded_job_ids: &[String],
-        now_unix_ms: i64,
-        lease_expires_ms: i64,
-    ) -> Result<Option<PretranscodeJob>, StoreError>;
-
-    /// Active queue rows whose resumable part directories belong to this
-    /// node. Housekeeping uses the ids as a fail-closed keep-list without
-    /// publishing an incomplete cache location.
+    /// Legacy staging references retained until import and retirement.
     async fn pretranscode_staging_jobs(&self, node_id: &str) -> Result<Vec<String>, StoreError>;
-
-    /// Complete bounded active-id universe for pruning node-local source
-    /// refusals. The queue schema caps active rows at 4,096.
-    async fn active_pretranscode_job_ids(&self) -> Result<Vec<String>, StoreError>;
-
-    async fn renew_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        now_unix_ms: i64,
-        lease_expires_ms: i64,
-    ) -> Result<Option<PretranscodeJob>, StoreError>;
-
-    /// Capacity/preemption is not a failed encode. Return the row to the due
-    /// queue without incrementing attempts.
-    async fn yield_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        now_unix_ms: i64,
-        not_before_ms: i64,
-    ) -> Result<bool, StoreError>;
-
-    /// Record one stable failure code. The fifth failure is terminal; earlier
-    /// failures return to the queue at the caller's bounded backoff deadline.
-    async fn fail_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        error_code: &str,
-        now_unix_ms: i64,
-        not_before_ms: i64,
-    ) -> Result<bool, StoreError>;
-
-    /// Permanently cancel a claimed source generation that no longer exists
-    /// or no longer matches its snapshotted bytes.
-    async fn cancel_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        error_code: &str,
-        now_unix_ms: i64,
-    ) -> Result<bool, StoreError>;
-
-    /// Publish the node-local cache location and ready job state in one fenced
-    /// transaction after the filesystem generation has been renamed.
-    #[allow(clippy::too_many_arguments)]
-    async fn complete_pretranscode_job(
-        &self,
-        job: &PretranscodeJob,
-        recipe_hash: &str,
-        recipe_version: i64,
-        relative_dir: &str,
-        bytes: i64,
-        expected_previous_bytes: Option<i64>,
-        manifest_digest: &str,
-        now_unix_ms: i64,
-    ) -> Result<bool, StoreError>;
 }
 
 /// Durable app-managed offline packages and their one renewable capability.
@@ -3844,6 +3938,18 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
         &self,
         node_id: &str,
     ) -> Result<Option<OfflinePackage>, StoreError>;
+
+    /// Whether any package *may* be queued for `node_id`, read from this
+    /// node's local replica without consensus and without a Raft proposal.
+    ///
+    /// A hint in both directions and never an authorization: `false` can be
+    /// a replica that has not applied a re-home or a re-enable yet, `true`
+    /// can be a package this node has since claimed. The offline worker uses
+    /// it only to decide whether to ask the authority at all;
+    /// [`claim_next_offline_package`](Self::claim_next_offline_package)'s
+    /// replicated claim stays the only thing that binds a package to a
+    /// producer (docs/cluster/REPLICATED-WRITE-RATE-HYGIENE-II.md §3.1).
+    async fn offline_queue_hint(&self, node_id: &str) -> Result<bool, StoreError>;
 
     /// Node and claim generation fence the yield to the exact current worker.
     /// A re-homed package, or one reclaimed by the same node, must not be
@@ -3982,6 +4088,19 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
     ) -> Result<bool, StoreError>;
 
     async fn expire_offline_packages(&self, now: i64) -> Result<u64, StoreError>;
+
+    /// Whether any package *may* have lapsed by `now` (`expires_at <= now`,
+    /// the predicate of [`expire_offline_packages`](Self::expire_offline_packages)),
+    /// read from this node's local replica without consensus and without a
+    /// Raft proposal.
+    ///
+    /// A hint in both directions and never an authorization: `true` can be a
+    /// replica that has not applied a renewal yet, `false` a replica that has
+    /// not applied a package at all. The expiry sweep uses it only to decide
+    /// whether to ask the authority, and the replicated sweep's own predicate
+    /// stays the only thing that deletes a package
+    /// (docs/cluster/REPLICATED-WRITE-RATE-HYGIENE-II.md §3.4).
+    async fn offline_expiry_hint(&self, now: i64) -> Result<bool, StoreError>;
 
     // --- Node removal (`CLUSTERING-PLAN.md` §6.7) -------------------------
     //
@@ -4157,6 +4276,15 @@ pub trait CoordinationStore: Send + Sync + 'static {
     ) -> Result<Option<Lease>, StoreError>;
 
     async fn release_lease(&self, lease: &Lease, now_unix_ms: i64) -> Result<bool, StoreError>;
+
+    /// This node's local, possibly stale view of `resource`'s lease expiry,
+    /// or `None` when no row is visible. No consensus and no proposal.
+    ///
+    /// A hint only: a caller may use it to *skip* an acquire while a lease is
+    /// visibly live, never to believe it holds one. A stale replica delays a
+    /// successor by its lag; it cannot grant anything, because
+    /// [`acquire_lease`](Self::acquire_lease) still decides on the authority.
+    async fn lease_expiry_hint(&self, resource: &str) -> Result<Option<i64>, StoreError>;
 }
 
 /// Durable mutations performed by singleton cluster jobs. Implementations
@@ -4164,6 +4292,13 @@ pub trait CoordinationStore: Send + Sync + 'static {
 /// transaction as the mutation.
 #[async_trait]
 pub trait FencedPublicationStore: Send + Sync + 'static {
+    async fn add_downloaded_subtitle_fenced(
+        &self,
+        file_id: i64,
+        track: &crate::domain::DownloadedSubtitle,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
     /// Apply exactly the server-generated repair plan while the library scan
     /// lease and the preview preimage are both current.
     async fn apply_identity_repair_fenced(
@@ -5103,6 +5238,7 @@ pub trait TimelineAnnotationStore: Send + Sync + 'static {
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
     SettingsStore
+    + BackgroundJobStore
     + DvConversionStore
     + MetricsStore
     + UserStore
@@ -5120,6 +5256,7 @@ pub trait Store:
     + SharedCacheStore
     + PretranscodeJobStore
     + OfflinePackageStore
+    + FileGrantStore
     + PlaybackTelemetryStore
     + NetworkPriorStore
     + FragmentIndexStore
@@ -5137,6 +5274,7 @@ pub trait Store:
 
 impl<T> Store for T where
     T: SettingsStore
+        + BackgroundJobStore
         + DvConversionStore
         + MetricsStore
         + UserStore
@@ -5155,6 +5293,7 @@ impl<T> Store for T where
         + SharedCacheStore
         + PretranscodeJobStore
         + OfflinePackageStore
+        + FileGrantStore
         + PlaybackTelemetryStore
         + NetworkPriorStore
         + FragmentIndexStore
@@ -5195,6 +5334,7 @@ pub async fn requeue_cluster_fragment_index_after_no_holder(
 #[derive(Clone, Default)]
 pub struct HttpStoreOperationCounts {
     counts: std::sync::Arc<[std::sync::atomic::AtomicU64; 3]>,
+    watch_reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl HttpStoreOperationCounts {
@@ -5203,6 +5343,16 @@ impl HttpStoreOperationCounts {
         use std::sync::atomic::Ordering;
 
         std::array::from_fn(|index| self.counts[index].load(Ordering::Relaxed))
+    }
+
+    /// Watch-state reads the Store performed inside this request (K-04 M3),
+    /// on either backend: one per statement a [`WatchStore`] read method
+    /// sends to the replicated store, Authority or local, and one per
+    /// connection checkout on SQLite. Catalogue queries that merely filter by
+    /// watch state are catalogue reads and are not counted here.
+    #[must_use]
+    pub fn watch_reads(&self) -> u64 {
+        self.watch_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn record(&self, class_index: usize) {
@@ -5231,6 +5381,133 @@ pub async fn scope_http_store_operations<T>(
 
 pub(super) fn record_http_store_operation(class_index: usize) {
     let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| counts.record(class_index));
+}
+
+/// Count one watch-state read into the current request, if any. Called by
+/// both backends at the one place each issues a watch read.
+pub(super) fn record_http_watch_read() {
+    let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| {
+        counts
+            .watch_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    });
+}
+
+/// Both halves of [`WatchStore::watch_summary`].
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct WatchSummary {
+    /// [`WatchStore::watch_map`]'s rows for the requested items.
+    pub watch: Vec<(i64, WatchState)>,
+    /// [`WatchStore::watch_rollups`]'s answer: every requested container,
+    /// `0/0` when nothing playable sits under it.
+    pub rollups: std::collections::HashMap<i64, WatchRollup>,
+}
+
+/// Both rails of [`WatchStore::progress_rails`].
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct ProgressRails {
+    pub continue_watching: Vec<InProgressItem>,
+    pub next_up: Vec<RecentItem>,
+}
+
+/// The watch-state commit position acknowledged inside one HTTP request
+/// (K-04 M2), offered to the client as `X-Plurx-Commit-Index`.
+///
+/// Only a request whose every watch write reported its Raft log index has a
+/// position to offer: echoing the index of one write while another in the
+/// same request is unknown would let a peer serve a read that misses the
+/// unknown one. Such a request says so instead ([`CommitIndexOffer::Unknown`]),
+/// because silence would leave the client echoing the index of its previous
+/// write, which is older than the one it was just told succeeded.
+#[derive(Clone, Default)]
+pub struct HttpWatchWriteAck {
+    state: std::sync::Arc<HttpWatchWriteAckState>,
+}
+
+#[derive(Default)]
+struct HttpWatchWriteAckState {
+    max_index: std::sync::atomic::AtomicU64,
+    unprovable: std::sync::atomic::AtomicBool,
+}
+
+/// What one response says about the watch writes its request made, as
+/// `X-Plurx-Commit-Index` (K-04 M2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitIndexOffer {
+    /// Every watch write in the request reported its Raft log index; this is
+    /// the highest. The client echoes it as `X-Plurx-Read-After`.
+    Index(u64),
+    /// At least one watch write's index is unknown: an older leader or a
+    /// proxy answered it, or it failed and may still commit. The client must
+    /// drop the index it holds, so its next reads go to Authority.
+    Unknown,
+}
+
+impl HttpWatchWriteAck {
+    /// The index to offer, if every watch write in the request reported one.
+    #[must_use]
+    pub fn commit_index(&self) -> Option<u64> {
+        match self.offer() {
+            Some(CommitIndexOffer::Index(index)) => Some(index),
+            Some(CommitIndexOffer::Unknown) | None => None,
+        }
+    }
+
+    /// What the response says: nothing when the request made no watch
+    /// write, the highest index when every one reported it, and
+    /// [`CommitIndexOffer::Unknown`] otherwise.
+    #[must_use]
+    pub fn offer(&self) -> Option<CommitIndexOffer> {
+        use std::sync::atomic::Ordering;
+
+        if self.state.unprovable.load(Ordering::Acquire) {
+            return Some(CommitIndexOffer::Unknown);
+        }
+        let index = self.state.max_index.load(Ordering::Acquire);
+        (index > 0).then_some(CommitIndexOffer::Index(index))
+    }
+
+    /// Record one acknowledged watch write. Exposed so HTTP-layer tests can
+    /// drive the response header without a replicated store.
+    pub fn record(&self, log_index: Option<u64>) {
+        use std::sync::atomic::Ordering;
+
+        match log_index {
+            Some(index) => {
+                self.state.max_index.fetch_max(index, Ordering::AcqRel);
+            }
+            None => self.state.unprovable.store(true, Ordering::Release),
+        }
+    }
+}
+
+tokio::task_local! {
+    static HTTP_WATCH_WRITE_ACK: HttpWatchWriteAck;
+}
+
+/// Scope one HTTP request so the watch writes it acknowledges can be offered
+/// back to the client after its response is ready.
+pub async fn scope_http_watch_write_ack<T>(
+    ack: HttpWatchWriteAck,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    HTTP_WATCH_WRITE_ACK.scope(ack, future).await
+}
+
+/// Record a watch write into the current request's acknowledgement, if the
+/// write runs inside one. Background writers (the progress coalescer's
+/// trailing flush, Trakt sync) have no request and record nothing here; the
+/// per-process fence still covers them.
+#[cfg_attr(not(feature = "hiqlite-store"), allow(dead_code))]
+pub(crate) fn record_http_watch_write(log_index: Option<u64>) {
+    let _ = HTTP_WATCH_WRITE_ACK.try_with(|ack| ack.record(log_index));
+}
+
+/// Record a watch write into the current request exactly as the replicated
+/// store does, for HTTP-layer contracts that run without one.
+#[doc(hidden)]
+pub fn validation_record_http_watch_write(log_index: Option<u64>) {
+    record_http_watch_write(log_index);
 }
 
 /// The only application-facing boundary for catalogue consistency choices.
@@ -5292,6 +5569,32 @@ impl CatalogueReader {
         }
     }
 
+    /// The initial preference before the operator saves a replicated override.
+    #[must_use]
+    pub fn bounded_reads_default(&self) -> bool {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(bounded) = &self.bounded {
+            return bounded.enabled;
+        }
+        true
+    }
+
+    /// Advisory observation only; every actual read obtains its own permit.
+    /// `None` means this process has no replicated reader (for example SQLite).
+    pub async fn bounded_read_observation(&self) -> Option<bool> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(bounded) = &self.bounded {
+            return Some(
+                bounded
+                    .metrics
+                    .run_bounded_replica_after(bounded.max_apply_lag_entries, 0, || async {})
+                    .await
+                    .is_some(),
+            );
+        }
+        None
+    }
+
     /// Construct the production bounded reader for real seeded-store
     /// contracts outside this module.
     #[cfg(all(feature = "hiqlite-store", feature = "cluster-read-cost-validation"))]
@@ -5324,10 +5627,43 @@ impl CatalogueReader {
         F: FnOnce(Arc<HiqliteAuthStore>) -> Fut,
         Fut: std::future::Future<Output = Result<T, StoreError>>,
     {
+        self.bounded_after(|_| Some(0), local_read).await
+    }
+
+    /// A bounded read of per-user watch state (K-04 M2). On top of the
+    /// catalogue permit, the local replica must have applied the client's
+    /// echoed `read_after`, raised to the latest watch write this process
+    /// acknowledged for the user when that is newer. Without `read_after`
+    /// Authority answers, whatever this process recorded: its own older
+    /// write proves nothing about a later one through a peer. See
+    /// [`watch_fence`].
+    #[cfg(feature = "hiqlite-store")]
+    async fn bounded_watch<T, F, Fut>(
+        &self,
+        user_id: i64,
+        read_after: Option<u64>,
+        local_read: F,
+    ) -> Option<T>
+    where
+        F: FnOnce(Arc<HiqliteAuthStore>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, StoreError>>,
+    {
+        self.bounded_after(
+            |store| store.watch_read_fence(user_id, read_after),
+            local_read,
+        )
+        .await
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn bounded_after<T, R, F, Fut>(&self, min_applied_index: R, local_read: F) -> Option<T>
+    where
+        R: FnOnce(&HiqliteAuthStore) -> Option<u64>,
+        F: FnOnce(Arc<HiqliteAuthStore>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, StoreError>>,
+    {
         let bounded = self.bounded.as_ref()?;
-        if !bounded.enabled {
-            return None;
-        }
+        let min_applied_index = min_applied_index(&bounded.store)?;
         let store = Arc::clone(&bounded.store);
         #[cfg(feature = "cluster-read-cost-validation")]
         let revoke_after_local = Arc::clone(&bounded.revoke_after_next_local);
@@ -5339,16 +5675,124 @@ impl CatalogueReader {
         // SQL/row-mapping failure the same way and retry the existing Authority
         // path below. The Authority result remains the caller's result.
         metrics
-            .run_bounded_replica(bounded.max_apply_lag_entries, move || async move {
-                let result = local_read(store).await;
-                #[cfg(feature = "cluster-read-cost-validation")]
-                if revoke_after_local.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                    post_query_metrics.validation_revoke_bounded_proof();
-                }
-                result
-            })
+            .run_bounded_replica_after(
+                bounded.max_apply_lag_entries,
+                min_applied_index,
+                move || async move {
+                    // A stale preference only chooses between two safe read paths.
+                    // Read it under the same proof, without contacting the leader.
+                    let result = if store.local_bounded_reads_enabled(bounded.enabled).await? {
+                        local_read(store).await.map(Some)
+                    } else {
+                        Ok(None)
+                    };
+                    #[cfg(feature = "cluster-read-cost-validation")]
+                    if revoke_after_local.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                        post_query_metrics.validation_revoke_bounded_proof();
+                    }
+                    result
+                },
+            )
             .await?
             .ok()
+            .flatten()
+    }
+
+    /// Per-user watch state for `item_ids`. Local only behind the
+    /// read-your-write fence ([`Self::bounded_watch`]); Authority otherwise.
+    pub async fn watch_map(
+        &self,
+        user_id: i64,
+        item_ids: &[i64],
+        read_after: Option<u64>,
+    ) -> Result<Vec<(i64, WatchState)>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let ids = item_ids.to_vec();
+            if let Some(result) = self
+                .bounded_watch(user_id, read_after, move |store| async move {
+                    store.local_watch_map(user_id, &ids).await
+                })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        #[cfg(not(feature = "hiqlite-store"))]
+        let _ = read_after;
+        self.authority.watch_map(user_id, item_ids).await
+    }
+
+    /// One container's watched rollup, behind the same fence.
+    pub async fn watch_rollup(
+        &self,
+        user_id: i64,
+        item_id: i64,
+        read_after: Option<u64>,
+    ) -> Result<WatchRollup, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded_watch(user_id, read_after, move |store| async move {
+                store.local_watch_rollup(user_id, item_id).await
+            })
+            .await
+        {
+            return Ok(result);
+        }
+        #[cfg(not(feature = "hiqlite-store"))]
+        let _ = read_after;
+        self.authority.watch_rollup(user_id, item_id).await
+    }
+
+    /// [`WatchStore::watch_summary`] behind the same fence.
+    pub async fn watch_summary(
+        &self,
+        user_id: i64,
+        item_ids: &[i64],
+        container_ids: &[i64],
+        read_after: Option<u64>,
+    ) -> Result<WatchSummary, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let items = item_ids.to_vec();
+            let containers = container_ids.to_vec();
+            if let Some(result) = self
+                .bounded_watch(user_id, read_after, move |store| async move {
+                    store
+                        .local_watch_summary(user_id, &items, &containers)
+                        .await
+                })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        #[cfg(not(feature = "hiqlite-store"))]
+        let _ = read_after;
+        self.authority
+            .watch_summary(user_id, item_ids, container_ids)
+            .await
+    }
+
+    /// [`WatchStore::progress_rails`] behind the same fence.
+    pub async fn progress_rails(
+        &self,
+        user_id: i64,
+        limit: i64,
+        read_after: Option<u64>,
+    ) -> Result<ProgressRails, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded_watch(user_id, read_after, move |store| async move {
+                store.local_progress_rails(user_id, limit).await
+            })
+            .await
+        {
+            return Ok(result);
+        }
+        #[cfg(not(feature = "hiqlite-store"))]
+        let _ = read_after;
+        self.authority.progress_rails(user_id, limit).await
     }
 
     pub async fn get_library(&self, id: i64) -> Result<Option<Library>, StoreError> {
@@ -5608,5 +6052,124 @@ mod producer_recovery_schema_tests {
                 .contains(&format!("<= {MAX_DECODE_RESTRICTION_BYTES}")),
             "the ledger's CHECK must name MAX_DECODE_RESTRICTION_BYTES exactly"
         );
+    }
+}
+
+#[cfg(test)]
+mod item_sort_order_tests {
+    use super::item_sort_order_by;
+    use crate::domain::ItemSort;
+
+    /// Every library sort ends in a unique key.
+    ///
+    /// This is a text assertion on the clause, and it is deliberately not the
+    /// fixture replay in `tests/store_contract.rs`. With movies alone that
+    /// replay did not detect the tie-break's removal: SQLite returned the tied
+    /// rows in rowid order, which is the order the fixture expects. It now
+    /// does — the fixture's photo/movie pair ties on every visible key, and
+    /// the grid query reads through `idx_items_library_kind`, which yields
+    /// them in kind order — but that is still an observation of today's query
+    /// plan. What SQLite does with tied rows is not promised by anything; it
+    /// can change with the plan, the schema, an added index or the backend,
+    /// and when it changes the symptom is a client paging by `offset` that
+    /// reads two adjacent pages of two different orderings: an item on the
+    /// seam shown twice and its neighbour never shown at all. A property
+    /// nothing guarantees cannot be pinned by observing that it currently
+    /// holds; it has to be pinned by requiring the clause that makes it true.
+    ///
+    /// `Added` ends in `id DESC` and the other four in `id ASC`. `Added` is
+    /// not made symmetric on purpose: it already had a tie-break, and flipping
+    /// it would reorder equal-`added_at` rows that viewers see today for
+    /// nothing.
+    #[test]
+    fn every_sort_ends_in_a_unique_key() {
+        for sort in [
+            ItemSort::Title,
+            ItemSort::Added,
+            ItemSort::Year,
+            ItemSort::Resolution,
+            ItemSort::Recorded,
+        ] {
+            let clause = item_sort_order_by(sort);
+            let last = clause
+                .rsplit(',')
+                .next()
+                .expect("a non-empty ORDER BY")
+                .split_whitespace()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                last.first().copied(),
+                Some("id"),
+                "{sort:?} ends in {clause:?}, which has no unique final key"
+            );
+            assert!(
+                matches!(last.get(1).copied(), Some("ASC") | Some("DESC")),
+                "{sort:?} ends in {clause:?}, whose final key has no explicit direction"
+            );
+        }
+        assert!(item_sort_order_by(ItemSort::Added).ends_with("id DESC"));
+    }
+
+    /// The `resolution` sort ranks by height exactly the kinds whose DTO
+    /// carries a `resolution`, and every other kind at -1.
+    ///
+    /// The clause and `ItemKind::carries_resolution` are two spellings of one
+    /// rule — SQL cannot call the Rust predicate — so this reads the kind list
+    /// out of the clause and compares it with the predicate for every kind. A
+    /// kind added to one and not the other is a row the server ranks by a key
+    /// the client never receives.
+    #[test]
+    fn resolution_ranks_exactly_the_kinds_that_carry_one() {
+        use crate::domain::ItemKind;
+
+        let clause = item_sort_order_by(ItemSort::Resolution);
+        let list = clause
+            .strip_prefix("CASE WHEN kind IN (")
+            .and_then(|rest| rest.split_once(')'))
+            .map(|(list, _)| list)
+            .unwrap_or_else(|| panic!("{clause:?} does not rank by kind first"));
+        let ranked: std::collections::BTreeSet<&str> = list
+            .split(',')
+            .map(|kind| kind.trim().trim_matches('\''))
+            .collect();
+        for kind in [
+            ItemKind::Movie,
+            ItemKind::Show,
+            ItemKind::Season,
+            ItemKind::Episode,
+            ItemKind::Book,
+            ItemKind::Audiobook,
+            ItemKind::Folder,
+            ItemKind::Video,
+            ItemKind::Photo,
+        ] {
+            assert_eq!(
+                ranked.contains(kind.as_str()),
+                kind.carries_resolution(),
+                "{kind:?}: the resolution sort and the DTO disagree about whether it has a resolution"
+            );
+        }
+        assert!(clause.contains("ELSE -1 END DESC"), "{clause:?}");
+    }
+
+    /// The clause is one function, and every backend's page and count use it.
+    ///
+    /// Three copies of this `match` is how the SQLite and Hiqlite stores would
+    /// drift apart, and a merge order that differs between backends is a
+    /// defect no single-backend test can see — `for_each_backend` runs the
+    /// Hiqlite voters only under `hiqlite-contract-tests`, so on an ordinary
+    /// run the fixture replay never compares them at all.
+    #[test]
+    fn the_stores_do_not_carry_their_own_copies_of_the_order() {
+        for source in [
+            include_str!("sqlite/media.rs"),
+            include_str!("hiqlite_media.rs"),
+        ] {
+            assert!(
+                !source.contains("ItemSort::Title =>"),
+                "a media store spells the library ORDER BY itself again"
+            );
+            assert!(source.contains("item_sort_order_by(sort)"));
+        }
     }
 }

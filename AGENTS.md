@@ -61,6 +61,28 @@ test failures, or denied lints.
 - Run the smallest focused regression for changed behavior locally and record
   that command in the task pull request. The effort workflow deliberately
   defers the full suites.
+- **If the change alters behavior a user could observe, its subject is `fix(`
+  or `perf(`.** The corrective-history audit narrows to those two prefixes past
+  its boundary commit, so a behavior fix labelled `chore(` or `refactor(` is
+  not audited at all and its regression is not recorded anywhere. That is an
+  accepted escape and this rule is what answers it; see
+  [VALIDATION.md](docs/VALIDATION.md) "The boundary, and what replaces a
+  fragment past it".
+- Name the regression in the pull request description, one per line:
+  `Regression-Test: <path>::<test name>`. The fast lane checks it against the
+  tree the merge will produce. Whoever merges puts the same lines in the
+  landing commit's message — `python3 -m validation.regression_field
+  --body-file <description> --landing-lines` prints them — because once
+  `validation/merge-errata.toml` sets its boundary, `make history-check`
+  reads them from the landing commit, and a corrective landing without them
+  turns every later pull request red until an errata row records it.
+  `.forgejo/default_merge_message/MERGE_TEMPLATE.md` prefills Forgejo's web
+  merge form with the description, so a web merge left as prefilled carries
+  them. The API does not: `POST …/pulls/<N>/merge` without
+  `MergeMessageField` lands the title line alone (Forgejo drops the
+  template's body on that path), so an API merge must pass the lines in
+  `MergeMessageField`.
+
 - A focused `plurx-core` regression that covers replicated storage must use
   `make unit-core` or pass `--features hiqlite-store`. Bare
   `cargo test -p plurx-core --lib` is not evidence for `store/hiqlite*` code.

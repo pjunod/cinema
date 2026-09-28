@@ -44,7 +44,18 @@ class KnownRedContractTest(unittest.TestCase):
         # S-08 adds two more of the same shape: the deinterlace argv fixture
         # matrix and the descriptor-bound idet pass, each of which needs the
         # shipped ffmpeg or ffprobe named in its own ignore reason.
-        self.assertEqual(len(ignored), 15)
+        # L-03 M3 adds two operator-run caption audits: the per-node hardware
+        # audit and the broadcast-capture summary, each driven by
+        # scripts/live-tv-caption-audit with the hardware or capture its
+        # ignore reason names.
+        # K-05 M0 adds the operator-run Hiqlite statement capture,
+        # k05_capture_hiqlite_statements, which writes the file named by
+        # K05_HIQLITE_CAPTURE for the query-plan evidence.
+        # K-08 M4 adds the tokenizer regex-backend equivalence check, which
+        # needs the pinned model files its ignore reason names.
+        # K-08 M5 adds embed_thread_scaling, the inference thread-count
+        # measurement behind EMBED_THREADS, which needs the same model files.
+        self.assertEqual(len(ignored), 20)
         self.assertTrue(all(item.reason for item in ignored))
         self.assertTrue(all(item.path in item.identity for item in ignored))
         self.assertTrue(all(item.cargo_name in item.identity for item in ignored))

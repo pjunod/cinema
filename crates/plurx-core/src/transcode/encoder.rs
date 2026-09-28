@@ -778,10 +778,13 @@ pub fn parse_video_decoder_list(output: &str) -> Vec<String> {
 
 /// Snapshot the portable video decoders exposed by this boot's ffmpeg.
 pub async fn detect_video_decoders(ffmpeg_bin: &str) -> Vec<String> {
-    match tokio::process::Command::new(ffmpeg_bin)
-        .args(["-hide_banner", "-decoders"])
-        .output()
-        .await
+    let mut command = tokio::process::Command::new(ffmpeg_bin);
+    command.args(["-hide_banner", "-decoders"]);
+    match crate::process::output_job_owned(
+        &mut command,
+        crate::process::ChildWork::background("ffmpeg decoder list"),
+    )
+    .await
     {
         Ok(output) if output.status.success() => {
             parse_video_decoder_list(&String::from_utf8_lossy(&output.stdout))
@@ -883,13 +886,15 @@ async fn try_encode(
     rate_control: EffectiveRateControl,
     force_idr: bool,
 ) -> Result<(), String> {
-    match tokio::process::Command::new(ffmpeg_bin)
+    let mut command = tokio::process::Command::new(ffmpeg_bin);
+    command
         .args(validation_args(encoder, rate_control, force_idr))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await
+        .stdin(std::process::Stdio::null());
+    match crate::process::output_job_owned(
+        &mut command,
+        crate::process::ChildWork::background("encoder test encode"),
+    )
+    .await
     {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => Err(String::from_utf8_lossy(&out.stderr).into_owned()),
@@ -955,8 +960,11 @@ where
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let mut child = match command.spawn() {
-        Ok(child) => child,
+    let (mut child, _job) = match crate::process::spawn_job_owned(
+        &mut command,
+        crate::process::ChildWork::background("encoder rate-control probe"),
+    ) {
+        Ok(spawned) => spawned,
         Err(error) => return YieldingProbe::Completed(Err(error.to_string())),
     };
     let mut stderr = child.stderr.take().expect("piped probe stderr");
@@ -1181,10 +1189,13 @@ where
 /// Detect *usable* encoders: parse the build's encoder list, then test-encode
 /// each candidate so we never pick a compiled-but-nonfunctional GPU path.
 pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
-    let output = tokio::process::Command::new(ffmpeg_bin)
-        .args(["-hide_banner", "-encoders"])
-        .output()
-        .await;
+    let mut command = tokio::process::Command::new(ffmpeg_bin);
+    command.args(["-hide_banner", "-encoders"]);
+    let output = crate::process::output_job_owned(
+        &mut command,
+        crate::process::ChildWork::background("ffmpeg encoder list"),
+    )
+    .await;
     let compiled = match output {
         Ok(out) => parse_encoder_list(&String::from_utf8_lossy(&out.stdout)),
         Err(e) => {

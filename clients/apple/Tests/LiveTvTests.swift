@@ -1,5 +1,4 @@
 import AVFoundation
-import Combine
 import Foundation
 import XCTest
 @testable import plurx
@@ -40,18 +39,10 @@ final class LiveTvTests: XCTestCase {
         let controller = LibraryChannelPlayerController()
         let item = AVPlayerItem(asset: AVMutableComposition())
         controller.player.replaceCurrentItem(with: item)
-        controller.observeFailure(item, sequence: 0)
-        let received = expectation(description: "notification failure is visible")
-        let observation = controller.$playbackError.compactMap { $0 }.first().sink { message in
-            XCTAssertTrue(message.contains("NSOSStatusErrorDomain -12880"))
-            received.fulfill()
-        }
         let error = NSError(domain: "NSOSStatusErrorDomain", code: -12880)
         XCTAssertNil(item.error, "a failure notification can arrive without item.error")
-        NotificationCenter.default.post(name: .AVPlayerItemFailedToPlayToEndTime, object: item,
-                                        userInfo: [AVPlayerItemFailedToPlayToEndTimeErrorKey: error])
-        await fulfillment(of: [received], timeout: 2)
-        observation.cancel()
+        controller.handleItemFailure(item, sequence: 0, notificationError: error)
+        XCTAssertTrue(controller.playbackError?.contains("NSOSStatusErrorDomain -12880") == true)
         controller.handleItemFailure(item, sequence: 0)
         XCTAssertTrue(controller.playbackError?.contains("NSOSStatusErrorDomain -12880") == true,
                       "a later callback without an error must not erase the notification's code")
@@ -217,7 +208,7 @@ final class LiveTvTests: XCTestCase {
         }
         let copied = try delivery(video: "copy", audio: "copy")
         XCTAssertEqual(copied.playbackMethod, "Direct stream · no transcoding")
-        XCTAssertEqual(copied.videoDescription, "Copied unchanged · H264 · 1920×1080")
+        XCTAssertEqual(copied.videoDescription, "Copied unchanged · H264")
         XCTAssertEqual(copied.audioDescription, "Copied unchanged · AAC · Stereo")
         let audio = try delivery(video: "copy", audio: "encode")
         XCTAssertEqual(audio.playbackMethod, "Audio transcoding · original video")
@@ -232,6 +223,25 @@ final class LiveTvTests: XCTestCase {
             .hasPrefix("Audio transcoding · original video"))
         XCTAssertTrue(liveTvTechnicalSummary(channel, status: nil)
             .hasPrefix("Playback method unavailable"))
+    }
+
+    func testPictureInfoKeepsSourcePlanAndPresentationSeparate() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let modern = #"{"source":{"video_codec":"mpeg2video","width":704,"height":480,"field_order":"tt","frame_rate":{"num":30000,"den":1001},"sample_aspect_ratio":"40:33"},"output":{"container":"mpegts","video_codec":"h264","audio_codec":"ac3","width":704,"height":480,"audio_channels":2,"frame_rate":{"num":60000,"den":1001}},"video_action":"encode","audio_action":"copy","packaging":"mpegts","deinterlace":true,"reasons":[{"code":"video_incompatible","explanation":"The active player did not claim the complete source video route."}]}"#
+        let plan = try decoder.decode(LiveTvDelivery.self, from: Data(modern.utf8))
+        let picture = LiveTvPictureInfo(delivery: plan, channel: nil)
+        XCTAssertEqual(picture.sourceFrame, "704×480")
+        XCTAssertEqual(picture.streamFrame, "704×480")
+        XCTAssertEqual(picture.streamNote, "Planned output")
+        XCTAssertEqual(picture.sourcePixelAspect, "40:33")
+        XCTAssertEqual(picture.sourceDisplayAspect, "16:9")
+        XCTAssertEqual(picture.frameComparison, "No resize planned")
+        XCTAssertEqual(picture.reason, "The active player did not claim the complete source video route.")
+        XCTAssertTrue(plan.videoDescription.contains("Progressive planned"))
+        let old = #"{"output":{"container":"mpegts","video_codec":"h264","audio_codec":"ac3","width":704,"height":480,"audio_channels":2},"video_action":"copy","audio_action":"copy","packaging":"mpegts"}"#
+        let legacy = try decoder.decode(LiveTvDelivery.self, from: Data(old.utf8))
+        XCTAssertEqual(LiveTvPictureInfo(delivery: legacy, channel: nil).sourceFrame, "Unavailable")
     }
 
     func testTheHintStoreRoundTripsAndTreatsAMissingFileAsNoHint() throws {
@@ -325,6 +335,7 @@ final class LiveTvTests: XCTestCase {
             let code: String?
             let retry: String?
             let ownerDecided: Bool?
+            let watchable: [LiveTvTunerHolder]?
         }
         struct Answer: Decodable {
             let `case`: String
@@ -335,6 +346,7 @@ final class LiveTvTests: XCTestCase {
             let offerRetry: Bool
             let keepHint: Bool
             let replay: Bool?
+            let offerWatchable: [String]?
         }
         struct ResumeBody: Decodable {
             let outcome: String?
@@ -393,6 +405,11 @@ final class LiveTvTests: XCTestCase {
             XCTAssertEqual(verdict.offerRetry, row.offerRetry, row.`case`)
             XCTAssertEqual(verdict.keepHint, row.keepHint, row.`case`)
             XCTAssertEqual(verdict.replay, row.replay ?? false, row.`case`)
+            if let offered = row.offerWatchable {
+                let failure = LiveTvFailure(code: row.body?.code ?? "", watchable: row.body?.watchable ?? [])
+                XCTAssertEqual(failure.watchable.map(\.guideNumber), offered, row.`case`)
+                XCTAssertTrue(failure.errorDescription?.contains("Watch 2.1 instead") == true)
+            }
         }
         // The fixture is the contract, but these two are the point of it: a
         // code nobody has ever heard of is not a verdict, and no answer at all
@@ -840,7 +857,7 @@ final class LiveTvTests: XCTestCase {
     }
 
     private func started(_ capability: String = "one") -> LiveTvStarted {
-        LiveTvStarted(sessionId: capability, channel: channel, live: true)
+        LiveTvStarted(sessionId: capability, playlistUrl: "/api/v1/live-tv/sessions/\(capability)/master.m3u8", channel: channel, live: true)
     }
 
     private func liveTvViewSource() throws -> String {
@@ -1061,7 +1078,10 @@ final class LiveTvTests: XCTestCase {
         )
         XCTAssertNil(controller.surfaceMessage)
         await controller.watch(channel)
-        XCTAssertEqual(controller.message, "Playing live · no recording or rewind")
+        // 014c0ad55 (DVR visibility) dropped "· no recording or rewind":
+        // Live TV records now, so the old suffix was no longer true.
+        XCTAssertEqual(controller.message, "Playing live")
+        XCTAssertTrue(LiveTvView.isSteadyStateMessage(controller.message))
         XCTAssertNil(controller.surfaceMessage, "attach clears stale surface copy")
         controller.togglePause()
         XCTAssertEqual(
@@ -1377,14 +1397,61 @@ final class LiveTvTests: XCTestCase {
         XCTAssertEqual(dto.liveTvTransitionFromOwnerNodeId, "old")
     }
 
-    func testCapabilityPlaylistIsLocalAndNeverContainsAccountToken() throws {
+    func testCapabilityPlaylistUsesOnlyTheServerIssuedPathForThisSession() throws {
         let api = LiveTvAPI(origin: "https://media.example", token: "account-secret")
-        let playlist = try api.playlistURL("cap/part?query")
-        XCTAssertEqual(playlist.host, "media.example")
-        XCTAssertNil(playlist.query)
-        XCTAssertTrue(playlist.absoluteString.contains("cap%2Fpart%3Fquery"))
-        XCTAssertFalse(playlist.absoluteString.contains("account-secret"))
-        XCTAssertThrowsError(try api.playlistURL(""))
+        let capability = "cap/part?query"
+        let prefix = "/api/v1/live-tv/sessions/cap%2Fpart%3Fquery/"
+        let master = try api.playlistURL(prefix + "master.m3u8", sessionId: capability)
+        XCTAssertEqual(master.absoluteString, "https://media.example" + prefix + "master.m3u8")
+        XCTAssertNil(master.query)
+        XCTAssertFalse(master.absoluteString.contains("account-secret"))
+        XCTAssertThrowsError(try api.playlistURL(prefix + "index.m3u8", sessionId: capability))
+        for invalid in [
+            "https://elsewhere.example" + prefix + "master.m3u8",
+            "//elsewhere.example" + prefix + "master.m3u8",
+            "/api/v1/live-tv/sessions/other/master.m3u8",
+            prefix + "master.m3u8?token=secret",
+            prefix + "master.m3u8#fragment",
+            prefix + "../master.m3u8",
+            prefix + "master.m3u8\\evil.example"
+        ] {
+            XCTAssertThrowsError(try api.playlistURL(invalid, sessionId: capability), invalid)
+        }
+        XCTAssertThrowsError(try api.playlistURL(prefix + "master.m3u8", sessionId: ""))
+    }
+
+    func testRealCapabilityMasterIsAcceptedAfterStartAndResume() throws {
+        let capability = "ltv1.bm9kZS0x.12345678-1234-4234-9234-123456789abc"
+        let path = "/api/v1/live-tv/sessions/\(capability)/master.m3u8"
+        let session: [String: Any] = [
+            "session_id": capability, "playlist_url": path, "live": true,
+            "channel": ["id": "7.1", "guide_number": "7.1", "guide_name": "Local"]
+        ]
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let started = try decoder.decode(LiveTvStarted.self,
+            from: JSONSerialization.data(withJSONObject: session))
+        let resumed = try decoder.decode(LiveTvResumeAnswer.self,
+            from: JSONSerialization.data(withJSONObject: ["outcome": "live", "session": session]))
+        let api = LiveTvAPI(origin: "https://media.example", token: "account-secret")
+        for info in [started, try XCTUnwrap(resumed.session)] {
+            let url = try api.playlistURL(info.playlistUrl, sessionId: info.sessionId)
+            XCTAssertEqual(url.absoluteString, "https://media.example" + path)
+            XCTAssertNil(url.query)
+            XCTAssertNil(url.fragment)
+            XCTAssertThrowsError(try api.playlistURL(path, sessionId: capability + "other"))
+        }
+    }
+
+    func testStartedSessionDecodesTheServerPlaylistCapability() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let body = Data(#"{"session_id":"cap","playlist_url":"/api/v1/live-tv/sessions/cap/master.m3u8","live":true,"channel":{"id":"7.1","guide_number":"7.1","guide_name":"Local"}}"#.utf8)
+        let started = try decoder.decode(LiveTvStarted.self, from: body)
+        XCTAssertEqual(started.playlistUrl, "/api/v1/live-tv/sessions/cap/master.m3u8")
+        XCTAssertEqual(try LiveTvAPI(origin: "https://media.example", token: nil)
+            .playlistURL(started.playlistUrl, sessionId: started.sessionId).path,
+            started.playlistUrl)
     }
 
     // ---- the programme guide -------------------------------------------
@@ -1786,9 +1853,10 @@ final class LiveTvTests: XCTestCase {
         let source = try String(
             contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
             encoding: .utf8)
-        // The mutually exclusive iOS inline, tvOS browse-picture, and
-        // fullscreen sites all hand the element to AVKit.
-        XCTAssertEqual(source.components(separatedBy: "allowsPictureInPicture: true").count - 1, 3,
+        // The mutually exclusive iOS inline, iPad tablet watch panel
+        // (298eced8e), tvOS browse-picture, and fullscreen sites all hand the
+        // element to AVKit.
+        XCTAssertEqual(source.components(separatedBy: "allowsPictureInPicture: true").count - 1, 4,
                        "every live picture surface must allow picture-in-picture")
         XCTAssertFalse(source.contains("allowsPictureInPicture: false"))
         // Entering PiP backgrounds the app. Stopping on that would kill the one
@@ -1955,7 +2023,19 @@ final class LiveTvTests: XCTestCase {
             contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
             encoding: .utf8)
         XCTAssertFalse(source.contains(".onChange(of: live.playing) { _, playing in if !playing { fullscreen = false } }"))
-        XCTAssertTrue(source.contains("if !busy && !live.playing { fullscreen = false }"))
+        // Both edges that can end a session route through one predicate that
+        // refuses while a tune is in flight. `playing` alone (861c6e24f) left
+        // a failed tune on a black cover — its `busy` edge was never observed;
+        // `busy` alone (9268f5f6e) left a stopped session on one.
+        let close = try XCTUnwrap(source.range(of: "private func closeSurfaceIfSessionFinished() {"))
+        let body = String(source[close.upperBound...].prefix(160))
+        XCTAssertTrue(body.contains("guard !live.playing && !live.busy else { return }"),
+                      "a tune in flight must never close the surface")
+        XCTAssertTrue(body.contains("fullscreen = false"))
+        XCTAssertTrue(source.contains(".onChange(of: live.playing) { _, _ in closeSurfaceIfSessionFinished() }"),
+                      "a stop ends on the playing edge")
+        XCTAssertTrue(source.contains(".onChange(of: live.busy) { _, _ in closeSurfaceIfSessionFinished() }"),
+                      "a failed tune ends on the busy edge")
     }
 
     func testTheGuideRefreshAndHeartbeatOutliveTheViewThatStartedThem() throws {
@@ -2369,6 +2449,16 @@ final class LiveTvTests: XCTestCase {
                        "the one already scheduled at the right instant is left alone")
     }
     #endif
+    func testLiveEnvelopeClaimsTheRouteChannelsForAac() {
+        XCTAssertEqual(LiveTvPlaybackEnvelope.aacChannelCeiling(routeChannels: 0), 2)
+        XCTAssertEqual(LiveTvPlaybackEnvelope.aacChannelCeiling(routeChannels: 2), 2)
+        XCTAssertEqual(LiveTvPlaybackEnvelope.aacChannelCeiling(routeChannels: 6), 6)
+        XCTAssertEqual(LiveTvPlaybackEnvelope.aacChannelCeiling(routeChannels: 8), 6)
+        let envelope = LiveTvPlaybackEnvelope.current(compatibility: nil, aacChannels: 6)
+        XCTAssertEqual(envelope.audioLimits.first { $0.codec == "aac" }?.maxChannels, 6)
+        XCTAssertTrue(envelope.audioLimits.filter { $0.codec != "aac" }.allSatisfy { $0.maxChannels == 8 })
+    }
+
 }
 
 /// Counts what actually reached the server. The coalescing test asserted a
@@ -2381,6 +2471,7 @@ private final class LiveTvCountingRequests: LiveTvRequests, @unchecked Sendable 
         starts += 1
         return LiveTvStarted(
             sessionId: "cap-\(starts)",
+            playlistUrl: "/api/v1/live-tv/sessions/cap-\(starts)/master.m3u8",
             channel: LiveTvChannel(id: channel, guideNumber: channel, guideName: "Test",
                                    favorite: false, drm: false, support: "ready",
                                    hd: nil, videoCodec: nil, audioCodec: nil),

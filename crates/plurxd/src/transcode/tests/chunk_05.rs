@@ -1482,7 +1482,124 @@
     include!("../../vodencode_manager_tests.rs");
 
     async fn seed_file(store: &Arc<dyn Store>) -> i64 {
-        seed_file_at(store, "/media/Heat.mkv").await
+        seed_file_at(store, &placeholder_source().await).await
+    }
+
+    /// The stand-in, not FFmpeg, is what the start spawned. Its marker is
+    /// written by the process itself, so wait for it; the bound only turns a
+    /// producer that never ran into a failure instead of a hang.
+    #[cfg(unix)]
+    async fn wait_for_stand_in(marker: &std::path::Path) {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the start ran the hardware encoder stand-in");
+    }
+
+    /// Stand in for FFmpeg driving a hardware encoder this host may not have.
+    ///
+    /// The hardware-admission tests start a session with `nvenc: true` to
+    /// hold a hardware slot, and what they assert is the slot and CPU
+    /// accounting, not the encode. On a runner without an NVIDIA GPU the real
+    /// FFmpeg cannot open `*_nvenc` and exits in about 70 ms; that exit then
+    /// raced the manager's registration of the start (a lost race failed the
+    /// start with `DecisionMismatch`) and the test's own assertions (a later
+    /// one handed the live slot back). The stand-in runs, as a working encoder
+    /// would, until the session stops it, and marks `<dir>/started` when it
+    /// does, so the test can tell that it — not FFmpeg — was the producer.
+    #[cfg(unix)]
+    fn hardware_encoder_stand_in(dir: &std::path::Path) -> std::path::PathBuf {
+        let marker = dir.join("started");
+        let bin = dir.join("hardware-ffmpeg");
+        crate::write_test_executable(
+            &bin,
+            format!("#!/bin/sh\n: > '{}'\nexec sleep 600\n", marker.display()),
+            0o700,
+        );
+        super::with_producer_ffmpeg_for_test(bin.to_string_lossy());
+        marker
+    }
+
+    /// The placeholder source every `seed_file` test plays: a real file with
+    /// the exact shape the seeded probe records (hevc · mkv · 3840×2160 ·
+    /// 6,000 s), so the held-source scan comparison agrees with the catalog
+    /// and ffmpeg keeps reading it for as long as the manager lets it.
+    ///
+    /// It used to be `/media/Heat.mkv`, a path that does not exist. That met
+    /// the documented need — ffmpeg *starts* — but the child then exited in
+    /// tens of milliseconds, and once producer decisions became
+    /// authoritative an exit that lands before `register_session` authorizes
+    /// the install makes `create_session` fail with `DecisionMismatch`, and
+    /// an exit that lands between two assertions hands a live permit back
+    /// early. Which one happened was the control actor's mailbox turn
+    /// against a process exit, and a loaded runner lost it in about one
+    /// transcode test per full run.
+    ///
+    /// One frame every fifty seconds keeps the encode to 120 4K frames, about
+    /// a second with libx265 ultrafast and under a megabyte. The file lives
+    /// at one fixed, shape-named path under the system temp dir and is
+    /// reused by every later test process on the host; it is encoded to a
+    /// process-private name and renamed into place, so two processes
+    /// starting at once cannot read a half-written file, and nothing is
+    /// left behind but that one file.
+    async fn placeholder_source() -> String {
+        static SOURCE: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+        SOURCE
+            .get_or_init(|| async {
+                let dir = std::fs::canonicalize(std::env::temp_dir())
+                    .expect("canonical system temporary directory");
+                let path = dir.join("plurxd-placeholder-source-hevc-3840x2160-6000s.mkv");
+                if std::fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false) {
+                    return path.to_string_lossy().into_owned();
+                }
+                let staging = dir.join(format!(
+                    "plurxd-placeholder-source-{}.mkv.part",
+                    std::process::id()
+                ));
+                let mut command = tokio::process::Command::new(
+                    std::env::var("PLURX_FFMPEG").unwrap_or_else(|_| "ffmpeg".into()),
+                );
+                command
+                    .kill_on_drop(true)
+                    .args([
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "color=c=black:size=3840x2160:rate=0.02:duration=6000",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-c:v",
+                        "libx265",
+                        "-preset",
+                        "ultrafast",
+                        "-x265-params",
+                        "log-level=none:keyint=1:pools=none",
+                        "-f",
+                        "matroska",
+                        "-y",
+                    ])
+                    .arg(&staging);
+                let output =
+                    tokio::time::timeout(std::time::Duration::from_secs(120), command.output())
+                        .await
+                        .expect("placeholder source encode exceeded its deadline")
+                        .expect("failed to start the placeholder source encode");
+                assert!(
+                    output.status.success(),
+                    "placeholder source encode failed — this suite needs an ffmpeg with libx265: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                std::fs::rename(&staging, &path).expect("placeholder source rename");
+                path.to_string_lossy().into_owned()
+            })
+            .await
+            .clone()
     }
 
     async fn seed_file_at(store: &Arc<dyn Store>, path: &str) -> i64 {
@@ -1792,6 +1909,8 @@
     /// authorizing two encoders, which is the contention the cap exists to
     /// prevent. What it must do instead is reserve the CPU the pipeline has
     /// started spending, which before this milestone it did not do at all.
+    // The encoder stand-in is a /bin/sh script.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_retry_that_keeps_its_encoder_keeps_its_slot_and_pays_for_its_decode() {
         super::require_ffmpeg();
@@ -1799,6 +1918,8 @@
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
         let work = crate::test_tempdir().expect("work");
+        let encoder = crate::test_tempdir().expect("encoder stand-in");
+        let producer_started = hardware_encoder_stand_in(encoder.path());
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -1821,6 +1942,7 @@
             .start(file_id, 1080, 0.0, None, None, "paul", "pb-mixed")
             .await
             .expect("hardware start");
+        wait_for_stand_in(&producer_started).await;
         assert_eq!(
             mgr.codec_qualification_encoder_count(Encoder::Nvenc, OutputGrade::Sdr),
             1,
@@ -1893,6 +2015,7 @@
 
     fn execution_file_for_retry() -> plurx_core::domain::MediaFile {
         plurx_core::domain::MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 91,
             item_id: 3,
             path: PathBuf::from("/media/retry.mkv"),
@@ -2140,7 +2263,7 @@
             prepared,
             &alternate,
             Pacing::unpaced(),
-            &dir,
+            &dir.to_string_lossy(),
             "presentation-m5c2b",
             mgr.admissions.software_pool(),
             mgr.software_budget().await,
@@ -2302,7 +2425,7 @@
             prepared,
             &software,
             Pacing::unpaced(),
-            &dir,
+            &dir.to_string_lossy(),
             "presentation-m7b-pair",
             paired.admissions.software_pool(),
             paired.software_budget().await,
@@ -2408,7 +2531,7 @@
             .expect("an alternate exists"),
             &alternate_plan,
             Pacing::unpaced(),
-            &dir,
+            &dir.to_string_lossy(),
             "presentation-m5c2d-exec",
             mgr.admissions.software_pool(),
             mgr.software_budget().await,
@@ -2523,4 +2646,95 @@
             .is_none(),
             "a software encoder is not a mixed transition"
         );
+    }
+
+    /// The last producer that had to reserve its whole per-session ceiling
+    /// was the transcode, because FFmpeg wrote its own HLS objects and no
+    /// Rust code saw a write before it landed. Now its muxer uploads every
+    /// object through the session's scratch endpoint, so a real transcode
+    /// is admitted on its startup allowance -- a fraction of the ceiling --
+    /// and every object its own playlist names is already in place.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scratch_charge_a_transcode_starts_small_and_writes_through_the_grant() {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let source = plurx_core::testfixtures::source("h264");
+        let file_id = seed_file_with_probe_at(
+            &store,
+            source.to_str().expect("utf-8 fixture path"),
+            plurx_core::domain::ProbeResult {
+                duration_ms: Some(12_000),
+                container: Some("mkv".into()),
+                video_codec: Some("h264".into()),
+                width: Some(640),
+                height: Some(360),
+                ..Default::default()
+            },
+        )
+        .await;
+        let work = crate::test_tempdir().expect("work");
+        let mgr = Arc::new(TranscodeManager::new(
+            Arc::clone(&store),
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let info = mgr
+            .start(file_id, 360, 0.0, None, None, "paul", "pb-scratch-upload")
+            .await
+            .expect("start");
+        let ceiling = RollingScratchSizing::SessionCeiling.grant_bytes(mgr.ahead_limits().await);
+        let session = mgr
+            .sessions
+            .lock()
+            .await
+            .get(&info.session_id)
+            .cloned()
+            .expect("the session is registered");
+        assert!(
+            session.upload.is_some(),
+            "a transcode's muxer writes through the upload endpoint"
+        );
+        let key = session.scratch.as_ref().expect("scratch permit").key();
+        let admitted = mgr.scratch_ledger.charge_of(key).expect("charged");
+        assert!(
+            admitted < ceiling / 4,
+            "admitted {admitted} bytes against a {ceiling}-byte ceiling"
+        );
+
+        // The whole twelve-second title, so the last playlist -- the one
+        // FFmpeg writes as it exits -- is part of what is checked.
+        let mut named = Vec::new();
+        let mut complete = false;
+        for _ in 0..240 {
+            if let Ok(text) = tokio::fs::read_to_string(session.dir.join("index.m3u8")).await {
+                named = text
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                complete = text.contains("#EXT-X-ENDLIST");
+                if complete {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        assert!(complete, "FFmpeg finished the title: {named:?}");
+        assert!(named.len() >= 5, "twelve seconds in two-second segments: {named:?}");
+        for name in &named {
+            let metadata = tokio::fs::metadata(session.dir.join(name))
+                .await
+                .unwrap_or_else(|error| panic!("{name} is named but missing: {error}"));
+            assert!(metadata.len() > 0, "{name} is empty");
+        }
+        let mut entries = tokio::fs::read_dir(&session.dir).await.expect("list");
+        while let Some(entry) = entries.next_entry().await.expect("entry") {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(!name.ends_with(".tmp"), "a temporary was left behind: {name}");
+        }
+        drop(session);
+        assert!(mgr.stop_session(&info.session_id, "test").await);
     }

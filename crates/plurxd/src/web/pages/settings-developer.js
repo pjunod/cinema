@@ -40,7 +40,7 @@ function clusterBackupCard(settings,readiness){
 // A readiness status is evidence, not authority. The daemon can report facts
 // it can observe on this node; the controls remain available regardless of
 // the answer, including when the reading itself is unavailable.
-const DEV_READINESS_LABEL={met:"met",unmet:"not met",unobservable:"not observable"};
+const DEV_READINESS_LABEL={met:"met",unmet:"not met",unobservable:"not observable",unknown:"unknown",unavailable:"unavailable"};
 function devReadinessRow(readiness,itemId,reqId){
   if(!readiness||!Array.isArray(readiness.items)) return null;
   const item=readiness.items.find(row=>row&&row.id===itemId);
@@ -57,7 +57,7 @@ function devReadinessPill(found,readiness){
 }
 function devReadinessEvidence(found,readiness){
   if(readiness&&readiness.unavailable) return `The prerequisite reading failed: ${readiness.unavailable}`;
-  if(found) return found.evidence;
+  if(found) return found.evidence+(readiness?.observed_at_ms?` Observed ${new Date(readiness.observed_at_ms).toLocaleString()}.`:"");
   return readiness?"This server did not report on this prerequisite.":"";
 }
 function devReq(readiness,itemId,reqId,title,detail){
@@ -123,6 +123,50 @@ async function saveLiveTvDeinterlace(btn){
     const card=btn.closest(".setcard");if(card)card.outerHTML=liveTvDeinterlaceCard(saved);
     toast("Live TV deinterlace cadence saved");
   }catch(e){if(err)err.textContent=e.message||String(e);btn.disabled=false;}
+}
+
+// F-1: the same replicated switch, moved to Developer. Every readiness row is
+// an observation or a dated qualification receipt; none is read on save or by
+// the player. Enabling remains an operator choice even when rows are red.
+function autoQualityCard(settings){
+  const enabled=!!settings.playback_auto_abr;
+  const webController=typeof autoControllerTick==="function";
+  return setCard(`${cardHead("Adaptive Auto quality","Let Auto react to changing playback conditions during a stream.",`<span class="pill" id="aqstate">${enabled?"Enabled":"Disabled"}</span>`)}
+      ${togRow("pabr",`Adjust Auto quality while playing <span class="pill warn">experimental</span>`,`Off keeps the server's first Auto choice and the full manual quality menu. On lets supported clients adjust rungs and recover supply stalls.`,enabled)}
+      <div class="hint"><b>This switch is the enable path.</b> It is saved on the server and is never disabled or overridden by the readiness rows below. It affects eligible Auto sessions; a manual rung remains the viewer's choice.</div>
+      <details class="setdetails" open><summary>Requirements and current evidence</summary><div class="setdetails-body">
+      ${devStaticReq("Web controller implementation",webController?"present":"absent","This page can see the browser controller function. Presence confirms the implementation loaded; the dated recovery traces below describe runtime qualification.",webController?"ok":"warn")}
+      ${devStaticReq("Native controllers","not met in this build","Apple and Android native adapters have not shipped. The server setting remains selectable and applies to a native client only when that client's controller exists.","warn")}
+      ${devStaticReq("Chrome shaped-network recovery","not met · 2026-09-26","The final-code two-cliff repeat downshifted in 7.215 s and 7.672 s with no restart or stall, but its 133.30 ms and 166.70 ms frame gaps exceeded the unchanged 100 ms limit. An earlier candidate pass did not repeat; loaded-host qualification remains open.","warn")}
+      ${devStaticReq("Firefox shaped-network recovery","failed · 2026-09-26","Candidate and final-code traces missed the 100 ms gap limit. The integrated repeat restarted at cliff two with a 1.73 s gap; a further source-exact experiment reached 216.66 ms and 1,766.68 ms gaps. A stable final-branch pass remains owed.","warn")}
+      ${devStaticReq("HDR playback","incomplete · 2026-09-26","Chrome could not present the synthetic HDR fixture's first frame in the 30 s smoke window. This display reported no HDR support and the server selected CPU tone-mapping to SDR. A real HDR display trace remains owed.","warn")}
+      ${devStaticReq("Safari and physical devices","not measured · 2026-09-26","Safari WebDriver session creation failed before playback. Apple and Android device traces remain owed. Record first frame, gap, rung, restarts and unexpected SDR transitions per platform.","warn")}
+      <p class="devcheck-note">Evidence is dated because this server cannot inspect another device's trace. Recheck the architecture-review fleet evidence before enabling broadly. These observations never gate this checkbox.</p>
+      </div></details><div class="err" id="aqerr" role="alert"></div>
+      ${setCardFoot("saveAutoQuality")}`);
+}
+
+async function saveAutoQuality(btn){
+  const err=document.getElementById("aqerr"); if(err) err.textContent="";
+  const card=btn&&btn.closest?btn.closest(".setcard"):null;
+  const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
+  const requested=document.getElementById("pabr").checked;
+  if(btn) btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{playback_auto_abr:requested}}));
+    if(SERVER) SERVER.playback_auto_abr=!!saved.playback_auto_abr;
+    if(card&&!card.isConnected) return true;
+    const currentRevision=Number(card&&card.dataset?card.dataset.revision||0:0);
+    if(card&&currentRevision!==revision){
+      toast("Earlier Auto quality choice saved; newer edit remains unsaved");
+      return true;
+    }
+    const toggle=document.getElementById("pabr");
+    if(toggle) toggle.checked=!!saved.playback_auto_abr;
+    const state=document.getElementById("aqstate");
+    if(state) state.textContent=saved.playback_auto_abr?"Enabled":"Disabled";
+    toast("Auto quality saved"); if(btn) setCardSaved(btn);
+  }catch(e){if(err) err.textContent=e.message||String(e); if(btn) btn.disabled=false;}
 }
 
 function preparedQualityCard(settings,readiness){
@@ -261,13 +305,83 @@ function seekScratchReservationsCard(){
       <h3 class="devcheck-group">More than three streams at once</h3>
       ${devStaticReq("Copy and remux output","enforced write boundary",
         "Every object the native copy writer publishes &mdash; the initialization segment, each media segment, each playlist rewrite &mdash; is authorized before it exists, so these sessions start with a startup allowance and grow under a real bound instead of reserving the whole per-session ceiling up front.","ok")}
-      ${devStaticReq("Transcoded output","conservative, by design",
-        "FFmpeg writes its own HLS output, and this build has no way to authorize those writes before they land &mdash; a measurement taken afterwards can only discover an overrun. Transcoded sessions therefore still reserve the whole per-session ceiling. This is the known limit of the repair, not an oversight.","warn")}
-      ${devStaticReq("Windows","conservative, unproved",
-        "The port's process suspension is implemented, but no native runtime receipt exists for growth enforcement, so Windows keeps the conservative reservation.","")}
+      ${devStaticReq("Transcoded output","enforced write boundary",
+        "FFmpeg's HLS muxer uploads every object to a loopback endpoint in this server (<code>-method PUT</code>) instead of writing the file itself. Each piece is authorized against the scratch budget before it is written, so a transcode starts with a startup allowance and grows. A refusal stops reading the upload and marks the stream starved, and the flow controller suspends FFmpeg until the budget frees.","ok")}
+      ${devStaticReq("Legacy copy writer and retries","enforced write boundary",
+        "A copy the segmenter cannot cut, a cluster takeover, and the legacy retry a segmenter session keeps in reserve all use FFmpeg's muxer too. They upload through the same endpoint, each attempt on its own lane, so a replaced attempt can never overwrite its successor's objects.","ok")}
+      ${devStaticReq("FFmpeg can write HLS over HTTP","met in the published image",
+        "The endpoint needs the engine's <code>http</code> output protocol, which both engines in the published image include. A custom build without network protocols fails every transcode and every copy that uses FFmpeg's muxer, with &ldquo;Protocol not found&rdquo; in the server log. Nothing checks this ahead of time.","ok")}
+      ${devStaticReq("Windows","same boundary, not yet run natively",
+        "The endpoint is loopback TCP and ordinary file writes, with nothing platform-specific in it. It is built for Windows, but no native runtime receipt exists yet.","")}
       <p class="devcheck-note">Advisory only. Capacity, authorization and retention rules are unchanged by anything on this card; the global scratch ceiling is still the one on <a href="#/settings/playback">Playback</a>.</p>
       </div></details>`);
 }
+function clusterPlacementCard(settings){
+  const ready=!!settings.cluster_media_pool_ready;
+  return setCard(`${cardHead("Cluster media placement","Place new streams on compatible workers with spare capacity.",'<span class="pill">Cluster</span>')}
+    ${togRow("cluster-placement-enabled","Enable remote media placement","Existing sessions keep their owner; new sessions can use another worker.",!!settings.cluster_media_pool_enabled)}
+    ${togRow("cluster-takeover-enabled","Enable session takeover","Allow compatible expired sessions to acquire a new owner when remote placement is enabled.",!!settings.cluster_session_takeover_enabled)}
+    ${devStaticReq("Peer protocol observations",ready?"met":"not fully met","Compatible reachable peers are considered individually. A stale or older peer never disables the other workers.",ready?"ok":"")}
+    ${devStaticReq("Worker resources","checked for each start","A selected worker needs the requested codecs, readable source, writable scratch space and an available hardware or CPU reservation.","")}
+    <p class="hint">Requirements are advisory and never prevent saving. Unknown performance measurements affect ranking only. Streams continue through their existing ingress proxy, so ingress bandwidth is still used.</p>
+    <div class="err" id="cluster-placement-error" role="alert"></div>${setCardFoot("saveClusterPlacement")}`,{id:"cluster-placement-settings"});
+}
+async function saveClusterPlacement(btn){
+  const err=document.getElementById("cluster-placement-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{
+      cluster_media_pool_enabled:/** @type {HTMLInputElement} */(document.getElementById("cluster-placement-enabled")).checked,
+      cluster_session_takeover_enabled:/** @type {HTMLInputElement} */(document.getElementById("cluster-takeover-enabled")).checked
+    }}));
+    const card=document.getElementById("cluster-placement-settings");if(card)card.outerHTML=clusterPlacementCard(saved);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
+function boundedCatalogueCard(settings,readiness){
+  return setCard(`${cardHead("Local catalogue reads","Use each replica for browsing when its current consistency proof permits it.",'<span class="pill">Cluster reads</span>')}
+    ${togRow("bounded-catalogue-reads","Enable local catalogue reads","Falls back to authority when a replica is stale or a watch-write position is unknown.",settings.bounded_replica_reads!==false)}
+    ${devReq(readiness,"bounded_catalogue_reads","replica_proof","Fresh replica proof","The current term, quorum watermark and apply lag are checked for each read. Saving this preference does not require a readiness result.")}
+    ${devReq(readiness,"bounded_catalogue_reads","watch_floor","Watch state consistency","The web client carries its latest acknowledged watch-write position across nodes for 60 seconds. Other clients retain authority reads until they implement the same echo.")}
+    <div class="err" id="bounded-catalogue-error" role="alert"></div>${setCardFoot("saveBoundedCatalogueReads")}`,{id:"bounded-catalogue-settings"});
+}
+async function saveBoundedCatalogueReads(btn){
+  const err=document.getElementById("bounded-catalogue-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{bounded_replica_reads:/** @type {HTMLInputElement} */(document.getElementById("bounded-catalogue-reads")).checked}}));
+    const card=document.getElementById("bounded-catalogue-settings");if(card)card.outerHTML=boundedCatalogueCard(saved,DEVELOPER_READINESS);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
+function durableQueueCard(settings,readiness){
+  const cadence=Number(settings.cache_produce_mins)||0;
+  return setCard(`${cardHead("Durable cluster work","Share preparation across eligible idle workers and keep accepted work through restarts.",'<span class="pill">Shared queue</span>')}
+    ${togRow("durable-analysis","Enable fragment indexing and analysis workers","Use the existing analysis preference. Pausing keeps accepted requests and their history.",!!settings.vod_index_cluster_cache)}
+    ${togRow("durable-pretranscode","Enable pre-transcoding workers","Use the existing scheduled preparation preference. Enabling keeps the current cadence, or uses every six hours when it was off.",cadence>0)}
+    <input type="hidden" id="durable-cadence" value="${cadence>0?cadence:360}">
+    <p class="hint">Pre-transcoding still uses the configured <a href="#/settings/maintenance">cache disk budget</a>. A zero budget leaves no room for production. Queue cleanup and cancellation remain active while workers are paused.</p>
+    <details class="setdetails" open><summary>Requirements and current observations</summary><div class="setdetails-body">
+      ${devReq(readiness,"durable_cluster_work","durable_role","Worker authority","Ready learners can prepare immutable artifacts. Library scans and provider coordination remain voter work.")}
+      ${devReq(readiness,"durable_cluster_work","durable_store","Durable storage responds","Accepted work needs the replicated Store, or the local Store on a standalone server.")}
+      ${devReq(readiness,"durable_cluster_work","durable_tools","Compatible tools","A worker needs decoders and the exact output recipe required by its job.")}
+      ${devReq(readiness,"durable_cluster_work","durable_capacity","Spare capacity","Live playback takes precedence. Heavy jobs share one local lane and bounded source I/O across the cluster.")}
+      ${devReq(readiness,"durable_cluster_work","durable_scratch","Cache headroom","Each output needs writable local storage and enough room for its stage and final artifact.")}
+      ${devReq(readiness,"durable_cluster_work","durable_sources","Readable sources","At least one eligible worker must be able to read and validate the source.")}
+      ${devReq(readiness,"durable_cluster_work","durable_peers","Peer compatibility","Peers are checked individually. One unavailable peer does not disable the saved preference.")}
+      <p class="devcheck-note">Advisory only. Every preference can be saved regardless of these observations.</p>
+    </div></details>
+    <p><a href="#/activity">Inspect queued work, owners, retries and attempts in Activity</a>.</p>
+    <div class="err" id="durable-setting-error" role="alert"></div>${setCardFoot("saveDurableQueueSettings")}`,{id:"durable-queue-settings"});
+}
+async function saveDurableQueueSettings(btn){
+  const err=document.getElementById("durable-setting-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{
+      vod_index_cluster_cache:/** @type {HTMLInputElement} */ (document.getElementById("durable-analysis")).checked,
+      cache_produce_mins:/** @type {HTMLInputElement} */ (document.getElementById("durable-pretranscode")).checked?Number(/** @type {HTMLInputElement} */ (document.getElementById("durable-cadence")).value):0
+    }}));
+    const card=document.getElementById("durable-queue-settings");if(card)card.outerHTML=durableQueueCard(saved,DEVELOPER_READINESS);
+    toast("Cluster work preferences saved");
+  }catch(error){if(err)err.textContent=error.message||String(error);btn.disabled=false;}
+}
+
 function developerPanel(settings,readiness){
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
     <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>Tuner, guide, recording and library channels</span></a>
@@ -280,13 +394,17 @@ function developerPanel(settings,readiness){
       ${directedChangeDeveloperRows()}`,{local:true});
   return `${setHead("Developer","Experimental features still awaiting device qualification.")}
       ${destinations}
+      <div class="setsection"><h2>Cluster work</h2><p>Shared preparation and durable job history.</p></div>${durableQueueCard(settings,readiness)}${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${storageDomainsCard()}
+      <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
       <div class="setsection"><h2>Live TV video</h2><p>Output choices whose device and node capacity evidence remains advisory.</p></div>${liveTvDeinterlaceCard(settings)}
       <div class="setsection"><h2>Recovery</h2><p>Portable backup scheduling and visible readiness. Saving is never gated by these observations.</p></div>${clusterBackupCard(settings,readiness)}
       <div class="setsection" id="enable-seek-scratch"><h2>Seek scratch accounting</h2><p>Recently shipped accounting and retention changes with unverified native-device behavior.</p></div>${seekScratchReservationsCard()}
+      <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
       <div class="setsection" id="enable-quality"><h2>Prepared quality handoff</h2><p>Prepare a replacement stream using a second player. Device qualification is still incomplete.</p></div>${preparedQualityCard(settings,readiness)}${browser}
       <div class="setsection" id="enable-subtitle-refusal"><h2>Subtitle delivery</h2><p>Experimental error handling that still needs observations on each playback engine.</p></div>${subtitleNotReadyCard(settings,readiness)}
       <div class="setsection" id="enable-pgs-overlay"><h2>PGS subtitle overlay</h2><p>Serve bitmap subtitles separately from the video on capable clients.</p></div>${pgsOverlayCard(settings,readiness)}
-      <div class="setsection" id="enable-subtitle-sources"><h2>Stored subtitle tracks</h2><p>Keep each PGS track while the file is indexed, and read it instead of the whole source.</p></div>${subtitleStoredSourcesCard(settings,readiness)}
+      <div class="setsection" id="enable-subtitle-sources"><h2>Stored subtitle tracks</h2><p>Keep tracks during indexing and share verified tracks across the cluster.</p></div>${subtitlePlaybackRangesCard(readiness)}${subtitleStoredSourcesCard(settings,readiness)}${subtitleClusterSourcesCard(settings,readiness)}${subtitleBackfillCard(settings,readiness)}
+      <div class="setsection" id="enable-chapter-thumbnails"><h2>Chapter thumbnails</h2><p>A frame per chapter for the watch view's chapter rail, made the first time a page asks for it.</p></div>${chapterThumbnailsCard(settings,readiness)}
       <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}`;
 }
 // Automatic decode recovery.
@@ -346,8 +464,15 @@ function pgsOverlayCard(s,readiness){
 // burn path read a kept track instead of demuxing the whole source again. On
 // by default. Off stops the pass keeping tracks and makes both paths ignore
 // what is stored, which is how a wrong stored artifact is taken out of service
-// without a redeploy. The pass keeps nothing until the startup self-test has
-// passed and the cache is on a local filesystem.
+// without a redeploy. The startup self-test and cache probes are advisory
+// readings for the operator; they never override the saved switch.
+function subtitlePlaybackRangesCard(readiness){
+  return setCard(`${cardHead("Parallel playback subtitle ranges","Prepare text near the playhead while peers prepare the next ranges.",`<span class="pill">automatic</span>`)}
+      <p>For indexed Matroska text subtitles, this node prepares the current range and up to two reachable peers prepare the next ranges. Peer requests and responses are authenticated, and each completed range is served from this node's subtitle cache.</p>
+      <div class="hint">Keep the subtitle cache on local storage. If peers are unavailable or refuse work, current local extraction and the existing playback fallback continue. PGS and styled subtitle burns still need complete tracks.</div>
+      ${devReq(readiness,"subtitle_cluster_sources","reachable_peer","A media peer is reachable","This live directory reading is advisory; each range request still verifies its peer and source. It does not prove a successful range exchange.")}
+      <p class="devcheck-note">Playback ranges are automatic. The switches below control durable stored tracks and their extraction queue; they do not enable or disable these temporary playback ranges.</p>`);
+}
 function subtitleStoredSourcesCard(s,readiness){
   const enabled=s.subtitle_stored_sources!==false;
   const state=enabled
@@ -358,14 +483,63 @@ function subtitleStoredSourcesCard(s,readiness){
       <div class="hint"><b>This checkbox is the enable path.</b> Off stops the index pass keeping tracks and makes both consumers ignore the store and read the source as they always have.</div>
       <details class="setdetails" open><summary>What it needs</summary><div class="setdetails-body">
       ${devReq(readiness,"subtitle_stored_sources","stored_source_producer","Something fills the store","The fragment-index pass keeps each PGS track as it reads the file, with the tracks attempted and their verdicts since this process started.")}
-      ${devReq(readiness,"subtitle_stored_sources","stored_source_self_test","The startup self-test passed","At startup the configured ffmpeg runs the index argv with the tee over a tiny synthetic file with one corrupted track, and ffprobe must be the same build as ffmpeg. Until it passes, the index pass keeps nothing.")}
-      ${devReq(readiness,"subtitle_stored_sources","stored_source_local_cache","The cache is on a local filesystem","A stage on NFS, SMB or FUSE could stall the demuxer the index shares, so on those the index pass keeps nothing.")}
-      ${devReq(readiness,"subtitle_stored_sources","stored_source_free_space","The cache has room for the stage","The pass keeps nothing while the cache has less free than 1 GiB or 2% of its filesystem, whichever is larger: stage writes share the disk with the index it is about to publish.")}
+      ${devReq(readiness,"subtitle_stored_sources","stored_source_self_test","The startup self-test passed","At startup the configured ffmpeg runs the index argv with the tee over a tiny synthetic file with one corrupted track. Review its result before relying on stored tracks.")}
+      ${devReq(readiness,"subtitle_stored_sources","stored_source_local_cache","The cache is on a local filesystem","A stage on NFS, SMB or FUSE could stall the demuxer shared with the index pass.")}
+      ${devReq(readiness,"subtitle_stored_sources","stored_source_free_space","The cache has room for the stage","Keep at least 1 GiB or 2% free, whichever is larger; stages share the index cache disk.")}
       ${devReq(readiness,"subtitle_stored_sources","stored_source_lookups","Lookups answered from the store","How many overlay and burn lookups this process served from a stored track, answered as having no cues, or passed through to extraction.")}
       <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice.</p>
       </div></details>
       <div class="err" id="subsrcerr" role="alert"></div>
       ${setCardFoot("saveSubtitleStoredSources")}`,{id:"subsrccard"});
+}
+function subtitleClusterSourcesCard(s,readiness){
+  const enabled=!!s.subtitle_cluster_sources;
+  return setCard(`${cardHead("Share stored subtitle tracks","Join one cluster extraction and copy a verified track from a peer.",`<span class="pill${enabled?" ok":""}">${enabled?"enabled":"off"}</span>`)}
+      ${togRow("subcluster",`Use cluster subtitle sources <span class="pill">preview</span>`,`Applies to new subtitle flights. Your saved choice controls use; the checks below only advise.`,enabled)}
+      <details class="setdetails" open><summary>What to confirm before enabling</summary><div class="setdetails-body">
+      ${devReq(readiness,"subtitle_cluster_sources","analysis_queue","Analysis queue is enabled","The cluster analysis queue must be available for cold sources.")}
+      ${devReq(readiness,"subtitle_cluster_sources","schema_v47","All voters support schema 47","Deploy schema 47 on every voter before enqueuing the subtitle-source component.")}
+      ${devReq(readiness,"subtitle_cluster_sources","reachable_peer","A media peer is reachable","A holder can serve verified tracks over the authenticated private media route.")}
+      ${devReq(readiness,"subtitle_cluster_sources","local_cache","The subtitle store is local","Keep staging and stored tracks on a local filesystem.")}
+      ${devReq(readiness,"subtitle_cluster_sources","free_space","The store has room","Leave capacity for stored tracks and a publish stage.")}
+      <p class="devcheck-note">Advisory only. These observations never disable the switch or override your saved choice.</p>
+      </div></details><div class="err" id="subclustererr" role="alert"></div>${setCardFoot("saveSubtitleClusterSources")}`,{id:"subclustercard"});
+}
+function subtitleBackfillCard(s,readiness){
+  const enabled=!!s.subtitle_backfill;
+  return setCard(`${cardHead("Backfill subtitle tracks","Use otherwise idle analysis capacity to prepare uncovered subtitle tracks.",`<span class="pill${enabled?" ok":""}">${enabled?"enabled":"off"}</span>`)}
+      ${togRow("subbackfill",`Backfill uncovered tracks <span class="pill">preview</span>`,`Enqueues at most eight files per discovery pass while workers are idle.`,enabled)}
+      <details class="setdetails" open><summary>Current work and readiness</summary><div class="setdetails-body">
+      ${devReq(readiness,"subtitle_backfill","backfill_lease","Exclusive backfill lease","One node holds the cluster lease during each pass; no holder between passes is normal.")}
+      ${devReq(readiness,"subtitle_backfill","backfill_enqueued","Files enqueued here","Count of files this process has added to the analysis queue since startup.")}
+      ${devReq(readiness,"subtitle_backfill","backfill_remaining","Eligible files remaining","Files with an uncovered eligible subtitle ordinal, excluding active and cooling requests.")}
+      ${devReq(readiness,"subtitle_backfill","backfill_bytes","Estimated source bytes","Source sizes for those eligible files; actual output is much smaller.")}
+      <p class="devcheck-note">Advisory only. The switch remains available regardless of the reported status.</p>
+      </div></details><div class="err" id="subbackfillerr" role="alert"></div>${setCardFoot("saveSubtitleBackfill")}`,{id:"subbackfillcard"});
+}
+// Chapter thumbnails.
+//
+// One ffmpeg seek per chapter, on request, kept under the runtime cache.
+// There is no background producer: nothing runs unless a watch page asks
+// for that chapter, and the rows below say how much has run. The switch is
+// the enable path; off answers the route 404 and the rail shows numbered
+// tiles instead of pictures.
+function chapterThumbnailsCard(s,readiness){
+  const enabled=s.chapter_thumbnails!==false;
+  const state=enabled
+    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
+    : `<span class="pill">disabled</span>`;
+  return setCard(`${cardHead("Make chapter thumbnails","Extract one small frame per chapter the first time the watch view asks for it, and keep it on this node.",state)}
+      ${togRow("chthumb",`Make chapter thumbnails on request`,`Applies to the next thumbnail a watch page asks for. This checkbox is authoritative: nothing below turns it on or off.`,enabled)}
+      <div class="hint"><b>This checkbox is the enable path.</b> Off runs no ffmpeg for thumbnails and the chapter rail shows numbered tiles; what is already cached stays on disk and is served again when the switch comes back.</div>
+      <details class="setdetails" open><summary>What it needs</summary><div class="setdetails-body">
+      ${devReq(readiness,"chapter_thumbnails","chapter_thumbs_ffmpeg","ffmpeg can decode a frame","The configured ffmpeg answered -version at startup. Every thumbnail is one seek into the source and one decoded frame scaled to 320 px, CPU only.")}
+      ${devReq(readiness,"chapter_thumbnails","chapter_thumbs_cache_space","The runtime cache has room","Thumbnails are tens of kilobytes each and live under the runtime cache beside the other node-local stores; a full cache fails every write.")}
+      ${devReq(readiness,"chapter_thumbnails","chapter_thumbs_work","What this process has extracted","Made, served from cache, failed and running now since this process started, and what the cache holds on disk. At most two extractions run at once, each bounded to 15 seconds.")}
+      <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice.</p>
+      </div></details>
+      <div class="err" id="chthumberr" role="alert"></div>
+      ${setCardFoot("saveChapterThumbnails")}`,{id:"chthumbcard"});
 }
 function decodeRecoveryCard(s){
   const q=s.decoder_health_qualification||{};
@@ -446,4 +620,63 @@ function verifiedDecodeCard(s){
       </div></details>
       <div class="err" id="dhqerr" role="alert"></div>
       ${setCardFoot("saveVerifiedDecode")}`,{id:"vdcard"});
+}
+
+
+function hevcCopyCard(settings){
+  const enabled=!!settings.hevc_unverified_copy;
+  const trace=settings.hevc_header_trace_available;
+  const indexing=!!settings.vod_index_cluster_cache||Number(settings.vod_index_mins)>0;
+  return setCard(`${cardHead("Unverified HEVC copy","Allow a VOD copy to delete in-band parameter sets before the film's configuration is proved. Rolling and progressive copies keep them and never need this.",`<span class="pill${enabled?" warn":""}">${enabled?"Enabled":"Verified VOD only"}</span>`)}
+    ${togRow("hevc-unverified","Enable unverified HEVC copy","Applies to new playback starts without a restart. Files whose parameter sets change are already copied with them kept; enabling this lets an unproved file be copied with them deleted, which can bring the pink/green corruption back.",enabled)}
+    <details class="setdetails" open><summary>Requirements for safe use — advisory only</summary><div class="setdetails-body">
+    ${devStaticReq("Original-header analysis",trace===true?"met":trace===false?"not met":"not observable",trace===true?"This node’s FFmpeg reports trace_headers. A complete scan of each title is still required.":"This node has not confirmed the trace_headers filter; enabling remains available.",trace===true?"ok":"warn")}
+    ${devStaticReq("Background preparation",indexing?"configured":"not configured","Enable Content analysis indexing to prepare title-specific proofs. A configured worker does not mean every title has finished.",indexing?"ok":"warn")}
+    ${devStaticReq("This title’s decoder configuration","not observable here","A complete scan must find one unchanged VPS/SPS/PPS configuration. A scan that finds changes means header-stripping copy can alter the decoded picture.","")}
+    ${devStaticReq("Source held through playback and retries","VOD only","Verified VOD holds the source it analyzed. Rolling and progressive HEVC copies keep their in-band parameter sets, so they need no proof.","warn")}
+    ${devStaticReq("Every worker updated","not observable here","Deploy the fix on all serving nodes and drain older sessions. This build uses media-worker protocol 7; a local settings page cannot certify every public ingress.","")}
+    <p class="devcheck-note">These observations never disable the checkbox or reject its save. Turning the override off requires verified VOD for new HEVC copy starts; running sessions keep their existing policy.</p>
+    </div></details><div class="err" id="hevc-copy-error" role="alert"></div>${setCardFoot("saveHevcCopy")}`,{id:"hevc-copy-card"});
+}
+async function saveHevcCopy(btn){
+  const err=document.getElementById("hevc-copy-error"); if(err)err.textContent="";
+  if(btn)btn.disabled=true;
+  try{
+    const saved=await api("/settings",{method:"PUT",body:{hevc_unverified_copy:!!document.getElementById("hevc-unverified").checked}});
+    cacheSettings(saved);
+    const card=document.getElementById("hevc-copy-card"); if(card)card.outerHTML=hevcCopyCard(saved);
+    toast("HEVC copy preference saved");
+  }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
+}
+
+function storageDomainsCard(){
+  return setCard(`${cardHead("Shared storage budgets","Give mount paths on the same disk or NAS the same domain name.",'<span class="pill">2 readers per domain</span>')}
+    <p class="hint">An empty domain uses the shared default. A library with multiple roots reserves each domain before starting. Library jobs also share provider concurrency. Maintenance requests are paced across nodes: TMDB at most one dispatch per 100 ms, AniList one per 2.1 seconds, with shared server cooldowns.</p>
+    <div id="storage-domain-roots"><button type="button" class="ghost" onclick="loadStorageDomains(this)">Load library roots</button></div>
+    <p class="hint">Save identity changes while background jobs are idle so existing reservations keep their meaning. This does not change any feature's enable switch.</p>
+    <div id="storage-domain-error" class="err" role="alert"></div>
+    <button type="button" class="ghost" onclick="saveStorageDomains(this)">Save storage domains</button>`);
+}
+async function loadStorageDomains(btn){
+  btn.disabled=true;
+  const error=document.getElementById("storage-domain-error");if(error)error.textContent="";
+  try{
+    const data=await api("/cluster/work/storage-domains");
+    const roots=document.getElementById("storage-domain-roots");if(!roots)return;
+    roots.innerHTML=(data.libraries||[]).flatMap(library=>(library.paths||[]).map(root=>{
+      const mapping=(data.mappings||[]).find(row=>String(row.library_id)===String(library.id)&&row.root_path===root);
+      return `<label class="field">${esc(library.name)} · ${esc(root)}<input class="storage-domain-input" data-library="${esc(String(library.id))}" data-root="${esc(root)}" maxlength="64" value="${esc(mapping?mapping.domain_id:"")}" placeholder="Shared default"></label>`;
+    })).join("")||'<p class="hint">No library roots configured.</p>';
+    roots.dataset.loaded="true";
+  }catch(e){if(error)error.textContent=e.message||String(e);btn.disabled=false;}
+}
+async function saveStorageDomains(btn){
+  const roots=document.getElementById("storage-domain-roots"),error=document.getElementById("storage-domain-error");
+  if(error)error.textContent="";
+  if(!roots||roots.dataset.loaded!=="true"){if(error)error.textContent="Load library roots before saving.";return;}
+  const mappings=Array.from(roots.querySelectorAll(".storage-domain-input")).map(element=>{const input=/** @type {HTMLInputElement} */(element);return {library_id:Number(input.dataset.library),root_path:input.dataset.root,domain_id:input.value.trim()};}).filter(row=>row.domain_id);
+  btn.disabled=true;
+  try{await api("/cluster/work/storage-domains",{method:"PUT",body:mappings});toast("Storage domains saved");}
+  catch(e){if(error)error.textContent=e.message||String(e);}
+  finally{btn.disabled=false;}
 }

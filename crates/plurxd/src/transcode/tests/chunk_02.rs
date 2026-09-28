@@ -265,7 +265,9 @@
         assert_eq!(bitrate_for_height(2160), 20_000);
         assert_eq!(bitrate_for_height(1080), 8_000);
         assert_eq!(bitrate_for_height(720), 4_000);
-        assert_eq!(bitrate_for_height(240), 1_200);
+        assert_eq!(bitrate_for_height(360), 1_200);
+        assert_eq!(bitrate_for_height(240), 500);
+        assert_eq!(bitrate_for_height(144), 100);
     }
 
     #[test]
@@ -1367,8 +1369,8 @@
         assert_eq!(snap_height(900), 720, "equidistant resolves DOWN");
         assert_eq!(
             snap_height(144),
-            360,
-            "below the ladder climbs to its floor"
+            144,
+            "the low rung remains available"
         );
         assert_eq!(
             snap_height(1440),
@@ -1386,7 +1388,7 @@
         let full = ladder(Some(2160));
         assert_eq!(
             full.iter().map(|r| r.height).collect::<Vec<_>>(),
-            vec![1080, 720, 480, 360],
+            vec![1080, 720, 480, 360, 240, 144],
             "the shared lower ladder does not promise unresolved 4K output"
         );
         let top = full[0];
@@ -1398,19 +1400,24 @@
                 .iter()
                 .map(|r| r.height)
                 .collect::<Vec<_>>(),
-            vec![720, 480, 360],
+            vec![720, 480, 360, 240, 144],
             "a 720p file offers 720p and below — never an upscale"
         );
-        assert!(
-            ladder(Some(240)).is_empty(),
-            "nothing to offer below the floor"
+        assert_eq!(
+            ladder(Some(240))
+                .iter()
+                .map(|r| (r.height, r.total_kbps, r.peak_kbps))
+                .collect::<Vec<_>>(),
+            vec![(240, 660, 910), (144, 260, 310)],
+            "the low rungs must be encoded and advertised within the two cliff rates"
         );
+        assert!(ladder(Some(120)).is_empty(), "nothing exists below the floor");
         assert_eq!(
             ladder(None).len(),
-            4,
+            6,
             "an unprobed source has nothing to filter by"
         );
-        assert_eq!(ladder(Some(0)).len(), 4, "0 is not a height");
+        assert_eq!(ladder(Some(0)).len(), 6, "0 is not a height");
 
         let live_four_k = advertised_ladder(Some(2160), MAX_HEIGHT);
         assert_eq!(
@@ -1418,7 +1425,7 @@
                 .iter()
                 .map(|rung| rung.height)
                 .collect::<Vec<_>>(),
-            vec![2160, 1080, 720, 480, 360],
+            vec![2160, 1080, 720, 480, 360, 240, 144],
             "a resolved live hardware session may retain 4K"
         );
         assert_eq!(live_four_k[0].total_kbps, 20_160);
@@ -1435,7 +1442,7 @@
                 .iter()
                 .map(|rung| rung.height)
                 .collect::<Vec<_>>(),
-            vec![1080, 720, 480, 360],
+            vec![1080, 720, 480, 360, 240, 144],
             "an unresolved or HDR ceiling must not advertise 4K"
         );
     }
@@ -1914,7 +1921,7 @@
 
     #[tokio::test]
     async fn process_supervisor_reports_current_exit_and_fences_predecessor_exit() {
-        let control = crate::playback_control::RollingControlHandle::spawn("supervisor-test");
+        let control = crate::playback_control::RollingControlHandle::spawn_for_test("supervisor-test");
         let current_attempt = control
             .begin_producer_attempt()
             .await
@@ -1992,7 +1999,7 @@
 
     #[tokio::test]
     async fn process_supervisor_owns_signals_termination_and_reaping() {
-        let control = crate::playback_control::RollingControlHandle::spawn("supervisor-signal");
+        let control = crate::playback_control::RollingControlHandle::spawn_for_test("supervisor-signal");
         let attempt = control
             .begin_producer_attempt()
             .await
@@ -2058,7 +2065,7 @@
 
     #[tokio::test]
     async fn deferred_flow_signal_reauthorizes_attempt_before_touching_pid() {
-        let control = crate::playback_control::RollingControlHandle::spawn("signal-capacity");
+        let control = crate::playback_control::RollingControlHandle::spawn_for_test("signal-capacity");
         let attempt = control
             .begin_producer_attempt()
             .await
@@ -2096,7 +2103,7 @@
 
     #[tokio::test]
     async fn deferred_flow_signal_wakes_fail_closed_when_control_is_fenced() {
-        let control = crate::playback_control::RollingControlHandle::spawn("signal-unavailable");
+        let control = crate::playback_control::RollingControlHandle::spawn_for_test("signal-unavailable");
         let attempt = control
             .begin_producer_attempt()
             .await
@@ -2128,7 +2135,7 @@
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn actor_task_exit_fences_a_reserved_signal_and_cleanup_still_progresses() {
-        let control = crate::playback_control::RollingControlHandle::spawn("signal-actor-exit");
+        let control = crate::playback_control::RollingControlHandle::spawn_for_test("signal-actor-exit");
         let attempt = control
             .begin_producer_attempt()
             .await
@@ -2139,7 +2146,7 @@
             control.clone(),
             None,
         ));
-        let pause = Arc::new(std::sync::Barrier::new(2));
+        let pause = SupervisorPause::new("after-flow-reservation");
         child.pause_signal_after_flow_reservation(Arc::clone(&pause));
         let signal = {
             let child = Arc::clone(&child);
@@ -2150,7 +2157,10 @@
             })
         };
 
-        pause.wait();
+        // Held until released below, or until this test unwinds: a failed
+        // assertion here must report itself, not leave the supervisor
+        // blocking a worker thread the runtime cannot drop.
+        let held = pause.wait_reached();
         assert!(
             control.producer_transition_guard_is_held_for_test(),
             "the reserved signal owns the transition fence before its syscall"
@@ -2161,7 +2171,7 @@
             !control.is_retired(),
             "actor-exit retirement waits behind the already-authorized signal"
         );
-        pause.wait();
+        held.release();
         assert!(signal
             .await
             .expect("reserved signal task")
@@ -2191,7 +2201,7 @@
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn producer_signal_and_retirement_share_one_authorization_linearization() {
-        let control = crate::playback_control::RollingControlHandle::spawn("signal-fence");
+        let control = crate::playback_control::RollingControlHandle::spawn_for_test("signal-fence");
         let attempt = control
             .begin_producer_attempt()
             .await
@@ -2202,7 +2212,7 @@
             control.clone(),
             None,
         ));
-        let pause = Arc::new(std::sync::Barrier::new(2));
+        let pause = SupervisorPause::new("after-signal-authorization");
         child.pause_signal_after_authorization(Arc::clone(&pause));
         let signal = {
             let child = Arc::clone(&child);
@@ -2214,8 +2224,9 @@
         };
 
         // The supervisor has authorized the exact attempt and still owns the
-        // transition guard immediately before the syscall.
-        pause.wait();
+        // transition guard immediately before the syscall. It stays held
+        // until released below, or until this test unwinds.
+        let held = pause.wait_reached();
         assert!(
             control.producer_transition_guard_is_held_for_test(),
             "the paused supervisor must own the transition guard"
@@ -2237,7 +2248,7 @@
             observed.recv_timeout(Duration::from_millis(50)).is_err(),
             "retirement cannot linearize between authorization and signal"
         );
-        pause.wait();
+        held.release();
         assert!(signal
             .await
             .expect("signal task")
@@ -2274,9 +2285,134 @@
         child.kill().await.expect("reap stopped child");
     }
 
+    /// The two fence-point race tests above hold the supervisor on a runtime
+    /// worker thread. When one of their assertions fails while it is held,
+    /// the unwinding test must let the supervisor go at once, so the runtime
+    /// can drop and the harness reports the assertion (PR #556 review: with
+    /// an unbounded barrier the binary waited forever instead). The bound is
+    /// far longer than the check, so only the guard's drop can pass it.
+    #[test]
+    fn supervisor_pause_releases_its_supervisor_when_the_test_unwinds() {
+        let pause = SupervisorPause::with_bound("unwind", Duration::from_secs(30));
+        let supervisor = {
+            let pause = Arc::clone(&pause);
+            std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                (pause.hold(), started.elapsed())
+            })
+        };
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = pause.wait_reached();
+            panic!("a race-test assertion failed while the supervisor was held");
+        }));
+        assert!(unwound.is_err(), "the held test body panicked");
+        let (released_by_test, held_for) = supervisor.join().expect("supervisor thread");
+        assert!(
+            released_by_test,
+            "the unwinding test released the supervisor; it did not wait out the bound"
+        );
+        assert!(
+            held_for < Duration::from_secs(5),
+            "the supervisor was released promptly, not after {held_for:?}"
+        );
+    }
+
+    /// A supervisor that never reaches its pause fails the test by name
+    /// within the bound, rather than leaving it waiting.
+    #[test]
+    fn supervisor_pause_names_a_point_the_supervisor_never_reaches() {
+        let pause = SupervisorPause::with_bound("never-reached", Duration::from_millis(100));
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = pause.wait_reached();
+        }));
+        let message = unwound.expect_err("an absent supervisor fails the wait");
+        let message = message
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| message.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        assert!(
+            message.contains("never-reached"),
+            "the failure names the pause point: {message}"
+        );
+    }
+
+    /// A supervisor whose test never arrives lets itself go after the bound,
+    /// so a test that failed before reaching its pause cannot wedge the
+    /// runtime either.
+    #[test]
+    fn supervisor_pause_lets_the_supervisor_go_when_the_test_never_arrives() {
+        let pause = SupervisorPause::with_bound("absent-test", Duration::from_millis(100));
+        let started = std::time::Instant::now();
+        assert!(
+            !pause.hold(),
+            "the bound, not a test, released the supervisor"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the supervisor left within its bound"
+        );
+    }
+
+    /// M8's shipped-shape test for the attempt child: the production
+    /// constructor (`new_with_job`, no-op hooks) runs each of the three hook
+    /// points the race tests pause at to completion. A suspend passes the
+    /// authorization and flow-reservation points and publishes the held flow;
+    /// a resume does the same for running; a termination request passes the
+    /// before-reap point and the supervisor publishes the terminal. Acceptance
+    /// runs it in the release profile
+    /// (`cargo test --release -p plurxd attempt_child_shipped_shape`), where the
+    /// child has the layout and await points the daemon ships.
+    #[tokio::test]
+    async fn attempt_child_shipped_shape() {
+        let control = crate::playback_control::RollingControlHandle::spawn_for_test("attempt-shipped-shape");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("producer attempt");
+        let process = long_running_child();
+        let job = crate::process_control::ChildJob::attach(&process).ok();
+        let child = AttemptChild::new_with_job(attempt, process, job, control.clone(), None);
+        assert!(child.id().is_some(), "the producer is running");
+
+        assert!(
+            child
+                .signal(crate::process_control::ProcessSignal::Suspend)
+                .await
+                .expect("suspend verdict"),
+            "the authorized suspend reaches the process"
+        );
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, true)),
+            "the suspend publishes the held flow for its attempt"
+        );
+        assert!(
+            child
+                .signal(crate::process_control::ProcessSignal::Resume)
+                .await
+                .expect("resume verdict"),
+            "the authorized resume reaches the process"
+        );
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, false)),
+            "the resume publishes the running flow for its attempt"
+        );
+
+        child
+            .request_termination()
+            .expect("termination request reaches the supervisor");
+        tokio::time::timeout(Duration::from_secs(5), child.wait_for_terminal())
+            .await
+            .expect("the supervisor passes the before-reap point and publishes the reap")
+            .expect("terminal wait result");
+        assert!(child.id().is_none(), "a reaped attempt exposes no pid");
+    }
+
     #[tokio::test]
     async fn dropping_process_owner_terminates_and_reaps_without_a_pid_side_channel() {
-        let control = crate::playback_control::RollingControlHandle::spawn("supervisor-drop");
+        let control = crate::playback_control::RollingControlHandle::spawn_for_test("supervisor-drop");
         let attempt = control
             .begin_producer_attempt()
             .await

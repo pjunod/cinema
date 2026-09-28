@@ -98,9 +98,16 @@ function homeCard(it){
     <div class="artbox">${artHtml(it,'sq')}</div>
     <div class="meta"><div class="t">${esc(it.title)}</div><div class="s"><span class="stxt">${esc(fmtDate(it.recorded_at))}</span></div></div></div>`;
 }
-function grid(items){
-  // Remember this grid's photos so the lightbox can walk them with ←/→.
+// Remember a grid's photos so the lightbox can walk them with ←/→. This is
+// its own function because the library view can extend a grid by appending the
+// new batch's cards, which paints without calling `grid()` at all — and a
+// lightbox that only knows the first two hundred photos is the bug that would
+// buy.
+function rememberGridPhotos(items){
   PHOTO_SET=(items||[]).filter(i=>i.kind==='photo').map(i=>({id:exactWireId(i),title:i.title,recorded_at:i.recorded_at}));
+}
+function grid(items){
+  rememberGridPhotos(items);
   return items.length? `<div class="grid">${items.map(i=>card(i)).join("")}</div>` : `<div class="empty">Nothing here yet.</div>`;
 }
 

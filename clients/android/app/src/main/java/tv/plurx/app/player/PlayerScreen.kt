@@ -3,6 +3,7 @@
 
 package tv.plurx.app.player
 
+import android.Manifest
 import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
 import android.graphics.Rect
@@ -10,6 +11,8 @@ import android.os.Build
 import android.util.Log
 import android.util.Rational
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -65,6 +68,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -89,6 +93,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
@@ -120,6 +125,7 @@ import java.util.Locale
 import kotlin.math.roundToInt
 import tv.plurx.app.BuildConfig
 import tv.plurx.app.data.AudioTrack
+import tv.plurx.app.data.AudioOutputRoute
 import tv.plurx.app.data.Caps
 import tv.plurx.app.data.Decision
 import tv.plurx.app.data.DeviceCaps
@@ -170,6 +176,7 @@ private data class Plan(
     /** Both protocol spellings from the route probe that produced the plan. */
     val legacyCaps: Map<String, String>,
     val decisionCaps: DeviceCaps,
+    override val audioOutputRoute: AudioOutputRoute?,
     /**
      * `delivery.audio` — the audio index this plan already carries. Executed as
      * given rather than re-derived: it is what the server actually applied to
@@ -188,6 +195,7 @@ private data class Plan(
     val progressOffsetMs: Long,
     val itemDurationMs: Long?,
     val nextAudiobookPartId: Long?,
+    override val isAudioOnly: Boolean,
     /** Quality captured by the exact request that produced this plan. */
     override val requestedQuality: PlaybackQuality,
 ) : PlanLike {
@@ -259,6 +267,7 @@ private suspend fun loadPlan(
             deliveredDolbyVisionProfile = decision.delivered_dolby_vision_profile,
             legacyCaps = playbackDecision.capabilities.legacyQuery,
             decisionCaps = playbackDecision.capabilities.document,
+            audioOutputRoute = playbackDecision.capabilities.audioOutputRoute,
             deliveryAudio = decision.delivery?.audio,
             markers = decision.markers,
             reasons = decision.reasons,
@@ -274,6 +283,7 @@ private suspend fun loadPlan(
             nextAudiobookPartId = if (detail.item.isAudiobook) {
                 nextAudiobookPartId(detail.files, fileId)
             } else null,
+            isAudioOnly = detail.item.isAudiobook,
             requestedQuality = requestedQuality,
         )
     }
@@ -316,7 +326,7 @@ internal fun playerRuntimeLabel(milliseconds: Long): String {
     return if (hours > 0) "${hours}h ${minutes}m" else "${minutes}m"
 }
 
-private enum class PlayerPanel { Tracks, Settings, Info }
+internal enum class PlayerPanel { Tracks, Settings, Info }
 
 internal enum class PlayerControlId {
     SkipBack,
@@ -740,13 +750,23 @@ private fun PlayerContent(
     val scope = rememberCoroutineScope()
     val displayModeMatcher = remember(activity) { activity?.let(::DisplayModeMatcher) }
     val preferences by vm.preferences.collectAsStateWithLifecycle()
+    val notificationPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* Media3 still owns playback if notification permission is denied. */ }
+    LaunchedEffect(plan.isAudioOnly) {
+        if (plan.isAudioOnly && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     val controller = remember(plan) {
         // The decision and its session body must describe the same quality,
         // even if the stored preference changes between request and compose.
         playbackIntent.adoptQuality(plan.requestedQuality)
         Controller(
             context,
-            buildPlayer(context, vm),
+            buildPlayer(context, vm, plan.isAudioOnly),
             plan,
             plan.legacyCaps,
             plan.decisionCaps,
@@ -758,6 +778,7 @@ private fun PlayerContent(
             initialAudioOffsetMs = audioOffsetMs,
             retainedAudio = retainedAudio,
             retainedSubtitle = retainedSubtitle,
+            replan = onReload,
         )
     }
     // The one surface, projected from the player by the presenter.
@@ -838,6 +859,13 @@ private fun PlayerContent(
         java.util.UUID.randomUUID().toString()
     }
     var findingNext by remember { mutableStateOf(false) }
+    // The panel, its quality chip, and the wait overlay consume session status.
+    // Prepared replacement is also checked by the controller itself.
+    SideEffect {
+        controller.statusPollingVisible = {
+            !isInPip && (panel != null || controlsVisible || findingNext || progressFault != null)
+        }
+    }
 
     fun poke() {
         controlsVisible = true
@@ -1091,10 +1119,13 @@ private fun PlayerContent(
     // value instead of being rebuilt for it.
     val autoplayNext by rememberUpdatedState(preferences.autoplayNext)
     val playNext by rememberUpdatedState(onPlayNext)
-    DisposableEffect(controller, playbackLifecycleOwner) {
+    DisposableEffect(controller, playbackLifecycleOwner, componentActivity) {
         val lifecycle = playbackLifecycleOwner.lifecycle
         fun updateForeground() {
-            controller.setPresentationForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+            controller.setPresentationForeground(
+                lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED),
+                inPictureInPicture = componentActivity?.let(::isInPictureInPicture) == true,
+            )
         }
         val observer = LifecycleEventObserver { _, _ -> updateForeground() }
         lifecycle.addObserver(observer)
@@ -1102,13 +1133,21 @@ private fun PlayerContent(
         onDispose { lifecycle.removeObserver(observer) }
     }
     DisposableEffect(controller) {
+        fun updateScreenOn() {
+            val current = controller.player
+            playerView?.keepScreenOn = !plan.isAudioOnly &&
+                (current.isPlaying ||
+                    (current.playWhenReady && current.playbackState == Player.STATE_BUFFERING))
+        }
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
+                updateScreenOn()
                 isPlaying = playing
                 if (!playing) vm.postProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs)
             }
 
             override fun onPlaybackStateChanged(state: Int) {
+                updateScreenOn()
                 // No screen-held copy of "the player is buffering": that is the
                 // presenter's `media_waiting` now, and one of it is the point.
                 if (state == Player.STATE_ENDED) {
@@ -1125,6 +1164,10 @@ private fun PlayerContent(
                         }
                     }
                 }
+            }
+
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                updateScreenOn()
             }
 
             override fun onVideoSizeChanged(videoSize: VideoSize) {
@@ -1167,6 +1210,10 @@ private fun PlayerContent(
         } else {
             val pipModeListener = Consumer<PictureInPictureModeChangedInfo> { info ->
                 isInPip = info.isInPictureInPictureMode
+                controller.setPresentationForeground(
+                    playbackLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED),
+                    inPictureInPicture = info.isInPictureInPictureMode,
+                )
                 panel = null
                 if (info.isInPictureInPictureMode) {
                     controlsVisible = false
@@ -1323,7 +1370,10 @@ private fun PlayerContent(
                     useController = false
                     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                     setShutterBackgroundColor(android.graphics.Color.BLACK)
-                    keepScreenOn = true
+                    keepScreenOn = !plan.isAudioOnly &&
+                        (controller.player.isPlaying ||
+                            (controller.player.playWhenReady &&
+                                controller.player.playbackState == Player.STATE_BUFFERING))
                     playerView = this
                 }
             },
@@ -1339,6 +1389,10 @@ private fun PlayerContent(
                     // parks the predecessor and waits to be told.
                     controller.collectRetiredPlayer()
                 }
+                val current = controller.player
+                view.keepScreenOn = !plan.isAudioOnly &&
+                    (current.isPlaying ||
+                        (current.playWhenReady && current.playbackState == Player.STATE_BUFFERING))
                 playerView = view
             },
             modifier = Modifier.fillMaxSize(),
@@ -1429,8 +1483,7 @@ private fun PlayerContent(
             ) { Text(activeMarker.displayLabel, fontWeight = FontWeight.SemiBold) }
         }
 
-        val miniInfo = panel == PlayerPanel.Info && statsMode == PlaybackStatsMode.Mini
-        if (!isInPip && controlsVisible && (panel == null || miniInfo) && blockingFault == null) {
+        if (playbackTransportOnScreen(isInPip, controlsVisible, panel, statsMode, blockingFault != null)) {
             Controls(
                 title = plan.title,
                 subtitle = plan.subtitle,
@@ -1567,7 +1620,11 @@ private fun PlayerContent(
                 controller = controller,
                 positionMs = positionMs,
                 displayHdrTypes = displayHdrTypes,
-                transportReserve = playbackTransportReserve(controlsVisible, transportHeightPx),
+                transportReserve = playbackTransportReserve(
+                    playbackTransportOnScreen(isInPip, controlsVisible, panel, statsMode, blockingFault != null),
+                    transportHeightPx,
+                    LocalDensity.current,
+                ),
                 mode = statsMode,
                 onMode = {
                     statsMode = it
@@ -2076,8 +2133,11 @@ private fun PlayerInfo(
             container = source?.container?.uppercase(),
             sourceAudio = sourceAudioSummary(source),
             playingVideo = videoFormatSummary(videoFormat),
-            decodeResolution = player.videoSize.takeIf { it.width > 0 && it.height > 0 }
+            streamFrame = player.videoSize.takeIf { it.width > 0 && it.height > 0 && it.unappliedRotationDegrees == 0 }
                 ?.let { "${it.width}×${it.height}" },
+            streamPixelAspect = player.videoSize.takeIf { it.width > 0 && it.height > 0 && it.unappliedRotationDegrees == 0 }
+                ?.pixelWidthHeightRatio?.takeIf { it.isFinite() && it > 0f }
+                ?.let { if (it == 1f) "1:1" else String.format(Locale.US, "≈%.4f:1", it) },
             playingAudio = selectedAudio,
             dynamicRange = dynamicRangeSummary(
                 source = sourceDynamicRange(plan.source),
@@ -2129,15 +2189,34 @@ private fun PlayerInfo(
 }
 
 /**
+ * Whether the bottom transport block ([Controls]) is composed right now. This
+ * is the one predicate both the composition and the playback-info reserve read,
+ * so they cannot disagree: opening the info panel in any mode but Mini removes
+ * the transport while `controlsVisible` stays true, and a reserve keyed on
+ * `controlsVisible` alone kept subtracting the transport's last measured
+ * height (~300 dp of a 540 dp-tall Android TV frame) from a panel that had the
+ * whole screen to itself — which squashed the info body down to its header.
+ */
+internal fun playbackTransportOnScreen(
+    isInPip: Boolean,
+    controlsVisible: Boolean,
+    panel: PlayerPanel?,
+    statsMode: PlaybackStatsMode,
+    faulted: Boolean,
+): Boolean {
+    val miniInfo = panel == PlayerPanel.Info && statsMode == PlaybackStatsMode.Mini
+    return !isInPip && controlsVisible && (panel == null || miniInfo) && !faulted
+}
+
+/**
  * How much of the bottom of the screen the transport block is occupying right
- * now. Zero when the controls are not composed — the common case, since opening
- * the info panel hides them — the measured height once they have been laid out,
+ * now. Zero when the transport is not composed — the common case, since every
+ * info mode but Mini hides it — the measured height once it has been laid out,
  * and only a floor in the window between the two.
  */
-@Composable
-private fun playbackTransportReserve(controlsVisible: Boolean, measuredPx: Int): Dp = when {
-    !controlsVisible -> 0.dp
-    measuredPx > 0 -> with(LocalDensity.current) { measuredPx.toDp() }
+internal fun playbackTransportReserve(transportOnScreen: Boolean, measuredPx: Int, density: Density): Dp = when {
+    !transportOnScreen -> 0.dp
+    measuredPx > 0 -> with(density) { measuredPx.toDp() }
     else -> PlaybackTransportReserveFallback
 }
 
@@ -2160,6 +2239,8 @@ internal data class PlaybackInfoDetails(
     val sourceAudio: String? = null,
     val playingVideo: String? = null,
     val decodeResolution: String? = null,
+    val streamFrame: String? = null,
+    val streamPixelAspect: String? = null,
     val playingAudio: String? = null,
     val dynamicRange: String? = null,
     val subtitles: String = "Off",
@@ -2254,7 +2335,7 @@ private val PlaybackOverlayInset = 12.dp
  * with chips, a context line and a three-line overview it is closer to 318.dp,
  * which is exactly why this is a fallback and not the reserve.
  */
-private val PlaybackTransportReserveFallback = 192.dp
+internal val PlaybackTransportReserveFallback = 192.dp
 private val PlaybackPanelMinHeight = 180.dp
 /**
  * A source value is a run of separator-joined facts, sometimes with a clause
@@ -2316,13 +2397,19 @@ internal fun playbackInfoRows(
         InfoRow("file_id", "File ID", "PLAYBACK", setOf(PlaybackStatsMode.Debug), "#${details.fileId}"),
         InfoRow("session", "Session", "PLAYBACK", setOf(PlaybackStatsMode.Debug), details.sessionId, placement = "notes"),
         InfoRow("source_video", "Original video", "SOURCE", StandardAndDebug, details.sourceVideo, placement = "notes"),
-        InfoRow("source_resolution", "Original resolution", "SOURCE", StandardAndDebug, details.sourceResolution),
+        InfoRow("source_resolution", "Source frame", "SOURCE", StandardAndDebug, details.sourceResolution),
+        InfoRow("source_pixel_aspect", "Source pixel aspect", "SOURCE", setOf(PlaybackStatsMode.Details, PlaybackStatsMode.Debug), "Unavailable"),
+        InfoRow("source_display_aspect", "Source display aspect", "SOURCE", setOf(PlaybackStatsMode.Details, PlaybackStatsMode.Debug), "Unavailable"),
         InfoRow("source_bitrate", "Source bitrate", "SOURCE", StandardAndDebug, details.sourceBitrate),
         InfoRow("container", "Container", "SOURCE", StandardAndDebug, details.container),
         InfoRow("source_audio", "Source audio track", "SOURCE", StandardAndDebug, details.sourceAudio, placement = "notes"),
         InfoRow("source_file", "File", "SOURCE", setOf(PlaybackStatsMode.Debug), details.sourceFile, placement = "notes"),
         InfoRow("av_offset", "AV offset", "SOURCE", setOf(PlaybackStatsMode.Debug), details.audioSync ?: "0 ms"),
-        InfoRow("decode_resolution", "Playing resolution", "NOW DECODING", AllInfoModes, details.decodeResolution ?: "Not reported"),
+        InfoRow("decode_resolution", "Player display size", "NOW DECODING", AllInfoModes, "Unavailable", note = "Not reported by this player"),
+        InfoRow("stream_frame", "Stream frame", "NOW DECODING", AllInfoModes, details.streamFrame ?: "Unavailable", note = if (details.streamFrame != null) "Measured stream · decoded/cropped frame" else "Unavailable"),
+        InfoRow("stream_pixel_aspect", "Stream pixel aspect", "NOW DECODING", setOf(PlaybackStatsMode.Details, PlaybackStatsMode.Debug), details.streamPixelAspect ?: "Not measured"),
+        InfoRow("frame_comparison", "Frame comparison", "NOW DECODING", setOf(PlaybackStatsMode.Details, PlaybackStatsMode.Debug), "Unavailable"),
+        InfoRow("aspect_comparison", "Aspect comparison", "NOW DECODING", setOf(PlaybackStatsMode.Details, PlaybackStatsMode.Debug), "Not verified"),
         InfoRow("stream_format", "Stream format", "NOW DECODING", StandardAndDebug, details.playingVideo ?: "Not reported"),
         InfoRow("device_audio", "Device audio output", "NOW DECODING", StandardAndDebug, "Not reported"),
         InfoRow(
@@ -2761,17 +2848,7 @@ internal fun toneMapPeakSummary(status: PlaybackSessionStatus?): String? {
 
 private fun videoFormatSummary(format: Format?): String? {
     if (format == null) return null
-    val hdr = when (format.colorInfo?.colorTransfer) {
-        C.COLOR_TRANSFER_ST2084 -> "HDR10 / PQ"
-        C.COLOR_TRANSFER_HLG -> "HLG"
-        else -> null
-    }
-    return listOfNotNull(
-        codecShort(format.sampleMimeType) ?: format.codecs?.takeIf { it.isNotBlank() },
-        if (format.width != Format.NO_VALUE && format.height != Format.NO_VALUE) "${format.width}×${format.height}" else null,
-        hdr,
-        format.bitrate.takeIf { it != Format.NO_VALUE && it > 0 }?.toLong()?.let(::formatBitrate),
-    ).joinToString(" · ").ifBlank { null }
+    return codecShort(format.sampleMimeType) ?: format.codecs?.takeIf { it.isNotBlank() }
 }
 
 private fun selectedSubtitleLabel(

@@ -1245,6 +1245,7 @@ mod tests {
         drop(store);
 
         let connection = rusqlite::Connection::open(&path).expect("downgrade fixture");
+        crate::queue_fixture::remove_common_queue_schema(&connection);
         connection
             .execute_batch(
                 // Everything v44 and later built has to go, or the replayed
@@ -1270,11 +1271,19 @@ mod tests {
                 // `media_playback_pointers` fails with "no such table" rather
                 // than with anything about this fixture.
                 "DROP TRIGGER IF EXISTS cache_publication_generation_guard;
+                 DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_advance;
+                 DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_delete_source;
+                 DROP TRIGGER IF EXISTS subtitle_source_repair_epochs_supersede_source;
+                 DROP TABLE IF EXISTS subtitle_source_repair_epochs;
+                 DROP TRIGGER IF EXISTS subtitle_source_publications_delete_source;
+                 DROP TRIGGER IF EXISTS subtitle_source_publications_supersede_source;
+                 DROP TABLE IF EXISTS subtitle_source_publications;
                  DROP INDEX IF EXISTS analysis_requests_one_active_forced_fragment_successor;
                  DROP INDEX IF EXISTS analysis_requests_one_active_forced_skip_successor;
                  DROP INDEX IF EXISTS analysis_requests_one_active_source;
                  DROP TRIGGER IF EXISTS analysis_index_repairs_delete_source;
                  DROP TABLE IF EXISTS analysis_index_repairs;
+                 DROP TABLE IF EXISTS file_grants;
                  DROP TRIGGER IF EXISTS classification_source_changed;
                  DROP TRIGGER IF EXISTS classification_au;
                  DROP TRIGGER IF EXISTS classification_ad;
@@ -1319,6 +1328,7 @@ mod tests {
                  ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_diagnostic_json;
                  ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_retry_deadline_ms;
                  ALTER TABLE analysis_requests DROP COLUMN video_identity;
+                 ALTER TABLE files DROP COLUMN downloaded_subtitles;
                  ALTER TABLE files DROP COLUMN luminance_source;
                  ALTER TABLE files DROP COLUMN mastering_max_luminance;
                  ALTER TABLE files DROP COLUMN max_fall;
@@ -1420,7 +1430,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 22] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 38] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1445,6 +1455,7 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS dvr_event_heads",
             "ADD COLUMN video_codec_tag",
             "CREATE TABLE IF NOT EXISTS media_classifications",
+            "CREATE TABLE IF NOT EXISTS file_grants",
             "CREATE TABLE analysis_index_repairs",
             "ADD COLUMN typed_code",
             // v64's field order. Like `video_codec_tag` it is an additive
@@ -1463,6 +1474,29 @@ mod tests {
             // survives its wind-back, while the v14 fixture drops the whole
             // table and takes the column with it.
             "ADD COLUMN validated_revision",
+            "ADD COLUMN downloaded_subtitles",
+            // v67 rebuilds the request table and adds the subtitle-source
+            // publication and durable repair ledgers. Both tables and their
+            // triggers are dropped by the fixtures above.
+            "CREATE TABLE IF NOT EXISTS subtitle_source_repair_epochs",
+            // v70's K-05 M5 read indexes. Nothing to drop: every statement is
+            // `CREATE INDEX IF NOT EXISTS` on v2's `items`, so the replay after
+            // either wind-back finds them standing and does nothing.
+            "CREATE INDEX IF NOT EXISTS idx_items_top_level_title",
+            // v71 queue objects are removed before older domain columns.
+            "CREATE TABLE IF NOT EXISTS background_jobs",
+            "CREATE TABLE IF NOT EXISTS background_job_domain_leases",
+            "CREATE TABLE IF NOT EXISTS background_library_requests",
+            "CREATE TABLE IF NOT EXISTS background_storage_domains",
+            "CREATE TABLE IF NOT EXISTS background_provider_budgets",
+            // v76 adds only background-prefixed triggers, removed by the same fixture helper.
+            "CREATE TRIGGER IF NOT EXISTS background_subtitle_claimed",
+            "CREATE TABLE IF NOT EXISTS background_artwork_locations",
+            "CREATE TABLE IF NOT EXISTS background_transcode_artifacts",
+            "CREATE TABLE IF NOT EXISTS background_predictions",
+            "CREATE TABLE IF NOT EXISTS background_embeddings",
+            "CREATE TRIGGER IF NOT EXISTS background_job_publish_probe_command",
+            "CREATE TABLE IF NOT EXISTS background_artifact_repairs",
         ];
 
         assert!(

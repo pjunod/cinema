@@ -30,8 +30,12 @@ use super::hiqlite::validate_sql;
 ///
 /// [`the module list matches the directory`](module_list_matches_the_directory)
 /// fails if a new `hiqlite*.rs` appears without being added here.
-const STORE_SOURCES: &[(&str, &str)] = &[
+pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
     ("hiqlite.rs", include_str!("hiqlite.rs")),
+    (
+        "hiqlite_background_jobs.rs",
+        include_str!("hiqlite_background_jobs.rs"),
+    ),
     ("hiqlite_catalog.rs", include_str!("hiqlite_catalog.rs")),
     (
         "hiqlite_classification.rs",
@@ -84,6 +88,10 @@ const STORE_SOURCES: &[(&str, &str)] = &[
 /// makes adding a module without adding its SQL to the census impossible.
 const SQLITE_SOURCES: &[(&str, &str)] = &[
     ("apikeys.rs", include_str!("sqlite/apikeys.rs")),
+    (
+        "background_jobs.rs",
+        include_str!("sqlite/background_jobs.rs"),
+    ),
     ("cache.rs", include_str!("sqlite/cache.rs")),
     (
         "classification.rs",
@@ -91,12 +99,14 @@ const SQLITE_SOURCES: &[(&str, &str)] = &[
     ),
     ("coordination.rs", include_str!("sqlite/coordination.rs")),
     ("dv_conversion.rs", include_str!("sqlite/dv_conversion.rs")),
+    ("file_grants.rs", include_str!("sqlite/file_grants.rs")),
     ("dvr.rs", include_str!("sqlite/dvr.rs")),
     ("fragindex.rs", include_str!("sqlite/fragindex.rs")),
     (
         "fragment_index_cluster.rs",
         include_str!("sqlite/fragment_index_cluster.rs"),
     ),
+    ("housekeeping.rs", include_str!("sqlite/housekeeping.rs")),
     ("library.rs", include_str!("sqlite/library.rs")),
     (
         "library_channels.rs",
@@ -128,6 +138,10 @@ const SQLITE_SOURCES: &[(&str, &str)] = &[
 /// these, such a statement resolves to a neutral token, stops looking like a
 /// statement, and is never judged.
 const SHARED_CONSTANT_SOURCES: &[(&str, &str)] = &[
+    (
+        "downloaded_subtitles.rs",
+        include_str!("downloaded_subtitles.rs"),
+    ),
     ("dv_conversion.rs", include_str!("dv_conversion.rs")),
     ("fragindex.rs", include_str!("fragindex.rs")),
     (
@@ -843,7 +857,33 @@ fn is_sqlite_candidate(text: &str) -> bool {
 /// placeholders themselves are still covered by this census. The two entries
 /// main contributed (field order, luminance) and this one are the whole
 /// difference between the pre-merge sets; no other literal changed shape.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 93;
+///
+/// +2 on K-05's branch (93 -> 95 before main's two subtitle-source sites
+/// below, so 97 with them), re-measured site by site against `origin/main`
+/// (the census printed every unchecked literal on both trees): the query-plan
+/// capture needs each hot statement's SQL in a binding it can hand to
+/// `trace_statement` before running it, which takes three statements that
+/// bound inline out of the census's reach — `list_top_items_in_genre`'s
+/// `COUNT(*)` (`?1`/`?2`, two values) and `item_by_external_id` (`?1`-`?3`,
+/// three) in `sqlite/media.rs`, and `authenticate_token`'s read in
+/// `sqlite/users.rs` (a `const SQL` beside its `query_row`). `recently_added`
+/// left the directory for `sql_source` and takes its unchecked site with it.
+/// Each of the three runs in the SQLite contracts, where rusqlite refuses a
+/// wrong parameter count at run time.
+// Subtitle-source discovery prepares its shared candidate query before the
+// `query_map` binding, and ready retirement composes its shared
+// uncovered-ordinal predicate before binding in the next statement.
+//
+// 97 -> 96 on K-05 M5's branch: `item_by_external_id` left
+// `sqlite/media.rs` for `sql_source` (one statement for both dialects, the
+// union spelling its partial indexes need) and takes its unchecked
+// `?1`-`?3` site with it, as `recently_added` did. `list_top_items_in_genre`'s
+// count and page moved into `library_page_statements` in the same file and
+// bind exactly as before, so their sites are unchanged.
+// Common queue execution removes three legacy prepared/bound SQL sites.
+// The new bridge uses one JSON argument rather than per-field binding lists.
+// E2 retires the old separately prepared manifest-candidate query.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 92;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {

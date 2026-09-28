@@ -216,6 +216,16 @@ function analysisSummaryCard(value,context="activity"){
 // switch — background work is attributable from where it shows. Turned off,
 // this pass still finishes its index but publishes none of the tracks.
 function analysisRideAlong(row){
+  if(row.component==="subtitle_source"){
+    const textTracks=Number(row.text_tracks||0);
+    const pgsTracks=Number(row.pgs_tracks||0);
+    const parts=[];
+    if(textTracks) parts.push(`${textTracks} text`);
+    if(pgsTracks) parts.push(`${pgsTracks} PGS`);
+    const read=Number(row.bytes_read||0), total=Number(row.total_bytes||0);
+    const amount=total>=1e9?`${(read/1e9).toFixed(1)} of ${(total/1e9).toFixed(1)} GB`:`${fmtBytes(read)||"0 B"}${total?` of ${fmtBytes(total)}`:""}`;
+    return `<div class="analysis-sub">Reading ${esc(row.title||`File ${row.file_id}`)} on ${esc(row.node_id||"this node")} for ${parts.join(" + ")||"subtitle"} tracks · ${amount} · <a href="#/settings/developer/enable-subtitle-sources">cluster subtitle sources setting</a></div>`;
+  }
   const tracks=Number(row.pgs_tracks||0);
   if(!tracks) return "";
   return `<div class="analysis-sub">Also keeping ${tracks} PGS track${tracks===1?"":"s"} · ${fmtBytes(row.pgs_bytes_written)||"0 B"} written · <a href="#/settings/developer/enable-subtitle-sources" title="Turning stored subtitle tracks off lets this pass finish its index and discards the tracks it kept">stored subtitle tracks setting</a></div>`;
@@ -230,7 +240,7 @@ function analysisLiveProgress(value,names){
     const rate=row.throughput_bps?`${fmtBytes(row.throughput_bps)}/s`:"—";
     const eta=row.eta_ms!=null?fmtDur(row.eta_ms):"—";
     return `<tr><td><b>${title}</b><div class="analysis-sub">File ${row.file_id} · ${esc(row.component||"analysis")}</div></td>
-      <td><span class="analysis-state running">${esc((row.stage||"running").replace(/_/g," "))}</span><div class="analysis-sub">${row.fragments_indexed||0} fragments</div>${analysisRideAlong(row)}</td>
+      <td><span class="analysis-state running">${esc((row.stage||"running").replace(/_/g," "))}</span>${row.component==="subtitle_source"?"":`<div class="analysis-sub">${row.fragments_indexed||0} fragments</div>`}${analysisRideAlong(row)}</td>
       <td><b>${bytes}</b><div class="analysis-sub">Media ${media} · ${rate} · elapsed ${fmtDur(row.elapsed_ms)||"0s"} · ETA ${eta}</div></td>
       <td>${analysisNodeCell(names,row.node_id)}</td></tr>`;
   }).join("")}</tbody></table></div>`;

@@ -12,6 +12,22 @@ repeating because every fork below inherits it: **the server's best move is to
 send the file untouched.** Transcoding is the last resort, not the default —
 and the player says so out loud in `/decision`.
 
+## HEVC header correctness
+
+Copied HEVC normally requires a complete original-header proof showing one
+unchanged VPS/SPS/PPS configuration, bound to the source held by VOD. Removing
+changed headers can alter decoded colors even though the video is copied.
+Unverified or changing configurations return typed errors instead of falling
+back to rolling copy. Progressive and rolling HEVC copy are unverified routes.
+
+Settings → Developer → **Enable HEVC copy** provides an unrestricted
+**Enable unverified HEVC copy** override. Readiness is advisory and never
+prevents saving it. Enabling can restore these routes, including files whose
+scan found changes, but can restore pink/green corruption too. It applies to
+new starts without restart. Default: off. See the
+[root cause and implementation](streaming/HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md)
+for source attestation, rollout and remaining browser qualification.
+
 ## The end-to-end path
 
 ```
@@ -532,6 +548,27 @@ An older client never reads the field; a newer one treats an absent field as
 "unknown" and falls back to the source-only chip. Nothing breaks either way.
 
 ## Subtitles — three independent delivery questions
+
+While an HLS text sidecar is cold, indexed Matroska playback windows use a
+bounded input seek. The serving node starts the current window immediately;
+up to two peers prepare the next windows concurrently. Each completed window
+is published independently, so a slow peer does not delay current subtitles.
+Late-file seeks use this same path. The session owns the bounded fan-out;
+source attestation and replacement checks fence peer results. The complete
+subtitle job continues to populate the durable store. PGS and styled burns
+retain their complete-track producers. See the
+[range implementation status](clients/PARALLEL-SUBTITLE-RANGES-STATUS.md) for
+bounds, preroll boundary semantics and verification evidence.
+
+
+Downloaded OpenSubtitles captions join the same selectable list after the
+embedded ordinals. The catalog retains normalized WebVTT, provider identity,
+language and accessibility flags against the file's size and modification
+time. Subtitle delivery reads these captions locally from the replicated
+catalog; a cold or evicted extraction cache never needs another provider
+download. The existing WebVTT, HLS and text-burn paths consume the acquired
+track with absolute media cue times. Replacing the source invalidates the
+association; rescanning the unchanged source preserves it.
 
 Every subtitle in `/decision` carries `text` and `native` plus an optional
 `overlay` capability. They are not interchangeable claims. A client that reads
@@ -1623,7 +1660,12 @@ explicit enable choice.
   in the published range at least one playlist target duration behind the
   edge; progressive remux uses buffered ranges only. A local seek that neither
   emits `seeked` nor gains target coverage within three seconds reopens once at
-  the same film target. Android still reopens for every non-VOD seek; adopting
+  the same film target. Immutable VOD seeks stay local even outside the browser
+  buffer: a missing target gets the existing 20-second seek deadline, then one
+  fenced reopen at the same film target. `seeked` alone does not settle a VOD
+  seek; target coverage or presentation does. The generic eight-second stall
+  clock cannot spend recovery while that target is still missing, and target
+  coverage starts a fresh presentation-stall observation. Android still reopens for every non-VOD seek; adopting
   the same window routing there is open work.
 - **Auto adapts by restarting one encode, not by running a multivariant
   ladder.** The web controller consumes the server ladder and changes the one

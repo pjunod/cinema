@@ -23,10 +23,10 @@ use crate::state::AppState;
 
 pub(crate) const SNAPSHOT_PATH: &str = "/internal/v1/media/snapshot";
 pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
-/// Protocol 5 carries Library-channel purpose in every worker/takeover
-/// envelope. Exact-version offer filtering is the activation fence: a mixed
-/// cluster refuses placement instead of losing following semantics.
-pub(crate) const PROTOCOL_VERSION: i64 = 6;
+/// Protocol 7 requires pre-filter HEVC proof and source-fenced copy VOD.
+/// Exact-version placement/takeover checks exclude pre-fix workers. Old
+/// public ingress and existing sessions must still be drained on rollout.
+pub(crate) const PROTOCOL_VERSION: i64 = 7;
 pub(crate) const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const SNAPSHOT_EXPIRY: Duration = Duration::from_secs(15);
@@ -81,6 +81,68 @@ pub(crate) struct ToneMapOfferCapability {
     pub pipeline: String,
 }
 
+/// Recent observations, never capacity certificates. No sample is unknown,
+/// and each fixed 30-second window expires without background probing.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct MediaIoObservation {
+    pub storage_read_micros: Option<u64>,
+    pub delivered_bytes_per_second: Option<u64>,
+    pub peer_bytes_per_second: Option<u64>,
+}
+struct IoWindow {
+    started: std::time::Instant,
+    reads: u64,
+    read_micros: u64,
+    delivered: u64,
+    peer: u64,
+}
+impl Default for IoWindow {
+    fn default() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            reads: 0,
+            read_micros: 0,
+            delivered: 0,
+            peer: 0,
+        }
+    }
+}
+static MEDIA_IO: std::sync::LazyLock<Mutex<IoWindow>> =
+    std::sync::LazyLock::new(|| Mutex::new(IoWindow::default()));
+pub(crate) fn observe_media_io(delivered: u64, peer: u64, storage_read: Option<Duration>) {
+    let mut window = MEDIA_IO
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if window.started.elapsed() >= Duration::from_secs(30) {
+        *window = IoWindow::default();
+    }
+    window.delivered = window.delivered.saturating_add(delivered);
+    window.peer = window.peer.saturating_add(peer);
+    if let Some(elapsed) = storage_read {
+        window.reads = window.reads.saturating_add(1);
+        window.read_micros = window
+            .read_micros
+            .saturating_add(elapsed.as_micros().min(u64::MAX as u128) as u64);
+    }
+}
+fn media_io_observation() -> MediaIoObservation {
+    let window = MEDIA_IO
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let elapsed = window.started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    if elapsed >= 30_000 {
+        return MediaIoObservation::default();
+    }
+    let rate = |bytes: u64| {
+        (elapsed >= 1500 && bytes > 0).then(|| bytes.saturating_mul(1000) / elapsed.max(1))
+    };
+    MediaIoObservation {
+        storage_read_micros: (window.reads > 0).then(|| window.read_micros / window.reads.max(1)),
+        delivered_bytes_per_second: rate(window.delivered),
+        peer_bytes_per_second: rate(window.peer),
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct MediaNodeSnapshot {
     pub node_id: String,
@@ -99,6 +161,10 @@ pub(crate) struct MediaNodeSnapshot {
     pub egress_pressure: PressureBand,
     pub live_waiting: bool,
     pub background_active: bool,
+    #[serde(default)]
+    pub io: MediaIoObservation,
+    #[serde(default)]
+    pub live_tv_processing: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -261,6 +327,8 @@ struct RootReadability {
 struct RootProbe {
     child: tokio::process::Child,
     kill_sent: bool,
+    /// Keeps the probe listed with its priority class until it is reaped.
+    _job: Option<crate::process_control::ChildJob>,
 }
 
 #[derive(Default)]
@@ -423,7 +491,7 @@ impl MediaPool {
                     continue;
                 }
                 match spawn_library_root_probe(&root) {
-                    Ok(mut child) => {
+                    Ok((mut child, job)) => {
                         let mut registry = registry
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -440,6 +508,7 @@ impl MediaPool {
                             RootProbe {
                                 child,
                                 kill_sent: late,
+                                _job: Some(job),
                             },
                         );
                     }
@@ -628,6 +697,32 @@ impl MediaPool {
             .retain(|_, cached| now <= cached.expires_at);
     }
 
+    /// Observed capacity ranks candidates; the selected worker still reserves
+    /// the actual delivery plan atomically before starting its encoder.
+    pub(crate) async fn live_tv_worker(&self, state: &AppState) -> String {
+        if !self.remote_placement_ready(state).await {
+            return state.node_id.clone();
+        }
+        let voters = match self.membership.activity_peers().await {
+            Ok(peers) => peers
+                .into_iter()
+                .filter(|p| p.reachable)
+                .map(|p| p.node_id)
+                .collect::<BTreeSet<_>>(),
+            Err(_) => return state.node_id.clone(),
+        };
+        self.expire().await;
+        let mut nodes = vec![local_snapshot(state).await];
+        nodes.extend(
+            self.snapshots
+                .read()
+                .await
+                .values()
+                .map(|e| e.snapshot.clone()),
+        );
+        select_live_tv_worker(nodes, &voters, &state.node_id)
+    }
+
     pub(crate) async fn diagnostics(&self, state: &AppState) -> MediaDirectoryDiagnostics {
         self.expire().await;
         let mut nodes = vec![local_snapshot(state).await];
@@ -648,7 +743,7 @@ impl MediaPool {
             .as_deref()
             == Some("1");
         let remote_placement_rollout_ready = self.remote_rollout_ready().await;
-        let remote_placement_ready = remote_placement_enabled && remote_placement_rollout_ready;
+        let remote_placement_ready = remote_placement_enabled;
         let session_takeover_enabled = state
             .store
             .get_setting(plurx_core::store::keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
@@ -671,28 +766,21 @@ impl MediaPool {
         }
     }
 
-    /// Remote starts remain off until an operator opts in and every committed
-    /// voter has a fresh snapshot for this exact protocol. Comparing the peer
-    /// directory with the Raft voter count makes missing HTTP rows, stale
-    /// heartbeats, oversized clusters, and rolling old binaries fail closed.
+    /// The saved operator preference controls placement. Compatibility and
+    /// capacity are evaluated for each candidate, independently of other peers.
     pub(crate) async fn remote_placement_ready(&self, state: &AppState) -> bool {
-        if state
+        state
             .store
             .get_setting(plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED)
             .await
             .ok()
             .flatten()
             .as_deref()
-            != Some("1")
-        {
-            return false;
-        }
-        self.remote_rollout_ready().await
+            == Some("1")
     }
 
-    /// Prove the committed voter set is uniformly publishing this protocol,
-    /// independent of the operator opt-in bit. The settings API uses this
-    /// precondition before it writes the replicated enable flag.
+    /// Advisory observation of uniform protocol publication. It never controls
+    /// preference persistence, placement, or session takeover.
     ///
     /// The question is whether every committed VOTER is visible in the peer
     /// directory, which is not the same as whether the local node is one.
@@ -828,6 +916,29 @@ impl MediaPool {
     }
 }
 
+fn select_live_tv_worker(
+    nodes: Vec<MediaNodeSnapshot>,
+    voters: &BTreeSet<String>,
+    local_node_id: &str,
+) -> String {
+    nodes
+        .into_iter()
+        .filter(|n| {
+            (n.node_id == local_node_id || voters.contains(&n.node_id)) && n.live_tv_processing
+        })
+        .max_by_key(|n| {
+            (
+                n.hardware_slots_max.saturating_sub(n.hardware_slots_used),
+                n.software_threads_max
+                    .saturating_sub(n.software_threads_used),
+                n.scratch_pressure.preference(),
+                n.egress_pressure.preference(),
+                n.node_id == local_node_id,
+            )
+        })
+        .map_or_else(|| local_node_id.to_owned(), |n| n.node_id)
+}
+
 fn remote_directory_ready(
     peers: &[ActivityPeer],
     voter_count: usize,
@@ -901,21 +1012,27 @@ fn bounded_command_safe_roots(roots: impl IntoIterator<Item = PathBuf>) -> BTree
 /// `try_wait` confirms exit: SIGKILL cannot immediately release a process in
 /// uninterruptible filesystem I/O, and dropping/resubmitting it would turn a
 /// hard mount into unbounded PID growth.
-fn spawn_library_root_probe(root: &Path) -> std::io::Result<tokio::process::Child> {
+fn spawn_library_root_probe(
+    root: &Path,
+) -> std::io::Result<(tokio::process::Child, crate::process_control::ChildJob)> {
     debug_assert!(root.is_absolute());
     // Appending `.` forces directory traversal. A dangling symlink or a link
     // to a regular file fails instead of being mistaken for an empty readable
     // directory by `find -H`.
     let directory = root.join(".");
-    tokio::process::Command::new("find")
+    let mut command = tokio::process::Command::new("find");
+    command
         .arg("-H")
         .arg(directory)
         .args(["-mindepth", "1", "-maxdepth", "1", "-print", "-quit"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
+        .kill_on_drop(true);
+    crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::background("library root reachability probe"),
+    )
 }
 
 async fn fetch_offer(
@@ -981,6 +1098,9 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
         egress_pressure: workload_pressure,
         live_waiting: runtime.live_waiting,
         background_active: runtime.background_active,
+        io: media_io_observation(),
+        live_tv_processing: state.serving.is_ready()
+            && !state.membership.local_maintenance_active(),
     }
 }
 
@@ -1260,6 +1380,17 @@ fn compare_offer(
         .then_with(|| left.cache_hit.cmp(&right.cache_hit))
         .then_with(|| left_can_start.cmp(&right_can_start))
         .then_with(|| pressure_score(left).cmp(&pressure_score(right)))
+        .then_with(|| {
+            match (
+                left_snapshot.and_then(|node| node.io.storage_read_micros),
+                right_snapshot.and_then(|node| node.io.storage_read_micros),
+            ) {
+                (Some(left), Some(right)) => right.cmp(&left),
+                (Some(_), None) => Ordering::Greater,
+                (None, Some(_)) => Ordering::Less,
+                (None, None) => Ordering::Equal,
+            }
+        })
         .then_with(|| compare_speed(left.recent_speed, right.recent_speed))
         .then_with(|| compare_spare(left, right, left_snapshot, right_snapshot))
         .then_with(|| {
@@ -1420,6 +1551,8 @@ mod tests {
             egress_pressure: PressureBand::Idle,
             live_waiting: false,
             background_active: false,
+            io: MediaIoObservation::default(),
+            live_tv_processing: true,
         }
     }
 
@@ -1446,6 +1579,7 @@ mod tests {
 
     fn media_file_with_tracks() -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: PathBuf::from("/media/movie.mkv"),
@@ -1498,7 +1632,7 @@ mod tests {
     // `remote_rollout_ready`. Pin that it asks membership for the local role
     // and hands it through, and that the old unconditional form is gone.
     #[test]
-    fn the_rollout_gate_asks_membership_whether_this_node_is_a_voter() {
+    fn advisory_rollout_observation_asks_membership_whether_this_node_is_a_voter() {
         let body = include_str!("media_pool.rs")
             .split_once("pub(crate) async fn remote_rollout_ready(")
             .expect("remote_rollout_ready was renamed")
@@ -1521,7 +1655,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_placement_requires_every_voter_on_the_current_protocol() {
+    fn advisory_rollout_observation_reports_every_voter_on_the_current_protocol() {
         let now = tokio::time::Instant::now();
         let peers = vec![ActivityPeer {
             node_id: "peer-a".to_owned(),
@@ -1714,6 +1848,7 @@ mod tests {
                 RootProbe {
                     child: running_child,
                     kill_sent: false,
+                    _job: None,
                 },
             );
         pool.signal_timed_out_root_probes(&BTreeSet::from([running_root.clone()]));
@@ -1759,6 +1894,7 @@ mod tests {
                 RootProbe {
                     child: completed_child,
                     kill_sent: false,
+                    _job: None,
                 },
             );
         let outcomes = pool.reap_root_probes_until(
@@ -1795,6 +1931,51 @@ mod tests {
         task.abort();
     }
 
+    #[test]
+    fn a_busy_tuner_owner_uses_a_free_processor_despite_an_incompatible_peer() {
+        let mut busy = snapshot("owner", &["h264"], 1080);
+        busy.hardware_slots_max = 1;
+        busy.hardware_slots_used = 1;
+        busy.software_threads_max = 4;
+        busy.software_threads_used = 4;
+        let mut free = snapshot("free", &["h264"], 1080);
+        free.hardware_slots_max = 1;
+        free.hardware_slots_used = 0;
+        free.io = MediaIoObservation::default();
+        let mut old = free.clone();
+        old.node_id = "old".into();
+        old.live_tv_processing = false;
+        old.hardware_slots_max = 100;
+        let mut learner = free.clone();
+        learner.node_id = "learner".into();
+        learner.hardware_slots_max = 100;
+        let voters = BTreeSet::from(["free".into(), "old".into()]);
+        assert_eq!(
+            select_live_tv_worker(vec![busy, free, old, learner], &voters, "owner"),
+            "free"
+        );
+    }
+
+    #[test]
+    fn recent_storage_latency_ranks_workers_without_refusing_missing_samples() {
+        let mut slow = snapshot("slow", &["h264"], 1080);
+        slow.io.storage_read_micros = Some(50_000);
+        let mut fast = snapshot("fast", &["h264"], 1080);
+        fast.io.storage_read_micros = Some(1000);
+        let snapshots = HashMap::from([("slow".into(), slow), ("fast".into(), fast)]);
+        let mut candidates = vec![offer("slow"), offer("fast")];
+        rank_offers(&mut candidates, &snapshots, "request", "slow");
+        assert_eq!(candidates[0].node_id, "fast");
+        let unknown = offer("unknown");
+        assert!(unknown.eligible);
+        assert!(offer_is_bounded(
+            &unknown,
+            "unknown",
+            &"a".repeat(64),
+            unknown.scratch_bytes_required
+        ));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn snapshots_expire_after_fifteen_seconds() {
         let pool = MediaPool::new(MembershipManager::unavailable());
@@ -1818,6 +1999,8 @@ mod tests {
                     egress_pressure: PressureBand::Unavailable,
                     live_waiting: false,
                     background_active: false,
+                    io: MediaIoObservation::default(),
+                    live_tv_processing: true,
                 },
                 expires_at: tokio::time::Instant::now() + SNAPSHOT_EXPIRY,
             },

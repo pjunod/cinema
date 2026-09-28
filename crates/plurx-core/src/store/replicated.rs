@@ -117,6 +117,11 @@ pub enum TransactionShape {
     /// here rather than left to be rediscovered.
     WriteReadBack,
     WriteUntilStable,
+    /// Reads only, held in one transaction so that several statements see
+    /// one WAL snapshot (`with_read_txn`, K-05 section 3.1): a count and the
+    /// page it describes cannot straddle a commit. It writes nothing, so it
+    /// has no replicated write shape to port.
+    ReadSnapshot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -153,6 +158,13 @@ pub struct SqliteTransactionSite {
 /// Rust-driven backfills remain separate audit populations. Keeping explicit
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
+    SqliteTransactionSite {
+        module: "background_jobs.rs",
+        method: "queue_transaction",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
     SqliteTransactionSite {
         module: "dvr.rs",
         method: "put_dvr_rule",
@@ -272,6 +284,13 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
     },
+    SqliteTransactionSite {
+        module: "mod.rs",
+        method: "with_read_txn",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadSnapshot,
+    },
     // The Live TV configuration is generation-fenced, so its write is a
     // compare-and-set: read the stored generation, branch on whether it still
     // matches the caller's, and write the batch only then. That is
@@ -316,13 +335,6 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     SqliteTransactionSite {
         module: "cache.rs",
         method: "claim_cache_entry",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::VerbatimBatch,
-    },
-    SqliteTransactionSite {
-        module: "cache.rs",
-        method: "mark_cache_manifests_checked",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::VerbatimBatch,
@@ -495,15 +507,8 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         shape: TransactionShape::ReadBranchWrite,
     },
     SqliteTransactionSite {
-        module: "pretranscode.rs",
-        method: "claim_pretranscode_job",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteImmediateTransaction,
-        shape: TransactionShape::ReadBranchWrite,
-    },
-    SqliteTransactionSite {
-        module: "pretranscode.rs",
-        method: "complete_pretranscode_job",
+        module: "fragment_index_cluster.rs",
+        method: "enqueue_or_promote_subtitle_source",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
@@ -528,13 +533,6 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::BranchOnRowsAffected,
-    },
-    SqliteTransactionSite {
-        module: "fragment_index_cluster.rs",
-        method: "submit_fragment_index_analysis",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::ReadBranchWrite,
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
@@ -584,27 +582,6 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::BranchOnRowsAffected,
-    },
-    SqliteTransactionSite {
-        module: "fragment_index_cluster.rs",
-        method: "claim_cluster_fragment_index",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::ReadBranchWrite,
-    },
-    SqliteTransactionSite {
-        module: "fragment_index_cluster.rs",
-        method: "complete_cluster_fragment_index",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::ReadBranchWrite,
-    },
-    SqliteTransactionSite {
-        module: "fragment_index_cluster.rs",
-        method: "complete_cluster_fragment_index_by_hydration",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::ReadBranchWrite,
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
@@ -863,13 +840,6 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
-        method: "fail_cluster_fragment_index_typed",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::ReadBranchWrite,
-    },
-    SqliteTransactionSite {
-        module: "fragment_index_cluster.rs",
         method: "apply_analysis_index_repair",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
@@ -1003,12 +973,14 @@ mod tests {
         ),
         ("coordination.rs", include_str!("sqlite/coordination.rs")),
         ("dv_conversion.rs", include_str!("sqlite/dv_conversion.rs")),
+        ("file_grants.rs", include_str!("sqlite/file_grants.rs")),
         ("fragindex.rs", include_str!("sqlite/fragindex.rs")),
         (
             "fragment_index_cluster.rs",
             include_str!("sqlite/fragment_index_cluster.rs"),
         ),
         ("dvr.rs", include_str!("sqlite/dvr.rs")),
+        ("housekeeping.rs", include_str!("sqlite/housekeeping.rs")),
         ("library.rs", include_str!("sqlite/library.rs")),
         (
             "library_channels.rs",
@@ -1018,6 +990,10 @@ mod tests {
         ("mod.rs", include_str!("sqlite/mod.rs")),
         ("offline.rs", include_str!("sqlite/offline.rs")),
         ("outbox.rs", include_str!("sqlite/outbox.rs")),
+        (
+            "background_jobs.rs",
+            include_str!("sqlite/background_jobs.rs"),
+        ),
         ("pretranscode.rs", include_str!("sqlite/pretranscode.rs")),
         ("publication.rs", include_str!("sqlite/publication.rs")),
         ("reading.rs", include_str!("sqlite/reading.rs")),
@@ -1177,12 +1153,24 @@ mod tests {
         // because the count is the authorization for the delete. Registering
         // it is this commit's whole change to this list; M3 added the
         // boundary and left it unnamed.
+        // 100 with subtitle-source enqueue and foreground claim. The enqueue
+        // joins or promotes before inserting; the claim writes its attempt
+        // row only when it wins the conditional request update.
+        //
+        // 101 with K-05's `with_read_txn`: a read-pool helper that holds one
+        // `BEGIN DEFERRED` across a closure's statements so a library page
+        // and its count come from one snapshot. It reads only; M1 added the
+        // boundary and this registers it.
         //
         // The number is written out rather than derived so that adding a
         // transaction boundary has to be a deliberate edit here. That is the
         // point of the assertion: two of the sites above reached main without
         // one, and ten more did before this correction.
-        assert_eq!(methods.len(), 98);
+        // Seven legacy execution boundaries now use the one common queue
+        // transaction bridge: six claim/publication methods and submission.
+        // Subtitle execution now uses the common queue transaction.
+        // E2 retires the unfenced manifest-cursor transaction.
+        assert_eq!(methods.len(), 93);
     }
 
     #[test]

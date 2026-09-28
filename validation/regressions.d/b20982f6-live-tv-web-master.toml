@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b20982f6"]
+points = ["web.experience"]
+checks = ["web-static"]
+reason = "The shipped Live TV web test exercises the caption-bearing master playlist and capacity-offer rendering; web-static runs that fixture and checks the embedded scripts."

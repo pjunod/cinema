@@ -1,11 +1,12 @@
 "use strict";
-function usersPanel(users){
+function usersPanel(users,settings){
   const admins=users.filter(u=>u.is_admin).length;
   const summary=`${users.length} account${users.length===1?"":"s"} · ${admins} admin${admins===1?"":"s"}`;
   return `${setHead("Users",summary,`<button class="sm" onclick="openUserDrawer('new')">+ Add user</button>`)}
       ${USER_DRAWER==="new"?userDrawerHtml(null):""}
       <div class="card" style="padding:8px 10px 4px"><table><thead><tr><th>User</th><th>Role</th><th>Created</th><th></th></tr></thead>
-      <tbody>${users.map(u=>userRow(u)).join("")}</tbody></table></div>`;
+      <tbody>${users.map(u=>userRow(u)).join("")}</tbody></table></div>
+      ${signInExpiryCard(settings)}`;
 }
 // Which user row has its drawer open ("new" for the add form, a user id for
 // a password reset, or null). Same rules as the library drawer.

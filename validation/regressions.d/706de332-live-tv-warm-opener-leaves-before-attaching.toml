@@ -1,0 +1,25 @@
+version = 1
+
+[[coverage]]
+commits = ["706de332"]
+points = ["live-tv.integration", "live.dvr"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+PR #496 review finding 1. A warm opening's fan-out began its opening sample \
+(epoch 1) only once a consumer attached, and a joiner cannot attach before that \
+sample's probe, so a warm opener that ended before attaching left every joiner \
+waiting to its start deadline, then failing with "the tuner sent no data ... \
+no signal". The transport now records its warm opener, the session marks it \
+done on attach or seat release, and await_first_consumer stops waiting once \
+the opener is gone without attaching while another consumer holds a seat, so \
+the fan-out collects and probes the sample with nobody attached. \
+a_joiner_of_a_warm_opening_starts_when_the_opener_leaves_before_attaching \
+(live_tv::tests) is the reviewer's reproduction through the real start path, \
+transport and fan-out: one cold watch caches the facts, every software encoder \
+admission is held, a warm opener and a joiner share one transport (asserted \
+with Arc::ptr_eq), the opener is stopped while it waits for its encoder slot, \
+the admissions are released, and the joiner must start within 10 s and count \
+as joined. With the early return removed from await_first_consumer the joiner \
+fails after 13.0 s with StartupTimeout (exit 101, run on nuc3). Runs in the \
+local and hosted Rust gates.
+"""

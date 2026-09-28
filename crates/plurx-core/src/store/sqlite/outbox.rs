@@ -98,4 +98,17 @@ impl WatchedOutboxStore for SqliteStore {
         })
         .await
     }
+
+    async fn watched_outbox_hint(&self) -> Result<bool, StoreError> {
+        self.with_read(move |conn| {
+            let due: i64 = conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM watched_outbox
+                  WHERE status = 'pending' AND next_at <= ?1 AND claim_until <= ?1)",
+                params![now()],
+                |row| row.get(0),
+            )?;
+            Ok(due != 0)
+        })
+        .await
+    }
 }

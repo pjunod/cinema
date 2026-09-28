@@ -44,10 +44,15 @@ appear over USB and Wi-Fi at once. The playbook deduplicates those endpoints
 and fails if a required device is absent; a partial push is not a successful
 deploy.
 
-The Android path deploys the signed debug APK to the controller's physical
-test devices; it does not sign or upload a Google Play release. The release
-target has no signing configuration, so store delivery remains the separate §5
-workflow instead of borrowing a development key behind the operator's back.
+The Android path deploys to the controller's physical test devices; it does
+not upload a Google Play release. The `mobile_release` role in `plurx-agent`
+**still builds and installs the debuggable debug APK** until it is switched to
+`:app:assembleRelease` / `app-release.apk` with the four `PLURX_ANDROID_*`
+signing inputs (see the 2026-09-23 note in
+[clients/CLIENT-DEPLOY-PROMPT.md](clients/CLIENT-DEPLOY-PROMPT.md)). The
+in-repository paths — `make android-publish` and `scripts/ship-physical` —
+already ship the release variant (§5.1). Store delivery remains the separate §5
+workflow.
 
 Apple upload uses an App Store Connect API key. Keep the private key out of the
 repo at
@@ -103,7 +108,14 @@ It resolves `origin/main`, pins a detached worktree under
 checkout is neither read for its working state nor left holding build output.
 Apple builds the `plurx-iOS` and `plurx-tvOS` Release targets against
 `generic/platform=iOS` and `generic/platform=tvOS` — a device build, not an
-archive — and Android assembles the same signed debug APK the playbook ships.
+archive — and Android assembles the signed **release** APK
+(`:app:assembleRelease`), never the debuggable debug build. It takes the same
+four signing inputs as `make android-release` (§5.1) and stops before any work
+when one is missing; a relative `PLURX_ANDROID_KEYSTORE` is resolved against the
+directory it was started from. A device still on the pre-release debug build is
+not treated as "already installed" at an equal versionCode, and when Android
+refuses the upgrade across signers the script names the one-time
+`adb uninstall` and what it costs rather than doing it.
 `codesign --verify --deep --strict` and `apksigner verify` both run before any
 device is touched.
 
@@ -372,18 +384,91 @@ Play requirement. The pinned JDK 25 / AGP 9.3.2 / SDK 37.0 image is documented
 in [clients/android/README.md](../clients/android/README.md), and
 `make android-test` proves its JVM suite and lint in that image.
 
-One real blocker remains, not polish: **a release signing config.**
-`build.gradle.kts` defines no `signingConfigs`,
-so `assembleRelease` produces an unsigned or debug-signed artifact that Play
-refuses. Generate an upload key, keep it out of git, and enrol in **Play App
-Signing** so Google holds the distribution key — losing an upload key is
-recoverable, losing a distribution key without Play App Signing means the app
-can never be updated again.
+**The release signing blocker is closed in the repository.**
+`build.gradle.kts` now defines `signingConfigs.release`, and the `release`
+build type selects it. The four values come from the environment —
+`PLURX_ANDROID_KEYSTORE`, `PLURX_ANDROID_KEYSTORE_PASSWORD`,
+`PLURX_ANDROID_KEY_ALIAS`, `PLURX_ANDROID_KEY_PASSWORD` — and any one of them
+missing fails the build naming it (`requiredSigningValue`). There is no debug
+fallback for the durable release identity. Existing physical installs are
+debug-signed, however, so the final sideload APK is re-signed with an audited
+certificate-rotation lineage. The old debug key is used only as the
+predecessor in that lineage; Android 9+ verifies the new release key and can
+retain installed app data across the update.
+
+`make android-release` builds it; `make android-publish` serves it at
+`/download/plurx-android.apk`. `make android` still produces the debug APK for
+local use. `PLURX_ANDROID_KEYSTORE` may be relative to the directory `make` runs
+in (the `keytool` line below leaves `plurx-upload.jks` in the cwd); it is
+resolved to an absolute path before Docker bind-mounts it.
+
+The release APK is R8-obfuscated, so `android-publish` also keeps the build's
+`mapping.txt` beside it as `plurx-android-<versionCode>.mapping.txt` in
+`ANDROID_DATA_DIR` (keyed by the versionCode in the build's
+`output-metadata.json`), writes it before replacing the APK, and refuses to
+publish a build that has none. Only `/download/plurx-android.apk` is served;
+the mappings are not. To de-obfuscate a device stack trace, run R8's `retrace`
+against the mapping of the versionCode the device reports.
+
+A durable release key and signed lineage have been generated outside the
+repository for the agent-owned fleet rollout. Their certificate and lineage
+hashes are in the [dated fleet readout](reviews/ARCHITECTURE-REVIEW-FLEET-READOUT-2026-09-25.md). A lineage-signed code126 APK updated one TCL from debug code125 in place, with the sign-in and first-install time preserved. The current code128 candidate and remaining physical devices still require an exact-main rollout; playable offline retention remains unproved. For a new installation, generate and retain both outside the repository. The old signer must grant
+`installed-data` in the lineage or the on-device update loses its data. Stream
+the files and passwords to the build host; never commit them or pass passwords
+as command-line literals. `scripts/sign-android-release` verifies the old
+fleet certificate and new release certificate, signs the APK for rotation at
+API 28, and refuses any artifact whose manifest still supports API 23–27.
 
 ```bash
 keytool -genkey -v -keystore plurx-upload.jks \
   -keyalg RSA -keysize 2048 -validity 10000 -alias upload   # store OUTSIDE the repo
 ```
+
+For the existing physical fleet, supply the audited old keystore in
+`PLURX_ANDROID_OLD_KEYSTORE`, its alias and passwords in the matching
+`PLURX_ANDROID_OLD_KEY_*` variables, the new key in the four
+`PLURX_ANDROID_KEY*` variables above, the new certificate SHA-256 in
+`PLURX_ANDROID_RELEASE_CERT_SHA256`, and the lineage file in
+`PLURX_ANDROID_LINEAGE`. Create that lineage once, outside the repository:
+
+```bash
+apksigner rotate --out "$PLURX_ANDROID_LINEAGE" \
+  --old-signer --ks "$PLURX_ANDROID_OLD_KEYSTORE" \
+  --ks-key-alias "$PLURX_ANDROID_OLD_KEY_ALIAS" \
+  --ks-pass env:PLURX_ANDROID_OLD_KEYSTORE_PASSWORD \
+  --key-pass env:PLURX_ANDROID_OLD_KEY_PASSWORD \
+  --set-installed-data true \
+  --new-signer --ks "$PLURX_ANDROID_KEYSTORE" \
+  --ks-key-alias "$PLURX_ANDROID_KEY_ALIAS" \
+  --ks-pass env:PLURX_ANDROID_KEYSTORE_PASSWORD \
+  --key-pass env:PLURX_ANDROID_KEY_PASSWORD
+```
+
+Keep the old keystore and lineage until every installation has rotated; keep
+the durable release key and lineage for future updates. The signing helper
+uses `--rotation-min-sdk-version 28` so Android 9–12 also adopts the new key.
+
+For Play distribution, enrol this durable release identity as the **Play app
+signing key**, and register a separate upload key for App Bundle uploads. If
+Google generates a different app signing key, Play-delivered APKs cannot update
+the existing sideload fleet in place. Play App Signing holds the distribution
+key; a lost upload key can be reset, while a lost self-held distribution key
+would strand sideload updates. Verify the enrolled app signing certificate
+against `PLURX_ANDROID_RELEASE_CERT_SHA256` before publishing a bundle. The
+current `bundleRelease` path still signs with the durable app key; configure a
+separate upload-key signing path before sending a bundle to Play. See
+[Android's Play App Signing guidance](https://developer.android.com/studio/publish/app-signing).
+
+On Android 9+ devices whose installed certificate matches the audited old
+signer, install the lineage-signed APK with `adb install -r`; **do not
+uninstall**. Capture the installed certificate and app-data baseline first,
+canary one device, verify the new effective signer and preserved sign-in and
+offline data, then deploy the remaining devices serially. An incompatible
+signature is a stop condition. Android 8.1 and older cannot rotate an
+installed signing key. The Android app now requires API 28 in every build
+variant, including debug and tests, rather than silently retaining an insecure
+release path on API 23–27. This explicit compatibility decision covers the
+current physical fleet, which is API 34+.
 
 ### 5.2 Build and upload
 
@@ -427,8 +512,9 @@ Ordered by what blocks a submission soonest.
 - [ ] Simulator screenshots at the three required sizes (§3)
 - [ ] Privacy policy + support URLs published (§3, §5.3)
 - [ ] **One name chosen** across bundle, web UI `APP_NAME`, and brand (§3)
-- [ ] Android `targetSdk` 35 → **36** before 2026-08-31 (§5.1)
-- [ ] Android release signing config + upload keystore (§5.1)
+- [x] Android `targetSdk` 37 (§5.1)
+- [ ] Verify the release key and lineage in a physical data-preserving canary,
+      then enrol that key as the Play app signing key (§5.1)
 - [ ] Auth token moves from `UserDefaults` (Apple) to the **Keychain**, and from
       plaintext DataStore (Android) to a **Keystore-encrypted** value — note
       `EncryptedSharedPreferences` is deprecated and is not the answer. Not a

@@ -504,12 +504,31 @@ Per-surface adapters map inputs as follows; anything not listed is
 |---|---|---|---|---|
 | `left`/`right`/`up`/`down` | `onMoveCommand` directions | `KEYCODE_DPAD_*` | — | Arrow keys |
 | `select` | Select (`onTapGesture` on the focused view) | `DPAD_CENTER`/`ENTER` | tap on a control | Enter; Space when the timeline is focused |
-| `back` | Menu (`onExitCommand`) | `BACK` | system back (Android); iOS has no producer | Escape |
+| `back` | Menu (`onExitCommand`) | `BACK` | system back (Android); iOS has no producer | Escape; `GoBack`/`BrowserBack`; `keyCode` 10009 (Tizen) or 461 (webOS) |
 | `close` (`close_control`, not a table input) | — | — | ✕ (iOS) / back arrow (Android phone) | `✕ Close` |
-| `play_pause` | Play/Pause (`onPlayPauseCommand`, **on every state's root**, not only the hidden surface) | `MEDIA_PLAY_PAUSE` | lock-screen / headset commands | Space or K when the timeline is not focused |
-| `skip_back`/`skip_forward` | — (no producer) | `MEDIA_REWIND`/`MEDIA_FAST_FORWARD` | remote-command skips | J / L |
+| `play_pause` | Play/Pause (`onPlayPauseCommand`, **on every state's root**, not only the hidden surface) | `MEDIA_PLAY_PAUSE` | lock-screen / headset commands | Space or K when the timeline is not focused; MediaSession `play` and `pause` as two handlers, each routed through this table and idempotent on the viewer's intent |
+| `skip_back`/`skip_forward` | — (no producer) | `MEDIA_REWIND`/`MEDIA_FAST_FORWARD` | remote-command skips | J / L; MediaSession `seekbackward`/`seekforward`, routed through this table, honouring the browser's own `seekOffset` |
 | `tap_surface` | — | — | tap on the video | click on the video |
 | `idle` | hide timer | hide timer | hide timer | hide timer |
+
+On the web the MediaSession commands are decoded in the same
+`player-input-adapter` region as the keys, because they are the same question
+asked by a different producer — the OS media keys, a headset button, the lock
+screen. They are routed through the same table as the keys
+(`watchRouteInput(playerInputState(), …)`): `failed` ignores `play_pause` and
+both skips, `scrub` commits the pending seek before `play_pause` acts and
+ignores the skips, and `menu`/`info` ignore the skips. `play` and `pause` are
+separate handlers and each is idempotent on the viewer's **intent** (the
+pending open's, else the player's `wantsPlayback`), never on the element's
+`paused`: a pending open and every reattach leave the element paused while the
+viewer still wants playback, so a `play` sent then leaves it playing and a
+`pause` pauses it. The `playbackState` the OS shows is the same intent. Every
+handler is installed behind a feature check for `mediaSession` and again per
+action, because a browser throws on an action it does not implement.
+`nexttrack` has a handler only while autoplay-next is on and the title is not
+known to be something other than an episode — a browser shows a Next control
+for any action that has a handler — and changing the setting re-registers or
+removes it. There is no Remote Playback or Chromecast claim.
 
 On Apple, every explicit Play/Pause producer—including the tvOS Siri Remote and
 iOS lock-screen/headset commands—routes through the same playback-request
@@ -621,6 +640,15 @@ track is not proof of speaker or HDMI output. Buffering interruptions exclude
 intentional pauses; unavailable counters say `Not reported`, not zero. Live-edge
 distance is to available stream media and is not broadcast latency.
 
+**Web Live TV controls follow the attached session.** The guide has one
+transport button: Pause while playing or buffering, Resume live while paused
+or blocked by browser autoplay, and no transport button while idle, tuning,
+or failed. The Playback info opener is disabled without an active session.
+The live panel requires attached media and closes when that attachment is
+lost; an empty tuner panel must not survive onto a movie page. Ordinary file
+playback keeps its own information panel. The lifecycle regressions live in
+[`tests/web/live-tv.test.js`](../../tests/web/live-tv.test.js).
+
 **Diagnostics remain available.** The canonical fields below retain their IDs,
 units and platform applicability. Source, delivery, encoder, control and surface
 history are still reachable under grouped disclosures. Extra Live TV fields
@@ -651,7 +679,9 @@ _Generated from [`tests/playback/playback-info-fields.json`](../../tests/playbac
 | Row | mini | standard | details | debug | Format | Placement | Available on | Note |
 |---|---|---|---|---|---|---|---|---|
 | `Original video` | – | ✓ | ✓ | ✓ | list | notes | all | codec · profile · bit depth · HDR format. |
-| `Original resolution` | – | ✓ | ✓ | ✓ | resolution | grid | all |  |
+| `Source frame` | – | ✓ | ✓ | ✓ | resolution | grid | all |  |
+| `Source pixel aspect` | – | – | ✓ | ✓ | text | grid | all |  |
+| `Source display aspect` | – | – | ✓ | ✓ | text | grid | all |  |
 | `Source bitrate` | – | ✓ | ✓ | ✓ | bitrate | grid | all |  |
 | `Container` | – | ✓ | ✓ | ✓ | text | grid | all |  |
 | `Source audio track` | – | ✓ | ✓ | ✓ | list | notes | all | codec · channels · language, "+N tracks" when more exist. |
@@ -662,8 +692,12 @@ _Generated from [`tests/playback/playback-info-fields.json`](../../tests/playbac
 
 | Row | mini | standard | details | debug | Format | Placement | Available on | Note |
 |---|---|---|---|---|---|---|---|---|
-| `Playing resolution` | ✓ | ✓ | ✓ | ✓ | resolution | grid | all | always shown Positive dimensions reported by the attached player. Not reported is not zero or the original file size. |
-| `Stream format` | – | ✓ | ✓ | ✓ | text | grid | all | always shown Stream or manifest metadata. Not a player picture measurement. |
+| `Player display size` | ✓ | ✓ | ✓ | ✓ | resolution | grid | all | always shown Presentation dimensions reported by the attached player; not encoded frame dimensions. |
+| `Stream frame` | ✓ | ✓ | ✓ | ✓ | resolution | grid | all | always shown Encoded output plan or eligible attached stream sample, with provenance shown beside the value. |
+| `Stream pixel aspect` | – | – | ✓ | ✓ | text | grid | all |  |
+| `Frame comparison` | – | – | ✓ | ✓ | text | grid | all |  |
+| `Aspect comparison` | – | – | ✓ | ✓ | text | grid | all |  |
+| `Stream format` | – | ✓ | ✓ | ✓ | text | grid | all | always shown Codec, scan and cadence only. Stream frame is the sole active output dimension row. |
 | `Device audio output` | – | ✓ | ✓ | ✓ | text | grid | all | always shown Speaker or HDMI output only when reported by the platform; never inferred from the audio track. |
 | `Dynamic range` | – | ✓ | ✓ | ✓ | text | notes | all | Mini shows the chip form ("DV P7 → HDR10"); the ledger shows the sentence. |
 | `Stream audio track` | – | ✓ | ✓ | ✓ | list | notes | all | Selected stream audio track metadata; not a claim about speaker or HDMI output. |

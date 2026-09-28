@@ -15,6 +15,9 @@
 //! anyone who asks for it gets a verdict, and an environment that cannot host
 //! the fixture device says so instead of quietly passing.
 
+// A test, never a daemon child: the launcher rule in clippy.toml is for
+// production code.
+#![allow(clippy::disallowed_methods)]
 #![cfg(unix)]
 
 use std::fs::{File, Permissions};
@@ -1131,5 +1134,160 @@ async fn moving_the_owner_hands_the_tuner_to_the_new_node_exactly_once() {
         "the device was opened {} times across one owner move; the old owner must release it \
          and the new one must open it exactly once",
         device.opens.load(Ordering::Acquire)
+    );
+}
+
+/// Plan L-03 M1: two viewers on one channel cost one tuner GET. One starts
+/// through the owner and one through the ingress, so two capabilities, two
+/// activations and two FFmpeg graphs exist; the fixture device's open counter
+/// is the oracle for the one GET they share.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_viewers_on_one_channel_open_one_tuner_get() {
+    let (device, _serial) = exclusive_device().await;
+    let mut cluster = Cluster::start().await;
+    cluster
+        .configure(&device.address, &cluster.node_a_id.clone())
+        .await;
+    cluster.enable().await;
+    let channel = cluster.channel_id(&cluster.a_base.clone()).await;
+
+    let mut capabilities = Vec::new();
+    for base in [cluster.a_base.clone(), cluster.b_base.clone()] {
+        let started = cluster.start_session(&base, &channel).await;
+        assert_eq!(
+            started.status(),
+            StatusCode::OK,
+            "a viewer could not start; node A: {}",
+            cluster.node_a.diagnostics()
+        );
+        capabilities.push(
+            started.json::<Value>().await.expect("start JSON")["session_id"]
+                .as_str()
+                .expect("capability")
+                .to_owned(),
+        );
+    }
+    assert_ne!(
+        capabilities[0], capabilities[1],
+        "two viewers are two capabilities; the transport authorises nothing"
+    );
+    let a_base = cluster.a_base.clone();
+    let b_base = cluster.b_base.clone();
+    let owner_read = cluster.read_until_rolled(&a_base, &capabilities[0]).await;
+    let ingress_read = cluster.read_until_rolled(&b_base, &capabilities[1]).await;
+    assert!(owner_read >= 3 && ingress_read >= 3);
+    assert_eq!(
+        device.opens.load(Ordering::Acquire),
+        1,
+        "two viewers on one channel must share one tuner GET"
+    );
+    let metrics = cluster
+        .client
+        .get(format!("{a_base}/metrics"))
+        .bearer_auth(&cluster.token)
+        .send()
+        .await
+        .expect("metrics request")
+        .text()
+        .await
+        .expect("metrics body");
+    assert!(
+        metrics.contains("plurx_live_tv_transports 1\n"),
+        "one transport on the owner: {metrics}"
+    );
+    assert!(
+        metrics.contains("plurx_live_tv_transport_consumers{kind=\"viewer\"} 2\n"),
+        "two viewers on it: {metrics}"
+    );
+}
+
+/// Plan L-02 §5.3 with the real FFmpeg and FFprobe. The second watch of a
+/// channel on its owner plans from the facts the first watch probed, starts
+/// FFmpeg on the tuner's first bytes, and is answered only once the real
+/// probe of *this* tune has re-proven the plan: identical delivery, identical
+/// argument vector.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_watch_starts_warm_and_the_real_probe_agrees() {
+    let (device, _serial) = exclusive_device().await;
+    let mut cluster = Cluster::start().await;
+    cluster
+        .configure(&device.address, &cluster.node_a_id.clone())
+        .await;
+    cluster.enable().await;
+    let channel = cluster.channel_id(&cluster.a_base.clone()).await;
+    let a_base = cluster.a_base.clone();
+    let opens_before = device.opens.load(Ordering::Acquire);
+    let metrics = |cluster: &Cluster| {
+        let request = cluster
+            .client
+            .get(format!("{}/metrics", cluster.a_base))
+            .bearer_auth(&cluster.token);
+        async move {
+            request
+                .send()
+                .await
+                .expect("metrics request")
+                .text()
+                .await
+                .expect("metrics body")
+        }
+    };
+
+    let mut answered_in = Vec::new();
+    for watch in ["cold", "warm"] {
+        let asked = Instant::now();
+        let started = cluster.start_session(&a_base, &channel).await;
+        assert_eq!(
+            started.status(),
+            StatusCode::OK,
+            "the {watch} watch could not start; node A: {}",
+            cluster.node_a.diagnostics()
+        );
+        answered_in.push(asked.elapsed());
+        let capability = started.json::<Value>().await.expect("start JSON")["session_id"]
+            .as_str()
+            .expect("capability")
+            .to_owned();
+        assert!(cluster.read_until_rolled(&a_base, &capability).await >= 3);
+        let stopped = cluster
+            .client
+            .delete(format!("{a_base}/api/v1/live-tv/sessions/{capability}"))
+            .bearer_auth(&cluster.token)
+            .send()
+            .await
+            .expect("stop request");
+        assert!(stopped.status().is_success(), "stop: {}", stopped.status());
+        // The next watch must open its own tuner GET, not join this one.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !metrics(&cluster)
+            .await
+            .contains("plurx_live_tv_transports 0\n")
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the {watch} watch's transport never closed"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    let metrics = metrics(&cluster).await;
+    for (source, count) in [
+        ("cold", 1),
+        ("joined", 0),
+        ("warm_agreed", 1),
+        ("warm_disagreed", 0),
+    ] {
+        assert!(
+            metrics.contains(&format!(
+                "plurx_live_tv_start_plan_total{{source=\"{source}\"}} {count}\n"
+            )),
+            "start_plan_total{{source={source}}} should be {count}: {metrics}"
+        );
+    }
+    assert_eq!(device.opens.load(Ordering::Acquire) - opens_before, 2);
+    eprintln!(
+        "L-02 M3 on the two-node fixture: cold start answered in {:?}, warm start in {:?}",
+        answered_in[0], answered_in[1]
     );
 }

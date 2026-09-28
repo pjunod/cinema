@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["858c8bc0"]
+points = ["web.experience"]
+checks = ["web-static", "playback-smoke"]
+reason = "The embedded web check loads decode-tiers.js and the browser playback smoke exercises direct and progressive media attachment; the correction preserves same-turn completion for those synchronous routes."

@@ -151,6 +151,67 @@
         );
     }
 
+    /// `hls.rs` and every product child of `http/hls/`, in the parent's marker
+    /// order: what the source scans in this module read.
+    ///
+    /// The texts are compiled in, so a scan reads exactly the code under test,
+    /// and the list is checked against the directory on every call: a child
+    /// added to `http/hls/` without being listed here fails each scan instead
+    /// of going unread by it. Test children (`tests.rs`, `tests/`) quote
+    /// production code as literals and are not product sources.
+    const HLS_PRODUCT_SOURCES: [(&str, &str); 15] = [
+        ("../hls.rs", include_str!("../../hls.rs")),
+        ("session_guard.rs", include_str!("../session_guard.rs")),
+        ("create.rs", include_str!("../create.rs")),
+        ("relay.rs", include_str!("../relay.rs")),
+        ("release.rs", include_str!("../release.rs")),
+        ("control.rs", include_str!("../control.rs")),
+        ("preparation.rs", include_str!("../preparation.rs")),
+        ("status.rs", include_str!("../status.rs")),
+        ("response.rs", include_str!("../response.rs")),
+        ("playlist.rs", include_str!("../playlist.rs")),
+        ("subtitle_playlist.rs", include_str!("../subtitle_playlist.rs")),
+        ("context.rs", include_str!("../context.rs")),
+        ("subtitle_names.rs", include_str!("../subtitle_names.rs")),
+        ("playlist_text.rs", include_str!("../playlist_text.rs")),
+        ("segment.rs", include_str!("../segment.rs")),
+    ];
+
+    fn hls_product_source() -> String {
+        let hls = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/http/hls");
+        let mut on_disk = std::collections::BTreeSet::new();
+        let mut directories = vec![hls.clone()];
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(&directory).expect("an hls module directory") {
+                let path = entry.expect("a directory entry").path();
+                if path.file_stem().and_then(|stem| stem.to_str()) == Some("tests") {
+                    continue;
+                }
+                if path.is_dir() {
+                    directories.push(path);
+                } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                    on_disk.insert(
+                        path.strip_prefix(&hls)
+                            .expect("a module under http/hls/")
+                            .to_str()
+                            .expect("a UTF-8 module path")
+                            .replace('\\', "/"),
+                    );
+                }
+            }
+        }
+        let listed: std::collections::BTreeSet<String> = HLS_PRODUCT_SOURCES[1..]
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect();
+        assert_eq!(
+            listed, on_disk,
+            "every product child of http/hls/ must be listed in HLS_PRODUCT_SOURCES, \
+             or the source scans do not read it"
+        );
+        HLS_PRODUCT_SOURCES.iter().map(|(_, text)| *text).collect()
+    }
+
     /// One start mints one epoch, and the session and the durable row get the
     /// same one.
     ///
@@ -175,7 +236,7 @@
         // moved out of `hls.rs` into this directory, the file *is* the
         // production half and the split has nothing to find — it returned
         // `None` and this `expect` panicked. Read the file whole instead.
-        let source = include_str!("../../hls.rs");
+        let source = hls_product_source();
         assert_eq!(
             source
                 .matches("recovery_epoch_for(activation_predecessor.as_ref())")
@@ -225,7 +286,7 @@
     /// the reserved deadline it must never be given, fails here.
     #[test]
     fn the_confirmation_reserves_recovery_budget_inside_the_owner_lease() {
-        let source = include_str!("../../hls.rs");
+        let source = hls_product_source();
         let reservation = source
             .split_once("    let confirmation_deadline = activation_confirmation_deadline(")
             .expect("the confirmation must be awaited on its own reserved deadline")
@@ -1183,19 +1244,16 @@
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(session_id.clone(), Arc::clone(&pause));
-        let detach_pause = Arc::new(tokio::sync::Barrier::new(2));
-        fixture
+        let detach_pause = fixture
             .state
             .transcode
-            .set_vod_terminal_detach_pause_for_test(Arc::clone(&detach_pause));
+            .arm_vod_terminal_detach_pause_for_test();
         let deletion = tokio::spawn({
             let state = fixture.state.clone();
             let session_id = session_id.clone();
             async move { delete(State(state), AxPath(session_id)).await }
         });
-        tokio::time::timeout(Duration::from_secs(5), detach_pause.wait())
-            .await
-            .expect("VOD cleanup reached its pre-detach seam");
+        let detach_held = detach_pause.reached().await;
         tokio::time::timeout(Duration::from_secs(5), pause.wait())
             .await
             .expect("release reached its post-tombstone seam");
@@ -1226,9 +1284,7 @@
             "the cached durable tombstone must refuse media before actor cleanup"
         );
 
-        tokio::time::timeout(Duration::from_secs(5), detach_pause.wait())
-            .await
-            .expect("release VOD detach");
+        detach_held.release();
         tokio::time::timeout(Duration::from_secs(5), pause.wait())
             .await
             .expect("release durable deletion");

@@ -111,6 +111,14 @@ closure performs only descriptor syscalls" (`:83`). That is the model for
 any new `pre_exec`. `grep -rn "setpriority\|ioprio\|oom_score_adj\|setrlimit"
 crates/` in non-test source: none.
 
+**Corrected 2026-09-24 (review of PR #457).** Two claims above were already
+false when this plan was written. `inherit_file_descriptors` is one of five
+production `pre_exec` registrations (`ffmpeg.rs:131`, `fragindex.rs:1754`,
+`dv_disk.rs:1578` and `:5811`, `decode_facts.rs:2472`), and not every ffmpeg
+reaches `spawn_job_owned`: `plurx-core` spawns its own. §3.2.1 has the
+survey. `setrlimit` now has one production caller, §3.3's
+`process::rlimit`.
+
 ### 2.3 CI ffmpeg
 
 `ci.yml:267` `check` runs on `[…, high-cpu, ffmpeg-6]` and calls
@@ -180,6 +188,92 @@ value and its "validate" column with a dated result; the assessment's
 "missing explicit limits does not establish the fleet's inherited limits or
 measured exhaustion threshold" is why the table has those two columns.
 
+### 3.1.1 What the fleet actually inherits — observed 2026-09-23
+
+M1's measurement, as far as this session could take it. Every number below
+was read, not proposed. The hosts reachable from the executing session were
+**nuc3** (192.168.4.7), **nuc4** (192.168.4.8) and **nynuc** (192.168.5.236);
+no host named `media1` or `lab1` was reachable, and **every reading is idle**
+— see "What is still unobserved" below.
+
+All three run the container path. `systemctl show plurxd -p LoadState`
+answered `LoadState=not-found` on all three, so `deploy/plurxd.service` is
+installed nowhere on them; that answers open question 1 for this slice of the
+fleet (§7.1).
+
+```text
+$ ssh <host> "docker exec plurxd sh -c 'cat /proc/1/limits'"     # 2026-09-23
+Limit                     Soft Limit           Hard Limit           Units
+Max open files            1024                 524288               files
+Max processes             unlimited            unlimited            processes
+Max stack size            8388608              unlimited            bytes
+Max locked memory         8388608              8388608              bytes
+```
+
+Identical on nuc3, nuc4 and nynuc. The pair is systemd's own default handed
+through Docker unchanged — `systemctl show -p DefaultLimitNOFILE
+-p DefaultLimitNOFILESoft` reads `524288` / `1024` on all three hosts — and
+`docker inspect plurxd` confirms nothing in the Compose file narrows or
+widens it:
+
+```text
+$ ssh <host> 'docker inspect plurxd --format "Ulimits={{.HostConfig.Ulimits}} PidsLimit={{.HostConfig.PidsLimit}} OomScoreAdj={{.HostConfig.OomScoreAdj}}"'
+Ulimits=[] PidsLimit=<nil> OomScoreAdj=0
+```
+
+| Reading | nuc3 | nuc4 | nynuc | Command |
+|---|---|---|---|---|
+| `/proc/1/limits` open files (soft / hard) | 1024 / 524288 | 1024 / 524288 | 1024 / 524288 | `docker exec plurxd cat /proc/1/limits` |
+| pid 1 descriptors held (idle, two samples) | 45–46 | 56–61 | 46–47 | `docker exec plurxd sh -c 'ls /proc/1/fd \| wc -l'` |
+| pid 1 threads (idle) | 28 | 32 | 28 | `docker exec plurxd sh -c 'ls /proc/1/task \| wc -l'` |
+| pid 1 `oom_score_adj` | 0 | 0 | 0 | `docker exec plurxd cat /proc/1/oom_score_adj` |
+| cgroup `pids.current` / `pids.max` | 30 / 37262 | 34 / 37300 | 30 / 74782 | `docker exec plurxd cat /sys/fs/cgroup/pids.current /sys/fs/cgroup/pids.max` |
+| cgroup `memory.max` | `max` | `max` | `max` | `docker exec plurxd cat /sys/fs/cgroup/memory.max` |
+| cgroup `memory.current` | 833658880 (795 MiB) | 21234450432 (19.8 GiB) | 9531957248 (8.9 GiB) | `docker exec plurxd cat /sys/fs/cgroup/memory.current` |
+| host `DefaultTasksMax` | 37262 | 37300 | 74782 | `systemctl show -p DefaultTasksMax` |
+| `docker.service` own limits | `LimitNOFILE=infinity`, `TasksMax=infinity`, `OOMScoreAdjust=-500` | same | same | `systemctl show docker.service -p LimitNOFILE -p TasksMax -p OOMScoreAdjust` |
+
+`memory.current` is the cgroup's charge, page cache included, not the
+daemon's resident set; it is here because §3.1's `MemoryHigh` row asks for
+a week of it, and one idle sample is not that.
+
+Three things follow.
+
+1. **The soft limit is the one that runs out, and it is 512× lower than the
+   ceiling the deployment actually chose.** Nothing narrowed the hard limit:
+   524288 is available on every one of these hosts today, and the daemon may
+   have it for the asking. That is §3.3, and it is implemented — it needs no
+   deployment-file change and no peak-load number to justify, because it
+   cannot lower anything.
+2. **`pids.max` is the host's slice default, not a decision.** It varies with
+   host RAM (37262 on the two NUCs, 74782 on nynuc) because systemd derives
+   `DefaultTasksMax` from the pid limit. A `pids_limit` in Compose would be
+   the first deliberate value; §3.1's row still needs its peak number first.
+3. **The OOM killer has no preference to act on.** pid 1 sits at
+   `oom_score_adj=0` and Docker resets the container to 0 regardless of
+   `docker.service`'s own `-500`. Whatever ffmpeg children inherit is also 0,
+   so under memory pressure the kernel is as free to take the daemon — and
+   every session with it — as one wedged x265. That is §3.2's case, and this
+   session did not implement it; see §3.2.1.
+
+#### What is still unobserved
+
+- **Every reading above is idle.** A `/proc` walk inside each container found
+  exactly two processes — `plurxd` and the healthcheck's `sh` — so no
+  transcode, no DVR recording and no ffmpeg child was running when these were
+  taken. The peak descriptor count §3.1's first row is gated on, and the peak
+  `pids.current` the second is gated on, are **not** in this document.
+- **No `media1` or `lab1`.** The three hosts above are the ones this session
+  could reach. If those names are other machines, their limits are unread.
+- **`EMFILE` history is a weak negative.** `docker logs plurxd | grep -ciE
+  'too many open files|EMFILE'` returned 0 on all three, but the containers
+  had been up 2 h, 11 h and 2 h respectively, which is nothing like the week
+  §3.1 asks for, and `docker logs` only covers the current container.
+- **No child `oom_score_adj` or `nice` reading**, because no child existed.
+
+M1's GPT prompt in §5.1 remains the way to close all four. It is unchanged
+and still needs running on a busy evening.
+
 ### 3.2 Child priorities and the `pre_exec` contract
 
 ```rust
@@ -240,6 +334,287 @@ Rules with reasons:
   whole unit; the `+500` child is the pick. Document that `OOMPolicy=kill`
   would kill the daemon along with it and is not set.
 
+### 3.2.1 Flagged, not taken: the child priorities need a decision first
+
+**M3 decided by Paul 2026-09-25: go.** The seam is (b), one launcher, with
+the rows below migrated onto it first and an audit over every production
+spawn, as this section asked; the classification in §3.2.2 was accepted with
+it. What follows is the flag as it was written, kept because §3.2.2 answers
+it point by point.
+
+The standing instruction at the head of this plan says that a step which
+seems to require changing the process-supervision contract must be stopped
+and flagged rather than decided by the executing session, and the work
+board's rule 4 says the same. §3.2 is such a step. It is flagged here and in
+[PR #457](http://192.168.4.7:3000/noirr/plurx/pulls/457); nothing in §3.2 or
+its `OOMScoreAdjust` companion row in §3.1 is implemented.
+
+**The wiring §3.2 prescribes does not cover the tree.** §3.2 says to add the
+call "at each `Command::new(ffmpeg_bin())` site" and to have "a test [grep]
+that every `ffmpeg_bin()` command passes through it". A survey of every
+`Command::new(` in `crates/plurxd/src` outside test modules (2026-09-23; it
+did not look at `plurx-core`, which the correction below does)
+finds fourteen sites that name `ffmpeg_bin()` literally — in `ffmpeg.rs`,
+`subtitles.rs`, `fragindex.rs`, `pgs_overlay.rs` and `pipeprobe.rs` — and
+these, which spawn ffmpeg through a value instead:
+
+| Site | Program expression | Why the grep misses it |
+|---|---|---|
+| `producer_spawn.rs:182` | `Command::new(program)` | the copy-HLS and transcode producers, the two longest-lived ffmpeg children there are, reach this through a `&Path` argument |
+| `live_tv.rs:6083` | `Command::new(&system.ffmpeg)` | the probed system binary, resolved at boot |
+| `http/images.rs:863` | `Command::new(ffmpeg_bin)` | a parameter that happens to share the function's name |
+| `ffmpeg.rs:2115` | `Command::new(&bin)` | `let bin = ffmpeg_bin();` three lines earlier |
+| `dv_disk.rs:5752,5805,5853` | `Command::new(program)` | the Dolby Vision conversion tools |
+| `decode_facts.rs:3095,3219,…` | `Command::new(snapshot_execution_path(…))` | a snapshotted executable path |
+
+A test keyed on the literal `ffmpeg_bin()` would be green while the producer
+that carries realtime playback spawns unadjusted children. That is a test
+which proves nothing, and this campaign does not land those.
+
+**Correction (2026-09-24, review of #457): no seam covers the tree today.**
+The first version of this section said that every child reaches
+`plurx_core::process::spawn_job_owned`, so one `pre_exec` registration there
+"would be complete by construction and provable by one test". That was
+false. Its survey covered only `crates/plurxd/src`, and it missed a spawn
+there too. Re-surveyed on the branch after merging main, across
+`crates/plurx-core/src` and `crates/plurxd/src` (every production
+`Command::new(`, then every production `.spawn()` / `.output()` /
+`.status()` on a command, each traced to the call that starts the child),
+these production children never reach `spawn_job_owned`:
+
+| Site | Child | Started by |
+|---|---|---|
+| `plurx-core` `metadata/local.rs:402` (`generate_thumb_with`, from `:365` and `:812`) | ffmpeg: library-scan thumbnail extraction | `cmd.spawn()` `:419` |
+| `plurx-core` `metadata/book.rs:678` (`extract_attached_picture`, from `:199` and `:610`) | ffmpeg: embedded cover extraction | `.spawn()` `:693` |
+| `plurx-core` `transcode/encoder.rs:781` (`detect_video_decoders`) | ffmpeg: decoder inventory | `.output()` `:783` |
+| `plurx-core` `transcode/encoder.rs:886` (`try_encode`) | ffmpeg: test-encode validation | `.output()` `:891` |
+| `plurx-core` `transcode/encoder.rs:951` (`try_encode_yielding`) | ffmpeg: test-encode validation | `command.spawn()` `:958` |
+| `plurx-core` `transcode/encoder.rs:1184` (`detect_encoders`) | ffmpeg: encoder inventory | `.output()` `:1186` |
+| `plurx-core` `transcode/decoder_inventory.rs:376`, `:451`, `:509` (`advertised_backends`, `probe_clip`, `probe_decode`) | ffmpeg: decoder inventory probes | `.output()` `:379`, `:470`, `:526`, under the file's own timeout `bounded()` (`:483`), not `process::bounded` |
+| `plurx-core` `scan/probe.rs:177` (`probe_reporter_identity`) | `ffprobe -version` | `.spawn()` `:183` |
+| `plurxd` `media_pool.rs:910` (`spawn_library_root_probe`) | `find`: library-root reachability probe | `.spawn()` `:918` |
+| `plurxd` `subtitle_ride_along.rs:1755` (`run_ffmpeg`; arrived with the main merge) | ffmpeg: PGS ride-along self-test | `command.output()` `:1763` under `tokio::time::timeout` |
+| `plurxd` `decode_facts.rs:2314` (`spawn_configured_probe`, from `:3112`, `:3868` and `:4038`) | the held-source decode-fact probes | `command.spawn()` `:2319` inside `spawn_blocking` |
+
+Every other production `Command::new(` in the two crates does reach
+`spawn_job_owned`: directly, through `output_job_owned` /
+`status_job_owned`, through `process::bounded::output`, through `ffmpeg.rs`'s
+`bounded_command_output*` (`:2383`) or `BoundedDiagnosticChild` (`:194`,
+`:214`), or through `dv_disk.rs`'s `run_tool_command_with_timeout`
+(`:5885`). The three builders that return a `Command` (`live_tv.rs:6071`,
+`http/chapter_thumbs.rs:339`, `http/images.rs:855`) are spawned by job-owned
+callers. `plurx-pgs` and `plurx-compat-plex` spawn nothing in production, and
+`plurx-cluster-check` is a separate harness binary, not a daemon child.
+
+The rows above are exactly the background ffmpeg work that child
+priorities exist to push below playback: scan thumbnails, cover extraction,
+encoder and decoder inventory, and test encodes. So **neither option is
+complete as it stands**:
+
+- **(a) a call at each `Command::new(ffmpeg_bin())` site plus a grep test**
+  misses the value-spawned producers in the first table, as above.
+- **(b) one `pre_exec` inside `spawn_job_owned`** misses every row of this
+  table. Its one test would be green while scan thumbnails and encoder
+  probes run at the daemon's priority and `oom_score_adj`, which is the same
+  defect that rules out (a).
+
+Each option therefore carries its own migration list. (b) must first move
+the rows above onto `spawn_job_owned` or an equivalent owned spawn, and needs
+an audit test that fails on any production `.spawn()` / `.output()` /
+`.status()` outside `process/`. The existing
+`process::tests::output_job_owned_call_sites_are_the_audited_set` has that
+shape. (a) needs every literal and value-spawned ffmpeg site in both crates,
+including the `plurx-core` rows. The choice between them remains the
+decision this section flags, together with whether an OOM preference should
+reach non-ffmpeg children such as `find` at all. This PR does not take it.
+
+**`pre_exec` composition is answered.** std's `CommandExt::pre_exec` appends
+each closure, and the child runs every registered closure in registration
+order before `exec` ("multiple closures can be registered and they will be
+called in order of their registration"). tokio's `Command::pre_exec`
+delegates to std. This was checked on nuc3 with rustc 1.97.1: two closures
+on one `Command` printed `first` then `second`. A second registration
+composes with `inherit_file_descriptors` and does not replace it. Two things
+follow for whichever seam is chosen:
+
+- There are five production `pre_exec` registrations, not one (§2.2's
+  correction lists them).
+- Order matters where a caller's closure does not return. In production,
+  `decode_facts.rs:2472` installs seccomp filters and then execs the probe
+  from inside the closure (`execute_held_probe`, `SYS_execveat`, `:2395`).
+  A closure registered after it would never run. That is where a
+  registration inside `spawn_job_owned` would land, because callers
+  configure the command first. A closure registered before it would run
+  ahead of the seccomp filter. That path does not reach `spawn_job_owned`
+  today anyway (the last row above).
+
+**Independently, §3.2's own acceptance is out of reach here.** The `nice` and
+`ioprio` values are explicitly proposals that §3.2's realtime cadence
+measurement on a busy media host is supposed to settle, up to and including
+settling on "none". No such host was reachable from this session, and §4's
+guardrail ("do not keep child priorities that measurably slow realtime
+delivery — the measurement decides") is not satisfiable without it.
+
+**So the `OOMScoreAdjust` row in §3.1 also stays out**, under §4's guardrail
+that it must not be set without the child `pre_exec`: alone it would make
+every ffmpeg exactly as protected as the daemon, which inverts the intent.
+
+What the next session needs, in order:
+
+1. A decision on the seam: (a) with its full site list across both crates;
+   (b) with the rows above migrated first and an audit test over every
+   production spawn; or §4.1's spawn unification first.
+2. For (b), where the registration goes relative to a caller's own
+   `pre_exec` (the decode-facts path above), pinned by a test.
+3. §3.2's measurement, on a host running real sessions.
+
+### 3.2.2 As built — one launcher, a class on every child (M3, 2026-09-25)
+
+[PR #518](http://192.168.4.7:3000/noirr/plurx/pulls/518), branch `plan/P-02-m3`. Where §3.2's sketch and the code
+differ, the code is right and the reason is here.
+
+**One launcher, and a spawn cannot skip the class.**
+`plurx_core::process::spawn_job_owned(command, work)` takes a `ChildWork`
+(a `ChildClass` plus a few words of purpose) on every call, and so do
+`output_job_owned`, `status_job_owned` and `process::bounded::output`, which
+go through it. The one synchronous caller (the PGS ride-along verdict probe,
+already inside `spawn_blocking`) has `output_job_owned_blocking`, the same
+policy and registration without the async runtime. All eleven rows of
+§3.2.1's second table now start through the launcher, and so do the three
+Windows-only probes (`decode_facts.rs` `probe_version` and `collect`,
+`dv_disk.rs` `probe_bound`) that no Linux build compiles.
+
+**Two classes, not one policy.** §3.2 proposed one value for every child
+(nice 10, BE/7, `+500`). A single value would put the copy-HLS producer a
+viewer is watching at the same priority as a library-scan thumbnail, so the
+launcher has two:
+
+| Class | Who waits | `nice` | I/O | `oom_score_adj` |
+|---|---|---:|---|---:|
+| `realtime` | a viewer or a recording | 5 | best-effort 4 | 500 |
+| `background` | nobody | 15 | best-effort 7 | 800 |
+
+Realtime starts at §3.2's own fallback (5, BE/4), so playback is not the
+child that falls behind while the measurement is outstanding; background
+takes the lowest best-effort level and the higher OOM score, so the killer's
+order is background child, then playback child, then the daemon (0 on every
+observed node, §3.1.1). `nice` is a floor: a class never raises a child
+above what it would have inherited. The measurement in §3.2 still decides
+whether these values stay (§7 question 2).
+
+**The class is the caller's, not the child's.** The first build fixed one
+class per kind of child, so the probes and extractions a VOD start waits on
+ran at the background class whenever a start, not a warm-up, asked for them
+(the review of #518, [comment 4817](http://192.168.4.7:3000/noirr/plurx/pulls/518#issuecomment-4817), finding 1). Several of them have
+short deadlines, and under the load the classes exist for a slow probe
+becomes a refusal: `vod_source_rescan_required` for a file that is fine, a
+Profile 5 proof memoized as failed, a burn start answered "pending". A helper
+whose child either kind of caller can await now takes the class from its
+caller:
+
+| Child (helper) | Realtime when | Background when |
+|---|---|---|
+| held source probe (`ffmpeg::held_source_probe_json(source, work)`) | the VOD start, under the 5 s `ENGINE_PROBE_TIMEOUT` | no production caller |
+| decode-fact probes (the `ChildWork` rides on `DecodeFactSource`; `BoundPlanCaller::decode_fact_work`) | the VOD start (`resolve_vod_movie_plan`, `DECODE_PLAN_PROBE_BUDGET`) | the pre-transcode pass (`resolve_bound_movie_plan`); the probe binary's `-version` check at discovery |
+| Dolby Vision Profile 5 pixel proof (`dovi_reshape_changes_pixels(file, class)`) | `encoder_and_grade_for`, whose every caller is a session start (VOD or streamed) or a peer's media offer for one | the pre-transcode and offline producers, an offline package's rate-control snapshot, the rate-control refresh |
+| burn-in extraction and derivation (`subtitles::ensure_burn_source(…, class)`) | the VOD start that joins it for `SIDECAR_JOIN_BUDGET` | no production caller |
+| whole-track text `.vtt` (`ensure_vtt*_with_store(…, work)`) | `GET /api/v1/files/{id}/subs/{n}` when a viewer turns a track on; a streamed start's text burn (`ensure_text_subtitle`) | the native-HLS warm-up; offline package production and the offline subtitle download |
+
+Realtime otherwise: playback transcode, copy HLS and remux producers, the
+VOD transcode and its init segment, the Live TV stream and its source probe,
+the playhead subtitle window, and the other session-start probes (the
+playback-start media probe, the chapter list, `ffprobe -version` for the
+reporter identity). Background otherwise: PGS track demux, the PGS
+ride-along self-test and verdict probe, the pre-transcode producer, encoder,
+decoder, Dolby Vision, HDR and engine capability probes, scan thumbnails,
+luminance probes and book covers, chapter thumbnails and artwork
+derivatives, fragment indexing, subtitle source extraction, Dolby Vision
+conversion and its source probes, Live TV readiness and caption probes, and
+the library-root `find`.
+
+`plurx_child_spawns_by_purpose_total{class, purpose}` (and
+`process::priority::spawns_of`) reads each caller's choice back, and a test
+per path pins it: `vodencode_manager_tests`'s
+`an_empty_stored_track_starts_an_encoded_session_without_the_overlay` (the
+start's held probe and burn extraction), `decode_fact_probes_take_the_class_of_the_caller_waiting_on_them`
+(VOD start realtime, pre-transcode background),
+`the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it`
+(start realtime, offline package background),
+`a_whole_track_extraction_runs_at_the_class_its_caller_passes` (viewer
+realtime, warm-up background) and `subtitle_extraction_is_cached_by_source_identity`
+(the `/subs` handler itself).
+
+**A known limit.** A single-flight extraction (a whole-track `.vtt` or a
+burn sidecar) and a memoized proof keep the class of the caller that started
+them. A viewer who joins a warm-up already running waits on a background
+child: an unprivileged daemon cannot lower a running child's `nice` (that
+needs `CAP_SYS_NICE`), so a joined flight is not promoted. The first caller
+decides; a start that finds nothing running starts it at realtime.
+
+**The `pre_exec`.** `process::priority::apply_policy` registers one closure
+that makes raw syscalls on values computed before the fork: `getpriority` /
+`setpriority`, `ioprio_set`, and `open` / `write` / `close` of
+`/proc/self/oom_score_adj` with the decimal text formatted into a fixed
+buffer beforehand. Every result is ignored
+(`a_priority_the_kernel_refuses_never_fails_the_spawn` asks for nice −20 and
+`oom_score_adj` −1000 and still gets a running child). Linux applies all
+three, other Unix `nice` only, Windows none; the Job Object path is
+untouched and a Windows child is still listed.
+
+**Registration order.** The launcher registers its closure when it is
+called, so after any `pre_exec` the caller registered while configuring the
+command. Every such closure returns, except the decode-fact probe's, which
+installs seccomp and `execveat`s from inside itself; that caller calls
+`priority::apply` in `configure_probe_execution` before registering its
+closure, and the launcher's own registration, which lands after it, never
+runs (registering twice is harmless). The priority is
+therefore set before the seccomp filter, which needs none of those syscalls
+afterwards. `a_priority_registered_before_a_closure_that_execs_still_applies`
+shows both outcomes on a real exec (applied first: the class's nice; applied
+after: the daemon's), and
+`the_child_priority_is_registered_before_the_probe_execs_from_pre_exec` pins
+the order in `decode_facts.rs`.
+
+**The census, in two halves.**
+`process::census::every_production_spawn_goes_through_the_launcher` reads
+every source file of `plurx-core`, `plurxd`, `plurx-pgs` and
+`plurx-compat-plex`, blanks comments and literals, drops `#[cfg(test)]` items
+and every file a test-only module declares or `include!`s, and fails on a
+zero-argument `.spawn()` / `.output()` / `.status()` on a command, the same
+called as `Command::spawn(…)`, a job attached by hand, or a raw
+`fork`/`vfork`/`posix_spawn`; the only exemptions are the launcher's two
+`.spawn()`s. The typed half is root `clippy.toml`'s `disallowed-methods` for
+`Command::{spawn, output, status}` in tokio and std: each daemon crate root
+allows them under `cfg(test)` only, and the harness crate, integration
+tests, examples and `build.rs` allow them with a line saying why.
+Clippy reads the nearest `clippy.toml` upwards, so the root policy also
+reached the separate `spikes/` workspaces and failed the spike's own clippy
+lane (`ci.yml`'s replicated topology contracts, on a `ps` RSS read in its
+test; review of #518, finding 2). Each spike workspace now carries its own
+`clippy.toml` without the policy.
+`clippy_refuses_every_spawning_method_outside_tests` pins all three.
+
+**Seen and stopped from inside the product.** Each child is registered with
+its class, purpose, program and start time until its owner drops the job.
+`/api/v1/activity/detail` carries `processes` for an admin, each row with the
+requested and the kernel-reported `nice`, I/O class and level and
+`oom_score_adj`, whether the class was applied, and whether it can be
+stopped. `DELETE /api/v1/activity/processes/{pid}` (admin) kills a listed
+child through the pidfd opened at spawn, so a reused pid cannot be hit
+(`404` unlisted, `409` without a pidfd); its owner sees an ordinary exit.
+The web Activity page draws a **Processes** table with a **Stop** per
+stoppable row (`tests/web/activity-processes.test.js`). `/metrics` adds
+`plurx_child_processes`, `plurx_child_spawns_total` and
+`plurx_child_priority_unapplied_total`, each by class, and
+`plurx_child_spawns_by_purpose_total` by class and purpose (OPERATIONS.md,
+Health & metrics).
+
+**Not in M3.** `OOMScoreAdjust=-500` in `deploy/plurxd.service` (and any
+Compose `oom_score_adj`) is M4's; §4's guardrail no longer blocks it, since
+the child `pre_exec` exists, but nothing here set or validated it. §3.2's
+realtime measurement on a busy media host is outstanding; its steps are in
+the execution log.
+
 ### 3.3 Raise soft `NOFILE` at startup
 
 In `main.rs` before the runtime starts: `getrlimit(RLIMIT_NOFILE)`, set
@@ -249,6 +624,59 @@ not raise it; raising it is free and makes `LimitNOFILE`'s hard value the
 operative one on every install path (including the Windows service, where
 the call is a no-op). A unit test with `ulimit -n 256` in a child process
 asserts the log line shows `256 → <hard>`.
+
+**Landed 2026-09-23** (`claude-opus-5`). The raise is
+`plurx_core::process::rlimit::raise_open_file_limit`, called from `run()` in
+`crates/plurxd/src/main.rs` immediately after `init_logging()` and reported by
+`report_open_file_limit` beside it. Two departures from the paragraph above,
+both deliberate:
+
+- **Not "before the runtime starts".** `#[tokio::main]` builds the runtime
+  before any of `main`'s body runs, so that position does not exist. The
+  limit is consulted when a descriptor is opened, and the call runs before
+  store activation, the system probe and every listener open theirs.
+- **The child lowers its own soft limit rather than inheriting `ulimit -n
+  256` from a shell.** The test re-execs the test binary — the pattern the
+  sibling process-ownership tests already use — and the child calls
+  `setrlimit` on itself, so the test needs no shell and cannot disturb the
+  shared test process. It asserts the raise both as the function reports it
+  and as an independent `getrlimit` reads it back, and it fails loudly rather
+  than vacuously on a host whose hard limit is too low to demonstrate
+  anything.
+
+**Corrected 2026-09-24 (review of #457): macOS.** As first landed, the raise
+always asked for `rlim_cur = rlim_max`. launchd gives a LaunchAgent such as
+`deploy/com.plurx.plurxd.plist` `256` soft against an **unlimited** hard
+limit, and macOS enforces `kern.maxfilesperproc` whatever the hard limit
+says. The review reasoned from `setrlimit(2)`'s COMPATIBILITY note that
+`rlim_cur = RLIM_INFINITY` is refused with `EINVAL`, leaving the daemon at 256
+with a WARN on every boot and the unit test red. On the lab Mac `mba`
+(macOS 27.0; soft `256`, hard `unlimited`, `kern.maxfilesperproc` `122880`)
+that does **not** reproduce. `setrlimit` accepts the infinite soft limit,
+`getrlimit` reports it back, the kernel still stops the process at 122877
+open descriptors with `EMFILE`, and the unfixed test passes. The defect on
+this macOS is therefore a daemon that logs `soft 256 -> 9223372036854775807`
+for a limit it does not have. On the older versions the man page describes,
+the defect is the one the review names; that was not run.
+
+On either behaviour the target should be the per-process ceiling. The
+raise now clamps it to `kern.maxfilesperproc` on Apple targets, as Go's
+runtime does, and falls back to `OPEN_MAX` (10240) if the sysctl cannot be
+read. The Linux behaviour is unchanged: Linux caps the hard limit at
+`fs.nr_open`, so a Linux hard limit is always an acceptable soft limit. The
+clamp is a pure function (`raised_soft_limit`), pinned on every host by
+`an_unlimited_hard_limit_is_clamped_to_the_platform_ceiling`. The re-exec
+test, now `the_soft_limit_is_raised_as_far_as_the_platform_allows`, compares
+against `min(hard, sysctl -n kern.maxfilesperproc)` on macOS and against the
+hard limit elsewhere. On `mba` it fails when the Apple ceiling is removed
+and passes with it; the disposition comment on #457 has the output.
+
+The `LimitNOFILE` / `ulimits.nofile` row in §3.1 did **not** land with it, and
+deliberately: the observed hard limit is already 524288, so the raise takes
+the fleet from 1024 to 524288 with no deployment-file change at all, while
+writing `65536:65536` into Compose would *lower* that ceiling eightfold on
+the strength of a number nobody has measured. That row still waits on §3.1.1's
+peak descriptor count.
 
 ### 3.4 CI unit tests on jellyfin-ffmpeg 8
 
@@ -275,6 +703,45 @@ retired and VALIDATION.md says why; if something does, that test moves to a
 RUST-TEST-EXECUTION-POLICY.md §7.1 chooses; if `make unit` joins the fast
 lane, the fast lane's `rust_compile` gets the same action and label.
 
+**Audit result, 2026-09-23** (`claude-opus-5`; read-only, no `ci.yml` change
+in this slice). Five jobs carry the `ffmpeg-6` label and `major: "6"`:
+`check` (`ci.yml:267,278`), `cluster_daemon` (`:848,861`), `web_layout`
+(`:882,902`), `vod_web` (`:930,955`) and `coverage` (`:1228,1255`).
+
+Nothing found in `crates/`, `tests/` or `validation/` *asserts* ffmpeg-6
+behaviour — but one test quietly *loses* coverage on 8, which the audit
+question as §3.4 words it would have missed:
+
+- The one test that asserts a runtime capability,
+  `nightly_runner_has_ffmpeg_readrate` (`crates/plurxd/src/ffmpeg.rs:5189`,
+  `#[ignore = "nightly runner capability contract"]`), requires only
+  `-readrate`, which landed in 5.1 and is present in 8.
+- Most of what names `-readrate_initial_burst` either builds an argument list
+  and asserts on the strings (`plurx-core/src/transcode/mod.rs:3959`,
+  `plurxd/src/ffmpeg.rs:5034,5077`) or exercises the daemon's own capability
+  detection against a stub (`ffmpeg.rs:4971,5006,5148`). Those are
+  major-independent and stay green on 8.
+- **The exception, and it matters.** The live session test in
+  `crates/plurxd/src/transcode/tests/chunk_05.rs` branches on
+  `pacing_caps().await.initial_burst` at `:1337`: on a build that declares
+  the option without honouring it — which the comment at `:1331` names as
+  ffmpeg 8 — it prints `INFO: … does not honour -readrate_initial_burst` and
+  **skips** the ahead-window and suspend-resume assertions (`:1346-1352`).
+  It does not fail, so moving every lane to 8 would retire that coverage
+  silently, with a green suite and an INFO line nobody reads.
+
+So the answer to §3.4's audit question is neither of the two it offers. No
+test *requires* ffmpeg 6, so no lane has to be retained to keep the suite
+green; but one test *is* weaker on 8, so retiring the last burst-honouring
+runner is a real coverage decision, not bookkeeping. Whoever executes M5
+should either keep one lane on a burst-honouring build for that test, or
+change `chunk_05.rs` to assert the paced-rate behaviour on 8 instead of
+skipping — and say which in VALIDATION.md, as §3.4 requires.
+
+This is a source audit only. It does **not** establish that `make unit` is
+green on a jellyfin-ffmpeg 8 runner, which is M5's actual acceptance and
+needs the runner-provisioning change in `plurx-agent` first.
+
 ### 3.5 Dockerfile base pin and the release profile
 
 Pin: `FROM rust:1-bookworm@sha256:<digest> AS build` and
@@ -298,7 +765,43 @@ overflow-checks = true      # PR 4: changes runtime behaviour (a wrapped counter
                             #       run make test-full and a week on lab1 before the fleet
 ```
 
-No semicolons, no `strip = "debuginfo"` (assessment 18). PR 1's acceptance
+No semicolons, no `strip = "debuginfo"` (assessment 18).
+
+**Pin landed 2026-09-23** (`claude-opus-5`); **the release profile is
+untouched.** `Dockerfile:9` and `:35` now read:
+
+```dockerfile
+FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime-assets
+```
+
+Both are **index** digests (`application/vnd.oci.image.index.v1+json`), not
+per-platform manifest digests, because the image is built for amd64 and arm64
+from the same `FROM`. They were read with `docker buildx imagetools inspect`
+on nuc3 on 2026-09-23, and each was verified to be the SHA-256 of the
+manifest bytes `--raw` returns. `tests/operations/test_contracts.py`'s
+`test_dockerfile_base_images_are_pinned_by_digest` rejects any registry
+`FROM` in `Dockerfile` that carries no digest, and
+`test_base_image_pin_drift_is_reported_weekly_and_gates_nothing` pins the
+drift report onto `rust-audit.yml`'s weekly `scheduled` job, where
+`scripts/image-base-drift` prints each pinned digest beside the current
+upstream one under `continue-on-error` and `if: ${{ !cancelled() }}`. The
+condition was added after review: `continue-on-error` only keeps the step's
+own failure from failing the job and does not make it run after an earlier
+step failed, so without the condition the report was skipped in every week
+the audit it rides on went red. The contract test now asserts it. That step
+has **not** been observed
+running on a CI runner; it is non-gating by construction, but the claim here
+is only that it is wired, not that it has reported.
+
+`Dockerfile.store-shard:8` pins `rust:1.97.1-bookworm` by version tag and is
+left alone: the contract test covers `Dockerfile`, which is what ships.
+
+The profile block above — `lto`, `codegen-units`, `debug`, `strip`,
+`overflow-checks` — is **unchanged in `Cargo.toml`**. Each of PRs 1-4 is
+gated on a measurement (image size delta, a symbolicated backtrace from a
+release build, cold build time on the `high-cpu` runner, seven days of lab1
+journal) and none of those was run here. PR 1's acceptance
 is a symbolicated backtrace from a deliberate `panic!` behind a hidden CLI
 flag on the release binary; PR 2 (`split-debuginfo = "packed"` plus
 uploading the `.dwp` beside the image) only if PR 1's size delta on the
@@ -326,9 +829,88 @@ Rules: filesystem-input seams get a tempfile harness that never reads
 outside it (assessment F-build-13); each crash artefact is promoted to a
 unit test in the parser's own `mod tests` before the fix merges;
 `test_evidence_workflows.py:119`'s assertion extends to all five targets.
-Ten minutes per target is a budget, not coverage evidence — the nightly
-summary prints executions and corpus growth so a target that stops finding
-new edges is visible.
+Fifteen minutes per target (the 900 s budget) is a budget, not coverage
+evidence — each job's summary prints executions and corpus growth so a
+target that stops finding new edges is visible.
+
+**As built, 2026-09-24/25 (`plan/P-02-2`, claude-fable-5-1).** The four
+targets, `scripts/fuzz-seeds`, `scripts/fuzz-campaign`, the nightly
+`parser-fuzz` matrix job and the operations-test extension landed. Where the
+table above and the code differ, the code is right and the reason is here:
+
+- **A second fuzz package.** The four targets are `fuzz/parsers/`
+  (`plurx-parser-fuzz`: its own `Cargo.toml`, lock, `fuzz_targets/`,
+  `corpus/` and `artifacts/`), not `[[bin]]`s beside `inspect_sup` in
+  `fuzz/`. A package's dependencies are built for every one of its bins, so
+  adding `plurx-core` to the PGS package would have put ~240 crates under
+  AddressSanitizer in front of the PGS job's 20-minute step. `inspect_sup`
+  and `fuzz/Cargo.lock` are untouched. A campaign is
+  `cargo +nightly-2026-08-01 fuzz run --fuzz-dir fuzz/parsers <target>
+  fuzz/parsers/corpus/<target>`; `fuzz/parsers/Cargo.lock` was seeded from
+  the root lock so the fuzzer resolves the versions that ship.
+
+- **`rpu_rewrite`'s seam.** `Converter::for_init` / `convert` do not exist;
+  the module header of `transcode/dvconvert.rs` explains why the
+  between-two-ffmpegs form was withdrawn. The seam is
+  `convert_length_prefixed(sample, nal_length_size, &mut out)`, and the
+  target drives it directly over a length-prefixed sample, with the first
+  input byte choosing the `hvcC` width (the three legal widths get seven
+  slots in eight, an illegal width one). Its seeds are the repository's own
+  Profile 7 RPU (`tests/playback/dv-p7-rpu.hex`) framed as samples, not
+  `dv-evidence` output, which needs a server and a real title.
+- **Bounds.** Input caps are 4 MiB (`fmp4_reader`) and 1 MiB (the other
+  three). The reader target's unit cap is a termination guard at 2²⁰, not
+  1 000: a well-formed 4 MiB input cannot reach it, so it fires only for a
+  reader that yields without consuming. `-rss_limit_mb` stays at libFuzzer's
+  2048 default rather than the 1024 written above: `epub_facts` peaks at
+  991 MiB under AddressSanitizer with the reader's own 12 MiB cover cap in
+  force, so 1024 would report the sanitizer's overhead as a finding.
+- **Tempfile.** `epub_facts` reuses one `NamedTempFile` per thread, truncated
+  and rewritten per input, exactly as `inspect_sup` does; the reader is
+  handed that path and nothing else. Deleting and recreating per iteration
+  bought nothing the reuse does not.
+- **`parse_epub`.** No such function; `read_epub_facts` is the catalogue
+  seam and the only one a scan reaches. No second EPUB target.
+- **Seeds are generated, committed and reproducible.** `scripts/fuzz-seeds`
+  writes 13 / 14 / 20 / 17 seeds (≈ 140 / 60 / 80 / 550 KiB); the fMP4 ones
+  come from a one-second 64×64 lavfi pattern through libx264, so an x264
+  build change can move bytes in them, which is why regeneration is a PR
+  that names its build and not a nightly step. `scripts/fuzz-seeds --check`
+  runs in the job so an emptied corpus fails before the campaign.
+- **The fuzz workspace patches its own `dolby_vision` and `bitvec_helpers`.**
+  `fuzz/parsers/Cargo.toml` is a separate workspace and does not inherit the
+  root `[patch]` table; the first campaign after the fix below was still
+  fuzzing the registry crate until the rows were added there too. Keep the
+  two tables in step.
+- **Debug assertions are on in the nightly.** `cargo fuzz run` without `-O`
+  builds `--release` and adds `-Cdebug-assertions`, so overflow checks are on
+  in the campaign and off in the shipped binary. That is wanted (an overflow
+  is a finding) and it is why `bitvec_helpers` is vendored too: its `read_ue`
+  shifted `1 << 64` on sixty-four zero bits, a panic under the campaign and a
+  wrong value in production. The local acceptance runs below used `-O`.
+
+**Findings, first hour.** `fmp4_reader`, `nfo_parse` and `epub_facts` ran
+60 s, then 450–300 s, clean (1.1 M / 1.0 M / 21 K executions in the first
+minute; 3.2 M / 76 K in the longer runs). `rpu_rewrite` found three ways for
+a malformed RPU to stop the conversion inside its first ten thousand
+executions, all in the `dolby_vision` 3.4.0 dependency: an allocation sized
+from an unbounded ue(v) count (`num_ext_blocks` in the hundreds of millions
+→ a 0x603c2cfd0-byte, ~25.8 GB `Vec::with_capacity` → the process aborts),
+an `unimplemented!()` two bits away from any valid RPU, and an
+`unreachable!()` reached by any level 8/9/10 block with an unlisted length
+(those two unwind the converting task, not the process). The crate is now
+vendored under `vendor/dolby_vision` with refusals in place of those (its
+`PLURX-PATCH.md` has the table, five patches after the review added capped
+capacity hints and a per-component mapping-method check that closes a
+write-side index panic), `dvconvert` refuses any RPU NAL over 64 KiB before
+parsing, and each fuzz input is a fixture under
+`tests/playback/dv-p7-rpu-hostile-*.hex` with a test in `dvconvert`'s own
+`mod tests`, per the rule above. `bitvec_helpers` 4.0.2, the bit reader
+under it, is vendored for two Exp-Golomb overflows the review found. The
+vendoring follows `vendor/rust_decimal`: workspace exclude,
+`[patch.crates-io]`, `scripts/vendor-audit-lock`, THIRD-PARTY-NOTICES §3.
+After the patches `rpu_rewrite` ran 900 s clean: 11.4 M executions, 5 103
+new corpus units, 523 MiB peak RSS.
 
 ---
 
@@ -387,6 +969,11 @@ labelled busy/idle.
 Acceptance: §3.1's "observe first" column has media1 and lab1 values with a
 date.
 
+**Partial, 2026-09-23** (`claude-opus-5`). §3.1.1 records idle values for
+nuc3, nuc4 and nynuc with the command that produced each. No busy-evening
+sample and no host named media1 or lab1; the prompt above is unchanged and
+still has to be run.
+
 ### 5.2 M2 — `NOFILE` raise at startup and the `ulimits`/`LimitNOFILE` rows
 
 Per §3.3 and the first table row, values from M1.
@@ -395,6 +982,14 @@ Acceptance: `cargo test -p plurxd rlimit` (the `ulimit -n 256` child test);
 after deploy, `docker exec plurxd cat /proc/1/limits | grep 'open files'`
 shows the new soft = hard; a week of journal with no `EMFILE`/`Too many
 open files`.
+
+**The startup raise landed 2026-09-23** (`claude-opus-5`); **the table row
+did not** — see §3.3. The test is `cargo test -p plurx-core rlimit`, not
+`-p plurxd`: the raise lives in `plurx_core::process::rlimit`, and
+`cargo test -p plurxd open_file_limit` covers the daemon's reporting of it.
+The two post-deploy halves of the acceptance — `/proc/1/limits` showing soft
+= hard, and a week without `EMFILE` — are **outstanding**, because this
+session deployed nothing.
 
 ### 5.3 M3 — child priorities behind a measurement
 
@@ -410,6 +1005,16 @@ $(pgrep ffmpeg); do cat /proc/$p/oom_score_adj; done` prints the child
 value and `/proc/$(pidof plurxd)/oom_score_adj` the daemon's; the segment
 cadence table before/after is in the PR.
 
+**Built 2026-09-25** (`claude-opus-5-5`, [PR #518](http://192.168.4.7:3000/noirr/plurx/pulls/518)), as §3.2.2
+describes, after Paul's go. The acceptance test is
+`cargo test -p plurx-core process::priority`
+(`each_class_runs_its_child_at_the_class_nice_ionice_and_oom_score` reads
+each class's child back from `/proc/<pid>/stat`, `ioprio_get` and
+`/proc/<pid>/oom_score_adj`, and checks the test process kept its own), not
+`-p plurxd child_priority`: the launcher lives in `plurx-core`. The
+`OOMScoreAdjust` half moved to M4. The media1 readback and the cadence table
+are **post-merge** evidence; the steps are in the execution log.
+
 ### 5.4 M4 — `TasksMax`/`pids_limit`, `PrivateTmp`, hardening trio
 
 The remaining table rows, each with its validation run on lab1 (the
@@ -421,6 +1026,12 @@ in the PR; lab1 plays direct, copy HLS, transcode with burned text
 subtitles, and records one DVR programme under the new unit; `make
 operations-check` green with an updated unit-file text contract if one
 exists.
+
+**Not started (2026-09-25), with `OOMScoreAdjust=-500` added to it.** No
+node runs `deploy/plurxd.service` (§7 question 1), and every row's
+acceptance is a playback matrix or a GPU selection under the new unit on a
+lab VM, which a transient unit on nuc3 cannot stand in for; `TasksMax` also
+still lacks its observed peak. The steps are in the execution log.
 
 ### 5.5 M5 — jellyfin-ffmpeg 8 in CI
 
@@ -443,6 +1054,53 @@ dockerfile_base_is_pinned`; `docker build` reproduces; `plurxd
 --diagnostic-panic` (hidden) on the release binary prints a backtrace with
 `crates/plurxd/src/…:<line>` frames; image size delta recorded.
 
+**Digest half landed 2026-09-23** (`claude-opus-5`), with the drift step; the
+test is `-k dockerfile_base_images` (§3.5 names both new tests). **The
+release-profile half did not land at all**: no `debug = "line-tables-only"`,
+no `strip = "none"`, no hidden panic flag, no image-size delta, and no
+`docker build` was run from the pinned Dockerfile. Those are the parts that
+need a release build to mean anything.
+
+**Release-profile half measured 2026-09-25** (`plan/P-02-2`,
+claude-fable-5-1) **and not shipped as written.** The hidden flag landed as
+the subcommand `plurxd diagnostic-panic` (a subcommand is the shape this CLI
+gives every action; `Command::DiagnosticPanic`, `#[command(hide = true)]`).
+Four profiles were built from the same tree (`4dd1cfcc`, identical in
+content to `c5ee15d8`, the same tree under its final history) on nuc3 with the pinned 1.97.1, 16 threads, thin LTO,
+`cargo build --release -p plurxd --bin plurxd` after `cargo clean`, and
+`RUST_BACKTRACE=1 plurxd diagnostic-panic` run on each binary:
+
+| Profile | `plurxd` bytes | vs A | gzip (image-layer proxy) | vs A | Build wall / peak RSS | Backtrace |
+|---|---|---|---|---|---|---|
+| A `strip = "symbols"` (main) | 83 637 528 (79.8 MiB) | — | 31 187 341 | — | 6 m 27 s / 8.9 GB | panic line only; **"stack backtrace:" is empty** |
+| B `debug = "line-tables-only"`, `strip = "none"` (PR 1 as written) | 440 675 232 (420 MiB) | **+427 %** | 103 867 528 | +233 % | 6 m 55 s / 10.6 GB | full: `plurxd::diagnostic_panic at ./crates/plurxd/src/main.rs:372:5`, `{async_fn#0} at ./crates/plurxd/src/main.rs:413:37`, `main at …:363:7`, tokio and std frames with paths |
+| C B + `split-debuginfo = "packed"` (PR 2 as written) | 241 166 712 (230 MiB) + `plurxd.dwp` 185 212 632 (177 MiB) | +188 % (binary alone) | 61 732 532 + 38 458 907 | +98 % (binary alone) | 7 m 12 s / 11.3 GB | full, as B, with the `.dwp` beside the binary |
+| D `debug = "line-tables-only"`, `strip = "debuginfo"` | 113 813 160 (109 MiB) | **+36 %** | 34 786 422 | **+11.5 %** | 6 m 48 s / 11.2 GB | named frames, no lines: `plurxd::diagnostic_panic`, `plurxd::dispatch::{closure#0}`, `plurxd::main` |
+
+`size(1)` shows A and B within 20 KiB of each other in `text` + `data`; the
+whole difference is debug sections. The image delta is the binary delta:
+`Dockerfile` copies `plurxd` and `plurx-cluster-check` into a
+`debian:bookworm-slim` base and nothing else changes, so B's image grows by
+~357 MB uncompressed and ~73 MB as a compressed layer; no `docker build` was
+run because nuc3's disk was at 95 % and the binary is the whole of the delta.
+On the 2-CPU cloud host that measured A first (83 553 536 bytes, an 84 KiB
+path-string difference from nuc3's), the B compile of `plurxd` was killed at
+6 GB RSS by a ~7 GB cgroup where A's had taken 2.7 GB — line tables through
+thin LTO roughly double the linker's peak, a number the §5.7 table wants.
+
+**Outcome.** §3.5's premise, "~+10–20 % binary", is off by an order of
+magnitude for this dependency graph (candle, tokenizers, hiqlite, reqwest
+and the rest carry most of the line tables), and §5.7's own rule — split
+debug only if the delta exceeds 15 % — is met by every option, so PR 1 as
+written is **not** the right thing to ship and `Cargo.toml`'s profile stays
+main's. The choice is Paul's (§7, question 6): D is the cheap step (named
+frames, +11.5 % on the wire, nothing to publish); C is the way to line
+numbers without a 420 MiB binary, at the price of a 177 MiB `.dwp` per
+release that the release cut (P-03's `scripts/release-cut`) would have to
+upload beside the image and an operator would have to fetch to
+symbolicate; B is honest and simple and five times the download. Whichever
+lands, `plurxd diagnostic-panic` on the deployed image is the check.
+
 ### 5.7 M7 — release profile PRs 2–4 (each by its numbers)
 
 Split debug only if M6's delta > 15 %; fat LTO / CGU 1 with the build-time
@@ -460,6 +1118,17 @@ Acceptance: `cargo +nightly-2026-08-01 fuzz run <target> -- -max_total_time=60`
 runs each target locally without a crash; the next nightly's summary lists
 five campaigns with executions and corpus sizes; `python3 -m unittest
 tests.operations.test_evidence_workflows` green.
+
+**Status (2026-09-25):** built on `plan/P-02-2`, in `fuzz/parsers/`. Local
+60 s runs with debug assertions on, as the nightly runs them, against the
+review-round tree: `fmp4_reader` 544 092, `rpu_rewrite` 1 085 140,
+`nfo_parse` 817 151 and `epub_facts` 21 156 executions, no finding, peak
+RSS 428–527 MiB; the three earlier crash inputs run clean through the new
+binary. Before the `dolby_vision` refusals `rpu_rewrite` crashed within its
+first minute (§3.6). `tests.operations.test_evidence_workflows` green. The
+five-campaign nightly summary is **post-merge** evidence: the job has not
+run on a runner yet, and its first night's summaries belong in the
+execution log through the evidence-only docs PR.
 
 ---
 
@@ -481,11 +1150,16 @@ the whole procedure. Profile changes roll back by the `sha-` image tag.
 
 ## 7. Open questions
 
-1. **Which node is bare-metal, if any.** The unit is maintained but the
-   fleet is containers; if nothing runs the unit, M4's validation is on a
-   lab VM and the doc says so.
+1. **Which node is bare-metal, if any.** **Answered 2026-09-23, for the
+   three reachable hosts: none.** `systemctl show plurxd -p LoadState`
+   returns `LoadState=not-found` on nuc3, nuc4 and nynuc, all of which run
+   the container (§3.1.1). `deploy/plurxd.service` is an install path with
+   no node behind it today, so M4's validation is a lab VM, as the question
+   anticipated. Hosts outside those three are unchecked.
 2. **`nice`/`ioprio` values.** 10 and BE/7 are proposals; §3.2's
    measurement may settle on 5 and BE/4 or on none.
+   **As built (M3):** two classes, realtime 5 / BE 4 / `+500` and
+   background 15 / BE 7 / `+800` (§3.2.2); the measurement still decides.
 3. **Runner provisioning ownership.** The Ansible runner role lives in
    `plurx-agent`; M5's provisioning half is a PR there, referenced from the
    `ci.yml` PR.
@@ -494,6 +1168,15 @@ the whole procedure. Profile changes roll back by the `sha-` image tag.
 5. **`epub_facts` vs `parse_epub`.** Two EPUB parsers exist (metadata facts
    and the reader's publication model); whether both get a target depends
    on the first one's cost.
+   **Answered 2026-09-25:** there is one, `read_epub_facts`; `parse_epub`
+   does not exist. One target (§3.6 as built).
+6. **Which release profile ships** (§5.6's table, 2026-09-25): A (today:
+   empty backtraces), D (`strip = "debuginfo"`: named frames, +36 % binary,
+   +11.5 % compressed), C (packed split debuginfo: file:line frames, 230 MiB
+   binary plus a 177 MiB `.dwp` the release cut must publish), or B (file:line
+   frames, 420 MiB binary). The executing session's recommendation is D now
+   and C when line numbers are worth the artefact plumbing; §5.7's PR 2 is
+   C. **Paul's call.**
 
 ---
 
@@ -507,4 +1190,18 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 (partial) | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | Idle limits read on nuc3, nuc4 and nynuc and recorded in §3.1.1 with their commands: `/proc/1/limits` open files **1024 soft / 524288 hard** on all three, `Ulimits=[] PidsLimit=<nil> OomScoreAdj=0`, `pids.max` = the host slice default, `memory.max` unset. `plurxd.service` is `LoadState=not-found` on all three, answering §7.1. **No busy-evening sample and no media1/lab1**; §5.1's prompt still has to be run. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 (§3.3 only) | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | `plurx_core::process::rlimit::raise_open_file_limit` raises soft to hard and never touches hard; `run()` reports both values at `info`. Proof it is load-bearing: with the `setrlimit` call removed from the function, `cargo test -p plurx-core rlimit` fails `left: 256, right: 524288`; with the reporter's message and error arm reverted, both `cargo test -p plurxd open_file_limit` tests fail. The §3.1 `LimitNOFILE`/`ulimits` row deliberately did **not** land: the observed hard limit is already 524288, and the plan's 65536 would lower it. Post-deploy `/proc/1/limits` evidence outstanding. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 (audit only) | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | §3.4's audit run read-only; `ci.yml` unchanged. Five `ffmpeg-6` jobs listed; no test *requires* ffmpeg 6, but `transcode/tests/chunk_05.rs:1337` **skips** its ahead-window and suspend-resume assertions on a build that ignores `-readrate_initial_burst`, so moving every lane to 8 silently retires that coverage. Recorded as a decision M5 owes, not as a clean bill. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 (digest half) | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | Both `Dockerfile` bases pinned to their index digests, read on nuc3 and each verified against the SHA-256 of `imagetools inspect --raw`. `test_dockerfile_base_images_are_pinned_by_digest` fails on the unpinned Dockerfile (`[('rust:1-bookworm', 'build')] != []`) and `test_base_image_pin_drift_is_reported_weekly_and_gates_nothing` fails with the workflow step removed. `scripts/image-base-drift` exits 1 on an unpinned base. The release profile is untouched; the drift step has not been observed on a runner. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — **flagged, not implemented** | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | §3.2.1. §3.2's prescribed wiring (each `Command::new(ffmpeg_bin())` site plus a grep test) does not reach the producers that carry realtime playback, which spawn through a value; the seam that does is `spawn_job_owned`, which the plan's standing instruction says to stop and flag rather than change. §3.2's realtime measurement is also unreachable from here, so the `OOMScoreAdjust` row stays out under §4's guardrail. |
+| 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4, M7, M8 — not started | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | M4 needs a lab VM playback matrix and a GPU-selection check under the new unit; M7's three PRs are each gated on a measurement; M8's four fuzz targets need the nightly toolchain and generated corpora. None was attempted, and nothing in the branch pretends otherwise. |
+| 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Review of #457 (M2, M3 flag, M6) | [#457](http://192.168.4.7:3000/noirr/plurx/pulls/457) | Three findings, all addressed on the branch after merging main. (1) §3.2.1's claim that every child reaches `spawn_job_owned` was false. It has been re-surveyed across `plurx-core` and `plurxd`: eleven production sites spawn without it, including scan thumbnails, cover extraction, the encoder/decoder inventory, `media_pool.rs`'s `find`, the PGS ride-along self-test and the held decode-fact probes. Both M3 options now carry a migration list, and the decision stays open. `pre_exec` composition is answered: std runs every closure in registration order, checked on rustc 1.97.1. §2.2's "only `pre_exec`" claim is corrected to five. (2) The open-file raise now clamps to `kern.maxfilesperproc` on Apple targets. On `mba` (macOS 27.0) the review's `EINVAL` did not reproduce: the old code set and reported an infinite soft limit that the kernel does not enforce. `an_unlimited_hard_limit_is_clamped_to_the_platform_ceiling` fails on Linux without the clamp, and `the_soft_limit_is_raised_as_far_as_the_platform_allows` fails on `mba` without the Apple ceiling (`9223372036854775807` vs `122880`). (3) The drift step is `if: ${{ !cancelled() }}`, and `test_base_image_pin_drift_is_reported_weekly_and_gates_nothing` fails without it. M3 is still not implemented. |
+| 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | Claim (second pass: M8, M6 release-profile half) | [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) | Branch `plan/P-02-2` from `f600d2823`. M3 stays on Paul's seam decision, M4 on the lab1 matrix, M5's lane and M7's PRs 2-4 untouched. |
+| 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | M8 (targets, seeds, nightly, contract) | [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) | `d51a11d2`, then `6aa9bed2` after review: `fuzz/parsers/` with `fmp4_reader`, `rpu_rewrite`, `nfo_parse`, `epub_facts`; `scripts/fuzz-seeds` (13/16/20/17 seeds); `scripts/fuzz-campaign`; the `parser-fuzz` matrix job; `test_parser_fuzzers_are_bounded_seeded_artifacted_and_gating`. §3.6 "as built" records every departure from the table. 60 s runs clean on all four (see §5.8). |
+| 2026-09-24 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | M8 finding: `dolby_vision` 3.4.0 | [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) | `9024fd63`: `rpu_rewrite` found a ~25.8 GB `Vec::with_capacity` from an unbounded ue(v) (process abort), an `unimplemented!()` and an `unreachable!()` (task unwinds) inside 10 000 executions. Crate vendored at `vendor/dolby_vision` with refusals; fixtures `tests/playback/dv-p7-rpu-hostile-*.hex`; three tests in `dvconvert`, named as `Regression-Test:` lines on the pull request (P-03 phase B was switched on while this branch was open, so the ledger rows first written for these commits were withdrawn). After the patches: 900 s, 11.4 M executions, clean. |
+| 2026-09-25 | claude-opus (subagent adc9b30ebfcfc08d9) | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | Adversarial review | [#510 comment 4575](http://192.168.4.7:3000/noirr/plurx/pulls/510#issuecomment-4575) | 3 P1 (catalog lint, PGS job cost, input-scaled bounds), 5 P2, 8 P3. All folded: `ef4bdae7` (patches 4-5, `MAX_RPU_NAL_BYTES`, `vendor/bitvec_helpers` for two Exp-Golomb overflows; its test is the fourth `Regression-Test:` line on the pull request) and `6aa9bed2` (the `fuzz/parsers` split, catalog rows, campaign summary, seeds, audit-lock dedupe, test slices). Disposition on the PR. |
+| 2026-09-25 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | M6 release-profile half — measured, profile not shipped | [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) | `c5ee15d8` adds `plurxd diagnostic-panic`; four profiles built on nuc3 (§5.6 table): PR 1 as written is +427 % binary; `strip = "debuginfo"` is +36 % (+11.5 % gzipped) with named frames; packed split is 230 MiB + a 177 MiB `.dwp`. `Cargo.toml` keeps main's profile; which one ships is §7 question 6, Paul's. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — built (Paul 2026-09-25: go) | [#518](http://192.168.4.7:3000/noirr/plurx/pulls/518) | §3.2.2. One launcher with a `ChildWork` on every call; realtime 5 / BE 4 / `+500`, background 15 / BE 7 / `+800`; the eleven §3.2.1 rows and three Windows-only probes migrated; the decode-fact probe registers its priority before its exec-from-`pre_exec`; a source census plus clippy `disallowed-methods` over every production spawn; `processes` on `/activity/detail`, admin `DELETE /activity/processes/{pid}` through a pidfd, the web Processes table and three `/metrics` families. Built on `origin/main` @ `448e803d`, apart from [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) (M6 profile measurement, M8); #510 merged while this was open and main was merged in after it, with conflicts in documents only. Each behavioural hunk was reverted and its test seen to fail: the `pre_exec` (three priority tests), the pidfd kill (the stop test times out), a spawn site put back to `cmd.spawn()` (the census names `metadata/local.rs:419`), the decode-facts `apply` (its order test), the `processes` field, the `/metrics` families and the DELETE route (the HTTP test, each at its own assertion), the painter line (the web suite), and the census's lexical path resolution (without it the census reads `vodencode_tests.rs`, `include!`d from a test chunk, as production). Gate results are in the PR body. **Outstanding, post-merge (GPT):** §3.2's measurement — on media1, with three concurrent transcodes, a 4K direct play and a DVR recording, `for p in $(pgrep ffmpeg); do echo $p $(awk '{print $19}' /proc/$p/stat) $(cat /proc/$p/oom_score_adj); done` inside the container (realtime children read 5 / 500, background 15 / 800, `/proc/1` its own), the Activity page's Processes table and `curl -s localhost:32400/metrics \| grep plurx_child_` (`plurx_child_priority_unapplied_total` 0 for both classes), then each session's `http_wait_count` and the journal's segment materialisation interval with the build before this PR and with this PR; if a copy-HLS or transcode producer that kept up now falls behind, report it — the values move, not the launcher. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 — not started | [#518](http://192.168.4.7:3000/noirr/plurx/pulls/518) | Not separable from its evidence: no node runs the unit, and each row's acceptance needs a lab VM's playback matrix or GPU selection under the new unit. `OOMScoreAdjust=-500` joins M4. **Steps (GPT, lab VM running `deploy/install`):** (1) at peak (two transcodes, a direct play, a DVR recording) record `systemctl show plurxd -p TasksCurrent -p MemoryCurrent` and `cat /proc/$(pidof plurxd)/oom_score_adj`; (2) add `TasksMax=4096` (only if the peak is ≤ 25 % of it), `PrivateTmp=true`, `ProtectKernelTunables=true`, `RestrictSUIDSGID=true`, `LockPersonality=true` and `OOMScoreAdjust=-500` to the unit, `systemctl daemon-reload && systemctl restart plurxd`; (3) paste `systemd-analyze security plurxd` before and after; (4) play direct, copy HLS, a transcode with burned text subtitles, record one DVR programme, and confirm the GPU probe still selects QSV/VAAPI; (5) confirm `/proc/$(pidof plurxd)/oom_score_adj` is -500 while every ffmpeg reads 500 or 800. Any row that breaks playback stays out and is recorded. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — review round ([comment 4817](http://192.168.4.7:3000/noirr/plurx/pulls/518#issuecomment-4817)) | [#518](http://192.168.4.7:3000/noirr/plurx/pulls/518) | Main @ `3c89ad2ee` merged in first (`76608b5ca`); conflicts in `subtitles.rs` (main's bounded playhead-window pipe kept, this branch's realtime class given to it), `process/mod.rs` (the `output_job_owned` audit), the ownership ledger (three counts measured by zeroing) and the board; the textually clean `/metrics` `format!` had 17 placeholders for 18 arguments and was given one. **Finding 1 (P1), fixed:** the class is now the caller's (§3.2.2's table). The VOD start's held source probe, its decode-fact probes, the Profile 5 pixel proof asked for by any session start or peer offer, the burn extraction a start joins, and the `/subs` extraction a viewer waits on are realtime; the pre-transcode pass, offline packages, the rate-control refresh and the HLS warm-up are background. `plurx_child_spawns_by_purpose_total{class,purpose}` reads each choice back. Revert-proved: each helper put back to its fixed background class (held probe, decode-fact collection, pixel probe, whole-track `.vtt`, burn extraction) and each caller's choice flipped (`SESSION_START_CLASS`, `BoundPlanCaller::decode_fact_work`, the `/subs` handler) fails its test — `an_empty_stored_track_starts_an_encoded_session_without_the_overlay`, `decode_fact_probes_take_the_class_of_the_caller_waiting_on_them`, `the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it`, `a_whole_track_extraction_runs_at_the_class_its_caller_passes`, `subtitle_extraction_is_cached_by_source_identity`; the counter itself, `every_spawn_is_counted_by_its_class_and_purpose`. **Not changed, recorded:** a joined single flight or a memoized proof keeps the class of the caller that started it (§3.2.2's known limit), and a Profile 5 proof that fails because it timed out is still memoized as failed until restart; the class change makes that timeout less likely under load but does not change the memo, which is a behaviour question for Paul rather than part of this finding. **Finding 2 (P2), fixed:** each `spikes/` workspace carries its own `clippy.toml`; `cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml --tests --no-deps -- -D warnings` exits 0 with it and 101 without it, and `clippy_refuses_every_spawning_method_outside_tests` now fails when a spike workspace has none. **Post-merge (GPT), added to the measurement above:** after a VOD start, a Profile 5 start and a `/subs` request on media1, `curl -s localhost:32400/metrics \| grep plurx_child_spawns_by_purpose_total` shows `held source probe for a session start`, `decode-fact probe for a session start`, `Dolby Vision pixel probe`, `burned-subtitle track extraction` and `subtitle track a viewer turned on` under `class="realtime"`. |

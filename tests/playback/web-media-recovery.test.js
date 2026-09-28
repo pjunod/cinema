@@ -46,11 +46,11 @@ test("media recovery shares the attach budget and never loops across reopens", (
 });
 
 test("the current fatal handler rescues before reporting terminal failure", () => {
-  const attach = declaration("attachHls");
-  const recovery = attach.indexOf("PlaybackPolicy.hlsMediaFatalAction");
-  const terminal = attach.indexOf('notifyPlaybackControl("failed"', recovery);
+  const handler = declaration("onHlsError");
+  const recovery = handler.indexOf("PlaybackPolicy.hlsMediaFatalAction");
+  const terminal = handler.indexOf('notifyPlaybackControl("failed"', recovery);
   assert.ok(recovery >= 0);
   assert.ok(terminal > recovery);
-  assert.match(attach, /sourceBufferName:d\.sourceBufferName\|\|null/);
-  assert.match(attach, /attachedPlayer\.hlsRetryUsed=.*\+1/);
+  assert.match(handler, /sourceBufferName:d\.sourceBufferName\|\|null/);
+  assert.match(handler, /attachedPlayer\.hlsRetryUsed=.*\+1/);
 });

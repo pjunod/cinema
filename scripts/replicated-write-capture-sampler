@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# K-03 M0 replicated-write sampler (docs/cluster/REPLICATED-WRITE-RATE-HYGIENE.md §5.1).
+# Read-only: unauthenticated GET /metrics on the three voters every 60 s; it
+# deploys nothing. Evaluate its samples.tsv with scripts/replicated-write-capture.
+set -uo pipefail
+
+capture_dir=$(cd "$(dirname "$0")" && pwd)
+samples="$capture_dir/samples.tsv"
+events="$capture_dir/events.log"
+status_file="$capture_dir/status.txt"
+interval_seconds=60
+# Paul set the M0 gate to 12 hours on 2026-09-25 (it was 24).
+required_idle_seconds=43200
+
+nodes=(nuc4 m6 nynuc)
+urls=(
+  "http://192.168.4.8:32400/metrics"
+  "http://192.168.4.14:32400/metrics"
+  "http://192.168.5.236:32400/metrics"
+)
+
+metric_value() {
+  local body=$1
+  local selector=$2
+  printf '%s\n' "$body" | awk -v selector="$selector" '$1 == selector { print $2; exit }'
+}
+
+metric_sum() {
+  local body=$1
+  local prefix=$2
+  printf '%s\n' "$body" | awk -v prefix="$prefix" '
+    index($1, prefix) == 1 { total += $2; found = 1 }
+    END { if (found) print total }
+  '
+}
+
+write_status() {
+  local state=$1
+  local now=$2
+  local window_start=${3:-none}
+  local elapsed=${4:-0}
+  printf 'state=%s\nupdated_at=%s\nwindow_start=%s\nelapsed_seconds=%s\nrequired_idle_seconds=%s\n' \
+    "$state" "$now" "$window_start" "$elapsed" "$required_idle_seconds" > "$status_file"
+}
+
+# Append, never truncate: a restart must not discard samples already taken.
+if [[ ! -s $samples ]]; then
+  printf 'timestamp_utc\tepoch\tnode\turl\treachable\tbuild\tlocal_is_voter\tcommit_index\tauthority_reads\twrites\tsnapshot_builds\tpending_outbox\ttranscode_active\tlive_tv_starting\tlive_tv_active\tactive_playback_entries\n' > "$samples"
+fi
+printf '%s waiting for a continuous %s-hour idle window on the three current voters\n' "$(date -u +%FT%TZ)" "$((required_idle_seconds / 3600))" >> "$events"
+
+window_start_epoch=0
+window_start_iso=none
+window_builds=''
+previous_commit=()
+previous_authority=()
+previous_writes=()
+previous_snapshots=()
+
+while true; do
+  now_epoch=$(date -u +%s)
+  now_iso=$(date -u +%FT%TZ)
+  sample_valid=1
+  sample_builds=''
+  current_commit=()
+  current_authority=()
+  current_writes=()
+  current_snapshots=()
+
+  for index in 0 1 2; do
+    node=${nodes[$index]}
+    url=${urls[$index]}
+    if ! body=$(curl -fsS --connect-timeout 3 --max-time 10 "$url" 2>/dev/null); then
+      printf '%s\t%s\t%s\t%s\t0\t\t\t\t\t\t\t\t\t\t\t\n' \
+        "$now_iso" "$now_epoch" "$node" "$url" >> "$samples"
+      sample_valid=0
+      continue
+    fi
+
+    build=$(printf '%s\n' "$body" | awk -F 'build="' '/^plurx_build_info/ { split($2, a, "\""); print a[1]; exit }')
+    voter=$(metric_value "$body" 'plurx_cluster_local_is_voter')
+    commit=$(metric_value "$body" 'plurx_raft_commit_index')
+    authority=$(metric_sum "$body" 'plurx_store_operations_total{class="authority_read"')
+    writes=$(metric_sum "$body" 'plurx_store_operations_total{class="write"')
+    snapshots=$(metric_sum "$body" 'plurx_raft_snapshot_seconds_count{operation="build"')
+    pending=$(metric_value "$body" 'plurx_watched_outbox{status="pending"}')
+    transcode=$(metric_value "$body" 'plurx_transcode_sessions_active')
+    live_starting=$(metric_value "$body" 'plurx_live_tv_sessions{state="starting"}')
+    live_active=$(metric_value "$body" 'plurx_live_tv_sessions{state="active"}')
+    active_playback=$(metric_value "$body" 'plurx_cache_protected_entries{reason="active_playback"}')
+
+    printf '%s\t%s\t%s\t%s\t1\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$now_iso" "$now_epoch" "$node" "$url" "$build" "$voter" "$commit" \
+      "$authority" "$writes" "$snapshots" "$pending" "$transcode" \
+      "$live_starting" "$live_active" "$active_playback" >> "$samples"
+
+    sample_builds+="$node=$build;"
+    current_commit[$index]=$commit
+    current_authority[$index]=$authority
+    current_writes[$index]=$writes
+    current_snapshots[$index]=$snapshots
+
+    for value in "$voter" "$commit" "$authority" "$writes" "$snapshots" "$pending" "$transcode" "$live_starting" "$live_active" "$active_playback"; do
+      if ! [[ $value =~ ^[0-9]+$ ]]; then sample_valid=0; fi
+    done
+    if [[ $voter != 1 || $pending != 0 || $transcode != 0 || $live_starting != 0 || $live_active != 0 || $active_playback != 0 ]]; then
+      sample_valid=0
+    fi
+  done
+
+  if (( window_start_epoch > 0 )); then
+    if [[ $sample_builds != "$window_builds" ]]; then sample_valid=0; fi
+    for index in 0 1 2; do
+      if (( ${current_commit[$index]:-0} < ${previous_commit[$index]:-0} )); then sample_valid=0; fi
+      if (( ${current_authority[$index]:-0} < ${previous_authority[$index]:-0} )); then sample_valid=0; fi
+      if (( ${current_writes[$index]:-0} < ${previous_writes[$index]:-0} )); then sample_valid=0; fi
+      if (( ${current_snapshots[$index]:-0} < ${previous_snapshots[$index]:-0} )); then sample_valid=0; fi
+    done
+  fi
+
+  if (( sample_valid == 0 )); then
+    if (( window_start_epoch > 0 )); then
+      printf '%s reset idle window started at %s: activity, reachability, build, role, or counter continuity changed\n' \
+        "$now_iso" "$window_start_iso" >> "$events"
+    fi
+    window_start_epoch=0
+    window_start_iso=none
+    window_builds=''
+    previous_commit=()
+    previous_authority=()
+    previous_writes=()
+    previous_snapshots=()
+    write_status waiting_for_idle "$now_iso"
+  else
+    if (( window_start_epoch == 0 )); then
+      window_start_epoch=$now_epoch
+      window_start_iso=$now_iso
+      window_builds=$sample_builds
+      printf '%s started continuous idle window on %s\n' "$now_iso" "$sample_builds" >> "$events"
+    fi
+    for index in 0 1 2; do
+      previous_commit[$index]=${current_commit[$index]}
+      previous_authority[$index]=${current_authority[$index]}
+      previous_writes[$index]=${current_writes[$index]}
+      previous_snapshots[$index]=${current_snapshots[$index]}
+    done
+    elapsed=$((now_epoch - window_start_epoch))
+    write_status capturing "$now_iso" "$window_start_iso" "$elapsed"
+    if (( elapsed >= required_idle_seconds )); then
+      printf '%s completed continuous %s-hour idle window started at %s\n' "$now_iso" "$((required_idle_seconds / 3600))" "$window_start_iso" >> "$events"
+      write_status complete "$now_iso" "$window_start_iso" "$elapsed"
+      exit 0
+    fi
+  fi
+
+  sleep "$interval_seconds"
+done

@@ -15,6 +15,12 @@ const {shellSource} = require("./shell-source.js");
 // the app's body rows, joined in served order. See tests/web/shell-source.js.
 const SHIPPED_UI = shellSource().bodyScript;
 const DECLARATIONS = ["\nfunction ", "\nasync function "];
+// A slice ends at the next top-level declaration of ANY kind, not only the
+// next function. A row that declares `const X=…` between two functions used to
+// be swallowed into the slice above it, so composing that same const beside the
+// function — which this file does for `DEV_READINESS_LABEL` — declared it twice
+// and the panel harness died on a SyntaxError instead of an assertion.
+const TERMINATORS = DECLARATIONS.concat(["\nconst ", "\nlet ", "\nvar "]);
 
 function shippedSource(name) {
   const start = DECLARATIONS.map((kind) =>
@@ -22,7 +28,7 @@ function shippedSource(name) {
   ).find((at) => at !== -1);
   assert.notEqual(start, undefined, `index.html no longer declares ${name}`);
   const rest = SHIPPED_UI.slice(start + 1);
-  const ends = DECLARATIONS.map((kind) => rest.indexOf(kind, 1)).filter((at) => at !== -1);
+  const ends = TERMINATORS.map((kind) => rest.indexOf(kind, 1)).filter((at) => at !== -1);
   const end = ends.length ? Math.min(...ends) : -1;
   return (end === -1 ? rest : rest.slice(0, end)).trimEnd();
 }
@@ -78,7 +84,7 @@ test("every section is a route, grouped in the rail's order", () => {
     livetv: "liveTvPanel(d.settings,d.developerReadiness)",
     analysis: "analysisSettingsPanel(d.settings,d.analysis)",
     maintenance: "maintenancePanel(d.settings,d.dvConversions,d.developerReadiness)",
-    users: "usersPanel(d.users)",
+    users: "usersPanel(d.users,d.settings)",
     system: "systemPanel(d.sys,d.playbackEvents)",
     cluster: "clusterPanel(d)",
     integrations: "integrationsPanel(d.settings,d.trakt)",
@@ -220,7 +226,8 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   // Protocol and quality switching have separate cards. Streaming must not
   // write either field: a card that saves a field it does not show can turn
   // something back on that an operator deliberately turned off.
-  const streaming = ["prr", "pabr", "phr", "phb", "pha", "pvod", "pvws", "pvmb", "pvbg", "serr"];
+  const streaming = ["prr", "phr", "phb", "pha", "pvod", "pvws", "pvmb", "pvbg", "serr"];
+  const autoQuality = ["pabr", "aqerr", "aqstate"];
   const liveRecovery = ["dvlr", "dvlrerr"];
   const developer = ["pcpv1", "dverr"];
   const prepared = ["pqh", "pqherr", "pqhstate"];
@@ -234,6 +241,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   return Promise.all([
     run("savePlaybackDefaults", defaults)({ disabled: false }),
     run("saveStreaming", streaming)({ disabled: false }),
+    run("saveAutoQuality", autoQuality)({ disabled: false }),
     run("saveLiveHlsRecovery", liveRecovery)({ disabled: false }),
     run("savePlaybackCompatibility", developer)({ disabled: false }),
     run("savePreparedQuality", prepared)({ disabled: false }),
@@ -243,7 +251,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   ]).then(() => {
     assert.deepEqual(Object.keys(writes.savePlaybackDefaults.body).sort(), ["default_audio_lang", "default_sub_lang", "sub_mode"]);
     assert.deepEqual(Object.keys(writes.saveStreaming.body).sort(), [
-      "hls_ahead_max_secs", "hls_burst_secs", "hls_readrate", "playback_auto_abr",
+      "hls_ahead_max_secs", "hls_burst_secs", "hls_readrate",
       "stream_readrate", "vod_block_budget_secs", "vod_blocked_get_cap",
       "vod_materialize_budget_secs", "vod_presentation",
       "vod_working_set_bytes",
@@ -254,6 +262,8 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     );
     assert.deepEqual(Object.keys(writes.savePlaybackCompatibility.body).sort(), ["playback_control_protocol_v1"]);
     assert.deepEqual(Object.keys(writes.savePreparedQuality.body), ["prepared_quality_handoff"]);
+    assert.deepEqual(Object.keys(writes.saveAutoQuality.body), ["playback_auto_abr"]);
+    assert.equal(writes.saveAutoQuality.path, "/settings");
     // Its own card, its own field. The verified-decode request renames cached
     // transcodes on covered paths, so it must never ride along with a save an
     // operator made for something else.
@@ -267,6 +277,55 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     assert.equal(writes.saveStreaming.path, "/settings");
     assert.equal(writes.savePlaybackCompatibility.path, "/settings");
   });
+});
+
+test("PGS overlay saves either choice despite unmet readiness and reports a failed save", async () => {
+  const nodes = {
+    pgsoverlay: { checked: false },
+    pgsoverlayerr: { textContent: "" },
+    pgsoverlaycard: { outerHTML: "original" },
+  };
+  const readiness = { items: [{ id: "pgs_overlay", requirements: [
+    { id: "clients_render_overlays", status: "unmet" },
+    { id: "overlay_acceptance", status: "unobservable" },
+  ] }] };
+  const writes = [], cached = [], notices = [];
+  let reject = false;
+  const save = new Function(
+    "document", "api", "cacheSettings", "toast", "setCardSaved", "pgsOverlayCard", "DEVELOPER_READINESS",
+    `${shippedSource("savePgsOverlay")}\nreturn savePgsOverlay;`,
+  )(
+    { getElementById: (id) => { assert.ok(id in nodes); return nodes[id]; } },
+    async (path, request) => {
+      assert.equal(path, "/settings");
+      assert.equal(request.method, "PUT");
+      writes.push(request.body);
+      if (reject) throw new Error("Setting write refused");
+      return { pgs_overlay: request.body.pgs_overlay };
+    },
+    (value) => { cached.push(value); return value; },
+    (message) => notices.push(message),
+    () => {},
+    (value, evidence) => { assert.equal(evidence, readiness); return `saved:${value.pgs_overlay}`; },
+    readiness,
+  );
+  for (const enabled of [true, false]) {
+    nodes.pgsoverlay.checked = enabled;
+    await save({ disabled: false });
+    assert.deepEqual(writes.at(-1), { pgs_overlay: enabled });
+    assert.deepEqual(cached.at(-1), { pgs_overlay: enabled });
+    assert.equal(nodes.pgsoverlaycard.outerHTML, `saved:${enabled}`);
+    assert.equal(nodes.pgsoverlayerr.textContent, "");
+  }
+  reject = true;
+  nodes.pgsoverlay.checked = true;
+  const button = { disabled: false };
+  await save(button);
+  assert.equal(nodes.pgsoverlayerr.textContent, "Setting write refused");
+  assert.equal(button.disabled, false, "a failed save can be retried");
+  assert.equal(nodes.pgsoverlaycard.outerHTML, "saved:false", "failure cannot repaint a saved value");
+  assert.equal(cached.length, 2, "failure cannot update the settings cache");
+  assert.equal(notices.length, 2, "failure cannot report success");
 });
 
 test("quality switching renders the server's saved value", async () => {
@@ -359,6 +418,34 @@ function shippedDeclares(name) {
   return DECLARATIONS.some((kind) => SHIPPED_UI.includes(`${kind}${name}(`));
 }
 
+test("Durable work settings save while readiness is unavailable", async () => {
+  const writes=[];
+  const controls={"durable-setting-error":{textContent:""},"durable-analysis":{checked:true},
+    "durable-pretranscode":{checked:true},"durable-cadence":{value:"720"},"durable-queue-settings":null};
+  const save=new Function("document","api","cacheSettings","toast","DEVELOPER_READINESS",
+    `${shippedSource("saveDurableQueueSettings")}\nreturn saveDurableQueueSettings;`)(
+    {getElementById:id=>controls[id]},async(path,options)=>{writes.push({path,...options});return options.body;},
+    value=>value,()=>{},{unavailable:"observation timed out"});
+  await save({disabled:false});
+  assert.deepEqual(writes[0],{path:"/settings",method:"PUT",body:{vod_index_cluster_cache:true,cache_produce_mins:720}});
+  controls["durable-analysis"].checked=false;controls["durable-pretranscode"].checked=false;
+  await save({disabled:false});
+  assert.deepEqual(writes[1].body,{vod_index_cluster_cache:false,cache_produce_mins:0});
+});
+
+test("Durable retry preserves its UUID after a transport failure and sends an object body", async () => {
+  const writes=[],queue={retries:new Map(),epoch:0};
+  const retry=new Function("DURABLE_ACTIVITY","crypto","api","toast","refreshDurableActivity",
+    `${shippedSource("retryDurableJob")}\nreturn retryDurableJob;`)(queue,{randomUUID:()=>"retry-uuid"},
+    async(path,options)=>{writes.push({path,...options});if(writes.length===1)throw new Error("response lost");return {outcome:"existing"};},
+    ()=>{},async()=>{});
+  const button={disabled:false};
+  await retry("job",button);assert.equal(button.disabled,false);
+  await retry("job",button);
+  assert.deepEqual(writes.map(write=>write.body),[{request_id:"retry-uuid"},{request_id:"retry-uuid"}]);
+  assert.equal(queue.retries.size,0);
+});
+
 test("Developer keeps only experiments; everyday controls retain their saves and advisory readiness", () => {
   assert.doesNotMatch(
     shippedSource("playbackPanel"),
@@ -370,23 +457,32 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   // `//` comment and swallow whatever follows it.
   const composedBody = [
       shippedSource("preparedHandoffEnabled"), shippedSource("liveTvSettingsCard"),
-      shippedSource("verifiedDecodeCard"), shippedSource("decodeRecoveryCard"),
+      shippedSource("verifiedDecodeCard"), shippedSource("decodeRecoveryCard"), shippedSource("hevcCopyCard"),
       // #309's sibling problem, twice over: a card or fragment `developerPanel`
       // calls has to be composed here or the panel throws on the name and this
       // whole gate reports one failure instead of checking anything.
       shippedSource("subtitleNotReadyCard"),
       shippedSource("pgsOverlayCard"),
+      // The fifth time: #517 put the automatic playback-ranges card at the
+      // head of the stored-subtitle section without composing it here.
+      shippedSource("subtitlePlaybackRangesCard"),
       shippedSource("subtitleStoredSourcesCard"),
+      shippedSource("subtitleClusterSourcesCard"),
+      shippedSource("subtitleBackfillCard"),
+      shippedSource("chapterThumbnailsCard"),
       shippedSource("seekScratchReservationsCard"),
       shippedSource("liveTvGuideCard"), shippedSource("liveTvDeinterlaceCard"),
-      // `clusterBackupCard`'s extracted source runs to the next function and
-      // so already carries `DEV_READINESS_LABEL`; composing both declares it
-      // twice.
-      shippedSource("clusterBackupCard"),
+      shippedConst("DEV_READINESS_LABEL"), shippedConst("LIVE_TV_GUIDE_DRAFT"),
       shippedSource("devReadinessRow"), shippedSource("devReadinessPill"),
       shippedSource("devReadinessEvidence"), shippedSource("devReq"),
       shippedSource("devStaticReq"), shippedSource("clusterTransportRecoveryCard"),
-      shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
+      // The fourth time (see above): `clusterBackupCard` shipped with the
+      // portable backup and fenced restore and reached `developerPanel`
+      // without being composed here, so this whole gate died on its name.
+      shippedSource("clusterBackupCard"), shippedSource("durableQueueCard"),
+      shippedSource("clusterPlacementCard"), shippedSource("boundedCatalogueCard"),
+      shippedSource("storageDomainsCard"),
+      shippedSource("autoQualityCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       shippedSource("libraryChannelsSettingsCard"),
       shippedSource("playbackProtocolCard"), shippedSource("liveHlsRecoveryCard"),
       shippedSource("playbackPanel"), shippedSource("metadataPanel"),
@@ -451,8 +547,25 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const html = renderComposedPanel(
     "developerPanel", () => panels.developerPanel(settings, readiness),
   );
-  for (const id of ["pqh", "pdp", "dhqa", "adr", "sub503", "pgsoverlay", "subsrc"])
+  for (const id of ["hevc-unverified", "durable-analysis", "durable-pretranscode", "pabr", "pqh", "pdp", "dhqa", "adr", "sub503", "pgsoverlay", "subsrc", "subcluster", "subbackfill", "chthumb"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
+  // Parallel playback ranges are automatic: the card explains them and reads
+  // peer reachability as advisory, and offers no switch of its own.
+  const ranges = /Parallel playback subtitle ranges[\s\S]*?(?=<div class="setsection"|TOG:subsrc)/.exec(html);
+  assert.ok(ranges, "Developer shows the automatic playback-ranges card");
+  assert.doesNotMatch(ranges[0], /TOG:/, "playback ranges have no enable switch");
+  const unverified = panels.developerPanel({...settings, hevc_unverified_copy:true,
+    hevc_header_trace_available:false, vod_index_cluster_cache:false, vod_index_mins:0}, readiness);
+  assert.match(unverified, /TOG:hevc-unverified\|[^|]*\|[^|]*\|checked=true\|/);
+  assert.match(unverified, /FOOT:saveHevcCopy/);
+  assert.match(unverified, /not configured/);
+  // Absent from the settings document is on: chapter thumbnails default on.
+  assert.match(html, /TOG:chthumb\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(html, /FOOT:saveChapterThumbnails/);
+  assert.match(
+    panels.developerPanel({ ...settings, chapter_thumbnails: false }, readiness),
+    /TOG:chthumb\|[^|]*\|[^|]*\|checked=false/,
+  );
   assert.match(html, /TOG:pgsoverlay\|[^|]*\|[^|]*\|checked=false/);
   assert.match(html, /FOOT:savePgsOverlay/);
   assert.match(panels.developerPanel({ ...settings, pgs_overlay: true }, readiness),
@@ -464,15 +577,31 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     panels.developerPanel({ ...settings, subtitle_stored_sources: false }, readiness),
     /TOG:subsrc\|[^|]*\|[^|]*\|checked=false/,
   );
+  // Neither the unseen schema report nor an unmet queue reading may remove
+  // the switch or force a saved cluster/backfill choice off.
+  const unmet = {items:[
+    {id:"subtitle_cluster_sources",requirements:[{id:"analysis_queue",status:"unmet",evidence:"Queue is off."}]},
+    {id:"subtitle_backfill",requirements:[{id:"backfill_lease",status:"unobservable",evidence:"No holder between passes."}]},
+  ]};
+  const optedIn = renderComposedPanel("developerPanel", () => panels.developerPanel(
+    {...settings,subtitle_cluster_sources:true,subtitle_backfill:true}, unmet));
+  assert.match(optedIn, /TOG:subcluster\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(optedIn, /TOG:subbackfill\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(optedIn, /Queue is off\./);
+  assert.match(optedIn, /No holder between passes\./);
+  for (const id of ["backfill_lease","backfill_enqueued","backfill_remaining","backfill_bytes"])
+    assert.match(optedIn,new RegExp(`data-devstat="subtitle_backfill:${id}"`));
   assert.doesNotMatch(html, /HDHomeRun Live TV|CARDHEAD:Programme guide/);
   for (const route of ["livetv", "playback", "cluster"])
     assert.ok(html.includes(`href="#/settings/${route}"`), `${route} has a destination link`);
+  assert.match(html, /FOOT:saveAutoQuality/);
   assert.match(html, /FOOT:savePreparedQuality/);
   assert.match(html, /Seek scratch accounting/);
   for (const id of ["pcpv1", "dvlr", "dvrenabled", "lcenabled", "lcsubjectenabled", "ca-enabled", "dvwin"])
     assert.ok(!html.includes(`TOG:${id}|`), `Developer no longer owns ${id}`);
   assert.doesNotMatch(html, /Playback surface contract|Web HLS startup recovery|HEVC sample-entry admission|Source probe compatibility|Search and classification|id="ui-enable"/);
   const playback = panels.playbackPanel(settings, readiness);
+  assert.doesNotMatch(playback, /TOG:pabr\|/, "Auto quality belongs to Developer");
   for (const id of ["pcpv1", "dvlr"])
     assert.match(playback, new RegExp(`TOG:${id}\\|[^|]*\\|[^|]*\\|checked=true`));
   assert.match(playback, /FOOT:savePlaybackCompatibility/);
@@ -494,6 +623,8 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.match(html, /reopen loop/);
   assert.match(html, /One recovery per playback, and it is never given back/);
   assert.match(html, /best-effort selected-stream diagnostics/);
+  assert.match(html, /Chrome shaped-network recovery[\s\S]*?not met/);
+  assert.match(html, /These observations never gate this checkbox/);
   const quality = panels.preparedQualityCard(settings, readiness);
   assert.match(quality, /TOG:pqh\|[^|]*\|[^|]*\|checked=true/);
   assert.match(quality, /FOOT:savePreparedQuality/);
@@ -549,6 +680,33 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.match(live, /api\.hdhomerun\.com/);
   assert.match(live, /never stores, logs or relays that credential/);
   assert.match(live, /FOOT:saveLiveTvGuide/);
+});
+
+test("unmet subtitle readiness cannot refuse the saved cluster or backfill switches", async () => {
+  const writes=[];
+  const nodes=new Map([
+    ["subcluster",{checked:true}], ["subbackfill",{checked:true}],
+    ["subclustererr",{textContent:""}], ["subbackfillerr",{textContent:""}],
+    ["subclustercard",{outerHTML:""}], ["subbackfillcard",{outerHTML:""}],
+  ]);
+  const document={getElementById:id=>nodes.get(id)};
+  const api=async (_path,request)=>{writes.push(request.body);return request.body;};
+  const save=new Function("document","api",
+    `const DEVELOPER_READINESS={items:[{id:"subtitle_cluster_sources",requirements:[{id:"analysis_queue",status:"unmet"}]}]};
+     const cacheSettings=value=>value,toast=()=>{},setCardSaved=()=>{};
+     const subtitleClusterSourcesCard=s=>\`cluster: \${s.subtitle_cluster_sources}\`;
+     const subtitleBackfillCard=s=>\`backfill: \${s.subtitle_backfill}\`;
+     ${shippedSource("saveSubtitleClusterSources")}
+     ${shippedSource("saveSubtitleBackfill")}
+     return {saveSubtitleClusterSources,saveSubtitleBackfill};`,
+  )(document,api);
+  await save.saveSubtitleClusterSources(null);
+  await save.saveSubtitleBackfill(null);
+  assert.deepEqual(writes,[{subtitle_cluster_sources:true},{subtitle_backfill:true}]);
+  assert.equal(nodes.get("subclustercard").outerHTML,"cluster: true");
+  assert.equal(nodes.get("subbackfillcard").outerHTML,"backfill: true");
+  assert.equal(nodes.get("subclustererr").textContent,"");
+  assert.equal(nodes.get("subbackfillerr").textContent,"");
 });
 
 test("server guidance sends disabled Live TV features to their current settings", () => {
@@ -972,14 +1130,14 @@ test("Maintenance shows the stored subtitle tracks: size, what is riding now, an
   assert.match(html, /a pass already running finishes its index but publishes none of the tracks it kept/, "what off does, exactly");
   assert.doesNotMatch(html, /setwarn/);
 
-  // Switch on, gate closed: the card says so and why, instead of a green pill
-  // over "nothing is riding".
+  // Switch on with a readiness concern: the card explains it without
+  // treating the observation as a feature gate.
   const blocked = render({
     subtitle_stored_sources: true,
     subtitle_store: { riding: [], gate: { open: false, reason: "the startup self-test failed: ffprobe <7.1> and ffmpeg 8.0 differ" } },
   });
-  assert.match(blocked, /HEAD:Stored subtitle tracks\|<span class="pill bad">not keeping tracks<\/span>/);
-  assert.match(blocked, /class="setwarn">⚠ <b>The index pass on this node keeps no PGS tracks:<\/b> the startup self-test failed: ffprobe &lt;7\.1&gt; and ffmpeg 8\.0 differ\./);
+  assert.match(blocked, /HEAD:Stored subtitle tracks\|<span class="pill warn">readiness concern<\/span>/);
+  assert.match(blocked, /class="setwarn">⚠ <b>Review stored-track readiness:<\/b> the startup self-test failed: ffprobe &lt;7\.1&gt; and ffmpeg 8\.0 differ\./);
 
   const idle = render({ subtitle_stored_sources: false, vod_index_mins: 15, subtitle_store: { riding: [], gate: { open: false, reason: "subtitles.stored_sources is off" } } });
   assert.match(idle, /HEAD:Stored subtitle tracks\|<span class="pill">off<\/span>/);
@@ -1153,6 +1311,22 @@ test("the viewer's four appearance choices share one popover", () => {
   for (const fn of ["setTheme", "setAppearance", "setIconSize"])
     assert.match(shippedSource(fn), /repaintLookMenu\(\)/, `${fn} repaints the shared menu`);
   assert.match(shippedSource("sizeMenuHtml"), /Poster size/, "named as the mobile apps name it");
+});
+
+test("HEVC override saves either choice without consulting advisory readiness", async () => {
+  for (const enabled of [true, false]) {
+    const calls=[];
+    const err={textContent:""}, card={outerHTML:""};
+    const save = new Function("api","document","cacheSettings","hevcCopyCard","toast",
+      `${shippedSource("saveHevcCopy")}\nreturn saveHevcCopy;`)(
+      async (path, opts) => {calls.push([path,opts.body]);return {hevc_unverified_copy:enabled,hevc_header_trace_available:false};},
+      {getElementById:(id)=>id==="hevc-copy-error"?err:id==="hevc-copy-card"?card:{checked:enabled}},
+      ()=>{}, s=>`saved:${s.hevc_unverified_copy}`, ()=>{});
+    await save({disabled:false});
+    assert.deepEqual(calls, [["/settings",{hevc_unverified_copy:enabled}]]);
+    assert.equal(card.outerHTML, `saved:${enabled}`);
+    assert.equal(err.textContent, "");
+  }
 });
 
 main().then(() => {

@@ -30,8 +30,8 @@ class PlaybackInfoContractTest {
         sourceBitrate = "48 Mb/s",
         container = "MKV",
         sourceAudio = "TRUEHD · 7.1 · English",
-        playingVideo = "HEVC · 1920×1080",
-        decodeResolution = "1920×1080",
+        playingVideo = "HEVC",
+        streamFrame = "1920×1080",
         playingAudio = "AAC · Stereo · English",
         dynamicRange = "HDR10",
         subtitles = "English · native",
@@ -127,7 +127,7 @@ class PlaybackInfoContractTest {
             .filter { PlaybackStatsMode.Mini in it.modes }
             .map(InfoRow::id)
         assertEquals(
-            listOf("decode_resolution", "player_state", "client_loaded"),
+            listOf("decode_resolution", "stream_frame", "player_state", "client_loaded"),
             mini,
         )
     }
@@ -135,7 +135,8 @@ class PlaybackInfoContractTest {
     @Test
     fun missingPlayerSizeDoesNotFallBackToTheSourceSize() {
         val rows = playbackInfoRows(details.copy(decodeResolution = null, sourceResolution = "3840×2160"), emptyList())
-        assertEquals("Not reported", rows.single { it.id == "decode_resolution" }.value)
+        assertEquals("Unavailable", rows.single { it.id == "decode_resolution" }.value)
+        assertEquals("1920×1080", rows.single { it.id == "stream_frame" }.value)
         assertEquals("3840×2160", rows.single { it.id == "source_resolution" }.value)
     }
 

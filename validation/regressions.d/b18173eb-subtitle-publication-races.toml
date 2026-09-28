@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b18173eb"]
+points = ["core.media", "playback.pipeline", "server.api"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The sole adversarial review found cold HLS and PGS overlay misses bypassing queued extraction or verified hydration, a foreground wait starting a second producer beside a running worker, partial ready coverage unable to repair, redundant indexing on a second node, and publication after cancellation. cold_hls_rendition_warm_enqueues_and_completes_queued_source, node_a_publication_hydrates_node_b_overlay_before_demux, remote_running_beyond_wait_bound_never_starts_inline_producer, the partial-ready SQLite and Hiqlite store cases, a_second_nodes_index_pass_skips_cluster_extracted_coverage_for_the_same_source, cancellation_during_publish_removes_new_cluster_rows_and_local_entry, and admin_cancellation_during_publish_compensates_rows_and_manifest retain those boundaries."

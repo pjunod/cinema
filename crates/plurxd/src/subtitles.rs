@@ -6,6 +6,9 @@
 //! subtitle endpoint always uses it, and burned transcodes reuse it for simple
 //! text codecs whose authored styling is not lost by WebVTT conversion.
 
+#[cfg(test)]
+use crate::background_jobs::subtitle_fixture::SubtitleFixture;
+
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -33,6 +36,9 @@ const MAX_WINDOW_ENTRIES: usize = 64;
 /// (a stalled mount that never returns bytes and never errors) can no longer
 /// park every waiter forever.
 const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(600);
+// A queue wait must finish before the surrounding sidecar producer's 600 s
+// timeout, so it can report an active remote owner without racing that timer.
+const CLUSTER_WAIT_TIMEOUT: Duration = Duration::from_secs(590);
 
 /// How long a failure is remembered. AVPlayer asks for a VTT segment roughly
 /// every segment duration (~6 s), and before this memo each of those requests
@@ -42,6 +48,9 @@ const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(600);
 /// the NAS, replacing the file) is picked up inside a viewer's patience
 /// rather than needing a restart.
 const NEGATIVE_TTL: Duration = Duration::from_secs(120);
+/// Internal flight result: all waiters must see the same no-cues answer, but
+/// it is a success and must not enter the negative failure memo.
+const EMPTY_BURN_RESULT: &str = "subtitle cluster burn track has no cues";
 
 /// Failures remembered at once. A memo is a path, a deadline and a short
 /// message, so the cap is about refusing unbounded growth rather than saving
@@ -856,19 +865,352 @@ async fn enlist(cached: &Path, max_bytes: u64) -> Flight {
 }
 
 /// Return a cached WebVTT sidecar, extracting it atomically on a miss.
-pub async fn ensure_vtt(dir: &Path, file: &MediaFile, index: i64) -> Result<PathBuf, String> {
-    ensure_vtt_with(dir, file, index, |tmp, file, index| async move {
-        extract_vtt(&tmp, &file, index).await
+///
+/// `work` is the caller's class and purpose for the extraction a miss starts.
+/// A flight already running keeps the class of the caller that started it.
+pub async fn ensure_vtt(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    work: crate::process_control::ChildWork,
+) -> Result<PathBuf, String> {
+    ensure_vtt_with(dir, file, index, move |tmp, file, index| async move {
+        extract_vtt(&tmp, &file, index, work).await
     })
     .await
+}
+
+/// The VTT-keyed path consults the stored representation before enlisting an
+/// extraction. This must stay outside `ensure_vtt_at`: that helper also owns
+/// burn and seek-window keys, for which a WebVTT copy would be wrong.
+pub(crate) async fn ensure_vtt_with_store(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    stored: &crate::subtitle_source::StoreAccess,
+    work: crate::process_control::ChildWork,
+) -> Result<PathBuf, String> {
+    if let Some(path) = try_store_vtt(dir, file, index, stored).await? {
+        return Ok(path);
+    }
+    let stored = stored.clone();
+    ensure_vtt_with(dir, file, index, move |tmp, file, index| async move {
+        match cluster_vtt_into(&tmp, &file, index, &stored).await {
+            Ok(true) => Ok(()),
+            Ok(false) => extract_vtt(&tmp, &file, index, work).await,
+            Err(reason) => Err(reason),
+        }
+    })
+    .await
+}
+
+/// The cluster preference runs in the already detached whole-track flight.
+/// A session start still joins for five seconds; direct and offline callers
+/// keep their existing long join. Failure to find a usable cluster answer
+/// releases this same flight to its original inline extractor.
+async fn cluster_vtt_into(
+    tmp: &Path,
+    file: &MediaFile,
+    index: i64,
+    access: &crate::subtitle_source::StoreAccess,
+) -> Result<bool, String> {
+    use crate::subtitle_source::{Consumer, Live, Lookup, RepresentationFormat};
+    use plurx_core::store::SubtitleSourceStamp;
+
+    if crate::subtitle_source::is_mpegts_container(file) || !access.cluster_enabled().await {
+        return Ok(false);
+    }
+    let (Some(store), Some(jobs)) = (access.store(), access.jobs()) else {
+        return Ok(false);
+    };
+    if !jobs.subtitle_source_queue_enabled().await {
+        return Ok(false);
+    }
+    let copy_local = || async {
+        match crate::subtitle_source::lookup(
+            access,
+            Consumer::Vtt,
+            file,
+            index,
+            Live::Path(&file.path),
+        )
+        .await
+        {
+            Lookup::Kept(kept) => crate::subtitle_source::copy_verified(&kept, tmp).await,
+            Lookup::Empty(_) => tokio::fs::write(tmp, b"WEBVTT\n\n").await.is_ok(),
+            Lookup::Miss(_) => false,
+        }
+    };
+    if crate::subtitle_source::hydrate_from_peers(access, file, index, RepresentationFormat::Webvtt)
+        .await
+        && copy_local().await
+    {
+        return Ok(true);
+    }
+    let publications = store
+        .list_subtitle_source_publications(file.id, file.size, file.mtime)
+        .await
+        .unwrap_or_default();
+    let portable_digest = if publications.is_empty() {
+        None
+    } else {
+        publication_source_digest(access, file, None).await
+    };
+    let settled_here = publications.iter().find(|row| {
+        row.ordinal == index
+            && row.format == "webvtt"
+            && row.origin == "extracted"
+            && Some(row.source_attestation.as_str()) == portable_digest.as_deref()
+            && (matches!(row.verdict.as_str(), "kept" | "empty" | "malformed")
+                || (row.verdict == "transient" && row.attempts >= 3))
+    });
+    if let Some(row) = settled_here {
+        if row.verdict == "empty" {
+            return Ok(tokio::fs::write(tmp, b"WEBVTT\n\n").await.is_ok());
+        }
+        if row.verdict != "kept" {
+            return Ok(false);
+        }
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if crate::subtitle_source::hydrate_from_peers(
+                access,
+                file,
+                index,
+                RepresentationFormat::Webvtt,
+            )
+            .await
+                && copy_local().await
+            {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    let stamp = SubtitleSourceStamp {
+        file_id: file.id,
+        source_size: file.size,
+        source_mtime: file.mtime,
+        pipeline_version: crate::state::subtitle_source_pipeline_version().await,
+    };
+    let mut request = match store
+        .enqueue_or_promote_subtitle_source(&stamp, "foreground", subtitle_clock_ms())
+        .await
+    {
+        Ok(Some(request)) => {
+            crate::telemetry::record_subtitle_source(
+                crate::telemetry::SubtitleSourceMetric::RequestForeground,
+            );
+            request
+        }
+        _ => return Ok(false),
+    };
+    if request.state == "ready" {
+        let source_digest = publication_source_digest(access, file, None).await;
+        if let Some(source_digest) = source_digest.filter(|digest| !digest.is_empty()) {
+            if store
+                .retire_subtitle_source_ready_for_ordinal(
+                    &stamp,
+                    index,
+                    &source_digest,
+                    subtitle_clock_ms(),
+                )
+                .await
+                .unwrap_or(false)
+            {
+                crate::telemetry::record_subtitle_source(
+                    crate::telemetry::SubtitleSourceMetric::Repair,
+                );
+                request = match store
+                    .enqueue_or_promote_subtitle_source(&stamp, "foreground", subtitle_clock_ms())
+                    .await
+                {
+                    Ok(Some(request)) => request,
+                    _ => return Ok(false),
+                };
+            }
+        }
+    }
+    let started = tokio::time::Instant::now();
+    let mut self_claimed = false;
+    loop {
+        if copy_local().await {
+            return Ok(true);
+        }
+        if crate::subtitle_source::hydrate_from_peers(
+            access,
+            file,
+            index,
+            RepresentationFormat::Webvtt,
+        )
+        .await
+            && copy_local().await
+        {
+            return Ok(true);
+        }
+        let current = match store.analysis_request(&request.request_id).await {
+            Ok(Some(current)) => current,
+            _ => return Ok(false),
+        };
+        match current.state.as_str() {
+            "cancelled" if current.last_error_code != "artifact_lost" => {
+                return Err("subtitle cluster job was cancelled".to_owned());
+            }
+            "failed" | "cancelled" => return Ok(false),
+            "ready" => {
+                let rows = store
+                    .list_subtitle_source_publications(file.id, file.size, file.mtime)
+                    .await
+                    .unwrap_or_default();
+                let portable_digest = publication_source_digest(access, file, None).await;
+                if rows.iter().any(|row| {
+                    row.ordinal == index
+                        && row.format == "webvtt"
+                        && row.origin == "extracted"
+                        && row.verdict == "empty"
+                        && Some(row.source_attestation.as_str()) == portable_digest.as_deref()
+                }) {
+                    return Ok(tokio::fs::write(tmp, b"WEBVTT\n\n").await.is_ok());
+                }
+                return Ok(false);
+            }
+            "queued" if started.elapsed() >= Duration::from_secs(20) && !self_claimed => {
+                self_claimed = true;
+                let runtime_cache = access.root().parent().unwrap_or(access.root());
+                let claimed = jobs
+                    .self_claim_subtitle_source(&request.request_id, runtime_cache)
+                    .await;
+                if !claimed
+                    && store
+                        .analysis_request(&request.request_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some_and(|latest| latest.state == "queued")
+                {
+                    return Err(
+                        "subtitle cluster job is still queued after the foreground claim wait"
+                            .to_owned(),
+                    );
+                }
+            }
+            _ => {}
+        }
+        if started.elapsed() >= CLUSTER_WAIT_TIMEOUT {
+            // The queue worker may legitimately own this row longer than the
+            // old inline extractor's bound. Expiring our wait must not start
+            // a second full-source producer beside that running job.
+            return Err(
+                "subtitle cluster job is still running after the sidecar wait bound".to_owned(),
+            );
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// A replicated empty verdict has no bytes to verify. Attest the current
+/// source before accepting it, and bind a burn flight to its held descriptor.
+async fn publication_source_digest(
+    access: &crate::subtitle_source::StoreAccess,
+    file: &MediaFile,
+    held_object_version: Option<&str>,
+) -> Option<String> {
+    let node_id = access.node_id()?;
+    let attested = crate::fragment_index_cluster::attest_source(node_id, file, None, &|_| {})
+        .await
+        .ok()?;
+    if held_object_version.is_some_and(|held| held != attested.observation.object_version) {
+        return None;
+    }
+    Some(attested.observation.source_sha256)
+}
+
+fn subtitle_clock_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            elapsed.as_millis().min(i64::MAX as u128) as i64
+        })
+}
+
+async fn try_store_vtt(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    stored: &crate::subtitle_source::StoreAccess,
+) -> Result<Option<PathBuf>, String> {
+    let cached = vtt_path(dir, file, index);
+    if valid_sidecar(&cached, MAX_SIDECAR_BYTES).await {
+        return Ok(Some(cached));
+    }
+    use crate::subtitle_source::{Consumer, Live, Lookup};
+    match crate::subtitle_source::lookup(stored, Consumer::Vtt, file, index, Live::Path(&file.path))
+        .await
+    {
+        Lookup::Kept(kept) => {
+            if !extractions().lock().await.contains_key(&cached) {
+                tokio::fs::create_dir_all(dir)
+                    .await
+                    .map_err(|error| format!("creating subtitle cache: {error}"))?;
+                let tmp = dir.join(format!(".tmp-{}.vtt", uuid::Uuid::new_v4()));
+                if crate::subtitle_source::copy_verified(&kept, &tmp).await {
+                    let valid = tokio::fs::metadata(&tmp)
+                        .await
+                        .is_ok_and(|metadata| metadata.len() <= MAX_SIDECAR_BYTES);
+                    if valid && tokio::fs::rename(&tmp, &cached).await.is_ok() {
+                        forget_failure(&cached).await;
+                        return Ok(Some(cached));
+                    }
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                }
+            }
+        }
+        Lookup::Empty(store_dir) => {
+            if !extractions().lock().await.contains_key(&cached) {
+                tokio::fs::create_dir_all(dir)
+                    .await
+                    .map_err(|error| format!("creating subtitle cache: {error}"))?;
+                let tmp = dir.join(format!(".tmp-{}.vtt", uuid::Uuid::new_v4()));
+                if tokio::fs::write(&tmp, b"WEBVTT\n\n").await.is_ok()
+                    && tokio::fs::rename(&tmp, &cached).await.is_ok()
+                {
+                    crate::subtitle_source::record_access(&store_dir).await;
+                    forget_failure(&cached).await;
+                    return Ok(Some(cached));
+                }
+                let _ = tokio::fs::remove_file(&tmp).await;
+            }
+        }
+        Lookup::Miss(_) => {}
+    }
+    Ok(None)
 }
 
 /// Return the complete sidecar bytes from the same no-follow handle that was
 /// bounded. HTTP consumers must use this instead of validating a pathname and
 /// reopening it, which would let a symlink/oversized replacement win between
 /// the two operations.
-pub async fn ensure_vtt_bytes(dir: &Path, file: &MediaFile, index: i64) -> Result<Vec<u8>, String> {
-    let path = ensure_vtt(dir, file, index).await?;
+#[cfg(test)]
+pub async fn ensure_vtt_bytes(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    work: crate::process_control::ChildWork,
+) -> Result<Vec<u8>, String> {
+    let path = ensure_vtt(dir, file, index, work).await?;
+    read_vtt_path(&path, MAX_SIDECAR_BYTES)
+        .await?
+        .ok_or_else(|| "published subtitle sidecar is no longer valid".to_owned())
+}
+
+pub(crate) async fn ensure_vtt_bytes_with_store(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    stored: &crate::subtitle_source::StoreAccess,
+    work: crate::process_control::ChildWork,
+) -> Result<Vec<u8>, String> {
+    let path = ensure_vtt_with_store(dir, file, index, stored, work).await?;
     read_vtt_path(&path, MAX_SIDECAR_BYTES)
         .await?
         .ok_or_else(|| "published subtitle sidecar is no longer valid".to_owned())
@@ -901,6 +1243,9 @@ pub enum SidecarState {
 /// Probe the cache for one track. See [`SidecarState`] for why this starts
 /// nothing.
 pub async fn sidecar_state(dir: &Path, file: &MediaFile, index: i64) -> SidecarState {
+    if file.downloaded_subtitle(index).is_some() {
+        return SidecarState::Ready;
+    }
     let cached = vtt_path(dir, file, index);
     if matches!(read_vtt_path(&cached, MAX_SIDECAR_BYTES).await, Ok(Some(_))) {
         return SidecarState::Ready;
@@ -916,6 +1261,19 @@ pub async fn sidecar_state(dir: &Path, file: &MediaFile, index: i64) -> SidecarS
         return SidecarState::Failed;
     }
     SidecarState::Absent
+}
+
+pub(crate) async fn sidecar_state_with_store(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    stored: &crate::subtitle_source::StoreAccess,
+) -> SidecarState {
+    if matches!(try_store_vtt(dir, file, index, stored).await, Ok(Some(_))) {
+        SidecarState::Ready
+    } else {
+        sidecar_state(dir, file, index).await
+    }
 }
 
 /// Probe the whole-track cache and the exact forward window serving one
@@ -955,6 +1313,21 @@ pub async fn sidecar_state_for_demand(
     SidecarState::Absent
 }
 
+pub(crate) async fn sidecar_state_for_demand_with_store(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    anchor_seconds: i64,
+    window_seconds: i64,
+    stored: &crate::subtitle_source::StoreAccess,
+) -> SidecarState {
+    if sidecar_state_with_store(dir, file, index, stored).await == SidecarState::Ready {
+        SidecarState::Ready
+    } else {
+        sidecar_state_for_demand(dir, file, index, anchor_seconds, window_seconds).await
+    }
+}
+
 /// How much longer this track's failure memo stands, when one does.
 ///
 /// The memo is what stops a player re-launching a full-source read every six
@@ -977,7 +1350,20 @@ pub async fn read_cached_vtt(
     file: &MediaFile,
     index: i64,
 ) -> Result<Option<Vec<u8>>, String> {
+    if let Some(track) = file.downloaded_subtitle(index) {
+        return Ok(Some(track.vtt.as_bytes().to_vec()));
+    }
     read_vtt_path(&vtt_path(dir, file, index), MAX_SIDECAR_BYTES).await
+}
+
+pub(crate) async fn read_cached_vtt_with_store(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    stored: &crate::subtitle_source::StoreAccess,
+) -> Result<Option<Vec<u8>>, String> {
+    let _ = try_store_vtt(dir, file, index, stored).await;
+    read_cached_vtt(dir, file, index).await
 }
 
 async fn read_vtt_path(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>, String> {
@@ -1003,8 +1389,32 @@ pub async fn ensure_vtt_file(
     dir: &Path,
     file: &MediaFile,
     index: i64,
+    work: crate::process_control::ChildWork,
 ) -> Result<std::fs::File, String> {
-    let path = ensure_vtt(dir, file, index).await?;
+    let path = ensure_vtt(dir, file, index, work).await?;
+    tokio::task::spawn_blocking(move || {
+        let handle = plurx_core::fs_secure::open_read_nofollow_blocking(&path)
+            .map_err(|error| format!("opening subtitle sidecar: {error}"))?;
+        let metadata = handle
+            .metadata()
+            .map_err(|error| format!("reading subtitle sidecar metadata: {error}"))?;
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_SIDECAR_BYTES {
+            return Err("published subtitle sidecar is not a bounded regular file".to_owned());
+        }
+        Ok(handle)
+    })
+    .await
+    .map_err(|error| format!("subtitle sidecar open worker failed: {error}"))?
+}
+
+pub(crate) async fn ensure_vtt_file_with_store(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    stored: &crate::subtitle_source::StoreAccess,
+    work: crate::process_control::ChildWork,
+) -> Result<std::fs::File, String> {
+    let path = ensure_vtt_with_store(dir, file, index, stored, work).await?;
     tokio::task::spawn_blocking(move || {
         let handle = plurx_core::fs_secure::open_read_nofollow_blocking(&path)
             .map_err(|error| format!("opening subtitle sidecar: {error}"))?;
@@ -1055,6 +1465,7 @@ pub(crate) async fn ensure_burn_file(
         expected_object_version,
         join_budget,
         &crate::subtitle_source::StoreAccess::off(),
+        crate::process_control::ChildClass::Background,
     )
     .await?
     {
@@ -1077,6 +1488,10 @@ pub(crate) async fn ensure_burn_file(
 /// the stored `.sup`, and `empty` answers [`BurnSource::Nothing`] without
 /// extracting at all. Every other state — and a derivation that fails — is
 /// today's extraction, unchanged, inside the same single flight.
+///
+/// `class` is the caller's: a session start that joins the flight for
+/// [`SIDECAR_JOIN_BUDGET`] passes realtime. A flight already running keeps
+/// the class of the caller that started it.
 pub(crate) async fn ensure_burn_source(
     dir: &Path,
     file: &MediaFile,
@@ -1084,6 +1499,7 @@ pub(crate) async fn ensure_burn_source(
     expected_object_version: Option<&str>,
     join_budget: Duration,
     stored: &crate::subtitle_source::StoreAccess,
+    class: crate::process_control::ChildClass,
 ) -> Result<BurnSource, String> {
     ensure_burn_source_with(
         dir,
@@ -1097,6 +1513,7 @@ pub(crate) async fn ensure_burn_source(
             ..Default::default()
         },
         Derivation::default(),
+        class,
     )
     .await
 }
@@ -1132,6 +1549,7 @@ impl Default for Derivation {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ensure_burn_source_with(
     dir: &Path,
     file: &MediaFile,
@@ -1140,11 +1558,22 @@ async fn ensure_burn_source_with(
     stored: &crate::subtitle_source::StoreAccess,
     limits: ExtractionLimits,
     derivation: Derivation,
+    class: crate::process_control::ChildClass,
 ) -> Result<BurnSource, String> {
     use sha2::{Digest, Sha256};
     let source = Arc::new(
         crate::fragment_index_cluster::open_source_fence(file, expected_object_version).await?,
     );
+    if file.downloaded_subtitle(index).is_some() {
+        return ensure_vtt_file(
+            dir,
+            file,
+            index,
+            crate::process_control::ChildWork::new(class, "downloaded subtitle for a burn"),
+        )
+        .await
+        .map(BurnSource::File);
+    }
     let version = hex::encode(Sha256::digest(source.object_version().as_bytes()));
     let cached = dir.join(format!("f{}-s{index}-{version}-burn-v2.mks", file.id));
     // A sidecar already published for this exact object is served before any
@@ -1167,6 +1596,8 @@ async fn ensure_burn_source_with(
         let kept_lookup = stored_track.is_some();
         let extractor_ran = Arc::clone(&ran);
         let extractor_source = Arc::clone(&source);
+        let cluster_access = stored.clone();
+        let cached_for_empty = cached.clone();
         let answer = ensure_vtt_at(
             cached,
             dir,
@@ -1182,38 +1613,66 @@ async fn ensure_burn_source_with(
                 // the derivation would refuse the source extraction below for
                 // its whole TTL. That is also why the derivation has a bound of
                 // its own, far inside the flight's.
-                if let Some(kept) = stored_track {
-                    // Boxed: both routes carry a 64 KiB copy buffer in their
-                    // state, and unboxed they are laid out, and in debug builds
-                    // moved, side by side on the polling thread's stack.
-                    if Box::pin(derive_burn_from_store(
-                        &tmp,
-                        &kept,
-                        MAX_BURN_BYTES,
-                        derivation,
-                    ))
-                    .await
-                    {
-                        #[cfg(test)]
-                        note_burn_route(file.id, "store");
-                        if !source.unchanged() {
-                            return Err("source changed during burn-track derivation".into());
+                let stored_track = match stored_track {
+                    Some(kept) => Some(kept),
+                    None => {
+                        match cluster_wait_burn(&cluster_access, &file, index, &source).await? {
+                            StoredBurn::Kept(kept) => Some(kept),
+                            StoredBurn::Nothing => return Err(EMPTY_BURN_RESULT.to_owned()),
+                            StoredBurn::Extract => None,
                         }
-                        return Ok(());
+                    }
+                };
+                if let Some(kept) = stored_track {
+                    if kept.format() == crate::subtitle_source::RepresentationFormat::Matroska {
+                        if crate::subtitle_source::copy_verified(&kept, &tmp).await
+                            && source.unchanged()
+                        {
+                            #[cfg(test)]
+                            note_burn_route(file.id, "store");
+                            return Ok(());
+                        }
+                        let _ = tokio::fs::remove_file(&tmp).await;
+                    } else {
+                        // Boxed: both routes carry a 64 KiB copy buffer in their
+                        // state, and unboxed they are laid out, and in debug builds
+                        // moved, side by side on the polling thread's stack.
+                        if Box::pin(derive_burn_from_store(
+                            &tmp,
+                            &kept,
+                            MAX_BURN_BYTES,
+                            derivation,
+                            class,
+                        ))
+                        .await
+                        {
+                            #[cfg(test)]
+                            note_burn_route(file.id, "store");
+                            if !source.unchanged() {
+                                return Err("source changed during burn-track derivation".into());
+                            }
+                            return Ok(());
+                        }
                     }
                 }
                 #[cfg(test)]
                 note_burn_route(file.id, "source");
                 #[cfg(not(test))]
                 let _ = &file;
-                extract_burn_from_source(&tmp, &source, index).await
+                extract_burn_from_source(&tmp, &source, index, class).await
             },
         )
         .await;
         if kept_lookup && !ran.load(std::sync::atomic::Ordering::Acquire) {
             crate::subtitle_source::record_kept_joined(crate::subtitle_source::Consumer::Burn);
         }
-        answer?
+        match answer {
+            Err(reason) if reason == EMPTY_BURN_RESULT => {
+                forget_failure(&cached_for_empty).await;
+                return Ok(BurnSource::Nothing);
+            }
+            other => other?,
+        }
     };
     if !source.unchanged() {
         return Err("source changed before burn sidecar attachment".into());
@@ -1273,6 +1732,185 @@ async fn stored_burn_track(
     }
 }
 
+/// Find or build a burn representation inside the existing detached burn
+/// flight. The held source remains open while a peer copy is bound to this
+/// node, so a replacement at the pathname cannot authorize the wrong inode.
+async fn cluster_wait_burn(
+    access: &crate::subtitle_source::StoreAccess,
+    file: &MediaFile,
+    index: i64,
+    source: &crate::fragment_index_cluster::SourceFence,
+) -> Result<StoredBurn, String> {
+    use crate::subtitle_source::RepresentationFormat;
+    use plurx_core::store::SubtitleSourceStamp;
+
+    if crate::subtitle_source::is_mpegts_container(file) || !access.cluster_enabled().await {
+        return Ok(StoredBurn::Extract);
+    }
+    let (Some(store), Some(jobs)) = (access.store(), access.jobs()) else {
+        return Ok(StoredBurn::Extract);
+    };
+    if !jobs.subtitle_source_queue_enabled().await {
+        return Ok(StoredBurn::Extract);
+    }
+    let format = match file
+        .subtitle_streams
+        .iter()
+        .find(|stream| stream.index == index)
+        .map(|stream| stream.codec.as_str())
+    {
+        Some("ass" | "ssa") => RepresentationFormat::Matroska,
+        Some("hdmv_pgs_subtitle") => RepresentationFormat::Sup,
+        _ => return Ok(StoredBurn::Extract),
+    };
+    let _ = crate::subtitle_source::hydrate_from_peers(access, file, index, format).await;
+    match stored_burn_track(access, file, index, source).await {
+        StoredBurn::Extract => {}
+        answer => return Ok(answer),
+    }
+    let stamp = SubtitleSourceStamp {
+        file_id: file.id,
+        source_size: file.size,
+        source_mtime: file.mtime,
+        pipeline_version: crate::state::subtitle_source_pipeline_version().await,
+    };
+    let rows = store
+        .list_subtitle_source_publications(file.id, file.size, file.mtime)
+        .await
+        .unwrap_or_default();
+    let portable_digest = if rows.is_empty() {
+        None
+    } else {
+        publication_source_digest(access, file, Some(source.object_version())).await
+    };
+    let format_name = format.publication_name();
+    if let Some(row) = rows.iter().find(|row| {
+        row.ordinal == index
+            && row.format == format_name
+            && row.origin == "extracted"
+            && Some(row.source_attestation.as_str()) == portable_digest.as_deref()
+            && (matches!(row.verdict.as_str(), "kept" | "empty" | "malformed")
+                || (row.verdict == "transient" && row.attempts >= 3))
+    }) {
+        match row.verdict.as_str() {
+            "empty" => return Ok(StoredBurn::Nothing),
+            "kept" => {
+                for _ in 0..10 {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    let _ = crate::subtitle_source::hydrate_from_peers(access, file, index, format)
+                        .await;
+                    match stored_burn_track(access, file, index, source).await {
+                        StoredBurn::Extract => {}
+                        answer => return Ok(answer),
+                    }
+                }
+                return Ok(StoredBurn::Extract);
+            }
+            _ => return Ok(StoredBurn::Extract),
+        }
+    }
+    let mut request = match store
+        .enqueue_or_promote_subtitle_source(&stamp, "foreground", subtitle_clock_ms())
+        .await
+    {
+        Ok(Some(request)) => {
+            crate::telemetry::record_subtitle_source(
+                crate::telemetry::SubtitleSourceMetric::RequestForeground,
+            );
+            request
+        }
+        _ => return Ok(StoredBurn::Extract),
+    };
+    if request.state == "ready" {
+        let source_digest =
+            publication_source_digest(access, file, Some(source.object_version())).await;
+        if let Some(source_digest) = source_digest.filter(|digest| !digest.is_empty()) {
+            if store
+                .retire_subtitle_source_ready_for_ordinal(
+                    &stamp,
+                    index,
+                    &source_digest,
+                    subtitle_clock_ms(),
+                )
+                .await
+                .unwrap_or(false)
+            {
+                crate::telemetry::record_subtitle_source(
+                    crate::telemetry::SubtitleSourceMetric::Repair,
+                );
+                request = match store
+                    .enqueue_or_promote_subtitle_source(&stamp, "foreground", subtitle_clock_ms())
+                    .await
+                {
+                    Ok(Some(request)) => request,
+                    _ => return Ok(StoredBurn::Extract),
+                };
+            }
+        }
+    }
+    let started = tokio::time::Instant::now();
+    let mut self_claimed = false;
+    loop {
+        let _ = crate::subtitle_source::hydrate_from_peers(access, file, index, format).await;
+        match stored_burn_track(access, file, index, source).await {
+            StoredBurn::Extract => {}
+            answer => return Ok(answer),
+        }
+        let current = match store.analysis_request(&request.request_id).await {
+            Ok(Some(current)) => current,
+            _ => return Ok(StoredBurn::Extract),
+        };
+        match current.state.as_str() {
+            "cancelled" if current.last_error_code != "artifact_lost" => {
+                return Err("subtitle cluster job was cancelled".to_owned());
+            }
+            "failed" | "cancelled" => return Ok(StoredBurn::Extract),
+            "ready" => {
+                let rows = store
+                    .list_subtitle_source_publications(file.id, file.size, file.mtime)
+                    .await
+                    .unwrap_or_default();
+                if rows.iter().any(|row| {
+                    row.ordinal == index && row.format == format_name && row.verdict == "empty"
+                }) {
+                    return Ok(StoredBurn::Nothing);
+                }
+                return Ok(StoredBurn::Extract);
+            }
+            "queued" if started.elapsed() >= Duration::from_secs(20) && !self_claimed => {
+                self_claimed = true;
+                let runtime_cache = access.root().parent().unwrap_or(access.root());
+                let claimed = jobs
+                    .self_claim_subtitle_source(&request.request_id, runtime_cache)
+                    .await;
+                if !claimed
+                    && store
+                        .analysis_request(&request.request_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some_and(|latest| latest.state == "queued")
+                {
+                    return Err(
+                        "subtitle cluster job is still queued after the foreground claim wait"
+                            .to_owned(),
+                    );
+                }
+            }
+            _ => {}
+        }
+        if started.elapsed() >= CLUSTER_WAIT_TIMEOUT {
+            // A running worker retains the sole producer slot until its own
+            // lease/worker deadline. Memo this flight error instead of
+            // launching an inline extraction in parallel with it.
+            return Err(
+                "subtitle cluster job is still running after the burn wait bound".to_owned(),
+            );
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
 /// Derive the burn sidecar from a stored `.sup`. `false` means use the source.
 ///
 /// **`-copyts` and no `-start_at_zero`.** The stored `.sup` was written
@@ -1293,12 +1931,13 @@ async fn derive_burn_from_store(
     kept: &crate::subtitle_source::KeptTrack,
     max_bytes: u64,
     derivation: Derivation,
+    class: crate::process_control::ChildClass,
 ) -> bool {
     use crate::subtitle_source::{record_fallback, Fallback};
     let Some(sup) = crate::subtitle_source::open_verified(kept).await else {
         return false;
     };
-    let run = Box::pin(run_burn_derivation(tmp, &sup, max_bytes));
+    let run = Box::pin(run_burn_derivation(tmp, &sup, max_bytes, class));
     #[cfg(test)]
     let run = async {
         if derivation.hang {
@@ -1380,6 +2019,7 @@ async fn run_burn_derivation(
     tmp: &Path,
     sup: &std::fs::File,
     max_bytes: u64,
+    class: crate::process_control::ChildClass,
 ) -> Result<(), String> {
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     crate::ffmpeg::inherit_file_descriptors(&mut command, &[(sup, 3)]);
@@ -1392,12 +2032,14 @@ async fn run_burn_derivation(
         .stdin(std::process::Stdio::null());
     #[cfg(windows)]
     crate::ffmpeg::verify_windows_source_path(sup, &input)?;
-    let (status, diagnostics) =
-        crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(&mut command)
-            .map_err(|error| format!("starting burn-track derivation: {error}"))?
-            .output_to_bounded_file(tmp, max_bytes)
-            .await
-            .map_err(|error| format!("waiting for burn-track derivation: {error}"))?;
+    let (status, diagnostics) = crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(
+        &mut command,
+        crate::process_control::ChildWork::new(class, "burned-subtitle track derivation"),
+    )
+    .map_err(|error| format!("starting burn-track derivation: {error}"))?
+    .output_to_bounded_file(tmp, max_bytes)
+    .await
+    .map_err(|error| format!("waiting for burn-track derivation: {error}"))?;
     if !status.success() {
         return Err(format!(
             "burn-track derivation failed: {}",
@@ -1432,6 +2074,7 @@ async fn extract_burn_from_source(
     tmp: &Path,
     source: &crate::fragment_index_cluster::SourceFence,
     index: i64,
+    class: crate::process_control::ChildClass,
 ) -> Result<(), String> {
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&source.handle, 3)]);
@@ -1467,12 +2110,14 @@ async fn extract_burn_from_source(
         .stdin(std::process::Stdio::null());
     #[cfg(windows)]
     crate::ffmpeg::verify_windows_source_path(&source.handle, &input)?;
-    let (status, diagnostics) =
-        crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(&mut command)
-            .map_err(|error| format!("starting burn-track extraction: {error}"))?
-            .output_to_bounded_file(tmp, MAX_BURN_BYTES)
-            .await
-            .map_err(|error| format!("waiting for burn-track extraction: {error}"))?;
+    let (status, diagnostics) = crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(
+        &mut command,
+        crate::process_control::ChildWork::new(class, "burned-subtitle track extraction"),
+    )
+    .map_err(|error| format!("starting burn-track extraction: {error}"))?
+    .output_to_bounded_file(tmp, MAX_BURN_BYTES)
+    .await
+    .map_err(|error| format!("waiting for burn-track extraction: {error}"))?;
     if !status.success() {
         return Err(format!(
             "burn-track extraction failed: {}",
@@ -1521,12 +2166,30 @@ pub(crate) fn burn_routes_for_test(file_id: i64) -> Vec<&'static str> {
 /// two seconds, while a real extraction may scan a multi-gigabyte source for
 /// minutes. One detached warmer per key lets playback begin immediately and
 /// lets later segments pick up the finished captions.
-pub async fn warm_vtt(dir: &Path, file: &MediaFile, index: i64) {
-    warm_vtt_with(dir, file, index, |tmp, file, index| async move {
-        extract_vtt(&tmp, &file, index).await
+pub(crate) async fn warm_vtt_with_store(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    stored: &crate::subtitle_source::StoreAccess,
+) {
+    if matches!(try_store_vtt(dir, file, index, stored).await, Ok(Some(_))) {
+        return;
+    }
+    let stored = stored.clone();
+    warm_vtt_with(dir, file, index, move |tmp, file, index| async move {
+        match cluster_vtt_into(&tmp, &file, index, &stored).await {
+            Ok(true) => Ok(()),
+            Ok(false) => extract_vtt(&tmp, &file, index, SUBTITLE_WARM_UP).await,
+            Err(reason) => Err(reason),
+        }
     })
     .await;
 }
+
+/// A warm-up nobody is waiting on: native HLS answers the segment empty and
+/// later segments pick the captions up.
+const SUBTITLE_WARM_UP: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::background("subtitle track warm-up");
 
 /// The whole-track warmer seam used by deterministic HTTP boundary tests.
 /// The injected producer still runs behind the production warmup and
@@ -1656,6 +2319,7 @@ where
                     );
                     forget_failure(&cached_for_task).await;
                 }
+                Err(why) if why == EMPTY_BURN_RESULT => {}
                 Err(why) => {
                     tracing::warn!(
                         file_id = file.id,
@@ -1842,34 +2506,23 @@ where
     outcome
 }
 
-/// Extract one bounded span of an embedded text track.
-///
-/// **`-ss` and `-to` go after `-i`, and that is load-bearing.** The obvious
-/// form — `-ss` before the input, so it is an index seek — is wrong twice, and
-/// both failures are silent:
-///
-/// - It rewrites cue timestamps toward zero. `slice_webvtt` and the
-///   `media_origin_seconds` shift both work in absolute source time, so a
-///   zero-based sidecar makes them select nothing and the handler falls back
-///   to the empty segment — which is the exact defect windowing exists to
-///   remove, wearing a different hat and passing a deadline test.
-/// - It does not bound the span. Measured against a fixture with cues at known
-///   times, `-ss 1800 -to 2000 -i src` returns *every cue in the file*.
-///
-/// `-copyts` restores the timestamps and still does not bound, which makes it
-/// the more dangerous near-miss: it fixes the half a reviewer checks.
-///
-/// The form below was measured to be the only one correct on both axes. It is
-/// an output seek, so ffmpeg reads the container from its start — see
-/// [`windowing_is_worthwhile`] for why that is acceptable and where it stops
-/// being so.
-async fn extract_vtt_window(
+/// Extract a playback text window. Indexed Matroska seeks skip preceding
+/// clusters. Copy timestamps without output -ss keeps one absolute timeline
+/// on both old and new FFmpeg; Rust filters preroll without rebasing cues.
+pub(crate) async fn extract_vtt_window(
     tmp: &Path,
     file: &MediaFile,
     index: i64,
     anchor_seconds: i64,
     window_seconds: i64,
 ) -> Result<(), String> {
+    if let Some(track) = file.downloaded_subtitle(index) {
+        // The consumer slices absolute cue times to its segment. Keeping the
+        // complete small track here also preserves cues spanning a window.
+        return tokio::fs::write(tmp, &track.vtt)
+            .await
+            .map_err(|e| e.to_string());
+    }
     let end = anchor_seconds
         .saturating_add(bounded_window_seconds(window_seconds))
         .saturating_add(WINDOW_SLACK_SECONDS);
@@ -1880,12 +2533,25 @@ async fn extract_vtt_window(
     let input = crate::ffmpeg::windows_source_path(&source.handle)?;
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&source.handle, 3)]);
-    command
-        .args(["-hide_banner", "-loglevel", "error", "-i"])
-        .arg(&input)
-        .args([
+    command.args(["-hide_banner", "-loglevel", "error"]);
+    let indexed = crate::subtitle_ranges::indexed_text(file, index);
+    if indexed {
+        command.args([
+            "-copyts",
+            "-start_at_zero",
             "-ss",
-            &anchor_seconds.to_string(),
+            &anchor_seconds.saturating_sub(60).max(0).to_string(),
+        ]);
+    }
+    command.arg("-i").arg(&input);
+    // Output -ss rebases subtitles on FFmpeg 5 but not 8. With copyts and
+    // no output seek both emit the full-extraction timeline, even when the
+    // first cue is sparse or the container starts at a nonzero timestamp.
+    if !indexed {
+        command.args(["-ss", &anchor_seconds.to_string()]);
+    }
+    command
+        .args([
             "-to",
             &end.to_string(),
             "-map",
@@ -1893,7 +2559,7 @@ async fn extract_vtt_window(
             "-f",
             "webvtt",
         ])
-        .arg(tmp)
+        .arg("pipe:1")
         .stdin(std::process::Stdio::null())
         // Same reason as the whole-track extractor: the bound is a kill, not
         // merely a stopped wait, or a wedged ffmpeg keeps the stalled mount
@@ -1901,21 +2567,36 @@ async fn extract_vtt_window(
         .kill_on_drop(true);
     #[cfg(windows)]
     crate::ffmpeg::verify_windows_source_path(&source.handle, &input)?;
-    let out = crate::process_control::output_job_owned(&mut command)
-        .await
-        .map_err(|e| format!("spawning subtitle window extraction: {e}"))?;
-    if !out.status.success() {
-        let why = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("subtitle window extraction failed: {}", why.trim()));
+    let (status, diagnostics) = crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(
+        &mut command,
+        crate::process_control::ChildWork::realtime("subtitle window for the playhead"),
+    )
+    .map_err(|error| format!("spawning subtitle window extraction: {error}"))?
+    .output_to_bounded_file(tmp, MAX_SIDECAR_BYTES)
+    .await
+    .map_err(|error| format!("reading subtitle window extraction: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "subtitle window extraction failed: {}",
+            diagnostics.trim()
+        ));
     }
-    // Normalize before the file is published, so what lands in the cache is
-    // always absolute-time whatever this ffmpeg build chose to emit. Doing it
-    // here rather than at read time means the base is decided once, by the
-    // code that knows the anchor, instead of on every segment request.
-    let extracted = tokio::fs::read(tmp)
+    if !source.unchanged() || source.reopen(file).await.is_err() {
+        return Err("subtitle window source changed during extraction".to_owned());
+    }
+    if !diagnostics.trim().is_empty() {
+        return Err("subtitle window decoder reported an error".to_owned());
+    }
+    let extracted = plurx_core::fs_secure::read_bounded_regular(tmp, MAX_SIDECAR_BYTES)
         .await
         .map_err(|e| format!("reading the extracted subtitle window: {e}"))?;
-    let normalized = normalize_window_cues(&extracted, anchor_seconds);
+    let normalized = if indexed {
+        // Preroll is already in absolute source time. Never infer its base
+        // from the first cue: sparse windows make that ambiguous.
+        crate::subtitle_ranges::filter_absolute_window(&extracted, anchor_seconds, end)?
+    } else {
+        normalize_window_cues(&extracted, anchor_seconds)
+    };
     if normalized != extracted {
         tokio::fs::write(tmp, &normalized)
             .await
@@ -1950,6 +2631,7 @@ pub async fn read_cached_window(
 /// settled on one. It is the only thing that lets a later anchor displace an
 /// earlier flight: without an ordering fact, a second anchor is just a second
 /// request, and the work already running is as likely to be the right work.
+#[allow(clippy::too_many_arguments)]
 pub async fn warm_vtt_window(
     session: &str,
     sequence: Option<u64>,
@@ -1958,7 +2640,10 @@ pub async fn warm_vtt_window(
     index: i64,
     anchor_seconds: i64,
     window_seconds: i64,
+    access: &crate::subtitle_source::StoreAccess,
 ) -> bool {
+    let access = access.clone();
+    let dir_owned = dir.to_owned();
     warm_vtt_window_with(
         session,
         sequence,
@@ -1967,8 +2652,17 @@ pub async fn warm_vtt_window(
         index,
         anchor_seconds,
         window_seconds,
-        |tmp, file, index, anchor_seconds, window_seconds| async move {
-            extract_vtt_window(&tmp, &file, index, anchor_seconds, window_seconds).await
+        move |tmp, file, index, anchor_seconds, window_seconds| async move {
+            crate::subtitle_ranges::prepare(
+                &access,
+                &dir_owned,
+                &tmp,
+                &file,
+                index,
+                anchor_seconds,
+                window_seconds,
+            )
+            .await
         },
     )
     .await
@@ -2004,12 +2698,14 @@ where
     // would become a filename with a minus in it and an `-ss -500`, and the
     // safety should not live only in the caller.
     let anchor_seconds = anchor_seconds.max(0);
-    if !windowing_is_worthwhile(
-        anchor_seconds,
-        duration_seconds,
-        window_seconds,
-        whole_track_progress(dir, file, index).await,
-    ) {
+    if !crate::subtitle_ranges::indexed_text(file, index)
+        && !windowing_is_worthwhile(
+            anchor_seconds,
+            duration_seconds,
+            window_seconds,
+            whole_track_progress(dir, file, index).await,
+        )
+    {
         return false;
     }
     let cached = vtt_window_path(dir, file, index, anchor_seconds, window_seconds);
@@ -2183,7 +2879,17 @@ pub(crate) fn peak_window_flights_for_test(session: &str) -> usize {
         .unwrap_or(0)
 }
 
-async fn extract_vtt(tmp: &Path, file: &MediaFile, index: i64) -> Result<(), String> {
+async fn extract_vtt(
+    tmp: &Path,
+    file: &MediaFile,
+    index: i64,
+    work: crate::process_control::ChildWork,
+) -> Result<(), String> {
+    if let Some(track) = file.downloaded_subtitle(index) {
+        return tokio::fs::write(tmp, &track.vtt)
+            .await
+            .map_err(|e| e.to_string());
+    }
     let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
     #[cfg(unix)]
     let input = PathBuf::from("/dev/fd/3");
@@ -2204,7 +2910,7 @@ async fn extract_vtt(tmp: &Path, file: &MediaFile, index: i64) -> Result<(), Str
         .kill_on_drop(true);
     #[cfg(windows)]
     crate::ffmpeg::verify_windows_source_path(&source.handle, &input)?;
-    let out = crate::process_control::output_job_owned(&mut command)
+    let out = crate::process_control::output_job_owned(&mut command, work)
         .await
         .map_err(|e| format!("spawning subtitle extraction: {e}"))?;
     if !out.status.success() {
@@ -2471,6 +3177,11 @@ async fn prune_matching_windows(
     }
 }
 
+/// The class a test's own extraction runs at.
+#[cfg(test)]
+pub(crate) const TEST_TRACK: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::background("subtitle extraction test");
+
 #[cfg(test)]
 mod tests {
     /// The measurement this rule exists for, kept where it can be checked.
@@ -2653,8 +3364,68 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn downloaded_captions_rebuild_cache_without_embedded_streams_or_provider() {
+        let dir = crate::test_tempdir().expect("downloaded caption fixture");
+        let mut file = media_file(dir.path().join("not-an-embedded-subtitle.mkv"));
+        let vtt = "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nFirst\n\n00:02:00.000 --> 00:02:05.000\nLater\n";
+        file.subtitle_streams = vec![plurx_core::domain::SubtitleStream {
+            index: 0,
+            codec: "webvtt".into(),
+            ..Default::default()
+        }];
+        file.downloaded_subtitles = vec![plurx_core::domain::DownloadedSubtitle {
+            source_size: file.size,
+            source_mtime: file.mtime,
+            provider_file_id: 1,
+            language: "en".into(),
+            title: "Example".into(),
+            hearing_impaired: false,
+            forced: false,
+            vtt: vtt.into(),
+        }];
+        assert_eq!(
+            read_cached_vtt(dir.path(), &file, 0)
+                .await
+                .expect("downloaded caption fixture")
+                .expect("downloaded caption fixture"),
+            vtt.as_bytes()
+        );
+        assert!(matches!(
+            sidecar_state(dir.path(), &file, 0).await,
+            SidecarState::Ready
+        ));
+        assert_eq!(
+            ensure_vtt_bytes(dir.path(), &file, 0, crate::subtitles::TEST_TRACK)
+                .await
+                .expect("downloaded caption fixture"),
+            vtt.as_bytes()
+        );
+        tokio::fs::remove_file(vtt_path(dir.path(), &file, 0))
+            .await
+            .expect("downloaded caption fixture");
+        assert_eq!(
+            ensure_vtt_bytes(dir.path(), &file, 0, crate::subtitles::TEST_TRACK)
+                .await
+                .expect("downloaded caption fixture"),
+            vtt.as_bytes()
+        );
+        let window = dir.path().join("window.vtt");
+        extract_vtt_window(&window, &file, 0, 200, 200)
+            .await
+            .expect("downloaded caption fixture");
+        assert_eq!(
+            tokio::fs::read(window)
+                .await
+                .expect("downloaded caption fixture"),
+            vtt.as_bytes(),
+            "absolute cues are never shifted to a later seek window"
+        );
+    }
+
     fn media_file(path: PathBuf) -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 77,
             item_id: 1,
             path,
@@ -3022,7 +3793,7 @@ mod tests {
         tokio::fs::write(&cached, original)
             .await
             .expect("warm sidecar");
-        let mut held = ensure_vtt_file(dir.path(), &file, 0)
+        let mut held = ensure_vtt_file(dir.path(), &file, 0, crate::subtitles::TEST_TRACK)
             .await
             .expect("held subtitle handle");
         let replacement = dir.path().join("replacement.vtt");
@@ -3421,11 +4192,16 @@ mod tests {
 mod stored_source_tests {
     use super::*;
     use crate::subtitle_source::testing::{kept, settled, stamp_of, write_manifest};
-    use crate::subtitle_source::{self as store, StoreAccess, Verdict};
+    use crate::subtitle_source::{
+        self as store, RepresentationEntry, RepresentationFormat, RepresentationOrigin,
+        StoreAccess, TrackEntry, TrackKind, Verdict,
+    };
+    use sha2::Digest;
 
     fn file_at(id: i64, path: PathBuf) -> MediaFile {
         let metadata = std::fs::metadata(&path).expect("source metadata");
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id,
             item_id: 1,
             size: metadata.len() as i64,
@@ -3576,6 +4352,193 @@ mod stored_source_tests {
         StoreAccess::new(root.to_owned(), true)
     }
 
+    fn text_store(base: &Path, file_id: i64, verdict: Verdict) -> (MediaFile, StoreAccess) {
+        let source = base.join("source.mkv");
+        std::fs::write(&source, b"source bytes").expect("source");
+        let file = file_at(file_id, source.clone());
+        let root = base.join("runtime").join(store::STORE_DIR);
+        let dir = store::file_dir(&root, file_id);
+        std::fs::create_dir_all(&dir).expect("store dir");
+        let bytes = b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhello\n";
+        let sha256 = hex::encode(sha2::Sha256::digest(bytes));
+        let name = store::representation_file_name(0, RepresentationFormat::Webvtt, &sha256)
+            .expect("name");
+        if verdict == Verdict::Kept {
+            std::fs::write(dir.join(&name), bytes).expect("VTT");
+        }
+        write_manifest(
+            &root,
+            file_id,
+            stamp_of(&source),
+            vec![TrackEntry {
+                ordinal: 0,
+                kind: TrackKind::Text,
+                representations: vec![RepresentationEntry {
+                    format: RepresentationFormat::Webvtt,
+                    origin: RepresentationOrigin::Extracted,
+                    verdict,
+                    attempts: 1,
+                    file: (verdict == Verdict::Kept).then_some(name),
+                    sha256: (verdict == Verdict::Kept).then_some(sha256),
+                    bytes: if verdict == Verdict::Kept {
+                        bytes.len() as u64
+                    } else {
+                        0
+                    },
+                }],
+                verdict,
+                attempts: 1,
+                file: None,
+                sha256: None,
+            }],
+        );
+        (file, on(&root))
+    }
+
+    #[tokio::test]
+    async fn store_answer_does_not_start_vtt_flight() {
+        let base = crate::test_tempdir().expect("fixture");
+        let (file, access) = text_store(base.path(), 93_001, Verdict::Kept);
+        let cache = base.path().join("subs");
+        let cached = vtt_path(&cache, &file, 0);
+        remember_failure(&cached, "a flight would hit this memo", NEGATIVE_TTL).await;
+        let path = ensure_vtt_with_store(&cache, &file, 0, &access, crate::subtitles::TEST_TRACK)
+            .await
+            .expect("stored VTT");
+        assert_eq!(
+            std::fs::read(path).expect("sidecar"),
+            b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhello\n"
+        );
+        assert_eq!(remembered_failure(&cached).await, None);
+        assert!(!extractions().lock().await.contains_key(&cached));
+    }
+
+    #[tokio::test]
+    async fn webvtt_store_lookup_never_targets_burn_or_window_key() {
+        let base = crate::test_tempdir().expect("fixture");
+        let (file, access) = text_store(base.path(), 93_002, Verdict::Kept);
+        let cache = base.path().join("subs");
+        ensure_vtt_with_store(&cache, &file, 0, &access, crate::subtitles::TEST_TRACK)
+            .await
+            .expect("stored VTT");
+        assert!(!vtt_window_path(&cache, &file, 0, 0, 200).exists());
+        assert!(!cache.join(format!("f{}-s0-burn-v2.mks", file.id)).exists());
+        assert_eq!(std::fs::read_dir(cache).expect("cache").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn empty_stored_text_publishes_webvtt_without_flight() {
+        let base = crate::test_tempdir().expect("fixture");
+        let (file, access) = text_store(base.path(), 93_003, Verdict::Empty);
+        let cache = base.path().join("subs");
+        let cached = vtt_path(&cache, &file, 0);
+        remember_failure(&cached, "a flight would hit this memo", NEGATIVE_TTL).await;
+        let path = ensure_vtt_with_store(&cache, &file, 0, &access, crate::subtitles::TEST_TRACK)
+            .await
+            .expect("empty VTT");
+        assert_eq!(std::fs::read(path).expect("sidecar"), b"WEBVTT\n\n");
+        assert_eq!(remembered_failure(&cached).await, None);
+        assert!(!extractions().lock().await.contains_key(&cached));
+    }
+
+    #[tokio::test]
+    async fn styled_ass_stored_matroska_burn_matches_source_cues_and_style() {
+        crate::transcode::require_ffmpeg();
+        let base = crate::test_tempdir().expect("fixture");
+        let authored = base.path().join("styled.ass");
+        std::fs::write(&authored, "[Script Info]\nScriptType: v4.00+\nPlayResX: 320\nPlayResY: 180\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Arial,24,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,2,10,10,10,1\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.50,0:00:03.50,Default,,0,0,0,,{\\pos(120,90)}Positioned caption\n").expect("ASS");
+        let source = base.path().join("styled.mkv");
+        run(
+            std::process::Command::new(ffmpeg_bin())
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-nostdin",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=black:s=320x180:r=10:d=5",
+                    "-i",
+                ])
+                .arg(&authored)
+                .args([
+                    "-map", "0:v:0", "-map", "1:s:0", "-c:v", "mpeg4", "-c:s", "ass",
+                ])
+                .arg(&source),
+            "mux styled ASS fixture",
+        );
+        let file = file_at(93_004, source.clone());
+        let direct_cache = base.path().join("direct");
+        let direct = ensure_burn_source(
+            &direct_cache,
+            &file,
+            0,
+            None,
+            SIDECAR_JOIN_UNBOUNDED,
+            &StoreAccess::off(),
+            crate::process_control::ChildClass::Background,
+        )
+        .await
+        .expect("direct burn");
+        let BurnSource::File(mut direct) = direct else {
+            panic!("direct burn file")
+        };
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut direct, &mut bytes).expect("direct bytes");
+        assert!(bytes
+            .windows(b"Positioned caption".len())
+            .any(|part| part == b"Positioned caption"));
+        let sha256 = hex::encode(sha2::Sha256::digest(&bytes));
+        let name = store::representation_file_name(0, RepresentationFormat::Matroska, &sha256)
+            .expect("name");
+        let root = base.path().join("runtime").join(store::STORE_DIR);
+        let local = store::file_dir(&root, file.id);
+        std::fs::create_dir_all(&local).expect("local store");
+        std::fs::write(local.join(&name), &bytes).expect("stored Matroska");
+        write_manifest(
+            &root,
+            file.id,
+            stamp_of(&source),
+            vec![TrackEntry {
+                ordinal: 0,
+                kind: TrackKind::TextStyled,
+                representations: vec![RepresentationEntry {
+                    format: RepresentationFormat::Matroska,
+                    origin: RepresentationOrigin::Extracted,
+                    verdict: Verdict::Kept,
+                    attempts: 1,
+                    file: Some(name),
+                    sha256: Some(sha256),
+                    bytes: bytes.len() as u64,
+                }],
+                verdict: Verdict::Kept,
+                attempts: 1,
+                file: None,
+                sha256: None,
+            }],
+        );
+        let stored_cache = base.path().join("stored");
+        let stored = ensure_burn_source(
+            &stored_cache,
+            &file,
+            0,
+            None,
+            SIDECAR_JOIN_UNBOUNDED,
+            &on(&root),
+            crate::process_control::ChildClass::Background,
+        )
+        .await
+        .expect("stored burn");
+        let BurnSource::File(mut stored) = stored else {
+            panic!("stored burn file")
+        };
+        let mut from_store = Vec::new();
+        std::io::Read::read_to_end(&mut stored, &mut from_store).expect("stored bytes");
+        assert_eq!(from_store, bytes, "styled Matroska is copied intact");
+    }
+
     /// The design's required fixture (§6.2 fact 10, §6.7 item 1).
     ///
     /// The derived `.mks` must put every cue exactly where today's source
@@ -3606,6 +4569,7 @@ mod stored_source_tests {
                     None,
                     SIDECAR_JOIN_UNBOUNDED,
                     &StoreAccess::off(),
+                    crate::process_control::ChildClass::Background,
                 )
                 .await
                 .expect("today's extraction"),
@@ -3639,6 +4603,7 @@ mod stored_source_tests {
                     None,
                     SIDECAR_JOIN_UNBOUNDED,
                     &on(&root),
+                    crate::process_control::ChildClass::Background,
                 )
                 .await
                 .expect("derived sidecar"),
@@ -3698,9 +4663,17 @@ mod stored_source_tests {
         );
         let cache = base.path().join("subs");
 
-        let answer = ensure_burn_source(&cache, &file, 0, None, SIDECAR_JOIN_UNBOUNDED, &on(&root))
-            .await
-            .expect("an answer");
+        let answer = ensure_burn_source(
+            &cache,
+            &file,
+            0,
+            None,
+            SIDECAR_JOIN_UNBOUNDED,
+            &on(&root),
+            crate::process_control::ChildClass::Background,
+        )
+        .await
+        .expect("an answer");
         assert!(matches!(answer, BurnSource::Nothing));
         assert!(
             burn_routes_for_test(file_id).is_empty(),
@@ -3719,6 +4692,7 @@ mod stored_source_tests {
             None,
             SIDECAR_JOIN_UNBOUNDED,
             &StoreAccess::new(root, false),
+            crate::process_control::ChildClass::Background,
         )
         .await
         .expect("off reads the source");
@@ -3754,6 +4728,7 @@ mod stored_source_tests {
             None,
             SIDECAR_JOIN_UNBOUNDED,
             &StoreAccess::new(root.clone(), false),
+            crate::process_control::ChildClass::Background,
         )
         .await
         .expect("off");
@@ -3779,6 +4754,7 @@ mod stored_source_tests {
             None,
             SIDECAR_JOIN_UNBOUNDED,
             &on(&root),
+            crate::process_control::ChildClass::Background,
         )
         .await
         .expect("mpegts");
@@ -3799,6 +4775,7 @@ mod stored_source_tests {
             None,
             SIDECAR_JOIN_UNBOUNDED,
             &on(&root),
+            crate::process_control::ChildClass::Background,
         )
         .await
         .expect("mpegts empty");
@@ -3834,10 +4811,17 @@ mod stored_source_tests {
         let before = store::fallbacks_for_test(store::Fallback::DeriveFailed);
 
         let today_cues = {
-            let answer =
-                ensure_burn_source(&cache, &file, 0, None, SIDECAR_JOIN_UNBOUNDED, &on(&root))
-                    .await
-                    .expect("the source answers in the same call");
+            let answer = ensure_burn_source(
+                &cache,
+                &file,
+                0,
+                None,
+                SIDECAR_JOIN_UNBOUNDED,
+                &on(&root),
+                crate::process_control::ChildClass::Background,
+            )
+            .await
+            .expect("the source answers in the same call");
             burned(answer, &base.path().join("fallback.mks"))
         };
         assert_eq!(
@@ -3931,6 +4915,7 @@ mod stored_source_tests {
                 timeout: Duration::from_millis(200),
                 hang: true,
             },
+            crate::process_control::ChildClass::Background,
         ))
         .await
         .expect("the source answers once the derivation is cut off");
@@ -4000,6 +4985,7 @@ mod stored_source_tests {
             &on(&root),
             limits,
             Derivation::default(),
+            crate::process_control::ChildClass::Background,
         ))
         .await
         {
@@ -4028,6 +5014,7 @@ mod stored_source_tests {
             &on(&root),
             limits,
             Derivation::default(),
+            crate::process_control::ChildClass::Background,
         ))
         .await;
         assert!(matches!(again, Err(ref why) if why == &remembered));
@@ -4074,7 +5061,8 @@ mod stored_source_tests {
                 0,
                 None,
                 SIDECAR_JOIN_UNBOUNDED,
-                &access
+                &access,
+                crate::process_control::ChildClass::Background
             )),
             Box::pin(ensure_burn_source(
                 &cache,
@@ -4082,7 +5070,8 @@ mod stored_source_tests {
                 0,
                 None,
                 SIDECAR_JOIN_UNBOUNDED,
-                &access
+                &access,
+                crate::process_control::ChildClass::Background
             )),
         );
         assert!(matches!(first, Ok(BurnSource::File(_))));
@@ -4097,5 +5086,499 @@ mod stored_source_tests {
             before + 2,
             "both lookups counted, the joiner's included"
         );
+    }
+}
+
+#[cfg(test)]
+mod cluster_consumer_tests {
+    use super::*;
+    use plurx_core::domain::{ItemKind, NewItem, NewLibrary, ProbeResult, SubtitleStream};
+    use plurx_core::store::{
+        keys, ClusterFragmentIndexStore, LibraryStore, MediaStore, SettingsStore, SqliteStore,
+        SubtitleSourcePublication, SubtitleSourceStamp,
+    };
+
+    /// Plan P-02 §3.2.2, review of #518 finding 1: a whole-track extraction
+    /// runs at the class its caller passes. The `/subs` request a viewer's
+    /// player waits on is realtime; the native-HLS warm-up nobody waits on is
+    /// background. Before the fix every whole-track extraction was background.
+    #[tokio::test]
+    async fn a_whole_track_extraction_runs_at_the_class_its_caller_passes() {
+        use crate::process_control::{priority::spawns_of, ChildClass};
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+
+        let fixture = fixture(97_002, &[Sub::Srt]);
+        let store = SqliteStore::open_in_memory().expect("SQLite");
+        let file = catalogued_text_source(&store, &fixture.source).await;
+        let off = crate::subtitle_source::StoreAccess::off();
+
+        let viewer = crate::http::stream::SUBTITLE_TRACK_FOR_A_VIEWER;
+        assert_eq!(viewer.class, ChildClass::Realtime);
+        let before = spawns_of(viewer);
+        let bytes =
+            ensure_vtt_bytes_with_store(&fixture.dir.path().join("viewer"), &file, 0, &off, viewer)
+                .await
+                .expect("the viewer's track");
+        assert!(std::str::from_utf8(&bytes).expect("VTT").contains("hello"));
+        assert!(
+            spawns_of(viewer) > before,
+            "the viewer's extraction was not started at the realtime class"
+        );
+
+        assert_eq!(SUBTITLE_WARM_UP.class, ChildClass::Background);
+        let before = spawns_of(SUBTITLE_WARM_UP);
+        let warm = fixture.dir.path().join("warm");
+        warm_vtt_with_store(&warm, &file, 0, &off).await;
+        let published = vtt_path(&warm, &file, 0);
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !valid_sidecar(&published, MAX_SIDECAR_BYTES).await {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the detached warm-up published its sidecar");
+        assert!(
+            spawns_of(SUBTITLE_WARM_UP) > before,
+            "the warm-up's extraction was not started at the background class"
+        );
+    }
+
+    async fn catalogued_text_source(store: &SqliteStore, source: &Path) -> MediaFile {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Cluster subtitle consumer".to_owned(),
+                kind: plurx_core::domain::LibraryKind::Movies,
+                paths: vec![source.parent().expect("parent").to_owned()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Subtitle fixture".to_owned(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let metadata = std::fs::metadata(source).expect("source metadata");
+        let stamp = crate::fragment_index_cluster::source_stamp(&metadata);
+        let probe = ProbeResult {
+            container: Some("mkv".to_owned()),
+            subtitle_streams: vec![SubtitleStream {
+                index: 0,
+                codec: "subrip".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let id = store
+            .upsert_file(
+                item,
+                source.to_str().expect("source path"),
+                metadata.len() as i64,
+                stamp.mtime,
+                &probe,
+            )
+            .await
+            .expect("catalogue source");
+        MediaFile {
+            id,
+            item_id: item,
+            path: source.to_owned(),
+            size: metadata.len() as i64,
+            mtime: stamp.mtime,
+            duration_ms: Some(16_000),
+            container: probe.container,
+            video_codec: Some("h264".to_owned()),
+            video_codec_tag: None,
+            field_order: None,
+            video_profile: None,
+            width: Some(64),
+            height: Some(64),
+            bit_depth: Some(8),
+            hdr: None,
+            hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
+            dolby_vision: Default::default(),
+            bitrate: None,
+            audio_streams: Vec::new(),
+            subtitle_streams: probe.subtitle_streams,
+            downloaded_subtitles: Vec::new(),
+            scanned_at: 0,
+            audio_offset_ms: 0,
+            probed: true,
+        }
+    }
+
+    async fn access(store: Arc<SqliteStore>, base: &Path) -> crate::subtitle_source::StoreAccess {
+        for key in [
+            keys::VOD_INDEX_CLUSTER_CACHE,
+            keys::SUBTITLE_CLUSTER_SOURCES,
+            keys::SUBTITLE_STORED_SOURCES,
+        ] {
+            store.put_setting(key, "1").await.expect("enable fixture");
+        }
+        let jobs = crate::state::JobManager::test_new(store.clone(), base.join("artwork"));
+        crate::subtitle_source::StoreAccess::from_setting(store, &base.join("runtime"))
+            .on_node(Some("test-node"))
+            .with_jobs(jobs)
+    }
+
+    async fn source_and_access(
+        base: &Path,
+    ) -> (
+        Arc<SqliteStore>,
+        MediaFile,
+        crate::subtitle_source::StoreAccess,
+    ) {
+        let source = base.join("source.mkv");
+        std::fs::write(&source, b"not needed by queue-state tests").expect("source");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("SQLite"));
+        let file = catalogued_text_source(&store, &source).await;
+        let access = access(Arc::clone(&store), base).await;
+        (store, file, access)
+    }
+
+    async fn stamp(file: &MediaFile) -> SubtitleSourceStamp {
+        SubtitleSourceStamp {
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            pipeline_version: crate::state::subtitle_source_pipeline_version().await,
+        }
+    }
+
+    async fn source_digest(file: &MediaFile) -> String {
+        crate::fragment_index_cluster::attest_source("test-node", file, None, &|_| {})
+            .await
+            .expect("attest fixture")
+            .observation
+            .source_sha256
+    }
+
+    #[tokio::test]
+    async fn cancelled_job_memos_for_negative_ttl_without_reenqueue() {
+        let base = crate::test_tempdir().expect("fixture");
+        let (store, file, access) = source_and_access(base.path()).await;
+        let request = store
+            .enqueue_or_promote_subtitle_source(
+                &stamp(&file).await,
+                "foreground",
+                subtitle_clock_ms(),
+            )
+            .await
+            .expect("enqueue")
+            .expect("request");
+        store
+            .cancel_analysis_request_admin(&request.request_id, subtitle_clock_ms())
+            .await
+            .expect("cancel request");
+        let cache = base.path().join("subs");
+        let first = ensure_vtt_with_store(&cache, &file, 0, &access, crate::subtitles::TEST_TRACK)
+            .await
+            .expect_err("operator cancellation is terminal for this flight");
+        assert!(first.contains("cancelled"));
+        let cached = vtt_path(&cache, &file, 0);
+        assert_eq!(
+            remembered_failure(&cached).await.as_deref(),
+            Some(first.as_str())
+        );
+        let second = ensure_vtt_with_store(&cache, &file, 0, &access, crate::subtitles::TEST_TRACK)
+            .await
+            .expect_err("negative memo refuses immediate retry");
+        assert_eq!(second, first);
+        let rows = store.analysis_requests(10).await.expect("requests");
+        assert_eq!(rows.len(), 1, "memo cannot fork a second producer");
+        assert_eq!(rows[0].state, "cancelled");
+        assert!(!rows[0].force_rebuild);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unreachable_holders_release_inline_after_claim_wait_without_second_producer() {
+        let base = crate::test_tempdir().expect("fixture");
+        let (store, file, access) = source_and_access(base.path()).await;
+        store
+            .upsert_subtitle_source_publication(&SubtitleSourcePublication {
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                source_attestation: source_digest(&file).await,
+                node_id: "unreachable-node".to_owned(),
+                ordinal: 0,
+                kind: "text".to_owned(),
+                format: "webvtt".to_owned(),
+                verdict: "kept".to_owned(),
+                attempts: 1,
+                origin: "extracted".to_owned(),
+                sha256: "b".repeat(64),
+                bytes: 25,
+                published_at_ms: subtitle_clock_ms(),
+            })
+            .await
+            .expect("holder publication");
+        let tmp = base.path().join("candidate.vtt");
+        assert!(!cluster_vtt_into(&tmp, &file, 0, &access)
+            .await
+            .expect("release to inline"));
+        assert!(store
+            .analysis_requests(10)
+            .await
+            .expect("requests")
+            .is_empty());
+        assert!(
+            !tmp.exists(),
+            "cluster preference did not fabricate a sidecar"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_failed_row_releases_inline_path() {
+        let base = crate::test_tempdir().expect("fixture");
+        let (store, file, access) = source_and_access(base.path()).await;
+        let now = subtitle_clock_ms();
+        let request = store
+            .enqueue_or_promote_subtitle_source(&stamp(&file).await, "foreground", now)
+            .await
+            .expect("enqueue")
+            .expect("request");
+        let claimed = store
+            .claim_subtitle_fixture(&request.request_id, "test-node", now, now + 120_000)
+            .await
+            .expect("claim")
+            .expect("running request");
+        assert!(store
+            .fail_subtitle_fixture(&claimed, "stored_probe_invalid", now)
+            .await
+            .expect("fail request"));
+        let tmp = base.path().join("candidate.vtt");
+        assert!(!cluster_vtt_into(&tmp, &file, 0, &access)
+            .await
+            .expect("terminal failure releases inline"));
+        let rows = store.analysis_requests(10).await.expect("requests");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, "failed");
+        assert!(!rows[0].force_rebuild);
+    }
+
+    #[tokio::test]
+    async fn source_empty_publication_completes_vtt_without_inline_extraction() {
+        let base = crate::test_tempdir().expect("fixture");
+        let (store, file, access) = source_and_access(base.path()).await;
+        store
+            .upsert_subtitle_source_publication(&SubtitleSourcePublication {
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                source_attestation: source_digest(&file).await,
+                node_id: "producer".to_owned(),
+                ordinal: 0,
+                kind: "text".to_owned(),
+                format: "webvtt".to_owned(),
+                verdict: "empty".to_owned(),
+                attempts: 1,
+                origin: "extracted".to_owned(),
+                sha256: String::new(),
+                bytes: 0,
+                published_at_ms: subtitle_clock_ms(),
+            })
+            .await
+            .expect("empty publication");
+        let cache = base.path().join("subs");
+        let path = ensure_vtt_with_store(&cache, &file, 0, &access, crate::subtitles::TEST_TRACK)
+            .await
+            .expect("empty representation");
+        assert_eq!(std::fs::read(path).expect("sidecar"), b"WEBVTT\n\n");
+        assert!(store
+            .analysis_requests(10)
+            .await
+            .expect("requests")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn direct_text_and_offline_cold_queued_requests_complete_without_500() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+
+        let fixture = fixture(97_000, &[Sub::Srt]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("SQLite"));
+        let file = catalogued_text_source(&store, &fixture.source).await;
+        let access = access(Arc::clone(&store), fixture.dir.path()).await;
+        let jobs = Arc::clone(access.jobs().expect("queue worker"));
+        let cache = fixture.dir.path().join("subs");
+
+        let direct = {
+            let access = access.clone();
+            let file = file.clone();
+            let cache = cache.clone();
+            tokio::spawn(async move {
+                ensure_vtt_bytes_with_store(&cache, &file, 0, &access, crate::subtitles::TEST_TRACK)
+                    .await
+            })
+        };
+        let offline = {
+            let access = access.clone();
+            let file = file.clone();
+            let cache = cache.clone();
+            tokio::spawn(async move {
+                ensure_vtt_file_with_store(&cache, &file, 0, &access, crate::subtitles::TEST_TRACK)
+                    .await
+            })
+        };
+        let request = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(request) = store
+                    .analysis_requests(10)
+                    .await
+                    .expect("queued requests")
+                    .into_iter()
+                    .next()
+                {
+                    break request;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("consumer queued foreground work");
+        assert_eq!(request.priority, "foreground");
+        assert!(!request.force_rebuild);
+        assert!(
+            jobs.self_claim_subtitle_source(
+                &request.request_id,
+                &fixture.dir.path().join("runtime")
+            )
+            .await
+        );
+        let direct = direct
+            .await
+            .expect("direct task")
+            .expect("direct VTT bytes");
+        let mut offline = offline
+            .await
+            .expect("offline task")
+            .expect("offline VTT file");
+        let mut offline_bytes = Vec::new();
+        std::io::Read::read_to_end(&mut offline, &mut offline_bytes).expect("offline VTT bytes");
+        assert_eq!(direct, offline_bytes);
+        assert!(std::str::from_utf8(&direct).expect("VTT").contains("hello"));
+        let rows = store.analysis_requests(10).await.expect("requests");
+        assert_eq!(rows.len(), 1, "both callers joined one producer");
+        assert_eq!(rows[0].state, "ready");
+    }
+
+    #[tokio::test]
+    async fn cold_hls_rendition_warm_enqueues_and_completes_queued_source() {
+        use crate::subtitle_ride_along::testing::{fixture, Sub};
+
+        let fixture = fixture(97_001, &[Sub::Srt]);
+        let store = Arc::new(SqliteStore::open_in_memory().expect("SQLite"));
+        let file = catalogued_text_source(&store, &fixture.source).await;
+        let access = access(Arc::clone(&store), fixture.dir.path()).await;
+        let jobs = Arc::clone(access.jobs().expect("queue worker"));
+        let cache = fixture.dir.path().join("hls-subs");
+
+        // The HLS segment returns while its detached warmer owns the flight.
+        warm_vtt_with_store(&cache, &file, 0, &access).await;
+        let request = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(request) = store
+                    .analysis_requests(10)
+                    .await
+                    .expect("queued requests")
+                    .into_iter()
+                    .next()
+                {
+                    break request;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("detached HLS warm enqueued its source");
+        assert_eq!(request.priority, "foreground");
+        assert!(!request.force_rebuild);
+        assert!(
+            jobs.self_claim_subtitle_source(
+                &request.request_id,
+                &fixture.dir.path().join("runtime")
+            )
+            .await
+        );
+        let sidecar = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let sidecar = vtt_path(&cache, &file, 0);
+                if valid_sidecar(&sidecar, MAX_SIDECAR_BYTES).await {
+                    break sidecar;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("queue result reached the detached HLS warmer");
+        assert!(std::fs::read_to_string(sidecar)
+            .expect("VTT")
+            .contains("hello"));
+        assert_eq!(
+            store.analysis_requests(10).await.expect("requests").len(),
+            1
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn remote_running_beyond_wait_bound_never_starts_inline_producer() {
+        let base = crate::test_tempdir().expect("fixture");
+        let (store, file, access) = source_and_access(base.path()).await;
+        let now = subtitle_clock_ms();
+        let request = store
+            .enqueue_or_promote_subtitle_source(&stamp(&file).await, "foreground", now)
+            .await
+            .expect("enqueue")
+            .expect("request");
+        store
+            .claim_subtitle_fixture(&request.request_id, "remote-worker", now, now + 1_800_000)
+            .await
+            .expect("claim")
+            .expect("running row");
+
+        let cache = base.path().join("vtt-cache");
+        let error = tokio::time::timeout(
+            Duration::from_secs(670),
+            ensure_vtt_with_store(&cache, &file, 0, &access, crate::subtitles::TEST_TRACK),
+        )
+        .await
+        .expect("bounded VTT wait")
+        .expect_err("active worker cannot release inline");
+        assert!(error.contains("still running"), "{error}");
+        assert_eq!(
+            remembered_failure(&vtt_path(&cache, &file, 0)).await,
+            Some(error)
+        );
+
+        let mut pgs = file.clone();
+        pgs.subtitle_streams[0].codec = "hdmv_pgs_subtitle".to_owned();
+        let source = crate::fragment_index_cluster::open_source_fence(&pgs, None)
+            .await
+            .expect("held source");
+        let error = tokio::time::timeout(
+            Duration::from_secs(610),
+            cluster_wait_burn(&access, &pgs, 0, &source),
+        )
+        .await
+        .expect("bounded burn wait")
+        .err()
+        .expect("active worker cannot release burn inline");
+        assert!(error.contains("still running"), "{error}");
+        let rows = store.analysis_requests(10).await.expect("requests");
+        assert_eq!(rows.len(), 1, "neither consumer forked a producer");
+        assert_eq!(rows[0].state, "running");
+        assert!(!rows[0].force_rebuild);
     }
 }

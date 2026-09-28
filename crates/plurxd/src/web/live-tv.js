@@ -71,6 +71,17 @@
     };
   }
 
+  function watchableOffers(error) {
+    const rows = error && error.code === "tuner_capacity" && error.answer && error.answer.body
+      ? error.answer.body.watchable : null;
+    if (!Array.isArray(rows)) return [];
+    const seen = new Set();
+    return rows.filter(row => row && typeof row.channel_id === "string"
+        && typeof row.guide_number === "string" && row.guide_number.trim()
+        && !seen.has(row.channel_id) && (seen.add(row.channel_id), true))
+      .map(row => ({ channelId: row.channel_id, label: `Watch ${row.guide_number} instead` }));
+  }
+
   function errorView(error) {
     const code = String((error && error.code) || "owner_unavailable");
     const outcome = startOutcome({
@@ -78,7 +89,7 @@
       body: { code, retry: error && error.retry, owner_decided: error && error.owner_decided },
     });
     const selected = ERROR_COPY[outcome.render] || ERROR_COPY.owner_unavailable;
-    return { code, title: selected[0], detail: selected[1], retryable: outcome.offerRetry };
+    return { code, title: selected[0], detail: selected[1], retryable: outcome.offerRetry, offers: watchableOffers(error) };
   }
 
   function channelView(channel) {
@@ -150,6 +161,122 @@
       exact: [dimensions || picture, video, audio].filter(Boolean),
       observedAt: format?.observed_at || null,
     };
+  }
+
+  // Information facts are normalized from one delivery object. In particular,
+  // browser intrinsic dimensions are a presentation observation, never an
+  // encoded output measurement or a fallback for a missing planned width.
+  function pictureDimension(value) {
+    return Number.isSafeInteger(value) && value > 0 && value <= 16384 ? value : null;
+  }
+
+  function pictureFrame(value) {
+    return { width: pictureDimension(value?.width ?? value?.video_width),
+      height: pictureDimension(value?.height ?? value?.video_height) };
+  }
+
+  function pictureGcd(a, b) {
+    while (b) [a, b] = [b, a % b];
+    return a;
+  }
+
+  function parsePictureRatio(value) {
+    if (typeof value !== "string" || !/^[1-9][0-9]*:[1-9][0-9]*$/.test(value.trim())) return null;
+    const [numerator, denominator] = value.trim().split(":").map(Number);
+    if (!Number.isSafeInteger(numerator) || !Number.isSafeInteger(denominator)) return null;
+    const divisor = pictureGcd(numerator, denominator);
+    return { numerator: numerator / divisor, denominator: denominator / divisor };
+  }
+
+  function pictureFrameText(frame) {
+    if (frame.width && frame.height) return `${frame.width}×${frame.height}`;
+    if (frame.height) return `Height ${frame.height}`;
+    return "Unavailable";
+  }
+
+  function pictureDar(frame, sar) {
+    if (!frame.width || !frame.height || !sar) return null;
+    const numerator = frame.width * sar.numerator;
+    const denominator = frame.height * sar.denominator;
+    if (!Number.isSafeInteger(numerator) || !Number.isSafeInteger(denominator)) return null;
+    const divisor = pictureGcd(numerator, denominator);
+    return { numerator: numerator / divisor, denominator: denominator / divisor };
+  }
+
+  function pictureRatioText(ratio) {
+    return ratio ? `${ratio.numerator}:${ratio.denominator}` : "Unavailable";
+  }
+
+  function pictureFrameComparison(source, stream, provenance) {
+    if (!source.width || !source.height || !stream.width || !stream.height) return "Unavailable";
+    const dw = stream.width - source.width, dh = stream.height - source.height;
+    const planned = provenance === "server_plan";
+    if (!dw && !dh) return planned ? "No resize planned" : "Frame dimensions unchanged";
+    if (dw <= 0 && dh <= 0) return planned ? "Resolution reduction planned" : "Stream resolution reduced";
+    if (dw >= 0 && dh >= 0) return planned ? "Larger frame dimensions planned" : "Stream frame dimensions increased";
+    return planned ? "Frame dimensions change planned" : "Stream frame dimensions changed";
+  }
+
+  function pictureDisplayAgreement(frame, dar, display) {
+    if (!dar || !display.width || !display.height) return null;
+    const expectedWidth = display.height * dar.numerator / dar.denominator;
+    const expectedHeight = display.width * dar.denominator / dar.numerator;
+    return (display.width >= Math.floor(expectedWidth) && display.width <= Math.ceil(expectedWidth)) ||
+      (display.height >= Math.floor(expectedHeight) && display.height <= Math.ceil(expectedHeight));
+  }
+
+  function normalizeLiveTvPictureFacts({ delivery, presentation, channelObservation,
+      attachmentCurrent, nowSeconds, compatibleAperture = false }) {
+    const plan = attachmentCurrent ? delivery : null;
+    const observed = !plan && channelObservation &&
+      Number.isSafeInteger(channelObservation.observed_at) &&
+      nowSeconds < channelObservation.observed_at + 20 * 60 ? channelObservation : null;
+    const source = pictureFrame(plan?.source || observed);
+    const stream = pictureFrame(plan?.output);
+    const display = attachmentCurrent ? pictureFrame(presentation) : pictureFrame(null);
+    const sourceSar = parsePictureRatio(plan?.source?.sample_aspect_ratio);
+    const sourceDar = pictureDar(source, sourceSar);
+    return {
+      source, stream, display, sourceSar, sourceDar,
+      sourceProvenance: plan?.source ? "source_probe" : observed ? "channel_observation" : "unavailable",
+      streamProvenance: plan?.output ? "server_plan" : "unavailable",
+      displayProvenance: display.width && display.height ? "player_presentation" : "unavailable",
+      frameComparison: plan?.source ? pictureFrameComparison(source, stream, "server_plan") : "Unavailable",
+      aspectComparison: compatibleAperture && plan?.source &&
+        pictureDisplayAgreement(source, sourceDar, display) === true
+        ? "Player display is consistent with source shape" : "Not verified",
+    };
+  }
+
+  function formatLiveTvPictureFacts(facts) {
+    return {
+      source_resolution: pictureFrameText(facts.source),
+      source_resolution_note: facts.sourceProvenance === "source_probe" ? "Source probe" :
+        facts.sourceProvenance === "channel_observation" ? "Last observed broadcast" : "Unavailable",
+      source_pixel_aspect: pictureRatioText(facts.sourceSar),
+      source_display_aspect: pictureRatioText(facts.sourceDar),
+      stream_frame: pictureFrameText(facts.stream),
+      stream_frame_note: facts.streamProvenance === "server_plan" ? "Planned output" : "Unavailable",
+      stream_pixel_aspect: "Not measured",
+      decode_resolution: pictureFrameText(facts.display),
+      decode_resolution_note: facts.displayProvenance === "player_presentation"
+        ? "Browser intrinsic dimensions" : "Unavailable",
+      frame_comparison: facts.frameComparison,
+      aspect_comparison: facts.aspectComparison,
+    };
+  }
+
+  function liveTvReasonText(reasons) {
+    if (!Array.isArray(reasons)) return "The server did not provide a conversion reason.";
+    const seen = new Set();
+    const explanations = [];
+    for (const reason of reasons) {
+      const explanation = typeof reason?.explanation === "string" ? reason.explanation.trim() : "";
+      if (!explanation) continue;
+      const pair = `${String(reason.code || "")}\u0000${explanation}`;
+      if (!seen.has(pair)) { seen.add(pair); explanations.push(explanation); }
+    }
+    return explanations.join(" · ") || "The server did not provide a conversion reason.";
   }
 
   // Source facts from the tuner and the bounded FFmpeg input description.
@@ -664,6 +791,10 @@
     channelBadges,
     measuredSourceFormat,
     sourceDetails,
+    parsePictureRatio,
+    normalizeLiveTvPictureFacts,
+    formatLiveTvPictureFacts,
+    liveTvReasonText,
     errorView,
     programmeAt,
     gridLayout,

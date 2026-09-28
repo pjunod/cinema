@@ -24,6 +24,15 @@ fn ffprobe_bin() -> String {
         .unwrap_or_else(|| "ffprobe".to_owned())
 }
 
+/// Exact parser/reporter identity used by portable leaf work.
+pub async fn pipeline_digest() -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let reporter = reporter_identity_of(&ffprobe_bin()).await?;
+    Some(hex::encode(Sha256::digest(format!(
+        "leaf-probe-v1:{reporter}"
+    ))))
+}
+
 /// A scan probe may read a large media file across a cold NAS mount. This is a
 /// hang ceiling, not a healthy-probe latency target.
 const SCAN_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -174,14 +183,18 @@ fn executable_version(bin: &str) -> String {
 /// spawns: a deadline, a read bound, and a child that dies with its future.
 async fn probe_reporter_identity(bin: &str) -> Option<String> {
     use tokio::io::AsyncReadExt;
-    let mut child = tokio::process::Command::new(bin)
+    let mut command = tokio::process::Command::new(bin);
+    command
         .arg("-version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .ok()?;
+        .kill_on_drop(true);
+    let (mut child, _job) = crate::process::spawn_job_owned(
+        &mut command,
+        crate::process::ChildWork::realtime("ffprobe version check"),
+    )
+    .ok()?;
     let mut stdout = child.stdout.take()?;
     let mut text = String::new();
     let read = tokio::time::timeout(
@@ -259,6 +272,7 @@ pub async fn probe(path: &Path) -> Result<ProbeResult, ProbeError> {
             &invocation.args,
             invocation.wall_time,
             SCAN_PROBE_MAX_BYTES,
+            crate::process::ChildWork::background("library scan media probe"),
         )
         .await
         .map_err(|error| match error.kind() {
@@ -332,6 +346,7 @@ async fn probe_first_frame_luminance(path: &Path) -> Option<Value> {
         ],
         FRAME_LUMINANCE_PROBE_TIMEOUT,
         FRAME_LUMINANCE_PROBE_MAX_BYTES,
+        crate::process::ChildWork::background("library scan luminance probe"),
     )
     .await
     .ok()?;

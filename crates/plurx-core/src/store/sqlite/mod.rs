@@ -9,13 +9,16 @@
 //! `watch` — this file owns open/migrate, shared row mappers, and settings.
 
 mod apikeys;
+mod background_jobs;
 mod cache;
 mod classification;
 mod coordination;
 mod dv_conversion;
 mod dvr;
+mod file_grants;
 mod fragindex;
 mod fragment_index_cluster;
+mod housekeeping;
 mod library;
 mod library_channels;
 mod media;
@@ -32,7 +35,7 @@ mod trakt;
 mod users;
 mod watch;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -1138,6 +1141,36 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // this as v64; the field-order and luminance columns reached main first,
     // so the validation column appends after them.
     crate::store::fragindex::FRAGMENT_INDEXES_VALIDATION_COLUMN,
+    // v67: durable downloaded captions associated with files.
+    super::downloaded_subtitles::SCHEMA,
+    // v68: one-file external-reader capabilities. Token hashes are durable;
+    // plaintext capability values never enter the database.
+    super::FILE_GRANTS_SCHEMA,
+    // v69: cluster subtitle-source queue constraints and publication metadata.
+    crate::store::fragment_index_cluster::SUBTITLE_SOURCE_SCHEMA,
+    // v70: K-05 M5 catalogue read indexes (external-id lookup, top-level
+    // items in title order). Indexes only: no row changes, and every
+    // statement is `IF NOT EXISTS`.
+    super::sql_source::ITEM_READ_INDEXES,
+    // v71: common durable background work identities and ownership.
+    super::background_jobs::SCHEMA,
+    // v72: durable library execution binds the existing catalogue lease.
+    super::background_jobs_domain::SCHEMA,
+    // v73: durable library requests and their independent results.
+    super::background_jobs_library::SCHEMA,
+    // v74: named storage domains and atomic provider/storage reservations.
+    super::background_jobs_resources::SCHEMA,
+    // v75: replicated provider request pacing and cooldowns.
+    super::background_jobs_provider::SCHEMA,
+    // v76: subtitle extraction executes under common queue ownership.
+    concat!(include_str!("../background_jobs_subtitle.sql"), "\n", "UPDATE analysis_requests SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL, fence = fence + 1 WHERE component = 'subtitle_source' AND state IN ('running','submitted');"),
+    // v77: immutable artwork variants and verified holder publications.
+    super::background_jobs_artwork::SCHEMA,
+    super::background_jobs_transcode::SCHEMA,
+    super::background_jobs_predictions::SCHEMA,
+    super::background_jobs_embeddings::SCHEMA,
+    super::background_jobs_probe::SCHEMA,
+    super::background_jobs_integrity::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1234,13 +1267,14 @@ const FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container,
      (probe_json IS NOT NULL), \
      dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, \
      video_codec_tag, field_order, \
-     max_cll, max_fall, mastering_max_luminance, luminance_source";
+     max_cll, max_fall, mastering_max_luminance, luminance_source, downloaded_subtitles";
 
 fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
     let path: String = row.get(2)?;
     let audio_json: String = row.get(14)?;
     let subs_json: String = row.get(15)?;
-    Ok(MediaFile {
+    MediaFile {
+        downloaded_subtitles: Vec::new(),
         id: row.get(0)?,
         item_id: row.get(1)?,
         path: path.into(),
@@ -1276,7 +1310,9 @@ fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
         max_fall: row.get(28)?,
         mastering_max_luminance: row.get(29)?,
         luminance_source: row.get(30)?,
-    })
+    }
+    .with_downloaded_subtitles(&row.get::<_, String>(31)?)
+    .map_err(|e| conversion_err(31, format!("downloaded_subtitles: {e}")))
 }
 
 const USER_COLS: &str = "id, username, password_hash, is_admin, created_at";
@@ -1304,7 +1340,16 @@ pub struct SqliteStore {
     /// where a second connection would be a different, empty database;
     /// their reads take the writer connection exactly as before.
     reads: Option<Arc<ReadPool>>,
+    /// Admits one `last_seen_at` refresh per token per activity window in
+    /// this process, so a burst of requests from one due session queues one
+    /// write on the writer instead of one each (K-05 section 3.2).
+    token_activity: Arc<users::TokenActivityGate>,
+    /// The database file, so a connection a panic left unusable can be
+    /// replaced (`housekeeping::lock_or_recover`). `None` in memory.
+    path: Option<Arc<PathBuf>>,
 }
+
+pub use housekeeping::prometheus_sqlite_health;
 
 /// A few read-only connections picked round-robin. Opened READ_ONLY so a
 /// routing mistake is a loud error instead of a write sneaking around the
@@ -1318,22 +1363,45 @@ struct ReadPool {
 /// enough to be nothing on any box this runs on.
 const READ_CONNS: usize = 2;
 
+/// The SQL a hot read is about to run, interpolations resolved.
+///
+/// K-05 section 3.4 takes every query plan on the statement *as executed*,
+/// not on a hand copy of the source text that can drift from it: with
+/// `RUST_LOG=plurx_core::store::sqlite=trace` each instrumented method logs
+/// its statement name and SQL here, and the `query_plans` example reads the
+/// events back to run `EXPLAIN QUERY PLAN` on exactly those strings. The
+/// macro evaluates nothing unless TRACE is enabled for this target.
+pub(crate) fn trace_statement(statement: &'static str, sql: &str) {
+    tracing::trace!(target: "plurx_core::store::sqlite", statement, sql, "sqlite statement");
+}
+
 impl SqliteStore {
     /// Open (creating if necessary) the database at `path` and migrate it.
+    ///
+    /// The file is checked with `quick_check(1)` before anything else touches
+    /// it (K-05 section 3.9): a corrupt database refuses to open with its
+    /// recovery named, and a check that outlives its budget lets startup
+    /// continue and runs the full check in the background.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        let mut store = Self::init(Connection::open(path)?)?;
+        Self::open_with_read_connections(path, READ_CONNS)
+    }
+
+    /// [`open`](Self::open) with `read_connections` read connections instead
+    /// of the default, for the K-05 section 3.3 read-pool bench.
+    #[doc(hidden)]
+    pub fn open_with_read_connections(
+        path: &Path,
+        read_connections: usize,
+    ) -> Result<Self, StoreError> {
+        let conn = Connection::open(path)?;
+        housekeeping::boot_integrity_check(&conn, path, housekeeping::BOOT_CHECK_BUDGET)?;
+        let mut store = Self::init(conn)?;
+        store.path = Some(Arc::new(path.to_owned()));
         // After init: the writer has migrated, so the schema the readers see
         // is the one this binary expects.
-        let mut conns = Vec::with_capacity(READ_CONNS);
-        for _ in 0..READ_CONNS {
-            let conn = Connection::open_with_flags(
-                path,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                    | rusqlite::OpenFlags::SQLITE_OPEN_URI
-                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )?;
-            conn.pragma_update(None, "busy_timeout", 5000)?;
-            conns.push(Mutex::new(conn));
+        let mut conns = Vec::with_capacity(read_connections.max(1));
+        for _ in 0..read_connections.max(1) {
+            conns.push(Mutex::new(housekeeping::open_reader(path)?));
         }
         store.reads = Some(Arc::new(ReadPool {
             conns,
@@ -1366,17 +1434,14 @@ impl SqliteStore {
     }
 
     fn init(conn: Connection) -> Result<Self, StoreError> {
-        // WAL for concurrent-reader friendliness on real files; in-memory
-        // databases report their own journal mode, which is fine.
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.pragma_update(None, "busy_timeout", 5000)?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        housekeeping::configure_writer(&conn)?;
         Self::migrate(&conn)?;
         Self::backfill_hdr_format(&conn)?;
         Ok(SqliteStore {
             conn: Arc::new(Mutex::new(conn)),
             reads: None,
+            token_activity: Arc::default(),
+            path: None,
         })
     }
 
@@ -1597,10 +1662,13 @@ impl SqliteStore {
         T: Send + 'static,
     {
         let conn = Arc::clone(&self.conn);
+        let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
-            let guard = conn
-                .lock()
-                .map_err(|_| StoreError::Task("sqlite connection mutex poisoned".to_owned()))?;
+            let guard = housekeeping::lock_or_recover(
+                &conn,
+                housekeeping::Pool::Writer,
+                path.as_deref().map(PathBuf::as_path),
+            )?;
             f(&guard)
         })
         .await
@@ -1646,7 +1714,21 @@ impl SqliteStore {
                     SET revision = ?6, expires_at_ms = ?7, updated_at_ms = ?8
                   WHERE resource = ?1 AND owner_node_id = ?2
                     AND fence = ?3 AND revision = ?4
-                    AND expires_at_ms = ?5 AND expires_at_ms > ?8",
+                    AND expires_at_ms = ?5 AND expires_at_ms > ?8
+                    AND NOT EXISTS (SELECT 1 FROM background_job_domain_leases binding
+                        WHERE binding.resource = job_leases.resource AND binding.domain_fence = job_leases.fence
+                        AND NOT EXISTS (SELECT 1 FROM background_jobs job WHERE job.id = binding.job_id
+                            AND job.fence = binding.job_fence AND job.owner_node_id = binding.node_id
+                            AND job.owner_boot_id = binding.boot_id AND job.claim_id = binding.claim_id
+                            AND job.state = 'running' AND job.lease_expires_ms > ?8
+            AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
+                WHERE required.job_id = job.id AND NOT EXISTS (
+                    SELECT 1 FROM background_job_reservations held
+                    WHERE held.job_id = job.id AND held.fence = job.fence
+                        AND held.resource_key = required.resource_key
+                        AND held.expires_at_ms >= job.lease_expires_ms))
+                            AND NOT EXISTS (SELECT 1 FROM settings WHERE key =
+                                'internal.cluster_job_owner_removed.' || job.owner_node_id)))",
                 params![
                     &lease.resource,
                     &lease.owner_node_id,
@@ -1678,6 +1760,32 @@ impl SqliteStore {
         .await
     }
 
+    /// [`with_read`](Self::with_read) inside one read transaction, for a
+    /// closure whose statements must agree with each other.
+    ///
+    /// A read connection in WAL mode gives each statement its own snapshot
+    /// (every implicit transaction starts at the current end mark), so a
+    /// count and a page read by two statements can straddle a commit: the
+    /// grid says 50 items and shows 51. `BEGIN DEFERRED` takes the snapshot at
+    /// the first read and holds it until `COMMIT`, which is what the writer
+    /// mutex used to give these closures by excluding every other writer.
+    /// The guard rolls back on drop, so an error or a panic inside `f` never
+    /// leaves the connection mid-transaction. On an in-memory store this runs
+    /// on the writer connection, where the mutex still provides the same.
+    async fn with_read_txn<T, F>(&self, f: F) -> Result<T, StoreError>
+    where
+        F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.with_read(move |conn| {
+            let snapshot = conn.unchecked_transaction()?;
+            let value = f(&snapshot)?;
+            snapshot.commit()?;
+            Ok(value)
+        })
+        .await
+    }
+
     /// Like [`with_conn`](Self::with_conn), on a read connection when the
     /// store has them. Only for closures that read: the pool's connections
     /// are opened READ_ONLY, so a write through here fails loudly rather
@@ -1690,11 +1798,14 @@ impl SqliteStore {
         let Some(pool) = self.reads.clone() else {
             return self.with_conn(f).await;
         };
+        let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let idx = pool.next.fetch_add(1, Ordering::Relaxed) % pool.conns.len();
-            let guard = pool.conns[idx]
-                .lock()
-                .map_err(|_| StoreError::Task("sqlite read mutex poisoned".to_owned()))?;
+            let guard = housekeeping::lock_or_recover(
+                &pool.conns[idx],
+                housekeeping::Pool::Read,
+                path.as_deref().map(PathBuf::as_path),
+            )?;
             f(&guard)
         })
         .await
@@ -1830,11 +1941,21 @@ impl MetricsStore for SqliteStore {
                       WHERE state = 'running'
                         AND COALESCE(lease_expires_ms, 0) < ?2 * 1000),
                     (SELECT COALESCE(MAX(updated_at_ms), 0)
-                       FROM cluster_fragment_index_jobs WHERE state = 'ready')
+                       FROM cluster_fragment_index_jobs WHERE state = 'ready'),
+                    (SELECT json_object('jobs', json((SELECT COALESCE(json_group_array(json_object(
+                        'kind', grouped.kind, 'state', grouped.state, 'count', grouped.count,
+                        'oldest_age_ms', MAX(0, ?2 * 1000 - grouped.created))), '[]')
+                        FROM (SELECT kind, state, COUNT(*) AS count, MIN(created_at_ms) AS created
+                            FROM background_jobs GROUP BY kind, state LIMIT 128) grouped)),
+                        'source_io_reservations', (SELECT COUNT(*) FROM background_job_reservations
+                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000),
+                        'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import')))
                  FROM offline_packages WHERE node_id = ?1",
                 params![node_id, now],
                 |row| {
                     Ok(PrometheusStoreSnapshot {
+                        background_jobs: super::background_jobs_observation::background_job_metrics(&row.get::<_, String>(24)?)
+                            .map_err(|error| rusqlite::Error::FromSqlConversionFailure(24, rusqlite::types::Type::Text, Box::new(error)))?,
                         libraries: row.get(0)?,
                         users: row.get(1)?,
                         offline: OfflinePackageStats {
@@ -1941,6 +2062,20 @@ impl SettingsStore for SqliteStore {
             Ok(pair)
         })
         .await
+    }
+
+    async fn get_settings(
+        &self,
+        keys: &[&str],
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        let keys = super::selected_settings_json(keys)?;
+        self.with_read(move |conn| {
+            // Keep the SQL and its binding in one statement so the placeholder
+            // census proves their arity instead of growing the unchecked set.
+            conn.prepare("SELECT key, value FROM settings WHERE key IN (SELECT value FROM json_each(?1)) ORDER BY key")?
+                .query_map(params![keys], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                .collect::<Result<_, _>>().map_err(StoreError::from)
+        }).await
     }
 
     async fn settings_snapshot(
@@ -2198,6 +2333,199 @@ mod tests {
 
         release_tx.send(()).expect("release");
         holder.await.expect("join").expect("holder");
+    }
+
+    /// K-05 M1: every Home and library-page read on the read pool (the 16
+    /// M1 moved there, plus `home_preview_pages`, which already was)
+    /// completes while the writer holds an open write transaction, and none
+    /// of them sees that transaction's uncommitted row.
+    ///
+    /// The writer here is not just holding the mutex but has taken the WAL
+    /// write lock with `BEGIN IMMEDIATE` and inserted a library, which is what
+    /// a scan batch does. Each read gets two seconds; a method routed back
+    /// through `with_conn` waits for the release that only comes after all of
+    /// them returned, so it times out instead of passing slowly.
+    #[tokio::test]
+    async fn home_and_library_page_reads_do_not_queue_behind_a_held_writer_transaction() {
+        use crate::domain::{ItemKind, ItemSort, LibraryKind, NewItem, NewLibrary};
+        use crate::store::{LibraryStore, UserStore};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SqliteStore::open(&dir.path().join("plurx.db")).expect("open"));
+        let user = store
+            .create_user("reader", "hash", true)
+            .await
+            .expect("user");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Shows".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = |kind, parent_id, title: &str, season, episode| NewItem {
+            library_id: library.id,
+            kind,
+            parent_id,
+            title: title.to_owned(),
+            year: None,
+            season_number: season,
+            episode_number: episode,
+        };
+        let show = store
+            .insert_item(&item(ItemKind::Show, None, "Harbor Lights", None, None))
+            .await
+            .expect("show");
+        let season = store
+            .insert_item(&item(
+                ItemKind::Season,
+                Some(show),
+                "Season 1",
+                Some(1),
+                None,
+            ))
+            .await
+            .expect("season");
+        let episode = store
+            .insert_item(&item(
+                ItemKind::Episode,
+                Some(season),
+                "Pilot",
+                Some(1),
+                Some(1),
+            ))
+            .await
+            .expect("episode");
+        store
+            .put_progress(user.id, episode, 1_000, Some(10_000))
+            .await
+            .expect("progress");
+
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                store
+                    .with_conn(move |conn| {
+                        conn.execute_batch(
+                            "BEGIN IMMEDIATE;
+                             INSERT INTO libraries(name, kind, paths)
+                             VALUES('uncommitted', 'movies', '[]');",
+                        )?;
+                        held_tx.send(()).ok();
+                        release_rx.recv().ok();
+                        conn.execute_batch("ROLLBACK")?;
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+        tokio::task::spawn_blocking(move || held_rx.recv())
+            .await
+            .expect("join")
+            .expect("the holder took the write lock");
+
+        let bound = std::time::Duration::from_secs(2);
+        macro_rules! off_the_writer {
+            ($name:literal, $call:expr) => {
+                tokio::time::timeout(bound, $call)
+                    .await
+                    .unwrap_or_else(|_| panic!("{} queued behind the writer", $name))
+                    .unwrap_or_else(|error| panic!("{}: {error}", $name))
+            };
+        }
+        let libraries = off_the_writer!("list_libraries", store.list_libraries());
+        assert_eq!(
+            libraries.len(),
+            1,
+            "a read connection must not see the writer's uncommitted row"
+        );
+        off_the_writer!("get_library", store.get_library(library.id));
+        let page = off_the_writer!(
+            "list_top_items_in_genre",
+            store.list_top_items_in_genre(library.id, ItemSort::Title, 0, 50, None)
+        );
+        assert_eq!((page.total, page.items.len()), (1, 1));
+        off_the_writer!("home_preview_pages", store.home_preview_pages(24));
+        off_the_writer!("recently_added", store.recently_added(None, 24));
+        off_the_writer!("search_items", store.search_items("harbor", 24));
+        off_the_writer!("get_item_children", store.get_item_children(show));
+        off_the_writer!("episodes_for_show", store.episodes_for_show(show));
+        off_the_writer!("files_for_item", store.files_for_item(episode));
+        off_the_writer!("child_counts", store.child_counts(&[show, season]));
+        off_the_writer!("item_max_heights", store.item_max_heights(&[episode]));
+        off_the_writer!("item_media_facts", store.item_media_facts(&[episode]));
+        off_the_writer!("watch_map", store.watch_map(user.id, &[episode]));
+        off_the_writer!("watch_rollup", store.watch_rollup(user.id, show));
+        off_the_writer!("watch_rollups", store.watch_rollups(user.id, &[show]));
+        let in_progress =
+            off_the_writer!("continue_watching", store.continue_watching(user.id, 24));
+        assert_eq!(in_progress.len(), 1);
+        off_the_writer!("next_up", store.next_up(user.id, 24));
+
+        release_tx.send(()).expect("release");
+        holder.await.expect("join").expect("holder");
+    }
+
+    /// `with_read_txn` gives a multi-statement closure one WAL snapshot: a
+    /// commit that lands between its two statements is invisible to the
+    /// second, where plain `with_read` shows it. That second half is the
+    /// control: it proves the interleaving really happened, so the first half
+    /// cannot pass merely because the insert was late.
+    #[tokio::test]
+    async fn read_transactions_see_one_snapshot_across_statements() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SqliteStore::open(&dir.path().join("plurx.db")).expect("open"));
+        store.put_setting("seed", "0").await.expect("seed");
+
+        async fn two_counts(
+            store: &Arc<SqliteStore>,
+            snapshot: bool,
+            key: &'static str,
+        ) -> (i64, i64) {
+            let (between_tx, between_rx) = std::sync::mpsc::channel::<()>();
+            let (inserted_tx, inserted_rx) = std::sync::mpsc::channel::<()>();
+            let writer = {
+                let store = Arc::clone(store);
+                tokio::spawn(async move {
+                    tokio::task::spawn_blocking(move || between_rx.recv())
+                        .await
+                        .expect("join")
+                        .expect("reader reached the gap");
+                    store.put_setting(key, "1").await.expect("insert");
+                    inserted_tx.send(()).expect("signal");
+                })
+            };
+            let read = move |conn: &Connection| -> Result<(i64, i64), StoreError> {
+                let count = |conn: &Connection| -> Result<i64, StoreError> {
+                    Ok(conn.query_row("SELECT COUNT(*) FROM settings", [], |row| row.get(0))?)
+                };
+                let first = count(conn)?;
+                between_tx.send(()).ok();
+                inserted_rx.recv().ok();
+                Ok((first, count(conn)?))
+            };
+            let counts = if snapshot {
+                store.with_read_txn(read).await
+            } else {
+                store.with_read(read).await
+            }
+            .expect("read");
+            writer.await.expect("writer");
+            counts
+        }
+
+        let (first, second) = two_counts(&store, true, "during-snapshot").await;
+        assert_eq!(first, second, "one read transaction, one snapshot");
+        let (first, second) = two_counts(&store, false, "during-plain-read").await;
+        assert_eq!(
+            second,
+            first + 1,
+            "control: without the transaction the second statement sees the commit"
+        );
     }
 
     /// The revision advances on a change of ask and on nothing else.
@@ -2558,9 +2886,15 @@ mod tests {
         // main first. 65 -> 66 for v66, `FRAGMENT_INDEXES_VALIDATION_COLUMN`:
         // the node-local publication proof C-05 drafted as v64, appended after
         // both of those for the same reason they reached main first. No
-        // earlier entry moved; the list stays append-only.
+        // earlier entry moved; the list stays append-only. v67 adds durable
+        // downloaded captions to files. v68 adds external-reader file grants;
+        // v69 adds the cluster subtitle-source queue and publication metadata;
+        // v70 adds K-05 M5's catalogue read indexes; v71 adds the common queue.
+        // v72–v76 add library work, domain leases, source-I/O reservations,
+        // provider dispatch budgets and the subtitle adapter; v77 adds artwork holders,
+        // and v78 retains portable transcode source/manifest provenance.
         assert_eq!(
-            version, 66,
+            version, 82,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

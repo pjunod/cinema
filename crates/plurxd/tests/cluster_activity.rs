@@ -4,6 +4,9 @@
 //! prove response shaping, but only separate daemons can prove that node A's
 //! authenticated peer read observes work owned by node B.
 
+// A test, never a daemon child: the launcher rule in clippy.toml is for
+// production code.
+#![allow(clippy::disallowed_methods)]
 #![cfg(unix)]
 
 use std::fs::{File, Permissions};

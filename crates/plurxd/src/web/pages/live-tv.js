@@ -80,8 +80,25 @@ async function liveTvOrphanHints(){
 async function liveTvRetireOrphanHints(){
   for(const hint of await liveTvOrphanHints()) liveTvRetireHint(hint.id);
 }
+// Channels the browser's audio output reaches, between stereo and 5.1 (the
+// most the server encodes). A fixed 2 is what folded every 5.1 broadcast to
+// stereo; a browser on a multichannel output decodes 5.1 AAC natively.
+function liveTvAacChannelCeiling(destinationChannels){
+  const channels=Number(destinationChannels);
+  return Number.isFinite(channels)?Math.min(6,Math.max(2,Math.floor(channels))):2;
+}
+let LIVE_TV_AUDIO_CONTEXT=null;
+function liveTvOutputChannels(){
+  try{
+    const Ctx=window.AudioContext||window.webkitAudioContext;
+    if(!Ctx) return 2;
+    LIVE_TV_AUDIO_CONTEXT=LIVE_TV_AUDIO_CONTEXT||new Ctx();
+    return LIVE_TV_AUDIO_CONTEXT.destination.maxChannelCount;
+  }catch(e){ return 2; }
+}
 function liveTvPlaybackEnvelope(compatibility=null){
   const caps=currentCapsDocument();
+  const aacChannels=liveTvAacChannelCeiling(liveTvOutputChannels());
   const audio=(caps.audio||[]).filter(codec=>["aac","ac3","eac3"].includes(codec));
   const formats=[{container:"mpegts",video:"h264",audio:"aac"}];
   for(const video of caps.video||[]){
@@ -96,7 +113,7 @@ function liveTvPlaybackEnvelope(compatibility=null){
       max_width:3840,max_height:video.max_height||2160,max_frame_rate:{num:60,den:1},interlaced:false});
   }
   return {v:1,caps,hls_formats:Array.from(unique.values()),video_limits,
-    audio_limits:audio.map(codec=>({codec,max_channels:codec==="aac"?2:8})),
+    audio_limits:audio.map(codec=>({codec,max_channels:codec==="aac"?aacChannels:8})),
     ...(compatibility?{compatibility}:{})};
 }
 const LIVE_TV_LEASE=new PlurxLiveTv.Lease({
@@ -142,7 +159,7 @@ const LIVE_TV_LEASE=new PlurxLiveTv.Lease({
       }
       if(outcome.replay&&attempt+1<attempts) continue;
       const typed=answer.body||{};
-      throw {code:outcome.render,retry:typed.retry,owner_decided:typed.owner_decided,status:answer.status};
+      throw {code:outcome.render,retry:typed.retry,owner_decided:typed.owner_decided,status:answer.status,answer};
     }
   },
   release:async id=>{
@@ -187,6 +204,17 @@ function liveTvMessage(message){
 function liveTvFailure(error){
   const view=PlurxLiveTv.errorView(error);
   liveTvMessage(`${view.title}. ${view.detail}`);
+  const mount=document.getElementById("live-tv-message");
+  if(!mount||!view.offers.length) return;
+  for(const offer of view.offers){
+    // Use the current lineup as the final authority: a stale capacity answer
+    // must not create a button for a channel this client cannot play.
+    if(!LIVE_TV.channels.some(channel=>channel.id===offer.channelId&&PlurxLiveTv.channelView(channel).disabled===false)) continue;
+    const button=document.createElement("button");
+    button.type="button"; button.textContent=offer.label;
+    button.addEventListener("click",()=>liveTvSelect(offer.channelId));
+    mount.append(" ",button);
+  }
 }
 async function viewLiveTv(generation=PAGE_RENDER_GENERATION){
   if(generation!==PAGE_RENDER_GENERATION) return;
@@ -201,7 +229,7 @@ async function viewLiveTv(generation=PAGE_RENDER_GENERATION){
   // The host follows the route back into its slot; a dock returning here
   // never restarts the stream, it just moves.
   liveTvSetMode("slot");
-  const host=liveTvHost(); if(host) host.hidden=!LIVE_TV_LEASE.current;
+  const host=liveTvHost(); if(host) host.hidden=!LIVE_TV_LEASE.current&&!LIVE_TV.starting;
   try{
     const result=await api("/live-tv/channels",{signal:AbortSignal.timeout(30000)});
     if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
@@ -390,16 +418,69 @@ function liveTvTechnicalDetails(channel,status){
   }
   return rows.length?`<div class="lt-tech" aria-label="Live stream details">${rows.join("")}</div>`:"";
 }
+// The manifest advertises 608/708 services, but the live player owns its own
+// video element: the Watch player's #pbsubs menu cannot select these tracks.
+// Read the media element's tracks so this works for hls.js and native HLS.
+function liveTvCaptionTracks(){
+  const tracks=document.getElementById("live-tv-video")?.textTracks;
+  return tracks?[...tracks].map((track,index)=>({track,index}))
+    .filter(({track})=>track.kind==="captions"||track.kind==="subtitles"):[];
+}
+function liveTvCaptionTrackLabel(track,index){
+  return track.label||track.language||`${track.kind==="captions"?"Caption":"Subtitle"} ${index+1}`;
+}
+function liveTvRefreshCaptionControls(){
+  const tracks=liveTvCaptionTracks();
+  const signature=JSON.stringify(tracks.map(({track,index})=>[index,track.kind,track.label,track.language]));
+  const showing=tracks.find(({track})=>track.mode==="showing");
+  for(const select of document.querySelectorAll("[data-live-tv-captions]")){
+    select.parentElement.hidden=tracks.length===0;
+    if(select.dataset.tracks!==signature){
+      select.innerHTML='<option value="off">Off</option>'+tracks.map(({track,index})=>
+        `<option value="${index}">${esc(liveTvCaptionTrackLabel(track,index))}</option>`).join("");
+      select.dataset.tracks=signature;
+    }
+    select.value=showing?String(showing.index):"off";
+  }
+  if(document.getElementById("live-tv-stats")) updateLiveTvStats();
+}
+function liveTvCaptionBlur(){
+  // Focusout runs before activeElement has moved to the next control.
+  queueMicrotask(()=>{
+    if(LIVE_TV.captionRenderPending&&location.hash==="#/live-tv") renderLiveTvChannels();
+  });
+}
+function liveTvSelectCaption(value){
+  const tracks=liveTvCaptionTracks();
+  const selected=value==="off"?null:tracks.find(({index})=>String(index)===value);
+  if(value!=="off"&&!selected) return;
+  for(const {track} of tracks) track.mode=selected&&track===selected.track?"showing":"disabled";
+  liveTvRefreshCaptionControls();
+}
 let LIVE_TV_STATS_TIMER=null;
 let LIVE_TV_STATS_OPENER=null;
 function liveTvStatsTelemetry(){
   const v=document.getElementById("live-tv-video"),current=LIVE_TV_LEASE.current;
   const channel=current&&liveTvChannelById(current.channel?.id||LIVE_TV.selected);
   const attached=!!current&&!!v&&!!(v.currentSrc||v.src);
-  const status=LIVE_TV.status,plan=status?.delivery||current?.delivery;
+  const status=attached?LIVE_TV.status:null,plan=attached?(status?.delivery||current?.delivery):null;
   const source=PlurxLiveTv.sourceDetails(channel,liveTvNowSeconds(),liveTvSourceProgrammeEnd(channel));
+  const picture=PlurxLiveTv.formatLiveTvPictureFacts(PlurxLiveTv.normalizeLiveTvPictureFacts({
+    delivery:plan,
+    presentation:attached?{width:v.videoWidth,height:v.videoHeight}:null,
+    channelObservation:PlurxLiveTv.measuredSourceFormat(channel,liveTvNowSeconds(),liveTvSourceProgrammeEnd(channel)),
+    attachmentCurrent:attached,
+    nowSeconds:liveTvNowSeconds(),
+  }));
+  const scan=plan?.deinterlace===true?"Progressive planned":
+    plan?.video_action==="copy"&&["tt","bb","tb","bt"].includes(plan.source?.field_order)?"Interlaced":null;
+  const rate=plan?.output?.frame_rate;
+  const cadence=Number.isSafeInteger(rate?.num)&&Number.isSafeInteger(rate?.den)&&rate.den>0&&rate.num>0
+    ?`${(rate.num/rate.den).toFixed(2).replace(/0+$/,'').replace(/\.$/,'')} frames/s (planned)`:null;
   const level=LIVE_TV.hls?.levels?.[LIVE_TV.hls.currentLevel];
   const signal=status?.signal;
+  const captions=liveTvCaptionTracks();
+  const selectedCaption=captions.find(({track})=>track.mode==="showing");
   let edge=null,buffer=null,frames=null;
   if(attached){
     try{ buffer=`${bufferRunway(v).toFixed(1)} s`; }catch(e){}
@@ -409,13 +490,17 @@ function liveTvStatsTelemetry(){
   return {
     method:plan?(plan.video_action==="copy"?(plan.audio_action==="copy"?"Remux":"Audio converted for this player"):"Video converted for this player"):"Not reported",
     player_state:!attached?"Waiting for player":v.error?"Failed":v.ended?"Ended":v.paused?"Paused":v.readyState<3?"Buffering":"Playing",
-    decode_resolution:attached&&v.videoWidth>0&&v.videoHeight>0?`${v.videoWidth}×${v.videoHeight}`:"Not reported",
-    source_resolution:source.exact[0]||"Not reported",
-    source_video:source.exact.slice(1).join(" · ")||null,
-    source_resolution_note:source.observedAt?`Tuner source observed ${new Date(source.observedAt*1000).toLocaleString()}`:"Source measurement not reported.",
-    stream_format:plan?.output?[plan.output.width>0&&plan.output.height>0?`${plan.output.width}×${plan.output.height}`:null,plan.output.video_codec,plan.output.hdr].filter(Boolean).join(" · "):null,
-    decode_audio:plan?.output?[plan.output.audio_codec,plan.output.audio_channels>0?`${plan.output.audio_channels} channels`:null].filter(Boolean).join(" · "):null,
-    subtitles:attached&&v.textTracks?[...v.textTracks].filter(t=>t.mode==="showing").map(t=>t.label||t.language||"Selected").join(" · ")||"Off":"Not reported",
+    ...picture,
+    source_video:attached?[plan?.source?.video_codec?.toUpperCase()||source.exact.slice(1)[0],
+      ["tt","bb","tb","bt"].includes(plan?.source?.field_order)?"Interlaced":null].filter(Boolean).join(" · ")||null:null,
+    stream_format:plan?.output?[plan.output.video_codec?.toUpperCase(),scan,cadence].filter(Boolean).join(" · ")||null:null,
+    reason:plan?PlurxLiveTv.liveTvReasonText(plan.reasons):null,
+    delivery_reasons:plan?.reasons?.map(r=>[r.code,r.explanation].filter(Boolean).join(": ")).join(" · ")||null,
+    aspect_comparison_note:picture.aspect_comparison==="Not verified"?"Output pixel aspect and compatible aperture are not verified.":null,
+    decode_audio:plan?.output?[plan.output.audio_codec,plan.output.audio_channels>0?`${plan.audio_action==="encode"&&!(plan.source?.audio_channels>0)?"up to ":""}${plan.output.audio_channels} channels`:null].filter(Boolean).join(" · "):null,
+    subtitles:!attached?"Not reported":selectedCaption?liveTvCaptionTrackLabel(selectedCaption.track,selectedCaption.index):"Off",
+    subtitles_note:!attached?null:selectedCaption?"Track selected; text appears when this broadcast supplies cues.":
+      captions.length?"Caption track available in the Live TV selector.":"No caption track listed by this player yet.",
     client_loaded:buffer||"Not reported",live_edge:edge||"Not reported",frames,
     stalls:"Not reported",stalls_note:"This live player does not expose an interruption counter.",
     observed_rate:LIVE_TV.hls?.bandwidthEstimate?fmtMbps(LIVE_TV.hls.bandwidthEstimate):null,
@@ -433,8 +518,13 @@ function setLiveTvStatsMode(mode){
   const backdrop=document.getElementById("live-tv-stats-backdrop");if(backdrop)backdrop.hidden=mode==="mini";
   updateLiveTvStats();
 }
+function liveTvHasAttachedMedia(){
+  const video=/** @type {HTMLVideoElement|null} */ (document.getElementById("live-tv-video"));
+  return !!LIVE_TV_LEASE.current&&!!video&&!!(video.currentSrc||video.src);
+}
 function openLiveTvStats(){
   closeLiveTvStats(false);
+  if(!liveTvHasAttachedMedia()) return;
   LIVE_TV_STATS_OPENER=document.activeElement;
   const panel=document.createElement("section");
   panel.id="live-tv-stats"; panel.className="statsov on live-stats"; panel.dataset.mode="standard";
@@ -461,6 +551,7 @@ function closeLiveTvStats(restore=true){
   LIVE_TV_STATS_OPENER=null;
 }
 function updateLiveTvStats(){
+  if(!liveTvHasAttachedMedia()){ closeLiveTvStats(false); return; }
   const panel=document.getElementById("live-tv-stats");if(!panel)return;
   const mode=panel.dataset.mode,t=liveTvStatsTelemetry(),body=panel.querySelector(".statsbody");
   const rows=playbackInfoRows(mode,t);
@@ -469,10 +560,11 @@ function updateLiveTvStats(){
 
     extra("live_edge","Behind stream live edge","BUFFERING / DELIVERY","Behind latest available media; not broadcast delay.");
     extra("reception","Tuner reception","BUFFERING / DELIVERY","Strength, quality and symbol quality reported by the tuner.");
+    if(mode==="debug")extra("delivery_reasons","Delivery reasons","PLAYBACK","Raw server reason codes and explanations.");
   }
   patchPlaybackInfoRows(body,mode,rows,"","");
   const overview=body.querySelector("[data-stats-overview]");
-  if(overview)overview.innerHTML=mode==="mini"?[["Playing resolution",t.decode_resolution],["Playback",t.player_state],["Buffered on device",t.client_loaded]].map(([label,value])=>`<div class="pi-fact"><span class="pi-label">${esc(label)}</span><strong>${esc(value)}</strong></div>`).join(""):playbackInfoOverview(t,true);
+  if(overview)overview.innerHTML=mode==="mini"?playbackInfoCompact(t):playbackInfoOverview(t,true);
   panel.querySelectorAll("[data-live-stats-mode]").forEach(button=>{const selected=button.dataset.liveStatsMode===mode;button.classList.toggle("on",selected);button.setAttribute("aria-checked",String(selected));});
 }
 function liveTvRefreshTechnicalDetails(){
@@ -539,6 +631,7 @@ function liveTvNowBar(channel){
   const at=liveTvProgramme(channel.id);
   const pct=at.progress===null?0:Math.round(at.progress*100);
   const playing=!!LIVE_TV_LEASE.current;
+  const transport=liveTvTransportState();
   const left=at.now?Math.max(0,Math.round((at.now.end-liveTvNowSeconds())/60)):null;
   const muted=!!document.getElementById("live-tv-video")?.muted;
   const muteLabel=muted?"Unmute":"Mute";
@@ -549,13 +642,14 @@ function liveTvNowBar(channel){
       <br><span class="muted">${esc(channel.guide_number)} · ${esc(channel.guide_name)}${at.now?" · "+esc(liveTvClock(at.now.start))+"–"+esc(liveTvClock(at.now.end)):""}${left!==null?" · "+left+" min left":""}${at.next?" · Next: "+esc(at.next.title):""}</span>
     </span>
     <span class="lt-mini" style="width:120px"><i style="width:${pct}%"></i></span>
-    <button type="button" onclick="pauseLiveTv()" title="Pause" aria-label="Pause">⏸</button>
+    <button type="button" id="live-tv-transport" onclick="toggleLiveTvPlayback()" title="${transport.label}" aria-label="${transport.label}" ${transport.hidden?"hidden disabled":""}>${transport.icon}</button>
+    <label class="lt-captions" hidden>Captions <select data-live-tv-captions aria-label="Live TV captions" onchange="liveTvSelectCaption(this.value)" onblur="liveTvCaptionBlur()"><option value="off">Off</option></select></label>
     <button type="button" onclick="liveTvTogglePlayerSize()" title="${wide?"Use compact player":"Use original-size player"}" aria-label="${wide?"Use compact player":"Use original-size player"}">${wide?"⤡ Smaller":"⤢ Larger"}</button>
     <button type="button" data-live-tv-mute onclick="muteLiveTv()" title="${muteLabel}" aria-label="${muteLabel}">${muted?"🔊":"🔇"}</button>
     ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture (P)" aria-label="Picture-in-picture">⧉</button>':""}
     <button type="button" onclick="fullscreenLiveTv()" title="Fullscreen (F)" aria-label="Fullscreen">⛶</button>
     <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop">■</button>
-    <button type="button" data-live-info-opener onclick="openLiveTvStats()">Playback info</button>
+    <button type="button" id="live-tv-info" data-live-info-opener onclick="openLiveTvStats()" ${transport.hidden?"disabled":""}>Playback info</button>
     <div class="lt-nowtech" data-live-tv-technical>${liveTvTechnicalDetails(channel,LIVE_TV.status)}</div>
   </div>`;
 }
@@ -695,6 +789,13 @@ function liveTvGridMarkup(visible,selected){
   </div>`;
 }
 function renderLiveTvChannels(){
+  // Keep the native dropdown and keyboard focus alive across the minute tick
+  // and asynchronous guide updates. Blur flushes the latest pending render.
+  if(document.activeElement?.matches?.(".lt-captions select")){
+    LIVE_TV.captionRenderPending=true;
+    return;
+  }
+  LIVE_TV.captionRenderPending=false;
   const mount=document.getElementById("live-tv-body"); if(!mount) return;
   const visible=liveTvVisible();
   const selected=liveTvChannelById(LIVE_TV.selected)||null;
@@ -720,6 +821,7 @@ function renderLiveTvChannels(){
   }
   liveTvWireSlot();
   liveTvPaint();
+  liveTvRefreshCaptionControls();
 }
 // Switching views is a re-render of the browse region and nothing else: it
 // never stops the stream, never restarts it, and never refetches.
@@ -1010,6 +1112,8 @@ function liveTvKeydown(event){
   if(document.getElementById("live-tv-stats")) return;
   const state=liveTvInputState();
   if(state===null) return;
+  LIVE_TV.controlsInput="keyboard";
+  if(event.target?.closest?.(".lth-captions")) liveTvReveal();
   if(event.target&&/^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName)) return;
   if(liveTvTargetOwnsKey(event.target,event.key)) return;
   const hotkey=PlaybackPolicy.liveHotkey(event.key);
@@ -1043,7 +1147,14 @@ function liveTvReveal(){
   if(host.dataset.mode!=="full"||!video||video.paused) return;
   LIVE_TV.idleTimer=setTimeout(()=>{
     const still=document.getElementById("live-tv-video");
-    if(still&&!still.paused&&!still.ended) liveTvIdle();
+    if(!still||still.paused||still.ended) return;
+    if(LIVE_TV.controlsInput==="keyboard"&&host.contains(document.activeElement)) return;
+    // Keep an open native popup visible. Unsupported :open selectors simply
+    // fall back to the normal timer; keyboard focus is protected separately.
+    let menuOpen=false;
+    try{ menuOpen=!!host.querySelector("select:open"); }catch(_){}
+    if(menuOpen){ liveTvReveal(); return; }
+    liveTvIdle();
   },PlaybackPolicy.liveContractTiming("hide_after_ms"));
 }
 function liveTvIdle(){
@@ -1056,13 +1167,24 @@ function liveTvWireHost(){
   // what a key does, and a second listener that also reveals would give every
   // `ignore` row an effect. Same choice the finite player made.
   ["mousemove","pointerdown","touchstart"].forEach(event=>window.addEventListener(event,()=>{
+    if(event!=="mousemove") LIVE_TV.controlsInput="pointer";
     if(liveTvInputState()==="fullscreen_hidden"||liveTvInputState()==="fullscreen_controls") liveTvReveal();
   },{passive:true}));
   liveTvWireKeys();
+  const host=liveTvHost();
+  if(host){
+    host.addEventListener("focusin",liveTvReveal);
+    host.addEventListener("focusout",liveTvReveal);
+  }
   const video=document.getElementById("live-tv-video");
   if(video){
     video.addEventListener("leavepictureinpicture",()=>liveTvPaint());
     video.addEventListener("enterpictureinpicture",()=>liveTvPaint());
+    video.addEventListener("loadedmetadata",liveTvRefreshCaptionControls);
+    video.textTracks?.addEventListener?.("addtrack",liveTvRefreshCaptionControls);
+    video.textTracks?.addEventListener?.("removetrack",liveTvRefreshCaptionControls);
+    video.textTracks?.addEventListener?.("change",liveTvRefreshCaptionControls);
+    liveTvRefreshCaptionControls();
   }
   document.addEventListener("fullscreenchange",()=>{
     const host=liveTvHost();
@@ -1114,4 +1236,3 @@ function scheduleLiveTvGuide(guide,generation,route){
     loadLiveTvGuide(generation,route);
   },delay);
 }
-

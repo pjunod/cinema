@@ -13,13 +13,32 @@
 
   const AUTO_DEFAULTS = Object.freeze({
     sampleMs: 5_000,
+    // A 5s decision clock plus a prepared successor's first fragments missed
+    // the 10s cliff budget even when the handoff itself was seamless.
+    decisionMs: 1_000,
     safeEstimateFactor: 0.95,
     severeEstimateRatio: 0.7,
+    // The bottom three rungs have little recovery room. A fresh transfer
+    // below their nominal rate is already unsustainable even if a deep
+    // buffer briefly masks the cliff. Higher rungs wait for the stronger
+    // ratio below: their first partial fragment can straddle two links.
+    lowRungEmergencyCount: 3,
+    // An in-flight fragment's first progress window can span a link change.
+    // Leave room for that mixed sample and the encoded segment's peak, not
+    // merely its nominal bitrate, when choosing a cliff replacement.
+    severePeakSafetyFactor: 0.95,
     mildHeadroom: 1.3,
     mildSamples: 2,
     cooldownMs: 20_000,
     upgradeHeadroom: 1.8,
     upgradeHoldMs: 45_000,
+    // A higher prepared stream has to refill its own buffer before an
+    // incumbent with little runway can be retired.
+    upgradeRunwaySeconds: 10,
+    // A short fragment can drain a token bucket's burst above the sustained
+    // link rate. Keep the lower rung while a recent cliff settles, then allow
+    // a later exploratory upgrade when the link might have recovered.
+    upgradeAfterCliffMs: 90_000,
     // The estimate alone is not evidence that a higher rung is sustainable.
     // On a JIT server hls.js measures min(link, encode) of the CURRENT rung,
     // so a fast 720p encode reads as ~200 Mb/s and clears any bandwidth bar
@@ -197,6 +216,18 @@
     return (bytes * 8) / elapsedMs;
   }
 
+  function completedMediaWindowKbps(samples, nowMs, windowMs = AUTO_DEFAULTS.recentSampleMaxAgeMs) {
+    const rows = (Array.isArray(samples) ? samples : []).filter(row =>
+      Number.isFinite(row.atMs) && row.atMs <= nowMs
+      && nowMs - row.atMs <= windowMs
+      && Number(row.bytes) > 0 && Number(row.endedAtMs) > Number(row.startedAtMs));
+    if (rows.length < 2) return null;
+    const first = rows[0], last = rows.at(-1);
+    const span = last.endedAtMs - first.startedAtMs;
+    if (!(span >= 5_000)) return null;
+    return rows.reduce((sum, row) => sum + row.bytes, 0) * 8 / span;
+  }
+
   // One browser pause can be reported near its start by hls.js and again at
   // its end by the video element. Both reports carry the wait's start time as
   // their episode identity, so a long pause still contributes exactly one
@@ -302,6 +333,7 @@
     estimateKbps = null,
     recentEstimateKbps = null,
     recentEstimateAtMs = null,
+    recentMediaDeliveryKbps = null,
     runwaySeconds = null,
     previousRunwaySeconds = null,
     recentSpeed = null,
@@ -310,6 +342,7 @@
     lastStallAtMs = null,
     nowMs = 0,
     lastSwitchAtMs = null,
+    lastCliffAtMs = null,
     mildSamples = 0,
     upgradeSinceMs = null,
     playerHeight = Infinity,
@@ -360,7 +393,9 @@
       Number.isFinite(runway) && runway <= defaults.nearEmptyRunwaySeconds;
     const freshBandwidthCliff =
       freshRecentEstimate > 0 &&
-      freshRecentEstimate < current.total_kbps * defaults.severeEstimateRatio;
+      (freshRecentEstimate < current.total_kbps * defaults.severeEstimateRatio ||
+       (currentIndex < defaults.lowRungEmergencyCount &&
+        freshRecentEstimate < current.total_kbps));
     const supplyBurst = supplyStalls >= 3;
     const starvation = activeSupplyStall || nearEmpty || supplyBurst;
     const causeKind = causeEvidence && typeof causeEvidence.kind === "string"
@@ -402,23 +437,19 @@
     const severe = freshBandwidthCliff;
 
     if (severe && currentIndex > 0) {
-      // hls.js's EWMA intentionally carries history. At a sharp cliff that
-      // history can briefly make the next rung look safe, even though the
-      // fragment that just completed already measured the lower link. During
-      // severe pressure only, bound the stable EWMA by that fresh transfer so
-      // one restart lands below the cliff instead of teaching a replacement
-      // instance the same lesson and walking the ladder.
-      const severeEstimate = freshRecentEstimate > 0
-        ? (estimate > 0
-          ? Math.min(estimate, freshRecentEstimate)
-          : freshRecentEstimate)
-        : estimate;
-      const safe = highestSafeRung(available, severeEstimate, defaults);
+      // The completed or in-flight transfer is the current link observation.
+      // hls.js's EWMA can still contain the old link in either direction:
+      // capping by a stale LOW estimate needlessly skips a sustainable rung,
+      // while a stale HIGH estimate would risk another stall.
+      const severeEstimate = freshRecentEstimate;
+      const peakCeiling = severeEstimate * defaults.severePeakSafetyFactor;
+      const safe = available.slice().reverse().find(rung =>
+        (rung.peak_kbps || rung.total_kbps) <= peakCeiling) || available[0];
       const safeIndex = safe
         ? closestRungIndex(available, safe.height)
         : currentIndex - 1;
       // Empty runway establishes urgency, not cause. The target comes from a
-      // fresh completed transfer, so a server refusal or stopped loader can
+      // fresh measured transfer, so a server refusal or stopped loader can
       // never be translated into the ladder floor.
       const target = available[Math.min(currentIndex - 1, safeIndex)];
       return {
@@ -506,9 +537,17 @@
       predicted == null || predicted >= defaults.upgradeSpeedFloor;
     const stallFree =
       lastStallAtMs == null || nowMs - lastStallAtMs >= defaults.stallWindowMs;
+    const cliffSettled = lastCliffAtMs == null
+      || nowMs - lastCliffAtMs >= defaults.upgradeAfterCliffMs;
+    const sustainedHeadroom = next && Number(recentMediaDeliveryKbps) >
+      (next.peak_kbps || next.total_kbps) * defaults.upgradeHeadroom;
     const upgradeReady =
       next &&
       estimate > next.total_kbps * defaults.upgradeHeadroom &&
+      freshRecentEstimate > (next.peak_kbps || next.total_kbps)
+        * defaults.upgradeHeadroom &&
+      Number.isFinite(runway) && runway >= defaults.upgradeRunwaySeconds &&
+      (cliffSettled || sustainedHeadroom) &&
       encodeHeadroom &&
       stallFree &&
       !estimatePressure &&
@@ -2055,6 +2094,7 @@
     initialAutoRung,
     bandwidthSeedBps,
     transferSampleKbps,
+    completedMediaWindowKbps,
     recordStallEpisode,
     playerPixelHeight,
     decideRung,

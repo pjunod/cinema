@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["0a774e5e"]
+points = ["cluster.auth"]
+checks = ["rust-gate-ci"]
+reason = "The current Rust lane exercises v45-to-v46 migration admission, the complete schema chain, imported-table and SQLite module inventories, and both downgrade-fixture guards. All five previously failing focused cases plus the v43 rollback case passed with pinned Rust 1.97.1 after this change."

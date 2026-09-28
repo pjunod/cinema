@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <movie>
+                <title>Beach day</title>
+                <plot>The kids discovered crabs.</plot>
+                <premiered>2019-06-14</premiered>
+                <year>2019</year>
+                <tag>beach</tag>
+                <tag>kids</tag>
+                <genre>Family</genre>
+                <runtime>12</runtime>
+                <fileinfo><streamdetails><video><codec>h264</codec></video></streamdetails></fileinfo>
+                <actor><name>Someone</name><role>Self</role></actor>
+            </movie>

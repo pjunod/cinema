@@ -3,6 +3,7 @@
 
 Usage: split-identity BASE SOURCE PIECE [PIECE ...]
        split-identity BASE --plan
+       split-identity BASE --moves
 
 PIECE files are concatenated in source order. Lines inside a
 ``// split: header`` / ``// split: end header`` pair are split-only module
@@ -14,6 +15,33 @@ markers in each current parent with the children named below, removes only
 the module plumbing represented by those markers, and compares the complete
 reconstructed parent byte-for-byte with BASE. The segment-index recipe also
 checks the exact count of parent-visibility additions before removing them.
+``--moves`` proves the S-14 continuation moves (M2/T3 onward) against BASE,
+which is the branch's current merge base with main: the reconstruction reads
+the working tree and BASE only supplies the expected parents, so after a merge
+of main the same proof is run against the new merge base. Every main change
+to a split parent has to be re-applied inside the child now holding its
+region; an ``OK`` against the new merge base shows none was dropped or
+duplicated, and the per-row counts below include the ``pub(super)`` that
+main's new cross-child items needed. Each row of ``MOVES`` names a parent, a marker
+and the child that marker stands for: the child's exact ``use super::*;``
+header is dropped, every ``pub(super) `` it gained is removed (and counted
+against the row's declared number), the result replaces the marker block,
+and the reconstructed parent is passed through ``rustfmt`` on stdin (the
+added visibility pushes some signatures past the line limit, so rustfmt
+wrapped them; formatting the reconstruction unwraps exactly those) before a
+byte-for-byte comparison with the base parent. The base parent is itself
+checked to be a rustfmt fixed point so formatting cannot hide a difference.
+A child's tracing events also carry an explicit ``target:`` naming the
+parent's module path, so the move does not relabel its log lines (a
+``#[path]`` child's default target is its own ``module_path!()``). Each
+was inserted in one of three spellings, which reconstruction removes
+exactly: its own line directly after a ``tracing::<level>!(`` that ends
+its line; ``target: "...", `` directly after the opening parenthesis; or,
+for a one-line call the pin would push past the line limit, the call
+wrapped as ``(`` / pin / the untouched arguments / ``)``. The base parents
+contain no ``target: "`` at all (checked), and any other spelling is left
+in place to fail the comparison.
+
 This one-shot helper is deleted before the plan PR is promoted.
 """
 
@@ -21,6 +49,7 @@ from __future__ import annotations
 
 import difflib
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -161,6 +190,235 @@ def plan_reconstructions() -> dict[str, str]:
     return {transcode_path: transcode, hls_path: hls, vod_path: vod}
 
 
+MOVES: list[tuple[str, str, str, int]] = [
+    # (parent, marker, child relative to the parent's directory, pub(super) additions)
+    ("crates/plurxd/src/transcode.rs", "flow", "transcode/rolling/flow.rs", 51),
+    ("crates/plurxd/src/transcode.rs", "spawn", "transcode/producer/spawn.rs", 22),
+    ("crates/plurxd/src/transcode.rs", "prepublication", "transcode/rolling/prepublication.rs", 44),
+    ("crates/plurxd/src/transcode.rs", "retirement", "transcode/rolling/retirement.rs", 37),
+    ("crates/plurxd/src/transcode.rs", "prepublication-executor", "transcode/producer/prepublication_executor.rs", 8),
+    ("crates/plurxd/src/transcode.rs", "attempt-child", "transcode/producer/attempt_child.rs", 38),
+    ("crates/plurxd/src/transcode.rs", "publication", "transcode/rolling/publication.rs", 63),
+    ("crates/plurxd/src/transcode.rs", "session", "transcode/rolling/session.rs", 159),
+    ("crates/plurxd/src/transcode.rs", "response", "transcode/response.rs", 31),
+    ("crates/plurxd/src/transcode.rs", "hls-codecs", "transcode/hls_codecs.rs", 2),
+    ("crates/plurxd/src/transcode.rs", "cluster-adoption", "transcode/cluster_adoption.rs", 43),
+    ("crates/plurxd/src/transcode.rs", "session-request", "transcode/session_request.rs", 22),
+    ("crates/plurxd/src/transcode.rs", "requests", "transcode/requests.rs", 12),
+    ("crates/plurxd/src/transcode.rs", "pretranscode-source", "transcode/pretranscode/source.rs", 46),
+    ("crates/plurxd/src/transcode.rs", "pretranscode-parts", "transcode/pretranscode/parts.rs", 47),
+    ("crates/plurxd/src/transcode.rs", "rate-control", "transcode/rate_control.rs", 9),
+    ("crates/plurxd/src/transcode.rs", "retention", "transcode/rolling/retention.rs", 6),
+    ("crates/plurxd/src/transcode.rs", "ladder", "transcode/ladder.rs", 7),
+    ("crates/plurxd/src/transcode.rs", "test-support", "transcode/test_support.rs", 3),
+    ("crates/plurxd/src/http/hls.rs", "hls-session-guard", "hls/session_guard.rs", 13),
+    ("crates/plurxd/src/http/hls.rs", "hls-create", "hls/create.rs", 33),
+    ("crates/plurxd/src/http/hls.rs", "hls-relay", "hls/relay.rs", 2),
+    ("crates/plurxd/src/http/hls.rs", "hls-release", "hls/release.rs", 7),
+    ("crates/plurxd/src/http/hls.rs", "hls-control", "hls/control.rs", 45),
+    ("crates/plurxd/src/http/hls.rs", "hls-preparation", "hls/preparation.rs", 47),
+    ("crates/plurxd/src/http/hls.rs", "hls-status", "hls/status.rs", 3),
+    ("crates/plurxd/src/http/hls.rs", "hls-response", "hls/response.rs", 35),
+    ("crates/plurxd/src/http/hls.rs", "hls-playlist", "hls/playlist.rs", 5),
+    ("crates/plurxd/src/http/hls.rs", "hls-subtitle-playlist", "hls/subtitle_playlist.rs", 9),
+    ("crates/plurxd/src/http/hls.rs", "hls-context", "hls/context.rs", 9),
+    ("crates/plurxd/src/http/hls.rs", "hls-subtitle-names", "hls/subtitle_names.rs", 4),
+    ("crates/plurxd/src/http/hls.rs", "hls-playlist-text", "hls/playlist_text.rs", 8),
+    ("crates/plurxd/src/http/hls.rs", "hls-segment", "hls/segment.rs", 15),
+    ("crates/plurxd/src/vodserve.rs", "vod-discovery", "vod/discovery.rs", 7),
+    ("crates/plurxd/src/vodserve.rs", "vod-reader", "vod/reader.rs", 29),
+    ("crates/plurxd/src/vodserve.rs", "vod-marker-prewarm", "vod/marker_prewarm.rs", 68),
+    ("crates/plurxd/src/vodserve.rs", "vod-session", "vod/session.rs", 115),
+    ("crates/plurxd/src/vodserve.rs", "vod-shared", "vod/shared.rs", 13),
+    ("crates/plurxd/src/vodserve.rs", "vod-driver", "vod/driver.rs", 6),
+    ("crates/plurxd/src/vodserve.rs", "vod-marker-dispatch", "vod/marker_dispatch.rs", 4),
+    ("crates/plurxd/src/vodserve.rs", "vod-generation", "vod/generation.rs", 19),
+    ("crates/plurxd/src/vodserve.rs", "vod-plan", "vod/plan.rs", 15),
+    ("crates/plurxd/src/vodserve.rs", "vod-init", "vod/init.rs", 7),
+]
+
+CHILD_HEADER = "use super::*;\n\n"
+
+# A parent's own `pub(super)` names *its* parent. Moved one level down, the
+# same reach must be spelled out: `http/hls.rs`'s `pub(super)` (visible in
+# `http`) becomes `pub(in crate::http)` in a child, and one inside hls.rs's
+# inline `pub mod plan_derivation` (visible in `hls`) becomes
+# `pub(in crate::http::hls)`. Reconstruction maps each back after removing
+# the added `pub(super) `; the base parents contain no `pub(in ` at all.
+RESTATED: dict[str, tuple[str, ...]] = {
+    "crates/plurxd/src/http/hls.rs": ("pub(in crate::http) ", "pub(in crate::http::hls) "),
+}
+
+
+# Paths the parent wrote relative to *its* parent, which a child one level
+# down must write with one more `super::` (hls.rs's `super::stream::`
+# names `http::stream`). The base parents contain no `super::super::`.
+RELOCATED: dict[str, tuple[str, str]] = {
+    "crates/plurxd/src/http/hls.rs": ("super::super::", "super::"),
+}
+
+
+# The module path each parent's events were labelled with before the split.
+LOG_TARGETS: dict[str, str] = {
+    "crates/plurxd/src/transcode.rs": "plurxd::transcode",
+    "crates/plurxd/src/http/hls.rs": "plurxd::http::hls",
+    "crates/plurxd/src/vodserve.rs": "plurxd::vodserve",
+}
+
+
+def unpinned_targets(parent: str, text: str) -> tuple[str, int]:
+    call = r"(tracing::(?:trace|debug|info|warn|error)!\()"
+    pin = 'target: "' + re.escape(LOG_TARGETS[parent]) + '",'
+    count = 0
+
+    # A call that fitted on one line but not with its target was wrapped:
+    # the pin and the untouched argument text each on their own line, four
+    # spaces in, and the closing parenthesis back at the call's indentation.
+    # It is unwrapped only if the one line it came from fits the limit, so a
+    # call that was already written with one argument line because it did
+    # not fit keeps its shape and only loses the pin line below. One that
+    # did fit and was wrapped by hand anyway would be joined here and fail
+    # the comparison loudly.
+    def unwrap(match: re.Match[str]) -> str:
+        nonlocal count
+        if len(match["inner"]) != len(match["outer"]) + 4:
+            return match[0]
+        source = match.string
+        line_start = source.rfind("\n", 0, match.start()) + 1
+        line_end = source.find("\n", match.end())
+        rest = source[match.end() : len(source) if line_end < 0 else line_end]
+        width = match.start() - line_start + len(match[1]) + len(match["args"]) + 1 + len(rest)
+        if width > 100:
+            return match[0]
+        count += 1
+        return match[1] + match["args"] + ")"
+
+    text = re.sub(
+        call + r"\n(?P<inner> *)" + pin + r"\n(?P=inner)(?P<args>[^\n]*)\n(?P<outer> *)\)",
+        unwrap,
+        text,
+    )
+    text, own_line = re.subn(call + r"\n *" + pin + r"(?=\n)", r"\1", text)
+    text, inline = re.subn(call + pin + " ", r"\1", text)
+    return text, count + own_line + inline
+
+
+def unsplit_visibility(parent: str, text: str) -> tuple[str, int]:
+    added = text.count("pub(super) ")
+    text = text.replace("pub(super) ", "")
+    for spelling in RESTATED.get(parent, ()):
+        text = text.replace(spelling, "pub(super) ")
+    if parent in RELOCATED:
+        text = text.replace(*RELOCATED[parent])
+    return text, added
+
+# (parent, marker, impl header line, [chunk children], pub(super) additions):
+# one `impl` block cut into contiguous chunks. Each chunk child is the
+# structural header, the same impl header line, its methods, and a closing
+# `}`; the single blank line that separated two methods at each cut is
+# structural too, so the reconstruction joins chunks with one blank line.
+IMPL_SPLITS: list[tuple[str, str, str, list[str], int]] = [
+    (
+        "crates/plurxd/src/transcode.rs",
+        "manager",
+        'impl TranscodeManager {\n',
+        [
+            "transcode/manager/construct.rs",
+            "transcode/manager/plan.rs",
+            "transcode/manager/cache.rs",
+            "transcode/manager/produce.rs",
+            "transcode/manager/create.rs",
+            "transcode/manager/describe.rs",
+            "transcode/manager/start.rs",
+            "transcode/manager/control.rs",
+            "transcode/manager/publication.rs",
+            "transcode/manager/maintenance.rs",
+        ],
+        78,
+    ),
+    (
+        "crates/plurxd/src/vodserve.rs",
+        "vod-serve",
+        'impl VodServe {\n',
+        [
+            "vod/serve/construct.rs",
+            "vod/serve/create.rs",
+            "vod/serve/delivery.rs",
+            "vod/serve/end.rs",
+            "vod/serve/control.rs",
+            "vod/serve/serve.rs",
+        ],
+        11,
+    ),
+]
+
+
+def impl_split_reconstruction(
+    parent_text: str, parent: str, marker: str, header: str, chunks: list[str], expected: int
+) -> tuple[str, str]:
+    bodies: list[str] = []
+    added = 0
+    targets = 0
+    for chunk_rel in chunks:
+        chunk_path = str(pathlib.Path(parent).parent / chunk_rel)
+        text = read(chunk_path)
+        prefix = CHILD_HEADER + header
+        if not text.startswith(prefix) or not text.endswith("\n}\n"):
+            raise SystemExit(f"{chunk_path}: lost its exact impl-chunk wrapper")
+        body, count = unsplit_visibility(parent, text[len(prefix) : -len("}\n")])
+        body, pinned = unpinned_targets(parent, body)
+        targets += pinned
+        added += count
+        bodies.append(body)
+    if added != expected:
+        raise SystemExit(f"{marker}: pub(super) additions expected {expected}, got {added}")
+    rebuilt = header + "\n".join(bodies) + "}\n"
+    return (
+        replace_marker(parent_text, marker, rebuilt),
+        f"{marker}: {len(chunks)} impl chunks, {added} pub(super) additions, "
+        f"{targets} log targets",
+    )
+
+
+def rustfmt(text: str) -> str:
+    return subprocess.run(
+        ["rustfmt", "--edition", "2021", "--emit", "stdout"],
+        check=True,
+        input=text.encode("utf-8"),
+        stdout=subprocess.PIPE,
+    ).stdout.decode("utf-8")
+
+
+def moves_reconstructions() -> tuple[dict[str, str], list[str]]:
+    parents: dict[str, str] = {}
+    report: list[str] = []
+    for parent, marker, child_rel, expected in MOVES:
+        text = parents.get(parent) or read(parent)
+        child_path = str(pathlib.Path(parent).parent / child_rel)
+        child = read(child_path)
+        if not child.startswith(CHILD_HEADER):
+            raise SystemExit(f"{child_path}: lost its exact structural header")
+        child = child[len(CHILD_HEADER) :]
+        child, added = unsplit_visibility(parent, child)
+        child, targets = unpinned_targets(parent, child)
+        if added != expected:
+            raise SystemExit(
+                f"{child_path}: pub(super) additions expected {expected}, got {added}"
+            )
+        parents[parent] = replace_marker(text, marker, child)
+        report.append(
+            f"{child_path}: {child.count(chr(10))} lines, {added} pub(super) additions, "
+            f"{targets} log targets"
+        )
+    for parent, marker, header, chunks, expected in IMPL_SPLITS:
+        text = parents.get(parent) or read(parent)
+        parents[parent], line = impl_split_reconstruction(
+            text, parent, marker, header, chunks, expected
+        )
+        report.append(line)
+    return parents, report
+
+
 def baseline(base: str, source: str) -> str:
     return subprocess.run(
         ["git", "show", f"{base}:{source}"],
@@ -200,10 +458,37 @@ def main() -> int:
             else 1
         )
 
+    if len(sys.argv) == 3 and sys.argv[2] == "--moves":
+        base = sys.argv[1]
+        reconstructions, report = moves_reconstructions()
+        ok = True
+        for source, current in reconstructions.items():
+            original = baseline(base, source)
+            if 'target: "' in original:
+                print(f"{source}: base already spells a log target; the removal is not injective")
+                ok = False
+                continue
+            if rustfmt(original) != original:
+                print(f"{source}: base is not a rustfmt fixed point")
+                ok = False
+                continue
+            raw_same = current == original
+            ok &= compare(
+                base,
+                source,
+                rustfmt(current),
+                "marker-expanded continuation split tree"
+                + ("" if raw_same else " after rustfmt"),
+            )
+        for line in report:
+            print(line)
+        return 0 if ok else 1
+
     if len(sys.argv) < 4:
         print(
             "usage: split-identity BASE SOURCE PIECE [PIECE ...]\n"
-            "       split-identity BASE --plan",
+            "       split-identity BASE --plan\n"
+            "       split-identity BASE --moves",
             file=sys.stderr,
         )
         return 2

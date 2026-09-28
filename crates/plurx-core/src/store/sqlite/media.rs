@@ -17,12 +17,12 @@ use crate::error::StoreError;
 use crate::mediafacts::{FactsRow, MediaFacts};
 use crate::store::{
     directory_matches_movie_path, directory_matches_show_path, directory_path_bounds,
-    normalized_directory, ArtworkInventoryItem, ArtworkRepairFence, IdentityRepairBlocker,
-    IdentityRepairFile, IdentityRepairItem, IdentityRepairSnapshot, IdentityRepairWatch,
-    MediaStore, MissingFieldOrder, MissingVideoCodecTag, ReconcileOutcome, RootFingerprintStatus,
-    SeriesHintOutcome, IDENTITY_REPAIR_EPISODES_MAX, IDENTITY_REPAIR_FILES_MAX,
-    IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX, IDENTITY_REPAIR_SHOWS_MIN,
-    IDENTITY_REPAIR_WATCHES_MAX, TOP_LEVEL_ITEM_PREDICATE,
+    item_sort_order_by, normalized_directory, ArtworkInventoryItem, ArtworkRepairFence,
+    IdentityRepairBlocker, IdentityRepairFile, IdentityRepairItem, IdentityRepairSnapshot,
+    IdentityRepairWatch, MediaStore, MissingFieldOrder, MissingVideoCodecTag, ReconcileOutcome,
+    RootFingerprintStatus, SeriesHintOutcome, IDENTITY_REPAIR_EPISODES_MAX,
+    IDENTITY_REPAIR_FILES_MAX, IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX,
+    IDENTITY_REPAIR_SHOWS_MIN, IDENTITY_REPAIR_WATCHES_MAX, TOP_LEVEL_ITEM_PREDICATE,
 };
 
 pub(super) fn identity_repair_snapshot(
@@ -31,7 +31,7 @@ pub(super) fn identity_repair_snapshot(
     show_ids: &[i64],
 ) -> Result<IdentityRepairSnapshot, StoreError> {
     const REPAIR_ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, year, overview, tmdb_id, imdb_id, season_number, episode_number, air_date, runtime_ms, poster_path, backdrop_path, added_at, updated_at, recorded_at, tags, nfo_seeded_at, metadata_at, artwork_attempted_at, artwork_error, genres, author, book_work_id, book_edition_id, book_metadata_source";
-    const REPAIR_FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container, video_codec, video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, subtitle_streams, probe_json, scanned_at, hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, video_codec_tag, field_order, max_cll, max_fall, mastering_max_luminance, luminance_source";
+    const REPAIR_FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container, video_codec, video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, subtitle_streams, probe_json, scanned_at, hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, video_codec_tag, field_order, max_cll, max_fall, mastering_max_luminance, luminance_source, downloaded_subtitles";
     if !(IDENTITY_REPAIR_SHOWS_MIN..=IDENTITY_REPAIR_SHOWS_MAX).contains(&show_ids.len())
         || show_ids.iter().any(|id| *id <= 0)
     {
@@ -400,6 +400,49 @@ fn id_filter(column: &str, only: Option<&[i64]>) -> Option<String> {
     }
 }
 
+/// The count and page statements `list_top_items_in_genre` runs for the
+/// `ORDER BY` `order`, in that order.
+///
+/// Genres are a JSON array (migration v13), so membership is a `json_each`
+/// scan rather than an index probe. Written as "no filter asked, OR the array
+/// contains it" in ONE clause so the count and the page cannot drift: a total
+/// computed without the filter and a page computed with it is a grid that
+/// paginates into empty screens.
+///
+/// NOCASE because the value arrives from a URL a human or a client typed, and
+/// "science fiction" meaning nothing while "Science Fiction" works is not a
+/// distinction anybody asked for. ASCII-only folding, which is all TMDB's
+/// genre vocabulary needs.
+///
+/// Both statements carry `TOP_LEVEL_ITEM_PREDICATE` as written, which is what
+/// lets SQLite read them from the partial `idx_items_top_level_title`
+/// (K-05 M5): a partial index serves only a query whose `WHERE` contains the
+/// index's own `WHERE` term.
+fn library_page_statements(order: &str) -> (String, String) {
+    const GENRE_COUNT: &str = "(?2 IS NULL OR EXISTS ( \
+         SELECT 1 FROM json_each(items.genres) WHERE value = ?2 COLLATE NOCASE))";
+    const GENRE_PAGE: &str = "(?4 IS NULL OR EXISTS ( \
+         SELECT 1 FROM json_each(items.genres) WHERE value = ?4 COLLATE NOCASE))";
+    // Keep the count and page predicates structurally identical while giving
+    // each statement a gap-free binding sequence. The census rejects either
+    // clause if a future edit breaks that rule.
+    debug_assert_eq!(
+        GENRE_COUNT.replace("?2", "?"),
+        GENRE_PAGE.replace("?4", "?")
+    );
+    (
+        format!(
+            "SELECT COUNT(*) FROM items WHERE library_id = ?1 AND \
+             {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE_COUNT}"
+        ),
+        format!(
+            "SELECT {ITEM_COLS} FROM items
+             WHERE library_id = ?1 AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE_PAGE}
+             ORDER BY {order} LIMIT ?3 OFFSET ?2"
+        ),
+    )
+}
+
 #[async_trait]
 impl MediaStore for SqliteStore {
     async fn identity_repair_snapshot(
@@ -431,19 +474,12 @@ impl MediaStore for SqliteStore {
             // Each arm is guarded by its own `IS NOT NULL`, so an id we do not
             // have can never match a row whose id is also NULL. TMDB wins ties
             // because it is what plurx stores for everything it enriched; the
-            // IMDb arm is the fallback for items adopted from an NFO.
-            Ok(find_by(
-                conn,
-                &format!(
-                    "SELECT {ITEM_COLS} FROM items
-                     WHERE kind = ?1
-                       AND ((?2 IS NOT NULL AND tmdb_id = ?2)
-                         OR (?3 IS NOT NULL AND imdb_id = ?3 COLLATE NOCASE))
-                     ORDER BY (?2 IS NOT NULL AND tmdb_id = ?2) DESC, id
-                     LIMIT 1"
-                ),
-                params![kind, tmdb_id, imdb_id],
-            )?)
+            // IMDb arm is the fallback for items adopted from an NFO. Each arm
+            // is one partial-index search (K-05 M5; `sql_source` says why the
+            // statement is spelled as a union).
+            let sql = super::super::sql_source::item_by_external_id(ITEM_COLS).sqlite();
+            super::trace_statement("item_by_external_id", &sql);
+            Ok(find_by(conn, &sql, params![kind, tmdb_id, imdb_id])?)
         })
         .await
     }
@@ -732,7 +768,7 @@ impl MediaStore for SqliteStore {
     }
 
     async fn get_item_children(&self, parent_id: i64) -> Result<Vec<Item>, StoreError> {
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             // Shows order by season/episode; home folders want subfolders
             // first, then their media chronologically. The extra keys are
             // inert for movie/show libraries (recorded_at is NULL there).
@@ -852,52 +888,13 @@ impl MediaStore for SqliteStore {
         genre: Option<&str>,
     ) -> Result<ItemPage, StoreError> {
         let genre = genre.map(str::to_owned);
-        self.with_conn(move |conn| {
-            let order = match sort {
-                ItemSort::Title => "sort_title ASC",
-                ItemSort::Added => "added_at DESC, id DESC",
-                ItemSort::Year => "year IS NULL, year DESC, sort_title ASC",
-                // Best (max) file height per item, highest first; no-height items last.
-                ItemSort::Resolution => {
-                    "COALESCE((SELECT MAX(f.height) FROM files f WHERE f.item_id = items.id), -1) DESC, sort_title ASC"
-                }
-                ItemSort::Recorded => "(recorded_at IS NULL), recorded_at DESC, sort_title ASC",
-            };
-            // Genres are a JSON array (migration v13), so membership is a
-            // `json_each` scan rather than an index probe. Written as
-            // "no filter asked, OR the array contains it" in ONE clause so
-            // the count and the page cannot drift: a total computed without
-            // the filter and a page computed with it is a grid that paginates
-            // into empty screens.
-            //
-            // NOCASE because the value arrives from a URL a human or a client
-            // typed, and "science fiction" meaning nothing while "Science
-            // Fiction" works is not a distinction anybody asked for. ASCII-only
-            // folding, which is all TMDB's genre vocabulary needs.
-            const GENRE_COUNT: &str = "(?2 IS NULL OR EXISTS ( \
-                 SELECT 1 FROM json_each(items.genres) WHERE value = ?2 COLLATE NOCASE))";
-            const GENRE_PAGE: &str = "(?4 IS NULL OR EXISTS ( \
-                 SELECT 1 FROM json_each(items.genres) WHERE value = ?4 COLLATE NOCASE))";
-            // Keep the count and page predicates structurally identical while
-            // giving each statement a gap-free binding sequence. The census
-            // below rejects either clause if a future edit breaks that rule.
-            debug_assert_eq!(
-                GENRE_COUNT.replace("?2", "?"),
-                GENRE_PAGE.replace("?4", "?")
-            );
-            let total: i64 = conn.query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM items WHERE library_id = ?1 AND \
-                     {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE_COUNT}"
-                ),
-                params![library_id, genre],
-                |row| row.get(0),
-            )?;
-            let mut stmt = conn.prepare(&format!(
-                "SELECT {ITEM_COLS} FROM items
-                 WHERE library_id = ?1 AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE_PAGE}
-                 ORDER BY {order} LIMIT ?3 OFFSET ?2"
-            ))?;
+        self.with_read_txn(move |conn| {
+            let (count_sql, page_sql) = library_page_statements(item_sort_order_by(sort));
+            super::trace_statement("list_top_items_in_genre.count", &count_sql);
+            let total: i64 =
+                conn.query_row(&count_sql, params![library_id, genre], |row| row.get(0))?;
+            super::trace_statement("list_top_items_in_genre.page", &page_sql);
+            let mut stmt = conn.prepare(&page_sql)?;
             let items = stmt
                 .query_map(params![library_id, offset, limit, genre], |row| {
                     item_from_row(row, 0)
@@ -914,7 +911,7 @@ impl MediaStore for SqliteStore {
     ) -> Result<Vec<HomePreviewPage>, StoreError> {
         let limit_per_library = limit_per_library.clamp(1, 24);
         self.with_read(move |conn| {
-            let mut stmt = conn.prepare(&format!(
+            let sql = format!(
                 "WITH ranked AS (
                      SELECT id, library_id,
                             COUNT(*) OVER (PARTITION BY library_id) AS library_total,
@@ -934,7 +931,9 @@ impl MediaStore for SqliteStore {
                    JOIN items i ON i.id = selected.id
                   ORDER BY selected.library_id, selected.preview_rank",
                 item_cols("i")
-            ))?;
+            );
+            super::trace_statement("home_preview_pages", &sql);
+            let mut stmt = conn.prepare(&sql)?;
             let rows = stmt
                 .query_map([limit_per_library], |row| {
                     Ok((item_from_row(row, 0)?, row.get::<_, i64>(ITEM_COL_COUNT)?))
@@ -962,7 +961,7 @@ impl MediaStore for SqliteStore {
         library_id: Option<i64>,
         limit: i64,
     ) -> Result<Vec<RecentItem>, StoreError> {
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             // One card per movie, per show (latest episode represents the
             // show), and — in home libraries — per video or folder. A scan can
             // insert several seasons inside the same second, so added_at alone
@@ -970,48 +969,34 @@ impl MediaStore for SqliteStore {
             // episode, then id so the card also gets the newest season poster.
             // Photos are excluded on purpose: a 2,000-photo import would
             // otherwise flood the home screen, and its videos and folders
-            // still surface it.
-            let mut stmt = conn.prepare(&format!(
-                "WITH ranked AS (
-                     SELECT {i},
-                            show.title AS rail_show_title,
-                            season.poster_path AS rail_season_poster,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY
-                                    CASE WHEN i.kind = 'episode' AND show.id IS NOT NULL
-                                         THEN 'show:' || show.id
-                                         ELSE 'item:' || i.id END
-                                ORDER BY i.added_at DESC,
-                                         COALESCE(season.season_number, -1) DESC,
-                                         COALESCE(i.episode_number, -1) DESC,
-                                         i.id DESC
-                            ) AS rail_rank
-                     FROM items i
-                     LEFT JOIN items season
-                            ON season.id = i.parent_id AND i.kind = 'episode'
-                     LEFT JOIN items show ON show.id = season.parent_id
-                     WHERE i.kind IN ('movie','episode','video','folder','book','audiobook')
-                       AND (?1 IS NULL OR i.library_id = ?1)
-                       AND (?1 IS NOT NULL OR NOT EXISTS (SELECT 1 FROM libraries l WHERE l.id = i.library_id AND l.kind = 'recordings'))
-                 )
-                 SELECT {r}, r.rail_show_title, r.rail_season_poster
-                 FROM ranked r
-                 WHERE r.rail_rank = 1
-                 ORDER BY r.added_at DESC, r.id DESC
-                 LIMIT ?2",
-                i = item_cols("i"),
-                r = item_cols("r")
-            ))?;
-            let items = stmt
-                .query_map(params![library_id, limit], |row| {
-                    Ok(RecentItem {
-                        item: item_from_row(row, 0)?,
-                        show_title: row.get(ITEM_COL_COUNT)?,
-                        season_poster: row.get(ITEM_COL_COUNT + 1)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(items)
+            // still surface it. Read from a widening window of the newest
+            // rows; `sql_source::recently_added` states why that is exact.
+            let sql =
+                super::super::sql_source::recently_added(&item_cols("i"), &item_cols("r")).sqlite();
+            let mut stmt = conn.prepare(&sql)?;
+            let mut window_offset =
+                super::super::sql_source::recently_added_first_window_offset(limit);
+            loop {
+                // Once per pass: the query-plan protocol times every pass
+                // the read actually ran.
+                super::trace_statement("recently_added", &sql);
+                let mut cut = false;
+                let items = stmt
+                    .query_map(params![library_id, window_offset, limit], |row| {
+                        cut = row.get::<_, bool>(ITEM_COL_COUNT + 2)?;
+                        Ok(RecentItem {
+                            item: item_from_row(row, 0)?,
+                            show_title: row.get(ITEM_COL_COUNT)?,
+                            season_poster: row.get(ITEM_COL_COUNT + 1)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                if !cut || i64::try_from(items.len()).unwrap_or(i64::MAX) >= limit {
+                    return Ok(items);
+                }
+                window_offset =
+                    super::super::sql_source::recently_added_wider_window_offset(window_offset);
+            }
         })
         .await
     }
@@ -1020,9 +1005,16 @@ impl MediaStore for SqliteStore {
         let Some(match_expr) = fts_query(query) else {
             return Ok(Vec::new());
         };
-        self.with_conn(move |conn| {
-            let mut stmt = conn.prepare(&format!(
-                "WITH hits AS MATERIALIZED (SELECT rowid,rank AS score FROM items_fts WHERE items_fts MATCH ?1 AND rowid NOT IN (SELECT rowid FROM classification_fts) UNION ALL SELECT rowid,rank AS score FROM classification_fts WHERE classification_fts MATCH ?1) SELECT {i}, show.title, season.poster_path
+        self.with_read(move |conn| {
+            // An `items_fts` hit is dropped only while the item has a *current*
+            // classification index entry: membership of `classification_fts`,
+            // looked up per hit by rowid (K-05 section 3.6). A rename deletes
+            // that row (`classification_source_changed`) and keeps the
+            // `media_classifications` row for regeneration, so the renamed
+            // title is found through `items_fts`; testing the classification
+            // table instead would hide it from both branches.
+            let sql = format!(
+                "WITH hits AS MATERIALIZED (SELECT rowid,rank AS score FROM items_fts WHERE items_fts MATCH ?1 AND NOT EXISTS (SELECT 1 FROM classification_fts c WHERE c.rowid = items_fts.rowid) UNION ALL SELECT rowid,rank AS score FROM classification_fts WHERE classification_fts MATCH ?1) SELECT {i}, show.title, season.poster_path
                  FROM (SELECT rowid,min(score) AS score FROM hits GROUP BY rowid) f
                  JOIN items i ON i.id = f.rowid
                  LEFT JOIN items season
@@ -1031,7 +1023,9 @@ impl MediaStore for SqliteStore {
                  WHERE i.kind IN ('movie','show','episode','folder','video','photo','book','audiobook')
                  ORDER BY f.score, i.id LIMIT ?2",
                 i = item_cols("i")
-            ))?;
+            );
+            super::trace_statement("search_items", &sql);
+            let mut stmt = conn.prepare(&sql)?;
             let items = stmt
                 .query_map(params![match_expr, limit], |row| {
                     Ok(RecentItem {
@@ -1616,7 +1610,7 @@ impl MediaStore for SqliteStore {
     }
 
     async fn episodes_for_show(&self, show_id: i64) -> Result<Vec<Item>, StoreError> {
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             let mut stmt = conn.prepare(&format!(
                 "SELECT {e} FROM items e
                  JOIN items season ON e.parent_id = season.id
@@ -1805,6 +1799,43 @@ impl MediaStore for SqliteStore {
         .await
     }
 
+    async fn add_downloaded_subtitle(
+        &self,
+        file_id: i64,
+        track: &crate::domain::DownloadedSubtitle,
+    ) -> Result<bool, StoreError> {
+        let raw = crate::store::downloaded_subtitles::encode(track)?;
+        let track = track.clone();
+        self.with_conn(move |conn| {
+            let changed = conn.execute(
+                crate::store::downloaded_subtitles::ADD_DOWNLOADED_SUBTITLE,
+                params![
+                    file_id,
+                    track.source_size,
+                    track.source_mtime,
+                    raw,
+                    track.provider_file_id
+                ],
+            )?;
+            Ok(changed == 1)
+        })
+        .await
+    }
+
+    async fn subtitle_candidate_file_ids(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<i64>, StoreError> {
+        self.with_read(move |conn| {
+            Ok(conn
+                .prepare(crate::store::downloaded_subtitles::CANDIDATES)?
+                .query_map(params![after_id, limit.clamp(1, 16)], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+    }
+
     async fn get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError> {
         // The per-request metadata lookup: session starts, decisions, VTT.
         // Read-only, so it takes a read connection instead of queuing behind
@@ -1851,6 +1882,27 @@ impl MediaStore for SqliteStore {
                 params![file_id, chapters],
             )?;
             Ok(())
+        })
+        .await
+    }
+
+    async fn merge_file_probe_hevc_parameter_sets(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        census_json: &str,
+    ) -> Result<bool, StoreError> {
+        let census = census_json.to_owned();
+        self.with_conn(move |conn| {
+            // The same in-SQL graft as the chapters above, fenced to the
+            // measured revision.
+            Ok(conn.execute(
+                "UPDATE files
+                    SET probe_json = json_set(probe_json, '$.plurx_hevc_parameter_sets', json(?1))
+                  WHERE id = ?2 AND size = ?3 AND mtime = ?4 AND probe_json IS NOT NULL",
+                params![census, file_id, size, mtime],
+            )? == 1)
         })
         .await
     }
@@ -2110,15 +2162,17 @@ impl MediaStore for SqliteStore {
     }
 
     async fn files_for_item(&self, item_id: i64) -> Result<Vec<MediaFile>, StoreError> {
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             // Best version first: an item can have several source files (a 4K
             // and a 1080p rip of the same movie). Order by resolution, then
             // bitrate, so clients default to the highest quality; SQLite
             // sorts NULLs last under DESC.
-            let mut stmt = conn.prepare(&format!(
+            let sql = format!(
                 "SELECT {FILE_COLS} FROM files WHERE item_id = ?1
                  ORDER BY height DESC, bitrate DESC, path"
-            ))?;
+            );
+            super::trace_statement("files_for_item", &sql);
+            let mut stmt = conn.prepare(&sql)?;
             let files = stmt
                 .query_map(params![item_id], file_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2157,7 +2211,7 @@ impl MediaStore for SqliteStore {
         }
         // ids are our own row ids (trusted i64s), so an inline IN-list is safe.
         let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             let mut stmt = conn.prepare(&format!(
                 "SELECT parent_id, COUNT(*) FROM items
                  WHERE parent_id IN ({list}) GROUP BY parent_id"
@@ -2177,7 +2231,7 @@ impl MediaStore for SqliteStore {
         // ids come from our own item rows (trusted i64s), so an inline IN-list
         // is safe and avoids a variadic-params dance.
         let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             let mut stmt = conn.prepare(&format!(
                 "SELECT item_id, MAX(height) FROM files
                  WHERE height IS NOT NULL AND item_id IN ({list})
@@ -2198,7 +2252,7 @@ impl MediaStore for SqliteStore {
         // Same inline IN-list as `item_max_heights`, for the same reason: our
         // own row ids, and a bound list needs a statement per arity.
         let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             // ONE statement for the whole page. The window functions do both
             // halves of the aggregation rule documented on `MediaFacts`:
             // COUNT/SUM describe every file of the item, ROW_NUMBER picks the
@@ -2211,7 +2265,7 @@ impl MediaStore for SqliteStore {
             // NULL heights sort last via COALESCE rather than being filtered
             // out — an unprobed file is still a file, and dropping it here
             // would make `files`/`bytes` understate what is on the volume.
-            let mut stmt = conn.prepare(&format!(
+            let sql = format!(
                 "WITH ranked AS (
                      SELECT item_id,
                             COUNT(*)  OVER (PARTITION BY item_id) AS n_files,
@@ -2230,7 +2284,9 @@ impl MediaStore for SqliteStore {
                  SELECT item_id, n_files, total_bytes, container, video_codec,
                         height, hdr, hdr_format, audio_streams
                  FROM ranked WHERE pick = 1"
-            ))?;
+            );
+            super::trace_statement("item_media_facts", &sql);
+            let mut stmt = conn.prepare(&sql)?;
             let rows = stmt
                 .query_map([], |row| {
                     let audio_json: String = row.get(8)?;
@@ -2523,6 +2579,226 @@ mod tests {
         NewLibrary, ProbeResult,
     };
     use crate::store::{LibraryStore, MediaStore, SqliteStore};
+
+    /// The whole-catalogue statement `recently_added` ran before K-05, kept
+    /// as the oracle the windowed read must agree with.
+    fn legacy_recently_added(
+        conn: &rusqlite::Connection,
+        library_id: Option<i64>,
+        limit: i64,
+    ) -> Vec<(i64, Option<String>, Option<String>)> {
+        let sql = format!(
+            "WITH ranked AS (
+                 SELECT {i},
+                        show.title AS rail_show_title,
+                        season.poster_path AS rail_season_poster,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY
+                                CASE WHEN i.kind = 'episode' AND show.id IS NOT NULL
+                                     THEN 'show:' || show.id
+                                     ELSE 'item:' || i.id END
+                            ORDER BY i.added_at DESC,
+                                     COALESCE(season.season_number, -1) DESC,
+                                     COALESCE(i.episode_number, -1) DESC,
+                                     i.id DESC
+                        ) AS rail_rank
+                 FROM items i
+                 LEFT JOIN items season
+                        ON season.id = i.parent_id AND i.kind = 'episode'
+                 LEFT JOIN items show ON show.id = season.parent_id
+                 WHERE i.kind IN ('movie','episode','video','folder','book','audiobook')
+                   AND (?1 IS NULL OR i.library_id = ?1)
+                   AND (?1 IS NOT NULL OR NOT EXISTS (SELECT 1 FROM libraries l WHERE l.id = i.library_id AND l.kind = 'recordings'))
+             )
+             SELECT r.id, r.rail_show_title, r.rail_season_poster
+             FROM ranked r
+             WHERE r.rail_rank = 1
+             ORDER BY r.added_at DESC, r.id DESC
+             LIMIT ?2",
+            i = super::item_cols("i"),
+        );
+        let mut stmt = conn.prepare(&sql).expect("legacy statement");
+        stmt.query_map(rusqlite::params![library_id, limit], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .expect("legacy query")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("legacy rows")
+    }
+
+    async fn windowed_recently_added(
+        store: &SqliteStore,
+        library_id: Option<i64>,
+        limit: i64,
+    ) -> Vec<(i64, Option<String>, Option<String>)> {
+        store
+            .recently_added(library_id, limit)
+            .await
+            .expect("recently added")
+            .into_iter()
+            .map(|card| (card.item.id, card.show_title, card.season_poster))
+            .collect()
+    }
+
+    /// (id, library, kind, parent, added_at, season, episode)
+    type RecentSeedRow = (
+        i64,
+        i64,
+        &'static str,
+        Option<i64>,
+        i64,
+        Option<i64>,
+        Option<i64>,
+    );
+
+    /// Seed libraries 1 Movies, 2 Shows, 3 Home and 4 Recordings, then run
+    /// `insert` (id, library, kind, parent, added_at, season, episode) rows.
+    async fn seed_recent(store: &SqliteStore, rows: Vec<RecentSeedRow>) {
+        store
+            .with_conn(move |conn| {
+                conn.execute_batch(
+                    "INSERT INTO libraries(id,name,kind,paths) VALUES
+                         (1,'Movies','movies','[]'),(2,'Shows','shows','[]'),
+                         (3,'Home','home','[]'),(4,'Recordings','recordings','[]');",
+                )?;
+                let mut insert = conn.prepare(
+                    "INSERT INTO items(id,library_id,kind,parent_id,title,sort_title,
+                                       added_at,season_number,episode_number,poster_path,
+                                       tags,genres)
+                     VALUES(?1,?2,?3,?4,'t'||?1,'t'||?1,?5,?6,?7,'poster-'||?1,'[]','[]')",
+                )?;
+                for (id, library, kind, parent, added_at, season, episode) in rows {
+                    insert.execute(rusqlite::params![
+                        id, library, kind, parent, added_at, season, episode
+                    ])?;
+                }
+                Ok(())
+            })
+            .await
+            .expect("seed");
+    }
+
+    /// K-05 M4: one show whose episodes fill the whole first window (nine
+    /// times the limit, newer than everything else) leaves the first pass
+    /// with a single card, so the read must widen until it has the limit.
+    #[tokio::test]
+    async fn recently_added_widens_window() {
+        const LIMIT: i64 = 4;
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut rows = vec![
+            (1, 2, "show", None, 0, None, None),
+            (2, 2, "season", Some(1), 0, Some(1), None),
+        ];
+        for episode in 0..(9 * LIMIT) {
+            rows.push((
+                100 + episode,
+                2,
+                "episode",
+                Some(2),
+                10_000 + episode,
+                Some(1),
+                Some(episode + 1),
+            ));
+        }
+        for movie in 0..LIMIT {
+            rows.push((1_000 + movie, 1, "movie", None, 5_000 + movie, None, None));
+        }
+        seed_recent(&store, rows).await;
+        let cards = windowed_recently_added(&store, None, LIMIT).await;
+        assert_eq!(
+            cards.iter().map(|card| card.0).collect::<Vec<_>>(),
+            [100 + 9 * LIMIT - 1, 1_003, 1_002, 1_001],
+            "the show's newest episode, then the newest movies"
+        );
+        let legacy = store
+            .with_conn(move |conn| Ok(legacy_recently_added(conn, None, LIMIT)))
+            .await
+            .expect("legacy");
+        assert_eq!(cards, legacy);
+    }
+
+    /// K-05 M4: the windowed read returns exactly what the whole-catalogue
+    /// ranking returned, over 200 seeded catalogues dense in `added_at` ties
+    /// (including ties across the window boundary), shows whose episodes span
+    /// several seasons, home folders and photos, and Recordings, for every
+    /// library filter and several limits.
+    #[tokio::test]
+    async fn recently_added_matches_the_whole_catalogue_ranking() {
+        for seed in 0..200_u64 {
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut next = move |bound: u64| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                i64::try_from(state % bound).expect("small")
+            };
+            let store = SqliteStore::open_in_memory().expect("open");
+            let mut rows = Vec::new();
+            let mut id = 1;
+            let stamp = |next: &mut dyn FnMut(u64) -> i64| 1_000 + next(12);
+            for _ in 0..(5 + next(20)) {
+                rows.push((id, 1, "movie", None, stamp(&mut next), None, None));
+                id += 1;
+            }
+            for _ in 0..(1 + next(4)) {
+                let show = id;
+                rows.push((show, 2, "show", None, stamp(&mut next), None, None));
+                id += 1;
+                for season in 1..=(1 + next(3)) {
+                    let season_id = id;
+                    rows.push((
+                        season_id,
+                        2,
+                        "season",
+                        Some(show),
+                        stamp(&mut next),
+                        Some(season),
+                        None,
+                    ));
+                    id += 1;
+                    for episode in 1..=(1 + next(6)) {
+                        rows.push((
+                            id,
+                            2,
+                            "episode",
+                            Some(season_id),
+                            stamp(&mut next),
+                            Some(season),
+                            Some(episode),
+                        ));
+                        id += 1;
+                    }
+                }
+            }
+            for _ in 0..next(4) {
+                let folder = id;
+                rows.push((folder, 3, "folder", None, stamp(&mut next), None, None));
+                id += 1;
+                rows.push((id, 3, "video", Some(folder), stamp(&mut next), None, None));
+                id += 1;
+                rows.push((id, 3, "photo", Some(folder), stamp(&mut next), None, None));
+                id += 1;
+            }
+            for _ in 0..next(8) {
+                rows.push((id, 4, "video", None, stamp(&mut next), None, None));
+                id += 1;
+            }
+            seed_recent(&store, rows).await;
+            for library_id in [None, Some(1), Some(2), Some(3), Some(4)] {
+                for limit in [1, 2, 3, 7, 50] {
+                    let cards = windowed_recently_added(&store, library_id, limit).await;
+                    let legacy = store
+                        .with_conn(move |conn| Ok(legacy_recently_added(conn, library_id, limit)))
+                        .await
+                        .expect("legacy");
+                    assert_eq!(
+                        cards, legacy,
+                        "seed {seed}, library {library_id:?}, limit {limit}"
+                    );
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn scan_identity_directory_lookup_uses_the_path_range_index() {
@@ -4119,5 +4395,204 @@ mod tests {
         let after = store.get_item(id).await.expect("get").expect("item");
         assert_eq!(after.artwork_attempted_at, before.artwork_attempted_at);
         assert_eq!(after.artwork_error.as_deref(), Some("download: status 500"));
+    }
+
+    /// `EXPLAIN QUERY PLAN` detail lines for `sql` bound to `params`.
+    async fn plan_of(
+        store: &SqliteStore,
+        sql: String,
+        params: Vec<rusqlite::types::Value>,
+    ) -> Vec<String> {
+        store
+            .with_conn(move |conn| {
+                let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                let details = stmt
+                    .query_map(rusqlite::params_from_iter(params), |row| {
+                        row.get::<_, String>(3)
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(details)
+            })
+            .await
+            .expect("plan")
+    }
+
+    /// K-05 M5: the external-id lookup is one partial-index search per arm
+    /// and reads its rows by id. Before M5 it scanned every item once per
+    /// coming-soon entry (`SCAN items USING INDEX idx_items_library_kind`,
+    /// 3.3 ms on the 75,600-item fixture).
+    #[tokio::test]
+    async fn item_by_external_id_searches_one_partial_index_per_arm() {
+        use rusqlite::types::Value;
+        let store = SqliteStore::open_in_memory().expect("open");
+        let plan = plan_of(
+            &store,
+            crate::store::sql_source::item_by_external_id(super::ITEM_COLS).sqlite(),
+            vec![
+                Value::Text("movie".into()),
+                Value::Integer(42),
+                Value::Text("tt0000042".into()),
+            ],
+        )
+        .await;
+        assert!(
+            plan.iter()
+                .any(|line| line == "SEARCH items USING COVERING INDEX idx_items_tmdb (tmdb_id=?)"),
+            "{plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .any(|line| line == "SEARCH items USING COVERING INDEX idx_items_imdb (imdb_id=?)"),
+            "{plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .any(|line| line == "SEARCH items USING INTEGER PRIMARY KEY (rowid=?)"),
+            "{plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|line| line.starts_with("SCAN items")),
+            "{plan:?}"
+        );
+    }
+
+    /// K-05 M5: the union spelling returns exactly the row the `OR`
+    /// statement it replaced returns, for every kind and id combination,
+    /// including a null TMDB id on an IMDb match (which the `OR` statement's
+    /// `DESC` key ranks after a non-matching TMDB id), case-folded IMDb ids,
+    /// a row that matches both arms, and ids shared across kinds.
+    #[tokio::test]
+    async fn item_by_external_id_matches_the_or_statement() {
+        use rusqlite::OptionalExtension;
+        const LEGACY: &str = "WHERE kind = ?1
+                   AND ((?2 IS NOT NULL AND tmdb_id = ?2)
+                     OR (?3 IS NOT NULL AND imdb_id = ?3 COLLATE NOCASE))
+                 ORDER BY (?2 IS NOT NULL AND tmdb_id = ?2) DESC, id
+                 LIMIT 1";
+        const IMDB: [&str; 4] = ["tt01", "TT01", "tt02", "tt03"];
+        let store = SqliteStore::open_in_memory().expect("open");
+        store
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO libraries(id,name,kind,paths) VALUES (1,'M','movies','[]');",
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("library");
+        for seed in 0..200_u64 {
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut next = move |bound: u64| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                i64::try_from(state % bound).expect("small")
+            };
+            let mut rows = Vec::new();
+            for id in 1..=(4 + next(20)) {
+                let kind = ["movie", "show", "episode"][usize::try_from(next(3)).expect("index")];
+                let tmdb = (next(3) > 0).then(|| next(4));
+                let imdb = (next(3) > 0).then(|| IMDB[usize::try_from(next(4)).expect("index")]);
+                rows.push((id, kind, tmdb, imdb));
+            }
+            let lookups = store
+                .with_conn(move |conn| {
+                    conn.execute_batch("DELETE FROM items;")?;
+                    let mut insert = conn.prepare(
+                        "INSERT INTO items(id,library_id,kind,title,sort_title,tmdb_id,imdb_id,
+                                           added_at,tags,genres)
+                         VALUES(?1,1,?2,'t'||?1,'t'||?1,?3,?4,0,'[]','[]')",
+                    )?;
+                    for (id, kind, tmdb, imdb) in &rows {
+                        insert.execute(rusqlite::params![id, kind, tmdb, imdb])?;
+                    }
+                    let current = crate::store::sql_source::item_by_external_id("id").sqlite();
+                    let legacy = format!("SELECT id FROM items {LEGACY}");
+                    let mut compared = 0;
+                    for kind in ["movie", "show", "episode"] {
+                        for tmdb in [None, Some(0), Some(1), Some(2), Some(3), Some(9)] {
+                            for imdb in
+                                [None, Some("tt01"), Some("Tt01"), Some("tt02"), Some("tt09")]
+                            {
+                                let run = |sql: &str| -> rusqlite::Result<Option<i64>> {
+                                    conn.query_row(
+                                        sql,
+                                        rusqlite::params![kind, tmdb, imdb],
+                                        |row| row.get(0),
+                                    )
+                                    .optional()
+                                };
+                                assert_eq!(
+                                    run(&current)?,
+                                    run(&legacy)?,
+                                    "seed {seed}, kind {kind}, tmdb {tmdb:?}, imdb {imdb:?}"
+                                );
+                                compared += 1;
+                            }
+                        }
+                    }
+                    Ok(compared)
+                })
+                .await
+                .expect("compare");
+            assert_eq!(lookups, 90);
+        }
+    }
+
+    /// K-05 M5: every library page's count, and the Title page itself, read
+    /// the library's top-level items from the partial
+    /// `idx_items_top_level_title`; the Title page reads them in order
+    /// instead of sorting the library in a temp B-tree. Before M5 each
+    /// searched `idx_items_library_kind` and visited every season and
+    /// episode of a show library to count its shows.
+    #[tokio::test]
+    async fn library_pages_read_top_level_items_from_the_title_index() {
+        use rusqlite::types::Value;
+        let store = SqliteStore::open_in_memory().expect("open");
+        for sort in [
+            ItemSort::Title,
+            ItemSort::Added,
+            ItemSort::Year,
+            ItemSort::Resolution,
+            ItemSort::Recorded,
+        ] {
+            let (count, page) =
+                super::library_page_statements(crate::store::item_sort_order_by(sort));
+            for genre in [Value::Null, Value::Text("Drama".into())] {
+                let count_plan = plan_of(
+                    &store,
+                    count.clone(),
+                    vec![Value::Integer(1), genre.clone()],
+                )
+                .await;
+                assert_eq!(
+                    count_plan.first().map(String::as_str),
+                    Some("SEARCH items USING INDEX idx_items_top_level_title (library_id=?)"),
+                    "{sort:?} count: {count_plan:?}"
+                );
+                let page_plan = plan_of(
+                    &store,
+                    page.clone(),
+                    vec![
+                        Value::Integer(1),
+                        Value::Integer(0),
+                        Value::Integer(50),
+                        genre.clone(),
+                    ],
+                )
+                .await;
+                assert_eq!(
+                    page_plan.first().map(String::as_str),
+                    Some("SEARCH items USING INDEX idx_items_top_level_title (library_id=?)"),
+                    "{sort:?} page: {page_plan:?}"
+                );
+                if sort == ItemSort::Title {
+                    assert!(
+                        !page_plan.iter().any(|line| line.contains("TEMP B-TREE")),
+                        "the Title page reads the index in order: {page_plan:?}"
+                    );
+                }
+            }
+        }
     }
 }

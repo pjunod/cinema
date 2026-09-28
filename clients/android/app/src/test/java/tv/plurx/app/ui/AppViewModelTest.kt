@@ -134,4 +134,59 @@ class AppViewModelTest {
         assertEquals(SavedSessionValidation.InvalidToken, result)
         assertEquals(1, calls)
     }
+
+    @Test
+    fun idleExpiredSignInCarriesTheServersReasonToTheLoginScreen() = runBlocking {
+        var calls = 0
+
+        val result = validateSavedSession(
+            waitBeforeRetry = {},
+            request = {
+                calls++
+                val body = (
+                    """{"code":"session_expired","message":"Signed out after 90 days """ +
+                        """of inactivity. Sign in again to continue.","idle_days":90}"""
+                    ).toResponseBody("application/json".toMediaType())
+                throw HttpException(Response.error<Unit>(401, body))
+            },
+        )
+
+        assertEquals(
+            SavedSessionValidation.Expired(
+                "Signed out after 90 days of inactivity. Sign in again to continue.",
+            ),
+            result,
+        )
+        assertEquals(1, calls)
+    }
+
+    @Test
+    fun onlyAnUnauthorizedSessionExpiredCountsAsAnIdleExpiry() {
+        fun refusal(status: Int, body: String) = HttpException(
+            Response.error<Unit>(status, body.toResponseBody("application/json".toMediaType())),
+        )
+        val expired = """{"code":"session_expired","message":"Signed out after 1 day of inactivity."}"""
+
+        assertEquals(
+            SavedSessionValidation.Expired("Signed out after 1 day of inactivity."),
+            sessionExpiry(refusal(401, expired)),
+        )
+        assertEquals(null, sessionExpiry(refusal(403, expired)))
+        assertEquals(null, sessionExpiry(refusal(401, """{"error":"authentication required"}""")))
+        assertEquals(null, sessionExpiry(refusal(401, "not json")))
+    }
+
+    @Test
+    fun anotherExplainedUnauthorizedStaysAnOrdinarySignOut() = runBlocking {
+        val result = validateSavedSession(
+            waitBeforeRetry = {},
+            request = {
+                val body = """{"code":"cluster_recovery_authorization_unavailable","message":"x"}"""
+                    .toResponseBody("application/json".toMediaType())
+                throw HttpException(Response.error<Unit>(401, body))
+            },
+        )
+
+        assertEquals(SavedSessionValidation.InvalidToken, result)
+    }
 }

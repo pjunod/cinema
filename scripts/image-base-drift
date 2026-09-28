@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Print each pinned base-image digest beside the current upstream one.
+
+The Dockerfile pins its base images by digest so a Debian point release cannot
+change the shipped userland without a reviewable diff. A pin nobody looks at
+becomes a stale pin, so this reports drift -- deliberately as a report and not
+as a gate. Updating a pin is a decision (new system libraries in the image the
+daemon ships), and a job that failed every time Debian rebuilt `bookworm-slim`
+would train everyone to ignore it.
+
+Exit status is 0 whenever the report could be produced, drift or not. It is
+non-zero only when a Dockerfile base image carries no digest at all, which is
+the one state the pin is supposed to make impossible.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+# `FROM <image>@<digest> AS <stage>`, ignoring stages that build `FROM` an
+# earlier stage of the same file (those have no registry reference at all).
+PINNED = re.compile(
+    r"(?m)^FROM\s+(?P<image>[^\s@:]+(?::[^\s@]+)?)@(?P<digest>sha256:[0-9a-f]{64})\s+AS\s+(?P<stage>\S+)"
+)
+UNPINNED = re.compile(r"(?m)^FROM\s+(?P<ref>[^\s@]+/[^\s@]*|[a-z0-9._-]+:[^\s@]+)\s+AS\s+(?P<stage>\S+)")
+
+
+def upstream_digest(image: str) -> str | None:
+    """The index digest the image's tag resolves to right now, or None.
+
+    Anything that goes wrong -- no docker, no network, a registry that refuses
+    -- is reported as "unknown" rather than raised: this runs on a scheduled
+    job whose actual purpose is auditing Rust dependencies.
+    """
+
+    try:
+        result = subprocess.run(
+            ["docker", "buildx", "imagetools", "inspect", "--raw", image],
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    # `--raw` prints the manifest bytes, and a manifest's digest is the
+    # digest of exactly those bytes.
+    return "sha256:" + hashlib.sha256(result.stdout).hexdigest()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "dockerfile",
+        nargs="*",
+        default=["Dockerfile"],
+        help="Dockerfiles to report on, relative to the repository root.",
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Report the pins without contacting any registry.",
+    )
+    args = parser.parse_args()
+
+    status = 0
+    rows = []
+    for name in args.dockerfile:
+        text = (ROOT / name).read_text(encoding="utf-8")
+        pinned = list(PINNED.finditer(text))
+        for match in UNPINNED.finditer(text):
+            ref = match.group("ref")
+            if "/" not in ref and ":" not in ref:
+                continue
+            print(
+                f"{name}: stage {match.group('stage')} builds FROM {ref} with no digest",
+                file=sys.stderr,
+            )
+            status = 1
+        for match in pinned:
+            image = match.group("image")
+            current = None if args.offline else upstream_digest(image)
+            rows.append(
+                {
+                    "dockerfile": name,
+                    "stage": match.group("stage"),
+                    "image": image,
+                    "pinned": match.group("digest"),
+                    "upstream": current or "unknown",
+                    "drifted": bool(current) and current != match.group("digest"),
+                }
+            )
+
+    width = max((len(row["image"]) for row in rows), default=5)
+    for row in rows:
+        state = "DRIFTED" if row["drifted"] else ("unknown" if row["upstream"] == "unknown" else "current")
+        print(f"{row['image']:<{width}}  {state}")
+        print(f"  pinned   {row['pinned']}")
+        print(f"  upstream {row['upstream']}")
+    print(json.dumps(rows), file=sys.stderr)
+    return status
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -65,6 +65,7 @@ const BORROWED = [
   "liveTvActivityRows",
   // DVR cards/details have a full-browser regression in dvr-ui.browser.cjs.
   "liveTvNowSeconds",
+  "durableQueueHtml",
   "paintActivityBody",
 ];
 
@@ -78,12 +79,15 @@ const PRELUDE = `
   const main = { innerHTML: "", openStreams: [], querySelectorAll(){ return main.openStreams.map((key) => ({ dataset: { stream: key } })); } };
   const document = { getElementById: (id) => (id === "main" ? main : null) };
   const ME = { is_admin: true };
+  const DURABLE_ACTIVITY = {state:"queued",rows:[],counts:[],observed:0,detail:null};
   function paintActivity(acts){ PAINTED = acts; }
   function dvrRememberUi(){ return {}; }
   function dvrRestoreUi(){}
   function dvrActivityRows(){ return ""; }
   function analysisSummaryCard(){ return "<div class=\\"analysis\\"></div>"; }
   function statusText(){ return "idle"; }
+  // The Processes table has its own suite (activity-processes.test.js).
+  function activityProcessesHtml(){ return ""; }
 `;
 
 const painter = new Function(
@@ -91,7 +95,7 @@ const painter = new Function(
   "return (function(){" +
     PRELUDE +
     BORROWED.map(shippedSource).join("\n") +
-    "\nreturn {paintActivityBody, main, nodeLabel, select:(key)=>{ACTIVITY_VIEWING_ID=key;}};})()",
+    "\nreturn {paintActivityBody, main, nodeLabel, durable:DURABLE_ACTIVITY, select:(key)=>{ACTIVITY_VIEWING_ID=key;}};})()",
 )(require("../../crates/plurxd/src/web/live-tv.js"));
 
 const NODE_A = "5deeeebc-8f39-4cb5-8e4a-aa5f912f327f";
@@ -473,6 +477,23 @@ test("session facts are escaped on the way into the cell", () => {
   assert.doesNotMatch(html, /<img src=x/);
   assert.match(html, /· &quot;&gt;&lt;img src=x onerror=alert\(1\)&gt;<\/span>/);
   assert.match(html, /<b>Last request<\/b><span>&lt;b&gt;x&lt;\/b&gt;<\/span>/);
+});
+
+test("durable work renders escaped observations beside current activity", () => {
+  painter.durable.observed = Date.now();
+  painter.durable.rows = [{id:'job-"<id>',kind:"fragment_index_build",state:"queued",
+    title:"<hostile-title>",library:"<hostile-library>",owner_node_id:"<hostile-owner>",
+    priority:1,age_ms:120000,not_before_ms:0,supported:true,error_code:"<hostile-error>"}];
+  const html = paint(snapshot());
+  assert.match(html, /Durable cluster work/);
+  assert.match(html, /fragment index build/);
+  for(const field of ["title","library","owner","error"]){
+    assert.ok(html.includes(`&lt;hostile-${field}&gt;`));
+    assert.ok(!html.includes(`<hostile-${field}>`));
+  }
+  assert.match(html, /cancelDurableJob/);
+  assert.match(html, /2 min/);
+  painter.durable.rows = [];
 });
 
 let reported = false;

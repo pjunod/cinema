@@ -1,12 +1,13 @@
 # PGS subtitles on the start path — why a 79.5 GB read blocks playback, and the three fixes
 
-**Status:** every fix planned here has merged; **nothing here is deployed** ·
+**Status:** the fixes below are deployed on the four server nodes; §5.5's
+two-device physical bar passed on 2026-09-24 with the overlay gate on ·
 §3 #437 · §4 #445 · §5: B1 and most of B5 in #447, B2 built and deliberately
 reverted, B3 and B4 in #453 · §6 (Fix C, the subtitle ride-along on the index
 pass) in #456 (the store's readers), #466 (the producer; first merged as #460,
 which the forge did not keep — see `STATUS.md`) and #463 (attribution) · the
-overlay gate `subtitles.pgs_overlay` is still **off** pending §5.5's
-two-device check · reviewed — see
+overlay gate `subtitles.pgs_overlay` remains on; a separate Google TV Streamer
+stall remains open · reviewed — see
 [PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) ·
 **Reviewer:** Fable, adversarial · **Written:** 2026-09-22, revised 2026-09-23 ·
 **Reported by:** Paul, 2026-09-21 ~18:50 ET, Android on the TCL tablet
@@ -497,6 +498,87 @@ equivalent.
 
 ### 5.5 The proof bar — deliberately not a matrix
 
+#### 2026-09-24 physical check: failed, acceptance open
+
+The Google TV Streamer ran Android client `0.3.0` (versionCode `119`) against
+server build `v0.3.0-3649-g99d4abf8c`. *Casino* (file `5226`) is HDR10 with
+English SDH PGS at subtitle index `0`. Playback time advanced and a forward
+seek reached 15:02, but no cue appeared. On nynuc the overlay preparation
+ended after 584,654 ms with `PGS safety limit exceeded: normalized RGBA
+output exceeds 268435456 bytes`. Cue timing, placement, and backward-seek
+acceptance were therefore not reached. A protected-video screenshot cannot
+establish visible picture or HDR output, so those observations remain open.
+
+On the TCL tablet, *Casino* started immediately and playback advanced, but
+the first m6 extraction timed out after 600,001 ms. The tablet's Playback info
+reported `HDR → SDR`, 3840×2160 source to 1920×1080 playback, `Transcode ·
+VA-API · 1080p`, and `PGS overlay · unavailable`. It cannot establish the
+required HDR/direct-or-remux result. After the m6 index pass stored all seven
+PGS tracks for file `5226` (472 MB, one file), a second preparation served a
+stored track and failed after 610 ms on the same aggregate RGBA limit. The
+stored subtitle path is working; the normalizer limit is the remaining failure
+for this title.
+
+On iPhone 17 Pro Max, *Bad Boys: Ride or Die* (file `5208`, Dolby Vision
+Profile 8, forced PGS index `2`) played at 3840×2160 with a remux decision,
+Dolby Vision rendering, and no buffering interruptions. Nynuc's cold PGS
+preparation timed out after 600,002 ms, so no DV PGS cue was validated. A
+separate SDR control, *The Good Son* (file `6641`), prepared its stored PGS
+track in 2,330 ms and visibly drew a centered cue on the iPhone. That proves
+the renderer can draw a real cue; its forward/backward seek behavior remains
+unproven because no post-seek cue was captured.
+
+The browser check passed its narrower contract: *Casino* opened with
+subtitles Off; manually selecting PGS displayed “That subtitle requires an
+SDR burn-in. HDR playback was kept unchanged.” At that point the two-device
+HDR proof bar below had not been met. The overlay gate remained on for
+qualification. The streaming normalizer change required the HDR hardware
+retest recorded below.
+After those failed trials, current-main Apple build `181` was installed and
+confirmed on the six reachable physical Apple devices, and current-main
+Android versionCode `121` was installed and confirmed on the TCL tablet. The
+newer client versions have not yet passed the HDR PGS retest.
+
+#### 2026-09-24 recheck: the two-device HDR bar passed
+
+| Device and selected track | Start and cues | Forward seek | Backward seek | Grade and method | Playback cost |
+|---|---|---|---|---|---|
+| iPhone 18 Pro, Apple build 182, *Bad Boys: Ride or Die* (5208), Dolby Vision P8, English Full PGS index 0 | Video started while PGS prepared for 413,519 ms; dialogue cues appeared centered and timed to speech | New cue appeared at the destination | New cue appeared at the earlier destination | 3840×2160 Dolby Vision rendering; remux | No buffering interruptions or visible stutter in the observed run |
+| Pixel 11 Pro XL, Android versionCode 124, *Casino* (5226), HDR10, English SDH PGS index 0 | Video started before PGS preparation finished (489,545 ms); cues appeared centered and timed to speech | 10:11 to 57:36: new dialogue cue, continuous picture | Return to 10:11: new dialogue cue, continuous picture | 3840×2160 HDR10 rendering; remux | No observed stall after the seek fix; the earlier eight-minute run recorded zero buffering interruptions |
+
+The first Pixel 11 run exposed a client seek timeout even with subtitles Off:
+the remux rendered a frame 282 ms before the requested position, outside the
+client's 250 ms first-frame window. Android versionCode 124 waits for later
+rendered video to cross that target before settling a progressive-remux seek.
+The versionCode 124 package passed both PGS seek directions before the
+subsequent foreground guard review fix. The final package with that guard was
+installed on six physical Android devices, each reporting versionCode 124.
+On the unlocked Pixel 11 Pro XL, the final package played *Casino* with English
+SDH PGS overlay through a backward seek from about 1:06 to about 10 minutes
+and a forward seek to 58:16. Each destination showed continuous video and a
+new timed PGS cue. Its playback panel reported 3840×2160, HDR10 rendering,
+remux, Playing, and zero buffering interruptions after both seeks. No seek
+timeout appeared in the observed run. Six reachable physical Apple devices
+reported build 182. These installations
+used local development builds; they are not evidence of store-signed release
+packages.
+
+The web check remained safe with the gate on: *Casino* defaulted to subtitles
+Off, and a manual PGS selection showed the HDR-preserving SDR burn-in refusal.
+The gate remains on. A separate Google TV Streamer trial reached an initial
+cue but later stalled on a `503 Service Unavailable` stream response; it is
+not the Android device used for the two-device bar and needs its own playback
+follow-up. This result does not claim that every fleet device passed playback.
+
+Stored-track readiness was met on all four nodes in the 2026-09-24 snapshot:
+
+| Node | Startup self-test | Cache filesystem | Free / required margin | Stored tracks | Ride |
+|---|---|---|---|---|---|
+| m6 | 78 ms, met | ext4 | 189.1 / 8.8 GiB | 472 MB, one file | None |
+| nynuc | 74 ms, met | ext4 | 72.3 / 10.3 GiB | 13 MB, one file | None |
+| nuc4 | 101 ms, met | ext4 | 65.1 / 9.3 GiB | 4.0 GB, 39 files | *Life* running |
+| nuc3 | 77 ms, met | ext4 | 28.7 / 6.4 GiB | Zero directories | None |
+
 The plan's M4/M5 acceptance asks for an "executed compatibility matrix" and a
 "complete physical validation matrix". Those are ceremony for this feature. A
 bitmap overlay can be wrong in exactly three ways a screen reveals: a cue lands
@@ -515,7 +597,9 @@ the local override still works — and the HDR path is where an overlay can fail
 in a way a 4K SDR title will never show, so leaving the grade unspecified is
 how a check passes without testing anything.
 
-The gate stays off until this runs. `overlay_for_caller` removes the reason
+The first check failed; the 2026-09-24 recheck above closes §5.5's two-device
+proof bar. The Google TV Streamer stall remains a separate playback finding.
+`overlay_for_caller` removes the reason
 the switch was unsafe to flip — no client **that sends a capabilities
 document** is now offered a track it cannot draw, and none is told a delivery
 needs no burn when for it one does. That qualifier is load-bearing: a caller

@@ -282,6 +282,7 @@ final class PlayerResumeTests: XCTestCase {
 
     func testOneSecondAdmissionIsOneShotAndFinalPauseFencesTheRepair() async throws {
         var now: TimeInterval = 10
+        let admission = now + PlaybackResumeAttempt.fastPathSeconds
         let player = ResumePlayer()
         let controller = PlayerController(
             player: player,
@@ -292,8 +293,21 @@ final class PlayerResumeTests: XCTestCase {
             reportPlaybackIntent: { _ in 1 },
             resumeNow: { now },
             waitResumeSample: {
-                now += 0.25
-                await Task.yield()
+                // The injected clock runs up to the one-second admission and
+                // then holds. Advancing it on every sample let the monitor
+                // spin through the remaining fourteen virtual seconds to the
+                // 15-second root deadline in a few real milliseconds, so
+                // whether `waitUntil` (polling every 5 ms) ever saw the
+                // admitted repair was a race it lost about half the time.
+                // Past the admission the monitor keeps sampling — which is
+                // what makes the one-shot claim below mean something — but
+                // the root deadline cannot pass until the test acts.
+                if now < admission {
+                    now += 0.25
+                    await Task.yield()
+                } else {
+                    try? await Task.sleep(for: .milliseconds(1))
+                }
             }
         )
         startEstablished(controller)
@@ -304,6 +318,11 @@ final class PlayerResumeTests: XCTestCase {
         }
         let ownership = try XCTUnwrap(controller.resumeOwnershipForTesting)
         XCTAssertEqual(ownership.expiresAt, 25, "repair inherits the root deadline")
+        // Further samples past the admission admit nothing new: the same
+        // attempt, still admitted once.
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(controller.resumeOwnershipForTesting?.id, ownership.id)
+        XCTAssertEqual(controller.resumeOwnershipForTesting?.repairAdmitted, true)
         let generation = controller.openGenerationForTesting
         controller.setPlaybackRequested(false)
         XCTAssertNil(controller.resumeOwnershipForTesting)

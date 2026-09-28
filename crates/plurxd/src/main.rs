@@ -1,5 +1,15 @@
+// Production children go through `process_control::spawn_job_owned`; see
+// clippy.toml.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod admission;
 use plurx_core::process::bounded as bounded_process;
+#[cfg(test)]
+#[path = "../../plurx-core/tests/support/queue_fixture.rs"]
+mod queue_fixture;
+
+mod artifact_integrity;
+mod background_jobs;
 mod backup;
 mod cachekeep;
 mod channel_subjects;
@@ -10,8 +20,10 @@ mod delivery;
 mod dv_disk;
 mod dvpipe;
 mod ffmpeg;
+mod fontenv;
 mod fragindex;
 mod fragment_index_cluster;
+mod hevc_census;
 mod http;
 mod job_lease;
 mod library_search;
@@ -23,6 +35,8 @@ mod media_pool;
 mod media_sessions;
 mod meter;
 mod offline;
+mod online_subtitles;
+mod panics;
 mod pgs_overlay;
 mod pipeprobe;
 mod playback_control;
@@ -36,14 +50,19 @@ mod producer_spawn;
 mod progress;
 mod progressive;
 mod reader_formats;
+mod redact;
 mod renditiondir;
 mod schedule;
 mod scratch_ledger;
+mod scratch_put;
+mod seam_hooks;
 mod serving_fence;
 mod shared_cache;
+mod source_probe;
 mod state;
 mod store_result;
 mod storeprobe;
+mod subtitle_ranges;
 mod subtitle_ride_along;
 mod subtitle_source;
 mod subtitles;
@@ -87,6 +106,7 @@ use plurx_core::metadata::{self, AniListClient, TmdbClient};
 use plurx_core::store::SqliteStore;
 use plurx_core::store::{keys, Store};
 use serde::Deserialize;
+use std::io::IsTerminal;
 use tracing_subscriber::EnvFilter;
 
 use crate::job_lease::acquire_cluster_job;
@@ -100,6 +120,149 @@ use crate::state::{AppState, SystemInfo};
 pub(crate) fn test_tempdir() -> std::io::Result<tempfile::TempDir> {
     let root = std::fs::canonicalize(std::env::temp_dir())?;
     tempfile::tempdir_in(root)
+}
+
+/// Create an executable test fixture (a script standing in for FFmpeg, a
+/// tool, a probe) that this process can execute at once.
+///
+/// Writing it here with `std::fs::write` and then executing it races every
+/// other test thread: a child forked anywhere in this process while the write
+/// descriptor is open inherits it, and until that child reaches `exec` (which
+/// closes it, being close-on-exec) the kernel refuses to execute the file with
+/// `ETXTBSY` ("Text file busy"). On a loaded runner that window is long enough
+/// to hit. So this process never opens the file for writing at all: a `/bin/sh`
+/// child writes it and sets its mode, and the only writable descriptor lives
+/// and dies in that child's process tree before this returns.
+#[cfg(all(test, unix))]
+pub(crate) fn write_test_executable(
+    path: impl AsRef<std::path::Path>,
+    contents: impl AsRef<[u8]>,
+    mode: u32,
+) {
+    use std::io::Write;
+
+    let path = path.as_ref();
+    let mut writer = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("cat > \"$1\" && chmod \"$2\" \"$1\"")
+        .arg("write_test_executable")
+        .arg(path)
+        .arg(format!("{mode:o}"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("spawn a writer for {}: {error}", path.display()));
+    writer
+        .stdin
+        .take()
+        .expect("writer stdin")
+        .write_all(contents.as_ref())
+        .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+    let output = writer
+        .wait_with_output()
+        .unwrap_or_else(|error| panic!("wait for the writer of {}: {error}", path.display()));
+    assert!(
+        output.status.success(),
+        "writing {} failed: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(all(test, unix))]
+mod test_executable_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// The race `write_test_executable` exists for, run on purpose: other
+    /// threads fork continuously while fixtures are written and executed at
+    /// once. Written in-process (`std::fs::write` then `set_permissions`),
+    /// this fails with `ETXTBSY` within a few hundred iterations on a busy
+    /// host; written by the helper, no descriptor of this process is ever
+    /// writable on the fixture, so every exec succeeds.
+    #[test]
+    fn a_fixture_executes_at_once_while_other_threads_fork() {
+        let root = crate::test_tempdir().expect("root");
+        let stop = Arc::new(AtomicBool::new(false));
+        let forkers: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Acquire) {
+                        let _ = std::process::Command::new("/bin/true").status();
+                    }
+                })
+            })
+            .collect();
+        let outcome = std::panic::catch_unwind(|| {
+            for index in 0..300 {
+                let path = root.path().join(format!("fixture-{index}"));
+                crate::write_test_executable(&path, "#!/bin/sh\nexit 7\n", 0o700);
+                let status = std::process::Command::new(&path)
+                    .status()
+                    .unwrap_or_else(|error| panic!("fixture {index} did not execute: {error}"));
+                assert_eq!(status.code(), Some(7), "fixture {index} ran its own body");
+            }
+        });
+        stop.store(true, Ordering::Release);
+        for forker in forkers {
+            forker.join().expect("forker");
+        }
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn a_fixture_gets_exactly_the_mode_asked_for() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = crate::test_tempdir().expect("root");
+        for mode in [0o700, 0o755, 0o500] {
+            let path = root.path().join(format!("mode-{mode:o}"));
+            crate::write_test_executable(&path, "#!/bin/sh\n", mode);
+            let actual = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o7777;
+            assert_eq!(actual, mode, "{}", path.display());
+            assert_eq!(std::fs::read(&path).expect("contents"), b"#!/bin/sh\n");
+        }
+    }
+}
+
+/// A scoped tracing subscriber for one test, with a global default behind it.
+///
+/// `tracing::subscriber::set_default` alone is not enough in a parallel test
+/// binary. tracing caches an `Interest` per callsite, computed the first
+/// time the callsite is hit; when exactly one dispatcher is registered,
+/// tracing-core computes it from the *current thread's* default rather than
+/// the registered one, and on a thread with no scoped subscriber that is
+/// `NoSubscriber`, whose answer is "never". So a test that sets a scoped
+/// subscriber and then walks into a callsite another thread reached first
+/// finds that callsite cached as never-interesting, and its event is dropped
+/// before the subscriber sees it — on a loaded machine, often enough to fail
+/// the copy-argv test one run in three.
+///
+/// Installing a permissive global default once per process closes that:
+/// with a real dispatcher as the fallback on every thread, no callsite is
+/// ever cached as "never". A bare `Registry` accepts every callsite and
+/// keeps nothing but span data. A scoped subscriber set afterwards still
+/// wins on its own thread, exactly as before.
+#[cfg(test)]
+pub(crate) fn test_tracing_default<S>(subscriber: S) -> tracing::subscriber::DefaultGuard
+where
+    S: tracing::Subscriber + Send + Sync + 'static,
+{
+    static GLOBAL: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    GLOBAL.get_or_init(|| {
+        // Already set by an earlier `try_init` in this process is fine: any
+        // real dispatcher as the fallback is what matters.
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+    });
+    tracing::subscriber::set_default(subscriber)
 }
 
 #[cfg(test)]
@@ -203,6 +366,16 @@ enum Command {
         #[command(subcommand)]
         command: crate::wal_cli::WalCommand,
     },
+    /// Panic on purpose and exit, so a release binary's backtrace can be read.
+    ///
+    /// Hidden: it exists to prove the release profile's line tables
+    /// symbolicate (docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md
+    /// §3.5 and §5.6, which name it `--diagnostic-panic`; a subcommand is the
+    /// shape this CLI gives every other action), and for an operator to check
+    /// the same on a deployed image with `RUST_BACKTRACE=1 plurxd
+    /// diagnostic-panic`. It touches no storage and no network.
+    #[command(hide = true)]
+    DiagnosticPanic,
 }
 
 #[cfg(windows)]
@@ -316,6 +489,15 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The deliberate panic behind `plurxd diagnostic-panic`. Its own function, and
+/// `#[inline(never)]`, so the frame a reader looks for in the backtrace has
+/// this name and this file's line number rather than being folded into
+/// `dispatch`.
+#[inline(never)]
+fn diagnostic_panic() -> ! {
+    panic!("deliberate panic requested by `plurxd diagnostic-panic`");
+}
+
 /// Route a parsed command, separated from `main` so every subcommand but the
 /// server itself is reachable without a process launch.
 async fn dispatch(
@@ -339,7 +521,8 @@ async fn dispatch(
         | Command::Advertise { .. }
         | Command::Cluster { .. }
         | Command::Restore { .. }
-        | Command::Wal { .. } => {}
+        | Command::Wal { .. }
+        | Command::DiagnosticPanic => {}
     }
     match command {
         Command::Run => run(config).await,
@@ -353,6 +536,7 @@ async fn dispatch(
                 windows_service::dispatch_service(config).map_err(Into::into)
             }
         },
+        Command::DiagnosticPanic => diagnostic_panic(),
         Command::Healthcheck => {
             // One terse line either way — this output lands in `docker inspect`.
             if let Err(error) = healthcheck(&config) {
@@ -1457,6 +1641,10 @@ async fn reset_password(
 
 async fn run(config: Config) -> anyhow::Result<()> {
     let logs = init_logging();
+    // After the subscriber and before the first task: a panic reported before
+    // there is anywhere to report it to reaches only stderr.
+    panics::install_panic_hook();
+    report_open_file_limit(plurx_core::process::rlimit::raise_open_file_limit());
     // Signal streams must exist before store activation, system probing, or
     // any listener can make this process externally reachable. Installing them
     // is only half of it: nothing polls that future until `serve` first polls
@@ -1585,6 +1773,13 @@ async fn boot(
         .get_or_init_setting(keys::SERVER_NAME, &config.server.name)
         .await
         .context("initializing replicated server name")?;
+    // "Sign-ins expire" defaults to on; this is the moment it takes effect on
+    // an upgraded server, and no device's idle window starts before it.
+    let expiry_since =
+        http::users::start_token_expiry_clock(store.as_ref(), http::users::unix_now())
+            .await
+            .context("starting the sign-in expiry clock")?;
+    tracing::debug!(expiry_since, "sign-in expiry clock");
     log_startup(&config, &identity);
 
     let instance_id = identity.cluster_id;
@@ -1608,6 +1803,7 @@ async fn boot(
     // production rate-control arguments against this boot's real drivers and
     // publish only the effective result before any session can start.
     state.transcode.initialize_rate_control().await?;
+    state.live_tv.start_caption_probe();
     // Which artifact identity this node plans into, before anything can plan,
     // and the only time it is decided. It is part of every cache key the node
     // computes, so moving it on a live node would move the key space under
@@ -1672,6 +1868,36 @@ async fn boot(
 type MdnsAdvertiser =
     fn(&str, &str, &str, Option<&str>, SocketAddr, &str) -> anyhow::Result<mdns_sd::ServiceDaemon>;
 
+/// Widen the inherited open-file limit and say what it now is.
+///
+/// `#[tokio::main]` builds the runtime before any of `main`'s body runs, so
+/// there is no "before the runtime starts" to run this in. What matters is
+/// that the limit is consulted when a descriptor is opened, and this runs
+/// before the store, the system probe and every listener open theirs.
+///
+/// A limit that cannot be raised is reported and is not fatal: the daemon
+/// served on the inherited soft limit before this call existed, and refusing
+/// to boot over a resource limit would be a worse failure than the
+/// exhaustion it guards against.
+fn report_open_file_limit(
+    outcome: std::io::Result<Option<plurx_core::process::rlimit::OpenFileLimit>>,
+) {
+    match outcome {
+        Ok(Some(limit)) => tracing::info!(
+            "open files: soft {} -> {} (hard {})",
+            limit.soft_before,
+            limit.soft_after,
+            limit.hard
+        ),
+        // A platform without POSIX resource limits, which is the Windows
+        // service. There is no number to report.
+        Ok(None) => {}
+        Err(error) => tracing::warn!(
+            "raising the soft open-file limit failed ({error}); continuing on the inherited limit"
+        ),
+    }
+}
+
 /// Console logging plus separate bounded rings for general and cluster events.
 ///
 /// Cluster INFO/DEBUG detail belongs on Settings → Cluster and is omitted from
@@ -1679,20 +1905,103 @@ type MdnsAdvertiser =
 /// voter remains visible to service supervisors before an admin can sign in.
 /// The EnvFilter remains global, so `PLURX_LOG` governs every sink.
 fn init_logging() -> logbuf::LogBuffers {
-    use tracing::Level;
-    use tracing_subscriber::filter::filter_fn;
-    use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::Layer;
 
     let logs = logbuf::LogBuffers::default();
+    logging_subscriber(
+        &logs,
+        EnvFilter::try_from_env("PLURX_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
+        LogFormat::from_env(),
+        std::io::stdout().is_terminal(),
+        std::io::stdout,
+    )
+    .try_init()
+    .ok();
+    logs
+}
+
+/// How the console sink is formatted.
+///
+/// `PLURX_LOG_FORMAT=json|text`, default text. An environment variable rather
+/// than a replicated setting, beside `PLURX_LOG`, because it describes how
+/// *this process's* stdout is consumed: a node whose journald is scraped by a
+/// log pipeline needs JSON and its neighbour may not.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LogFormat {
+    Text,
+    Json,
+}
+
+impl LogFormat {
+    fn from_env() -> Self {
+        Self::parse(std::env::var("PLURX_LOG_FORMAT").ok().as_deref())
+    }
+
+    /// Anything that is not `json` is text, including an unset variable and a
+    /// misspelling. A log format is not worth refusing a boot over.
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some(value) if value.trim().eq_ignore_ascii_case("json") => Self::Json,
+            _ => Self::Text,
+        }
+    }
+}
+
+/// The subscriber `init_logging` installs, built separately so its format and
+/// its ANSI decision can be exercised against a captured writer rather than
+/// against the process's real stdout.
+///
+/// The filter is a parameter rather than read from `PLURX_LOG` in here: a test
+/// that has to reach into the environment to decide whether its own subscriber
+/// will emit anything is a test that fails when a neighbouring test sets the
+/// same variable, which is exactly what happened.
+///
+/// `with_ansi` is set explicitly because `tracing-subscriber` does not check
+/// for a terminal: `fmt_layer.rs` turns ANSI on whenever the `ansi` feature is
+/// compiled in and `NO_COLOR` is unset, with no TTY detection anywhere, so a
+/// systemd unit or a container gets escape bytes in its journal unless the
+/// operator knows to set `NO_COLOR`. Under `json` it is forced off regardless,
+/// because an escape sequence inside a JSON string field is not a colour, it
+/// is a parse hazard.
+fn logging_subscriber<W>(
+    logs: &logbuf::LogBuffers,
+    filter: EnvFilter,
+    format: LogFormat,
+    ansi: bool,
+    writer: W,
+) -> impl tracing::Subscriber + Send + Sync
+where
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
+{
+    use tracing_subscriber::filter::filter_fn;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Layer;
+
+    // Boxed, and built separately per arm. `fmt::Layer` carries the subscriber
+    // type it will be layered onto, so one shared builder reused by both arms
+    // would tie the text and JSON layers to the same position in the stack and
+    // neither would compile.
+    let console: Box<dyn Layer<_> + Send + Sync> = match format {
+        LogFormat::Text => Box::new(
+            tracing_subscriber::fmt::layer()
+                .with_writer(writer)
+                .with_ansi(ansi)
+                .with_filter(filter_fn(console_target)),
+        ),
+        LogFormat::Json => Box::new(
+            tracing_subscriber::fmt::layer()
+                .with_writer(writer)
+                .json()
+                // Never, whatever the terminal says: an escape sequence inside
+                // a JSON string field is not a colour, it is a parse hazard.
+                .with_ansi(false)
+                .with_filter(filter_fn(console_target)),
+        ),
+    };
+
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_env("PLURX_LOG").unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(
-            tracing_subscriber::fmt::layer().with_filter(filter_fn(|metadata| {
-                !logbuf::is_cluster_target(metadata.target()) || *metadata.level() <= Level::WARN
-            })),
-        )
+        .with(filter)
+        .with(console)
         .with(
             logbuf::BufferLayer(Arc::clone(&logs.general)).with_filter(filter_fn(|metadata| {
                 !logbuf::is_cluster_target(metadata.target())
@@ -1703,9 +2012,13 @@ fn init_logging() -> logbuf::LogBuffers {
                 logbuf::is_cluster_target(metadata.target())
             })),
         )
-        .try_init()
-        .ok();
-    logs
+}
+
+/// Cluster INFO/DEBUG detail belongs on Settings -> Cluster and is kept off
+/// stdout; WARN and ERROR still reach it so a broken voter stays visible to a
+/// service supervisor before an admin can sign in.
+fn console_target(metadata: &tracing::Metadata<'_>) -> bool {
+    !logbuf::is_cluster_target(metadata.target()) || *metadata.level() <= tracing::Level::WARN
 }
 
 /// The one line that says what is running and where its data is.
@@ -2393,6 +2706,14 @@ fn spawn_background_loops(
     state: &AppState,
     background_shutdown: tokio_util::sync::CancellationToken,
 ) {
+    tokio::spawn(http::file_grants::prune_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
+    tokio::spawn(http::subtitle_downloads::automatic_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(state.clone().store_metrics_loop());
     tokio::spawn(Arc::clone(&state.backup).schedule_loop(background_shutdown.clone()));
     tokio::spawn(
@@ -2447,6 +2768,14 @@ fn spawn_background_loops(
     tokio::spawn(crate::media_sessions::lease_loop(state.clone()));
     tokio::spawn(crate::media_sessions::takeover_loop(state.clone()));
     tokio::spawn(crate::media_sessions::maintenance_loop(state.clone()));
+    tokio::spawn(crate::artifact_integrity::run(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
+    tokio::spawn(crate::source_probe::run(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(crate::library_search::semantic::worker(
         state.clone(),
         background_shutdown.clone(),
@@ -2476,7 +2805,9 @@ fn spawn_background_loops(
     tokio::spawn(
         std::sync::Arc::clone(&state.live_tv).scratch_sweep_loop(background_shutdown.clone()),
     );
-    tokio::spawn(std::sync::Arc::clone(&state.live_tv).metrics_loop(background_shutdown.clone()));
+    tokio::spawn(
+        std::sync::Arc::clone(&state.live_tv).settings_observer_loop(background_shutdown.clone()),
+    );
     tokio::spawn(
         std::sync::Arc::clone(&state.live_tv)
             .guide_refresh_loop(state.serving.subscribe(), background_shutdown.clone()),
@@ -2532,6 +2863,14 @@ fn spawn_background_loops(
         std::sync::Arc::clone(&state.jobs).schedule_loop(std::sync::Arc::clone(&state.transcode)),
     );
 
+    tokio::spawn(
+        std::sync::Arc::clone(&state.jobs)
+            .background_work_loop(std::sync::Arc::clone(&state.transcode)),
+    );
+
+    tokio::spawn(crate::http::images::durable_artwork_loop(state.clone()));
+    tokio::spawn(crate::http::transcode_copies::run(state.clone()));
+
     // Trakt: hourly (and on-demand) two-way sync + the scrobble-pause sweep.
     tokio::spawn(
         std::sync::Arc::clone(&state.trakt)
@@ -2541,9 +2880,23 @@ fn spawn_background_loops(
     // The watched outbox. Its own loop because a retry scheduled two minutes
     // out has no request to wake it, and a Curator that is down must not stall
     // anything a viewer is waiting on.
-    tokio::spawn(
-        std::sync::Arc::clone(&state.watched).run(std::sync::Arc::new(state.membership.clone())),
-    );
+    match plurx_core::cluster::coordination::StoreCoordinator::new(
+        std::sync::Arc::clone(&state.store),
+        state.node_id.clone(),
+    ) {
+        Ok(coordinator) => {
+            tokio::spawn(std::sync::Arc::clone(&state.watched).run(
+                crate::watched::DrainAuthority {
+                    coordinator,
+                    authority: std::sync::Arc::new(state.membership.clone()),
+                    policy: crate::watched::WatchedLeasePolicy::PRODUCTION,
+                },
+            ));
+        }
+        Err(error) => {
+            tracing::error!(%error, "the watched outbox drain cannot start without a lease owner id");
+        }
+    }
 }
 
 /// Which port the GDM responder should answer on, or `None` when it must not
@@ -2635,7 +2988,42 @@ impl HttpAcceptor for tokio::net::TcpListener {
     type Stream = tokio::net::TcpStream;
 
     async fn accept(&self) -> std::io::Result<(Self::Stream, SocketAddr)> {
-        tokio::net::TcpListener::accept(self).await
+        let (stream, remote) = tokio::net::TcpListener::accept(self).await?;
+        disable_nagle(&stream, remote);
+        Ok((stream, remote))
+    }
+}
+
+/// Send every write as soon as it is made: set `TCP_NODELAY` on an accepted
+/// HTTP connection.
+///
+/// With Nagle's algorithm on, the kernel holds back a write smaller than one
+/// segment while earlier data on the connection is still unacknowledged. A
+/// media body is a run of large writes that usually ends in a short one, and
+/// the peer acknowledges lazily (delayed ACK, 40 ms minimum on Linux), so that
+/// last short write can wait one delayed-ACK interval before it leaves. How
+/// often a body ends that way depends on write timing, which the media read
+/// size changes: measured on loopback, the 128 KiB and 256 KiB reads put most
+/// HLS segment fetches into a ~50 ms mode that the 4 KiB read only reached in
+/// its tail (docs/streaming/MEDIA-BODY-BUFFERS.md §5.1.1, Decision 6).
+///
+/// The cost is more, smaller packets on HLS bodies. The HLS pump hands the
+/// body one `MEDIA_BODY_ACK_GRANULARITY` (4 KiB) piece and waits for it to be
+/// taken before splitting the next, so hyper usually finds the body pending
+/// and flushes after each piece: an HLS body leaves as a run of roughly 4 KiB
+/// writes. With Nagle on, the kernel merged those writes' sub-segment tails;
+/// with it off, each write is sent at once. On a 1500-byte-MTU link a 4 KiB
+/// write is two full segments and a 1200-byte tail, about 6% more packets
+/// (and ACKs) than full segments would need. Direct play and ranges are not
+/// affected: they hand hyper whole `MEDIA_BODY_READ_BUFFER` reads. The
+/// post-deploy check (§6) watches packet rate; batching the pump's
+/// acknowledgements (M2) is what would coalesce these writes.
+///
+/// Failing to set the option is not a reason to refuse the connection; it is
+/// only slower.
+fn disable_nagle(stream: &tokio::net::TcpStream, remote: SocketAddr) {
+    if let Err(error) = stream.set_nodelay(true) {
+        tracing::debug!(%error, %remote, "could not set TCP_NODELAY on an accepted connection");
     }
 }
 
@@ -3277,9 +3665,15 @@ async fn install_decoder_diagnostic_policy(ffmpeg: &str) {
 /// First line of `ffmpeg -version` (e.g. "ffmpeg version 6.1.1 …"), if the
 /// binary runs at all. Purely informational, for the settings page.
 async fn ffmpeg_version(bin: &str) -> Option<String> {
-    let out = crate::bounded_process::output(bin, &["-version"], Duration::from_secs(5), 64 * 1024)
-        .await
-        .ok()?;
+    let out = crate::bounded_process::output(
+        bin,
+        &["-version"],
+        Duration::from_secs(5),
+        64 * 1024,
+        crate::process_control::ChildWork::background("ffmpeg version probe"),
+    )
+    .await
+    .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -3570,6 +3964,49 @@ mod startup_tests {
         (address, stop, served)
     }
 
+    /// How long a timeout test waits for a response before calling it a
+    /// hang.
+    const TIMEOUT_TEST_HANG_GUARD: Duration = Duration::from_secs(20);
+
+    /// How long a header-timer test waits for the server to close the socket.
+    /// The server under test closes it on the 80 ms header timer from
+    /// [`test_http_timeouts`]. This bound must separate that timer from two
+    /// failures: no timer at all (nothing else closes an idle HTTP/1
+    /// connection), and `serve_http` ignoring the timeouts it was given and
+    /// applying the production [`HEADER_READ_TIMEOUT`] of 15 s. So it stays
+    /// well below the production value (asserted at compile time below), and
+    /// the tests also check the elapsed time against it. It is still far above
+    /// 80 ms: a sub-second bound failed on loaded runners with the timer
+    /// working, because a current-thread test runtime that is not scheduled
+    /// cannot read the EOF.
+    const HEADER_TIMER_CLOSE_BOUND: Duration = Duration::from_secs(5);
+    const _: () = assert!(
+        HEADER_TIMER_CLOSE_BOUND.as_millis() * 3 <= HEADER_READ_TIMEOUT.as_millis(),
+        "the close bound must stay far below the production header timer"
+    );
+
+    /// Wait for the server to close `stream` (EOF) within
+    /// [`HEADER_TIMER_CLOSE_BOUND`].
+    async fn expect_header_timer_close(stream: &mut tokio::net::TcpStream, context: &str) {
+        let started = tokio::time::Instant::now();
+        let mut byte = [0u8; 1];
+        let read = tokio::time::timeout(HEADER_TIMER_CLOSE_BOUND, stream.read(&mut byte))
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "{context}: the configured header timer must close the socket \
+                     within {HEADER_TIMER_CLOSE_BOUND:?} (production's is {HEADER_READ_TIMEOUT:?})"
+                )
+            })
+            .expect("read");
+        assert_eq!(read, 0, "{context}: the socket must end at EOF");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < HEADER_TIMER_CLOSE_BOUND,
+            "{context}: closed after {elapsed:?}, not by the configured header timer"
+        );
+    }
+
     fn test_http_timeouts() -> HttpTimeouts {
         HttpTimeouts {
             header_read: Duration::from_millis(80),
@@ -3594,6 +4031,30 @@ mod startup_tests {
             }
             self.listener.accept().await
         }
+    }
+
+    /// The production acceptor hands `serve_http` sockets with Nagle's
+    /// algorithm off. Revert `disable_nagle` in the `TcpListener` acceptor and
+    /// the accepted stream reports `nodelay() == false`, which is the default
+    /// the kernel gives every accepted socket.
+    #[tokio::test]
+    async fn accepted_http_connections_have_nagle_disabled() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+
+        let (client, accepted) = tokio::join!(
+            tokio::net::TcpStream::connect(address),
+            HttpAcceptor::accept(&listener),
+        );
+        let _client = client.expect("connect");
+        let (accepted, _remote) = accepted.expect("accept through the production acceptor");
+
+        assert!(
+            accepted.nodelay().expect("read TCP_NODELAY"),
+            "every accepted HTTP connection must have TCP_NODELAY set"
+        );
     }
 
     #[tokio::test]
@@ -3663,12 +4124,7 @@ mod startup_tests {
             .await
             .expect("partial request head");
 
-        let mut byte = [0u8; 1];
-        let read = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut byte))
-            .await
-            .expect("header timeout must close the socket")
-            .expect("read");
-        assert_eq!(read, 0, "a partial request head must end at EOF");
+        expect_header_timer_close(&mut stream, "a partial request head").await;
         stop_timeout_test_server(stop, served).await;
     }
 
@@ -3686,7 +4142,7 @@ mod startup_tests {
         let mut response = Vec::new();
         while !response.ends_with(b"ok") {
             let mut chunk = [0u8; 256];
-            let read = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut chunk))
+            let read = tokio::time::timeout(TIMEOUT_TEST_HANG_GUARD, stream.read(&mut chunk))
                 .await
                 .expect("response arrives")
                 .expect("read response");
@@ -3694,12 +4150,7 @@ mod startup_tests {
             response.extend_from_slice(&chunk[..read]);
         }
 
-        let mut byte = [0u8; 1];
-        let read = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut byte))
-            .await
-            .expect("the next-head timeout must close an idle keep-alive socket")
-            .expect("read");
-        assert_eq!(read, 0, "idle keep-alive must end at EOF");
+        expect_header_timer_close(&mut stream, "an idle keep-alive connection").await;
         stop_timeout_test_server(stop, served).await;
     }
 
@@ -5518,6 +5969,172 @@ mod startup_tests {
         assert_eq!(seen.ip(), loopback);
     }
 
+    /// `PLURX_LOG_FORMAT` decides only the console sink's shape, and anything
+    /// that is not `json` is text — including a misspelling, which must not
+    /// refuse a boot.
+    #[test]
+    fn the_log_format_variable_is_json_or_text_and_never_an_error() {
+        assert_eq!(LogFormat::parse(Some("json")), LogFormat::Json);
+        assert_eq!(LogFormat::parse(Some("JSON")), LogFormat::Json);
+        assert_eq!(LogFormat::parse(Some(" json ")), LogFormat::Json);
+        assert_eq!(LogFormat::parse(Some("text")), LogFormat::Text);
+        assert_eq!(LogFormat::parse(Some("jsonl")), LogFormat::Text);
+        assert_eq!(LogFormat::parse(None), LogFormat::Text);
+    }
+
+    fn captured_console(format: LogFormat, ansi: bool) -> String {
+        let logs = logbuf::LogBuffers::default();
+        let captured = logbuf::testwriter::CapturedWriter::new();
+        let subscriber = logging_subscriber(
+            &logs,
+            EnvFilter::new("trace"),
+            format,
+            ansi,
+            captured.clone(),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(detail = "value", "console line");
+        });
+        captured.text()
+    }
+
+    #[test]
+    fn json_format_emits_lines_a_parser_can_read() {
+        let text = captured_console(LogFormat::Json, false);
+        let lines = text.lines().filter(|line| !line.is_empty()).count();
+        assert_eq!(lines, 1, "{text}");
+        for line in text.lines().filter(|line| !line.is_empty()) {
+            let parsed: serde_json::Value =
+                serde_json::from_str(line).unwrap_or_else(|error| panic!("{error}: {line}"));
+            assert_eq!(parsed["level"], "WARN");
+            assert_eq!(parsed["fields"]["message"], "console line");
+            assert_eq!(parsed["fields"]["detail"], "value");
+        }
+    }
+
+    /// Every tracing event in a split child names its parent's target.
+    ///
+    /// The S-14 moves put code from `transcode.rs`, `http/hls.rs` and
+    /// `vodserve.rs` into `#[path]` child modules, and an event's default
+    /// target is its `module_path!()`: without an explicit target a moved line
+    /// would be labelled `plurxd::transcode::manager_start` instead of
+    /// `plurxd::transcode` in the console, in journald and in the log view.
+    /// The walk covers every file on disk, so a new child is scanned without
+    /// being listed. Test children (`tests.rs`, `tests/`) are skipped.
+    #[test]
+    fn split_children_log_under_their_parent_target() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut events = 0;
+        for (directory, target) in [
+            ("transcode", "plurxd::transcode"),
+            ("http/hls", "plurxd::http::hls"),
+            ("vod", "plurxd::vodserve"),
+        ] {
+            let mut files = Vec::new();
+            let mut directories = vec![src.join(directory)];
+            while let Some(directory) = directories.pop() {
+                for entry in std::fs::read_dir(&directory).expect("a split directory") {
+                    let path = entry.expect("a directory entry").path();
+                    if path.file_stem().and_then(|stem| stem.to_str()) == Some("tests") {
+                        continue;
+                    }
+                    if path.is_dir() {
+                        directories.push(path);
+                    } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                        files.push(path);
+                    }
+                }
+            }
+            assert!(
+                files.len() > 1,
+                "{directory}: the walk reached no child modules"
+            );
+            let pinned = format!("target: \"{target}\",");
+            for path in files {
+                let source = std::fs::read_to_string(&path).expect("a readable child");
+                for level in ["trace", "debug", "info", "warn", "error"] {
+                    let call = format!("tracing::{level}!(");
+                    for (at, _) in source.match_indices(&call) {
+                        assert!(
+                            source[at + call.len()..].trim_start().starts_with(&pinned),
+                            "{}: the `{call}` at byte {at} logs under its own module path, \
+                             not `{target}`",
+                            path.display()
+                        );
+                        events += 1;
+                    }
+                }
+                // Other event and span forms take the same default; none is
+                // used in a child today, so any one appearing is a new case.
+                for form in ["tracing::event!(", "_span!(", "instrument"] {
+                    assert!(
+                        !source.contains(form),
+                        "{}: `{form}` in a split child needs its target pinned too",
+                        path.display()
+                    );
+                }
+            }
+        }
+        assert!(
+            events >= 299,
+            "the scan found {events} events; the split moved 299"
+        );
+    }
+
+    /// `tracing-subscriber` turns ANSI on whenever the `ansi` feature is
+    /// compiled and `NO_COLOR` is unset, with no TTY detection anywhere, so a
+    /// systemd unit or a container gets escape bytes in its journal unless
+    /// something sets the flag. This is that something.
+    #[test]
+    fn ansi_is_off_when_stdout_is_not_a_terminal_and_never_on_in_json() {
+        const ESCAPE: &str = "\u{1b}[";
+        assert!(
+            !captured_console(LogFormat::Text, false).contains(ESCAPE),
+            "escape bytes reached a non-terminal sink"
+        );
+        // The flag is load-bearing rather than decorative: with it on, the very
+        // same line does carry escapes.
+        assert!(
+            captured_console(LogFormat::Text, true).contains(ESCAPE),
+            "the ansi flag decided nothing"
+        );
+        // JSON forces it off whatever the terminal says, because an escape
+        // sequence inside a JSON string field is a parse hazard, not a colour.
+        assert!(!captured_console(LogFormat::Json, true).contains(ESCAPE));
+    }
+
+    #[test]
+    fn cluster_detail_stays_off_the_console_unless_it_is_a_warning() {
+        // The console rule that predates the format switch, pinned so neither
+        // format can quietly change which events reach stdout: cluster INFO
+        // belongs on Settings -> Cluster, cluster WARN still reaches a service
+        // supervisor, and everything else is unaffected.
+        for format in [LogFormat::Text, LogFormat::Json] {
+            let logs = logbuf::LogBuffers::default();
+            let captured = logbuf::testwriter::CapturedWriter::new();
+            let subscriber = logging_subscriber(
+                &logs,
+                EnvFilter::new("trace"),
+                format,
+                false,
+                captured.clone(),
+            );
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::info!(target: "plurx::cluster", "cluster detail");
+                tracing::warn!(target: "plurx::cluster", "cluster trouble");
+                tracing::info!(target: "plurxd::http", "ordinary detail");
+            });
+            let console = captured.text();
+            assert!(!console.contains("cluster detail"), "{format:?}: {console}");
+            assert!(console.contains("cluster trouble"), "{format:?}: {console}");
+            assert!(console.contains("ordinary detail"), "{format:?}: {console}");
+            // The ring the product shows keeps the cluster detail the console
+            // dropped, and keeps the two surfaces apart.
+            assert_eq!(logs.cluster.tail("trace", 8).len(), 2);
+            assert_eq!(logs.general.tail("trace", 8).len(), 1);
+        }
+    }
+
     /// The daemon installs exactly one subscriber, and losing that race is not
     /// a reason to abort a boot — it can only mean logging already goes
     /// somewhere. Both entry points have to survive being second.
@@ -5641,13 +6258,58 @@ mod startup_tests {
 
     /// The whole boot below the ffmpeg probes: an empty data dir becomes a
     /// server that answers, and a shutdown drains it back out again.
+    ///
+    /// Boot is also the only thing that turns "Sign-ins expire" on for an
+    /// upgraded server: without `auth.token_expiry_since` no token can expire,
+    /// so the first boot must start that clock, and a later boot on the same
+    /// data dir must keep the first start rather than restart it.
     #[tokio::test]
     async fn a_measured_node_boots_serves_and_drains() {
         let tmp = crate::test_tempdir().expect("tempdir");
         let config = config_in(tmp.path());
-        let handle = plurx_core::cluster::open_store(&config)
+
+        let before = http::users::unix_now();
+        let first = boot_serve_and_drain(&config, tmp.path()).await;
+        let started = first
+            .get_setting(keys::AUTH_TOKEN_EXPIRY_SINCE)
+            .await
+            .expect("read")
+            .expect("boot must start the sign-in expiry clock, or nothing ever expires");
+        let started: i64 = started.parse().expect("a unix time");
+        assert!(
+            (before..=http::users::unix_now()).contains(&started),
+            "the clock starts at this boot, not {started}"
+        );
+
+        // A server that first started long ago: a restart must not move the
+        // clock forward, or every restart would postpone every expiry.
+        first
+            .put_setting(keys::AUTH_TOKEN_EXPIRY_SINCE, "1000")
+            .await
+            .expect("an earlier first start");
+        drop(first);
+        let second = boot_serve_and_drain(&config, tmp.path()).await;
+        assert_eq!(
+            second
+                .get_setting(keys::AUTH_TOKEN_EXPIRY_SINCE)
+                .await
+                .expect("read")
+                .as_deref(),
+            Some("1000"),
+            "a second boot keeps the first start of the clock"
+        );
+    }
+
+    /// Boots `config` over `root`, checks it is serving, shuts it down, and
+    /// hands back the store it ran on.
+    async fn boot_serve_and_drain(
+        config: &Config,
+        root: &std::path::Path,
+    ) -> Arc<dyn plurx_core::store::Store> {
+        let handle = plurx_core::cluster::open_store(config)
             .await
             .expect("store");
+        let store = Arc::clone(&handle.store);
         let catalogue = plurx_core::store::CatalogueReader::authority(Arc::clone(&handle.store));
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
 
@@ -5661,7 +6323,7 @@ mod startup_tests {
                 identity: handle.identity,
                 credential_key: handle.credential_key,
                 backup_client: None,
-                dirs: create_dirs(tmp.path()).expect("dirs"),
+                dirs: create_dirs(root).expect("dirs"),
                 encoder_caps: Default::default(),
                 system: Default::default(),
                 logs: logbuf::LogBuffers {
@@ -5678,8 +6340,8 @@ mod startup_tests {
         // The data dir is laid out and the store is open before anything is
         // served — a boot that answered before that would serve 500s.
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(tmp.path().join("plurx.db").is_file());
-        assert!(tmp.path().join("transcode").is_dir());
+        assert!(root.join("plurx.db").is_file());
+        assert!(root.join("transcode").is_dir());
         assert!(!booted.is_finished(), "the server must still be running");
 
         stop.send(()).expect("stop");
@@ -5688,6 +6350,7 @@ mod startup_tests {
             .expect("boot must return once shutdown fires")
             .expect("join")
             .expect("an orderly shutdown is exit 0");
+        store
     }
 
     /// The Dolby Vision conversion is on unless an operator says otherwise,
@@ -6271,6 +6934,51 @@ mod startup_tests {
             tracing_subscriber::registry().with(logbuf::BufferLayer(Arc::clone(&logs)));
         tracing::subscriber::with_default(subscriber, body);
         logs
+    }
+
+    /// Both numbers, or the line cannot answer the question it exists for.
+    ///
+    /// After an `EMFILE` the only thing worth knowing is which limit the
+    /// daemon was actually running under, and "soft 1024" without the hard
+    /// limit beside it does not say whether raising the unit's `LimitNOFILE`
+    /// would have helped. Synthetic values: the raise itself is process-wide
+    /// and is proved in `plurx_core::process::rlimit`.
+    #[test]
+    fn the_open_file_limit_is_logged_with_both_values() {
+        let logs = captured(|| {
+            report_open_file_limit(Ok(Some(plurx_core::process::rlimit::OpenFileLimit {
+                soft_before: 256,
+                soft_after: 524_288,
+                hard: 524_288,
+            })));
+        });
+        let messages = logs
+            .tail("info", 8)
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            vec!["open files: soft 256 -> 524288 (hard 524288)".to_owned()]
+        );
+    }
+
+    /// A resource limit is not a reason to refuse to serve.
+    #[test]
+    fn an_open_file_limit_that_cannot_be_raised_is_only_a_warning() {
+        let logs = captured(|| {
+            report_open_file_limit(Err(std::io::Error::other("refused")));
+        });
+        let entries = logs.tail("trace", 8);
+        let [entry] = &entries[..] else {
+            panic!("expected exactly one event, got {}", entries.len());
+        };
+        assert_eq!(entry.level, "WARN");
+        assert!(
+            entry.message.contains("continuing on the inherited limit"),
+            "unexpected message: {}",
+            entry.message
+        );
     }
 
     /// The async counterpart: capture on this thread until the guard drops.

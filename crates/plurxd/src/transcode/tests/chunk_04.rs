@@ -19,7 +19,7 @@
 
         let active = evaluate_flow(FlowInputs {
             physical_ahead: Some(physical),
-            published_end_ms: Some(80_000),
+            produced_end_ms: Some(80_000),
             staged_publication_seconds: None,
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
@@ -27,6 +27,7 @@
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
+            demand_observation_age: None,
             global_live_bytes: 1_000,
             global_ahead_bytes: 1_000,
             limits,
@@ -41,7 +42,7 @@
         demand.playback_rate = 2.0;
         let faster = evaluate_flow(FlowInputs {
             physical_ahead: Some(physical),
-            published_end_ms: Some(80_000),
+            produced_end_ms: Some(80_000),
             staged_publication_seconds: None,
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
@@ -49,6 +50,7 @@
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
+            demand_observation_age: None,
             global_live_bytes: 1_000,
             global_ahead_bytes: 1_000,
             limits,
@@ -68,7 +70,7 @@
                 seconds: 0,
                 bytes: 2_001,
             }),
-            published_end_ms: Some(120_000),
+            produced_end_ms: Some(120_000),
             staged_publication_seconds: None,
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
@@ -76,6 +78,7 @@
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
+            demand_observation_age: None,
             global_live_bytes: 1_000,
             global_ahead_bytes: 1_000,
             limits,
@@ -93,7 +96,7 @@
                 seconds: 10_000,
                 bytes: 0,
             }),
-            published_end_ms: Some(10_000_000),
+            produced_end_ms: Some(10_000_000),
             staged_publication_seconds: None,
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
@@ -101,6 +104,7 @@
             media_origin_ms: 0,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
+            demand_observation_age: None,
             global_live_bytes: 0,
             global_ahead_bytes: 0,
             limits: AheadLimits {
@@ -151,12 +155,13 @@
                         published_end_ms| {
             evaluate_flow(FlowInputs {
                 physical_ahead: None,
-                published_end_ms,
+                produced_end_ms: published_end_ms,
                 staged_publication_seconds: None,
                 startup_protected: true,
                 media_origin_ms,
                 lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
                 demand: Some(demand),
+                demand_observation_age: None,
                 global_live_bytes: 0,
                 global_ahead_bytes: 0,
                 limits,
@@ -173,12 +178,13 @@
                     seconds: published_end_ms / 1_000,
                     bytes: 0,
                 }),
-                published_end_ms: Some(published_end_ms),
+                produced_end_ms: Some(published_end_ms),
                 staged_publication_seconds: None,
                 startup_protected: true,
                 media_origin_ms,
                 lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
                 demand: Some(demand),
+                demand_observation_age: None,
                 global_live_bytes: 0,
                 global_ahead_bytes: 0,
                 limits,
@@ -258,12 +264,13 @@
                 seconds: 2,
                 bytes: limits.max_bytes + 1,
             }),
-            published_end_ms: Some(2_000),
+            produced_end_ms: Some(2_000),
             staged_publication_seconds: None,
             startup_protected: true,
             media_origin_ms: 0,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
+            demand_observation_age: None,
             global_live_bytes: 0,
             global_ahead_bytes: 0,
             limits,
@@ -280,12 +287,13 @@
         // must not hand startup protection back.
         let retried = evaluate_flow(FlowInputs {
             physical_ahead: None,
-            published_end_ms: None,
+            produced_end_ms: None,
             staged_publication_seconds: None,
             startup_protected: false,
             media_origin_ms: 0,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
+            demand_observation_age: None,
             global_live_bytes: 0,
             global_ahead_bytes: 0,
             limits,
@@ -303,12 +311,13 @@
         // when a row of paused clients could otherwise fill a full disk.
         let full_disk = evaluate_flow(FlowInputs {
             physical_ahead: None,
-            published_end_ms: None,
+            produced_end_ms: None,
             staged_publication_seconds: None,
             startup_protected: true,
             media_origin_ms: 0,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
+            demand_observation_age: None,
             global_live_bytes: 9_000,
             global_ahead_bytes: 9_000,
             limits,
@@ -353,7 +362,7 @@
                 seconds: 10,
                 bytes: 0,
             }),
-            published_end_ms: Some(65_000),
+            produced_end_ms: Some(65_000),
             staged_publication_seconds: None,
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
@@ -361,6 +370,7 @@
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
+            demand_observation_age: None,
             global_live_bytes: 0,
             global_ahead_bytes: 0,
             limits,
@@ -634,144 +644,44 @@
         }
     }
 
-    /// And the call site, which the function above cannot speak for.
-    ///
-    /// `served_copy_options` still pins legacy/takeover narrowing. A fresh
-    /// GOP-aware session has the post-mux converter, though, so this reads the
-    /// argv the real process is given and proves that the RPU survives for the
-    /// in-process stage while the enhancement layer does not.
-    ///
-    /// It asserts the invariant rather than the complete command: type 62
-    /// reaches the converter, type 63 does not, and movenc is allowed to carry
-    /// the source Dolby Vision side data until plurx replaces its record.
     #[tokio::test]
-    async fn a_fresh_copy_conversion_preserves_the_rpu_argv_it_spawns() {
+    async fn hevc_rolling_copy_keeps_its_parameter_sets_instead_of_refusing() {
         use plurx_core::store::SqliteStore;
-        use tracing_subscriber::prelude::*;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("HEVC regression fixture"));
+        let media = crate::test_tempdir().expect("HEVC regression fixture");
+        let source = media.path().join("hevc.mp4");
+        write_real_hevc_video(&source, 2).await;
+        let file_id = seed_file_with_probe_at(&store, &source.to_string_lossy(), plurx_core::domain::ProbeResult {
+            video_codec: Some("hevc".into()), ..Default::default()
+        }).await;
+        let work = crate::test_tempdir().expect("HEVC regression fixture");
+        let mgr = TranscodeManager::new(store.clone(), work.path().to_path_buf(), EncoderCaps::default(), Pipeline::Cpu);
+        // No proof and no Developer override: the rolling copy starts,
+        // because it keeps the definitions its pictures need.
+        let started = mgr.start_copy(file_id, 0.0, None, CopySessionOptions {
+            transcode_audio: false, preserve_dolby_vision: false, convert_dolby_vision: false,
+        }, "user", "playback").await.expect("a retaining rolling copy needs no proof");
+        assert!(mgr.stop_session(&started.session_id, "test cleanup").await);
+        assert!(LiveRecoveryReason::from_refusal("hevc_configuration_unverified").is_none());
+        assert!(LiveRecoveryReason::from_refusal("hevc_configuration_unsupported").is_none());
 
-        super::require_ffmpeg();
-        let media = crate::test_tempdir().expect("media dir");
-        let src = media.path().join("profile7.mp4");
-        write_real_hevc_video(&src, 4).await;
-
-        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let file_id = seed_file_with_probe_at(
-            &store,
-            &src.to_string_lossy(),
-            plurx_core::domain::ProbeResult {
-                duration_ms: Some(4_000),
-                container: Some("mp4".into()),
-                video_codec: Some("hevc".into()),
-                width: Some(160),
-                height: Some(120),
-                bit_depth: Some(10),
-                hdr: Some("dolby_vision".into()),
-                hdr_format: Some("Dolby Vision · Profile 7 (HDR10-compatible)".into()),
-                ..Default::default()
-            },
-        )
-        .await;
-
-        let work = crate::test_tempdir().expect("work");
-        let mgr = Arc::new(
-            TranscodeManager::new(
-                Arc::clone(&store),
-                work.path().to_path_buf(),
-                EncoderCaps::default(),
-                Pipeline::Cpu,
-            )
-            // Pinned rather than probed: the two strip shapes differ only in
-            // whether this build has the `dovi_rpu` bitstream filter, and a
-            // test whose argv depends on the host's ffmpeg asserts something
-            // different on every machine.
-            .with_dv_strippable(false),
-        );
-
-        // A ring, and the argv line is the *oldest* thing in it: `start_copy`
-        // spawns a real ffmpeg whose stderr is logged a line at a time, so a
-        // capacity anywhere near the number of events would evict the one
-        // entry this test exists to read and fail on the `expect` below —
-        // green mutation, red truth. Sized for a noisy encoder rather than
-        // for the handful of lines the happy path emits.
-        let logs = Arc::new(crate::logbuf::LogBuffer::new(8192));
-        let subscriber =
-            tracing_subscriber::registry().with(crate::logbuf::BufferLayer(Arc::clone(&logs)));
-        let guard = tracing::subscriber::set_default(subscriber);
-        let started = mgr
-            .start_copy(
-                file_id,
-                0.0,
-                None,
-                // What live-HLS recovery builds from a converting session's
-                // `SessionKind::Copy`: `start_live_recovery_session` copies
-                // both flags straight off `req.kind`.
-                CopySessionOptions {
-                    transcode_audio: false,
-                    preserve_dolby_vision: true,
-                    convert_dolby_vision: true,
-                },
-                "paul",
-                "pb-strip",
-            )
-            .await;
-
-        // The argv is logged by the producer task, not by the call that
-        // returns the session, so `start_copy` completing is not the moment
-        // the line exists. `set_default` is thread-local and this is a
-        // current-thread runtime, so the wait is also what lets that task be
-        // polled at all — a bare read here passes on an idle machine and
-        // fails under a loaded one, which is the flake this loop removes.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-        let argv = loop {
-            if let Some(line) = logs
-                .tail("trace", 8192)
-                .into_iter()
-                .map(|entry| entry.message)
-                .find(|message| message.contains("copy-video HLS ffmpeg args"))
-            {
-                break line;
-            }
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        for (preserve, convert) in [(false, false), (true, false), (true, true)] {
+            let options = super::manager_start::rolling_copy_video_options(&file, None, true, preserve, convert);
+            assert!(options.retains_hevc_parameter_sets(), "preserve={preserve} convert={convert}");
             assert!(
-                tokio::time::Instant::now() < deadline,
-                "the copy path logs the argv it is about to spawn"
+                plurx_core::transcode::copy_video_args(&file, options)
+                    .iter()
+                    .all(|arg| !arg.contains("32-34")),
+                "a rolling HEVC copy never deletes types 32-34"
             );
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        };
-        drop(guard);
-
-        assert!(
-            argv.contains("-strict unofficial"),
-            "a converting copy must let ffmpeg retain Dolby Vision side data: {argv}"
-        );
-        assert!(
-            !argv.contains("62-63"),
-            "the RPU (62) has to reach the in-process converter: {argv}"
-        );
-        assert!(
-            argv.contains("-tag:v hvc1"),
-            "the served stream is the HDR10 base, so the sample entry is the \
-             compatible one: {argv}"
-        );
-        assert!(
-            argv.contains("remove_types=32-34|63"),
-            "the converting recipe keeps the RPU and drops the enhancement layer: {argv}"
-        );
-
-        let info = started.expect("the copy session starts");
-        assert!(
-            matches!(
-                info.kind,
-                SessionKind::Copy {
-                    preserve_dolby_vision: true,
-                    convert_dolby_vision: true,
-                    ..
-                }
-            ),
-            "the badge the create response is computed from has to describe the \
-             same stream the argv produces: {:?}",
-            info.kind
-        );
+        }
+        let mut h264 = file.clone();
+        h264.video_codec = Some("h264".into());
+        assert!(!super::manager_start::rolling_copy_video_options(&h264, None, true, false, false)
+            .retains_hevc_parameter_sets());
     }
+
 
     /// The playlist for a converting session describes what the conversion
     /// produces, not what the source is.
@@ -2128,7 +2038,7 @@
             .await
             .expect("predecessor segment");
         let session = watchdog_session(dir.path(), Some(long_running_child()), false);
-        let reply_pause = Arc::new(tokio::sync::Barrier::new(2));
+        let reply_pause = crate::seam_hooks::AsyncPause::new("producer attempt reply");
         session
             .control
             .pause_producer_attempt_reply(Arc::clone(&reply_pause));
@@ -2139,7 +2049,7 @@
                 let _ = session.kill_child_for_replacement().await;
             }
         });
-        reply_pause.wait().await;
+        let held = reply_pause.reached().await;
         assert_eq!(
             session.control.current_producer_attempt(),
             1,
@@ -2156,7 +2066,7 @@
 
         // Release the actor so it can observe the dropped reply and process
         // the retirement command scheduled by the transaction's Drop.
-        reply_pause.wait().await;
+        held.release();
         tokio::time::timeout(Duration::from_secs(1), async {
             while !session.control.is_retired() {
                 tokio::task::yield_now().await;

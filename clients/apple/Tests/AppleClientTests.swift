@@ -50,6 +50,15 @@ private struct LayoutFramePreferenceKey: PreferenceKey {
     }
 }
 
+private struct HeroContentFramePreferenceKey: PreferenceKey {
+    static var defaultValue: CGRect = .null
+
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        value = value.isNull ? next : value.union(next)
+    }
+}
+
 private struct NativeAPIContractFixture: Decodable {
     let server: ServerInfo
     let itemDetail: ItemDetail
@@ -455,8 +464,7 @@ private struct DetailNavigationTestHost<Content: View>: View {
 final class AppleClientTests: XCTestCase {
     func testClusterMediaFailoverUsesEachValidatedNodeWithoutMovingAccountOrigin() {
         let session = Session()
-        session.origin = "http://primary.local:32400"
-        session.token = "bearer"
+        session.setCredentials(origin: "http://primary.local:32400", token: "bearer")
         session.configureNodeOrigins(
             [
                 "http://primary.local:32400",
@@ -466,7 +474,7 @@ final class AppleClientTests: XCTestCase {
                 "http://node-b.local:32400",
                 "https://node-c.local:443",
             ],
-            primary: session.origin
+            primary: session.credentials.origin
         )
 
         XCTAssertEqual(
@@ -478,7 +486,7 @@ final class AppleClientTests: XCTestCase {
             "token=bearer"
         )
         XCTAssertNil(session.nextMediaFailoverURL("/api/v1/hls/cap/index.m3u8", authenticated: false))
-        XCTAssertEqual(session.origin, "http://primary.local:32400")
+        XCTAssertEqual(session.credentials.origin, "http://primary.local:32400")
     }
 
     /// A candidate becomes a request authority the moment it is used, and a
@@ -509,8 +517,8 @@ final class AppleClientTests: XCTestCase {
     /// request, so neither may produce a candidate.
     func testOnlyAServerRelativePathIsRebound() {
         let session = Session()
-        session.origin = "http://primary.local:32400"
-        session.configureNodeOrigins(["http://node-b.local:32400"], primary: session.origin)
+        session.setCredentials(origin: "http://primary.local:32400", token: nil)
+        session.configureNodeOrigins(["http://node-b.local:32400"], primary: session.credentials.origin)
 
         XCTAssertNil(session.nextMediaFailoverURL("//evil.example/x", authenticated: false))
         XCTAssertNil(session.nextMediaFailoverURL("http://evil.example/x", authenticated: false))
@@ -526,11 +534,10 @@ final class AppleClientTests: XCTestCase {
     /// downgraded candidate would put it on the wire in cleartext.
     func testAnHTTPSSessionRefusesToFailOverToACleartextNode() {
         let session = Session()
-        session.origin = "https://primary.local"
-        session.token = "bearer"
+        session.setCredentials(origin: "https://primary.local", token: "bearer")
         session.configureNodeOrigins(
             ["http://node-b.local:32400", "https://node-c.local"],
-            primary: session.origin
+            primary: session.credentials.origin
         )
 
         XCTAssertEqual(
@@ -545,10 +552,10 @@ final class AppleClientTests: XCTestCase {
     /// in the same process, and the next one has no node left to try.
     func testAFreshStreamStartsAtTheHeadOfTheNodeList() {
         let session = Session()
-        session.origin = "http://primary.local:32400"
+        session.setCredentials(origin: "http://primary.local:32400", token: nil)
         session.configureNodeOrigins(
             ["http://node-b.local:32400", "http://node-c.local:32400"],
-            primary: session.origin
+            primary: session.credentials.origin
         )
 
         XCTAssertEqual(
@@ -911,8 +918,7 @@ final class AppleClientTests: XCTestCase {
     }
 
     override func tearDown() {
-        Session.shared.origin = ""
-        Session.shared.token = nil
+        Session.shared.setCredentials(origin: "", token: nil)
         super.tearDown()
     }
 
@@ -971,7 +977,7 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(detail.reading?.locator.locations?.totalProgression, 0.55)
     }
 
-    func testBookReaderPolicyAcceptsOnlyAvailablePhoneAndTabletEpubs() {
+    func testBookReaderPolicyKeepsSupportedBooksInTheApp() {
         let epub = MediaFile(id: 90, filename: "Contract.EPUB", available: true)
         let pdf = MediaFile(id: 91, filename: "Contract.pdf", available: true)
         let missing = MediaFile(id: 92, filename: "Missing.epub", available: false)
@@ -1008,6 +1014,13 @@ final class AppleClientTests: XCTestCase {
             available: true,
             reader: pdfRead
         )
+        let localOnlyPDF = MediaFile(
+            id: 96,
+            filename: "Legacy.pdf",
+            size: 4_096,
+            available: true,
+            reader: serverHandoff
+        )
 
         XCTAssertTrue(BookReaderPolicy.canRead(epub, onTelevision: false))
         XCTAssertTrue(BookReaderPolicy.canDownload(epub, onTelevision: false))
@@ -1020,6 +1033,7 @@ final class AppleClientTests: XCTestCase {
         XCTAssertFalse(BookReaderPolicy.canDownload(nativePDF, onTelevision: false))
         XCTAssertFalse(BookReaderPolicy.canRead(nativePDF, onTelevision: true))
         XCTAssertFalse(BookReaderPolicy.canRead(unverifiablePDF, onTelevision: false))
+        XCTAssertTrue(BookReaderPolicy.canRead(localOnlyPDF, onTelevision: false))
     }
 
     #if os(iOS)
@@ -2334,12 +2348,16 @@ final class AppleClientTests: XCTestCase {
 
     /// A reach expansion the merge created and neither side had on its own:
     /// `main`'s server-truth delivery watchdog funnels into
-    /// `retrySameDeliveryAfterStall`, the exact arm this branch bound to the
-    /// ladder. So a wedge that AVPlayer never reported is bounded by the same
-    /// floor and stops with its own message. It reopens unticketed, though: a
-    /// session whose published bytes were simply never fetched has nothing
-    /// wrong with the rung it was already serving.
-    func testTheDeliveryWatchdogAlsoStepsTheLadderDownAndStopsAtItsFloor() {
+    /// `retrySameDeliveryAfterStall`. So a wedge that AVPlayer never reported
+    /// is bounded by the same floor and stops with its own message.
+    ///
+    /// What intent that reopen carries is no longer asserted here, because
+    /// there is no longer a client function that decides it: A-04 deleted the
+    /// `stallReopenIntent` minter. `retrySameDeliveryAfterStall` reopens with
+    /// `intent: .sameDeliveryRepair`, which keeps the recovery budgets and
+    /// carries no server ticket, so nothing this arm produces is
+    /// `.stallReopen`. The wire it used to mint onto is untouched.
+    func testTheDeliveryWatchdogIsBoundedByItsFloorAndStopsWithItsOwnMessage() {
         var storm = RecoveryReopenBudget()
 
         // With floor budget left, a watchdog-detected starvation reopens, and
@@ -2355,17 +2373,6 @@ final class AppleClientTests: XCTestCase {
             ),
             .reopen
         )
-        XCTAssertEqual(
-            PlayerController.stallReopenIntent(
-                sessionId: "session-a",
-                isVOD: false,
-                requestId: "request-1",
-                wedge: true
-            ),
-            .normal,
-            "the watchdog arm comes back on the rung it was already serving"
-        )
-
         // At the floor it stops with the delivery-specific message rather than
         // the generic buffering one, so the failure screen still names what
         // actually went wrong.
@@ -2395,40 +2402,6 @@ final class AppleClientTests: XCTestCase {
                 now: 202
             ),
             .reopen
-        )
-    }
-
-    /// The legacy typed helper remains narrowly scoped for interoperability;
-    /// timer-only presentation recovery no longer calls it.
-    func testLegacyBoundRecoveryOnlyNamesAGrowingServerSession() {
-        XCTAssertEqual(
-            PlayerController.stallReopenIntent(
-                sessionId: "session-a",
-                isVOD: false,
-                requestId: "request-1",
-                wedge: false
-            ),
-            stallIntent()
-        )
-        XCTAssertEqual(
-            PlayerController.stallReopenIntent(
-                sessionId: "session-a",
-                isVOD: true,
-                requestId: "request-1",
-                wedge: false
-            ),
-            .normal,
-            "a completed cache entry has no ladder answer to give"
-        )
-        XCTAssertEqual(
-            PlayerController.stallReopenIntent(
-                sessionId: nil,
-                isVOD: false,
-                requestId: "request-1",
-                wedge: false
-            ),
-            .normal,
-            "direct play holds no session at all"
         )
     }
 
@@ -3784,8 +3757,39 @@ final class AppleClientTests: XCTestCase {
             String(source[setter.upperBound..<setterEnd.lowerBound]).contains(viewerStop),
             "the one explicit viewer stop belongs to the centralized intent setter"
         )
-        XCTAssertTrue(source.contains("self?.setPlaybackRequested(true)"))
-        XCTAssertTrue(source.contains("self?.setPlaybackRequested(false)"))
+        // The lock screen and remote controls reach the setter from inside
+        // their own command targets — past `RemoteCommandOwner`'s current-owner
+        // guard — rather than by a literal that could sit anywhere in the file.
+        for (command, requested) in [
+            ("commands.playCommand.addTarget", "true"),
+            ("commands.pauseCommand.addTarget", "false"),
+        ] {
+            let target = try XCTUnwrap(source.range(of: command), "remote command vanished: \(command)")
+            let targetEnd = try XCTUnwrap(
+                source.range(of: "remoteTargets.append", range: target.upperBound..<source.endIndex),
+                "\(command) is no longer followed by another registered target"
+            )
+            let slice = String(source[target.upperBound..<targetEnd.lowerBound])
+            let setterCall = slice.range(of: "self.setPlaybackRequested(\(requested))")
+            XCTAssertNotNil(
+                setterCall,
+                "\(command) no longer routes through the centralized intent setter"
+            )
+            // #506's ownership rule: a second or backgrounded controller must
+            // refuse lock-screen play/pause while another controller owns Now
+            // Playing. The guard has to sit in this target, ahead of the setter.
+            let ownerGuard = slice.range(of: "RemoteCommandOwner.shared.isCurrent(self.remoteOwnerToken)")
+            XCTAssertNotNil(
+                ownerGuard,
+                "\(command) acts without checking that this controller owns the remote commands"
+            )
+            if let ownerGuard, let setterCall {
+                XCTAssertLessThan(
+                    ownerGuard.lowerBound, setterCall.lowerBound,
+                    "\(command) reaches the intent setter before its current-owner guard"
+                )
+            }
+        }
         // Every remaining writer, named. One is the viewer, one is the end of
         // the film, one is teardown, one is the owner's single helper, and one
         // makes the visible intent agree after iOS ends an interruption without
@@ -4243,7 +4247,18 @@ final class AppleClientTests: XCTestCase {
             ("func stopAfterRepeatedEarlyEnd(", "source: \"repeated_early_end\""),
             ("guard !establishedHDRRetryAttempted, !unchangedRetryRuledOut else {", "source: \"owner_stopped\""),
             ("private func handleBlackFrameDecodeFailure(at position: Int) async {", "source: \"black_frame_ladder_spent\""),
+            ("private func expireResumeAttempt(at now: TimeInterval) {", "source: \"owner_exhausted\""),
+            ("private func raiseCreateRetryExhausted() {", "source: \"owner_exhausted\""),
         ]
+        // The census is closed: every `raiseOwnerFault(` call is one of the
+        // sites above or `handleItemFailure` below. A new raise site fails
+        // here until it is added to the census with its stop.
+        let declarations = source.components(separatedBy: "private func raiseOwnerFault(").count - 1
+        let raiseCalls = source.components(separatedBy: "raiseOwnerFault(").count - 1 - declarations
+        XCTAssertEqual(
+            raiseCalls, sites.count + 1,
+            "a raiseOwnerFault( call site is missing from this census"
+        )
         for (open, raise) in sites {
             let start = try XCTUnwrap(source.range(of: open), "site vanished: \(open)")
             let end = try XCTUnwrap(
@@ -4260,7 +4275,10 @@ final class AppleClientTests: XCTestCase {
         // usefully bound, so it is pinned on its own: the pause is the line the
         // ladder's last rung falls through to.
         let failureStart = try XCTUnwrap(
-            source.range(of: "private func handleItemFailure(_ item: AVPlayerItem) async {")
+            // Anchored on the name and first parameter only: the signature has
+            // grown a parameter before (the finite item stream's `fatalError`)
+            // and the pin is about the body, not the parameter list.
+            source.range(of: "private func handleItemFailure(_ item: AVPlayerItem")
         )
         let failureRaise = try XCTUnwrap(
             source.range(of: "Self.mediaFailureSurfaceSource(", range: failureStart.upperBound..<source.endIndex)
@@ -4575,6 +4593,40 @@ final class AppleClientTests: XCTestCase {
         }
     }
 
+    func testAnIdleExpiredSignInStillSignsOutAndKeepsItsReasonForTheLoginScreen() throws {
+        _ = Session.shared.takeSessionExpiryNotice()
+        let url = try XCTUnwrap(URL(string: "http://server.local/api/v1/me"))
+        let response = try XCTUnwrap(
+            HTTPURLResponse(url: url, statusCode: 401, httpVersion: "HTTP/1.1", headerFields: nil)
+        )
+        let expired = Data(
+            #"{"code":"session_expired","message":"Signed out after 90 days of inactivity. Sign in again to continue.","idle_days":90}"#.utf8
+        )
+        XCTAssertThrowsError(try PlurxAPI.check(response, data: expired)) { error in
+            XCTAssertTrue(AppModel.isSessionExpired(error), "an expired sign-in is still a sign-out")
+            guard let api = error as? APIError, case .http(401) = api else {
+                XCTFail("a 401 must stay status-shaped")
+                return
+            }
+        }
+        XCTAssertEqual(
+            Session.shared.takeSessionExpiryNotice(),
+            "Signed out after 90 days of inactivity. Sign in again to continue."
+        )
+        XCTAssertNil(Session.shared.takeSessionExpiryNotice(), "the reason is taken once")
+
+        // Any other 401 carries no reason, and neither does a 403.
+        let other = Data(#"{"code":"token_expired","message":"Sign in again."}"#.utf8)
+        XCTAssertThrowsError(try PlurxAPI.check(response, data: other))
+        XCTAssertNil(Session.shared.takeSessionExpiryNotice())
+        let forbidden = try XCTUnwrap(
+            HTTPURLResponse(url: url, statusCode: 403, httpVersion: "HTTP/1.1", headerFields: nil)
+        )
+        XCTAssertThrowsError(try PlurxAPI.check(forbidden, data: expired))
+        XCTAssertNil(Session.shared.takeSessionExpiryNotice())
+        XCTAssertNil(PlurxAPI.sessionExpiryMessage(status: 401, data: nil))
+    }
+
     func testRefusalBodiesAreKeptWithoutDisturbingTheMatchersThatPredateThem() throws {
         let url = try XCTUnwrap(URL(string: "http://server.local/api/v1/files/1/hls"))
 
@@ -4675,6 +4727,11 @@ final class AppleClientTests: XCTestCase {
                 mode.rawValue
             )
         }
+        let compact = fixture.fields.filter { $0.modes.contains("mini")
+            && ($0.availableOn == nil || $0.availableOn?.contains("apple") == true) }
+        XCTAssertEqual(PlaybackInfoPanel.compactFields.map(\.id),
+                       ["decode_resolution", "stream_frame", "player_state", "client_loaded"])
+        XCTAssertEqual(PlaybackInfoPanel.compactFields.map(\.label), compact.map(\.label))
     }
 
     func testPlayerRootCarriesTheRemoteAdapter() throws {
@@ -5993,8 +6050,12 @@ final class AppleClientTests: XCTestCase {
         defaults.set(true, forKey: "plurx.acceptance.probe")
 
         XCTAssertEqual(
-            PlaybackAcceptanceLaunch.current(defaults: defaults),
+            PlaybackAcceptanceLaunch.current(
+                defaults: defaults,
+                arguments: ["plurx", "-plurx.origin", "http://192.168.4.143:52773"]
+            ),
             PlaybackAcceptanceLaunch(
+                requestedOrigin: "http://192.168.4.143:52773",
                 itemId: 17,
                 fileId: 42,
                 startMs: 91_000,
@@ -6004,6 +6065,26 @@ final class AppleClientTests: XCTestCase {
                 probesEnabled: true
             )
         )
+
+        let missingProxy = try XCTUnwrap(
+            PlaybackAcceptanceLaunch.current(defaults: defaults, arguments: ["plurx"])
+        )
+        XCTAssertFalse(missingProxy.matchesActiveOrigins(
+            model: "http://192.168.4.7:32400",
+            session: "http://192.168.4.7:32400"
+        ))
+        let launch = try XCTUnwrap(PlaybackAcceptanceLaunch.current(
+            defaults: defaults,
+            arguments: ["plurx", "-plurx.origin", "http://192.168.4.143:52773"]
+        ))
+        XCTAssertTrue(launch.matchesActiveOrigins(
+            model: "http://192.168.4.143:52773",
+            session: "http://192.168.4.143:52773"
+        ))
+        XCTAssertFalse(launch.matchesActiveOrigins(
+            model: "http://192.168.4.143:52773",
+            session: "http://192.168.4.7:32400"
+        ))
     }
 
     func testApplePlaybackProbeCarriesRunwayAndNoCredentialSurface() throws {
@@ -7118,15 +7199,15 @@ final class AppleClientTests: XCTestCase {
     func testPlaybackQualityChoicesMatchTheAndroidClientAndSpellTheDecisionOverride() {
         XCTAssertEqual(
             PlaybackQuality.allCases.map(\.rawValue),
-            ["auto", "original", "2160", "1440", "1080", "720", "480", "360"]
+            ["auto", "original", "2160", "1440", "1080", "720", "480", "360", "240", "144"]
         )
         XCTAssertEqual(
             PlaybackQuality.allCases.map(\.label),
-            ["Auto", "Original", "4K · 2160p", "1440p", "1080p", "720p", "480p", "360p"]
+            ["Auto", "Original", "4K · 2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "144p"]
         )
         XCTAssertEqual(
             PlaybackQuality.allCases.map(\.rungHeight),
-            [nil, nil, 2_160, 1_440, 1_080, 720, 480, 360]
+            [nil, nil, 2_160, 1_440, 1_080, 720, 480, 360, 240, 144]
         )
 
         XCTAssertNil(PlaybackQuality.auto.decisionForce)
@@ -7624,8 +7705,7 @@ final class AppleClientTests: XCTestCase {
     }
 
     func testRelativeMediaURLCarriesTokenAndPreservesExistingQuery() throws {
-        Session.shared.origin = "http://media-box:32400"
-        Session.shared.token = "secret token"
+        Session.shared.setCredentials(origin: "http://media-box:32400", token: "secret token")
 
         let url = try XCTUnwrap(Session.shared.mediaURL("/api/v1/files/42/direct?download=1"))
         let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
@@ -7639,12 +7719,34 @@ final class AppleClientTests: XCTestCase {
     }
 
     func testAuthorizationHeaderUsesTheCurrentSessionToken() throws {
-        Session.shared.token = "bearer-token"
+        Session.shared.setCredentials(origin: Session.shared.credentials.origin, token: "bearer-token")
         var request = URLRequest(url: try XCTUnwrap(URL(string: "https://media.example.test/api/v1/me")))
 
         Session.shared.authorize(&request)
 
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer bearer-token")
+    }
+
+    func testConcurrentCredentialReadsNeverCombineTwoSessions() {
+        let first = (origin: "https://first.example.test", token: "first-token")
+        let second = (origin: "https://second.example.test", token: "second-token")
+        let mismatchLock = NSLock()
+        var mismatches = 0
+        DispatchQueue.concurrentPerform(iterations: 10_000) { iteration in
+            if iteration.isMultiple(of: 2) {
+                Session.shared.setCredentials(origin: first.origin, token: first.token)
+            } else {
+                Session.shared.setCredentials(origin: second.origin, token: second.token)
+            }
+            let pair = Session.shared.credentials
+            if !((pair.origin == first.origin && pair.token == first.token)
+                || (pair.origin == second.origin && pair.token == second.token)) {
+                mismatchLock.lock()
+                mismatches += 1
+                mismatchLock.unlock()
+            }
+        }
+        XCTAssertEqual(mismatches, 0)
     }
 
     func testAutoHlsRequestLeavesHeightUnsetAndCreatesAnIdempotencyKey() throws {
@@ -8747,6 +8849,12 @@ final class AppleClientTests: XCTestCase {
     /// The detail page had no dynamic-range badge at all, while Android and the
     /// web both did. It is source-only and stays that way: there is no session
     /// on a detail page to report a downgrade against.
+    ///
+    /// Since a767f5fe5 (docs/clients/CALM-LIBRARY-PAGES.md, "The item header
+    /// describes the selected file") resolution, video codec, dynamic range
+    /// and container are the header's coloured badges for every video file:
+    /// an SDR file is labelled SDR rather than left blank, and the container
+    /// closes the row.
     func testDetailBadgesCarryTheSourceDynamicRangeAfterTheCodec() throws {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
@@ -8763,25 +8871,37 @@ final class AppleClientTests: XCTestCase {
         let badges = DetailView.itemMetadataBadges(
             item, file: file, durationMs: file.durationMs, includeSeries: false
         )
-        XCTAssertEqual(badges.map(\.kind), [.year, .runtime, .resolution, .video, .dynamicRange])
-        let range = try XCTUnwrap(badges.last)
+        XCTAssertEqual(
+            badges.map(\.kind),
+            [.year, .runtime, .resolution, .video, .dynamicRange, .container]
+        )
+        let range = try XCTUnwrap(badges.first { $0.kind == .dynamicRange })
         XCTAssertEqual(range.symbol, "sparkles")
         XCTAssertEqual(range.mark, "DV P8")
         XCTAssertEqual(
             range.accessibilityLabel,
             "Dolby Vision · Profile 8 (HDR10-compatible)"
         )
+        let container = try XCTUnwrap(badges.last)
+        XCTAssertEqual(container.kind, .container)
+        XCTAssertEqual(container.mark, "MKV")
 
-        // An SDR file gains nothing, exactly as before.
+        // An SDR file is labelled SDR — never with the source HDR badge's
+        // symbol or mark — and still closes on its container.
         let sdr = try decoder.decode(MediaFile.self, from: Data(#"""
         {"id":12,"duration_ms":8520000,"container":"mp4","video_codec":"h264","height":1080}
         """#.utf8))
-        XCTAssertEqual(
-            DetailView.itemMetadataBadges(
-                item, file: sdr, durationMs: sdr.durationMs, includeSeries: false
-            ).map(\.kind),
-            [.year, .runtime, .resolution, .video]
+        let sdrBadges = DetailView.itemMetadataBadges(
+            item, file: sdr, durationMs: sdr.durationMs, includeSeries: false
         )
+        XCTAssertEqual(
+            sdrBadges.map(\.kind),
+            [.year, .runtime, .resolution, .video, .dynamicRange, .container]
+        )
+        let sdrRange = try XCTUnwrap(sdrBadges.first { $0.kind == .dynamicRange })
+        XCTAssertEqual(sdrRange.mark, "SDR")
+        XCTAssertEqual(sdrRange.symbol, "sun.max")
+        XCTAssertEqual(sdrBadges.last?.mark, "MP4")
     }
 
     func testSeasonEpisodeSummaryKeepsResolutionAndRichHDRCompact() throws {
@@ -9951,20 +10071,34 @@ final class AppleClientTests: XCTestCase {
             context.fill(CGRect(x: 0, y: 0, width: 160, height: 90))
         }
 
-        for viewportWidth: CGFloat in [375, 430] {
+        for viewportWidth: CGFloat in [320, 375, 402, 430] {
             var heroFrame: CGRect = .null
+            var contentFrame: CGRect = .null
             let controller = UIHostingController(rootView:
                 NavigationStack {
                     ScrollView {
                         LazyVStack(alignment: .leading) {
                             NavigationLink(value: 1) {
-                                ZStack {
+                                ZStack(alignment: .bottomLeading) {
                                     Image(uiImage: backdrop)
                                         .resizable()
                                         .aspectRatio(contentMode: .fill)
-                                        .frame(maxWidth: .infinity)
-                                        .frame(height: HomeHeroMetrics.compactHeight)
-                                        .clipped()
+                                        .modifier(IOSHomeHeroArtworkLayout())
+                                    VStack(alignment: .leading) {
+                                        Text("CONTINUE")
+                                        Text("Featured movie")
+                                        Color.clear.frame(height: 3)
+                                        Label("Resume", systemImage: "play.fill")
+                                    }
+                                    .background {
+                                        GeometryReader { geometry in
+                                            Color.clear.preference(
+                                                key: HeroContentFramePreferenceKey.self,
+                                                value: geometry.frame(in: .global)
+                                            )
+                                        }
+                                    }
+                                    .padding(16)
                                 }
                                 .modifier(IOSHomeHeroCardLayout())
                                 .reportLayoutFrame()
@@ -9977,6 +10111,9 @@ final class AppleClientTests: XCTestCase {
                 }
                 .onPreferenceChange(LayoutFramePreferenceKey.self) {
                     heroFrame = $0
+                }
+                .onPreferenceChange(HeroContentFramePreferenceKey.self) {
+                    contentFrame = $0
                 }
             )
 
@@ -9998,6 +10135,9 @@ final class AppleClientTests: XCTestCase {
                 viewportWidth - HomeHeroMetrics.horizontalInset,
                 accuracy: 0.5
             )
+            XCTAssertFalse(contentFrame.isNull)
+            XCTAssertEqual(contentFrame.minX, heroFrame.minX + 16, accuracy: 0.5)
+            XCTAssertEqual(contentFrame.maxX, heroFrame.maxX - 16, accuracy: 0.5)
             window.isHidden = true
         }
     }

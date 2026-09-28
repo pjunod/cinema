@@ -10,7 +10,6 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -39,9 +38,10 @@ import tv.plurx.app.player.PlayerControlObservation
 import tv.plurx.app.player.QualitySelection
 import tv.plurx.app.player.SubtitleMode
 import tv.plurx.app.player.SubtitleSelection
+import tv.plurx.app.player.PlayerRole
+import tv.plurx.app.player.PlurxPlayerBuilder
 import tv.plurx.app.player.controlCapabilities
 import java.util.UUID
-import tv.plurx.app.player.playbackLoadControl
 
 data class LibraryChannelPlayerState(
     val channels: List<LibraryChannel> = emptyList(),
@@ -62,10 +62,9 @@ data class LibraryChannelPlayerState(
 class LibraryChannelPlayer private constructor(context: Context) {
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    val player: ExoPlayer = ExoPlayer.Builder(appContext)
-        .setLoadControl(playbackLoadControl(appContext))
-        .setMediaSourceFactory(DefaultMediaSourceFactory(OkHttpDataSource.Factory(Net.capabilityClient)))
-        .build()
+    val player: ExoPlayer = PlurxPlayerBuilder(appContext, PlayerRole.LibraryChannel).build(
+        dataSource = OkHttpDataSource.Factory(Net.capabilityClient),
+    )
     private val mutableState = MutableStateFlow(LibraryChannelPlayerState())
     val state: StateFlow<LibraryChannelPlayerState> = mutableState.asStateFlow()
     private var api: PlurxApi? = null

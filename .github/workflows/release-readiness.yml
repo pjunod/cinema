@@ -1,10 +1,28 @@
 name: release readiness
 
+# The weekly release tag (docs/RELEASING.md "The weekly release tag";
+# docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md §3.5 option (a), the
+# cadence Paul chose on 2026-09-23). Every Monday this asks `main`'s tip
+# whether a release is waiting: its version is dated in CHANGELOG.md and not
+# yet tagged. If one is, the run checks out the release commit itself -- the
+# commit `scripts/release-cut` produced, which dated that section -- runs the
+# full release gate there, and when it is green the `tag` job pushes the
+# annotated `v` tag onto that same commit, which is what starts ci.yml's full
+# sweep and the image publication. Whatever merged on top of the release
+# commit since is not in the tag. A red gate tags nothing. A week with no
+# release pending runs the gate on the tip and tags nothing. A manual
+# dispatch answers the readiness question and never tags.
 on:
+  schedule:
+    - cron: "0 6 * * 1"
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+
+concurrency:
+  group: release-readiness
+  cancel-in-progress: false
 
 jobs:
   release-check:
@@ -13,11 +31,29 @@ jobs:
     # the gate's ffmpeg rather than the week's. See .github/actions/ffmpeg.
     runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
     timeout-minutes: 90
+    outputs:
+      pending: ${{ steps.release.outputs.pending }}
+      tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Find the release commit, if a release is waiting
+        id: release
+        run: |
+          # Not a pipe: a refusal (a dated section that no release commit
+          # explains) has to fail this step, not vanish into `tee`.
+          found=$(mktemp)
+          scripts/release-cut --pending > "$found"
+          cat "$found"
+          cat "$found" >> "$GITHUB_OUTPUT"
+      - name: Check out the release commit
+        if: steps.release.outputs.pending == 'true'
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        run: git checkout -q --detach "$RELEASE_SHA"
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
         with:
           components: rustfmt, clippy
@@ -29,4 +65,54 @@ jobs:
         with:
           version: "1.62.0"
       - name: Verify release readiness
+        if: steps.release.outputs.pending == 'true'
         run: make release-check
+      - name: Verify main is releasable (no release pending)
+        if: steps.release.outputs.pending != 'true'
+        run: |
+          echo "No release pending: $(scripts/release-cut --pending | tr '\n' ' ')"
+          scripts/validate run --profile ci --all --strict
+
+  tag:
+    name: tag the green release commit
+    needs: release-check
+    # Only a scheduled run tags, only when the gate above passed, and only a
+    # commit that is an untagged, dated release.
+    if: github.event_name == 'schedule' && needs.release-check.result == 'success' && needs.release-check.outputs.pending == 'true'
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 10
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ needs.release-check.outputs.sha }}
+      - name: Push the annotated tag on the release commit the gate passed
+        env:
+          # A tag pushed with the run's own token starts no workflow, so the
+          # tag that must start ci.yml is pushed with a repository secret
+          # scoped to this one step.
+          RELEASE_TAG_TOKEN: ${{ secrets.RELEASE_TAG_TOKEN }}
+          TESTED_SHA: ${{ needs.release-check.outputs.sha }}
+          TAG: ${{ needs.release-check.outputs.tag }}
+        run: |
+          set -eu
+          if [ -z "$RELEASE_TAG_TOKEN" ]; then
+            echo "RELEASE_TAG_TOKEN is not set; $TAG was not pushed. See docs/RELEASING.md." >&2
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "$TESTED_SHA"
+          scripts/release-cut --pending | grep -qx "pending=true"
+          scripts/release-cut --pending | grep -qx "tag=$TAG"
+          scripts/release-cut --pending | grep -qx "sha=$TESTED_SHA"
+          auth=$(printf 'x-access-token:%s' "$RELEASE_TAG_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$auth"
+          if git -c http.extraheader="AUTHORIZATION: basic $auth" \
+              ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            echo "$TAG already exists on origin; nothing to do" >&2
+            exit 1
+          fi
+          git -c user.name="plurx release" -c user.email="release@plurx.invalid" \
+            tag -a "$TAG" -m "$TAG" "$TESTED_SHA"
+          git -c http.extraheader="AUTHORIZATION: basic $auth" \
+            push origin "refs/tags/$TAG"

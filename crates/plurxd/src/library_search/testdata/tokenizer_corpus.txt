@@ -1,0 +1,140 @@
+# Tokenizer backend equivalence corpus (K-08 M4). One input per line; lines
+# starting with "# " are comments. Titles, overviews and taglines in the shape
+# library metadata takes, then a Unicode edge set. The test adds inputs that a
+# text file cannot carry (control characters, empty and oversized strings).
+The Shawshank Redemption
+Fear can hold you prisoner. Hope can set you free.
+Two imprisoned men bond over a number of years, finding solace and eventual redemption through acts of common decency.
+Amélie
+Le Fabuleux Destin d'Amélie Poulain
+She'll change your life.
+Crouching Tiger, Hidden Dragon (臥虎藏龍)
+Léon: The Professional
+If you want the job done right, hire a professional.
+WALL·E
+Mission: Impossible – Dead Reckoning Part One
+Se7en
+2001: A Space Odyssey
+M*A*S*H
+Æon Flux
+Pokémon: The First Movie — Mewtwo Strikes Back
+Spider-Man: Into the Spider-Verse
+Star Wars: Episode IV – A New Hope
+Harry Potter and the Philosopher's Stone
+The Lord of the Rings: The Return of the King
+Schindler's List
+Amores perros
+Y tu mamá también
+El laberinto del fauno
+Das Leben der Anderen
+Der Untergang
+Die Hard
+Lola rennt
+Les Misérables
+La Haine
+Cinéma Paradiso
+Nuovo Cinema Paradiso
+La vita è bella
+Ladri di biciclette
+8½
+Ōkami Kodomo no Ame to Yuki
+千と千尋の神隠し
+となりのトトロ
+もののけ姫
+君の名は。
+攻殻機動隊 GHOST IN THE SHELL
+기생충
+올드보이
+괴물 (The Host)
+부산행
+霸王别姬
+卧虎藏龙
+花樣年華
+無間道
+Гарри Поттер и философский камень
+Брат 2
+Сталкер
+Иди и смотри
+Ирония судьбы, или С лёгким паром!
+Ο Δράκουλας του Μπραμ Στόκερ
+Ζορμπάς
+ओम शांति ओम
+दिलवाले दुल्हनिया ले जायेंगे
+लगान: वन्स अपॉन अ टाइम इन इंडिया
+வடசென்னை
+బాహుబలి: ది బిగినింగ్
+ബാംഗ്ലൂർ ഡെയ്സ്
+জলসাঘর
+الرسالة
+وجدة
+באופן חופשי
+ואלס עם באשיר
+ภาพยนตร์ไทย: องค์บาก
+Bãi biển Mỹ Khê
+Kış Uykusu
+Bir Zamanlar Anadolu'da
+Żywot Mateusza
+Człowiek z marmuru
+Příběh kmotra
+Ďáblova past
+Årets Dokumentär: Ängelby
+Jægerne
+Þrestir
+Élite: The Series, Season 3 (2020) [1080p] {Director's Cut}
+S01E02 — "The One Where They're Together"
+Episode 12: ¿Quién mató a Mónica?
+Chapter Twenty-Seven: The Hills Have Eyes
+Part 1/2 — "Rock & Roll"
+Doctor Who (2005) - 13x01 - The Woman Who Fell to Earth
+The 100
+9-1-1: Lone Star
+Brooklyn Nine-Nine
+#blackAF
+ALF
+iCarly
+WandaVision
+Mr. Robot
+Dr. Strangelove or: How I Learned to Stop Worrying and Love the Bomb
+Birdman or (The Unexpected Virtue of Ignorance)
+The Good, the Bad and the Ugly
+Borat: Cultural Learnings of America for Make Benefit Glorious Nation of Kazakhstan
+Night of the Living Dead (1968)
+What's Eating Gilbert Grape?
+Who Framed Roger Rabbit?!
+Airplane!
+Oh, Brother, Where Art Thou?
+Everything Everywhere All at Once
+A documentary about astronauts exploring the universe
+Space exploration: a factual film about NASA missions to the moon
+A chef bakes bread and prepares a delicious dinner
+In a world where magic is forbidden, one girl must choose between her family and her destiny.
+A retired hitman seeks vengeance for the killing of the dog given to him by his late wife.
+After a nuclear war, survivors struggle in the ruins of Los Angeles — 2077 A.D.
+The film runs 2h 49m, costs $165,000,000 and grossed ~$700M (≈ €640M) worldwide.
+Rated PG-13 for sequences of intense sci-fi action & peril, and brief language.
+HDR10+ · Dolby Vision · Dolby Atmos · 4K UHD · 23.976 fps
+Temperature: −40 °C / −40 °F; 100% humidity; 3×3 grid; ½ price; ¼ inch; x² + y² = z²
+email: someone@example.com, web: https://example.org/path?q=1&r=2#frag
+C++, C#, F#, .NET, Node.js, Vue.js, R2-D2, C-3PO, BB-8
+don't won't can't shouldn't y'all o'clock rock'n'roll
+“Curly quotes” ‘single’ «guillemets» „German“ 「Japanese」 『double』
+Ellipsis… em—dash en–dash hyphen-minus ‐ non-breaking‑hyphen
+Tabs	and	multiple    spaces   inside
+Non-breaking space and narrow no-break and ideographic　space and en em thin spaces
+Zero​width​space, word⁠joiner, soft­hyphen, ZWNJ‌and ZWJ‍, BOM﻿inside
+Combining: é ñ Å ö à́̂ (stacked) vs precomposed é ñ Å ö
+Precomposed é vs decomposed é; Ω (ohm) vs Ω (omega); ﬁ ligature; ＦＵＬＬＷＩＤＴＨ; Å angstrom
+Emoji: 🎬🍿🎥 👨‍👩‍👧‍👦 🏳️‍🌈 👍🏽 ❤️ 🇯🇵🇺🇸
+Math 𝔸𝕓𝕔 𝒜ℬ𝒞 ∑∫∂∇ ∞ ≠ ≤ ≥ ± √
+Arrows ← → ↑ ↓ ⇒ ⇔ and box ┌─┐ │ └─┘ and blocks █▓▒░
+Mixed scripts: Tokyo東京Seoul서울Москва Athens Αθήνα القاهرة
+RTL mark ‏ and LTR mark ‎ and bidi embed ‪text‬ and isolate ⁦text⁩
+Accents: àáâãäå çèéêë ìíîï ðñòóôõö øùúûüýþÿ ĀāĂăĄą ŁłŃńŇňŐő ŠšŽž
+Uppercase SHOUTING TITLE WITH NUMBERS 1999 AND 2K26
+lowercase title with numbers 3.14159 and 1,000,000 and 1.000.000,50
+Hyphenated-compound-words-that-go-on-and-on-and-on
+Supercalifragilisticexpialidocious and Pneumonoultramicroscopicsilicovolcanoconiosis
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+Punctuation soup: !!!???...,,,;;;:::---___***###@@@$$$%%%^^^&&&((()))[[[]]]{{{}}}<<<>>>|||\\\///~~~```'''"""
+[CLS] [SEP] [MASK] [PAD] [UNK] are special tokens and ##piece is a continuation
+<b>HTML</b> &amp; &lt;tags&gt; and \n escaped \t sequences

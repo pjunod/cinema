@@ -4,6 +4,223 @@
 //  direct_play → native <video>, client-side seek/resume
 //  remux       → progressive fMP4 from ffmpeg, server fast-seek for resume
 //  transcode   → HLS via hls.js (ffmpeg tone-maps/re-encodes), offset resume
+/**
+ * The one playback object. `buildPlayer()` (decode-tiers.js) mints a new one
+ * per title and every reopen mutates it in place; the idle literal below is
+ * what the page holds before the first play and after a close. Fields that
+ * literal does not carry are optional here, which with `strict` off only
+ * means "may be absent"; a property this list does not name is a diagnostic
+ * `scripts/web-types` reports (docs/clients/WEB-TYPE-CHECKING-AND-PLAYER-
+ * DECOMPOSITION.md §3.4). Server documents are `any` on purpose: typing
+ * them is a later ratchet, and a wrong type here is worse than none.
+ * Times are film seconds unless the name says `Ms` or `At`; `At` is a
+ * `performance.now()` or epoch millisecond reading as the comment says.
+ * @typedef {Object} Player
+ *
+ * Identity and the decision
+ * @property {number|null} fileId          the media file being played
+ * @property {string} [title]
+ * @property {any} [meta]                  the item card's metadata (book parts, poster, episode facts)
+ * @property {string} [method]             direct_play | remux | transcode — mutates as the session moves
+ * @property {string} [decidedMethod]      the DECISION's method; never mutated (sessionHeight)
+ * @property {any} [capsSnapshot]          the capability document the decision was asked with
+ * @property {boolean} [requiresHls]       the delivery can only be served as HLS
+ * @property {any} [decodeRetest]          a learned decode limit this open is re-testing
+ * @property {any} [learnedLimit]          the learned decode-limit view the decision was rerouted by
+ * @property {string[]} [reasons]          the decision's reasons, for the stats panel
+ * @property {number} [declared]           the container's declared audio offset, ms
+ * @property {boolean} [transcodeAudio]
+ * @property {boolean} [preserveDolbyVision]
+ * @property {boolean} [requestHdr10]      what `/decision` asked the session to preserve; survives reopens
+ * @property {string|null} deliveredRange  the grade on the wire (decision, then each session's report)
+ * @property {number|null} deliveredDvProfile
+ * @property {boolean} [copyHls]           the HLS session copies the video stream
+ * @property {boolean} [vod]               the session answered with a VOD (fixed) playlist
+ * @property {string|null} [encoder]       the session's encoder, once one reports
+ *
+ * Position and duration
+ * @property {number} offset               film position of media-time zero, seconds
+ * @property {number} knownDur             duration the item card knew, ms
+ * @property {number} durMs                best known duration, ms
+ * @property {number} bookOffset           audiobook: this part's offset in the book, ms
+ * @property {number} bookDuration         audiobook: whole-book duration, ms
+ * @property {any[]|null} bookParts        audiobook: the parts, in order
+ * @property {number|null} [endedAt]       position of the last `ended` event
+ * @property {number} [endedTries]         consecutive `ended` events at the same position
+ * @property {number|null} [stallFrom]     position the current stall started at
+ *
+ * Tracks and subtitles
+ * @property {any[]} [audio]               the decision's audio tracks; `default` marks the effective one
+ * @property {any[]} [subs]                the decision's subtitle tracks
+ * @property {number} [curAudio]           index into `audio`
+ * @property {number} [curSub]             index into `subs`, -1 for none
+ * @property {number|null} [burnedSub]     the subtitle burned into the picture, if any
+ * @property {any} [preplay]               this playback's pre-play track choice, carried across reopens
+ * @property {number} [aoffset]            the viewer's audio offset for this session, ms
+ * @property {any} [_subOff]               the subtitle-offset control's state
+ *
+ * Markers (intro / credits)
+ * @property {any[]} markers
+ * @property {boolean} autoskip
+ * @property {Set<any>} [_markerOffers]    markers already offered this playback
+ * @property {number} [_lastMarkerSkipEndMs]
+ *
+ * Source and URLs
+ * @property {any} source                  the decision's source facts (duration, container, streams)
+ * @property {string|null} [probeUrl]      the URL the current attach is reading
+ * @property {string|null} [directUrl]     the direct-play URL
+ * @property {string} [segSrc]             the HLS playlist the segment table was read from
+ * @property {number[]|null} [segTimes]    HLS segment start times, film seconds
+ * @property {number|null} [_segIdx]       segment the stats panel last located
+ * @property {any} [segBytes]              per-segment byte sizes, for the stats panel
+ *
+ * The session
+ * @property {string|null} [sessionId]
+ * @property {string|null} [streamId]
+ * @property {any} [health]                the session's last health report
+ * @property {number} [healthObservedAt]   performance.now() the health report arrived
+ * @property {string|null} [attemptId]     `a<n>`, one per open attempt (stats and telemetry)
+ * @property {string|null} [attemptReason] cold-start | resume | seek | quality | …
+ * @property {number} [attemptAt]          performance.now() at the attempt
+ * @property {any} [openToken]             the open attempt's token (PLAY_OPEN_GATE)
+ * @property {any} [pendingOpenAttempt]    the open attempt this player was minted for, until it settles
+ * @property {any} [retiringOpenAttempt]   an open attempt being retired by a reopen
+ * @property {Player|null} [mediaPredecessor] the outgoing player kept until preparation succeeds
+ * @property {boolean} [internalMediaReset] the next media reset is ours, not a fault
+ * @property {any} [mediaAttachment]       the current media attachment token
+ * @property {any} [terminalStop]          the stop that ended this player, once one did
+ * @property {boolean} [samplingStopped]
+ * @property {number} [_mediaAttachmentOrdinal] the last attachment token's id (beginPlaybackMediaAttachment)
+ *
+ * Progress reporting (reportProgress)
+ * @property {any} [timelineAttachment]    the attachment that reached a timeline; a zero position posts only from it
+ * @property {number|null} [lastBeatMs]    position the last progress beat posted, ms; null after a failed post
+ * @property {number|null} [lastBeatAt]    performance.now() of that beat
+ * @property {any} [lastBeatAttachment]    the attachment that beat was posted from
+ *
+ * hls.js
+ * @property {any} hls                     the Hls instance (typed `any` via types/globals.d.ts)
+ * @property {any} [hlsStartup]            the startup episode of the current attach (attachHls)
+ * @property {number} [hlsRetryUsed]       the one automatic hls.js retry, 0 or 1
+ * @property {boolean} [triedFallback]     the remux → transcode fallback was already taken
+ * @property {any} [bufTarget]             hls.js buffer targets (bufferTargets(): fwd, back, budget)
+ * @property {number} [bufSegSecs]         segment duration the buffer target was sized for
+ * @property {number} [_levelAt]           performance.now() of the last LEVEL_LOADED
+ * @property {boolean} [_levelLive]        the last loaded level was a live playlist
+ * @property {any} [_hlsEvt]               per-event-name hls.js counters for the stats panel
+ * @property {any} [marks]                 per-kind performance.now() marks (frag, …) for the stats panel
+ * @property {number} [_segFetch]          performance.now() of the last segment fetch
+ * @property {number} [_chaseAt]           performance.now() of the last live-edge chase
+ *
+ * Stats panel
+ * @property {number|null} [_fpsVal]       smoothed measured frame rate
+ * @property {{total:number,at:number}} [_statsFrames] the frame count and time the rate was last measured from
+ *
+ * Quality ladder and adaptive bitrate
+ * @property {any[]} [ladder]              the quality rungs on offer
+ * @property {number|null} [priorKbps]     the bandwidth estimate carried from the last playback
+ * @property {number|null} [autoHeight]    the rung Auto started or settled on
+ * @property {number|null} [autoRequestedHeight] the rung Auto last asked the server for
+ * @property {number|null} [bandwidthSeedBps] a replacement's inherited bandwidth estimate
+ * @property {any} [abr]                   the adaptive controller's per-playback state
+ * @property {any} [pendingMediaChange]    a quality or track change waiting for its session
+ * @property {string|null} [inFlightChangeKey] the change whose session is in flight
+ * @property {any} [bufferLimits]
+ *
+ * Start, stalls and recovery
+ * @property {boolean} started             the first frame has been presented
+ * @property {number} [playStartedAt]      performance.now() of the click
+ * @property {number|null} [ttffMs]        time to first frame
+ * @property {number} [stalls]
+ * @property {any} [stallsByKind]          {supply, decode, …} counts
+ * @property {number} [stallRecoveries]
+ * @property {any} [recoveringStall]       the stall-recovery snapshot in progress
+ * @property {any} [stallPrompt]
+ * @property {any} [hitches]               {back, …} small-stall counters
+ * @property {number} [hitchArmedAt]       performance.now() the hitch detector armed
+ * @property {number} [_hitchReported]     hitches already reported
+ * @property {any} [rescuedNote]           why a stall rescue changed the stream (stats panel)
+ * @property {string} [surfaceTranscodeReason] why the surface moved this playback to a transcode
+ * @property {any} [decodeInfo]            MediaCapabilities.decodingInfo() answer for this stream
+ * @property {number} [mediaRecoveries]    media-error recoveries this playback
+ * @property {number|null} [mediaRecoveredAtMs]
+ * @property {boolean} [refusedOriginal]   the browser refused the original stream
+ * @property {boolean} [decodeRescued]     a decode-limit rescue already fired
+ * @property {boolean} [autoFallbackInFlight] the one automatic session-open claim (claimAutoFallback)
+ * @property {number|null} [waitAt]       performance.now() the current wait began
+ * @property {number|null} [waitStartedRunway] buffer runway when that wait began, seconds
+ * @property {boolean} [waitReported]
+ * @property {number|null} [waitReportedMs]
+ * @property {string|null} [waitReportedDetail]
+ * @property {number|null} [waitNudgedAt]  the wait began-time a nudge was already spent on
+ * @property {any} [surfaceState]          the presenter's shared state (PLAYBACK_SURFACE)
+ * @property {any} [progressWatch]         the presentation-progress watch ({key, clock, frames, at, startedAt, fired})
+ * @property {number|null} [presentationAdvancedAt] performance.now() the presented position last advanced
+ * @property {number} [stallDeferrals]     times the current wait deferred to the server's verdict
+ * @property {number|null} [stallDeferralsAt] the wait began-time those deferrals count against
+ *
+ * Playback control (the reporter and intent)
+ * @property {boolean} [wantsPlayback]     the viewer's intent, not the element's `paused`
+ * @property {any} [controlSeek]           the control-plane seek in flight
+ * @property {number} [controlSeekSequence]
+ * @property {number} [controlIntentGeneration]
+ * @property {number} [controlSequenceFloor]
+ * @property {number} [controlPresentedFrames]
+ * @property {boolean} [controlHasFrameCallbacks]
+ * @property {any} [controlFrameCancel]    cancels the frame-callback loop
+ * @property {any} [controlReporter]       the PlaybackControl reporter for this player
+ * @property {any[]} [controlWaiters]      callers waiting for the reporter's next exchange
+ * @property {number} [controlPresentationEpoch]
+ * @property {any} [controlLastPreparation] the last delivery.preparation the server reported
+ * @property {any} [controlRenderOverride] a prepared switch's render override, until committed
+ * @property {any} [controlObservationOverride] a prepared switch's observation override, until committed
+ * @property {any} [directedChange]        the directed quality/track change in flight
+ * @property {any} [controlOwner]          the owner the reporter was started for (flushPreparedSettlement)
+ * @property {any} [controlLastRequest]    the reporter's last request, for the Developer card
+ * @property {any} [controlLastResponse]   the server's last answer
+ * @property {number|null} [controlLastExchangeAt] Date.now() of that answer
+ * @property {{at:number,message:string}|null} [controlLastError] the last refused exchange, until one succeeds
+ * @property {number|null} [controlLastFailureLogAt] Date.now() the last refusal was logged (one per minute)
+ * @property {any} [controlVerdict]        an armed terminal action from the server, until its lease lapses
+ * @property {number|null} [controlVerdictExpiresAt] performance.now() the armed verdict lapses
+ * @property {any[]} [controlAcknowledgements] prepared-action acknowledgements queued for the next exchange
+ * @property {number|null} [controlPositionHintSec] film position reports claim until frames flow
+ * @property {boolean} [subtitleReadinessReady] the last subtitle readiness seen (one retry per transition)
+ *
+ * Prepared replacement (a staged successor for a quality or track change)
+ * @property {any} [prepared]              the successor being prepared, until it settles
+ * @property {any} [preparedCommitting]    the prepared successor being committed
+ * @property {any} [preparedRetiring]      a proven switch's hidden predecessor awaiting idle teardown
+ * @property {any} [preparedControlPending] the committed successor awaiting its control acknowledgement
+ * @property {any[]} [preparedSettled]     action ids already settled, so a late commit is refused
+ * @property {any} [switchCommit]          the last prepared switch's commit timing
+ * @property {any[]} [switchFrames]        frame samples taken around a prepared switch
+ *
+ * Library channels
+ * @property {any} [libraryChannel]        the channel this playback follows, if any
+ * @property {boolean} [libraryChannelReplacing]
+ *
+ * Timers (DOM timer ids)
+ * @property {number|null} timer           the 5 s sampling / progress tick
+ * @property {number|null} [autoTimer]     the 1 s Auto quality decision tick
+ * @property {number|null} idleTimer       control auto-hide
+ * @property {number|null} [stallTimer]
+ * @property {number|null} waitTimer
+ * @property {number|null} [progressTimer]
+ *
+ * Chrome, seek bar and menus
+ * @property {number|null} _seekPreview    seek-bar hover position, seconds
+ * @property {number|null} _seekPending    keyboard seek target, seconds
+ * @property {boolean} [_seekDragging]
+ * @property {number} [_seekToken]         generation of the latest seek
+ * @property {string} _lastFocusedControl  the control focus returns to
+ * @property {any} _opener                 the element that opened the player
+ * @property {any} _openerClick
+ * @property {any} [_menuOpener]
+ * @property {boolean} [_menuDismissedByPointer]
+ * @property {any} [_statsOpener]
+ */
+/** @type {Player} */
 let PLAYER={fileId:null,timer:null,offset:0,hls:null,knownDur:0,durMs:0,markers:[],source:null,started:false,idleTimer:null,autoskip:false,deliveredRange:null,deliveredDvProfile:null,waitTimer:null,bookOffset:0,bookDuration:0,bookParts:null,_seekPreview:null,_seekPending:null,_lastFocusedControl:"pbplay",_opener:null,_openerClick:null};
 let PENDING_LIBRARY_CHANNEL_PLAYBACK=null;
 let LIBRARY_CHANNEL_RETURN=null;
@@ -412,15 +629,63 @@ function resumeHlsStartup(video,player){
   armHlsStartupRetry(video,player,episode);
   return true;
 }
+function noteCompletedAutoTransfer(p,bytes,loading,now){
+  if(!p||!p.abr) return;
+  const elapsed=Number(loading&&loading.end)-Number(loading&&loading.start);
+  if(!(Number(bytes)>0)||!(elapsed>0)) return;
+  const age=PlaybackPolicy.AUTO_DEFAULTS.recentSampleMaxAgeMs;
+  const recent=(p.abr.completedTransfers||[]).filter(row=>
+    row.atMs<=now&&now-row.atMs<=age).slice(-31);
+  recent.push({bytes:Number(bytes),startedAtMs:now-elapsed,endedAtMs:now,atMs:now});
+  p.abr.completedTransfers=recent;
+}
 function createHlsStartupLoader(StockLoader,episode){
   return class PlurxStartupLoader extends StockLoader{
     constructor(config){ super(config); episode.loaders.add(this); this.plurxRequestOrdinal=0; }
     load(context,config,callbacks){
       this.plurxContext=context;
       this.plurxIntentGeneration=episode.player.controlIntentGeneration||0;
+      this.plurxMediaProgress=null;
       return super.load(context,config,callbacks);
     }
     openAndSendXhr(xhr,context,config){
+      // The bundled hls.js reports a fragment's throughput only after its
+      // final byte. At a cliff, that can outlast the remaining buffer. Its
+      // XHR loader still exposes progress byte counts: measure a full 1.5 s
+      // delta within one main-video fragment, leaving the stock onprogress
+      // handler and completed-fragment sample intact. Never use the time to
+      // first byte as bandwidth evidence; a slow producer would look like a
+      // slow link.
+      if(context&&context.frag&&context.frag.type==='main'
+        &&context.frag.duration>0&&typeof xhr.addEventListener==='function'){
+        xhr.addEventListener('progress',event=>{
+          const player=episode.player;
+          if(!hlsStartupCurrent(player,episode)
+            ||this.plurxIntentGeneration!==(player.controlIntentGeneration||0)) return;
+          // Error bodies can also arrive in several progress chunks. A 503
+          // must never become the bandwidth evidence for an Auto downshift.
+          if(!(xhr.status>=200&&xhr.status<300)) return;
+          const loaded=Number(event&&event.loaded),now=performance.now();
+          if(!(loaded>0)) return;
+          const previous=this.plurxMediaProgress;
+          if(!previous||previous.xhr!==xhr||loaded<previous.bytes){
+            this.plurxMediaProgress={xhr,bytes:loaded,at:now};
+            return;
+          }
+          const elapsed=now-previous.at,bytes=loaded-previous.bytes;
+          if(elapsed<1500||bytes<16*1024) return;
+          this.plurxMediaProgress={xhr,bytes:loaded,at:now};
+          const kbps=PlaybackPolicy.transferSampleKbps({loadedBytes:bytes,
+            loadingStartMs:previous.at,loadingEndMs:now});
+          if(kbps&&player.abr){
+            player.abr.recentEstimateKbps=kbps;
+            player.abr.recentEstimateAtMs=now;
+            player.abr.recentEstimateSource='progress';
+            player.abr.recentEstimateUrl=String(context.url||'');
+            scheduleUrgentAutoControllerTick(player,kbps,now);
+          }
+        });
+      }
       if(hlsStartupManifestRequest(context)){
         const current=hlsStartupCurrent(episode.player,episode)
           &&this.plurxIntentGeneration===(episode.player.controlIntentGeneration||0)
@@ -520,6 +785,20 @@ function scheduleHlsNetworkRetry(video,player,detail){
 }
 function attachHls(video, playlistUrl, startAt){
   const attachedPlayer=PLAYER;
+  const attachment=beginHlsAttachment(video,attachedPlayer);
+  if(!preferNativeHls(video) && window.Hls && Hls.isSupported()){
+    const {tgt,startup}=hlsStartupEpisode(attachedPlayer,attachment,playlistUrl,startAt);
+    const observesCurrent=()=>attachment.current()&&attachedPlayer.hls===startup.hls
+      &&playbackOwnsAttachedMedia(attachedPlayer)
+      &&!playbackAttemptTerminallyStopped(attachedPlayer,startup.mediaAttachment);
+    const hls=constructHls(startup,tgt,video,startAt,observesCurrent);
+    wireHlsObservers(hls,startup,video,observesCurrent);
+    hls.on(Hls.Events.ERROR,onHlsError(hls,startup,video,observesCurrent));
+  }else{
+    attachNativeHls(video,playlistUrl,startAt,attachedPlayer,attachment);
+  }
+}
+function beginHlsAttachment(video,attachedPlayer){
   rememberPlaybackTransportIntent(video,attachedPlayer);
   attachedPlayer.internalMediaReset=true;
   pausePlaybackInternally(video);
@@ -539,383 +818,408 @@ function attachHls(video, playlistUrl, startAt){
   // budget is per ATTACH, not per source, so two refusals of different kinds
   // cannot produce two retries. Reset here because this is the attach.
   attachedPlayer.hlsRetryUsed=0;
-  if(!preferNativeHls(video) && window.Hls && Hls.isSupported()){
-    // Buffer targets, in SECONDS, and deliberately not in bytes.
-    //
-    // An earlier version of this raised maxBufferSize to 400MB on the theory
-    // that hls.js's 60MB default was a hard cap binding before the 30s target
-    // — which would have made 4K unable to hold more than ~10s. That was
-    // backwards. hls.js computes its target as
-    //   min(max(8*maxBufferSize/bitrate, maxBufferLength), maxMaxBufferLength)
-    // so maxBufferLength is a FLOOR the byte value can only extend, never
-    // undercut: the stock config was already targeting 30s of 4K. What
-    // actually bounds a big forward buffer is the browser's own MSE quota,
-    // which varies by platform, device memory class, and version, and which
-    // no hls.js setting can raise — it arrives as BUFFER_FULL_ERROR and
-    // hls.js shrinks its own target in response.
-    //
-    // So: tune seconds, and move the byte target WITH them rather than leaving
-    // it at the stock 60 MB — hls.js takes the larger of the two, so a stock
-    // byte target is a floor under the seconds, not a cap on them (see
-    // applyBufferTargets). backBufferLength is bounded (hls.js keeps
-    // everything by default) because the server already prunes played-past
-    // segments and a two-hour 4K session would otherwise grow the tab's memory
-    // for the whole film.
-    const tgt=bufferTargets(PLAYER&&PLAYER.bufSegSecs);
-    PLAYER.bufTarget=tgt;
-    const startup={player:attachedPlayer,attachment,playlistUrl,
-      startAt:Math.max(0,Number(startAt)||0),hls:null,state:'active',
-      manifestState:'unknown',mediaLoaded:false,decoderFailed:false,
-      startedAt:performance.now(),
-      deadlineMs:performance.now()+PlaybackPolicy.HLS_STARTUP.cold_deadline_ms,
-      dispatches:0,loaders:new Set(),latestFailure:null,
-      intentGeneration:attachedPlayer.controlIntentGeneration||0,
-      evidenceOrdinal:0,establishedSuspension:null,
-      mediaAttachment:attachedPlayer.mediaAttachment,
-      retry:{state:'unused',dueMs:null,detail:null,timer:null,intentGeneration:null}};
-    attachedPlayer.hlsStartup=startup;
-    const observesCurrent=()=>attachment.current()&&attachedPlayer.hls===hls
-      &&playbackOwnsAttachedMedia(attachedPlayer)
-      &&!playbackAttemptTerminallyStopped(attachedPlayer,startup.mediaAttachment);
-    const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
-    const hls=new Hls({
-      maxBufferLength:tgt.fwd,
-      backBufferLength:tgt.back,
-      ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
-      ...(StockLoader?{loader:createHlsStartupLoader(StockLoader,startup)}:{}),
-      manifestLoadPolicy:PlaybackPolicy.HLS_STARTUP.manifest_load_policy,
-      // HLS may be immutable VOD or the bounded sliding recovery presentation.
-      // Both use the same finite fragment retry budget: rolling publication
-      // advertises only completed objects and keeps removed URLs readable
-      // through Grace, so an unbounded client retry would hide a real terminal
-      // retirement rather than make a late object safer.
-      fragLoadPolicy:vodClientContract().fragLoadPolicy,
-      // Told before the first fragment loads, not seeked afterwards. Seeking
-      // after attach downloads the opening of the film and throws it away —
-      // on a 4K cache hit that is tens of megabytes and several seconds of
-      // the viewer watching a spinner to arrive where they already were.
-      startPosition:(startAt>0?startAt:-1),
-      // `load` rather than a property assignment: hls.js installs its own
-      // onreadystatechange *after* this hook runs, so anything set there is
-      // overwritten — an added listener coexists with it and sees the body
-      // hls.js is about to throw away.
-      xhrSetup:x=>{
-        if(TOKEN) x.setRequestHeader("authorization","Bearer "+TOKEN);
-        x.addEventListener("load",()=>{
-          if(!observesCurrent()||x.status<400||x._plurxStartupObserved) return;
-          const intentGeneration=attachedPlayer.controlIntentGeneration||0;
-          const evidence={attachment:attachedPlayer.mediaAttachment,
-            intent_generation:intentGeneration,
-            resource:/\.m3u8(?:\?|$)/i.test(String(x.responseURL||''))?'manifest':'media',
-            request_ordinal:++startup.evidenceOrdinal};
-          observeStreamFailureResponse(x,evidence,()=>observesCurrent()
-            &&attachedPlayer.controlIntentGeneration===intentGeneration).catch(()=>{});
-        });
-      }});
-    const estimateSeed=PlaybackPolicy.bandwidthSeedBps({
-      outgoingEstimateBps:PLAYER&&PLAYER.bandwidthSeedBps,
-      priorKbps:PLAYER&&PLAYER.priorKbps
-    });
-    if(estimateSeed){
-      // hls.js exposes this setter so a restart does not throw away the EWMA
-      // it just paid to learn. A server prior seeds only the first instance;
-      // an outgoing live estimate always wins after that.
-      try{ hls.bandwidthEstimate=estimateSeed; }catch(e){}
-      PLAYER.bandwidthSeedBps=estimateSeed;
-    }
-    startup.hls=hls;
-    PLAYER.hls=hls;
-    hls.loadSource(playlistUrl);
-    hls.attachMedia(video);
-    if(Hls.Events.MANIFEST_LOADING) hls.on(Hls.Events.MANIFEST_LOADING,()=>{
-      if(observesCurrent()) startup.manifestState='loading';
-    });
-    if(Hls.Events.MANIFEST_LOADED) hls.on(Hls.Events.MANIFEST_LOADED,()=>{
-      if(observesCurrent()) startup.manifestState='loaded';
-    });
-    resetPlaybackTransportEvents(video);
-    // A subtitle chosen before the rendition list arrived is dropped on the
-    // floor: `hls.subtitleTrack = n` with no tracks yet sets nothing, and
-    // nothing re-applies it. That is one of the ways a viewer selects a
-    // subtitle, sees no error, and gets no cues — and it is most likely on
-    // the pre-play selection, which is applied at the moment the session
-    // opens. Re-apply on the edge where the list becomes real.
-    if(Hls.Events.SUBTITLE_TRACKS_UPDATED) hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED,()=>{
-      if(!observesCurrent()) return;
-      const p=attachedPlayer;
-      if(!p||p.burnedSub!=null||!(p.curSub>=0)) return;
-      const ordinal=nativeHlsSubtitleOrdinal(p,p.curSub);
-      if(ordinal<0) return;
-      try{ if(hls.subtitleTrack!==ordinal) hls.subtitleTrack=ordinal; }catch(err){}
-    });
-    hls.on(Hls.Events.MANIFEST_PARSED,()=>{
-      if(observesCurrent()) startup.manifestState='parsed';
-      // A newer native seek still belongs to this attachment. It must not
-      // suppress the only play request when the manifest finally arrives.
-      if(attachment.current()) applyPlaybackTransportIntent(video,attachedPlayer);
-    });
-    // Timestamps for the hitch detector to blame things on. A count of hitches
-    // says the picture stuttered; only an attribution says which subsystem to
-    // fix, and these three are the only things happening on a cadence that
-    // could plausibly produce one every few seconds:
-    //   flush   hls.js asking the browser to DROP buffered video. It does this
-    //           to honour backBufferLength and again whenever the quota bites,
-    //           and a removal that lands near the playhead is visible.
-    //   frag    a segment boundary — 1.75s apart on this source.
-    //   append  new data handed to the SourceBuffer.
-    if(Hls.Events.BUFFER_FLUSHING) hls.on(Hls.Events.BUFFER_FLUSHING,(_,d)=>{
-      if(!observesCurrent()) return;
-      markEvent("flush");
-      const p=PLAYER; if(!p||!p.marks) return;
-      // How far BEHIND the picture the eviction ended. A few seconds is the
-      // interesting case: that is the browser being asked to free memory in
-      // the region the decoder is still working in.
-      const end=d&&isFinite(d.endOffset)?d.endOffset:null;
-      p.marks.flushEdge=end==null?null:+((video.currentTime||0)-end).toFixed(1);
-    });
-    if(Hls.Events.FRAG_CHANGED) hls.on(Hls.Events.FRAG_CHANGED,()=>{
-      if(observesCurrent()) markEvent("frag");
-    });
-    // The playlist is the only place the real append granularity is written
-    // down. TARGETDURATION tracks the longest segment published so far, so a
-    // session that later cuts a longer one re-tunes again.
-    if(Hls.Events.LEVEL_LOADED) hls.on(Hls.Events.LEVEL_LOADED,(_,d)=>{
-      if(!observesCurrent()) return;
-      // A retry that loaded the playlist succeeded. Its earlier 503 is stale
-      // now, not after an arbitrary wall-clock TTL; otherwise an unrelated
-      // later fatal is confidently mislabeled "Still preparing".
-      clearStreamFailureFor(hls);
-      const t=d&&d.details&&d.details.targetduration;
-      if(t>0) retuneBuffer(t);
-      // Feed the reload keeper below: when the playlist last arrived, and
-      // whether it is still growing.
-      PLAYER._levelAt=performance.now();
-      PLAYER._levelLive=!!(d&&d.details&&d.details.live);
-    });
-    // The largest segment this session has actually appended, in BYTES.
-    //
-    // Every other figure available before this one is a derivation — seconds
-    // times an average bitrate, or a server-side ceiling — and the derivation
-    // was wrong by 2x on a real film, because a long segment is long exactly
-    // when the picture is cheap. This is the number the quota is charged in,
-    // read from the transfer that just happened.
-    if(Hls.Events.FRAG_LOADED) hls.on(Hls.Events.FRAG_LOADED,(_,d)=>{
-      if(!observesCurrent()) return;
-      startup.mediaLoaded=true;
-      const stats=d&&((d.frag&&d.frag.stats)||d.stats);
-      const b=stats&&(stats.total||stats.loaded);
-      const p=PLAYER; if(!p||p.hls!==hls||!(b>0)) return;
-      const loading=stats.loading||{};
-      const sampleKbps=d.frag&&d.frag.duration>0
-        ? PlaybackPolicy.transferSampleKbps({
-            loadedBytes:stats.loaded||b,
-            loadingStartMs:loading.start,
-            loadingEndMs:loading.end
-          })
-        : null;
-      if(sampleKbps&&p.abr){
-        p.abr.recentEstimateKbps=sampleKbps;
-        p.abr.recentEstimateAtMs=performance.now();
-      }
-      if(b<=(p.segBytes|0)) return;
-      p.segBytes=b;
-      retuneBuffer(p.bufSegSecs||((d.frag.duration>0)?d.frag.duration:1), true);
-    });
-    if(Hls.Events.BUFFER_APPENDED) hls.on(Hls.Events.BUFFER_APPENDED,()=>{
-      if(observesCurrent()) markEvent("append");
-    });
-    // Buffer pressure, classified. "It stopped buffering" has four unrelated
-    // causes and they need different fixes: the browser refusing more data
-    // (quota — the ceiling we cannot raise), an append that failed for another
-    // reason, a decode error, or simply nothing arriving. Reporting them as
-    // one event would leave the M0 buffer question unanswerable.
-    hls.on(Hls.Events.ERROR,(_,d)=>{
-      if(!observesCurrent()) return;
-      // Counted here, but a FATAL one still falls through to the rescue below:
-      // hls.js gives up on a segment after `appendErrorMaxRetry`, and a buffer
-      // failure that has become terminal is a dead player, not a statistic.
-      if(d.details===Hls.ErrorDetails.BUFFER_FULL_ERROR){ reportBufferLimit("quota", d); if(!d.fatal) return; }
-      if(d.details===Hls.ErrorDetails.BUFFER_APPEND_ERROR){ reportBufferLimit("append", d); if(!d.fatal) return; }
-      if(!d.fatal){
-        // The stall family names its mechanism — bufferStalledError,
-        // bufferNudgeOnStall, bufferSeekOverHole — and this handler used to
-        // drop every non-fatal on the floor. A deterministic 3-second stop
-        // at 12.5 s emitted its own explanation into this function on every
-        // play, and nothing kept it. First three per kind per session: the
-        // first occurrence is the diagnosis, the count is the pattern, and
-        // the thousandth would bury both.
-        const det=String(d.details||"");
-        if(/stall|nudge|hole|gap/i.test(det)){
-          const p=PLAYER;
-          if(p){
-            if(/bufferstallederror/i.test(det)){
-              const stallRunway=bufferRunway(video);
-              noteAutoStall(p,
-                stallRunway<SUPPLY_RUNWAY_SECS?'supply':'decode',p.waitAt);
-            }
-            p._hlsEvt=p._hlsEvt||{};
-            const n=(p._hlsEvt[det]=(p._hlsEvt[det]||0)+1);
-            if(n<=3) clientLog(Object.assign({level:"warn",event:"player_event",
-              detail:det,
-              message:`hls.js ${det}${d.reason?` — ${d.reason}`:""} at ${(video.currentTime||0).toFixed(1)}s (#${n})`},
-              playbackContext(), {runway:bufferRunway(video)}));
-          }
-        }
-        return;
-      }
-      console.warn("[cinema] hls.js fatal",d.type,d.details);
-      const hlsFailure=playbackControlHlsFatal(d,!!(PLAYER&&PLAYER.started));
-      const isMedia=hlsFailure.media_failure;
-      const mediaAction=PlaybackPolicy.hlsMediaFatalAction({
-        type:d.type,details:d.details,sourceBufferName:d.sourceBufferName||null,
-        retryUsed:attachedPlayer.hlsRetryUsed||0,
-        itemRecoveries:attachedPlayer.mediaRecoveries||0,
-        recoveredAtMs:attachedPlayer.mediaRecoveredAtMs,
-        nowMs:performance.now()
+  return attachment;
+}
+function hlsStartupEpisode(attachedPlayer,attachment,playlistUrl,startAt){
+  // Buffer targets, in SECONDS, and deliberately not in bytes.
+  //
+  // An earlier version of this raised maxBufferSize to 400MB on the theory
+  // that hls.js's 60MB default was a hard cap binding before the 30s target
+  // — which would have made 4K unable to hold more than ~10s. That was
+  // backwards. hls.js computes its target as
+  //   min(max(8*maxBufferSize/bitrate, maxBufferLength), maxMaxBufferLength)
+  // so maxBufferLength is a FLOOR the byte value can only extend, never
+  // undercut: the stock config was already targeting 30s of 4K. What
+  // actually bounds a big forward buffer is the browser's own MSE quota,
+  // which varies by platform, device memory class, and version, and which
+  // no hls.js setting can raise — it arrives as BUFFER_FULL_ERROR and
+  // hls.js shrinks its own target in response.
+  //
+  // So: tune seconds, and move the byte target WITH them rather than leaving
+  // it at the stock 60 MB — hls.js takes the larger of the two, so a stock
+  // byte target is a floor under the seconds, not a cap on them (see
+  // applyBufferTargets). backBufferLength is bounded (hls.js keeps
+  // everything by default) because the server already prunes played-past
+  // segments and a two-hour 4K session would otherwise grow the tab's memory
+  // for the whole film.
+  const tgt=bufferTargets(PLAYER&&PLAYER.bufSegSecs);
+  PLAYER.bufTarget=tgt;
+  const startup={player:attachedPlayer,attachment,playlistUrl,
+    startAt:Math.max(0,Number(startAt)||0),hls:null,state:'active',
+    manifestState:'unknown',mediaLoaded:false,decoderFailed:false,
+    startedAt:performance.now(),
+    deadlineMs:performance.now()+PlaybackPolicy.HLS_STARTUP.cold_deadline_ms,
+    dispatches:0,loaders:new Set(),latestFailure:null,
+    intentGeneration:attachedPlayer.controlIntentGeneration||0,
+    evidenceOrdinal:0,establishedSuspension:null,
+    mediaAttachment:attachedPlayer.mediaAttachment,
+    retry:{state:'unused',dueMs:null,detail:null,timer:null,intentGeneration:null}};
+  attachedPlayer.hlsStartup=startup;
+  return {tgt,startup};
+}
+function constructHls(startup,tgt,video,startAt,observesCurrent){
+  const attachedPlayer=startup.player;
+  const playlistUrl=startup.playlistUrl;
+  const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
+  const hls=new Hls({
+    maxBufferLength:tgt.fwd,
+    backBufferLength:tgt.back,
+    ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
+    ...(StockLoader?{loader:createHlsStartupLoader(StockLoader,startup)}:{}),
+    manifestLoadPolicy:PlaybackPolicy.HLS_STARTUP.manifest_load_policy,
+    // HLS may be immutable VOD or the bounded sliding recovery presentation.
+    // Both use the same finite fragment retry budget: rolling publication
+    // advertises only completed objects and keeps removed URLs readable
+    // through Grace, so an unbounded client retry would hide a real terminal
+    // retirement rather than make a late object safer.
+    fragLoadPolicy:vodClientContract().fragLoadPolicy,
+    // Told before the first fragment loads, not seeked afterwards. Seeking
+    // after attach downloads the opening of the film and throws it away —
+    // on a 4K cache hit that is tens of megabytes and several seconds of
+    // the viewer watching a spinner to arrive where they already were.
+    startPosition:(startAt>0?startAt:-1),
+    // `load` rather than a property assignment: hls.js installs its own
+    // onreadystatechange *after* this hook runs, so anything set there is
+    // overwritten — an added listener coexists with it and sees the body
+    // hls.js is about to throw away.
+    xhrSetup:x=>{
+      if(TOKEN) x.setRequestHeader("authorization","Bearer "+TOKEN);
+      x.addEventListener("load",()=>{
+        if(!observesCurrent()||x.status<400||x._plurxStartupObserved) return;
+        const intentGeneration=attachedPlayer.controlIntentGeneration||0;
+        const evidence={attachment:attachedPlayer.mediaAttachment,
+          intent_generation:intentGeneration,
+          resource:/\.m3u8(?:\?|$)/i.test(String(x.responseURL||''))?'manifest':'media',
+          request_ordinal:++startup.evidenceOrdinal};
+        observeStreamFailureResponse(x,evidence,()=>observesCurrent()
+          &&attachedPlayer.controlIntentGeneration===intentGeneration).catch(()=>{});
       });
-      if(mediaAction==="recover"||mediaAction==="swap_audio"){
-        attachedPlayer.hlsRetryUsed=(attachedPlayer.hlsRetryUsed||0)+1;
-        attachedPlayer.mediaRecoveries=(attachedPlayer.mediaRecoveries||0)+1;
-        attachedPlayer.mediaRecoveredAtMs=performance.now();
-        clientLog(Object.assign({level:"warn",event:"hls_media_recovery",
-          detail:String(d.details||d.type||"media"),message:mediaAction},playbackContext()));
-        raisePlaybackSurface("owner_recovery_step",{context:attachedPlayer.started?"attached":"start",
-          title:"Recovering the decoder…",detail:"hls.js is repairing the current media attachment"});
-        try{
-          if(mediaAction==="swap_audio") hls.swapAudioCodec();
-          else hls.recoverMediaError();
-          return;
-        }catch(error){
-          clientLog({level:"warn",event:"hls_media_recovery",detail:"call_failed",
-            message:String(error&&error.message||error)});
-        }
-      }
-      if(isMedia) startup.decoderFailed=true;
-      const controlTrigger=notifyPlaybackControl("failed",hlsFailure.observation);
-      clientLog(Object.assign({level:"error",event:"hls_fatal",detail:d.type,message:d.details,
-        control_trigger:controlTrigger}, playbackContext()));
-      if(finishStallRecovery("failed",String(d.details||d.type||"hls.js fatal error"))){
-        showStallRecoveryFailure("hls.js could not resume the stream ("+d.details+").");
-        return;
-      }
-      // The rescue the progressive path has had all along.
-      //
-      // On this transport the <video> element's own `error` never fires for a
-      // media failure: hls.js owns the MediaSource, consumes the failure, and
-      // reports it here — so a copy stream this browser's decoder will not
-      // take used to end at a toast with the player dead. A fatal media/codec
-      // error IS terminal (hls.js retries nothing further unless the app calls
-      // recoverMediaError, and a decoder that refused these samples refuses
-      // them again), so restart the playback as a transcode at position.
-      //
-      // Same guards as the <video> rescue, and for the same reasons: only a
-      // copy path is rescuable — a transcode already IS the fallback, and
-      // re-opening one on its own error is the infinite loop — and only once
-      // per item, via the `triedFallback` flag those two share. It lives on
-      // PLAYER, which a seek mutates in place and a new item replaces, so
-      // "once" means once per item and not once per stream. Network fatals are
-      // deliberately left alone: a different encode does not fix an
-      // unreachable server, and re-encoding a title because the wifi dropped
-      // is the "downgrade on a guess" this whole change refuses to do.
-      const fallback=PLAYER && PlaybackPolicy.fallbackAction({
-        method:PLAYER.method,
-        alreadyTried:PLAYER.triedFallback,
-        playbackIsReal:false,
-        mediaFailure:isMedia
-      });
-      if(fallback==='transcode'){
-        PLAYER.triedFallback=true;
-        const rejection=streamRejectionFacts();
-        // `isMedia` is hls.js's own classification, and it is exactly the
-        // question the profile sentence needs: a network fatal is not the
-        // profile whatever the session was handed.
-        const note=streamRejectionNote(rejection,PLAYER.method,d.details,isMedia);
-        clientLog(streamRejectionReport(rejection,{detail:d.type,
-          message:streamRejectionMessage(rejection,PLAYER.method,d.details,isMedia),
-          control_trigger:controlTrigger}));
-        raisePlaybackSurface("owner_recovery_step",{
-          title:"Stream rejected — switching to transcode…",detail:note});
-        startTranscodeFallback("stream-rejected",note);
-        return;
-      }
-      // Say what the server said. This used to be "the server couldn't build
-      // this stream — see Settings → Logs" for every cause alike: a producer
-      // that exited non-zero, a session superseded by another device, an
-      // ffmpeg build with no `subtitles` filter, and — the case that made this
-      // a defect rather than a wording problem — a session the server was
-      // still successfully starting. The refusal body names which; the
-      // overlay is only useful if it repeats that instead of sending someone
-      // to a log file on a headless box.
-      const startupFailure=hlsStartupIncomplete(PLAYER)&&PLAYER.hlsStartup.latestFailure;
-      if(startupFailure&&PlaybackPolicy.hlsStartupResponseAction(startupFailure)==='terminal')
-        STREAM_FAILURE=startupFailure;
-      const explained=currentStreamFailureOverlay();
-      // The class decides whether the picture stops. hls.js has called
-      // stopLoad() and the element keeps playing whatever it buffered — up to
-      // half a minute of it — so a refusal that is still "not yet" gets an
-      // indicator over a moving picture rather than the full screen that used
-      // to sit there calling it a failed start (§2.1, closed by §3.3 rows 9-12).
-      const where=hlsStartupIncomplete(PLAYER)?"start":PLAYER&&PLAYER.started?"attached":"start";
-      const refusal=explained?PlaybackPolicy.classifyStreamFailure({
-        status:STREAM_FAILURE.status,code:STREAM_FAILURE.code,context:where}):null;
-      if(explained){
-        clientLog(Object.assign({level:"error",event:"stream_refused",
-          detail:STREAM_FAILURE.code||String(STREAM_FAILURE.status),
-          message:explained.detail,control_trigger:controlTrigger}, playbackContext()));
-      }
-      if(refusal){
-        // The site's own decision, not the table's (§3.4).
-        const spent=playbackSurfaceSourceIsBlocking(refusal,where);
-        if(spent) stopPlayerForExhaustion();
-        raisePlaybackSurface(refusal,{context:where,player_stopped:spent,
-          title:explained.title,detail:explained.detail,
-          position_ms:STREAM_FAILURE.position_ms==null?null:STREAM_FAILURE.position_ms});
-        // A "not yet" the server explained is the other half of M5's shared
-        // hls.js budget: the picture is still moving, so one reload at the
-        // current position is worth a try before the reopen path runs.
-        if(explained.retryable
-          &&PlaybackPolicy.hlsStartupResponseAction(STREAM_FAILURE)==='retry'
-          &&(refusal==="segment_503_not_yet"||hlsStartupIncomplete(PLAYER)))
-          scheduleHlsNetworkRetry(video,PLAYER,d);
-        toast(explained.retryable?"Still starting…":"Playback failed");
-        return;
-      }
-      // A NETWORK fatal is not the owner out of rungs. hls.js has called
-      // stopLoad() and the element still holds everything it buffered — up to
-      // half a minute of it — and `persistentWait`'s reopen, with its budget
-      // untouched, is the thing that fixes exactly this. Stopping here would
-      // throw the buffer away AND tear down the detector that would have used
-      // it, so §3.0 does not authorise it: the owner has plenty left to try.
-      // Row 13, and the picture keeps playing under an indicator.
-      if(!isMedia){
-        raisePlaybackSurface("owner_recovery_step",{context:where,
-          title:"Reconnecting…",
-          detail:"the stream connection failed ("+d.details+") — recovering"});
-        // M5: one bounded reload at the current position before the reopen
-        // path. The classification above is untouched — this is a retry INSIDE
-        // `recovering`, not a new class.
-        scheduleHlsNetworkRetry(video,PLAYER,String(d.details||d.type||"network"));
-        toast("Reconnecting…");
-        return;
-      }
-      // A media/codec fatal with the rescue ladder spent: a decoder that
-      // refused these samples refuses them again, and there is no rung left.
-      // Contract §3.4: the owner stops the player, then raises.
-      stopPlayerForExhaustion();
-      raisePlaybackSurface("owner_stopped",{context:where,player_stopped:true,
-        title:explained?explained.title:"Playback failed to start ("+d.details+").",
-        detail:explained?explained.detail:"the server couldn't build this stream — see Settings → Logs"});
-      toast(explained?"Playback failed":"Playback failed ("+d.details+")");
-    });
-  } else {
-    // Native HLS: the session id in the URL is the credential, so the
-    // Apple TV can fetch segments itself when AirPlaying.
-    PLAYER.segSrc=tok(playlistUrl); PLAYER.segTimes=null; PLAYER._segIdx=null;
-    refreshSegTimes();
-    setPlaybackMediaSource(video,tok(playlistUrl));
-    const go=()=>{ video.removeEventListener("loadedmetadata",go);
-      applyPlaybackAttachmentPosition(video,attachedPlayer,attachment,startAt); };
-    video.addEventListener("loadedmetadata",go);
-    applyPlaybackTransportIntent(video,attachedPlayer);
+    }});
+  const estimateSeed=PlaybackPolicy.bandwidthSeedBps({
+    outgoingEstimateBps:PLAYER&&PLAYER.bandwidthSeedBps,
+    priorKbps:PLAYER&&PLAYER.priorKbps
+  });
+  if(estimateSeed){
+    // hls.js exposes this setter so a restart does not throw away the EWMA
+    // it just paid to learn. A server prior seeds only the first instance;
+    // an outgoing live estimate always wins after that.
+    try{ hls.bandwidthEstimate=estimateSeed; }catch(e){}
+    PLAYER.bandwidthSeedBps=estimateSeed;
   }
+  startup.hls=hls;
+  PLAYER.hls=hls;
+  hls.loadSource(playlistUrl);
+  hls.attachMedia(video);
+  return hls;
+}
+function wireHlsObservers(hls,startup,video,observesCurrent){
+  const attachedPlayer=startup.player;
+  const attachment=startup.attachment;
+  if(Hls.Events.MANIFEST_LOADING) hls.on(Hls.Events.MANIFEST_LOADING,()=>{
+    if(observesCurrent()) startup.manifestState='loading';
+  });
+  if(Hls.Events.MANIFEST_LOADED) hls.on(Hls.Events.MANIFEST_LOADED,()=>{
+    if(observesCurrent()) startup.manifestState='loaded';
+  });
+  resetPlaybackTransportEvents(video);
+  // A subtitle chosen before the rendition list arrived is dropped on the
+  // floor: `hls.subtitleTrack = n` with no tracks yet sets nothing, and
+  // nothing re-applies it. That is one of the ways a viewer selects a
+  // subtitle, sees no error, and gets no cues — and it is most likely on
+  // the pre-play selection, which is applied at the moment the session
+  // opens. Re-apply on the edge where the list becomes real.
+  if(Hls.Events.SUBTITLE_TRACKS_UPDATED) hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED,()=>{
+    if(!observesCurrent()) return;
+    const p=attachedPlayer;
+    if(!p||p.burnedSub!=null||!(p.curSub>=0)) return;
+    const ordinal=nativeHlsSubtitleOrdinal(p,p.curSub);
+    if(ordinal<0) return;
+    try{ if(hls.subtitleTrack!==ordinal) hls.subtitleTrack=ordinal; }catch(err){}
+  });
+  hls.on(Hls.Events.MANIFEST_PARSED,()=>{
+    if(observesCurrent()) startup.manifestState='parsed';
+    // A newer native seek still belongs to this attachment. It must not
+    // suppress the only play request when the manifest finally arrives.
+    if(attachment.current()) applyPlaybackTransportIntent(video,attachedPlayer);
+  });
+  // Timestamps for the hitch detector to blame things on. A count of hitches
+  // says the picture stuttered; only an attribution says which subsystem to
+  // fix, and these three are the only things happening on a cadence that
+  // could plausibly produce one every few seconds:
+  //   flush   hls.js asking the browser to DROP buffered video. It does this
+  //           to honour backBufferLength and again whenever the quota bites,
+  //           and a removal that lands near the playhead is visible.
+  //   frag    a segment boundary — 1.75s apart on this source.
+  //   append  new data handed to the SourceBuffer.
+  if(Hls.Events.BUFFER_FLUSHING) hls.on(Hls.Events.BUFFER_FLUSHING,(_,d)=>{
+    if(!observesCurrent()) return;
+    markEvent("flush");
+    const p=PLAYER; if(!p||!p.marks) return;
+    // How far BEHIND the picture the eviction ended. A few seconds is the
+    // interesting case: that is the browser being asked to free memory in
+    // the region the decoder is still working in.
+    const end=d&&isFinite(d.endOffset)?d.endOffset:null;
+    p.marks.flushEdge=end==null?null:+((video.currentTime||0)-end).toFixed(1);
+  });
+  if(Hls.Events.FRAG_CHANGED) hls.on(Hls.Events.FRAG_CHANGED,()=>{
+    if(observesCurrent()) markEvent("frag");
+  });
+  // The playlist is the only place the real append granularity is written
+  // down. TARGETDURATION tracks the longest segment published so far, so a
+  // session that later cuts a longer one re-tunes again.
+  if(Hls.Events.LEVEL_LOADED) hls.on(Hls.Events.LEVEL_LOADED,(_,d)=>{
+    if(!observesCurrent()) return;
+    // A retry that loaded the playlist succeeded. Its earlier 503 is stale
+    // now, not after an arbitrary wall-clock TTL; otherwise an unrelated
+    // later fatal is confidently mislabeled "Still preparing".
+    clearStreamFailureFor(hls);
+    const t=d&&d.details&&d.details.targetduration;
+    if(t>0) retuneBuffer(t);
+    // Feed the reload keeper below: when the playlist last arrived, and
+    // whether it is still growing.
+    PLAYER._levelAt=performance.now();
+    PLAYER._levelLive=!!(d&&d.details&&d.details.live);
+  });
+  // The largest segment this session has actually appended, in BYTES.
+  //
+  // Every other figure available before this one is a derivation — seconds
+  // times an average bitrate, or a server-side ceiling — and the derivation
+  // was wrong by 2x on a real film, because a long segment is long exactly
+  // when the picture is cheap. This is the number the quota is charged in,
+  // read from the transfer that just happened.
+  if(Hls.Events.FRAG_LOADED) hls.on(Hls.Events.FRAG_LOADED,(_,d)=>{
+    if(!observesCurrent()) return;
+    startup.mediaLoaded=true;
+    const stats=d&&((d.frag&&d.frag.stats)||d.stats);
+    const b=stats&&(stats.total||stats.loaded);
+    const p=PLAYER; if(!p||p.hls!==hls||!(b>0)) return;
+    const loading=stats.loading||{};
+    const sampleKbps=d.frag&&d.frag.duration>0
+      ? PlaybackPolicy.transferSampleKbps({
+          loadedBytes:stats.loaded||b,
+          loadingStartMs:loading.start,
+          loadingEndMs:loading.end
+        })
+      : null;
+    if(sampleKbps&&p.abr){
+      const now=performance.now();
+      if(d.frag.type==='main') noteCompletedAutoTransfer(p,stats.loaded||b,loading,now);
+      // The completed fragment's full-load average can include fast bytes
+      // from before a cliff. Preserve a fresher within-fragment byte delta
+      // until the next request supplies its own measurement.
+      const recentProgress=p.abr.recentEstimateSource==='progress'
+        &&p.abr.recentEstimateUrl===String(d.frag&&d.frag.url||'')
+        &&now-p.abr.recentEstimateAtMs<=3000;
+      if(!recentProgress){
+        p.abr.recentEstimateKbps=sampleKbps;
+        p.abr.recentEstimateAtMs=now;
+        p.abr.recentEstimateSource='complete';
+        p.abr.recentEstimateUrl=String(d.frag&&d.frag.url||'');
+        if(d.frag.type==='main') scheduleUrgentAutoControllerTick(p,sampleKbps,now);
+      }
+    }
+    if(b<=(p.segBytes|0)) return;
+    p.segBytes=b;
+    retuneBuffer(p.bufSegSecs||((d.frag.duration>0)?d.frag.duration:1), true);
+  });
+  if(Hls.Events.BUFFER_APPENDED) hls.on(Hls.Events.BUFFER_APPENDED,()=>{
+    if(observesCurrent()) markEvent("append");
+  });
+}
+function onHlsError(hls,startup,video,observesCurrent){
+  const attachedPlayer=startup.player;
+  // Buffer pressure, classified. "It stopped buffering" has four unrelated
+  // causes and they need different fixes: the browser refusing more data
+  // (quota — the ceiling we cannot raise), an append that failed for another
+  // reason, a decode error, or simply nothing arriving. Reporting them as
+  // one event would leave the M0 buffer question unanswerable.
+  return (_,d)=>{
+    if(!observesCurrent()) return;
+    // Counted here, but a FATAL one still falls through to the rescue below:
+    // hls.js gives up on a segment after `appendErrorMaxRetry`, and a buffer
+    // failure that has become terminal is a dead player, not a statistic.
+    if(d.details===Hls.ErrorDetails.BUFFER_FULL_ERROR){ reportBufferLimit("quota", d); if(!d.fatal) return; }
+    if(d.details===Hls.ErrorDetails.BUFFER_APPEND_ERROR){ reportBufferLimit("append", d); if(!d.fatal) return; }
+    if(!d.fatal){
+      // The stall family names its mechanism — bufferStalledError,
+      // bufferNudgeOnStall, bufferSeekOverHole — and this handler used to
+      // drop every non-fatal on the floor. A deterministic 3-second stop
+      // at 12.5 s emitted its own explanation into this function on every
+      // play, and nothing kept it. First three per kind per session: the
+      // first occurrence is the diagnosis, the count is the pattern, and
+      // the thousandth would bury both.
+      const det=String(d.details||"");
+      if(/stall|nudge|hole|gap/i.test(det)){
+        const p=PLAYER;
+        if(p){
+          if(/bufferstallederror/i.test(det)){
+            const stallRunway=bufferRunway(video);
+            noteAutoStall(p,
+              stallRunway<SUPPLY_RUNWAY_SECS?'supply':'decode',p.waitAt);
+          }
+          p._hlsEvt=p._hlsEvt||{};
+          const n=(p._hlsEvt[det]=(p._hlsEvt[det]||0)+1);
+          if(n<=3) clientLog(Object.assign({level:"warn",event:"player_event",
+            detail:det,
+            message:`hls.js ${det}${d.reason?` — ${d.reason}`:""} at ${(video.currentTime||0).toFixed(1)}s (#${n})`},
+            playbackContext(), {runway:bufferRunway(video)}));
+        }
+      }
+      return;
+    }
+    console.warn("[cinema] hls.js fatal",d.type,d.details);
+    const hlsFailure=playbackControlHlsFatal(d,!!(PLAYER&&PLAYER.started));
+    const isMedia=hlsFailure.media_failure;
+    const mediaAction=PlaybackPolicy.hlsMediaFatalAction({
+      type:d.type,details:d.details,sourceBufferName:d.sourceBufferName||null,
+      retryUsed:attachedPlayer.hlsRetryUsed||0,
+      itemRecoveries:attachedPlayer.mediaRecoveries||0,
+      recoveredAtMs:attachedPlayer.mediaRecoveredAtMs,
+      nowMs:performance.now()
+    });
+    if(mediaAction==="recover"||mediaAction==="swap_audio"){
+      attachedPlayer.hlsRetryUsed=(attachedPlayer.hlsRetryUsed||0)+1;
+      attachedPlayer.mediaRecoveries=(attachedPlayer.mediaRecoveries||0)+1;
+      attachedPlayer.mediaRecoveredAtMs=performance.now();
+      clientLog(Object.assign({level:"warn",event:"hls_media_recovery",
+        detail:String(d.details||d.type||"media"),message:mediaAction},playbackContext()));
+      raisePlaybackSurface("owner_recovery_step",{context:attachedPlayer.started?"attached":"start",
+        title:"Recovering the decoder…",detail:"hls.js is repairing the current media attachment"});
+      try{
+        if(mediaAction==="swap_audio") hls.swapAudioCodec();
+        else hls.recoverMediaError();
+        return;
+      }catch(error){
+        clientLog({level:"warn",event:"hls_media_recovery",detail:"call_failed",
+          message:String(error&&error.message||error)});
+      }
+    }
+    if(isMedia) startup.decoderFailed=true;
+    const controlTrigger=notifyPlaybackControl("failed",hlsFailure.observation);
+    clientLog(Object.assign({level:"error",event:"hls_fatal",detail:d.type,message:d.details,
+      control_trigger:controlTrigger}, playbackContext()));
+    if(finishStallRecovery("failed",String(d.details||d.type||"hls.js fatal error"))){
+      showStallRecoveryFailure("hls.js could not resume the stream ("+d.details+").");
+      return;
+    }
+    // The rescue the progressive path has had all along.
+    //
+    // On this transport the <video> element's own `error` never fires for a
+    // media failure: hls.js owns the MediaSource, consumes the failure, and
+    // reports it here — so a copy stream this browser's decoder will not
+    // take used to end at a toast with the player dead. A fatal media/codec
+    // error IS terminal (hls.js retries nothing further unless the app calls
+    // recoverMediaError, and a decoder that refused these samples refuses
+    // them again), so restart the playback as a transcode at position.
+    //
+    // Same guards as the <video> rescue, and for the same reasons: only a
+    // copy path is rescuable — a transcode already IS the fallback, and
+    // re-opening one on its own error is the infinite loop — and only once
+    // per item, via the `triedFallback` flag those two share. It lives on
+    // PLAYER, which a seek mutates in place and a new item replaces, so
+    // "once" means once per item and not once per stream. Network fatals are
+    // deliberately left alone: a different encode does not fix an
+    // unreachable server, and re-encoding a title because the wifi dropped
+    // is the "downgrade on a guess" this whole change refuses to do.
+    const fallback=PLAYER && PlaybackPolicy.fallbackAction({
+      method:PLAYER.method,
+      alreadyTried:PLAYER.triedFallback,
+      playbackIsReal:false,
+      mediaFailure:isMedia
+    });
+    if(fallback==='transcode'){
+      PLAYER.triedFallback=true;
+      const rejection=streamRejectionFacts();
+      // `isMedia` is hls.js's own classification, and it is exactly the
+      // question the profile sentence needs: a network fatal is not the
+      // profile whatever the session was handed.
+      const note=streamRejectionNote(rejection,PLAYER.method,d.details,isMedia);
+      clientLog(streamRejectionReport(rejection,{detail:d.type,
+        message:streamRejectionMessage(rejection,PLAYER.method,d.details,isMedia),
+        control_trigger:controlTrigger}));
+      raisePlaybackSurface("owner_recovery_step",{
+        title:"Stream rejected — switching to transcode…",detail:note});
+      startTranscodeFallback("stream-rejected",note);
+      return;
+    }
+    // Say what the server said. This used to be "the server couldn't build
+    // this stream — see Settings → Logs" for every cause alike: a producer
+    // that exited non-zero, a session superseded by another device, an
+    // ffmpeg build with no `subtitles` filter, and — the case that made this
+    // a defect rather than a wording problem — a session the server was
+    // still successfully starting. The refusal body names which; the
+    // overlay is only useful if it repeats that instead of sending someone
+    // to a log file on a headless box.
+    const startupFailure=hlsStartupIncomplete(PLAYER)&&PLAYER.hlsStartup.latestFailure;
+    if(startupFailure&&PlaybackPolicy.hlsStartupResponseAction(startupFailure)==='terminal')
+      STREAM_FAILURE=startupFailure;
+    const explained=currentStreamFailureOverlay();
+    // The class decides whether the picture stops. hls.js has called
+    // stopLoad() and the element keeps playing whatever it buffered — up to
+    // half a minute of it — so a refusal that is still "not yet" gets an
+    // indicator over a moving picture rather than the full screen that used
+    // to sit there calling it a failed start (§2.1, closed by §3.3 rows 9-12).
+    const where=hlsStartupIncomplete(PLAYER)?"start":PLAYER&&PLAYER.started?"attached":"start";
+    const refusal=explained?PlaybackPolicy.classifyStreamFailure({
+      status:STREAM_FAILURE.status,code:STREAM_FAILURE.code,context:where}):null;
+    if(explained){
+      clientLog(Object.assign({level:"error",event:"stream_refused",
+        detail:STREAM_FAILURE.code||String(STREAM_FAILURE.status),
+        message:explained.detail,control_trigger:controlTrigger}, playbackContext()));
+    }
+    if(refusal){
+      // The site's own decision, not the table's (§3.4).
+      const spent=playbackSurfaceSourceIsBlocking(refusal,where);
+      if(spent) stopPlayerForExhaustion();
+      raisePlaybackSurface(refusal,{context:where,player_stopped:spent,
+        title:explained.title,detail:explained.detail,
+        position_ms:STREAM_FAILURE.position_ms==null?null:STREAM_FAILURE.position_ms});
+      // A "not yet" the server explained is the other half of M5's shared
+      // hls.js budget: the picture is still moving, so one reload at the
+      // current position is worth a try before the reopen path runs.
+      if(explained.retryable
+        &&PlaybackPolicy.hlsStartupResponseAction(STREAM_FAILURE)==='retry'
+        &&(refusal==="segment_503_not_yet"||hlsStartupIncomplete(PLAYER)))
+        scheduleHlsNetworkRetry(video,PLAYER,d);
+      toast(explained.retryable?"Still starting…":"Playback failed");
+      return;
+    }
+    // A NETWORK fatal is not the owner out of rungs. hls.js has called
+    // stopLoad() and the element still holds everything it buffered — up to
+    // half a minute of it — and `persistentWait`'s reopen, with its budget
+    // untouched, is the thing that fixes exactly this. Stopping here would
+    // throw the buffer away AND tear down the detector that would have used
+    // it, so §3.0 does not authorise it: the owner has plenty left to try.
+    // Row 13, and the picture keeps playing under an indicator.
+    if(!isMedia){
+      raisePlaybackSurface("owner_recovery_step",{context:where,
+        title:"Reconnecting…",
+        detail:"the stream connection failed ("+d.details+") — recovering"});
+      // M5: one bounded reload at the current position before the reopen
+      // path. The classification above is untouched — this is a retry INSIDE
+      // `recovering`, not a new class.
+      scheduleHlsNetworkRetry(video,PLAYER,String(d.details||d.type||"network"));
+      toast("Reconnecting…");
+      return;
+    }
+    // A media/codec fatal with the rescue ladder spent: a decoder that
+    // refused these samples refuses them again, and there is no rung left.
+    // Contract §3.4: the owner stops the player, then raises.
+    stopPlayerForExhaustion();
+    raisePlaybackSurface("owner_stopped",{context:where,player_stopped:true,
+      title:explained?explained.title:"Playback failed to start ("+d.details+").",
+      detail:explained?explained.detail:"the server couldn't build this stream — see Settings → Logs"});
+    toast(explained?"Playback failed":"Playback failed ("+d.details+")");
+  };
+}
+function attachNativeHls(video,playlistUrl,startAt,attachedPlayer,attachment){
+  // Native HLS: the session id in the URL is the credential, so the
+  // Apple TV can fetch segments itself when AirPlaying.
+  PLAYER.segSrc=tok(playlistUrl); PLAYER.segTimes=null; PLAYER._segIdx=null;
+  refreshSegTimes();
+  setPlaybackMediaSource(video,tok(playlistUrl));
+  const go=()=>{ video.removeEventListener("loadedmetadata",go);
+    applyPlaybackAttachmentPosition(video,attachedPlayer,attachment,startAt); };
+  video.addEventListener("loadedmetadata",go);
+  applyPlaybackTransportIntent(video,attachedPlayer);
 }

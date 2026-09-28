@@ -88,14 +88,20 @@ internal fun PlaybackInfoPanel(
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
                 if (mode == PlaybackStatsMode.Mini) {
                     InfoPair(wide,
-                        { InfoSummary("Playing resolution", value("decode_resolution"), tv = tv) },
-                        { InfoSummary("Playback", value("player_state"), tv = tv) })
-                    InfoSummary("Buffered on device", value("client_loaded"), tv = tv)
+                        { InfoSummary("Player display size", value("decode_resolution"), note("decode_resolution"), tv) },
+                        { InfoSummary("Stream frame", value("stream_frame"), note("stream_frame"), tv) })
+                    InfoPair(wide,
+                        { InfoSummary("Player state", value("player_state"), tv = tv) },
+                        { InfoSummary("Buffered on device", value("client_loaded"), tv = tv) })
                 } else if (mode == PlaybackStatsMode.Standard) {
                     Text(value("player_state") + if (isLive) " · Live TV" else "", color = Color(0xFF8BB8FF), fontSize = bodySize, fontWeight = FontWeight.SemiBold)
                     InfoPair(wide,
-                        { InfoSummary("Playing resolution", value("decode_resolution"), "Size reported by the attached player.", tv, hero = true) },
-                        { InfoSummary(if (isLive) "Broadcast source" else "Original file", value("source_resolution"), facts.firstOrNull { it.id == "source_video" }?.value, tv) })
+                        { InfoSummary("Source frame", value("source_resolution"), note("source_resolution"), tv, hero = true) },
+                        { InfoSummary("Stream frame", value("stream_frame"), note("stream_frame"), tv, hero = true) })
+                    InfoSummary("Player display size", value("decode_resolution"), note("decode_resolution"), tv)
+                    facts.firstOrNull { it.id == "frame_comparison" && it.value != "Unavailable" }?.let {
+                        InfoSummary("Frame comparison", it.value, tv = tv)
+                    }
                     Column(Modifier.fillMaxWidth().background(Color(0xFF1E232D), RoundedCornerShape(10.dp)).tvFocusRing(RoundedCornerShape(10.dp), focusedScale = 1f).focusable(tv).padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                         Text(value("method"), color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = bodySize)
                         Text(facts.firstOrNull { it.id == "reason" }?.value ?: playbackMethodExplanation(value("method")), color = muted, fontSize = labelSize)
@@ -187,8 +193,9 @@ internal fun playbackInfoGroup(section: String): String = when (section) {
 }
 
 internal fun playbackInfoExplanation(id: String): String? = when (id) {
-    "decode_resolution" -> "Attached player measurement; never inferred from source size."
-    "source_resolution" -> "Original file metadata."
+    "decode_resolution" -> "Player presentation dimensions; not encoded frame dimensions."
+    "source_resolution" -> "Source frame metadata or probe."
+    "stream_frame" -> "Planned output or eligible stream sample; see provenance."
     "decode_audio" -> "Selected stream track; not the device's audio output."
     "client_loaded" -> "Contiguous media loaded ahead on this device."
     "server_ready" -> "Complete media ahead on the server; separate from the device buffer."

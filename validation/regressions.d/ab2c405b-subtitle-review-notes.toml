@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["ab2c405b"]
+reason = "This documentation-only commit records the adversarial review disposition, contract wording, status, and board claim. It changes no runtime behavior; the implementation and retained tests are mapped separately."
+ignore = true

@@ -1,6 +1,9 @@
 # Replicated write-rate hygiene — stop proposing no-ops every second on every voter
 
-**Status:** ready for review · **Executes:** S3, F-sc-3 and the takeover-loop
+**Status:** in progress — M0 done at Paul's 12-hour gate
+([readout](REPLICATED-WRITE-RATE-HYGIENE-M0.md)); M1–M3 built on `plan/K-03`
+(#405); the M4 after-measurement needs a fleet deploy ·
+**Executes:** S3, F-sc-3 and the takeover-loop
 audit from S3's row in
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -209,16 +212,19 @@ even if two nodes briefly both believed they held the lease across a leader
 change, the `UPDATE … RETURNING` still admits one claimant per row.
 
 The takeover loop gets the same treatment for its *reads*: one
-`get_setting_pair(CLUSTER_MEDIA_POOL_ENABLED, CLUSTER_SESSION_TAKEOVER_ENABLED)`
-cached for 60 s, `Notify`-refreshed on local writes, and the loop sleeps at
-`IDLE_TICK_MAX` while either is off. It does **not** become a singleton:
+`get_setting_pair(CLUSTER_MEDIA_POOL_ENABLED, CLUSTER_SESSION_TAKEOVER_ENABLED)`,
+an "off" answer cached for 60 s and dropped by a local switch write, and the
+loop sleeps at `IDLE_TICK_MAX` while either is off. An "on" answer is never
+cached (§4): with takeover on, each 2 s tick reads the pair again, so turning
+it off stops the scan and CAS on the next tick on every node. It does **not** become a singleton:
 every candidate must independently prove eligibility and the store CAS
 admits one successor (its doc comment at `:4348-4352`), and takeover latency
 when the feature is on stays at the 2 s tick.
 
 ### 3.5 Measurement
 
-Before/after, per voter, 24 h each: Δ`plurx_raft_commit_index` (proposals per
+Before/after, per voter, 12 h each (Paul, 2026-09-25; the plan said 24 h):
+Δ`plurx_raft_commit_index` (proposals per
 day), `plurx_store_operations_total{class="authority_read"}` rate,
 `plurx_store_operations_total{class="write"}` rate, snapshot builds per day
 from `plurx_raft_snapshot_seconds_count{operation="build"}`. Expected: the
@@ -252,20 +258,52 @@ values) so the skip reasons are visible.
 
 ### 5.1 M0 — baseline
 
-Twenty-four hours of the four series in §3.5 from lab1–lab3 with an empty
-outbox, attached to the M1 PR.
+Twelve hours of the four series in §3.5 from the three voters with an empty
+outbox, attached to the M1 PR. (The plan said twenty-four; deploys reset the
+capture every few hours and no 24-hour window ever completed, so Paul set the
+gate to 12 hours on 2026-09-25.)
 
 Acceptance: the PR body carries per-node proposals/day and authority
 reads/day, with the commit-index delta.
 
 ```text
-GPT prompt (fleet): On lab1–lab3, with no viewers, record over 24 h the
+GPT prompt (fleet): On the three voters, with no viewers, record over 12 h the
 increase of plurx_raft_commit_index, the rate of
 plurx_store_operations_total{class="authority_read"} and {class="write"},
 plurx_raft_snapshot_seconds_count{operation="build"}, and
 plurx_watched_outbox{status="pending"}. Repeat after <M1..M4 sha> is
 deployed and report both tables side by side.
 ```
+
+Read-only discovery on 2026-09-20 found that the old lab names no longer
+describe the live voter set: `192.168.4.7` reports itself as the learner,
+while `nuc4` (`192.168.4.8`), `m6` (`192.168.4.14`) and `nynuc`
+(`192.168.5.236`) report themselves as the three voters. No historical
+Prometheus-compatible endpoint was exposed on those nodes' standard ports,
+and the supplied deployment key was refused by all four hosts, so no
+node-local history could be inspected.
+
+A persistent read-only `/metrics` capture started at 2026-09-21T03:23:20Z. It samples
+the three voters every 60 s and starts the acceptance window only when all
+three are reachable, remain voters on one build, report zero pending outbox
+rows, and report no transcode, Live TV or protected-playback activity. It
+resets the window on activity, reachability, build or role change, or a
+counter rollback. `m6` reported one active transcode at launch, so the
+continuous 24-hour window had not started yet. The sampler deploys nothing
+and performs only unauthenticated `GET /metrics` reads.
+
+**Result (2026-09-25).** The sampler is now in the repo as
+`scripts/replicated-write-capture-sampler` and its evaluator as
+`scripts/replicated-write-capture`, both at the 12-hour gate. Replaying the
+capture finds 57 idle windows; one qualifies — 2026-09-22T03:36:36Z to
+19:39:03Z, 16.04 h, 956 samples. Over it the cluster proposed **902,512
+entries a day** (10.45/s), each voter paid ≈ 1.07 million authority reads and
+built 91 snapshots a day. An attribution of 25,170 contiguous replicated-log
+entries (a read-only copy of the learner's WAL) puts the watched-outbox claim
+at 28.9% of all proposals, behind a `metadata-classification` lease cycle
+(41.6%) and ahead of the idle offline-package claim (14.0%) — both outside
+this plan and flagged in the readout. Full numbers:
+[REPLICATED-WRITE-RATE-HYGIENE-M0.md](REPLICATED-WRITE-RATE-HYGIENE-M0.md).
 
 ### 5.2 M1 — hint + forced claim + settings cache + idle backoff (`watched.rs`)
 
@@ -317,16 +355,41 @@ draining at 1 Hz while new nodes defer to the lease — duplicate delivery is
 still prevented by the claim, so the order does not matter. Rollback is a
 redeploy.
 
-## 7. Open questions
+## 7. Decisions
 
-1. `HINT_FORCE_INTERVAL = 30 s` and `IDLE_TICK_MAX = 10 s` are proposals
-   inside the review's "5–10 s idle backoff"; Paul confirms.
-2. Should the SQLite standalone backend skip the singleton entirely (it is
-   the whole cluster) — yes by construction via `UnclusteredJobAuthority`,
-   but the lease row is still written; acceptable or special-case?
-3. Whether a settings-write `Notify` should be a general facility (C15's
-   telemetry loop and the Live TV owner reads want the same thing) or stay
-   local to these two loops; this plan keeps it local.
+The coordinator recorded the delegated decisions on 2026-09-20:
+
+1. Use `HINT_FORCE_INTERVAL = 30 s` and `IDLE_TICK_MAX = 10 s`, inside the
+   review's approved 5–10 s idle-backoff range.
+2. Keep the singleton lease on standalone SQLite. It preserves one-drainer
+   semantics across multiple processes, and its lease cost is negligible
+   beside the 1 Hz empty claims being removed.
+3. Keep the settings-write `Notify` local to the watched and takeover loops.
+   A general notification facility would expand K-03 beyond its plan.
+
+Paul decided on 2026-09-25:
+
+4. The M0 (and M4) capture gate is **12 hours**, not 24.
+
+The executing session (claude-opus-5-5) read two lines of §3 as follows and
+records them here so review can overrule them:
+
+5. §3.2's unconfigured case. An idle drain with no Curator URL or key makes
+   no claim at all, not even the 30 s forced one. When rows *are* waiting
+   (the local hint sees them, or this node just enqueued one), the drain
+   re-reads the settings pair on the authority first and then claims exactly
+   as before, so a still-unconfigured Curator fails them permanently ("monarr
+   is not configured") and one configured on another node since the cached
+   read receives them. Rows are never failed on a cached answer.
+6. §3.3's "≤ 1 s for a locally enqueued event" holds on the lease owner.
+   With M2, a row enqueued on a voter that does not own `watched:outbox` is
+   delivered by the owner within its idle ceiling (10 s) plus replication
+   lag — the bound §3.3 already states for an event enqueued on another node.
+7. The takeover loop keeps §3.4's fail-closed read: an unreadable switch is
+   off for that tick and the next tick reads again. Only "off" is cached
+   (§4); an "on" is re-read every tick. (The first M3 build cached "on" for
+   60 s as well, which let a local disable go unheeded for up to a minute;
+   the PR #405 review caught it and it was changed to match §4.)
 
 ---
 
@@ -340,4 +403,37 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M0 | #405 | Read-only discovery found the live three-voter set is `nuc4`, `m6`, and `nynuc`; the old `lab1`–`lab3` names are stale and `192.168.4.7` is now the learner. No historical metrics endpoint was found and node SSH refused the supplied key. A persistent 60 s `/metrics` sampler started at 2026-09-21T03:23:20Z and will complete only after a continuous 24-hour idle, empty-outbox, stable-build/role and monotonic-counter window; it was waiting because `m6` had one active transcode. The coordinator approved the 30 s forced claim, 10 s idle ceiling, unchanged SQLite singleton lease, and local-only notifications. No Rust was changed. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M0 | #405 | **Unblocked by Paul's 12-hour gate.** `5010892f3` puts the sampler (`scripts/replicated-write-capture-sampler`, 43,200 s, append-safe) and its evaluator (`scripts/replicated-write-capture`) in the repo with `tests/operations/test_replicated_write_capture.py`; the running Mac copy's `capture.sh` was replaced in place (new inode) with the same 12-hour, append-safe script and the sampler was not stopped. Replaying all 16,783 sample lines (2026-09-21T03:23:20Z – 2026-09-25T01:25:21Z) finds 57 idle windows, one qualifying: 2026-09-22T03:36:36Z – 19:39:03Z, 16.04 h. `52c03014c` records the readout: 902,512 proposals/day cluster-wide, ≈ 1.07 M authority reads and 91 snapshot builds/day per voter; the learner-WAL attribution puts the outbox claim at 28.9% of entries, a `metadata-classification` lease cycle at 41.6% and the idle offline-package claim at 14.0% (both flagged, out of scope). The sampler's last sample is 01:25:21Z and nothing was written by 09:15Z; its launchd state was not readable from the agent workspace. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1, M2 | #405 | `b12e18636`. Local outbox and lease-expiry hints on both backends; `plurx_core::store::watched_drain` (hint + 30 s forced claim + 60 s settings pair cache + 1→10 s backoff, woken by local enqueue and settings writes); the `watched:outbox` singleton lease with 15 s local-read retry; `plurx_watched_outbox_ticks_total{outcome}`. Three-voter `store_contract`: an idle configured minute proposes 2 claims (was 60), an unconfigured minute 0, a lease hint 0 against an acquire's 1. plurxd: 1 s local delivery, ≤ 30 s forced claim, 60 s settings refresh, 10 s backoff, two-drainer failover within TTL + retry with zero non-owner acquires. Ten production-hunk reverts each fail their test. Decisions 5–6 in §7 record how §3.2 and §3.3 were read. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 | #405 | `3763395d1`. Takeover switches read as one pair cached for 60 s; 10 s idle sleep while off, woken by a local switch write; 2 s cadence and CAS unchanged when on. Paused-clock tests: 10–11 reads in ten minutes off and no inventory tick; a local flip acted on within one tick; 2 s cadence with ≤ 2 reads in two minutes on. Reverting the cache or the wake fails them. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 (review) | #405 | Review P2: the first M3 gate cached "on" too and only listened for the local write while off, so a local disable took up to 60 s (the reviewer measured 29 more acting ticks over 68 s). Now only "off" is cached, keyed on a local write generation; "on" is re-read every tick, so a disable is seen on the next 2 s tick on every node, and a wake left over from a write made while on costs no read. New paused-clock tests: `takeover_loop_stops_acting_within_one_tick_of_a_local_disable`, `takeover_loop_sees_a_remote_disable_on_the_next_tick`, `takeover_loop_ignores_a_wake_left_over_from_a_write_made_while_on`; the cadence test now asserts one pair read per enabled tick. The Curator settings-route comment now states the 60 s bound for a write on a non-owner. Merged main at `b47c5ff88`. |
+| 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 | #405 | **needs: fleet** — the after-measurement runs only on a deployed build; steps below. The CLUSTER-PERFORMANCE-PLAN §6.5 rows wait for its numbers. |
+
+### needs: M4 fleet after-measurement (GPT)
+
+```text
+GPT prompt (fleet, K-03 M4). After the merge commit carrying K-03 M1–M3
+(branch plan/K-03, PR #405) is deployed with the usual ansible playbook to
+nuc4, m6, nynuc and nuc3:
+1. On each voter, `curl -s http://<ip>:32400/metrics | grep
+   plurx_watched_outbox_ticks_total` must list five outcomes. Over five
+   minutes exactly one voter's claimed+empty_claim+skipped_hint grows; the
+   other two grow only not_owner (every 15 s). Report which voter owns it.
+2. Start a fresh capture: copy scripts/replicated-write-capture-sampler to
+   ~/code/plurx-agent/workspaces/k03-m4-<UTC stamp>/capture.sh on the Mac and
+   run it under launchd or nohup (read-only; it exits 0 after one qualifying
+   12-hour idle window). Do not touch the M0 workspace
+   k03-m0-20260921T032002Z.
+3. When status.txt says complete, run
+   `scripts/replicated-write-capture evaluate <dir>/samples.tsv --json` and
+   report, per voter, proposals/day, store writes/day, authority reads/day and
+   snapshot builds/day beside docs/cluster/REPLICATED-WRITE-RATE-HYGIENE-M0.md
+   §2. Also report the owner's plurx_watched_outbox_ticks_total claimed +
+   empty_claim delta over the same window scaled to a day.
+4. Copy (read-only, cp) the learner nuc3's /srv/plurx/hiqlite/logs/*.wal to
+   /tmp and run `scripts/replicated-write-capture attribute <copies>`; report
+   the `UPDATE watched_outbox` and `job_leases ... watched:outbox` shares.
+Acceptance (§5.5): outbox proposals (claims + watched:outbox lease writes)
+< 10,000/day per cluster; authority reads per voter down by ≈ 85,000/day.
+```

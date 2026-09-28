@@ -19,7 +19,6 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "BSL-1.0",
-    "CC0-1.0",
     "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
@@ -43,10 +42,13 @@ multiple-versions = "allow"   # ecosystem lag is allowed; named native stacks ar
 deny = [
     # This obsolete copy existed only below the cryptr/S3 edge, which is now
     # gated behind hiqlite's own backup/s3 features and, when those are
-    # enabled, resolves through vendor/s3-simple instead. Pin the version:
-    # aws-lc-sys 0.43 remains until the provider decision has evidence. This
-    # ban only ever sees the workspace graph, so the fork's optional graph is
-    # held to the same list by tests/operations/test_hiqlite_patch_ledger.py.
+    # enabled, resolves through vendor/s3-simple instead. Pin the version, not
+    # the crate: since K-08 M3 made `ring` the only rustls provider the
+    # workspace graph compiles no aws-lc at all (RingOnlyProviderGraphCase
+    # holds that), but the fork's optional backup/S3 graph still resolves
+    # aws-lc-sys 0.42 through reqwest's `rustls` feature. This ban only ever
+    # sees the workspace graph, so the fork's optional graph is held to the
+    # same list by tests/operations/test_hiqlite_patch_ledger.py.
     { crate = "aws-lc-sys:=0.39.1", reason = "obsolete duplicate below the disabled cryptr/S3 edge" },
     # A second native TLS implementation is a security and build-policy
     # decision, never an incidental transitive dependency.

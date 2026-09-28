@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 import runpy
 import tempfile
 import tomllib
 import unittest
+from validation.rust_modules import module_source
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -453,24 +455,28 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
                 source = ROOT / surface["source"]
                 self.assertTrue(source.is_file())
                 self.assertEqual(
-                    source.read_text(encoding="utf-8").count(surface["anchor"]),
+                    module_source(source).count(surface["anchor"]),
                     1,
                     f'{surface["id"]} must name one exact source anchor',
                 )
                 self.assertTrue(surface["obligation"])
 
     def test_every_shipping_hls_builder_is_in_the_m0_inventory(self) -> None:
-        transcode = (ROOT / "crates/plurxd/src/transcode.rs").read_text(
-            encoding="utf-8"
-        )
+        transcode = module_source("crates/plurxd/src/transcode.rs")
         self.assertEqual(
             transcode.count("transcode::hls_args("),
             3,
             "update the M0 inventory when a shipping HLS builder is added or migrated",
         )
-        live_tv = (ROOT / "crates/plurxd/src/live_tv.rs").read_text(
+        # The shipping region ends where the first test module begins. A
+        # `#[cfg(test)]` field or seam inside a production item is not that
+        # boundary, so split on the module declaration, not on the attribute.
+        live_tv_source = (ROOT / "crates/plurxd/src/live_tv.rs").read_text(
             encoding="utf-8"
-        ).split("#[cfg(test)]", 1)[0]
+        )
+        test_module = re.search(r"^#\[cfg\(test\)\]\nmod \w+", live_tv_source, re.M)
+        self.assertIsNotNone(test_module, "live_tv.rs has no test module to split on")
+        live_tv = live_tv_source[: test_module.start()]
         self.assertEqual(
             live_tv.count("tokio::process::Command::new("),
             2,

@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import runpy
 import subprocess
+import sys
 import tempfile
 import textwrap
 import tomllib
@@ -1092,6 +1093,65 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("-decoders", dockerfile)
         self.assertIn("AC-4 decoder", dockerfile)
 
+    def test_dockerfile_base_images_are_pinned_by_digest(self):
+        # `rust:1-bookworm` and `debian:bookworm-slim` are moving tags. The
+        # compiler was never the exposure -- `COPY . .` puts rust-toolchain.toml
+        # in the build context and rustup honours it -- but the Debian system
+        # libraries the daemon links against and the entire runtime userland
+        # were whatever those tags pointed at on the day of the build. Two
+        # images built from one commit could ship different libc, different
+        # OpenSSL, and different fontconfig, and nothing in the tree would say
+        # so.
+        #
+        # Digests are index digests (multi-platform), because the image is
+        # built for amd64 and arm64 from the same `FROM`.
+        dockerfile = read("Dockerfile")
+        registry_bases = re.findall(
+            r"(?m)^FROM\s+(\S+)\s+AS\s+(\S+)",
+            dockerfile,
+        )
+        # `FROM runtime-assets AS runtime` names an earlier stage of this same
+        # file, which has no registry reference to pin.
+        stages = {stage for _, stage in registry_bases}
+        unpinned = [
+            (ref, stage)
+            for ref, stage in registry_bases
+            if ref not in stages and "@sha256:" not in ref
+        ]
+        self.assertEqual(unpinned, [], "a base image is not pinned by digest")
+        self.assertIn(
+            "FROM rust:1-bookworm@sha256:"
+            "93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build",
+            dockerfile,
+        )
+        self.assertIn(
+            "FROM debian:bookworm-slim@sha256:"
+            "3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251"
+            " AS runtime-assets",
+            dockerfile,
+        )
+
+    def test_base_image_pin_drift_is_reported_weekly_and_gates_nothing(self):
+        # A pin nobody looks at is a stale pin. The weekly dependency audit is
+        # the job that already exists to say "upstream moved", so the report
+        # rides it -- and rides it without a verdict, because updating the
+        # userland the daemon ships is a decision, not a build failure.
+        workflow = read(".github/workflows/rust-audit.yml")
+        step = workflow.split("- name: Report base-image pin drift")
+        self.assertEqual(len(step), 2, "the drift report step is missing")
+        body = step[1].split("- name:")[0]
+        self.assertIn("continue-on-error: true", body)
+        # `continue-on-error` does not make a step run after an earlier one
+        # failed; only a status condition does. Without it the report is
+        # skipped in exactly the weeks the audit it rides on goes red.
+        self.assertRegex(
+            body,
+            r"(?m)^\s+if: \$\{\{ (!cancelled\(\)|always\(\)) \}\}\s*$",
+            "the drift report is skipped whenever an earlier audit step fails",
+        )
+        self.assertIn("scripts/image-base-drift Dockerfile", step[1])
+        self.assertTrue((ROOT / "scripts/image-base-drift").exists())
+
     def test_docker_build_pins_and_verifies_disk_conversion_tools(self):
         dockerfile = read("Dockerfile")
         self.assertIn("ARG DOVI_TOOL_VERSION=2.3.3", dockerfile)
@@ -1123,7 +1183,11 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("platforms: linux/${{ matrix.arch }}", workflow)
         self.assertIn("file: Dockerfile.release", workflow)
 
-        runtime_assets_marker = "FROM debian:bookworm-slim AS runtime-assets"
+        # The stage boundary, not the image reference: this test is about
+        # what the runtime-assets stage contains and in what order, and
+        # the base image now carries a digest that will be refreshed
+        # without anything here changing meaning.
+        runtime_assets_marker = " AS runtime-assets"
         runtime_image_marker = "FROM runtime-assets AS runtime"
         runtime_assets = dockerfile.index(runtime_assets_marker)
         runtime_image = dockerfile.index(runtime_image_marker)
@@ -1233,7 +1297,17 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("generic/platform=iOS", script)
         self.assertIn("generic/platform=tvOS", script)
         self.assertIn("-configuration Release", script)
-        self.assertIn(":app:assembleDebug", script)
+        # Android ships the signed release variant: the debug APK is
+        # `debuggable`, which lets `adb shell run-as` read the bearer.
+        self.assertIn(":app:assembleRelease", script)
+        self.assertIn("apk/release/app-release.apk", script)
+        self.assertNotIn(":app:assembleDebug", script)
+        self.assertNotIn("app-debug.apk", script)
+
+        # A matching build number cannot prove that the device has this
+        # exact source tree; every reachable Apple device gets the archive.
+        self.assertIn('devicectl device install app --device "$ident" "$app"', script)
+        self.assertNotIn('already on build $APPLE_BUILD', script)
 
         # Neither artifact reaches a device unverified.
         self.assertIn("codesign --verify --deep --strict", script)
@@ -1323,10 +1397,12 @@ assert.equal(context.ACT_TIMER, null);
         workflow = read(".github/workflows/ci.yml")
         makefile = read("Makefile")
         self.assertIn("/Applications/Xcode.app/Contents/Developer", workflow)
-        self.assertNotIn("/Applications/Xcode_26.6.app/Contents/Developer", workflow)
+        self.assertNotIn("/Applications/Xcode_27.app/Contents/Developer", workflow)
         self.assertNotIn("brew install xcodegen", workflow)
-        self.assertIn('grep -Fxq "Xcode 26.6"', workflow)
-        self.assertIn('grep -Fxq "Build version 17F113"', workflow)
+        self.assertIn('grep -Fxq "Xcode 27.0"', workflow)
+        self.assertIn('grep -Fxq "Build version 27A266a"', workflow)
+        self.assertIn('test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.0"', workflow)
+        self.assertIn('test "$(xcrun --sdk appletvos --show-sdk-version)" = "27.0"', workflow)
         self.assertIn('= "Version: 2.46.0"', workflow)
         self.assertIn('iOS 26.5 (26.5 - 23F77)', workflow)
         self.assertIn('tvOS 26.5 (26.5 - 23L470)', workflow)
@@ -1708,7 +1784,7 @@ assert.equal(context.ACT_TIMER, null);
         effort_jobs = workflow_job_blocks(".github/workflows/effort-ci.yml")
         effort_rust_steps = workflow_step_blocks(effort_jobs["rust_compile"])
         fast_jobs = workflow_job_blocks(".github/workflows/main-fast-lane.yml")
-        self.assertIn("timeout-minutes: 5", fast_jobs["preflight"])
+        self.assertIn("timeout-minutes: 10", fast_jobs["preflight"])
         fast_rust_steps = workflow_step_blocks(fast_jobs["rust_compile"])
         lint = read(".github/workflows/lint.yml")
         makefile = read("Makefile")
@@ -2110,7 +2186,7 @@ assert.equal(context.ACT_TIMER, null);
             "membership_added_between_begin_passes_is_fenced_before_store_admission",
             "replicated_membership_exclusion_spans_final_roster_read_and_peer_end",
             "replicated_exclusion_projection_outlives_remote_ttl_and_clock_skew",
-            "cache_admin_revocation_operation_gate_fails_fast_and_is_raii_released",
+            "cache_admin_revocation_operation_queue_is_bounded_and_raii_released",
             "local_apply_ack_wire_version_rejects_pre_barrier_receivers",
             "begin_ack_installs_memory_fence_before_waiting_for_exact_local_apply",
             "cancelled_local_apply_wait_leaves_peer_memory_fence_closed",
@@ -3152,7 +3228,10 @@ assert.equal(context.ACT_TIMER, null);
             "<Registry>http://forge.lan:3000/noirr/-/packages/container/plurxd/main</Registry>",
             unraid,
         )
-        self.assertNotIn("schedule:", readiness)
+        # Weekly, from a green scheduled run: the cadence Paul chose on
+        # 2026-09-23 (docs/RELEASING.md "The weekly release tag"). The tag
+        # job itself is pinned in tests/operations/test_release_cut.py.
+        self.assertIn('  schedule:\n    - cron: "0 6 * * 1"\n', readiness)
         self.assertIn("workflow_dispatch:", readiness)
         self.assertIn("run: make release-check", readiness)
         self.assertIn("fetch-depth: 0", readiness)
@@ -3257,7 +3336,7 @@ assert.equal(context.ACT_TIMER, null);
             "Linux", "X64", "lab", "general", "high-cpu", "ffmpeg-6"
         )
         android = local("Linux", "X64", "lab", "android-kvm")
-        apple = local("macOS", "ARM64", "lab", "apple", "xcode-26")
+        apple = local("macOS", "ARM64", "lab", "apple", "xcode-27")
         ci_store = local("Linux", "X64", "lab", "ci-store")
         ci_topology = local("Linux", "X64", "lab", "ci-topology")
         release_general = "    runs-on: [self-hosted, Linux, X64, lab, general]"
@@ -3626,6 +3705,177 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn('curl -fsS "$base/metrics"', smoke)
         self.assertNotRegex(smoke, r"curl [^\n]+\| grep -q")
         self.assertIn('test "$instance_before" = "$instance_after"', smoke)
+
+    def test_container_restore_smoke_drills_backup_and_offline_restore(self):
+        # K-01 M4: the packaged image backs up a running instance through the
+        # operator CLI, verifies and restores the artefact offline into an
+        # empty second volume, and the restored instance keeps its identity,
+        # users, tokens and libraries. The container lane runs it after the
+        # stop/start smoke, and `make container-smoke` runs both.
+        drill = read("scripts/container-restore-smoke")
+        subprocess.run(
+            ["sh", "-n", str(ROOT / "scripts/container-restore-smoke")], check=True
+        )
+        self.assertIn("trap cleanup EXIT HUP INT TERM", drill)
+        self.assertIn("--publish 127.0.0.1:0:32400", drill)
+        self.assertIn("--user 0:0", drill)
+        self.assertIn("plurxd cluster backup", drill)
+        self.assertIn("--token-file /tmp/restore-smoke.token", drill)
+        self.assertIn("umask 077", drill)
+        self.assertNotIn("--token ", drill)
+        self.assertNotIn("docker exec -e", drill)
+        self.assertNotIn("Bearer $", drill)
+        self.assertIn('restore --verify --archive "/backups/$archive"', drill)
+        self.assertIn(
+            'restore --archive "/backups/$archive" --data-dir /var/lib/plurx', drill
+        )
+        self.assertIn('docker stop --time 10 "$source_name"', drill)
+        self.assertIn("a second restore over the restored data directory was accepted", drill)
+        self.assertIn('test "$instance_source" = "$instance_restored"', drill)
+        self.assertIn('"$restored_base/api/v1/auth/login"', drill)
+        self.assertIn('"$restored_base/api/v1/libraries"', drill)
+        self.assertNotRegex(drill, r"curl [^\n]+\| grep -q")
+
+        makefile = read("Makefile")
+        target = makefile.split("container-smoke: docker", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("@scripts/container-smoke plurx/plurxd:latest", target)
+        self.assertIn("@scripts/container-restore-smoke plurx/plurxd:latest", target)
+        workflow = read(".github/workflows/ci.yml")
+        package = workflow.split("  package_smoke:", 1)[1].split("\n  publish:", 1)[0]
+        self.assertLess(
+            package.index('scripts/container-smoke "$IMAGE"'),
+            package.index('run: scripts/container-restore-smoke "$IMAGE"'),
+        )
+
+    def test_container_restore_smoke_keeps_secrets_off_every_command_line(self):
+        # K-01 M4 review of #542: the drill's passwords and bearer tokens must
+        # not appear in any process's argv (curl, the host `docker` client, or a
+        # `docker exec -e` environment, which is argv to the client and is
+        # recorded on the exec instance). Run the real script against recording
+        # `docker` and `curl` stand-ins that emulate just enough of the image
+        # and the API, and inspect every argv they were given.
+        admin_token = "SECRET-admin-token-4b1d"
+        tokens = {
+            "admin": admin_token,
+            "viewer": "SECRET-viewer-token-77c2",
+            "relogin": "SECRET-relogin-token-90ae",
+        }
+        stub = textwrap.dedent(
+            f"""\
+            #!{sys.executable}
+            import json, os, pathlib, sys
+            state = pathlib.Path(os.environ["RESTORE_SMOKE_STUB_STATE"])
+            name = pathlib.Path(sys.argv[0]).name
+            args = sys.argv[1:]
+            with open(state / "argv.jsonl", "a") as log:
+                log.write(json.dumps([name, *args]) + "\\n")
+            TOKENS = {json.dumps(tokens)}
+
+            def docker():
+                verb = args[0]
+                if verb == "port":
+                    print("127.0.0.1:4" + ("1" if "source" in args[1] else "2") + "000")
+                elif verb == "exec" and "-i" in args:
+                    (state / "exec-stdin").write_bytes(sys.stdin.buffer.read())
+                elif verb == "exec" and "cluster" in args and "backup" in args:
+                    delivered = (state / "exec-stdin").read_text().strip()
+                    if "--token-file" not in args or delivered != TOKENS["admin"]:
+                        sys.exit(2)
+                    print('{{"status": "ok", "path": '
+                          '"/var/lib/plurx/backups/plurx-backup-20260926T000000Z-stub",'
+                          ' "manifest": {{"cluster_id": "stub"}}}}')
+                elif verb == "run" and "--data-dir" in args:
+                    marker = state / "restored"
+                    if marker.exists():
+                        sys.exit(1)
+                    marker.touch()
+
+            def curl():
+                headers, body, url, it = [], None, None, iter(args)
+                for arg in it:
+                    if arg == "-H":
+                        value = next(it)
+                        if value.startswith("@"):
+                            headers += pathlib.Path(value[1:]).read_text().splitlines()
+                        else:
+                            headers.append(value)
+                    elif arg in ("--data", "--data-binary", "-d"):
+                        value = next(it)
+                        body = (pathlib.Path(value[1:]).read_text()
+                                if value.startswith("@") else value)
+                    elif not arg.startswith("-"):
+                        url = arg
+                path = "/" + url.split("/", 3)[3]
+                bearer = {{h.split("Bearer ", 1)[1].strip() for h in headers
+                          if h.lower().startswith("authorization: bearer ")}}
+                admin = {{TOKENS["admin"], TOKENS["relogin"]}}
+                if path == "/readyz":
+                    print("ok")
+                elif path == "/api/v1/server":
+                    print('{{"instance_id": "stub-instance"}}')
+                elif path == "/api/v1/setup":
+                    print(json.dumps({{"token": TOKENS["admin"]}}))
+                elif path == "/api/v1/auth/login":
+                    user = json.loads(body)
+                    if not user.get("password"):
+                        sys.exit(22)
+                    key = "viewer" if user["username"] == "restore-viewer" else "relogin"
+                    print(json.dumps({{"token": TOKENS[key]}}))
+                elif path in ("/api/v1/users", "/api/v1/libraries"):
+                    if not bearer & admin:
+                        sys.exit(22)
+                    print('[{{"name": "Restore Smoke Movies"}}]' if body is None else "{{}}")
+                else:
+                    sys.exit(22)
+
+            docker() if name == "docker" else curl()
+            """
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            stubs = temporary_path / "bin"
+            state = temporary_path / "state"
+            scratch = temporary_path / "tmp"
+            for directory in (stubs, state, scratch):
+                directory.mkdir()
+            for name in ("docker", "curl"):
+                (stubs / name).write_text(stub)
+                (stubs / name).chmod(0o755)
+            result = subprocess.run(
+                ["sh", str(ROOT / "scripts/container-restore-smoke"), "stub-image"],
+                cwd=ROOT,
+                env=dict(
+                    os.environ,
+                    PATH=f"{stubs}:{os.environ['PATH']}",
+                    TMPDIR=str(scratch),
+                    RESTORE_SMOKE_STUB_STATE=str(state),
+                ),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=60,
+            )
+            invocations = [
+                json.loads(line)
+                for line in (state / "argv.jsonl").read_text().splitlines()
+            ]
+            secrets = [*tokens.values(), "restore-smoke-admin-", "restore-smoke-viewer-"]
+            leaks = [
+                " ".join(argv)
+                for argv in invocations
+                if any(secret in arg for arg in argv for secret in secrets)
+            ]
+            self.assertEqual([], leaks, "a secret reached a command line")
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("container restore smoke passed", result.stdout)
+            # The stand-ins only answer authenticated calls when the bearer
+            # arrived through a header file, and the in-container token file
+            # received exactly the admin token over stdin.
+            self.assertEqual(admin_token, (state / "exec-stdin").read_text().strip())
+            self.assertTrue(
+                any(argv[:2] == ["docker", "exec"] and "backup" in argv for argv in invocations)
+            )
+            self.assertEqual([], list(scratch.iterdir()), "the drill left scratch state")
 
     def test_perf_report_counts_copy_video_as_a_real_session(self):
         namespace = runpy.run_path(str(ROOT / "scripts/perf-report"))

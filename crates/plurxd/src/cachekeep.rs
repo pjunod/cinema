@@ -24,12 +24,14 @@
 //! is a *hit* — a viewer gets a playlist for a directory that no longer exists.
 //! This way the failure is an orphan directory, which step 3 collects.
 
+#[cfg(test)]
+use crate::queue_fixture::QueueFixture;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use plurx_core::domain::{CacheManifestCheck, CachedTranscode};
+use plurx_core::domain::CachedTranscode;
 use plurx_core::store::{keys, Store};
 
 /// Process-local ownership for finished cache entries that are being served.
@@ -247,14 +249,14 @@ impl ActiveCacheReaders {
     /// Unrelated foreground playback must not starve integrity work for the
     /// rest of the cache; the physical and wall-clock budgets bound aggregate
     /// background pressure instead.
-    fn has_readers_besides(&self, recipe: &str) -> bool {
+    pub(crate) fn has_readers_besides(&self, recipe: &str) -> bool {
         matches!(
             self.lock_states().get(recipe),
             Some(CacheActivity::Readers { count, .. }) if *count > 1
         )
     }
 
-    fn has_reader(&self, recipe: &str) -> bool {
+    pub(crate) fn has_reader(&self, recipe: &str) -> bool {
         matches!(
             self.lock_states().get(recipe),
             Some(CacheActivity::Readers { .. })
@@ -332,34 +334,6 @@ pub const STALE_CLAIM_SECS: i64 = 24 * 3600;
 /// safe default on a NAS.
 pub const DEFAULT_MAX_GB: i64 = 50;
 
-/// A sweep advances only this many generation locations. Successful pages
-/// update `last_seen_at`, so the oldest-first query rotates across the full
-/// inventory without an unbounded filesystem walk.
-const MANIFEST_SCRUB_BATCH: i64 = 128;
-
-/// CPU/syscall ceiling for degenerate manifests containing many tiny objects.
-/// The byte and wall-clock budgets usually stop the scrub first.
-const MANIFEST_SCRUB_MAX_OBJECTS: usize = 4_096;
-const MANIFEST_SCRUB_MAX_WALL: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Physical I/O ceiling for one cleanup pass. The manifest format rejects any
-/// individual object above this same bound, so the first object can never
-/// punch through it.
-// One maximally valid object must still fit after loading the maximally valid
-// manifest and reserving both EOF probes. Otherwise the oldest row can pin the
-// durable cursor forever and starve every later generation.
-const MANIFEST_SCRUB_BYTES: u64 = plurx_core::transcode::manifest::MAX_OBJECT_BYTES
-    + plurx_core::transcode::manifest::MAX_MANIFEST_BYTES
-    + 2;
-
-fn reserve_scrub_bytes(remaining: &mut u64, bytes: u64) -> bool {
-    if bytes > *remaining {
-        return false;
-    }
-    *remaining -= bytes;
-    true
-}
-
 /// Where a producer assembles an entry before publishing it: one directory per
 /// recipe, under the cache root so the publish is a rename on one filesystem.
 ///
@@ -397,7 +371,7 @@ fn staging_recipe(name: &str) -> &str {
 /// cache location. The recipe prefix still ensures one encoder identity per
 /// directory; the job suffix is the durable housekeeping authority.
 fn staging_queue_job(name: &str) -> Option<&str> {
-    let (recipe, job_id) = name.rsplit_once("-j")?;
+    let (recipe, job_id) = staging_recipe(name).rsplit_once("-j")?;
     if recipe.len() != 64 || !recipe.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
@@ -405,7 +379,7 @@ fn staging_queue_job(name: &str) -> Option<&str> {
 }
 
 fn staging_queue_recipe(name: &str) -> Option<&str> {
-    let (recipe, job_id) = name.rsplit_once("-j")?;
+    let (recipe, job_id) = staging_recipe(name).rsplit_once("-j")?;
     (recipe.len() == 64
         && recipe.bytes().all(|byte| byte.is_ascii_hexdigit())
         && uuid::Uuid::parse_str(job_id).is_ok())
@@ -589,14 +563,44 @@ fn orphan_inventory_authorized(snapshot: &OwnershipSnapshot) -> bool {
     snapshot.complete || snapshot.has_owners
 }
 
+async fn queue_staging_jobs(
+    store: &Arc<dyn Store>,
+    node_id: &str,
+) -> Result<Vec<String>, plurx_core::error::StoreError> {
+    store.pretranscode_staging_jobs(node_id).await
+}
+
+async fn queue_generation_owned(
+    store: &Arc<dyn Store>,
+    id: &str,
+    node_id: &str,
+    fence: i64,
+) -> Result<bool, plurx_core::error::StoreError> {
+    use plurx_core::store::background_jobs::JobState;
+    match store.background_job(id).await? {
+        Some(job) => Ok(
+            matches!(job.state, JobState::Running | JobState::Cancelling)
+                && job.fence == fence
+                && job
+                    .token
+                    .as_ref()
+                    .is_some_and(|token| token.node_id == node_id),
+        ),
+        None => Ok(store.pretranscode_job(id).await?.is_some_and(|job| {
+            matches!(job.state.as_str(), "running" | "cancelling")
+                && job.owner_node_id == node_id
+                && job.fence == fence
+        })),
+    }
+}
+
 async fn ownership_snapshot(
     store: &Arc<dyn Store>,
     root: &Path,
     node_id: &str,
 ) -> Result<OwnershipSnapshot, plurx_core::error::StoreError> {
     let inventory = store.cache_ownership_inventory(node_id).await?;
-    let queue_jobs = store
-        .pretranscode_staging_jobs(node_id)
+    let queue_jobs = queue_staging_jobs(store, node_id)
         .await?
         .into_iter()
         .collect::<HashSet<_>>();
@@ -678,7 +682,7 @@ async fn delete_final_batch(
             owned_paths.insert(path);
         }
     }
-    let queue_jobs = match store.pretranscode_staging_jobs(node_id).await {
+    let queue_jobs = match queue_staging_jobs(store, node_id).await {
         Ok(jobs) => jobs.into_iter().collect::<HashSet<_>>(),
         Err(error) => {
             tracing::warn!(%error, "cache: could not recheck queue ownership; keeping bytes");
@@ -696,11 +700,8 @@ async fn delete_final_batch(
             if !queue_jobs.contains(job_id) {
                 false
             } else {
-                match store.pretranscode_job(job_id).await {
-                    Ok(Some(job)) => {
-                        job.state == "running" && job.owner_node_id == node_id && job.fence == fence
-                    }
-                    Ok(None) => false,
+                match queue_generation_owned(store, job_id, node_id, fence).await {
+                    Ok(owned) => owned,
                     Err(error) => {
                         tracing::warn!(job = job_id, %error, "cache: could not recheck exact queue generation; keeping bytes");
                         true
@@ -752,7 +753,7 @@ async fn delete_staging_batch(
         .filter(|entry| !entry.complete)
         .map(|entry| entry.recipe_hash)
         .collect::<HashSet<_>>();
-    let queue_jobs = match store.pretranscode_staging_jobs(node_id).await {
+    let queue_jobs = match queue_staging_jobs(store, node_id).await {
         Ok(jobs) => jobs.into_iter().collect::<HashSet<_>>(),
         Err(error) => {
             tracing::warn!(%error, "cache: could not recheck queue ownership; keeping bytes");
@@ -766,8 +767,19 @@ async fn delete_staging_batch(
     // Same-recipe fenced staging directories share one canonical guard; keep
     // it until the whole batch is complete.
     for candidate in batch.iter() {
-        let owned = staging_queue_job(&candidate.name).is_some_and(|job| queue_jobs.contains(job))
-            || claimed_recipes.contains(staging_recipe(&candidate.name));
+        let queue_owned = if let Some((job, fence)) = final_queue_generation(&candidate.name) {
+            if queue_jobs.contains(job) {
+                // An expired generation cannot borrow a later attempt's ownership.
+                queue_generation_owned(store, job, node_id, fence)
+                    .await
+                    .unwrap_or(true)
+            } else {
+                false
+            }
+        } else {
+            staging_queue_job(&candidate.name).is_some_and(|job| queue_jobs.contains(job))
+        };
+        let owned = queue_owned || claimed_recipes.contains(staging_recipe(&candidate.name));
         if owned {
             kept += 1;
             continue;
@@ -793,8 +805,6 @@ pub struct Swept {
     pub stale: usize,
     /// Complete entries evicted to get under budget.
     pub evicted: usize,
-    /// Manifest-fenced locations invalidated before they could be offered.
-    pub corrupt: usize,
     /// Complete entries skipped because an active session is reading them.
     pub protected: usize,
     /// Entries already owned by another sweep in this process.
@@ -804,8 +814,6 @@ pub struct Swept {
     /// Bounded ownership snapshots taken after candidate eviction guards.
     pub ownership_rechecks: usize,
     pub bytes_freed: i64,
-    /// Conservative manifest + media bytes admitted to the integrity scrub.
-    pub scrub_bytes: u64,
     /// What the cache occupies now, by the rows.
     pub bytes_after: i64,
 }
@@ -889,227 +897,7 @@ pub async fn sweep_with_readers(
         Err(e) => tracing::warn!(error = %e, "cache: could not list stale claims"),
     }
 
-    // 2. Authenticate a bounded rotating page of generations. Each location
-    // advances through a bounded object page as it rotates through the
-    // oldest-first durable cursor; requested objects are also verified on the
-    // serving path. Invalidating the exact row first makes a crash leave an
-    // unowned directory, never a durable hit for missing bytes.
-    let mut manifest_checks = Vec::new();
-    let mut scrub_remaining = MANIFEST_SCRUB_BYTES;
-    let scrub_started = std::time::Instant::now();
-    let mut scrubbed_objects = 0usize;
-    match store
-        .cache_manifest_candidates(node_id, MANIFEST_SCRUB_BATCH)
-        .await
-    {
-        Ok(candidates) => {
-            for entry in candidates {
-                let Some(expected_digest) = entry.manifest_digest.as_deref() else {
-                    continue;
-                };
-                // Playback itself refreshes last_used_at, so skipping the same
-                // recipe does not age a valid ready holder out. Unrelated
-                // playback does not suppress this location's cheap heartbeat.
-                if readers.has_reader(&entry.recipe_hash) {
-                    continue;
-                }
-                // A shared read excludes eviction but allows playback to
-                // start. Foreground readers are detected between objects,
-                // which bounds their worst-case wait to one HLS object.
-                let Some(_scrub_reader) = readers.begin_read(&entry.recipe_hash) else {
-                    out.in_flight += 1;
-                    continue;
-                };
-                let directory = validated_entry_dir(root, &entry.relative_dir).await;
-                let manifest_present = match directory.as_deref() {
-                    Some(directory) => {
-                        match plurx_core::fs_secure::open_read_nofollow(
-                            &directory.join(plurx_core::transcode::manifest::MANIFEST_FILE),
-                        )
-                        .await
-                        {
-                            Ok(file) => file.metadata().await.is_ok_and(|metadata| {
-                                metadata.is_file()
-                                    && metadata.len() > 0
-                                    && metadata.len()
-                                        <= plurx_core::transcode::manifest::MAX_MANIFEST_BYTES
-                            }),
-                            Err(_) => false,
-                        }
-                    }
-                    None => false,
-                };
-                let deep_allowed = manifest_present
-                    && scrub_remaining > 0
-                    && scrubbed_objects < MANIFEST_SCRUB_MAX_OBJECTS
-                    && scrub_started.elapsed() < MANIFEST_SCRUB_MAX_WALL;
-                let manifest = if deep_allowed {
-                    match plurx_core::transcode::manifest::load_with_budget(
-                        directory.as_deref().expect("presence requires directory"),
-                        scrub_remaining,
-                    )
-                    .await
-                    {
-                        Ok(Some((manifest, charged_bytes))) => {
-                            debug_assert!(charged_bytes <= scrub_remaining);
-                            scrub_remaining -= charged_bytes;
-                            Some(manifest)
-                        }
-                        // The remaining deep-read budget is too small. The
-                        // descriptor-bound presence heartbeat still rotates
-                        // this holder; a later pass resumes its durable cursor.
-                        Ok(None) => None,
-                        Err(_) => {
-                            // A malformed manifest is corruption, not merely a
-                            // missed deep-scrub opportunity.
-                            // Lost work: a corrupt manifest must not remain a
-                            // durable candidate after the scrub rejected it.
-                            crate::store_result::observe(
-                                crate::store_result::Operation::InvalidateCorruptCacheManifest,
-                                crate::store_result::Discard::LostWork,
-                                store
-                                    .invalidate_cache_entry(
-                                        &entry.recipe_hash,
-                                        node_id,
-                                        &entry.storage_class,
-                                        &entry.relative_dir,
-                                        Some(expected_digest),
-                                    )
-                                    .await,
-                            );
-                            out.corrupt += 1;
-                            continue;
-                        }
-                    }
-                } else {
-                    None
-                };
-                let mut valid = manifest_present
-                    && manifest
-                        .as_ref()
-                        .is_none_or(|manifest| manifest.manifest_digest == expected_digest);
-                let mut checked = 0usize;
-                let mut next_object_index = entry.scrub_object_index.max(0) as usize;
-                if let (Some(directory), Some(manifest)) = (directory.as_deref(), manifest.as_ref())
-                {
-                    if next_object_index >= manifest.objects.len() {
-                        next_object_index = 0;
-                    }
-                    for object in manifest
-                        .objects
-                        .iter()
-                        .cycle()
-                        .skip(next_object_index)
-                        .take(manifest.objects.len())
-                    {
-                        if readers.has_readers_besides(&entry.recipe_hash) {
-                            break;
-                        }
-                        if scrubbed_objects >= MANIFEST_SCRUB_MAX_OBJECTS
-                            || scrub_started.elapsed() >= MANIFEST_SCRUB_MAX_WALL
-                        {
-                            break;
-                        }
-                        let path = directory.join(&object.name);
-                        let metadata = match tokio::fs::symlink_metadata(&path).await {
-                            Ok(metadata)
-                                if metadata.file_type().is_file()
-                                    && !metadata.file_type().is_symlink()
-                                    && metadata.len() == object.bytes =>
-                            {
-                                metadata
-                            }
-                            _ => {
-                                valid = false;
-                                break;
-                            }
-                        };
-                        // Reserve one extra byte: the verifier performs one
-                        // EOF read to prove a same-prefix larger file is not
-                        // accepted, so even a concurrent replacement stays
-                        // within this physical I/O ceiling.
-                        let reserved = metadata.len().saturating_add(1);
-                        if !reserve_scrub_bytes(&mut scrub_remaining, reserved) {
-                            break;
-                        }
-                        match manifest.verify_object(directory, &object.name).await {
-                            Ok(true) => {
-                                checked += 1;
-                                scrubbed_objects += 1;
-                            }
-                            Ok(false) | Err(_) => {
-                                valid = false;
-                                break;
-                            }
-                        }
-                    }
-                }
-                if valid {
-                    let next = if checked > 0 {
-                        let manifest = manifest.as_ref().expect("checked objects need manifest");
-                        let next = (next_object_index + checked) % manifest.objects.len();
-                        next as i64
-                    } else {
-                        entry.scrub_object_index.max(0)
-                    };
-                    manifest_checks.push(CacheManifestCheck {
-                        recipe_hash: entry.recipe_hash.clone(),
-                        node_id: node_id.to_owned(),
-                        storage_class: entry.storage_class.clone(),
-                        relative_dir: entry.relative_dir.clone(),
-                        manifest_digest: expected_digest.to_owned(),
-                        next_object_index: next,
-                        observed_at: now.saturating_add(i64::from(checked > 0)),
-                    });
-                    continue;
-                }
-                match store
-                    .invalidate_cache_entry(
-                        &entry.recipe_hash,
-                        node_id,
-                        &entry.storage_class,
-                        &entry.relative_dir,
-                        Some(expected_digest),
-                    )
-                    .await
-                {
-                    Ok(true) => {
-                        out.corrupt += 1;
-                        if directory.is_none() {
-                            tracing::warn!(
-                                recipe = %entry.recipe_hash,
-                                dir = %entry.relative_dir,
-                                "cache: invalidated an unsafe generation path without touching the filesystem"
-                            );
-                        }
-                        // Bytes become an orphan and are removed only by
-                        // the guarded, ownership-rechecking orphan pass.
-                    }
-                    Ok(false) => tracing::debug!(
-                        recipe = %entry.recipe_hash,
-                        "cache: corrupt manifest belonged to a superseded location"
-                    ),
-                    Err(error) => tracing::error!(
-                        recipe = %entry.recipe_hash,
-                        %error,
-                        "cache: could not invalidate a corrupt generation"
-                    ),
-                }
-            }
-        }
-        Err(error) => {
-            tracing::warn!(%error, "cache: could not list manifest scrub candidates")
-        }
-    }
-    out.scrub_bytes = MANIFEST_SCRUB_BYTES - scrub_remaining;
-    if let Err(error) = store.mark_cache_manifests_checked(&manifest_checks).await {
-        tracing::warn!(
-            checked = manifest_checks.len(),
-            %error,
-            "cache: could not durably advance the manifest scrub cursors"
-        );
-    }
-
+    // Integrity reads run separately through admitted ArtifactVerify jobs.
     // 3. Budget.
     let budget = budget_bytes(store).await;
     let mut used = store.cache_bytes(node_id).await.unwrap_or(0);
@@ -1186,19 +974,15 @@ pub async fn sweep_with_readers(
     out.protected += protected;
     out.in_flight += in_flight;
     out.ownership_rechecks = ownership_rechecks;
-    if out.stale + out.evicted + out.corrupt + out.protected + out.in_flight + out.orphans > 0
-        || out.scrub_bytes > 0
-    {
+    if out.stale + out.evicted + out.protected + out.in_flight + out.orphans > 0 {
         tracing::info!(
             stale = out.stale,
             evicted = out.evicted,
-            corrupt = out.corrupt,
             protected = out.protected,
             in_flight = out.in_flight,
             orphans = out.orphans,
             ownership_rechecks = out.ownership_rechecks,
             freed = out.bytes_freed,
-            scrub_bytes = out.scrub_bytes,
             used = out.bytes_after,
             "cache: swept"
         );
@@ -1528,7 +1312,8 @@ async fn sweep_orphan_dirs(
         };
         staging_scanned += 1;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if staging_queue_job(&name).is_some_and(|job| queue_staging.contains(job))
+        if (final_queue_generation(&name).is_none()
+            && staging_queue_job(&name).is_some_and(|job| queue_staging.contains(job)))
             || claimed_recipes.contains(staging_recipe(&name))
         {
             continue;
@@ -1611,6 +1396,7 @@ async fn sweep_orphan_dirs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact_integrity::{reserve_scrub_bytes, SCRUB_BYTES as MANIFEST_SCRUB_BYTES};
     use plurx_core::cluster::{open_store, StoreHandle};
     use plurx_core::config::Config;
     use plurx_core::domain::{
@@ -1742,6 +1528,15 @@ mod tests {
         let recipe = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
         assert_eq!(staging_queue_job(&format!("{recipe}-j{job}")), Some(job));
         assert_eq!(final_queue_job(&format!("{recipe}-j{job}-f42")), Some(job));
+        assert_eq!(
+            staging_queue_job(&format!("{recipe}-j{job}-f42")),
+            Some(job)
+        );
+        assert_eq!(
+            staging_queue_recipe(&format!("{recipe}-j{job}-f42")),
+            Some(recipe)
+        );
+        assert_eq!(staging_queue_job(&format!("{recipe}-j{job}-fno")), None);
         assert_eq!(staging_queue_job(&format!("abcdef-j{job}")), None);
         assert_eq!(staging_queue_job("abcdef-jnot-a-uuid"), None);
         assert_eq!(staging_queue_job("abcdef"), None);
@@ -1750,7 +1545,10 @@ mod tests {
     const NODE: &str = "node-a";
 
     async fn store() -> (Arc<dyn Store>, i64) {
-        let store = SqliteStore::open_in_memory().expect("store");
+        seed_store(SqliteStore::open_in_memory().expect("store")).await
+    }
+
+    async fn seed_store(store: SqliteStore) -> (Arc<dyn Store>, i64) {
         let lib = store
             .create_library(&NewLibrary {
                 name: "M".into(),
@@ -1844,7 +1642,7 @@ mod tests {
         })
         .expect("requirements");
         assert!(store
-            .enqueue_pretranscode_job(
+            .fixture_enqueue_pretranscode_job(
                 &NewPretranscodeJob {
                     id: job_id.to_owned(),
                     dedupe_key: format!("cachekeep-scrub-{job_id}"),
@@ -1877,7 +1675,7 @@ mod tests {
             scratch_bytes: 2,
         };
         let claimed = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 NODE,
                 &capabilities,
                 &[],
@@ -1889,7 +1687,7 @@ mod tests {
             .expect("scrub fixture job");
         assert_eq!(claimed.id, job_id);
         assert!(store
-            .complete_pretranscode_job(
+            .fixture_complete_pretranscode_job(
                 &claimed,
                 recipe,
                 1,
@@ -2384,7 +2182,7 @@ mod tests {
         .expect("requirements");
         let job_id = "00000000-0000-4000-8000-000000000201";
         assert!(store
-            .enqueue_pretranscode_job(
+            .fixture_enqueue_pretranscode_job(
                 &NewPretranscodeJob {
                     id: job_id.to_owned(),
                     dedupe_key: "cachekeep-queue-job".to_owned(),
@@ -2417,7 +2215,7 @@ mod tests {
             scratch_bytes: i64::MAX,
         };
         let first = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 NODE,
                 &capabilities,
                 &[],
@@ -2440,14 +2238,14 @@ mod tests {
             .expect("checkpoint");
         let first_resume_at = lease_now_ms().saturating_add(1_000);
         assert!(store
-            .yield_pretranscode_job(&first, first_resume_at, first_resume_at)
+            .fixture_yield_pretranscode_job(&first, first_resume_at, first_resume_at)
             .await
             .expect("yield"));
         sweep(&store, root.path(), NODE, unix_now()).await;
         assert!(staging.exists(), "a yielded local checkpoint was swept");
 
         let resumed = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 NODE,
                 &capabilities,
                 &[],
@@ -2479,11 +2277,11 @@ mod tests {
 
         let second_resume_at = lease_now_ms().saturating_add(1_000);
         assert!(store
-            .yield_pretranscode_job(&resumed, second_resume_at, second_resume_at)
+            .fixture_yield_pretranscode_job(&resumed, second_resume_at, second_resume_at)
             .await
             .expect("second yield"));
         let resumed_again = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 NODE,
                 &capabilities,
                 &[],
@@ -2508,7 +2306,7 @@ mod tests {
 
         let takeover_at = resumed_again.lease_expires_ms.saturating_add(1);
         let successor = store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 "node-b",
                 &capabilities,
                 &[],
@@ -2569,7 +2367,14 @@ mod tests {
 
         let readers = ActiveCacheReaders::default();
         let playback = readers.begin_playback(recipe).expect("playback reader");
-        let skipped = sweep_with_readers(&store, root.path(), NODE, &readers, unix_now()).await;
+        let skipped = crate::artifact_integrity::fixture_verify_and_sweep(
+            &store,
+            root.path(),
+            NODE,
+            &readers,
+            unix_now(),
+        )
+        .await;
         assert_eq!(skipped.scrub_bytes, 0, "scrub competed with playback");
         assert_eq!(
             store
@@ -2582,7 +2387,14 @@ mod tests {
         );
         drop(playback);
 
-        let first = sweep_with_readers(&store, root.path(), NODE, &readers, unix_now()).await;
+        let first = crate::artifact_integrity::fixture_verify_and_sweep(
+            &store,
+            root.path(),
+            NODE,
+            &readers,
+            unix_now(),
+        )
+        .await;
         assert!(first.scrub_bytes <= MANIFEST_SCRUB_BYTES);
         assert_eq!(
             store
@@ -2601,8 +2413,14 @@ mod tests {
             .await
             .expect("corrupt later object");
         let restarted_readers = ActiveCacheReaders::default();
-        let second =
-            sweep_with_readers(&store, root.path(), NODE, &restarted_readers, unix_now()).await;
+        let second = crate::artifact_integrity::fixture_verify_and_sweep(
+            &store,
+            root.path(),
+            NODE,
+            &restarted_readers,
+            unix_now(),
+        )
+        .await;
         assert_eq!(second.corrupt, 1);
         assert!(second.scrub_bytes <= MANIFEST_SCRUB_BYTES);
         assert!(store
@@ -2626,8 +2444,9 @@ mod tests {
 
     #[tokio::test]
     async fn manifest_scrub_invalidates_unsafe_rows_without_leaving_the_cache_root() {
-        let (store, file) = store().await;
         let sandbox = root();
+        let database = sandbox.path().join("plurx.db");
+        let (store, file) = seed_store(SqliteStore::open(&database).expect("store")).await;
         let cache_root = sandbox.path().join("cache");
         let outside = sandbox.path().join("outside");
         tokio::fs::create_dir_all(&cache_root)
@@ -2646,7 +2465,7 @@ mod tests {
             file,
             "00000000-0000-4000-8000-000000000402",
             recipes[0],
-            "../outside",
+            "valid/first",
             1,
             &"b".repeat(64),
         )
@@ -2656,13 +2475,46 @@ mod tests {
             file,
             "00000000-0000-4000-8000-000000000403",
             recipes[1],
-            &outside.to_string_lossy(),
+            "valid/second",
             1,
             &"c".repeat(64),
         )
         .await;
 
-        let swept = sweep_with_readers(
+        // Publication now rejects unsafe paths. Model an existing corrupt row
+        // after a valid fenced publication, without weakening that boundary.
+        let connection = rusqlite::Connection::open(&database).expect("corrupt fixture");
+        let guard: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'cache_publication_generation_guard'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("publication guard");
+        connection
+            .execute_batch("DROP TRIGGER cache_publication_generation_guard")
+            .expect("permit fixture corruption");
+        for (recipe, unsafe_path) in [
+            (recipes[0], "../outside".to_owned()),
+            (recipes[1], outside.to_string_lossy().into_owned()),
+        ] {
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE transcode_cache_locations SET relative_dir = ?1,
+                 publication_generation = publication_generation + 1 WHERE recipe_hash = ?2",
+                        rusqlite::params![unsafe_path, recipe],
+                    )
+                    .expect("inject unsafe path"),
+                1
+            );
+        }
+        connection
+            .execute_batch(&guard)
+            .expect("restore publication guard");
+        drop(connection);
+
+        let swept = crate::artifact_integrity::fixture_verify_and_sweep(
             &store,
             &cache_root,
             NODE,
@@ -2735,6 +2587,100 @@ mod tests {
             !final_dir.exists(),
             "unreferenced generation should become reclaimable after publication ownership ends"
         );
+    }
+
+    #[tokio::test]
+    async fn copied_transcode_gc_uses_durable_attempt_ownership_after_restart() {
+        use plurx_core::store::background_jobs::*;
+        let (store, _) = store().await;
+        let root = root();
+        let recipe = "a".repeat(64);
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = unix_now() * 1000;
+        store
+            .enqueue_job(EnqueueJob {
+                id: id.clone(),
+                payload: JobPayload::ArtifactHydrate {
+                    artifact_key: format!("transcode:{recipe}:{}", "b".repeat(64)),
+                    target_node_id: NODE.into(),
+                },
+                dedupe_key: format!("hydrate:{id}"),
+                priority: 1,
+                not_before_ms: now,
+                now_ms: now,
+                request: JobRequest {
+                    scope: "internal:copy".into(),
+                    request_id: id.clone(),
+                    request_digest: recipe.clone(),
+                    consumer_kind: "copy".into(),
+                    consumer_ref: id.clone(),
+                    target_node_id: Some(NODE.into()),
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .expect("enqueue copy");
+        let job = store
+            .background_job(&id)
+            .await
+            .expect("lookup")
+            .expect("job");
+        let ClaimOutcome::Claimed { job } = store
+            .claim_job(ClaimJob {
+                job_id: id.clone(),
+                expected_revision: job.revision,
+                node_id: NODE.into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::ArtifactHydrate,
+                payload_version: 1,
+                now_ms: now,
+                dispatched_at_ms: now,
+            })
+            .await
+            .expect("claim")
+        else {
+            panic!("copy not claimed")
+        };
+        assert!(queue_generation_owned(&store, &id, NODE, job.fence)
+            .await
+            .expect("owner"));
+        assert!(
+            !queue_generation_owned(&store, &id, "another-node", job.fence)
+                .await
+                .expect("wrong node")
+        );
+        assert!(!queue_generation_owned(&store, &id, NODE, job.fence + 1)
+            .await
+            .expect("wrong fence"));
+        let current = format!("{recipe}-j{id}-f{}", job.fence);
+        let stale = format!("{recipe}-j{id}-f{}", job.fence + 1);
+        for parent in ["aa", "tmp"] {
+            for name in [&current, &stale] {
+                let dir = root.path().join(parent).join(name);
+                tokio::fs::create_dir_all(&dir).await.expect("directory");
+                tokio::fs::write(dir.join("object"), b"bytes")
+                    .await
+                    .expect("bytes");
+            }
+        }
+        // Fresh reader registry models a restarted process. The replicated
+        // attempt, not a surviving process pin or a producer-only projection,
+        // must authorize both the staged and renamed copy.
+        let swept = sweep_with_readers(
+            &store,
+            root.path(),
+            NODE,
+            &ActiveCacheReaders::default(),
+            unix_now(),
+        )
+        .await;
+        assert_eq!(swept.orphans, 2);
+        for parent in ["aa", "tmp"] {
+            assert!(root.path().join(parent).join(&current).exists());
+            assert!(!root.path().join(parent).join(&stale).exists());
+        }
     }
 
     /// Budget eviction deletes bytes before forgetting its observed row. A

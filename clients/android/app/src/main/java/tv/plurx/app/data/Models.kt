@@ -71,6 +71,7 @@ data class Item(
     val kind: String,
     val parent_id: Long? = null,
     val title: String,
+    val sort_title: String? = null,
     val year: Int? = null,
     val overview: String? = null,
     val poster: String? = null,

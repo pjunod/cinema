@@ -1132,6 +1132,7 @@
     fn the_implicit_anime_burn_survives_ass_and_stops_at_an_hdr_delivery() {
         fn anime(codec: &str, hdr: Option<&str>) -> plurx_core::domain::MediaFile {
             plurx_core::domain::MediaFile {
+                downloaded_subtitles: Vec::new(),
                 id: 4_242,
                 item_id: 1,
                 path: "/media/Ash.Season.S01E01.mkv".into(),

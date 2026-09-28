@@ -2028,8 +2028,11 @@ async fn run_chapter_probe(path: &Path) -> Result<Vec<serde_json::Value>, Chapte
     #[cfg(windows)]
     crate::ffmpeg::verify_windows_source_path(&source, &input)
         .map_err(|_| ChapterProbeFailure::Failed)?;
-    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command)
-        .map_err(|_| ChapterProbeFailure::Failed)?;
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(
+        &mut command,
+        crate::process_control::ChildWork::realtime("chapter list probe"),
+    )
+    .map_err(|_| ChapterProbeFailure::Failed)?;
     let stdout = child.stdout.take().ok_or(ChapterProbeFailure::Failed)?;
     let mut bytes = Vec::new();
     stdout
@@ -2273,7 +2276,13 @@ pub async fn decision(
     // meaning until M2 moves every create path to the richer contract.
     decision.delivered_audio =
         playback::resolve_audio_for_method(&file, &q.profile(decision_now_ms), decision.method);
-    let probe_json = state.store.get_file_probe_json(id).await?;
+    // Only a copy needs the census; an encode never carries the source's
+    // parameter sets, and a direct play serves them untouched.
+    let probe_json = if decision.method == playback::PlaybackMethod::Remux {
+        crate::hevc_census::probe_json_for_copy(state.store.as_ref(), &file).await?
+    } else {
+        state.store.get_file_probe_json(id).await?
+    };
     let vod_video = plurx_core::transcode::CopyVideoOptions::from_probe(
         &file,
         probe_json.as_deref(),
@@ -2470,6 +2479,11 @@ pub async fn set_audio_offset(
 /// the file itself, to a temp name renamed into place once whole — two
 /// racing misses write identical bytes, and the loser's rename is a no-op
 /// worth nothing to fight over.
+/// A viewer turned this text track on and the player is waiting for it
+/// (plan P-02 §3.2.2).
+pub(crate) const SUBTITLE_TRACK_FOR_A_VIEWER: crate::process_control::ChildWork =
+    crate::process_control::ChildWork::realtime("subtitle track a viewer turned on");
+
 pub async fn subtitles_vtt(
     _user: AuthUser,
     State(state): State<AppState>,
@@ -2493,14 +2507,20 @@ pub async fn subtitles_vtt(
         ));
     }
 
-    let bytes = crate::subtitles::ensure_vtt_bytes(&state.subs_dir, &file, index)
-        .await
-        .map_err(|why| {
-            // Keep the endpoint's existing diagnostic while sharing the
-            // extraction/cache implementation with text subtitle burns.
-            tracing::warn!(file_id = id, index, "subtitle extraction failed: {why}");
-            ApiError::Internal("subtitle extraction failed".into())
-        })?;
+    let bytes = crate::subtitles::ensure_vtt_bytes_with_store(
+        &state.subs_dir,
+        &file,
+        index,
+        &state.subtitle_source_access(),
+        SUBTITLE_TRACK_FOR_A_VIEWER,
+    )
+    .await
+    .map_err(|why| {
+        // Keep the endpoint's existing diagnostic while sharing the
+        // extraction/cache implementation with text subtitle burns.
+        tracing::warn!(file_id = id, index, "subtitle extraction failed: {why}");
+        ApiError::Internal("subtitle extraction failed".into())
+    })?;
     Ok(vtt_response(bytes))
 }
 
@@ -2557,7 +2577,26 @@ pub async fn direct(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let file = load_file(&state, id).await?;
+    // A GET the server could not serve at all is a refused start (C-08 M5
+    // row 4); a HEAD carries no media and is not a start.
+    let refused = |state: &AppState, error: &ApiError| {
+        if method == Method::GET {
+            state.start_attempts.refused(
+                user.id,
+                id,
+                Some("direct_play"),
+                error.code(),
+                std::time::Instant::now(),
+            );
+        }
+    };
+    let file = match load_file(&state, id).await {
+        Ok(file) => file,
+        Err(error) => {
+            refused(&state, &error);
+            return Err(error);
+        }
+    };
     let served =
         serve_file_range(&file.path, &headers, &method, Some(file.size.max(0) as u64)).await;
     match &served {
@@ -2579,9 +2618,35 @@ pub async fn direct(
         Ok(_) => {}
         // The open failed, so whatever the availability cache believes is
         // wrong — the unmounted-share case, arriving as it actually arrives.
-        Err(_) => state.availability.forget(id),
+        Err(error) => {
+            state.availability.forget(id);
+            refused(&state, error);
+        }
     }
-    served
+    if method == Method::GET {
+        served.map(count_direct_play_bytes)
+    } else {
+        served
+    }
+}
+
+/// Credit a direct play's body to `plurx_delivered_bytes_total
+/// {method="direct_play"}` as each chunk is handed to the connection.
+///
+/// A direct play has no session and no meter, so this is its only count. The
+/// body was already a stream with its length in `Content-Length`, so wrapping
+/// it loses no size hint the connection was using. A body that is not a
+/// success (a 416, say) carries no media and is left alone.
+fn count_direct_play_bytes(response: Response) -> Response {
+    use futures_util::TryStreamExt;
+    if !response.status().is_success() {
+        return response;
+    }
+    response.map(|body| {
+        Body::from_stream(body.into_data_stream().inspect_ok(|chunk| {
+            crate::telemetry::record_delivered_bytes("direct_play", chunk.len() as u64);
+        }))
+    })
 }
 
 /// GET /api/v1/files/:id/content — original bytes for a text book.
@@ -2595,7 +2660,16 @@ pub async fn book_content(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let file = load_file(&state, id).await?;
+    serve_book_content(&state, id, &method, &headers).await
+}
+
+pub(super) async fn serve_book_content(
+    state: &AppState,
+    id: i64,
+    method: &Method,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    let file = load_file(state, id).await?;
     let item = state
         .store
         .get_item(file.item_id)
@@ -2604,7 +2678,23 @@ pub async fn book_content(
     if item.kind != ItemKind::Book {
         return Err(ApiError::NotFound("book content"));
     }
-    serve_file_range(&file.path, &headers, &method, Some(file.size.max(0) as u64)).await
+    let mut response =
+        serve_file_range(&file.path, headers, method, Some(file.size.max(0) as u64)).await?;
+    if response.status().is_success() {
+        let name = file
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("book");
+        let safe_name = name.replace(['\\', '"', '\r', '\n'], "_");
+        if let Ok(disposition) = HeaderValue::from_str(&format!("inline; filename=\"{safe_name}\""))
+        {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_DISPOSITION, disposition);
+        }
+    }
+    Ok(response)
 }
 
 // The caps fields are inlined (not `#[serde(flatten)]`ed) because axum's
@@ -2718,6 +2808,27 @@ impl StreamQuery {
 
 /// GET /api/v1/files/:id/stream.mp4 — fragmented-MP4 remux, optional start.
 pub async fn stream_mp4(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    AxPath(id): AxPath<i64>,
+    query: Query<StreamQuery>,
+) -> Result<Response, ApiError> {
+    let (user_id, start_attempts) = (auth.0.id, std::sync::Arc::clone(&state.start_attempts));
+    let served = serve_stream_mp4(auth, State(state), AxPath(id), query).await;
+    // A start request the server refused (C-08 M5 row 4).
+    if let Err(error) = &served {
+        start_attempts.refused(
+            user_id,
+            id,
+            Some("remux"),
+            error.code(),
+            std::time::Instant::now(),
+        );
+    }
+    served
+}
+
+async fn serve_stream_mp4(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
@@ -2747,9 +2858,12 @@ pub async fn stream_mp4(
             "this source cannot be made compatible by the progressive copy endpoint; use the planned HLS session",
         ));
     }
-    let probe_json = state.store.get_file_probe_json(id).await?;
+    let probe_json = crate::hevc_census::probe_json_for_copy(state.store.as_ref(), &file).await?;
     let promote_hevc_parameter_sets =
         plurx_core::transcode::hevc_parameter_set_promotion_required(&file, probe_json.as_deref());
+    // A progressive copy has no header proof either, so it keeps every HEVC
+    // source's in-band parameter sets, like the rolling copy.
+    let retain_hevc_parameter_sets = matches!(file.video_codec.as_deref(), Some("hevc" | "h265"));
     // Copy HEVC gets an `hvc1` tag so Safari's <video> accepts the fMP4 (an
     // `hev1`-tagged MKV copy otherwise plays audio-only / black in Safari).
     let hevc = matches!(file.video_codec.as_deref(), Some("hevc" | "h265"));
@@ -2774,6 +2888,7 @@ pub async fn stream_mp4(
         selected_transport = "progressive",
         output_sample_entry = output_sample_entry.unwrap_or("not_hevc"),
         promote_hevc_parameter_sets,
+        retain_hevc_parameter_sets,
         preserved_dv_muxer_strict,
         strips_dolby_vision,
         dovi_rpu_filter_available = state.system.dovi_rpu,
@@ -2852,6 +2967,7 @@ pub async fn stream_mp4(
         have_dovi_bsf: state.system.dovi_rpu,
         preserve_dolby_vision: served.preserve_dolby_vision,
         promote_hevc_parameter_sets,
+        retain_hevc_parameter_sets,
         runtime_cache: &state.runtime_cache_dir,
         readrate,
         tracked,
@@ -3108,6 +3224,9 @@ struct RemuxSpec<'a> {
     /// rewrite the init after muxing, so retain the in-band sets and use the
     /// `hev1`/`dvhe` sample entry that permits them.
     promote_hevc_parameter_sets: bool,
+    /// The source redefines its parameter sets in band
+    /// (`transcode::hevc_census`); keep them rather than delete them.
+    retain_hevc_parameter_sets: bool,
     runtime_cache: &'a Path,
     readrate: f64,
     /// Telemetry handle and its registration, when the client asked to be able
@@ -3177,11 +3296,28 @@ fn spawn_remux_process_owner(
     (RemuxProcessGuard { cancel }, task)
 }
 
+#[cfg(test)]
 fn progressive_hevc_copy_args(
     source: &MediaFile,
     have_dovi_bsf: bool,
     preserve_dolby_vision: bool,
     promote_hevc_parameter_sets: bool,
+) -> Vec<String> {
+    progressive_hevc_copy_args_retaining(
+        source,
+        have_dovi_bsf,
+        preserve_dolby_vision,
+        promote_hevc_parameter_sets,
+        false,
+    )
+}
+
+fn progressive_hevc_copy_args_retaining(
+    source: &MediaFile,
+    have_dovi_bsf: bool,
+    preserve_dolby_vision: bool,
+    promote_hevc_parameter_sets: bool,
+    retain_hevc_parameter_sets: bool,
 ) -> Vec<String> {
     let mut args = vec![
         "-tag:v".to_owned(),
@@ -3206,10 +3342,11 @@ fn progressive_hevc_copy_args(
     if !promote_hevc_parameter_sets {
         args.extend([
             "-bsf:v".to_owned(),
-            plurx_core::transcode::hevc_copy_bsf_for_client(
+            plurx_core::transcode::hevc_copy_bsf_for_client_retaining(
                 source.hdr.as_deref(),
                 have_dovi_bsf,
                 preserve_dolby_vision,
+                retain_hevc_parameter_sets,
             ),
         ]);
     } else if source.hdr.as_deref() == Some("dolby_vision") && !preserve_dolby_vision {
@@ -3264,6 +3401,7 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         have_dovi_bsf,
         preserve_dolby_vision,
         promote_hevc_parameter_sets,
+        retain_hevc_parameter_sets,
         runtime_cache,
         readrate,
         tracked,
@@ -3334,11 +3472,12 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     // parameter sets (and no dead DV metadata) — same hygiene, same reasons,
     // as the segmented copy path (`hevc_copy_bsf`).
     if hevc {
-        args.extend(progressive_hevc_copy_args(
+        args.extend(progressive_hevc_copy_args_retaining(
             media,
             have_dovi_bsf,
             preserve_dolby_vision,
             promote_hevc_parameter_sets,
+            retain_hevc_parameter_sets,
         ));
     }
     if transcode_audio {
@@ -3404,6 +3543,7 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
             },
             descriptors,
             env: &[],
+            work: crate::process_control::ChildWork::realtime("playback remux"),
         },
     )
     .map_err(ApiError::Internal)?;
@@ -3618,6 +3758,7 @@ mod tests {
 
     fn hevc_file(hdr: Option<&str>) -> MediaFile {
         MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 42,
             item_id: 1,
             path: "/movies/hevc.mp4".into(),
@@ -4477,6 +4618,7 @@ mod tests {
         use plurx_core::domain::AudioStream;
 
         let mut file = MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 5698,
             item_id: 1,
             path: "/movies/Michael (2026).mkv".into(),
@@ -5951,6 +6093,7 @@ mod tests {
             }
         }
         let mut file = MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: "/media/anime.mkv".into(),
@@ -6116,6 +6259,7 @@ mod tests {
     #[test]
     fn the_subtitle_route_names_how_the_cues_are_produced() {
         let file = MediaFile {
+            downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
             path: "/media/routes.mkv".into(),

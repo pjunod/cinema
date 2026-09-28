@@ -3,7 +3,9 @@
 function autoNextOn(){ try{ return localStorage.getItem("plurx_autonext")!=="0"; }catch(e){ return true; } }
 function setAutoNext(on){ try{ localStorage.setItem("plurx_autonext", on?"1":"0"); }catch(e){}
   const b=document.getElementById("autonextbtn"); if(b) b.classList.toggle("on", on);
-  const c=document.getElementById("autonext"); if(c) c.checked=on; }
+  const c=document.getElementById("autonext"); if(c) c.checked=on;
+  // The OS transport's Next exists only while autoplay-next is on.
+  syncPlayerNextTrack(); }
 function togglePlayerAutonext(){ setAutoNext(!autoNextOn()); toast(autoNextOn()?"Autoplay next: on":"Autoplay next: off"); }
 // Find and play the episode after the one that just finished — next in the
 // season, else the first episode of the next season. Reuses AUTOPLAY-on-navigate

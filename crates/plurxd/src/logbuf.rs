@@ -278,3 +278,48 @@ mod tests {
         assert_eq!(cluster[1].message, "raft detail");
     }
 }
+
+/// A `MakeWriter` that keeps what a subscriber formatted, so a test can read
+/// the bytes a real `tracing_subscriber::fmt` layer produced instead of
+/// asserting on a reimplementation of it.
+#[cfg(test)]
+pub(crate) mod testwriter {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    pub(crate) struct CapturedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedWriter {
+        pub(crate) fn new() -> Self {
+            Self::default()
+        }
+
+        /// Lossy on purpose: a formatted log line is being inspected, not
+        /// round-tripped, and a test must not fail on a split character.
+        pub(crate) fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().expect("captured log")).into_owned()
+        }
+    }
+
+    impl std::io::Write for CapturedWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("captured log")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedWriter {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+}

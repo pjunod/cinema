@@ -11,6 +11,8 @@ use std::{collections::HashMap, time::SystemTime};
 
 use plurx_core::domain::OfflinePackage;
 use plurx_core::error::StoreError;
+use plurx_core::store::offline_claim::{ClaimOutcome, OfflineClaimPolicy, OfflineClaimStore};
+use plurx_core::store::offline_expiry::{OfflineExpiryPolicy, SweepOutcome, SWEEP_TICK};
 use plurx_core::store::{keys, Store};
 
 use crate::transcode::{
@@ -88,6 +90,12 @@ pub(crate) struct OfflineMetrics {
     transfer_bytes: AtomicU64,
     failures: [AtomicU64; FAILURE_CODES.len()],
     cancellations: AtomicU64,
+    /// `plurx_offline_claim_ticks_total{outcome}`: why each worker pass did
+    /// or did not ask the authority. Four fixed values.
+    claim_ticks: [AtomicU64; 4],
+    /// `plurx_offline_expiry_ticks_total{outcome}`: why each expiry pass did
+    /// or did not run the replicated sweep. Three fixed values.
+    expiry_ticks: [AtomicU64; 3],
     transfers: Mutex<TransferRegistry>,
 }
 
@@ -106,6 +114,8 @@ impl OfflineMetrics {
             transfer_bytes: AtomicU64::new(0),
             failures: std::array::from_fn(|_| AtomicU64::new(0)),
             cancellations: AtomicU64::new(0),
+            claim_ticks: std::array::from_fn(|_| AtomicU64::new(0)),
+            expiry_ticks: std::array::from_fn(|_| AtomicU64::new(0)),
             transfers: Mutex::new(TransferRegistry {
                 samples: HashMap::new(),
                 last_pruned: Instant::now(),
@@ -120,6 +130,24 @@ impl OfflineMetrics {
         {
             self.requests[index].fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    fn record_claim_tick(&self, outcome: ClaimOutcome) {
+        self.claim_ticks[outcome.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn claim_ticks(&self, outcome: ClaimOutcome) -> u64 {
+        self.claim_ticks[outcome.index()].load(Ordering::Relaxed)
+    }
+
+    fn record_expiry_tick(&self, outcome: SweepOutcome) {
+        self.expiry_ticks[outcome.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn expiry_ticks(&self, outcome: SweepOutcome) -> u64 {
+        self.expiry_ticks[outcome.index()].load(Ordering::Relaxed)
     }
 
     fn record_quota_rejection(&self, quota: OfflineQuota) {
@@ -330,6 +358,30 @@ impl OfflineMetrics {
                 self.failures[index].load(Ordering::Relaxed)
             );
         }
+        out.push_str(
+            "# HELP plurx_offline_claim_ticks_total Offline worker passes by outcome.\n\
+             # TYPE plurx_offline_claim_ticks_total counter\n",
+        );
+        for outcome in ClaimOutcome::ALL {
+            let _ = writeln!(
+                out,
+                "plurx_offline_claim_ticks_total{{outcome=\"{}\"}} {}",
+                outcome.as_str(),
+                self.claim_ticks[outcome.index()].load(Ordering::Relaxed)
+            );
+        }
+        out.push_str(
+            "# HELP plurx_offline_expiry_ticks_total Offline expiry sweep passes by outcome.\n\
+             # TYPE plurx_offline_expiry_ticks_total counter\n",
+        );
+        for outcome in SweepOutcome::ALL {
+            let _ = writeln!(
+                out,
+                "plurx_offline_expiry_ticks_total{{outcome=\"{}\"}} {}",
+                outcome.as_str(),
+                self.expiry_ticks[outcome.index()].load(Ordering::Relaxed)
+            );
+        }
         out
     }
 }
@@ -350,6 +402,9 @@ pub struct OfflineManager {
     active: tokio::sync::Mutex<HashMap<String, ActivePreparation>>,
     serving: crate::serving_fence::ServingFence,
     metrics: Arc<OfflineMetrics>,
+    /// A package this node just created for itself: claim it now rather
+    /// than when the local hint or the forced claim would.
+    wake: tokio::sync::Notify,
     #[cfg(test)]
     fail_next_cancel_requeue: std::sync::atomic::AtomicBool,
 }
@@ -374,6 +429,7 @@ impl OfflineManager {
             active: tokio::sync::Mutex::new(HashMap::new()),
             serving,
             metrics: Arc::new(OfflineMetrics::new()),
+            wake: tokio::sync::Notify::new(),
             #[cfg(test)]
             fail_next_cancel_requeue: std::sync::atomic::AtomicBool::new(false),
         })
@@ -381,6 +437,21 @@ impl OfflineManager {
 
     pub(crate) async fn active_preparations(&self) -> usize {
         self.active.lock().await.len()
+    }
+
+    /// A package was created on this node for this node. The worker claims
+    /// on its next pass whatever its local replica shows (K-10 §3.1); a
+    /// notification with no worker waiting is kept for its next wait.
+    pub(crate) fn wake(&self) {
+        self.wake.notify_one();
+    }
+
+    /// Whether a wake is waiting for the worker, consuming it.
+    #[cfg(test)]
+    pub(crate) async fn take_wake(&self) -> bool {
+        tokio::time::timeout(Duration::ZERO, self.wake.notified())
+            .await
+            .is_ok()
     }
 
     pub(crate) fn record_request(&self, height: i64) {
@@ -439,6 +510,21 @@ impl OfflineManager {
         self: Arc<Self>,
         authority: Arc<dyn plurx_core::cluster::coordination::ClusterJobAuthority>,
     ) {
+        let store = Arc::clone(&self.store);
+        self.run_with_claims(authority, store.as_ref()).await;
+    }
+
+    /// [`Self::run`] with the claim policy's two Store calls — the local
+    /// queue hint and the replicated claim — taken from `claims`. Production
+    /// passes this manager's own store; a test passes a replica that has not
+    /// applied a new row yet, which a SQLite store never is.
+    async fn run_with_claims<C>(
+        self: Arc<Self>,
+        authority: Arc<dyn plurx_core::cluster::coordination::ClusterJobAuthority>,
+        claims: &C,
+    ) where
+        C: OfflineClaimStore + ?Sized,
+    {
         match self
             .store
             .reset_interrupted_offline_packages(&self.node_id)
@@ -453,71 +539,119 @@ impl OfflineManager {
             }
         }
 
-        let mut next_expiry_sweep = Instant::now();
+        let mut expiry = OfflineExpiryPolicy::new();
+        let mut next_expiry_pass = tokio::time::Instant::now();
+        let mut policy = OfflineClaimPolicy::new();
+        let mut delay = Duration::ZERO;
         loop {
-            if Instant::now() >= next_expiry_sweep {
-                let now = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-                if let Err(error) = self.store.expire_offline_packages(now).await {
-                    tracing::warn!(%error, "offline expiry sweep failed");
-                }
-                next_expiry_sweep = Instant::now() + Duration::from_secs(60);
+            tokio::select! {
+                () = tokio::time::sleep(delay) => {}
+                () = self.wake.notified() => policy.wake(),
             }
-            // Disabling takes this same lock while it fences every registered
-            // claim and commits the setting. A worker therefore cannot slip a
-            // newly claimed producer between the disable snapshot and the
-            // durable off switch.
-            let activation = self.activation.lock().await;
-            if !self.enabled().await {
-                drop(activation);
-                tokio::time::sleep(IDLE_POLL).await;
-                continue;
+            let now = tokio::time::Instant::now();
+            if now >= next_expiry_pass {
+                self.expiry_pass(&mut expiry, now.into_std()).await;
+                next_expiry_pass = now + SWEEP_TICK;
             }
-            if !authority.may_run_cluster_jobs().await {
-                // Not a duplicate-work concern: claiming binds cluster-wide
-                // work to this node, and a node with no vote has no way to
-                // hand it back.
-                drop(activation);
-                tokio::time::sleep(IDLE_POLL).await;
-                continue;
-            }
-            let Some(restart_admission) = self.serving.try_restart_admission().await else {
-                drop(activation);
-                tokio::time::sleep(IDLE_POLL).await;
-                continue;
-            };
-            let package = match self.store.claim_next_offline_package(&self.node_id).await {
-                Ok(Some(package)) => package,
-                Ok(None) => {
-                    drop(restart_admission);
-                    drop(activation);
-                    tokio::time::sleep(IDLE_POLL).await;
-                    continue;
-                }
-                Err(error) => {
-                    drop(restart_admission);
-                    drop(activation);
-                    tracing::warn!(%error, "offline queue lookup failed");
-                    tokio::time::sleep(IDLE_POLL).await;
-                    continue;
-                }
-            };
-            let cancelled = tokio_util::sync::CancellationToken::new();
-            self.active.lock().await.insert(
-                package.id.clone(),
-                ActivePreparation {
-                    cancelled: cancelled.clone(),
-                },
-            );
-            drop(activation);
-            // Registration now owns the lifetime sampled by restart status.
-            // Drop the admission only after that handoff is visible.
-            drop(restart_admission);
-            self.prepare(package.clone(), &cancelled).await;
-            self.active.lock().await.remove(&package.id);
+            delay = self
+                .claim_pass(&mut policy, authority.as_ref(), claims)
+                .await;
+            // Never sleep past the next expiry pass.
+            delay =
+                delay.min(next_expiry_pass.saturating_duration_since(tokio::time::Instant::now()));
         }
+    }
+
+    /// One expiry pass (K-10 §3.4). The local hint comes first: while this
+    /// node's replica shows no lapsed package and no forced sweep is owed,
+    /// the pass proposes nothing. The replicated sweep, with the same
+    /// `expires_at <= now` predicate, stays the only thing that deletes a
+    /// package, so a hint can make it run for nothing but never early.
+    async fn expiry_pass(&self, policy: &mut OfflineExpiryPolicy, now: Instant) {
+        let now_unix = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        match policy.pass(self.store.as_ref(), now_unix, now).await {
+            Ok((outcome, expired)) => {
+                self.metrics.record_expiry_tick(outcome);
+                if expired > 0 {
+                    tracing::info!(expired, "expired lapsed offline packages");
+                }
+            }
+            Err(error) => tracing::warn!(%error, "offline expiry sweep failed"),
+        }
+    }
+
+    /// One claim pass (K-10 §3.1); returns how long to wait before the next.
+    ///
+    /// The local hint comes first: while nothing is visibly queued for this
+    /// node and no forced claim is owed, the pass reads nothing on the
+    /// authority — not the switch, and not the queue. Only a hint that fires,
+    /// a local wake or the forced claim reaches the gates below and the
+    /// replicated claim, which stays the only thing that binds a package.
+    async fn claim_pass<C>(
+        &self,
+        policy: &mut OfflineClaimPolicy,
+        authority: &dyn plurx_core::cluster::coordination::ClusterJobAuthority,
+        claims: &C,
+    ) -> Duration
+    where
+        C: OfflineClaimStore + ?Sized,
+    {
+        let now = tokio::time::Instant::now().into_std();
+        if !policy.should_claim(claims, &self.node_id, now).await {
+            self.metrics.record_claim_tick(ClaimOutcome::SkippedHint);
+            return policy.delay();
+        }
+        // Disabling takes this same lock while it fences every registered
+        // claim and commits the setting. A worker therefore cannot slip a
+        // newly claimed producer between the disable snapshot and the
+        // durable off switch.
+        let activation = self.activation.lock().await;
+        // Not a duplicate-work concern: claiming binds cluster-wide work to
+        // this node, and a node with no vote has no way to hand it back.
+        if !self.enabled().await || !authority.may_run_cluster_jobs().await {
+            drop(activation);
+            policy.gated(now);
+            self.metrics.record_claim_tick(ClaimOutcome::Gated);
+            return policy.delay();
+        }
+        let Some(restart_admission) = self.serving.try_restart_admission().await else {
+            drop(activation);
+            policy.gated(now);
+            self.metrics.record_claim_tick(ClaimOutcome::Gated);
+            return policy.delay();
+        };
+        let package = match policy.claim(claims, &self.node_id, now).await {
+            Ok((outcome, package)) => {
+                self.metrics.record_claim_tick(outcome);
+                package
+            }
+            Err(error) => {
+                tracing::warn!(%error, "offline queue lookup failed");
+                None
+            }
+        };
+        let Some(package) = package else {
+            drop(restart_admission);
+            drop(activation);
+            return policy.delay();
+        };
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        self.active.lock().await.insert(
+            package.id.clone(),
+            ActivePreparation {
+                cancelled: cancelled.clone(),
+            },
+        );
+        drop(activation);
+        // Registration now owns the lifetime sampled by restart status.
+        // Drop the admission only after that handoff is visible.
+        drop(restart_admission);
+        self.prepare(package.clone(), &cancelled).await;
+        self.active.lock().await.remove(&package.id);
+        policy.delay()
     }
 
     pub async fn cancel(&self, package_id: &str) {
@@ -1768,5 +1902,265 @@ mod tests {
             + subtitle_playlist(90_000).len() as i64;
         assert_eq!(ready.state, "ready");
         assert_eq!(ready.actual_bytes, Some(expected));
+    }
+
+    /// A package queued for `test-node` whose source no longer matches, so a
+    /// claim is visible at once: preparation fails it `waiting_for_source`
+    /// without starting an encoder.
+    async fn queue_stale_package(fixture: &Fixture, id: &str) {
+        let package = NewOfflinePackage {
+            id: id.into(),
+            request_id: format!("request-{id}"),
+            user_id: fixture.user_id,
+            file_id: fixture.file.id,
+            node_id: "test-node".into(),
+            source_path: fixture.file.path.to_string_lossy().into_owned(),
+            source_size: fixture.file.size,
+            source_mtime: fixture.file.mtime + 1,
+            effective_rate_control: EffectiveRateControl::Vbr.snapshot_value(),
+            target_height: 720,
+            output_width: Some(1280),
+            output_height: Some(720),
+            audio_index: None,
+            audio_offset_ms: 0,
+            subtitle_index: None,
+            subtitle_language: None,
+            subtitle_mode: "none".into(),
+            estimated_bytes: 100,
+            reserved_bytes: 120,
+            expires_at: i64::MAX,
+        };
+        assert!(matches!(
+            fixture
+                .store
+                .create_offline_package(&package, 10, 1_000, 2_000)
+                .await
+                .expect("create package"),
+            OfflineCreateOutcome::Created(_)
+        ));
+    }
+
+    /// How long, on the virtual clock, until `id` leaves the queue.
+    async fn time_to_claim(fixture: &Fixture, id: &str, limit: Duration) -> Duration {
+        let start = tokio::time::Instant::now();
+        while stored_package(fixture, id).await.state == "queued" {
+            assert!(
+                start.elapsed() <= limit,
+                "{id} was still queued after {limit:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        start.elapsed()
+    }
+
+    /// K-10 §3.1: an idle worker asks the authority only on the forced
+    /// interval.
+    ///
+    /// Ten minutes over an empty queue used to be 300 replicated claims (one
+    /// every 2 s). The local hint now answers every pass, and the claim runs
+    /// at start and then once every 30 s: 20 or 21, depending on whether the
+    /// last one lands inside the window.
+    #[tokio::test(start_paused = true)]
+    async fn claim_an_idle_worker_asks_the_authority_only_on_the_forced_interval() {
+        let fixture = seeded_fixture().await;
+        let task = tokio::spawn(Arc::clone(&fixture.manager).run(voter_authority()));
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        let metrics = &fixture.manager.metrics;
+        let claims = metrics.claim_ticks(ClaimOutcome::Claimed)
+            + metrics.claim_ticks(ClaimOutcome::EmptyClaim);
+        assert!(
+            (20..=21).contains(&claims),
+            "{claims} claims in ten idle minutes"
+        );
+        assert!(metrics.claim_ticks(ClaimOutcome::SkippedHint) >= 40);
+        assert_eq!(metrics.claim_ticks(ClaimOutcome::Gated), 0);
+        assert!(fixture
+            .manager
+            .prometheus()
+            .contains("plurx_offline_claim_ticks_total{outcome=\"skipped_hint\"}"));
+        task.abort();
+    }
+
+    /// K-10 §3.1: a package created on this node is claimed on the next pass,
+    /// not when the idle worker next looks.
+    #[tokio::test(start_paused = true)]
+    async fn claim_a_locally_created_package_wakes_the_worker() {
+        let fixture = seeded_fixture().await;
+        let task = tokio::spawn(Arc::clone(&fixture.manager).run(voter_authority()));
+        // Long enough idle for the backoff to reach its 10 s ceiling, and
+        // clear of the forced claims at 60 s and 90 s.
+        tokio::time::sleep(Duration::from_secs(65)).await;
+        queue_stale_package(&fixture, "woken").await;
+        fixture.manager.wake();
+        let waited = time_to_claim(&fixture, "woken", Duration::from_millis(500)).await;
+        assert!(waited < plurx_core::store::offline_claim::BASE_TICK);
+        task.abort();
+    }
+
+    /// A replica that has not applied the newest offline rows: its local
+    /// queue hint stays silent, and the replicated claim still goes to the
+    /// authority. On SQLite the "local" hint is the authority, so without
+    /// this the woken pass would see the package anyway and claim it whether
+    /// or not the wake forced the claim.
+    struct LaggingReplica(Arc<dyn Store>);
+
+    #[plurx_core::cluster::coordination::cluster_job_async_trait]
+    impl OfflineClaimStore for LaggingReplica {
+        async fn queue_hint(&self, _node_id: &str) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+
+        async fn claim(&self, node_id: &str) -> Result<Option<OfflinePackage>, StoreError> {
+            self.0.claim_next_offline_package(node_id).await
+        }
+    }
+
+    /// K-10 §3.1, #540 review finding 2: the wake forces the claim.
+    ///
+    /// A package this node created is on the authority when `create`
+    /// returns, but the local replica may not have applied it yet. The wake
+    /// must make the next pass claim whatever the hint says: on a replica
+    /// whose hint is still silent, the package is claimed within one base
+    /// tick, not when the forced claim next falls due (90 s here, 25 s
+    /// away).
+    #[tokio::test(start_paused = true)]
+    async fn claim_a_wake_claims_what_the_local_replica_does_not_show_yet() {
+        let fixture = seeded_fixture().await;
+        let manager = Arc::clone(&fixture.manager);
+        let replica = LaggingReplica(Arc::clone(&fixture.store));
+        let task = tokio::spawn(async move {
+            manager.run_with_claims(voter_authority(), &replica).await;
+        });
+        // Clear of the forced claims at 60 s and 90 s.
+        tokio::time::sleep(Duration::from_secs(65)).await;
+        queue_stale_package(&fixture, "woken-lagging").await;
+        fixture.manager.wake();
+        let waited = time_to_claim(&fixture, "woken-lagging", Duration::from_millis(500)).await;
+        assert!(waited < plurx_core::store::offline_claim::BASE_TICK);
+        task.abort();
+    }
+
+    /// A package that belongs to another node, so this worker's claim never
+    /// touches it and only the expiry sweep can remove it.
+    async fn put_expiring_package(fixture: &Fixture, id: &str, expires_at: i64) {
+        let package = NewOfflinePackage {
+            id: id.into(),
+            request_id: format!("request-{id}"),
+            user_id: fixture.user_id,
+            file_id: fixture.file.id,
+            node_id: "another-node".into(),
+            source_path: fixture.file.path.to_string_lossy().into_owned(),
+            source_size: fixture.file.size,
+            source_mtime: fixture.file.mtime,
+            effective_rate_control: EffectiveRateControl::Vbr.snapshot_value(),
+            target_height: 720,
+            output_width: Some(1280),
+            output_height: Some(720),
+            audio_index: None,
+            audio_offset_ms: 0,
+            subtitle_index: None,
+            subtitle_language: None,
+            subtitle_mode: "none".into(),
+            estimated_bytes: 100,
+            reserved_bytes: 120,
+            expires_at,
+        };
+        assert!(matches!(
+            fixture
+                .store
+                .create_offline_package(&package, 10, 1_000, 2_000)
+                .await
+                .expect("create package"),
+            OfflineCreateOutcome::Created(_)
+        ));
+    }
+
+    async fn package_exists(fixture: &Fixture, id: &str) -> bool {
+        fixture
+            .store
+            .offline_package_for_user(id, fixture.user_id)
+            .await
+            .expect("package lookup")
+            .is_some()
+    }
+
+    fn sweeps(metrics: &OfflineMetrics) -> u64 {
+        metrics.expiry_ticks(SweepOutcome::Swept) + metrics.expiry_ticks(SweepOutcome::EmptySweep)
+    }
+
+    /// K-10 §3.4: an idle worker runs the replicated expiry sweep only on the
+    /// forced interval.
+    ///
+    /// Thirty minutes with nothing lapsed used to be 30 sweeps, one a minute,
+    /// each a replicated `txn`. The local hint now answers every pass, and the
+    /// sweep runs at start and then once every 10 minutes: 3, or 4 when the
+    /// last forced one lands on the window's edge.
+    #[tokio::test(start_paused = true)]
+    async fn expiry_an_idle_worker_sweeps_only_on_the_forced_interval() {
+        let fixture = seeded_fixture().await;
+        let task = tokio::spawn(Arc::clone(&fixture.manager).run(voter_authority()));
+        tokio::time::sleep(Duration::from_secs(30 * 60)).await;
+        let metrics = &fixture.manager.metrics;
+        let sweeps = sweeps(metrics);
+        assert!(
+            (3..=4).contains(&sweeps),
+            "{sweeps} sweeps in thirty idle minutes"
+        );
+        assert!(metrics.expiry_ticks(SweepOutcome::SkippedHint) >= 26);
+        assert!(fixture
+            .manager
+            .prometheus()
+            .contains("plurx_offline_expiry_ticks_total{outcome=\"skipped_hint\"}"));
+        task.abort();
+    }
+
+    /// K-10 §3.4: a package that lapses while the worker is idle is expired
+    /// on the next pass — within one sweep tick of its expiry, not when the
+    /// forced sweep next falls due — and a package that has not lapsed is
+    /// left alone.
+    #[tokio::test(start_paused = true)]
+    async fn expiry_a_lapsed_package_is_swept_within_one_tick_and_a_live_one_is_kept() {
+        let fixture = seeded_fixture().await;
+        let task = tokio::spawn(Arc::clone(&fixture.manager).run(voter_authority()));
+        // Past the forced sweep at start and clear of the next one at 600 s.
+        tokio::time::sleep(Duration::from_secs(65)).await;
+        let before = sweeps(&fixture.manager.metrics);
+        let now_unix = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("wall clock")
+            .as_secs() as i64;
+        put_expiring_package(&fixture, "lapsed", now_unix - 1).await;
+        put_expiring_package(&fixture, "live", now_unix + 3_600).await;
+        let start = tokio::time::Instant::now();
+        while package_exists(&fixture, "lapsed").await {
+            assert!(
+                start.elapsed() <= SWEEP_TICK,
+                "a lapsed package outlived one sweep tick"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        assert!(package_exists(&fixture, "live").await, "expired early");
+        assert_eq!(fixture.manager.metrics.expiry_ticks(SweepOutcome::Swept), 1);
+        assert_eq!(sweeps(&fixture.manager.metrics), before + 1);
+        task.abort();
+    }
+
+    /// K-10 §3.1: a package made `queued` for this node by another node — a
+    /// re-home after node removal, or a re-enable — reaches it through the
+    /// local hint within the idle ceiling, with no wake and well before the
+    /// forced claim.
+    #[tokio::test(start_paused = true)]
+    async fn claim_a_package_queued_elsewhere_is_claimed_within_the_idle_ceiling() {
+        let fixture = seeded_fixture().await;
+        let task = tokio::spawn(Arc::clone(&fixture.manager).run(voter_authority()));
+        tokio::time::sleep(Duration::from_secs(61)).await;
+        queue_stale_package(&fixture, "rehomed").await;
+        time_to_claim(
+            &fixture,
+            "rehomed",
+            plurx_core::store::offline_claim::IDLE_TICK_MAX + Duration::from_millis(100),
+        )
+        .await;
+        task.abort();
     }
 }

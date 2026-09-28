@@ -888,6 +888,480 @@
         assert!(String::from_utf8_lossy(&served.raw).contains("#EXT-X-ENDLIST"));
     }
 
+    /// What one simulated rolling session did, sampled on the publication
+    /// worker's own poll.
+    #[derive(Debug, Default)]
+    struct HeldRollingProducerRun {
+        /// `(wall ms, media ms)` added by every snapshot after the first.
+        batches: Vec<(i64, i64)>,
+        /// Wall time the viewer spent with nothing published to present.
+        stalled_ms: i64,
+        /// Wall time of the last poll on which the viewer was stalled.
+        last_stall_at_ms: Option<i64>,
+        /// Smallest published lead over the viewer once playback began.
+        min_runway_ms: i64,
+        /// Smallest published lead over the viewer in the final third of the
+        /// run, after any startup shortfall has had time to recover.
+        min_late_runway_ms: i64,
+        /// Largest produced lead over the viewer once playback began.
+        max_produced_lead_ms: i64,
+        /// Largest `produced end - allowed_end_ms` seen on any poll.
+        max_produced_over_allowed_ms: i64,
+        /// Polls on which a producer with a whole staged batch was released
+        /// at or beyond the clock's `allowed_end_ms`.
+        releases_beyond_allowance: Vec<(i64, i64, i64)>,
+        /// Polls on which the flow controller held the producer.
+        held_polls: usize,
+    }
+
+    impl HeldRollingProducerRun {
+        fn single_segment_batches_after(&self, wall_ms: i64) -> usize {
+            self.batches
+                .iter()
+                .filter(|(at, media)| *at > wall_ms && *media <= 2_000)
+                .count()
+        }
+    }
+
+    /// Drive the rolling publication clock and the flow controller together,
+    /// the way `publication_cycle` and `apply_ahead_window` share one
+    /// session: a producer that runs at `producer_speed` only while
+    /// `evaluate_flow` does not hold it, writing 2-second segments, and a
+    /// viewer that presents at `playback_rate` whatever has been published
+    /// and reports its position every exchange. `poll` is the publication
+    /// worker's cadence including its own cycle work; a poll that does not
+    /// divide the 16-second target observes each due publication slightly
+    /// late, as production does.
+    ///
+    /// Time is Tokio's paused clock, which the control actor also reads, so
+    /// the publication clock and the flow controller both project the
+    /// viewer's position from its last report, as in production. The clock
+    /// stamps a committed snapshot with the wall `Instant::now()`, which does
+    /// not advance here, so the harness restamps it on the paused clock, where
+    /// production's commit would have landed.
+    async fn simulate_held_rolling_producer(
+        label: &str,
+        poll: Duration,
+        producer_speed: f64,
+        playback_rate: f64,
+        wall: Duration,
+    ) -> HeldRollingProducerRun {
+        const SEGMENT_MS: i64 = 2_000;
+        let directory = crate::test_tempdir().expect("held rolling producer");
+        let session = test_session(directory.path().to_path_buf());
+        let poll_ms = i64::try_from(poll.as_millis()).expect("poll");
+        let consumed_per_poll_ms = ((poll_ms as f64) * playback_rate).round() as i64;
+        let exchange_ms = i64::from(crate::playback_control::NEXT_EXCHANGE_MS);
+        let batch_ms = rolling_publication_batch_ms(playback_rate);
+        let wall_ms = i64::try_from(wall.as_millis()).expect("wall");
+        let mut run = HeldRollingProducerRun {
+            min_runway_ms: i64::MAX,
+            min_late_runway_ms: i64::MAX,
+            max_produced_over_allowed_ms: i64::MIN,
+            ..HeldRollingProducerRun::default()
+        };
+        let mut segments = 0_usize;
+        let mut written_segments = usize::MAX;
+        let mut producer_progress_ms = 0.0_f64;
+        let mut held = false;
+        let mut position_ms = 0_i64;
+        let mut playing = false;
+        let mut sequence = 0_u64;
+        let mut last_report_ms: Option<i64> = None;
+        let mut served_end_ms: Option<i64> = None;
+        let mut served_revision: Option<u64> = None;
+        let mut elapsed_ms = 0_i64;
+
+        while elapsed_ms <= wall_ms {
+            let now = tokio::time::Instant::now().into_std();
+            // The viewer presents only what has been published.
+            let mut render_state = crate::playback_control::RenderState::Starting;
+            if playing {
+                let published = served_end_ms.unwrap_or(0);
+                if position_ms.saturating_add(consumed_per_poll_ms) <= published {
+                    position_ms = position_ms.saturating_add(consumed_per_poll_ms);
+                    render_state = crate::playback_control::RenderState::Rendering;
+                } else {
+                    position_ms = published.max(position_ms);
+                    run.stalled_ms = run.stalled_ms.saturating_add(poll_ms);
+                    run.last_stall_at_ms = Some(elapsed_ms);
+                    render_state = crate::playback_control::RenderState::Waiting;
+                }
+            }
+            if last_report_ms.is_none_or(|last| elapsed_ms.saturating_sub(last) >= exchange_ms) {
+                last_report_ms = Some(elapsed_ms);
+                sequence = sequence.saturating_add(1);
+                let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+                    crate::playback_control::ClientPlatform::Web,
+                );
+                snapshot.demand = crate::playback_control::PlaybackDemand::Active;
+                snapshot.position_ms = position_ms;
+                snapshot.buffered_from_ms = Some(position_ms);
+                snapshot.buffered_through_ms =
+                    served_end_ms.unwrap_or(position_ms).max(position_ms);
+                snapshot.playback_rate = playback_rate;
+                snapshot.render_state = render_state;
+                let outcome = session
+                    .control
+                    .control(crate::playback_control::LocalControlRequest {
+                        session_id: "rolling-budget-session",
+                        generation: "rolling-budget-generation",
+                        owner_node_id: "test-node",
+                        owner_epoch: 1,
+                        client_instance_id: "00000000-0000-4000-8000-000000000001",
+                        sequence,
+                        snapshot,
+                        prepared_successor:
+                            crate::playback_control::PreparedSuccessorObservation::NotRequested,
+                    })
+                    .await
+                    .expect("viewer report accepted");
+                assert_eq!(
+                    outcome.disposition,
+                    crate::playback_control::ControlDisposition::Accepted
+                );
+            }
+
+            // The producer writes whole segments while it is not held.
+            if !held {
+                producer_progress_ms += (poll_ms as f64) * producer_speed;
+                while producer_progress_ms >= SEGMENT_MS as f64 {
+                    producer_progress_ms -= SEGMENT_MS as f64;
+                    segments += 1;
+                }
+            }
+            if segments > 0 && segments != written_segments {
+                tokio::fs::write(
+                    directory.path().join("index.m3u8"),
+                    rolling_playlist(&vec![2.0; segments], false),
+                )
+                .await
+                .expect("writer playlist");
+                written_segments = segments;
+            }
+            let produced_end_ms = i64::try_from(segments).expect("segments") * SEGMENT_MS;
+
+            session
+                .publication_cycle_at(label, now)
+                .await
+                .expect("rolling publication stays live");
+            let (published, allowed_end_ms) = {
+                let mut clock = session.publication.lock().await;
+                let revision = clock.served.as_ref().map(|served| served.revision);
+                if revision != served_revision {
+                    served_revision = revision;
+                    clock.next_publish_at = Some(now + ROLLING_PUBLICATION_TARGET);
+                    clock.hard_deadline = Some(now + ROLLING_PUBLICATION_HARD);
+                    if let Some(served) = clock.served.as_mut() {
+                        served.available_at = now;
+                    }
+                }
+                (
+                    clock.served.as_ref().map(|served| served.end_ms),
+                    clock.allowed_end_ms,
+                )
+            };
+            if let (Some(previous), Some(current)) = (served_end_ms, published) {
+                if current > previous {
+                    run.batches.push((elapsed_ms, current - previous));
+                }
+            }
+            if published.is_some() && !playing {
+                playing = true;
+            }
+            served_end_ms = published;
+            if playing {
+                let published = served_end_ms.unwrap_or(0);
+                let runway_ms = published.saturating_sub(position_ms);
+                run.min_runway_ms = run.min_runway_ms.min(runway_ms);
+                if elapsed_ms * 3 >= wall_ms * 2 {
+                    run.min_late_runway_ms = run.min_late_runway_ms.min(runway_ms);
+                }
+                run.max_produced_lead_ms = run
+                    .max_produced_lead_ms
+                    .max(produced_end_ms.saturating_sub(position_ms));
+            }
+            if let Some(allowed_end_ms) = allowed_end_ms {
+                run.max_produced_over_allowed_ms = run
+                    .max_produced_over_allowed_ms
+                    .max(produced_end_ms.saturating_sub(allowed_end_ms));
+            }
+
+            // The flow controller, fed exactly as `apply_ahead_window` feeds
+            // it: the writer's produced end and the clock's staged seconds.
+            let lease = session.control.snapshot().await.expect("rolling lease");
+            assert_eq!(
+                lease.mode,
+                crate::playback_control::RollingLeaseMode::Explicit
+            );
+            let staged_publication_seconds = session
+                .staged_publication_seconds(session.control.current_producer_attempt())
+                .await;
+            let evaluation = evaluate_flow(FlowInputs {
+                physical_ahead: None,
+                produced_end_ms: (segments > 0).then_some(produced_end_ms),
+                staged_publication_seconds,
+                startup_protected: false,
+                media_origin_ms: 0,
+                lease_mode: lease.mode,
+                demand: lease.demand.as_ref(),
+                demand_observation_age: lease.demand_observation_age,
+                global_live_bytes: 0,
+                global_ahead_bytes: 0,
+                limits: AheadLimits {
+                    max_secs: HLS_AHEAD_MAX_SECS_DEFAULT,
+                    max_bytes: HLS_AHEAD_MAX_BYTES_DEFAULT,
+                    global_max_bytes: 0,
+                },
+                currently_suspended: held,
+                scratch_grant_exhausted: None,
+            });
+            held = evaluation.hold.is_some();
+            if held {
+                run.held_polls += 1;
+            } else if let (Some(staged), Some(allowed_end_ms)) =
+                (staged_publication_seconds, allowed_end_ms)
+            {
+                // A whole batch is staged, so only the next-publication rule
+                // can have released this producer; it must stop inside the
+                // clock's own allowance.
+                if staged.saturating_mul(1_000) >= batch_ms && produced_end_ms >= allowed_end_ms {
+                    run.releases_beyond_allowance
+                        .push((elapsed_ms, produced_end_ms, allowed_end_ms));
+                }
+            }
+
+            tokio::time::advance(poll).await;
+            elapsed_ms = elapsed_ms.saturating_add(poll_ms);
+        }
+        run
+    }
+
+    /// Regression: a publication observed a moment after its 16-second target
+    /// must not leave the session publishing one segment per cycle forever.
+    ///
+    /// Each scheduled snapshot must reach `consumed + 48 s`; the flow
+    /// controller used to hold the producer as soon as one 16-second batch was
+    /// staged past the *published* end. In steady state that is exactly the
+    /// media the next publication needs, so a cycle observed even 10 ms late
+    /// finds the producer one segment short. The clock then publishes only the
+    /// next segment, the producer may run just one segment further, and every
+    /// later cycle is short again: 2 s published per 16 s while the viewer's
+    /// runway drains (seen live on nuc4 as `production_ahead 16/16` with
+    /// 14-15 s stalls). The producer must instead be allowed to reach the
+    /// media the next publication will ask for.
+    #[tokio::test(start_paused = true)]
+    async fn rolling_publication_budget_late_cycle_does_not_trap_a_held_producer() {
+        // 260 ms is the 250 ms worker poll plus a little cycle work.
+        let run = simulate_held_rolling_producer(
+            "rolling_publication_budget_late_cycle",
+            Duration::from_millis(260),
+            2.0,
+            1.0,
+            Duration::from_secs(300),
+        )
+        .await;
+        assert_eq!(
+            run.stalled_ms, 0,
+            "the viewer must never run out of published media: {run:?}"
+        );
+        assert_eq!(
+            run.single_segment_batches_after(0),
+            0,
+            "scheduled publications must stay batched, not one segment per cycle: {run:?}"
+        );
+        assert!(
+            run.min_runway_ms
+                >= ROLLING_INITIAL_RUNWAY_MS - ROLLING_SEGMENT_MAX_MS - ROLLING_PUBLICATION_GUARD_MS,
+            "the published runway must not drain: {run:?}"
+        );
+        assert!(run.held_polls > 0, "the producer is still paced: {run:?}");
+        assert!(run.releases_beyond_allowance.is_empty(), "{run:?}");
+        assert!(
+            run.max_produced_over_allowed_ms <= 2_000,
+            "produced media stays within one segment of allowed_end_ms: {run:?}"
+        );
+    }
+
+    /// A realistic producer only 10% faster than playback. It reaches the
+    /// initial runway with nothing to spare, so the first scheduled cycle
+    /// legitimately finds it short and publishes one segment (measured: 2 s
+    /// at 59.5 s, then a 32 s catch-up batch, runway low point 18 s). What
+    /// must not happen is the permanent trap. The thresholds are therefore:
+    /// no stall, at most that one short cycle and none after the first
+    /// minute, a runway never below one batch, recovered in the final third
+    /// to within one batch and one guard of the initial runway, and produced
+    /// media within one segment of `allowed_end_ms`.
+    #[tokio::test(start_paused = true)]
+    async fn rolling_publication_budget_barely_faster_producer_recovers_from_late_cycles() {
+        let wall = Duration::from_secs(600);
+        let run = simulate_held_rolling_producer(
+            "rolling_publication_budget_barely_faster",
+            Duration::from_millis(260),
+            1.1,
+            1.0,
+            wall,
+        )
+        .await;
+        assert_eq!(run.stalled_ms, 0, "{run:?}");
+        assert!(run.single_segment_batches_after(0) <= 1, "{run:?}");
+        assert_eq!(
+            run.single_segment_batches_after(60_000),
+            0,
+            "no permanent one-segment cycle: {run:?}"
+        );
+        assert!(run.min_runway_ms >= ROLLING_SEGMENT_MAX_MS, "{run:?}");
+        assert!(
+            run.min_late_runway_ms
+                >= ROLLING_INITIAL_RUNWAY_MS - ROLLING_SEGMENT_MAX_MS - ROLLING_PUBLICATION_GUARD_MS,
+            "runway recovers: {run:?}"
+        );
+        assert!(run.releases_beyond_allowance.is_empty(), "{run:?}");
+        assert!(run.max_produced_over_allowed_ms <= 2_000, "{run:?}");
+    }
+
+    /// At 2x playback the next-publication release is capped at the clock's
+    /// `allowed_end_ms`: its guard scales with rate, the allowance's rounding
+    /// segment does not. The producer must never be released with a whole
+    /// batch staged at or beyond that allowance.
+    ///
+    /// Produced media can still pass `allowed_end_ms` here, through the
+    /// pre-existing one-batch staging rule rather than this release: at 2x a
+    /// batch is 32 s past the published end while the allowance rounds by an
+    /// unscaled 16 s. That excess is bounded by the difference plus one
+    /// segment (measured 6 s) and is asserted as such.
+    #[tokio::test(start_paused = true)]
+    async fn rolling_publication_budget_double_rate_release_stays_inside_the_allowance() {
+        let run = simulate_held_rolling_producer(
+            "rolling_publication_budget_double_rate",
+            Duration::from_millis(260),
+            3.0,
+            2.0,
+            Duration::from_secs(300),
+        )
+        .await;
+        assert_eq!(run.stalled_ms, 0, "{run:?}");
+        assert_eq!(run.single_segment_batches_after(0), 0, "{run:?}");
+        assert!(
+            run.releases_beyond_allowance.is_empty(),
+            "released beyond allowed_end_ms: {run:?}"
+        );
+        assert!(
+            run.max_produced_over_allowed_ms
+                <= rolling_publication_batch_ms(2.0) - ROLLING_SEGMENT_MAX_MS + 2_000,
+            "{run:?}"
+        );
+        assert!(
+            run.min_runway_ms >= rolling_initial_runway_ms(2.0) - rolling_publication_batch_ms(2.0),
+            "{run:?}"
+        );
+        assert!(run.held_polls > 0, "{run:?}");
+    }
+
+    /// Control for the regression above: a publication clock observed exactly
+    /// on time keeps its existing contract -- one batch of about 16 s per
+    /// cycle, a producer that is time-held between cycles, and a produced lead
+    /// bounded by the reserve plus one batch and one segment of rounding.
+    #[tokio::test(start_paused = true)]
+    async fn rolling_publication_budget_on_time_cycles_keep_batching_and_pacing() {
+        let run = simulate_held_rolling_producer(
+            "rolling_publication_budget_on_time",
+            ROLLING_PUBLICATION_POLL,
+            2.0,
+            1.0,
+            Duration::from_secs(300),
+        )
+        .await;
+        assert_eq!(run.stalled_ms, 0, "{run:?}");
+        assert!(run.batches.len() >= 15, "{run:?}");
+        assert!(
+            run.batches
+                .iter()
+                .all(|(_, media)| (14_000..=18_000).contains(media)),
+            "every scheduled publication is one ~16 s batch: {run:?}"
+        );
+        assert!(
+            run.held_polls * 3 >= run.batches.len() * 16,
+            "the producer spends a real part of each cycle time-held: {run:?}"
+        );
+        assert!(
+            run.max_produced_lead_ms <= ROLLING_INITIAL_RUNWAY_MS + 2 * ROLLING_SEGMENT_MAX_MS,
+            "produced inventory stays inside the publication allowance plus one batch: {run:?}"
+        );
+        assert!(run.max_produced_over_allowed_ms <= 2_000, "{run:?}");
+    }
+
+    /// The next-publication release target is the clock's own desired end
+    /// plus a rate-scaled guard, capped at the clock's `allowed_end_ms`. At
+    /// every rate a producer that has reached `allowed_end_ms` with a batch
+    /// staged is held; at 1x one that is a batch past publication but still
+    /// short of `desired + guard` keeps producing.
+    #[test]
+    fn rolling_flow_release_target_is_capped_by_the_publication_allowance() {
+        let limits = AheadLimits {
+            max_secs: HLS_AHEAD_MAX_SECS_DEFAULT,
+            max_bytes: HLS_AHEAD_MAX_BYTES_DEFAULT,
+            global_max_bytes: 0,
+        };
+        let evaluate = |demand: &crate::playback_control::PlaybackDemandSnapshot,
+                        age: Duration,
+                        produced_end_ms: i64| {
+            evaluate_flow(FlowInputs {
+                physical_ahead: None,
+                produced_end_ms: Some(produced_end_ms),
+                staged_publication_seconds: Some(64),
+                startup_protected: false,
+                media_origin_ms: 5_000,
+                lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+                demand: Some(demand),
+                demand_observation_age: Some(age),
+                global_live_bytes: 0,
+                global_ahead_bytes: 0,
+                limits,
+                currently_suspended: false,
+                scratch_grant_exhausted: None,
+            })
+            .hold
+            .map(|hold| hold.reason)
+        };
+        for rate in [1.0, 1.6, 2.0, 4.0] {
+            let mut demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
+                crate::playback_control::ClientPlatform::Web,
+            );
+            demand.playback_rate = rate;
+            let age = Duration::from_secs(3);
+            let ends = rolling_explicit_publication_ends(&demand, age, 5_000);
+            assert_eq!(
+                ends.consumed_end_ms,
+                10_000 + ((3_000.0 * rate) as i64) - 5_000,
+                "the flow reads the clock's projected position at {rate}x"
+            );
+            assert_eq!(
+                evaluate(&demand, age, ends.allowed_end_ms),
+                Some(AheadHoldReason::Time),
+                "held at allowed_end_ms at {rate}x"
+            );
+            assert_eq!(
+                evaluate(&demand, age, ends.allowed_end_ms - 1_000),
+                (rate < 1.6).then_some(AheadHoldReason::Time),
+                "one second short of allowed_end_ms at {rate}x"
+            );
+        }
+        let demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Web,
+        );
+        let ends = rolling_explicit_publication_ends(&demand, Duration::ZERO, 5_000);
+        assert_eq!(
+            evaluate(&demand, Duration::ZERO, ends.desired_end_ms + 9_000),
+            None,
+            "short of desired + guard at 1x the producer keeps producing"
+        );
+        assert_eq!(
+            evaluate(&demand, Duration::ZERO, ends.desired_end_ms + 10_000),
+            Some(AheadHoldReason::Time)
+        );
+    }
+
     #[test]
     fn rolling_publication_budget_target_only_rounding_is_a_negative_control() {
         let mut frontier_ms = ROLLING_INITIAL_RUNWAY_MS;
@@ -1072,6 +1546,187 @@
             .await
             .expect_err("a stopped writer cannot keep the presentation forever");
         assert!(reason.contains("hard deadline"), "{reason}");
+    }
+
+    async fn scratch_hold_write_playlist(session: &Session, durations: &[f64]) {
+        tokio::fs::write(
+            session.dir.join("index.m3u8"),
+            rolling_playlist(durations, false),
+        )
+        .await
+        .expect("writer playlist");
+    }
+
+    async fn scratch_hold_set(session: &Session, reason: Option<AheadHoldReason>, since: Instant) {
+        *session.suspended_at.lock().await = reason.map(|reason| SuspendedAt {
+            since,
+            hold: AheadHold {
+                reason,
+                release_value: 1,
+            },
+        });
+        session.suspended.store(reason.is_some(), Relaxed);
+    }
+
+    /// Publish once, then hold the producer for `reason` starting a second
+    /// later. Returns the served snapshot's publication instant.
+    async fn scratch_hold_published_and_held(session: &Session, reason: AheadHoldReason) -> Instant {
+        scratch_hold_write_playlist(session, &[16.0, 16.0, 16.0]).await;
+        session
+            .publication_cycle("scratch-hold-deadline")
+            .await
+            .expect("initial publication");
+        let published = session
+            .publication
+            .lock()
+            .await
+            .served
+            .as_ref()
+            .expect("served snapshot")
+            .available_at;
+        scratch_hold_set(session, Some(reason), published + Duration::from_secs(1)).await;
+        published
+    }
+
+    /// A producer held because global scratch is exhausted is waiting on
+    /// capacity, and scratch_put lets its starved writer wait as long as the
+    /// session lives. The 24 s publication deadline used to retire it anyway,
+    /// with the client still rendering from its buffer. Once the hold clears
+    /// the deadline runs its full length again, so a producer that stays
+    /// stuck is still retired.
+    ///
+    /// Run twice: with a slow speed frozen by the stop the capacity arm fires
+    /// first on the deadline; with no measured speed only the hard-deadline
+    /// arm can retire the session. Both must wait out the hold.
+    #[tokio::test]
+    async fn scratch_hold_publication_deadline_waits_out_a_global_scratch_hold() {
+        for (recent_milli, retired_by) in [
+            (Some(500), "rolling_insufficient_capacity"),
+            (None, "hard deadline"),
+        ] {
+            let directory = crate::test_tempdir().expect("publication deadline");
+            let session = test_session(directory.path().to_path_buf());
+            let published =
+                scratch_hold_published_and_held(&session, AheadHoldReason::Global).await;
+            if let Some(recent_milli) = recent_milli {
+                session.progress.recent_milli.store(recent_milli, Relaxed);
+            }
+            let held_until = published + ROLLING_PUBLICATION_HARD * 3;
+            let mut now = published;
+            while now < held_until {
+                now += Duration::from_secs(1);
+                session
+                    .publication_cycle_at("scratch-hold-deadline", now)
+                    .await
+                    .unwrap_or_else(|reason| {
+                        panic!("a producer held for scratch is waiting, not stuck: {reason}")
+                    });
+            }
+
+            scratch_hold_set(&session, None, held_until).await;
+            session
+                .publication_cycle_at(
+                    "scratch-hold-deadline",
+                    held_until + ROLLING_PUBLICATION_HARD - Duration::from_secs(1),
+                )
+                .await
+                .expect("the deadline restarts from the end of the hold");
+            let reason = session
+                .publication_cycle_at(
+                    "scratch-hold-deadline",
+                    held_until + ROLLING_PUBLICATION_HARD + Duration::from_secs(1),
+                )
+                .await
+                .expect_err("a producer still stuck after the hold clears is retired");
+            assert!(reason.contains(retired_by), "{retired_by}: {reason}");
+        }
+    }
+
+    /// Before the first snapshot the capacity check has no deadline: a
+    /// session that has staged its initial runway at a measured speed below
+    /// the playback rate is retired at once. A writer starved for global
+    /// scratch stops FFmpeg with its last measured speed frozen, so that
+    /// check must wait out the hold too, and apply as before once it clears.
+    #[tokio::test]
+    async fn scratch_hold_publication_deadline_prepublication_capacity_waits_out_a_global_scratch_hold(
+    ) {
+        let directory = crate::test_tempdir().expect("publication deadline");
+        let session = test_session(directory.path().to_path_buf());
+        let started = Instant::now();
+        // Anchor the legacy publication budget below the initial runway.
+        scratch_hold_write_playlist(&session, &[16.0, 16.0]).await;
+        session
+            .publication_cycle_at("scratch-hold-prepublication", started)
+            .await
+            .expect("below the initial runway nothing is judged");
+        // Exactly the initial runway, measured at half speed, staged ten
+        // seconds later: the legacy budget now wants 58 s, so nothing
+        // publishes and the session stays in its pre-publication state.
+        session.progress.recent_milli.store(500, Relaxed);
+        scratch_hold_write_playlist(&session, &[16.0, 16.0, 16.0]).await;
+        scratch_hold_set(&session, Some(AheadHoldReason::Global), started).await;
+        let held_until = started + ROLLING_PUBLICATION_HARD * 3;
+        let mut now = started + Duration::from_secs(10);
+        while now < held_until {
+            session
+                .publication_cycle_at("scratch-hold-prepublication", now)
+                .await
+                .unwrap_or_else(|reason| {
+                    panic!("a producer held for scratch is waiting, not slow: {reason}")
+                });
+            now += Duration::from_secs(1);
+        }
+        assert!(
+            session.publication.lock().await.served.is_none(),
+            "the hold is observed before the first snapshot"
+        );
+
+        scratch_hold_set(&session, None, held_until).await;
+        let reason = session
+            .publication_cycle_at("scratch-hold-prepublication", held_until)
+            .await
+            .expect_err("a slow producer is judged as before once the hold clears");
+        assert!(
+            reason.starts_with("rolling_insufficient_capacity:"),
+            "{reason}"
+        );
+    }
+
+    async fn scratch_hold_keeps_the_deadline(reason: AheadHoldReason) {
+        let directory = crate::test_tempdir().expect("publication deadline");
+        let session = test_session(directory.path().to_path_buf());
+        let published = scratch_hold_published_and_held(&session, reason).await;
+        session
+            .publication_cycle_at(
+                "scratch-hold-deadline",
+                published + ROLLING_PUBLICATION_HARD - Duration::from_secs(1),
+            )
+            .await
+            .expect("inside the deadline");
+        let error = session
+            .publication_cycle_at(
+                "scratch-hold-deadline",
+                published + ROLLING_PUBLICATION_HARD + Duration::from_secs(1),
+            )
+            .await
+            .expect_err("only a scratch hold extends the publication deadline");
+        assert!(error.contains("hard deadline"), "{reason:?}: {error}");
+    }
+
+    /// Only a scratch hold suspends the deadline. A producer held because it
+    /// ran ahead of demand has nothing to wait for from the budget, and keeps
+    /// the ordinary deadline.
+    #[tokio::test]
+    async fn scratch_hold_publication_deadline_still_applies_to_a_demand_hold() {
+        scratch_hold_keeps_the_deadline(AheadHoldReason::Demand).await;
+    }
+
+    /// The per-session byte bound is the closest neighbour to the global one,
+    /// but it holds a producer for running ahead of its own client, not for
+    /// shared capacity. It keeps the ordinary deadline.
+    #[tokio::test]
+    async fn scratch_hold_publication_deadline_still_applies_to_a_bytes_hold() {
+        scratch_hold_keeps_the_deadline(AheadHoldReason::Bytes).await;
     }
 
     #[tokio::test]
@@ -2233,11 +2888,12 @@
                     seconds: 0,
                     bytes: 0,
                 }),
-                published_end_ms: Some(86_086),
+                produced_end_ms: Some(86_086),
                 staged_publication_seconds: None,
                 media_origin_ms: 729_643,
                 lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
                 demand: Some(demand),
+                demand_observation_age: None,
                 global_live_bytes: 64_391_174,
                 global_ahead_bytes: 0,
                 limits: AheadLimits {
@@ -2300,7 +2956,7 @@
                     seconds: 60,
                     bytes: 1_000,
                 }),
-                published_end_ms: Some(80_000),
+                produced_end_ms: Some(80_000),
                 staged_publication_seconds: Some(16),
                 // Pre-existing coverage: the startup grant is already spent, so
                 // these assertions are about steady-state flow control.
@@ -2308,6 +2964,7 @@
                 media_origin_ms: 100_000,
                 lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
                 demand: Some(&demand),
+                demand_observation_age: None,
                 global_live_bytes: 1_000,
                 global_ahead_bytes: 1_000,
                 limits,
@@ -2386,12 +3043,13 @@
                 seconds: 60,
                 bytes: 1_000,
             }),
-            published_end_ms: Some(80_000),
+            produced_end_ms: Some(80_000),
             staged_publication_seconds: Some(16),
             startup_protected: false,
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&loaded_demand),
+            demand_observation_age: None,
             global_live_bytes: 1_000,
             global_ahead_bytes: 1_000,
             limits,
@@ -2433,12 +3091,13 @@
                 seconds: 20,
                 bytes: 1_000,
             }),
-            published_end_ms: Some(20_000),
+            produced_end_ms: Some(20_000),
             staged_publication_seconds: None,
             startup_protected: false,
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
+            demand_observation_age: None,
             global_live_bytes: 1_000,
             global_ahead_bytes: 1_000,
             limits,

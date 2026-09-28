@@ -197,6 +197,11 @@ struct LiveTvDeveloperView: View {
                 Button("Reload server settings") { Task { await load() } }.disabled(busy)
             }
         }
+        #if os(tvOS)
+        // Match Settings: keep these choices in a menu instead of pushing the
+        // Form picker's empty destination through the tab bar's stack.
+        .pickerStyle(.menu)
+        #endif
         .navigationTitle("Developer")
         .task { await load() }
         .onDisappear { revision = UUID() }
@@ -219,7 +224,7 @@ struct LiveTvDeveloperView: View {
         let expected = UUID()
         revision = expected
         busy = true
-        let client = LiveTvAPI(origin: model.origin, token: Session.shared.token)
+        let client = LiveTvAPI(origin: model.origin, token: Session.shared.credentials.token)
         api = client
         do {
             let settings = try await client.settings()

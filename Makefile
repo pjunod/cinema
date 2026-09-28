@@ -156,6 +156,34 @@ spike-lock-check: ## Prove the isolated spike's lockfile still resolves
 	@#   cargo update --manifest-path spikes/hiqlite-m0/Cargo.toml --workspace
 	@$(CARGO) metadata --locked --manifest-path spikes/hiqlite-m0/Cargo.toml \
 	  --format-version 1 >/dev/null
+	@# spikes/tokenizer-backends depends on no workspace crate, so nothing can
+	@# strand its lockfile; checking it here keeps the committed lock honest.
+	@$(CARGO) metadata --locked --manifest-path spikes/tokenizer-backends/Cargo.toml \
+	  --format-version 1 >/dev/null
+
+.PHONY: tokenizer-backends
+tokenizer-backends: ## K-08 M4: onig vs fancy-regex token ids (PLURX_TEST_MINILM_DIR=<pinned tokenizer.json dir>)
+	@# plurxd cannot build fancy-regex (candle-core forces tokenizers/onig), so
+	@# the comparison builds tokenizers alone, once per backend. Each run checks
+	@# the fixture ids against plurxd's recorded ones; PLURX_TEST_TOKENIZER_CORPUS
+	@# appends a further corpus to both runs.
+	@test -n "$(PLURX_TEST_MINILM_DIR)" || { \
+	  echo "set PLURX_TEST_MINILM_DIR to a directory holding the pinned tokenizer.json" >&2; exit 2; }
+	@set -e; out=$$(mktemp -d); \
+	for backend in onig fancy-regex; do \
+	  $(CARGO) run --locked --release --quiet \
+	    --manifest-path spikes/tokenizer-backends/Cargo.toml \
+	    --no-default-features --features $$backend -- \
+	    "$(PLURX_TEST_MINILM_DIR)" "$$out/$$backend.ids"; \
+	done; \
+	$(CARGO) tree --locked --manifest-path spikes/tokenizer-backends/Cargo.toml \
+	  --no-default-features --features fancy-regex -e normal,build --prefix none \
+	  > "$$out/fancy-regex.tree"; \
+	if grep -q '^onig_sys ' "$$out/fancy-regex.tree"; then \
+	  echo "the fancy-regex build still compiles onig_sys" >&2; exit 1; fi; \
+	cmp "$$out/onig.ids" "$$out/fancy-regex.ids"; \
+	echo "tokenizer-backends: onig and fancy-regex ids identical over $$(wc -l < "$$out/onig.ids") inputs; no onig_sys in the fancy-regex graph"; \
+	rm -rf "$$out"
 
 .PHONY: hiqlite-spike
 hiqlite-spike: ## Run the isolated M0 raft/SQLite semantic proof
@@ -180,6 +208,14 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::frame_io::tests::raw_write_frame_stays_idle_after_transport_recovers_until_an_explicit_flush \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::api::tests::write_ack_variants_are_appended_after_every_deployed_response_ordinal \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::api::tests::write_ack_log_index_is_sent_only_on_a_negotiated_connection \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
@@ -868,7 +904,7 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::extract::tests::replicated_exclusion_projection_outlives_remote_ttl_and_clock_skew \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
-	  http::extract::tests::cache_admin_revocation_operation_gate_fails_fast_and_is_raii_released \
+	  http::extract::tests::cache_admin_revocation_operation_queue_is_bounded_and_raii_released \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::capability_refresh_error_and_rollback_clear_cache_only_admin_authority \
@@ -1449,10 +1485,16 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/page-read-budget.test.js
 	@node tests/web/theme-family.test.js
 	@node tests/web/activity-node-names.test.js
+	# Every child process is listed with its priority class and a stop (P-02 §3.2).
+	@node tests/web/activity-processes.test.js
 	@node tests/web/analysis-node-names.test.js
 	@node tests/web/settings-sections.test.js
+	@node --test tests/web/subtitle-downloads.test.js
 	# A cluster fault must reach the panel, not the login page.
 	@node tests/web/cluster-recovery-session.test.js
+	# An idle-expired sign-in lands on the login page saying why.
+	@node tests/web/session-expiry.test.js
+	@node tests/web/read-after.test.js
 	# The validation runner already has this as `web-membership`, but this is
 	# the target a web change reaches for, and the Cluster panel is a web
 	# surface like any other here. Two seconds.
@@ -1464,6 +1506,13 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/asset-load.test.js
 	@node tests/web/asset-layout.test.js
 	@scripts/js-check
+	# Shape, not order: TypeScript's checker (tsc, checkJs) over the same rows,
+	# against a per-file baseline that only shrinks. The file list is generated
+	# from the shell, so a new row is read the day it is served.
+	# docs/clients/WEB-TYPE-CHECKING-AND-PLAYER-DECOMPOSITION.md §3.
+	@node tests/web/jsconfig-generated.test.js
+	@scripts/web-types
+	@node tests/web/player-typedef.test.js
 	@scripts/contrast-check --from-index crates/plurxd/src/web/core/theme.js \
 		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
 		--allow scripts/contrast-allow.txt
@@ -1486,8 +1535,9 @@ docker: ## Build the container image
 	docker build --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" -t plurx/plurxd:latest .
 
 .PHONY: container-smoke
-container-smoke: docker ## Build, start, probe, restart, and re-probe the container
+container-smoke: docker ## Build, start, probe, restart, re-probe, then back up and restore the container
 	@scripts/container-smoke plurx/plurxd:latest
+	@scripts/container-restore-smoke plurx/plurxd:latest
 
 # The Compose deploy, as one command that cannot forget the stamp.
 #
@@ -1748,7 +1798,7 @@ android-instrumentation-run: ## Install and run instrumented tests (set PLURX_AN
 android-instrumentation: android-instrumentation-build android-instrumentation-run ## Run UI tests on an explicitly selected disposable device
 
 .PHONY: android
-android: android-image ## Build the Android debug APK in Docker (no host JDK/SDK)
+android: android-image ## Build the Android debug APK for local use (NOT what ships)
 	docker run --rm \
 	  --platform $(ANDROID_PLATFORM) \
 	  -u $$(id -u):$$(id -g) -e HOME=/tmp \
@@ -1760,11 +1810,81 @@ android: android-image ## Build the Android debug APK in Docker (no host JDK/SDK
 .PHONY: apk
 apk: android ## Build the Android debug APK (alias for android)
 
+# The variant that reaches devices. `release` clears `debuggable`, which is
+# what `adb shell run-as` follows: while the fleet ran the debug APK, any host
+# the device trusted could read the account bearer straight out of
+# `files/datastore/plurx.preferences_pb`.
+#
+# Both keystores and the signing lineage stay on the host, outside the repo
+# and image, and are bind-mounted read-only for the one build. Passwords and
+# aliases pass by environment variable name rather than appearing in command
+# arguments. Gradle first signs with the durable release key; the helper then
+# applies the audited lineage and verifies the effective signer at API 28 and
+# 36. Any missing input or mismatch fails before publishing an APK.
+#
+# The keystore path is resolved to an absolute one before `docker run -v`
+# sees it. Docker reads a source that is not absolute as a *volume name*: the
+# `plurx-upload.jks` that PUBLISHING.md's `keytool` line leaves in the cwd
+# would become an empty named volume, mounted as a directory at
+# /signing/upload.jks, and the build would fail on a keystore that exists.
+.PHONY: android-release
+android-release: android-image ## Build the lineage-signed Android release APK (needs the release and migration signers)
+	@test -n "$${PLURX_ANDROID_KEYSTORE:-}" || { echo "set PLURX_ANDROID_KEYSTORE to the upload keystore's path on this host (streamed from the vault, not stored in the repo)"; exit 1; }
+	@test -f "$${PLURX_ANDROID_KEYSTORE}" || { echo "PLURX_ANDROID_KEYSTORE=$${PLURX_ANDROID_KEYSTORE} is not a file"; exit 1; }
+	@test -f "$${PLURX_ANDROID_OLD_KEYSTORE:-}" || { echo "set PLURX_ANDROID_OLD_KEYSTORE to the audited original signer"; exit 1; }
+	@test -f "$${PLURX_ANDROID_LINEAGE:-}" || { echo "set PLURX_ANDROID_LINEAGE to the signed debug-to-release lineage"; exit 1; }
+	keystore="$$(cd "$$(dirname "$${PLURX_ANDROID_KEYSTORE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_KEYSTORE}")" && \
+	oldkeystore="$$(cd "$$(dirname "$${PLURX_ANDROID_OLD_KEYSTORE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_OLD_KEYSTORE}")" && \
+	lineage="$$(cd "$$(dirname "$${PLURX_ANDROID_LINEAGE}")" && pwd -P)/$$(basename "$${PLURX_ANDROID_LINEAGE}")" && \
+	docker run --rm \
+	  --platform $(ANDROID_PLATFORM) \
+	  -u $$(id -u):$$(id -g) -e HOME=/tmp \
+	  -e GRADLE_USER_HOME=/workspace/clients/android/.gradle-docker \
+	  -e PLURX_ANDROID_KEYSTORE_PASSWORD -e PLURX_ANDROID_KEY_ALIAS \
+	  -e PLURX_ANDROID_KEY_PASSWORD \
+	  -e PLURX_ANDROID_OLD_KEYSTORE_PASSWORD -e PLURX_ANDROID_OLD_KEY_ALIAS \
+	  -e PLURX_ANDROID_OLD_KEY_PASSWORD -e PLURX_ANDROID_RELEASE_CERT_SHA256 \
+	  -e PLURX_ANDROID_KEYSTORE=/signing/upload.jks \
+	  -e PLURX_ANDROID_OLD_KEYSTORE=/signing/old.jks \
+	  -e PLURX_ANDROID_LINEAGE=/signing/lineage.bin \
+	  -v "$$keystore":/signing/upload.jks:ro \
+	  -v "$$oldkeystore":/signing/old.jks:ro \
+	  -v "$$lineage":/signing/lineage.bin:ro \
+	  -v "$(CURDIR)":/workspace -w /workspace/clients/android \
+	  $(ANDROID_IMAGE) sh -ec './gradlew --no-daemon :app:assembleRelease && python3 /workspace/scripts/sign-android-release'
+	@echo "→ clients/android/app/build/outputs/apk/release/app-release.apk"
+
+# Publishing keeps the R8 mapping of every build it serves (plan
+# ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD §3.5, F-android-12): the
+# release APK is obfuscated, so a device stack trace means nothing without the
+# `mapping.txt` of the exact build that produced it, and the next Gradle run
+# overwrites that file. It is kept beside the APK as
+# `plurx-android-<versionCode>.mapping.txt`, the versionCode read from the
+# build's own output-metadata.json rather than from build.gradle.kts. The
+# mapping is written before the APK is replaced, so a served APK always has
+# one; a republish of the same versionCode with a different mapping moves the
+# earlier one aside instead of overwriting it. Only
+# /download/plurx-android.apk is served, so the mappings stay private.
+ANDROID_OUTPUTS ?= clients/android/app/build/outputs
+
 .PHONY: android-publish
-android-publish: android ## Build the APK + serve it from the web UI (ANDROID_DATA_DIR=/path/to/data)
+android-publish: android-release ## Build the signed APK + serve it from the web UI (ANDROID_DATA_DIR=/path/to/data)
 	@test -n "$(ANDROID_DATA_DIR)" || { echo "set ANDROID_DATA_DIR to the server's data_dir, e.g. make android-publish ANDROID_DATA_DIR=~/.local/share/plurx"; exit 1; }
-	cp clients/android/app/build/outputs/apk/debug/app-debug.apk "$(ANDROID_DATA_DIR)/plurx-android.apk"
+	@metadata="$(ANDROID_OUTPUTS)/apk/release/output-metadata.json"; \
+	  mapping="$(ANDROID_OUTPUTS)/mapping/release/mapping.txt"; \
+	  code="$$(sed -n 's/.*"versionCode": *\([0-9][0-9]*\).*/\1/p' "$$metadata" | head -1)"; \
+	  test -n "$$code" || { echo "no versionCode in $$metadata; nothing published"; exit 1; }; \
+	  test -s "$$mapping" || { echo "no R8 mapping at $$mapping; nothing published (a release APK without its mapping cannot be de-obfuscated)"; exit 1; }; \
+	  kept="$(ANDROID_DATA_DIR)/plurx-android-$$code.mapping.txt"; \
+	  if [ -e "$$kept" ] && ! cmp -s "$$mapping" "$$kept"; then \
+	    aside="$$kept.$$(date +%Y%m%dT%H%M%S)"; \
+	    mv "$$kept" "$$aside" && echo "versionCode $$code was published before with a different build; its mapping is kept as $$aside"; \
+	  fi; \
+	  cp "$$mapping" "$$kept.tmp" && mv "$$kept.tmp" "$$kept" && \
+	  cp "$(ANDROID_OUTPUTS)/apk/release/app-release.apk" "$(ANDROID_DATA_DIR)/plurx-android.apk" && \
+	  echo "R8 mapping for versionCode $$code -> $$kept"
 	@echo "Published -> $(ANDROID_DATA_DIR)/plurx-android.apk (served at /download/plurx-android.apk, no restart needed)"
+	@echo "NOTE: retain the verified release key and lineage for every future update."
 
 .PHONY: clean
 clean: ## Remove build artifacts and coverage output

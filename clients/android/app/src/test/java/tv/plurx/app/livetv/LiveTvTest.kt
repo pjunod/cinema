@@ -24,6 +24,56 @@ import tv.plurx.app.player.DisplayModeMatchResult
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LiveTvTest {
+    @Test fun playbackPictureSeparatesPlanSampleAndPlayerDisplay() {
+        val plan = LiveTvDelivery(
+            output = LiveTvDeliveryOutput("mpegts", "h264", "ac3", 704, 480, audio_channels = 2),
+            video_action = "encode", audio_action = "copy", packaging = "mpegts",
+            source = LiveTvDeliverySource(704, 480, "mpeg2video", "tt", sample_aspect_ratio = "40:33"),
+            deinterlace = true,
+            reasons = listOf(LiveTvDeliveryReason("video_incompatible", "The active player did not claim the complete source video route.")),
+        )
+        val planned = liveTvPictureInfo(plan, { null }, null)
+        assertEquals("704×480", planned.sourceFrame)
+        assertEquals("16:9", planned.sourceDisplayAspect)
+        assertEquals("No resize planned", planned.frameComparison)
+        assertEquals("Planned output", planned.streamNote)
+        assertEquals("Not measured", planned.streamPixelAspect)
+        assertEquals("The active player did not claim the complete source video route.", planned.reason)
+
+        val matchingFormat = androidx.media3.common.Format.Builder().setWidth(704).setHeight(480).build()
+        var attachedSample = androidx.media3.common.VideoSize(704, 480, 0, 40f / 33f)
+        val measured = liveTvPictureInfo(plan, { attachedSample }, null,
+            format = matchingFormat)
+        assertEquals("Measured stream · decoded/cropped frame", measured.streamNote)
+        assertEquals("≈40:33", measured.streamPixelAspect)
+        assertEquals("Frame dimensions unchanged", measured.frameComparison)
+        assertEquals("Stream aspect agrees with source", measured.aspectComparison)
+        attachedSample = androidx.media3.common.VideoSize(704, 480, 0, 1f)
+        val changedAspect = liveTvPictureInfo(plan, { attachedSample }, null,
+            format = matchingFormat)
+        assertEquals("Stream aspect differs from source", changedAspect.aspectComparison)
+        val unknownBasis = liveTvPictureInfo(plan, { attachedSample }, null)
+        assertEquals("Not verified", unknownBasis.aspectComparison)
+        assertNull(eligibleLiveTvVideoSample(704, 480, 90, 1f))
+        assertNull(eligibleLiveTvVideoSample(0, 480, 0, 1f))
+        val unattached = liveTvPictureInfo(plan, { error("stale sample must not be read") }, null,
+            format = matchingFormat, attachmentCurrent = false)
+        assertEquals("Planned output", unattached.streamNote)
+    }
+
+    @Test fun playbackPictureReportsMeasuredReductionAndPlanConflict() {
+        val plan = LiveTvDelivery(
+            output = LiveTvDeliveryOutput("mpegts", "h264", "ac3", 1280, 720, audio_channels = 2),
+            video_action = "encode", audio_action = "copy", packaging = "mpegts",
+            source = LiveTvDeliverySource(1920, 1080, sample_aspect_ratio = "1:1"),
+        )
+        val reduced = liveTvPictureInfo(plan, { androidx.media3.common.VideoSize(1280, 720, 0, 1f) }, null)
+        assertEquals("Stream resolution reduced", reduced.frameComparison)
+        val disagreement = liveTvPictureInfo(plan, { androidx.media3.common.VideoSize(1920, 1080, 0, 1f) }, null)
+        assertEquals("1920×1080", disagreement.streamFrame)
+        assertTrue(disagreement.planConflict!!.contains("planned 1280×720"))
+    }
+
     @Test fun liveConfigurationLeavesTheTargetOffsetToThePlaylist() {
         val item = MediaItem.Builder()
             .setLiveConfiguration(
@@ -59,6 +109,29 @@ class LiveTvTest {
         assertFalse(wire.containsKey("compatibility"))
     }
 
+    @Test fun liveEnvelopeCarriesTheSinkFactsAndBothHevcContainers() {
+        val caps = Net.json.decodeFromString<tv.plurx.app.data.DeviceCaps>("""{
+            "v":2,"client":{"kind":"android","build":"test","ua":"fixture"},
+            "video":[{"codec":"hevc","profiles":["main10"],"present":["sdr"]},{"codec":"mpeg2video","present":["sdr"]}],
+            "audio":["aac","ac3"],"containers":["ts"],"transports":["hls"],
+            "display":{"hdr":false,"dolby_vision":false}
+        }""")
+        val television = LiveTvPlaybackEnvelope.from(
+            caps, sink = tv.plurx.app.data.LiveSinkFacts(deinterlaces = true, aacChannels = 6),
+        )
+        assertTrue(television.video_limits.all { it.interlaced })
+        assertEquals(6, television.audio_limits.single { it.codec == "aac" }.max_channels)
+        assertEquals(8, television.audio_limits.single { it.codec == "ac3" }.max_channels)
+        assertTrue(television.hls_formats.contains(LiveTvHlsFormat("fmp4", "hevc", "ac3")))
+        assertTrue(television.hls_formats.contains(LiveTvHlsFormat("mpegts", "hevc", "ac3")))
+        assertTrue(television.hls_formats.contains(LiveTvHlsFormat("mpegts", "mpeg2video", "ac3")))
+        assertFalse(television.hls_formats.contains(LiveTvHlsFormat("fmp4", "mpeg2video", "ac3")))
+
+        val handset = LiveTvPlaybackEnvelope.from(caps)
+        assertTrue(handset.video_limits.none { it.interlaced })
+        assertEquals(2, handset.audio_limits.single { it.codec == "aac" }.max_channels)
+    }
+
     private val channel = LiveTvChannel("one", "7.1", "Fixture News")
 
     /**
@@ -84,7 +157,7 @@ class LiveTvTest {
         override suspend fun start(channel: String, requestId: String): LiveTvStarted {
             events += "start:$channel"
             error?.let { throw LiveTvFailure(it, ownerDecided = ownerDecided) }
-            return response?.await() ?: LiveTvStarted("cap-$channel", this@LiveTvTest.channel, true)
+            return response?.await() ?: LiveTvStarted("cap-$channel", this@LiveTvTest.channel, true, playlist_url = "/api/v1/live-tv/sessions/cap-$channel/master.m3u8")
         }
         override suspend fun release(capability: String) {
             events += "release:$capability"
@@ -185,7 +258,7 @@ class LiveTvTest {
         val lease = lease(requests, Store(), CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler)))
         val started = lease.start("one")
         val stopped = lease.stop()
-        requests.response!!.complete(LiveTvStarted("late", channel, true))
+        requests.response!!.complete(LiveTvStarted("late", channel, true, playlist_url = "/api/v1/live-tv/sessions/late/master.m3u8"))
         assertNull(started.await())
         stopped.await()
         assertEquals(listOf("start:one", "release:late"), requests.events)
@@ -200,7 +273,7 @@ class LiveTvTest {
         val waiter = launch { started.await() }
         waiter.cancel()
         val stopped = lease.stop()
-        requests.response!!.complete(LiveTvStarted("late", channel, true))
+        requests.response!!.complete(LiveTvStarted("late", channel, true, playlist_url = "/api/v1/live-tv/sessions/late/master.m3u8"))
         stopped.await()
         assertNull(lease.current)
         assertEquals(listOf("start:one", "release:late"), requests.events)
@@ -403,6 +476,29 @@ class LiveTvTest {
         assertEquals(21L, settings.live_tv_transition_drain_before)
         assertEquals(23L, settings.live_tv_config_generation)
         assertTrue(settings.playback_display_mode_match)
+    }
+
+    @Test fun playbackUsesReturnedMasterPlaylistAndRejectsOtherOrigins() {
+        val api = LiveTvApi("http://10.42.4.10:32400", "fixture-account-secret")
+        val channel = LiveTvChannel("one", "7.1", "Fixture News")
+        val started = LiveTvStarted(
+            "cap-one", channel, live = true,
+            playlist_url = "/api/v1/live-tv/sessions/cap-one/master.m3u8",
+        )
+        assertEquals(
+            "http://10.42.4.10:32400/api/v1/live-tv/sessions/cap-one/master.m3u8",
+            api.playbackUrl(started),
+        )
+        assertEquals(
+            "http://10.42.4.10:32400/api/v1/live-tv/sessions/cap-one/master.m3u8",
+            api.playbackUrl(started.copy(playlist_url = "/api/v1/live-tv/sessions/cap-one/index.m3u8")),
+        )
+        assertThrows(LiveTvFailure::class.java) {
+            api.playbackUrl(started.copy(playlist_url = "https://other.invalid/cap-one/master.m3u8"))
+        }
+        assertThrows(LiveTvFailure::class.java) {
+            api.playbackUrl(started.copy(playlist_url = "/api/v1/live-tv/sessions/other/master.m3u8"))
+        }
     }
 
     @Test fun playlistStaysAtOriginalOriginAndDoesNotCarryAccountToken() {

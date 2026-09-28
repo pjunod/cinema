@@ -4,6 +4,8 @@ package tv.plurx.app.data
 
 import android.content.Context
 import android.hardware.display.DisplayManager
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.os.Build
@@ -20,7 +22,13 @@ import tv.plurx.app.BuildConfig
 internal data class CapabilitySnapshot(
     val legacyQuery: Map<String, String>,
     val document: DeviceCaps,
+    val audioOutputRoute: AudioOutputRoute?,
 )
+
+data class AudioOutputDevice(val id: Int, val type: Int)
+data class AudioOutputRoute(val devices: Set<AudioOutputDevice>) {
+    val present: Boolean get() = devices.isNotEmpty()
+}
 
 /**
  * Runtime playback capabilities for this device, sent to `/decision` so the
@@ -45,6 +53,10 @@ object Caps {
         "video/hevc" to "hevc",
         "video/av01" to "av1",
         "video/x-vnd.on2.vp9" to "vp9",
+        // ATSC 1.0 is MPEG-2, and a television SoC decodes it in hardware.
+        // Claiming it lets Live TV copy the broadcast instead of encoding it;
+        // [videoCodecCaps] keeps the claim to hardware components.
+        "video/mpeg2" to "mpeg2video",
     )
     private val VIDEO_PROBE_SIZES = listOf(
         3840 to 2160,
@@ -125,6 +137,7 @@ object Caps {
         )
         return CapabilitySnapshot(
             legacyQuery = result,
+            audioOutputRoute = audioOutputRoute(context),
             document = capsDocument(
                 video = video,
                 audio = audio,
@@ -138,6 +151,82 @@ object Caps {
             ),
         )
     }
+
+    /** The active media route on API 33+, with the available outputs as the older fallback. */
+    internal fun audioOutputRoute(context: Context): AudioOutputRoute? = try {
+        val manager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val devices: List<AudioDeviceInfo> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            manager.getAudioDevicesForAttributes(
+                android.media.AudioAttributes.Builder()
+                    .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MOVIE)
+                    .build(),
+            )
+        } else {
+            manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList()
+        }
+        AudioOutputRoute(devices.mapTo(mutableSetOf()) { AudioOutputDevice(it.id, it.type) })
+    } catch (_: Exception) {
+        // A failed route query is unknown, not proof that the output vanished.
+        null
+    }
+
+    /**
+     * What the live envelope says about the sink this device plays into,
+     * beyond codec names: whether it may take interlaced video untouched,
+     * and how many channels its AAC decode can actually reach.
+     *
+     * Television SoCs deinterlace in the video pipeline behind MediaCodec,
+     * which is how every Android TV live-TV app direct-plays 480i/1080i
+     * MPEG-2; a phone or tablet decoder weaves fields and shows combing, so
+     * the claim follows the UI mode.
+     *
+     * The channel count is what the HDMI sink advertises for PCM
+     * (`AudioDeviceInfo.channelCounts` on the HDMI/ARC/eARC output), floored
+     * at stereo and capped at 5.1 (the most the server encodes). Media3's
+     * `AudioCapabilities.maxChannelCount` is not that number: without an HDMI
+     * plug intent it is a fixed 8, and on API 33+ it folds in AC-3/E-AC-3
+     * passthrough masks, so it would claim 5.1 on earbuds. A handset is
+     * stereo; a television with no HDMI device listed (the panel's own
+     * speakers) is stereo too.
+     */
+    internal fun liveSinkFacts(context: Context): LiveSinkFacts {
+        val television = try {
+            val mode = context.resources.configuration.uiMode and
+                android.content.res.Configuration.UI_MODE_TYPE_MASK
+            mode == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+        } catch (_: Exception) {
+            false
+        }
+        val channels = if (!television) {
+            LiveSinkFacts.MIN_AAC_CHANNELS
+        } else {
+            try {
+                val manager = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+                hdmiPcmChannelsOf(manager.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS).toList())
+            } catch (_: Exception) {
+                LiveSinkFacts.MIN_AAC_CHANNELS
+            }
+        }
+        return LiveSinkFacts(
+            deinterlaces = television,
+            aacChannels = channels.coerceIn(LiveSinkFacts.MIN_AAC_CHANNELS, LiveSinkFacts.MAX_AAC_CHANNELS),
+        )
+    }
+
+    /** The widest PCM channel count an HDMI-class output device advertises, or stereo. */
+    private fun hdmiPcmChannelsOf(devices: List<android.media.AudioDeviceInfo>): Int =
+        hdmiPcmChannels(devices.filter { it.type in HDMI_OUTPUT_TYPES }.map { it.channelCounts.toList() })
+
+    internal fun hdmiPcmChannels(hdmiChannelCounts: List<List<Int>>): Int =
+        hdmiChannelCounts.flatten().maxOrNull() ?: LiveSinkFacts.MIN_AAC_CHANNELS
+
+    private val HDMI_OUTPUT_TYPES = setOf(
+        android.media.AudioDeviceInfo.TYPE_HDMI,
+        android.media.AudioDeviceInfo.TYPE_HDMI_ARC,
+        // TYPE_HDMI_EARC (API 31); the constant is stable across releases.
+        30,
+    )
 
     /**
      * Highest ordinary movie frame each registered decoder proves at 30 fps.

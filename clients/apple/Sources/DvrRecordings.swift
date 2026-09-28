@@ -1113,7 +1113,7 @@ struct DvrRecordingsRootView: View {
         .padding()
         .background(Palette.bg)
         .navigationTitle("Recordings")
-        .task { await dvr.load(origin: model.origin, token: Session.shared.token) }
+        .task { await dvr.load(origin: model.origin, token: Session.shared.credentials.token) }
         .onReceive(tick) { _ in now = Int(Date().timeIntervalSince1970) }
     }
 }

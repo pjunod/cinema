@@ -1,5 +1,7 @@
 //! App-managed offline package API and scoped HLS capability routes.
 
+#[cfg(test)]
+use crate::queue_fixture::QueueFixture;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -438,6 +440,9 @@ pub async fn create(
     {
         OfflineCreateOutcome::Created(package) => {
             state.offline.record_request(package.target_height);
+            if package.node_id == state.node_id {
+                state.offline.wake();
+            }
             Ok((StatusCode::ACCEPTED, Json(status(package))))
         }
         OfflineCreateOutcome::Existing(package) => {
@@ -1528,21 +1533,29 @@ pub async fn subtitle(
                         "The source for this offline subtitle has changed.",
                     ));
                 }
-                let recovered = crate::subtitles::ensure_vtt(&state.subs_dir, &file, index)
-                    .await
-                    .map_err(|message| {
-                        tracing::warn!(
-                            package_id = %package.id,
-                            subtitle_index = index,
-                            error = %message,
-                            "offline subtitle recovery failed"
-                        );
-                        typed(
-                            StatusCode::GONE,
-                            "subtitle_unavailable",
-                            "The offline subtitle could not be restored.",
-                        )
-                    })?;
+                let recovered = crate::subtitles::ensure_vtt_with_store(
+                    &state.subs_dir,
+                    &file,
+                    index,
+                    &state.subtitle_source_access(),
+                    crate::process_control::ChildWork::background(
+                        "subtitle track for an offline package",
+                    ),
+                )
+                .await
+                .map_err(|message| {
+                    tracing::warn!(
+                        package_id = %package.id,
+                        subtitle_index = index,
+                        error = %message,
+                        "offline subtitle recovery failed"
+                    );
+                    typed(
+                        StatusCode::GONE,
+                        "subtitle_unavailable",
+                        "The offline subtitle could not be restored.",
+                    )
+                })?;
                 plurx_core::fs_secure::read_bounded_regular(&recovered, MAX_OFFLINE_VTT_BYTES)
                     .await
                     .map_err(|_| {
@@ -2020,7 +2033,7 @@ mod tests {
         assert!(fixture
             .state
             .store
-            .enqueue_pretranscode_job(
+            .fixture_enqueue_pretranscode_job(
                 &NewPretranscodeJob {
                     id: job_id.clone(),
                     dedupe_key: format!("offline-manifest-adoption:{}", package.id),
@@ -2045,7 +2058,7 @@ mod tests {
         let claimed = fixture
             .state
             .store
-            .claim_pretranscode_job(
+            .fixture_claim_pretranscode_job(
                 "test-node",
                 &PretranscodeWorkerCapabilities {
                     version: PretranscodeRequirements::VERSION,
@@ -2068,7 +2081,7 @@ mod tests {
         assert!(fixture
             .state
             .store
-            .complete_pretranscode_job(
+            .fixture_complete_pretranscode_job(
                 &claimed,
                 recipe,
                 7,
@@ -2248,7 +2261,14 @@ mod tests {
         assert_eq!(available.file_id, fixture.file.id);
         assert_eq!(available.recommended_audio_index, Some(1));
         assert_eq!(available.recommended_subtitle_index, Some(4));
-        assert_eq!(available.qualities.len(), 4);
+        assert_eq!(
+            available
+                .qualities
+                .iter()
+                .map(|quality| quality.height)
+                .collect::<Vec<_>>(),
+            vec![1080, 720, 480, 360, 240, 144],
+        );
         assert_eq!(available.qualities[0].height, 1080);
         assert_eq!(available.qualities[0].label, "High");
         assert!(available.qualities[0].reserved_bytes > available.qualities[0].estimated_bytes);
@@ -2449,6 +2469,30 @@ mod tests {
                 "case {index} persisted work after a quota rejection"
             );
         }
+    }
+
+    /// K-10 §3.1, #540 review finding 2: a package created on this node
+    /// wakes this node's offline worker, which then claims it whatever its
+    /// local replica shows (`offline::tests::claim_a_wake_claims_what_the_local_replica_does_not_show_yet`).
+    /// A retry that finds the existing package does not wake it again.
+    #[tokio::test]
+    async fn a_created_package_wakes_this_nodes_offline_worker() {
+        let fixture = fixture().await;
+        assert!(!fixture.state.offline.take_wake().await, "no wake yet");
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (code, created) =
+            create_response(&fixture, fixture.file.id, request(&request_id)).await;
+        assert_eq!(code, StatusCode::ACCEPTED, "{created}");
+        assert!(
+            fixture.state.offline.take_wake().await,
+            "a local creation wakes the worker"
+        );
+        let (code, retry) = create_response(&fixture, fixture.file.id, request(&request_id)).await;
+        assert_eq!(code, StatusCode::ACCEPTED, "{retry}");
+        assert!(
+            !fixture.state.offline.take_wake().await,
+            "a retry is not a new package"
+        );
     }
 
     #[tokio::test]
@@ -2909,7 +2953,7 @@ mod tests {
     #[tokio::test]
     async fn offline_reuse_rejects_corrupt_fenced_bytes_and_settles_the_ready_package() {
         let fixture = fixture().await;
-        let package = ready_package(&fixture, "fenced-corrupt", "none", None).await;
+        let package = ready_package(&fixture, &"c".repeat(64), "none", None).await;
         fence_ready_package_manifest(&fixture, &package).await;
         let token = "f".repeat(64);
         assert_eq!(

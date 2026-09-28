@@ -470,10 +470,10 @@ struct PreparedOfferWait: Equatable {
     /// past the floor to come back.
     ///
     /// A sequence, not a flag, and that is the whole of the rule. The caller
-    /// polls every 25 ms and is handed the *same* answer back until the next
-    /// exchange lands, so "have I observed an accepted answer before" is true
-    /// again 25 ms later. Keyed that way this rule declined 25 milliseconds
-    /// after the dispatch exchange instead of one exchange later — precisely
+    /// can inspect the same answer after a timer wake before the next exchange
+    /// lands, so "have I observed an accepted answer before" can become true
+    /// for that same response. Keyed that way this rule declined after the
+    /// dispatch exchange instead of one exchange later — precisely
     /// the behaviour it was written to prevent, and invisible to any test whose
     /// only timing assertion is "inside the bound".
     ///
@@ -727,6 +727,20 @@ final class PreparedReplacementCoordinator {
         case .switching:
             return false
         }
+    }
+
+    /// Remaining time on the current stage's original monotonic deadline.
+    /// Observation may wake earlier, but it must not restart the 6 s or 12 s
+    /// clock when the item publishes another status value.
+    func readinessRemainingMs() -> Int? {
+        guard let openedAtMs, ledger.hasActivePreparation else { return nil }
+        let bound: Int
+        switch ledger.phase {
+        case .building: bound = PreparedReplacementBounds.metadataMs
+        case .metadataReady, .bufferReady: bound = PreparedReplacementBounds.readinessMs
+        case .switching: return nil
+        }
+        return max(0, bound - (now() - openedAtMs))
     }
 
     /// Give the staging up and take the in-place path instead.
