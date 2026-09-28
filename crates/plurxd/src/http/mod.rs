@@ -7990,7 +7990,16 @@ mod tests {
                 .oneshot(post(path, Some(&admin), json!({})))
                 .await
                 .expect("response");
-            assert!(!response.status().is_success(), "{path}");
+            // Unknown paths intentionally return the app shell. They must not
+            // return a relay admission or a tuner stream to a household bearer.
+            assert!(
+                response
+                    .headers()
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value.starts_with("text/html")),
+                "{path} must remain an unrouted app-shell fallback"
+            );
         }
         assert!(state.live_tv.activities().is_empty());
     }
