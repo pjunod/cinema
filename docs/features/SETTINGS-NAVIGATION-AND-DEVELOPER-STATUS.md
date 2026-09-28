@@ -14,7 +14,7 @@ the settings navigation and Developer-page redesign.
 | Phase | State | Evidence |
 |---|---|---|
 | Isolated implementation branch | complete | `codex/settings-navigation-developer`, based on Forgejo `main` at `4cef0da7` |
-| Navigation and control ownership | complete | Live TV owns tuner and guide cards · Playback owns quality switching · Cluster owns transport guidance · Developer owns compatibility and experiments |
+| Navigation and control ownership | complete | Live TV owns tuner and guide cards · Playback owns quality switching · Cluster owns transport guidance · Developer owns compatibility and experiments (as delivered; since 2026-09-28 Developer holds only unfinished features — see decisions 5 and 6) |
 | Readiness layout and responsive treatment | complete | Shared nonshrinking rows · neutral static throughput support · closed native disclosures · deliberate stacking below 360 CSS px |
 | Interaction and stale-response correctness | complete | Independent save payloads · returned-value badges · Live TV route fencing · card-local repaint and sibling-draft preservation |
 | Portable UI structure golden | complete | 78 deterministic captures · 7,536 structural facts · settings and Developer drift accepted across all three layouts at desktop and mobile widths · no console or page errors |
@@ -109,7 +109,9 @@ requested.
 2. **Every control has one owner.** Live TV owns tuner, enablement, fencing,
    and guide configuration · Playback owns prepared quality switching ·
    Cluster owns automatic transport-recovery guidance · Developer owns
-   compatibility controls and decoder/delivery experiments.
+   compatibility controls and experiments that are not yet fully active or
+   tested. The decoder controls were Developer's until 2026-09-28; they now
+   belong to Playback → Advanced server delivery (decision 6).
 3. **The prototype is a reference, not a base.** The implementation starts
    from current Forgejo `main`; only relevant ideas are ported from the local
    prototype, and unrelated work in the original checkout is left untouched.
@@ -126,7 +128,8 @@ requested.
 6. **Chapter thumbnails and both decoder controls graduate as permanent
    Playback settings (Paul approved graduating them, 2026-09-28; the
    destination is this change's call and Paul can overturn it).**
-   - *Chapter thumbnails* → Settings → Playback, beside the player defaults.
+   - *Chapter thumbnails* → Settings → Playback, after the player defaults
+     and the browser-local card.
      A permanent switch makes sense: every first open of a film costs an
      ffmpeg seek per chapter, and off is how an operator stops that on a
      CPU-poor node. Default unchanged (on).
@@ -193,7 +196,7 @@ graduates in this change; **(c)** unclear, stays and is listed for Paul.
 | Stored PGS tracks | `subtitle_stored_sources` | K-09 | merged: M0–M5 | fleet and device evidence | (a) stays → Settings → Maintenance |
 | Share stored subtitle tracks | `subtitle_cluster_sources` | K-09 | merged: M0–M5 | fleet evidence | (a) stays → Cluster, or removed (Paul's choice) |
 | Backfill subtitle tracks | `subtitle_backfill` | K-09 | merged: M0–M5 | fleet evidence | (a) stays → Settings → Analysis |
-| Chapter thumbnails | `chapter_thumbnails` | [WATCH-VIEW-LAYOUT](../clients/WATCH-VIEW-LAYOUT.md) | built; on by default; in the deployed main | none the plan names | **(b) graduated to Settings → Playback** (Paul, 2026-09-28; decision 6) |
+| Chapter thumbnails | `chapter_thumbnails` | [WATCH-VIEW-LAYOUT](../clients/WATCH-VIEW-LAYOUT.md) | built; on by default; in the deployed main | none the plan names; the fleet observation its Developer line waited on was never recorded and was waived by Paul's approval | **(b) graduated to Settings → Playback** (Paul, 2026-09-28; decision 6) |
 | Verified decode artifacts | `decoder_health_qualified_artifacts` | [DECODER_SELECTION_RECOVERY_STATUS](../DECODER_SELECTION_RECOVERY_STATUS.md) | M0–M7 merged | fleet qualification, which the plan calls optional | **(b) graduated to Playback → Advanced server delivery**, default off (Paul, 2026-09-28; decision 6) |
 | Automatic decode recovery | `automatic_decoder_recovery` | same | M0–M7 merged; off by default | a matched hardware/software retained pair, which is advisory | **(b) graduated to Playback → Advanced server delivery**, default off (Paul, 2026-09-28; decision 6) |
 | Android: Match television refresh rate | display cadence | D-01 | merged: M1–M3 | M0 three-TV measurement, M4, M5 HDMI | (a) stays |

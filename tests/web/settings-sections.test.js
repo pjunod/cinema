@@ -232,8 +232,8 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   const developer = ["pcpv1", "dverr"];
   const prepared = ["pqh", "pqherr", "pqhstate"];
   // `vdcard` is read too: this handler replaces its own card rather than
-  // re-rendering the panel, because the four cards beside it stage unsaved
-  // edits. The handler's own catch would swallow a missing-id assertion, so
+  // re-rendering the panel, because the other Playback cards (Streaming and
+  // the rest of Advanced server delivery) stage unsaved edits. The handler's own catch would swallow a missing-id assertion, so
   // the id has to be listed here for the guard to mean anything.
   const verifiedDecode = ["dhqa", "dhqerr", "vdcard"];
   const automaticRecovery = ["adr", "adrerr", "drcard"];

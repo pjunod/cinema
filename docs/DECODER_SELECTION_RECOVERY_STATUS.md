@@ -3612,7 +3612,8 @@ physically qualifies a two-player successor.
 | Android | `hold`, `retry_resource`, `terminal` | No; unit test expects terminal protocol error | No | No physical run | At most `prepublication` after server qualification |
 | Live TV Web | None; outside `playback-control` | No protocol participant | No; one owned media element | No physical run | Prepublication only after server qualification |
 
-The visible Settings → Developer values are operator-requested upper bounds,
+The visible settings values (Settings → Developer until 2026-09-28, Playback
+→ Advanced server delivery since) are operator-requested upper bounds,
 not a claim that every node or session can execute them. Each node computes an
 effective plan policy from its current local capability/grammar receipt. Each
 playback computes an effective recovery mode from that node result, owned

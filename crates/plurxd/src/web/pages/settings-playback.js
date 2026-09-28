@@ -150,9 +150,9 @@ async function saveVerifiedDecode(btn){
       decoder_health_qualified_artifacts:document.getElementById("dhqa").checked}});
     cacheSettings(saved);
     toast("Verified decode setting saved"); if(btn) setCardSaved(btn);
-    // Replace this card only. A full panel re-render would rebuild the four
-    // cards beside it and silently discard anything typed into them — the Live
-    // TV card next door stages a whole configuration before its own Save.
+    // Replace this card only. A full panel re-render would rebuild the other
+    // Playback cards and silently discard anything typed into them — Streaming
+    // and the other Advanced server delivery cards stage unsaved edits.
     const card=document.getElementById("vdcard");
     if(card) card.outerHTML=verifiedDecodeCard(saved);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
