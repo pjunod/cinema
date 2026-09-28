@@ -2283,6 +2283,49 @@ unavailable authoritative store refuses the exchange with `503
 channel_store_unavailable`. Detached **Watch from start** playback has ordinary
 VOD purpose and is unaffected by later channel state.
 
+## 17a. Optical media
+
+Optical resources are physical-source records, not library files. Public
+responses expose an owner-qualified drive id, insertion generation, stable
+disc/title ids, bounded probe facts and player routes; they never expose a
+device path, mount path, helper diagnostic, fingerprint evidence or the
+physical session capability hidden inside a busy-drive state.
+
+| Method | Path | Auth | What it does |
+|---|---|---|---|
+| GET | `/api/v1/optical/drives` | bearer + optical grant | Lists local and freshly advertised remote drives, their public state and advisory requirements. This discovery route also works while optical playback is disabled so Settings and clients can explain why |
+| GET | `/api/v1/optical/drives/{drive}/disc` | bearer + optical grant | Returns the current insertion and bounded title summaries |
+| GET | `/api/v1/optical/discs/{disc}/titles/{title}?angle=1` | bearer + optical grant | Returns one title, chapters and this user's resume state |
+| POST | `/api/v1/optical/drives/{drive}/titles/{title}/decision` | bearer + optical grant | Revalidates insertion identity, capabilities, angle and tracks; returns the encoded-VOD plan |
+| POST | `/api/v1/optical/drives/{drive}/titles/{title}/sessions` | bearer + optical grant | Starts or idempotently rejoins one managed finite-VOD session on the drive owner |
+| POST | `/api/v1/optical/discs/{disc}/titles/{title}/progress` | bearer + optical grant | Writes progress only when user, session, source, generation, angle and selected rendition all match |
+| PUT | `/api/v1/optical/discs/{disc}/titles/{title}/match` | admin | Sets or clears the library-item match; a supplied match kind must agree with the target item |
+| POST | `/api/v1/optical/drives/{drive}/eject` | admin | Generation-fenced eject. A busy drive requires explicit `stop_active` and the exact session id; the reader is drained before the tray opens |
+
+The public router accepts at most 64 KiB per body and rejects unknown fields.
+Decision and session bodies carry `expected_disc_id`, `media_generation`, a
+positive `angle`, and the ordinary caps-v2 document; start additionally carries
+stable `playback_id` and `request_id` values. Progress repeats `drive_id`,
+`media_generation`, `session_id`, angle and timeline. New sessions also bind
+the exact admitted audio index and burned-subtitle index, so a client must echo
+those choices rather than crediting a different rendition.
+
+All opaque drive, disc and title components must be URL-encoded independently.
+Treat `optical_media_changed`, `optical_drive_busy` and
+`optical_eject_conflict` as insertion/lease conflicts, not retryable transport
+failures. `optical_owner_unavailable` means the advertised physical owner is
+not reachable; another voter must not adopt the disc. Protection, unavailable
+reader and unsupported title/subtitle paths have their own typed errors. The
+Developer setting `optical.enabled` is authoritative for decision, start and
+eject. Its readiness list is advice and never vetoes an explicit enable.
+
+An optical grant is a per-user entitlement, separate from API-key scopes.
+Administrators default to granted when no explicit override exists, and the
+physical owner repeats grant/admin authorization for relayed operations rather
+than trusting the ingress's claim.
+
+---
+
 ## 18. Trakt and the Curator seam
 
 | Method | Path | Auth | What it does |
@@ -2791,6 +2834,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | POST | `/internal/cluster/media/sessions/prepare` | 96 KiB | Validates an already-reserved successor identity, primes its durable recipe on the target owner, and returns only after the existing actor slot accepts it |
 | POST | `/internal/cluster/media/sessions/abort`, `/internal/cluster/media/sessions/relay` | 96 KiB | Settles an abort; relays one owned HLS resource |
 | POST | `/internal/cluster/media/sessions/control` | 20 KiB | Relays one playback-control exchange |
+| POST | `/internal/optical/owner` | 128 KiB | Exact-auth, signed-response relay for one path-free drive read, decision, start, progress or eject operation. The owner repeats user/admin authorization; replies are capped at 2 MiB |
 
 The five path prefixes are historical, not a versioning scheme. In particular,
 the `/api/v1/internal/…` ones are inside the API prefix **by spelling only** —

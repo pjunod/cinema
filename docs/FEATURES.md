@@ -473,6 +473,48 @@ decoding shows what the file is versus what your browser is actually rendering.
 
 ---
 
+## 4.1. Optical discs — "the title, not a ripped file"
+
+**What it does:** lets an explicitly authorized user browse and play DVD-Video
+or Blu-ray titles from a configured Linux drive through the same web, iOS,
+tvOS, and Android players used by the library. It does not import, rip, or
+invent a file row for the disc.
+
+- **One physical reader has one owner.** The configured node inspects the
+  insertion and keeps the title reader for the full playback lifetime. A
+  second title cannot take the drive until the first reader and its child
+  processes are gone. Cluster ingress may relay an owner session, but another
+  node cannot adopt or reopen the physical source.
+- **Enable is an operator decision, not a hidden gate.** Settings → Developer →
+  *Play DVD and Blu-ray titles* is the authoritative runtime switch. The rows
+  beside it report helper, drive, mount, FFmpeg and cluster readiness, but an
+  unmet advisory row does not disable the switch. Startup configuration names
+  trusted device and read-only mount paths; it does not silently enable them.
+- **Access is explicit.** Each user has an optical-play grant; administrators
+  default to granted unless an explicit override says otherwise. Matching a
+  title to a library item and ejecting media remain administrator actions.
+- **Insertion identity is fenced.** Every decision, start, progress update and
+  eject carries both the disc id and the observed media generation. Replacing
+  a disc makes stale work fail rather than play or eject the new insertion.
+- **The current producer is finite encoded VOD.** It produces SDR H.264/AAC
+  through the ordinary immutable HLS controller, including seek, chapters,
+  resume, progress, teardown, Picture in Picture and player telemetry. Original
+  quality is reported as unavailable rather than being silently treated as a
+  copy. DVD subpicture and Blu-ray PGS selections burn through the admitted
+  reader; a text subtitle that would require reopening the physical title is
+  refused by name.
+- **Protection support is whatever the installed reader stack can lawfully
+  provide.** Plurx does not download keys, change region state, or promise that
+  commercial AACS/BD+ media will decrypt. A protected disc on a host without
+  an authorized backend remains visible with a typed explanation.
+
+The implementation is built but not release-qualified: copy-video indexing,
+playable-media seek evidence, live owner-loss acceptance, and physical client
+acceptance remain open. The current evidence and exact blockers live on the
+[optical status page](features/OPTICAL-MEDIA-STATUS.html).
+
+---
+
 ## 4a. Live TV — "the antenna, on every screen"
 
 **What it does:** plays live over-the-air television from one HDHomeRun tuner
