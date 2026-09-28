@@ -1,7 +1,7 @@
 # Durable cluster work — build status
 
 **Status:** M1–M3 and E0–E3 merged into main · **Updated:** 2026-09-27 ·
-**Final implementation:** `82df7f59e` · **Production:** unchanged ·
+**Final implementation:** `82df7f59e` · **Production:** deployed in `55aa430fd` on all four nodes, 2026-09-27 (A-04 board row, exact-55aa fleet point) ·
 **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) ·
 **E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) ·
 **E1–E3:** [#572 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/572) ·
