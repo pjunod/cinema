@@ -20,9 +20,11 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `136` — measured library prefetch, bounded
-> debug/Live diagnostics and release profile tooling; qualification and
-> physical acceptance pending.
+> Status: **v0.3.0**, build `137` — every Live TV box builds its own player
+> view, so fullscreen fills the screen on tablets instead of keeping the
+> inline picture in a corner; physical acceptance pending.
+> Build 136 adds measured library prefetch, bounded debug/Live diagnostics
+> and release profile tooling.
 > Build 135 adds actual Live TV caption choices and explicit watchable
 > channel actions; its eight focused regressions passed.
 > Build 134 names an encoder refusal as the encoder being busy.
