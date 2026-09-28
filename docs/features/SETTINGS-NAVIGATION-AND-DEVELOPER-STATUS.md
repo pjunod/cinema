@@ -116,6 +116,79 @@ requested.
 4. **No feature gate is added.** Experiment toggles stay explicit and
    editable. Developer explains what safe enablement needs and which evidence
    the daemon can currently observe.
+5. **Developer is a waiting room, not a home (Paul, 2026-09-28).** A fully
+   active option has no reason to be in Developer. A feature enters Developer
+   while it is not fully active or not fully tested, and every Developer card
+   says what it is waiting on. When that lands the card leaves: to its proper
+   settings section if a permanent enable/disable makes sense, otherwise the
+   toggle comes out and the feature is simply on. See
+   [the Developer lifecycle](#developer-lifecycle--every-card-graduates).
+
+## Developer lifecycle — every card graduates
+
+Paul's rule, 2026-09-28: *"If it's a fully active option, then there's no
+reason to have it in the dev tab. If it's still not fully active or tested or
+whatever, then it goes in the dev tab. But everything in the dev tab
+eventually moves out of it and into a proper place in settings if it makes
+sense to have an enable/disable for it permanently, else they just come out
+of the dev tab when the feature is done and ready to just use."*
+
+It sits beside the standing rule that there are no feature gates: Developer
+entries carry advisory readiness and safety information that never gates
+enablement.
+
+| Stage | What happens | Where it is recorded |
+|---|---|---|
+| Enters | A feature that is not fully active or not fully tested gets a Developer card: its explicit switch (or, for automatic behaviour, an explanation), advisory readiness, and one **Leaves Developer when … Then …** line | `devGraduation(waitingOn, then)` in `web/pages/settings-developer.js` |
+| Waits | The line names the plan acceptance or board evidence still owed, not a vague "qualification" | The owner plan and its workboard row |
+| Graduates, permanent switch | The switch moves to its proper settings section; the Developer card is deleted in the same change | The plan's execution log and this page's audit |
+| Graduates, no switch | The toggle is removed and the behaviour becomes the default; a server-side default change carries a settings migration that keeps an operator's explicit choice, plus a test | Same |
+
+Where the line says **Paul chooses**, the destination is his call at
+graduation time. `tests/web/settings-sections.test.js` fails when a card
+rendered by `developerPanel` does not carry the line.
+
+### Audit, 2026-09-28
+
+Decision key: **(a)** not done, stays and states what it waits on; **(b)** done,
+graduates in this change; **(c)** unclear, stays and is listed for Paul.
+
+| Card (web Developer unless marked) | Switch | Owner row / plan | Owner status | Evidence still owed | Decision |
+|---|---|---|---|---|---|
+| Enable Live TV | `live_tv_enabled` | L-02, L-03 ([HDHOMERUN-LIVE-TV-PLAN](HDHOMERUN-LIVE-TV-PLAN.md)) | merged: code; acceptance open | L-02's leader-restart, cold/warm-start (L6) and scratch-fault (L9) fleet prompts; L-03 M2 capacity offer and caption-positive M4 | (a) stays → Settings → Live TV |
+| Durable cluster work | `vod_index_cluster_cache`, `cache_produce_mins` | [DURABLE-WORK-QUEUE-STATUS](../cluster/DURABLE-WORK-QUEUE-STATUS.md) | merged M1–M3, E0–E3 (`82df7f59e`); deployed in `55aa430fd` to all four nodes on 2026-09-27 | none: the plan calls the queue infrastructure and OPERATIONS says there is no fleet receipt to obtain | **(b) graduated: card removed.** Its two switches were copies of the permanent ones in Analysis (`an-enabled`) and Maintenance (pre-transcoding cadence) |
+| Cluster media placement | `cluster_media_pool_enabled`, `cluster_session_takeover_enabled` | [CLUSTER-MEDIA-POOL-PLAN](../cluster/CLUSTER-MEDIA-POOL-PLAN.md) | built P0–P8 | physical-device corpus; ten-second takeover budget (§8.8–§8.9) | (a) stays → Settings → Cluster |
+| Local catalogue reads | `bounded_replica_reads` | K-04 | merged: M0–M3 server; web read-after echo and on-by-default preference shipped in `5ba02212f`, deployed | §5.1 lab readout, rolling-upgrade check | (a) stays → Cluster, or removed (Paul's choice) |
+| Shared storage budgets | storage domains | [DURABLE-WORK-QUEUE-STATUS](../cluster/DURABLE-WORK-QUEUE-STATUS.md) | as durable work: deployed | none | **(b) graduated: moved to Settings → Libraries** beside the roots it names; it is the only editor for the mapping, so it moves rather than goes |
+| Unverified HEVC copy | `hevc_unverified_copy` | [HEVC-COLOR-CORRUPTION-RCA-AND-FIX](../streaming/HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md) | proof-before-stripping containment `87ca67c0e` deployed in `55aa430fd` | complete-scan proof for every HEVC title VOD copies | (a) stays → removed, or Playback escape hatch (Paul's choice) |
+| Live TV deinterlace cadence | `live_tv_deinterlace_output` | S-08 | merged: M1–M4 | M5 media1 QSV/VAAPI qualification | (a) stays → Settings → Live TV |
+| Portable cluster backup | `backup_*` | K-01 | merged: M1–M4; amd64 container smoke passed in run 3205 | M4 arm64 in-lane leg; M5 loss drills, physical restore, RPO/RTO | (a) stays → Settings → Cluster |
+| Seek scratch accounting | none (automatic) | [SEEK-SCRATCH-RESERVATIONS-STATUS](../streaming/SEEK-SCRATCH-RESERVATIONS-STATUS.html) | merged and deployed | physical acceptance | (a) stays → card removed |
+| Adaptive Auto quality | `playback_auto_abr` | A-04, A-05 | A-04 blocked: incomplete D3 matrix; A-05 unclaimed | Safari, HDR and Apple/Android physical traces; native controllers | (a) stays → Playback toggle, or removed (Paul's choice) |
+| Prepared quality handoff | `prepared_quality_handoff` | [QUALITY-SWITCH-CONTINUITY-BUILD](../playback-control/QUALITY-SWITCH-CONTINUITY-BUILD.md) | in execution | M2-Android, M1-web, M3; physical-client fleet receipt | (a) stays → Settings → Playback |
+| Second player in this browser | browser-local | same | same | same | (a) stays → moves with prepared handoff |
+| Refuse a subtitle segment that failed | `subtitle_not_ready_503` | [SUBTITLE-RELIABILITY-PHYSICAL-VERIFICATION-PROMPT](../clients/SUBTITLE-RELIABILITY-PHYSICAL-VERIFICATION-PROMPT.md) | open | AVPlayer, Media3 and hls.js observations | (a) stays → toggle removed, refusal becomes default |
+| PGS subtitle overlay | `pgs_overlay` | [APPLE-PGS-OVERLAY-ACCEPTANCE](../clients/APPLE-PGS-OVERLAY-ACCEPTANCE.md) | open | Apple and Android physical acceptance | (a) stays → Settings → Playback |
+| Parallel playback subtitle ranges | none (automatic) | K-09 | merged: M0–M5 | fleet evidence of a peer range exchange | (a) stays → card removed |
+| Stored PGS tracks | `subtitle_stored_sources` | K-09 | merged: M0–M5 | fleet and device evidence | (a) stays → Settings → Maintenance |
+| Share stored subtitle tracks | `subtitle_cluster_sources` | K-09 | merged: M0–M5 | fleet evidence | (a) stays → Cluster, or removed (Paul's choice) |
+| Backfill subtitle tracks | `subtitle_backfill` | K-09 | merged: M0–M5 | fleet evidence | (a) stays → Settings → Analysis |
+| Chapter thumbnails | `chapter_thumbnails` | [WATCH-VIEW-LAYOUT](../clients/WATCH-VIEW-LAYOUT.md) | built; on by default; in the deployed main | no recorded fleet observation; the plan names no other acceptance | (c) Paul: graduate to Playback now, or wait for a fleet observation |
+| Verified decode artifacts | `decoder_health_qualified_artifacts` | [DECODER_SELECTION_RECOVERY_STATUS](../DECODER_SELECTION_RECOVERY_STATUS.md) | M0–M7 merged | retained contracts for the fleet's paths; the plan calls fleet qualification optional | (c) Paul: is optional fleet qualification enough to graduate |
+| Automatic decode recovery | `automatic_decoder_recovery` | same | M0–M7 merged; off by default | no matched hardware/software retained pair | (c) Paul: same question; graduation would also decide its default |
+| Android: Match television refresh rate | display cadence | D-01 | merged: M1–M3 | M0 three-TV measurement, M4, M5 HDMI | (a) stays |
+| Apple: Bounded pause/resume | device-local | M4 item 4 (hold/resume barriers) | built | matched physical Apple TV latency | (a) stays |
+| Apple: Prepared quality handoff | device-local | as prepared handoff | as above | as above | (a) stays |
+| Android and Apple: Library channels, Recording, HDHomeRun Live TV, Programme guide | server settings | web already moved these to Settings → Live TV | — | native screens still show them under Developer | (c) Paul: move them to each client's Live TV settings in a client change |
+
+Two graduated on 2026-09-28, after the PR's one adversarial review showed
+durable cluster work deployed with no fleet receipt to wait for: the Durable
+cluster work card was removed (its switches already live permanently in
+Analysis and Maintenance) and the Shared storage budgets editor moved to
+Settings → Libraries. No other card's plan or board row records complete
+acceptance evidence. The server still reports the `durable_cluster_work`
+readiness item at `GET /api/v1/developer/readiness`; the web no longer renders it. Native Developer rows do not yet print their graduation
+condition; the table above is their record until a client change adds it.
 
 ## Remaining limits — evidence must name what it cannot prove
 

@@ -30,6 +30,19 @@ that table, all in one commit; three tests fail otherwise. They are plain
 scripts in one global scope, so served order is load order, and `export` /
 `import` / `module.exports` do not belong in any of them.
 
+## Optional features and the Developer tab
+
+There are no feature gates: an optional or unfinished feature gets an
+explicit switch in Settings → Developer with advisory readiness that never
+disables the switch, rejects its Save, or overrides the saved choice.
+Developer is where a feature waits while it is not fully active or not fully
+tested, and each card says what it is waiting on (`devGraduation` in
+`web/pages/settings-developer.js`; `tests/web/settings-sections.test.js`
+enforces it). When the feature is done it leaves Developer — to its proper
+settings section if a permanent on/off makes sense, otherwise the toggle is
+removed and the feature is simply on. The rule and the current audit are in
+[SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md](docs/features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md#developer-lifecycle--every-card-graduates).
+
 ## Rust compile loop
 
 At the start of any session that may change Rust, establish a working compiler
