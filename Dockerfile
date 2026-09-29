@@ -132,6 +132,9 @@ RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' \
     && mkvmerge --version | grep -F "mkvmerge v74.0.0" \
     && apt-get purge -y curl gnupg && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /usr/share/doc/plurx \
+    && dpkg-query -W -f='${Package}=${Version}\n' | LC_ALL=C sort \
+        > /usr/share/doc/plurx/media-runtime-packages.txt \
     && groupadd -r plurx \
     && useradd -r -g plurx -d /var/lib/plurx plurx \
     && mkdir -p /var/lib/plurx \

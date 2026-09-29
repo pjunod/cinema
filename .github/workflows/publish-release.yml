@@ -245,8 +245,29 @@ jobs:
             test "$cluster_identity" = "$SOURCE_SHA"
           fi
           release-source/scripts/container-smoke "$image_ref"
+          runtime_record=$(docker run --rm --platform "linux/$ARCH" "$image_ref" media-runtime-identity)
+          printf '%s\n' "$runtime_record" | jq -e --arg sha "$SOURCE_SHA" --arg arch "$ARCH" '
+            .application_sha == $sha and
+            .architecture == (if $arch == "amd64" then "x86_64" else "aarch64" end) and
+            (.engine_digest | test("^[0-9a-f]{64}$")) and
+            (.package_manifest_sha256 | test("^[0-9a-f]{64}$")) and
+            .engine_current == true
+          ' >/dev/null
+          mkdir -p runtime-record
+          printf '%s\n' "$runtime_record" | jq --arg image_digest "$DIGEST" \
+            '. + {application_image_digest: $image_digest}' > "runtime-record/$ARCH.json"
+          docker run --rm --platform "linux/$ARCH" --entrypoint cat "$image_ref" \
+            /usr/share/doc/plurx/media-runtime-packages.txt > "runtime-record/$ARCH.packages.txt"
+          test "$(sha256sum "runtime-record/$ARCH.packages.txt" | cut -d ' ' -f 1)" = \
+            "$(printf '%s\n' "$runtime_record" | jq -r .package_manifest_sha256)"
           mkdir -p digests
           printf '%s\n' "$DIGEST" > "digests/$ARCH"
+      - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: media-runtime-record-${{ matrix.arch }}
+          path: runtime-record
+          if-no-files-found: error
+          retention-days: 14
       - uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: release-image-digest-${{ matrix.arch }}
