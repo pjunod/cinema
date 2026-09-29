@@ -267,6 +267,26 @@ function autoCauseEvidence(p,nowMs){
     return {kind:"bandwidth-limited",ageMs:sampleAge};
   return {kind:healthAge==null?"unknown":"stale",ageMs:healthAge};
 }
+// The element's typed decoder error reaches `wirePlayerMedia` before the
+// periodic stall reporter can run. Give Auto its one policy move there, before
+// the terminal compatibility owner decides whether anything else can recover.
+function autoDecodeMediaError(p,v){
+  if(!p||!p.abr||p.method!=="transcode"||qualityForce()!=="auto"
+    ||p.abr.switching||p.autoFallbackInFlight||p.pendingMediaChange
+    ||hasPendingPlaybackOpen(p)) return false;
+  const currentHeight=Number(p.health?.target_height||p.autoHeight||v.videoHeight);
+  if(!(currentHeight>0)) return false;
+  const result=PlaybackPolicy.decideRung({ladder:p.ladder,currentHeight,
+    decodeStalls:1,decodeStepConsumed:!!p.abr.decodeStepConsumed,
+    blockedHeights:p.abr.failedHeights,
+    causeEvidence:{kind:"decode-failed",ageMs:0},nowMs:performance.now()});
+  if(!result.blockedHeights||result.height===currentHeight) return false;
+  p.abr.decodeStepConsumed=true;
+  p.abr.failedHeights=p.abr.failedHeights||new Set();
+  for(const height of result.blockedHeights) p.abr.failedHeights.add(height);
+  switchAutoRung(currentHeight,result).catch(()=>{});
+  return true;
+}
 function recordAutoDecision(p,currentHeight,result,runway,throughputKbps){
   if(!p||!p.abr) return;
   if(!result||result.action!=="suppressed"){
@@ -487,6 +507,7 @@ async function autoControllerTick(){
     recentSpeed:health.recent_speed,
     activeSupplyStall,supplyStalls:p.abr.stallEvents.supply.length,
     decodeStalls:p.abr.stallEvents.decode.length,
+    decodeStepConsumed:!!p.abr.decodeStepConsumed,
     lastStallAtMs:p.abr.lastStallAtMs,nowMs:now,
     lastSwitchAtMs:p.abr.lastSwitchAtMs,mildSamples:p.abr.mildSamples,
     lastCliffAtMs:p.abr.lastCliffAtMs,
@@ -495,6 +516,7 @@ async function autoControllerTick(){
   });
   p.abr.previousRunway=runway;
   if(result.blockedHeights){
+    p.abr.decodeStepConsumed=true;
     for(const height of result.blockedHeights) p.abr.failedHeights.add(height);
   }
   p.abr.mildSamples=result.mildSamples;

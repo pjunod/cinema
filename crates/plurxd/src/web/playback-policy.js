@@ -340,6 +340,7 @@
     activeSupplyStall = false,
     supplyStalls = 0,
     decodeStalls = 0,
+    decodeStepConsumed = false,
     lastStallAtMs = null,
     nowMs = 0,
     lastSwitchAtMs = null,
@@ -445,7 +446,7 @@
       : new Set(Array.isArray(blockedHeights) ? blockedHeights : []);
     if (causeFresh && causeKind === "decode-failed" && decodeStalls > 0) {
       const target = available[currentIndex - 1];
-      if (blocked.size > 0 || !target) {
+      if (decodeStepConsumed || !target) {
         return {height: current.height, reason: "decode", action: "suppressed",
           emergency: false, mildSamples: 0, upgradeSinceMs: null};
       }

@@ -37,7 +37,7 @@ requested before M3.
 
 - `tests/playback/auto-quality-policy.json` — the shared policy fixture at
   schema 1, driven today by `node tests/playback/web-policy.test.js`.
-  31 cases, 13 controller-gate rows; the gate rows pin all eight of the
+  32 cases, 13 controller-gate rows; the gate rows pin all eight of the
   design §8.1 tick guards.
 - The design's §8 — the per-platform adapter specification, with the six
   fields that are not simply available and the seven corrections it made to
@@ -251,4 +251,4 @@ claim protocol). **Model** is the runtime's exact model identifier;
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-29 | gpt-6-sol | agent:/root/a05_m0_builder | M0 | [#618](http://192.168.4.7:3000/noirr/plurx/pulls/618) | Four M0 cases now use plain `expect`: bounded stall verdict, 60 s voluntary gap, typed decode, and publication refusal. `node tests/playback/web-policy.test.js`, `node tests/playback/web-control.test.js`, and `make web-check` pass. Reverting verdict suppression, decode policy, or stalled-ask publication fails the focused regression. Draft awaits its sole adversarial review; no native adapter or M1 wire change. |
+| 2026-09-29 | gpt-6-sol | agent:/root/a05_m0_builder | M0 | [#618](http://192.168.4.7:3000/noirr/plurx/pulls/618) | Four M0 cases now use plain `expect`: bounded stall verdict, 60 s voluntary gap, typed decode, and publication refusal. `node tests/playback/web-policy.test.js`, `node tests/playback/web-control.test.js`, and `make web-check` pass. Reverting verdict suppression, decode policy, or stalled-ask publication fails the focused regression. The sole adversarial review found the absent live media-error seam and conflated blocked heights; both are corrected with a shipped error-listener regression and a separate `decodeStepConsumed` state. `transport.js` changes only at that error-listener seam. No native adapter or M1 wire change. |

@@ -321,7 +321,8 @@ The input record, named once:
     recentSpeed:         float|null   // server encode pace, x realtime
     activeSupplyStall:   bool
     supplyStalls:        int          // within stallWindowMs
-    decodeStalls:        int          // within stallWindowMs
+    decodeStalls:        int          // within stallWindowMs, or 1 for a typed media error
+    decodeStepConsumed: bool         // separate from failed auto-open heights
     lastStallAtMs:       int|null
     lastSwitchAtMs:      int|null
     mildSamples:         int
@@ -333,7 +334,7 @@ The input record, named once:
   }
 
   AutoDecision { height|null, reason|null, emergency, action, evidence,
-                 mildSamples, upgradeSinceMs }
+                 blockedHeights, mildSamples, upgradeSinceMs }
 ```
 
 Where each field comes from per platform. **This table is a sketch and §8 is
@@ -374,6 +375,14 @@ endpoint:
 | **Deliberate hold** | `hold:` | `loader-suspended`, a `hold`/`retry_resource` verdict that answered **this client's own `stalled` ask** (fixture kind `control-stall-verdict`), or a `publication`/`segment_`/`response_` refusal (fixture kind `delivery-refused`) | **no downward move** while the stall verdict is in force, bounded by the client's stall deferral (20 s on the web). A publication refusal suppresses a rung move while that refusal is fresh; repair delivery first. Upgrades after a stall still require `stallFree`. **Not** fed by the routine advisory hold or by `producer_state == "held"`, the healthy paced steady state (below) |
 | **Denied authority** | `authority:` | 401/403/410, `owner_lost`, `owner_transition`, `node_removal_fenced`, `learner_route_ineligible` | **do nothing to quality.** Re-establish ownership; a rung change on a session you no longer own is a second session |
 | *(unknown / stale)* | `unknown:` | nothing fresher than `causeMaxAgeMs` | **do nothing.** Not bandwidth pressure (§2.3) |
+
+On the web, `decodeStepConsumed` records whether the quality controller has
+already taken its one decode step. It is separate from `blockedHeights`:
+that set also contains a target whose automatic session-open failed. Such a
+failure does not spend the decoder response. The typed HTML media error
+(`code === 3`) enters the policy at `wirePlayerMedia` before its terminal
+compatibility handling, so the first genuine decoder failure can request
+one lower Auto rung even when the prior open target was blocked.
 
 Android's existing refusal (§2.5) is exactly the last row, and is preserved
 by construction: a stationary presentation with no fresh cause is
@@ -641,7 +650,7 @@ which changes no behaviour; nothing else under A-04 touches runtime code.
 
 ### 5.1 D1 — the shared policy artifact and its fixtures — DELIVERED
 
-`tests/playback/auto-quality-policy.json`, schema 1, now 31 cases and 13
+`tests/playback/auto-quality-policy.json`, schema 1, now 32 cases and 13
 controller-gate rows, driven by `node tests/playback/web-policy.test.js`.
 M0 settled its four `web_current` cases; the proposed switch budget still
 has one. Two gate rows retain findings for background visibility and HDR
@@ -1028,9 +1037,10 @@ everything below is `autoControllerTick`'s `sampleMs`, 5 s.
 | `activeSupplyStall` | `!!p.waitAt && runway < SUPPLY_RUNWAY_SECS` | bool | per tick | false |
 | `supplyStalls` | `p.abr.stallEvents.supply.length`, pruned to `stallWindowMs` | count | per event | 0 |
 | `decodeStalls` | `p.abr.stallEvents.decode.length`, passed to `decideRung` | count | per event | 0; only a fresh typed decoder failure yields `decode-failed` |
+| `decodeStepConsumed` | `p.abr.decodeStepConsumed`, set when the policy takes its one decode step | bool | per decode decision | false; failed auto-open heights do not consume it |
 | `lastStallAtMs`, `lastSwitchAtMs`, `mildSamples`, `upgradeSinceMs` | `p.abr.*`, written back from the previous decision | ms / count | per tick | `null`/0 |
 | `playerHeight` | `playerPixelHeight(v)` — CSS height × `devicePixelRatio`, ratio clamped to 4, else the intrinsic decoded height | pixels | per tick | `Infinity`; a ceiling only, which is why it can never strand a downgrade |
-| `blockedHeights` | `p.abr.failedHeights`, extended with the policy's returned `blockedHeights` before a rung switch | set | per decode failure | empty |
+| `blockedHeights` | `p.abr.failedHeights`, extended with the policy's returned `blockedHeights` before a rung switch | set | per decode failure or failed auto-open | empty; it bars upgrades, but does not itself say a decode step was spent |
 | `cause` | `autoCauseEvidence(p, now)` | see §2.3 | per tick | `{kind:"unknown"\|"stale"}` |
 
 Tick location: `autoControllerTick`, `crates/plurxd/src/web/player/stall-diagnosis.js`.

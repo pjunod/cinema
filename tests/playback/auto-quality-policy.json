@@ -73,6 +73,7 @@
     "activeSupplyStall": false,
     "supplyStalls": 0,
     "decodeStalls": 0,
+    "decodeStepConsumed": false,
     "lastStallAtMs": null,
     "nowMs": 600000,
     "lastSwitchAtMs": null,
@@ -184,10 +185,23 @@
       "sample": {
         "currentHeight": 480,
         "decodeStalls": 2,
+        "decodeStepConsumed": true,
         "blockedHeights": [720],
         "causeEvidence": {"kind": "decode-failed", "ageMs": 500, "code": "codec_error"}
       },
       "expect": {"height": 480, "reason": "decode", "action": "suppressed"}
+    },
+    {
+      "name": "decode: a failed auto-open target does not spend the decoder step",
+      "section": "3.2 decode, 4 compatibility owner",
+      "sample": {
+        "currentHeight": 1080,
+        "decodeStalls": 1,
+        "blockedHeights": [720],
+        "decodeStepConsumed": false,
+        "causeEvidence": {"kind": "decode-failed", "ageMs": 0, "code": "codec_error"}
+      },
+      "expect": {"height": 720, "reason": "decode", "blockedHeights": [1080]}
     },
     {
       "name": "hold: a suspended loader is a transport repair, not a rung change",
