@@ -895,6 +895,22 @@ function playbackSeekBufferedRangesMs(v,p){
   }catch(e){}
   return ranges;
 }
+// Null when the element exposes no `seekable` (test doubles); a real element
+// always has one, and an empty one means nothing can be sought locally.
+function playbackSeekSeekableRangesMs(v,p){
+  const seekable=v&&v.seekable;
+  if(!seekable||typeof seekable.length!=="number") return null;
+  const ranges=[];
+  const offsetMs=(Number(p&&p.offset)||0)*1000;
+  try{
+    for(let index=0;index<seekable.length;index+=1){
+      const from=offsetMs+seekable.start(index)*1000;
+      const through=offsetMs+seekable.end(index)*1000;
+      if(Number.isFinite(from)&&through>=from) ranges.push({from,through});
+    }
+  }catch(e){}
+  return ranges;
+}
 function playbackSeekPublishedRangeMs(p){
   if(!p||!p.hls||!p.hls.levels) return null;
   const level=p.hls.levels[p.hls.currentLevel];
@@ -998,6 +1014,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
     changing:!!me.pendingMediaChange,targetMs:targetSec*1000,bufferedMs,
     publishedMs:published&&published.range,
     holdbackMs:published&&published.holdbackMs,
+    seekableMs:playbackSeekSeekableRangesMs(v,me),
   });
   if(route.route==='local'){
     const attachment=me.mediaAttachment, atMs=route.atMs;
@@ -1009,7 +1026,25 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
       if(vod) seekIntent.localVodSeekFallbackPending=false;
       try{v.removeEventListener('seeked',onSeeked);}catch(e){}
     };
-    const onSeeked=()=>{ if(!current()) return; settled=true; cleanup(); };
+    // `seeked` proves the element finished seeking, not that it went where it
+    // was told: a clamp lands elsewhere and still fires it. Only a landing at
+    // the target settles the local seek; anywhere else reopens now.
+    const onSeeked=()=>{
+      if(!current()) return;
+      const landedMs=((me.offset||0)+(Number(/** @type {HTMLVideoElement} */(v).currentTime)||0))*1000;
+      if(Math.abs(landedMs-atMs)>PlaybackPolicy.SEEK_LOCAL_LANDING_SLACK_MS){ fallback('landed_elsewhere'); return; }
+      settled=true; cleanup(); };
+    const fallback=(why)=>{
+      if(settled) return;
+      settled=true;
+      cleanup();
+      clientLog({level:'warn',event:'seek_local_fallback',
+        detail:`${me.copyHls?'copy_hls':me.method||'unknown'}:${why}`,
+        message:'local seek did not settle; reopening at the same target'});
+      Promise.resolve(seekTo(
+        targetSec,true,autoHeightOverride,viewerInitiated,recoveryEpisode
+      )).catch(()=>{});
+    };
     // A `waiting` event may have armed an old 8 s timer during the 100 ms
     // scrub coalescing above. The committed seek replaces that observation.
     endWait(false);
@@ -1032,13 +1067,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
     timer=setTimeout(()=>{
       if(settled||!current()||vod&&seekIntent.localVodPresented) { cleanup(); return; }
       if(playbackSeekBufferCovers(v,me,atMs)) { cleanup(); return; }
-      cleanup();
-      clientLog({level:'warn',event:'seek_local_fallback',
-        detail:me.copyHls?'copy_hls':me.method||'unknown',
-        message:'local seek did not settle; reopening at the same target'});
-      Promise.resolve(seekTo(
-        targetSec,true,autoHeightOverride,viewerInitiated,recoveryEpisode
-      )).catch(()=>{});
+      fallback('unsettled');
     },vod?PlaybackPolicy.HLS_STARTUP.seek_deadline_ms:PlaybackPolicy.SEEK_LOCAL_SETTLE_MS);
     return;
   }

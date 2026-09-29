@@ -182,6 +182,7 @@ function fullOpenHarness() {
       "finishPlayAttach","play"].map(shippedSource),
     shippedSource("setQuality"),
     shippedSource("playbackSeekBufferedRangesMs"),
+    shippedSource("playbackSeekSeekableRangesMs"),
     shippedSource("playbackSeekPublishedRangeMs"),
     shippedSource("playbackSeekBufferCovers"),
     shippedSource("seekTo"), shippedSource("switchAudio"), shippedSource("setSub"),shippedSource("burnSub"),

@@ -970,6 +970,9 @@
   // A local rolling/progressive seek gets one short chance to land. The
   // transport owns the timer; this policy owns the frozen bound and route.
   const SEEK_LOCAL_SETTLE_MS = 3_000;
+  // How far a `seeked` landing may sit from the target and still be the
+  // viewer's seek. An element clamp lands tens of seconds away.
+  const SEEK_LOCAL_LANDING_SLACK_MS = 5_000;
 
   function seekRoute({
     method,
@@ -981,6 +984,7 @@
     bufferedMs = [],
     publishedMs = null,
     holdbackMs = 0,
+    seekableMs = null,
   } = {}) {
     const target = Number(targetMs);
     if (!Number.isFinite(target) || target < 0 || forceReopen || changing) {
@@ -990,6 +994,17 @@
     if (vod) return { route: "local", atMs: target, basis: "vod" };
     const rolling = Boolean(copyHls) || method === "transcode";
     if (!rolling && method !== "remux") return { route: "reopen" };
+    // The element clamps any assignment to `seekable`, and a growing EVENT
+    // playlist is live to native HLS: Safari ends `seekable` three target
+    // durations (3 x 16 s) before the published edge, which is behind most of
+    // what it has buffered. Buffered-but-unseekable is not a local target -
+    // the assignment would land back at the playhead and play on from there.
+    if (Array.isArray(seekableMs) && !seekableMs.some(range => {
+      const from = Number(range && range.from);
+      const through = Number(range && range.through);
+      return Number.isFinite(from) && Number.isFinite(through)
+        && target >= from && target <= through;
+    })) return { route: "reopen" };
     for (const range of Array.isArray(bufferedMs) ? bufferedMs : []) {
       const from = Number(range && range.from);
       const through = Number(range && range.through);
@@ -2118,6 +2133,7 @@
     HLS_MEDIA_RECOVERY,
     hlsMediaFatalAction,
     SEEK_LOCAL_SETTLE_MS,
+    SEEK_LOCAL_LANDING_SLACK_MS,
     seekRoute,
     HLS_STARTUP,
     HLS_STARTUP_TERMINAL_CODES,
