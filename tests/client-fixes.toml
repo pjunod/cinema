@@ -3202,3 +3202,14 @@ source = "clients/android/baselineprofile/src/main/java/tv/plurx/profile/Release
 source_anchor = "@JvmStatic @AfterClass fun sealCompletedInvocation()"
 test = "tests/operations/test_android_profile_report.py"
 test_anchor = "test_real_macrobenchmark_device_context_and_binding_are_required"
+
+# A rolling session retired by the 180 s pause grace failed the paused item
+# with "resource unavailable" and raised "Playback stopped." for nobody. The
+# failure now parks while paused and Play reopens at the saved position.
+[[fixes]]
+id = "apple.paused-retirement-reopen"
+commits = ["f06062c1"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "if let retiredSession = sessionId, Self.parksPausedItemFailure("
+test = "clients/apple/Tests/PlayerResumeTests.swift"
+test_anchor = "testAPausedItemFailureParksBeforeFailoverOrAnySurface"
