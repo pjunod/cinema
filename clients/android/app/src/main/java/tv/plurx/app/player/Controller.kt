@@ -484,6 +484,16 @@ class Controller internal constructor(
 
     /** The HLS session this player owns, if the plan opened one. */
     private var sessionId: String? = null
+
+    /**
+     * Set while paused when the server retired this rolling session (see
+     * [PausedRetirement]). [playPause] consumes it; it is honoured only while
+     * it names the attached session, so any successor retires it by identity.
+     */
+    private var pausedRetirement: PausedRetirement? = null
+
+    private fun currentPausedRetirement(): PausedRetirement? =
+        pausedRetirement?.takeIf { it.sessionId == sessionId }
     private var activeMediaPath: String? = null
 
     private val playbackTelemetry = ControllerPlaybackTelemetry(
@@ -818,6 +828,29 @@ class Controller internal constructor(
             // still own success/failure; failover must not steal the request.
             if (stallGuard.defersPredecessorRecovery(recipeOwnership.needsMediaReplacement(currentRecipe()))) return
             val mediaCompatibilityFailure = isCompatibilityPlaybackError(error.errorCode)
+            // Paused on a rolling session: this is the pause grace retiring the
+            // presentation (§9.5), not a failure anyone is watching. Walking the
+            // node list or raising "Playback stopped" here is what the latch
+            // replaces — every node answers the same 404/410. Play reopens.
+            val retiredSession = sessionId
+            if (retiredSession != null && parksPausedPlaybackError(
+                    playbackRequested = playbackIntent.playbackRequested,
+                    rollingSession = !sessionIsVod,
+                    compatibilityFailure = mediaCompatibilityFailure,
+                )
+            ) {
+                val parkedAt = realPosition()
+                pausedRetirement = PausedRetirement(retiredSession, parkedAt)
+                playbackTelemetry.report(
+                    event = "playback_paused_retirement",
+                    level = "info",
+                    message = error.errorCodeName,
+                    code = error.errorCode,
+                    detail = "parked at ${parkedAt}ms; Play reopens",
+                )
+                surfaceOwner.logOnly(mediaMutationEpoch, "paused error parked (${error.errorCodeName})")
+                return
+            }
             // Only a transport failure can be answered by another node, and
             // for 2004 only some of them: `nodeFailoverEligible` reads the
             // status the exception carries, so an ended session's 404 or a
@@ -1591,6 +1624,12 @@ class Controller internal constructor(
 
     fun playPause() {
         if (!playbackControlBootstrapFence.isActive()) return
+        if (!playbackIntent.playbackRequested) {
+            currentPausedRetirement()?.let { retired ->
+                reopenAfterPausedRetirement(retired)
+                return
+            }
+        }
         if (plan.isAudioOnly && !playbackIntent.playbackRequested) {
             PlaybackService.attach(context, mediaSession)
         }
@@ -1598,6 +1637,27 @@ class Controller internal constructor(
         stallGuard.setPlaybackRequested(playbackIntent, !playbackIntent.playbackRequested) {
             player.playWhenReady = it && !lifecyclePaused
         }
+        playbackControl.playerChanged()
+    }
+
+    /**
+     * The presentation this pause held no longer exists on the server, so there
+     * is nothing to resume in place. Record Play, then open the one replacement
+     * at the saved position (or the seek the viewer made while paused).
+     */
+    private fun reopenAfterPausedRetirement(retired: PausedRetirement) {
+        pausedRetirement = null
+        if (plan.isAudioOnly) PlaybackService.attach(context, mediaSession)
+        playbackControl.clearVerdict()
+        stallGuard.setPlaybackRequested(playbackIntent, true) {
+            player.playWhenReady = it && !lifecyclePaused
+        }
+        val position = pausedRetirementReopenPositionMs(
+            playbackIntent.pendingSeek?.targetMs,
+            retired,
+        ) { realPosition() }
+        surfaceOwner.logOnly(mediaMutationEpoch, "paused retirement reopen at ${position}ms")
+        restartAt(position, "paused-retirement")
         playbackControl.playerChanged()
     }
 
@@ -3049,6 +3109,15 @@ class Controller internal constructor(
      */
     private fun controlReportingGaveUp(failure: String) {
         surfaceOwner.logOnly(mediaMutationEpoch, "control reporting stopped ($failure)")
+        // The item may still be attached and able to play out its buffer, but
+        // the session behind it is gone: Play must open the replacement rather
+        // than run into the playlist's 404.
+        val retiredSession = sessionId
+        if (isPauseGraceExpiry(failure) && !playbackIntent.playbackRequested &&
+            retiredSession != null && !sessionIsVod && currentPausedRetirement() == null
+        ) {
+            pausedRetirement = PausedRetirement(retiredSession, positionMs = null)
+        }
     }
 
     /** The contract's client-log events (§3.6), on the reporter that already exists. */

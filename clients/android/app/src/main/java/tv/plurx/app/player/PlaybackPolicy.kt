@@ -439,3 +439,44 @@ private fun rungLabel(label: String, totalKbps: Int): String = when {
     totalKbps >= 1_000 -> "%s · %.1f Mbps".format(Locale.US, label, totalKbps / 1_000.0)
     else -> "$label · $totalKbps kbps"
 }
+
+/**
+ * A rolling session the server retired while the viewer was paused.
+ *
+ * The server ends a rolling presentation 180 s after an accepted Hold
+ * (`ROLLING_PAUSE_GRACE`): the control exchange answers
+ * `410 pause_grace_expired`, and Media3, which keeps refreshing a live playlist
+ * while paused, fails the item on the next refresh with the 404/410. Nobody is
+ * watching, so that is not a failure to show. The sliding-HLS contract (§9.5)
+ * says a paused client stays paused and opens one replacement at the saved
+ * position on resume; this is that latch. It names the session it is about, so
+ * a successor replacing `sessionId` retires it by identity.
+ */
+internal data class PausedRetirement(val sessionId: String, val positionMs: Long?)
+
+/**
+ * Whether a player error is parked for resume instead of surfaced: only for a
+ * viewer who has paused a rolling session, the one kind the server retires on
+ * a pause timer. VOD and direct play are kept alive by a paused client and keep
+ * their ladder; a compatibility rejection is still a verdict about the media.
+ */
+internal fun parksPausedPlaybackError(
+    playbackRequested: Boolean,
+    rollingSession: Boolean,
+    compatibilityFailure: Boolean,
+): Boolean = !playbackRequested && rollingSession && !compatibilityFailure
+
+/** The reporter's rendering of the server's pause-grace refusal. */
+internal fun isPauseGraceExpiry(failure: String): Boolean =
+    failure == "transport:410:pause_grace_expired"
+
+/**
+ * Where the replacement opens: a seek made while paused, else the position
+ * saved when the item failed, else the still-attached player's own clock. The
+ * control give-up arrives off the player's thread, so it saves no position.
+ */
+internal fun pausedRetirementReopenPositionMs(
+    pendingSeekMs: Long?,
+    retired: PausedRetirement,
+    attachedPositionMs: () -> Long,
+): Long = (pendingSeekMs ?: retired.positionMs ?: attachedPositionMs()).coerceAtLeast(0)
