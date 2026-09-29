@@ -614,7 +614,7 @@ if adding or moving another document.
 |---|---|
 | Implementation base / effort / task branches | `1869871ce`; `effort/safari-seek`; `codex/safari-seek-build` in a separate temporary clone |
 | Compiler version and baseline check | Rust 1.97.1; `rustup run 1.97.1 cargo check -p plurxd --all-targets --locked` passed on 2026-09-29 |
-| M0 browser fixture and stage diagnostics | Not started; historical observations in §2 |
+| M0 browser fixture and stage diagnostics | Bounded client route and settlement trace implemented on `codex/safari-seek-build`; native fixture and server stage diagnostics still owed |
 | M1 demand lifetime, promotion and engine eligibility | Not started |
 | M2 shared I/O policy and throughput trade-off | Not started |
 | M3 selected runtime inputs and per-architecture identities | Not started |

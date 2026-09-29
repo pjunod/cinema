@@ -628,6 +628,10 @@ pub struct ClientLog {
     pub stack: Option<String>,
     /// Extra detail (hls.js error type, stall verdict, …).
     pub detail: Option<String>,
+    /// Bounded JSON from the client route and settlement sample. The browser
+    /// sends film coordinates and at most four ranges of each kind; this is
+    /// diagnostic evidence, never authority for server publication.
+    pub seek_trace: Option<String>,
     /// Browser label the client computed ("Safari" | "Chrome" | …).
     pub ua: Option<String>,
     /// Whether this browser will decode this stream in hardware, as reported
@@ -1523,6 +1527,9 @@ fn client_log_line(ev: &ClientLog, suppressed: u64) -> String {
     }
     if let Some(d) = field(&ev.detail, 200) {
         line.push_str(&format!(" [{d}]"));
+    }
+    if let Some(trace) = one_line_field(&ev.seek_trace, 640) {
+        line.push_str(&format!(" seek_trace={trace}"));
     }
     // Attempt identity last: it's what you group by when reading back, and
     // putting it at the end keeps the front of every line comparable.
@@ -6180,6 +6187,7 @@ mod tests {
             col: None,
             stack: None,
             detail: None,
+            seek_trace: None,
             ua: None,
             attempt: None,
             reason: None,
@@ -6198,6 +6206,17 @@ mod tests {
             delivered_dv_profile: None,
             declared_dv_profiles: None,
         }
+    }
+
+    #[test]
+    fn client_seek_trace_is_bounded_to_one_log_line() {
+        let mut event = beacon("seek_route", 0);
+        event.seek_trace = Some(format!("{{\"target_ms\":50000}}\n{}", "x".repeat(2_000)));
+        let line = client_log_line(&event, 0);
+        let trace = line.split(" seek_trace=").nth(1).expect("seek trace");
+        assert!(trace.starts_with("{\"target_ms\":50000}x"));
+        assert!(!trace.contains('\n'));
+        assert!(trace.chars().count() <= 641);
     }
 
     #[test]

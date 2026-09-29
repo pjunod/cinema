@@ -13,7 +13,7 @@ exists for the named milestone; it does not imply a fleet rollout.
 
 | Milestone | State | Evidence and next step |
 |---|---|---|
-| M0 — browser fixture and stage diagnostics | In progress | Existing PR #613 protects the `seekable` gate; preserve the four native variants and add truthful route and stage traces. |
+| M0 — browser fixture and stage diagnostics | In progress | Added bounded client route and settlement traces with film-coordinate ranges, media origin, attempt and session. Native fixture and server stage diagnostics remain. |
 | M1 — viewer preparation | Pending | Analysis, artifact and hydration need one expiring consumer interest. |
 | M2 — source I/O admission | Pending | Keep one of two shared slots available for live demand. |
 | M3 — reproducible media runtime | Pending | Pin immutable per-architecture runtime inputs and record actual engine digests. |
@@ -25,6 +25,7 @@ exists for the named milestone; it does not imply a fleet rollout.
 | Check | Result |
 |---|---|
 | Pinned compiler | Rust 1.97.1 confirmed on the separate clone host; baseline `rustup run 1.97.1 cargo check -p plurxd --all-targets --locked` passed 2026-09-29. |
+| M0 compile and syntax | Pinned `plurxd` check, `cargo fmt --check`, and JavaScript syntax checks passed after the first trace edit. The added Rust log regression has not been executed. |
 | Focused regressions | Deferred until the final adversarial review, per the requested sequence. |
 | Astra adversarial review | Pending final main candidate. |
 | Ready fast lane | Pending review fixes. |
