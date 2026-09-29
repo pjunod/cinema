@@ -253,6 +253,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [NATIVE-HLS-STARTUP-IMPLEMENTATION.md](streaming/NATIVE-HLS-STARTUP-IMPLEMENTATION.md) | Build contract for native-HLS readiness, bounded reload, joinable source preparation, and three-client parity. | open |
 | [SAFARI-SEEK-IMPLEMENTATION.md](streaming/SAFARI-SEEK-IMPLEMENTATION.md) | Build contract for native seek evidence, viewer preparation, shared I/O admission, reproducible runtime inputs, and bounded rolling coverage. | open |
 | [SAFARI-SEEK-STATUS.md](streaming/SAFARI-SEEK-STATUS.md) | Current Safari seek implementation, validation, review, and promotion state. | open |
+| [Native Safari seek fixture evidence](evidence/safari-seek-native-2026-09-29.json) | Served playlists, media generator identity, and native buffered/seekable/landing snapshots for four synthetic variants. | done |
 | [Native startup replay](evidence/native-startup-replay.cjs) | Replays the native-HLS startup controller against delayed publication without private media or a running server. | open |
 | [STREAMING-RELIABILITY-HANDOFF.md](streaming/STREAMING-RELIABILITY-HANDOFF.md) | The remaining work, for the next streaming agent. | open |
 | [STREAMING-CONTINUATION-HANDOFF.md](streaming/STREAMING-CONTINUATION-HANDOFF.md) | The continuation-session workflow, branch state, and integration queue for streaming reliability. | open |

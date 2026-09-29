@@ -128,6 +128,7 @@ function usage() {
 Usage:
   scripts/playback-lab doctor [--browser chrome|safari|edge|firefox]
   scripts/playback-lab fixtures [--rebuild] [--fixtures DIR]
+  scripts/playback-lab safari-seek-fixture [--port PORT] [--fixtures DIR]
   scripts/playback-lab plan [--suite smoke|full|stall-recovery|vod]
                              [--case TEXT] [--exclude-case TEXT]
   scripts/playback-lab run [--suite smoke|full|stall-recovery|vod]
@@ -151,6 +152,7 @@ Usage:
 Commands:
   doctor     Verify the external programs and browser automation surface.
   fixtures   Generate and ffprobe-verify the deterministic media corpus.
+  safari-seek-fixture  Serve four native-HLS seek variants over identical synthetic media.
   plan       Print the cases without starting a server or browser.
   run        Boot an isolated server, scan the corpus, and play every case.
   normalize  Scrub a report's run-local values so two runs can be compared.
@@ -4437,6 +4439,123 @@ async function deviceRunCommand(options, dependencies = {}) {
   return evidence;
 }
 
+// A small physical-client experiment inside the playback lab. The media bytes
+// are identical for every row; only the served playlist differs. This page
+// needs a human to start playback so Safari's native media policy is real.
+async function safariSeekFixtureCommand(options) {
+  const fixtureDir = path.resolve(options.fixtures || path.join(DEFAULT_FIXTURE_DIR, "safari-seek"));
+  const mediaDir = path.join(fixtureDir, "hls");
+  const sourcePath = path.join(mediaDir, "source.m3u8");
+  await fsp.mkdir(mediaDir, { recursive: true });
+  if (!fs.existsSync(sourcePath)) {
+    const result = spawnSync("ffmpeg", [
+      "-hide_banner", "-loglevel", "error", "-y",
+      "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24", "-t", "120", "-an",
+      "-c:v", "libx264", "-preset", "ultrafast", "-g", "144",
+      "-keyint_min", "144", "-sc_threshold", "0", "-f", "hls",
+      "-hls_time", "6", "-hls_list_size", "0", "-hls_segment_type", "fmp4",
+      "-hls_playlist_type", "vod", "-hls_segment_filename", path.join(mediaDir, "seg%03d.m4s"),
+      sourcePath,
+    ], { encoding: "utf8", timeout: 180_000 });
+    if (result.status !== 0) throw new Error(`Safari fixture FFmpeg failed: ${result.stderr}`);
+  }
+  const identity = spawnSync("ffmpeg", ["-version"], { encoding: "utf8" });
+  const ffmpegIdentity = (identity.stdout || "").split("\n")[0].trim();
+  const source = await fsp.readFile(sourcePath, "utf8");
+  const mediaLines = source.split(/\r?\n/).filter((line) =>
+    line.startsWith("#EXTINF:") || line.startsWith("#EXT-X-MAP:") || /^seg\d+\.m4s$/.test(line));
+  if (mediaLines.filter((line) => line.startsWith("#EXTINF:")).length !== 20) {
+    throw new Error("Safari fixture expected twenty six-second segments");
+  }
+  const variants = {
+    live16: { target: 16, type: null, end: false },
+    event16: { target: 16, type: "EVENT", end: false },
+    vod16: { target: 16, type: "VOD", end: true },
+    live6: { target: 6, type: null, end: false },
+  };
+  const playlist = (variant) => [
+    "#EXTM3U", "#EXT-X-VERSION:7", `#EXT-X-TARGETDURATION:${variant.target}`,
+    "#EXT-X-MEDIA-SEQUENCE:0", ...(variant.type ? [`#EXT-X-PLAYLIST-TYPE:${variant.type}`] : []),
+    ...mediaLines, ...(variant.end ? ["#EXT-X-ENDLIST"] : []), "",
+  ].join("\n");
+  const page = String.raw`<!doctype html><meta charset="utf-8"><title>Safari seek fixture</title>
+<style>body{font:16px system-ui;max-width:880px;margin:2rem auto;padding:0 1rem}button{margin:.25rem;padding:.5rem}video{display:block;width:640px;max-width:100%;margin:1rem 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eee;padding:1rem}</style>
+<h1>Native Safari seek fixture</h1><p>Each button starts the same 120-second H.264/fMP4 media with a different served playlist. Let the buffer reach the end; the page then seeks to film second 100 and captures ranges before, at seeked, and one second later.</p>
+<div id="buttons"></div><video id="video" controls playsinline></video><pre id="result">Choose a playlist to start.</pre>
+<script>
+const variants=['live16','event16','vod16','live6'];
+const video=document.querySelector('#video'), result=document.querySelector('#result');
+let runId=0;
+function ranges(value){return Array.from({length:value.length},(_,i)=>[value.start(i),value.end(i)]);}
+function snapshot(){return {at_ms:performance.now(),position_s:video.currentTime,buffered:ranges(video.buffered),seekable:ranges(video.seekable),ready_state:video.readyState};}
+function waitFor(name,limitMs){return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{video.removeEventListener(name,done);reject(new Error(name+' timed out'));},limitMs);function done(){clearTimeout(timer);video.removeEventListener(name,done);resolve();}video.addEventListener(name,done);});}
+async function run(variant){
+  const own=++runId;
+  result.textContent='Starting '+variant+'…';
+  const record={variant,at:new Date().toISOString(),user_agent:navigator.userAgent,ffmpeg_identity:FFMPEG_IDENTITY,requested_position_s:100,served_manifest:null,before:null,seeked:null,after_1s:null,error:null};
+  try{
+    record.served_manifest=await (await fetch('/manifest/'+variant+'.m3u8')).text();
+    video.pause();video.removeAttribute('src');video.load();
+    video.src='/manifest/'+variant+'.m3u8';
+    await video.play();
+    const started=performance.now();
+    while(own===runId && Math.max(0,...ranges(video.buffered).map(range=>range[1]))<119.5){
+      if(performance.now()-started>120000)throw new Error('full buffer timed out');
+      await new Promise(resolve=>setTimeout(resolve,250));
+    }
+    if(own!==runId)return;
+    video.pause();record.before=snapshot();
+    const seeking=waitFor('seeked',15000);video.currentTime=100;await seeking;
+    record.seeked=snapshot();await new Promise(resolve=>setTimeout(resolve,1000));
+    record.after_1s=snapshot();
+  }catch(error){record.error=String(error);}
+  if(own!==runId)return;
+  result.textContent=JSON.stringify(record,null,2);
+  await fetch('/report',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(record)}).catch(()=>{});
+}
+for(const name of variants){const button=document.createElement('button');button.textContent=name;button.onclick=()=>run(name);document.querySelector('#buttons').append(button);}
+</script>`.replace("FFMPEG_IDENTITY", JSON.stringify(ffmpegIdentity));
+  const reportDir = path.join(DEFAULT_REPORT_DIR, "safari-seek");
+  await fsp.mkdir(reportDir, { recursive: true });
+  const port = Number(options.port || 8765);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("invalid port");
+  const server = http.createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url, `http://127.0.0.1:${port}`);
+      if (req.method === "GET" && url.pathname === "/") {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        res.end(page); return;
+      }
+      const variantMatch = /^\/manifest\/(live16|event16|vod16|live6)\.m3u8$/.exec(url.pathname);
+      if (req.method === "GET" && variantMatch) {
+        res.writeHead(200, { "content-type": "application/vnd.apple.mpegurl", "cache-control": "no-store" });
+        res.end(playlist(variants[variantMatch[1]])); return;
+      }
+      const mediaMatch = /^\/(?:manifest\/)?(init\.mp4|seg\d{3}\.m4s)$/.exec(url.pathname);
+      if (req.method === "GET" && mediaMatch) {
+        const bytes = await fsp.readFile(path.join(mediaDir, mediaMatch[1]));
+        res.writeHead(200, { "content-type": "video/mp4", "content-length": bytes.length });
+        res.end(bytes); return;
+      }
+      if (req.method === "POST" && url.pathname === "/report") {
+        let body = "";
+        for await (const chunk of req) {
+          body += chunk;
+          if (body.length > 200_000) throw new Error("report too large");
+        }
+        const report = JSON.parse(body);
+        if (!Object.hasOwn(variants, report.variant)) throw new Error("unknown variant");
+        const filename = `${Date.now()}-${report.variant}.json`;
+        await fsp.writeFile(path.join(reportDir, filename), `${JSON.stringify(report, null, 2)}\n`);
+        res.writeHead(200, { "content-type": "text/plain" });res.end(filename);return;
+      }
+      res.writeHead(404);res.end();
+    } catch (error) { res.writeHead(400);res.end(String(error)); }
+  });
+  await new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
+  process.stdout.write(`Safari seek fixture: http://127.0.0.1:${port}/\nFFmpeg: ${ffmpegIdentity}\nReports: ${reportDir}\n`);
+}
+
 async function main() {
   const { command, options } = parseArgs(process.argv.slice(2));
   if (command === "help" || command === "--help" || command === "-h") {
@@ -4446,6 +4565,7 @@ async function main() {
   if (command === "normalize") return normalizeCommand(options);
   if (command === "device-proxy") return deviceProxyCommand(options);
   if (command === "device-run") return deviceRunCommand(options);
+  if (command === "safari-seek-fixture") return safariSeekFixtureCommand(options);
   if (command === "run") {
     const outcome = await executeRun(loadManifest(), options);
     if (outcome.error) throw outcome.error;
