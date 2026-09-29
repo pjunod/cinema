@@ -1166,7 +1166,7 @@ enum LiveTvStartReducer {
     /// `node_maintenance` row says.
     static let rendered: Set<String> = [
         "live_tv_disabled", "live_tv_protocol_unready", "tuner_capacity",
-        "tuner_unavailable", "channel_not_found", "drm_unsupported",
+        "encoder_capacity", "tuner_unavailable", "channel_not_found", "drm_unsupported",
         "codec_unsupported", "startup_timeout", "source_format_changed",
         "stream_failed", "capability_expired", "settings_conflict",
         "invalid_request", "invalid_settings", "admin_required",

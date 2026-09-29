@@ -3202,3 +3202,45 @@ source = "clients/android/baselineprofile/src/main/java/tv/plurx/profile/Release
 source_anchor = "@JvmStatic @AfterClass fun sealCompletedInvocation()"
 test = "tests/operations/test_android_profile_report.py"
 test_anchor = "test_real_macrobenchmark_device_context_and_binding_are_required"
+
+# A rolling session retired by the 180 s pause grace failed the paused item
+# with "resource unavailable" and raised "Playback stopped." for nobody. The
+# failure now parks while paused and Play reopens at the saved position.
+[[fixes]]
+id = "apple.paused-retirement-reopen"
+commits = ["f06062c1"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "if let retiredSession = sessionId, Self.parksPausedItemFailure("
+test = "clients/apple/Tests/PlayerResumeTests.swift"
+test_anchor = "testAPausedItemFailureParksBeforeFailoverOrAnySurface"
+
+# Android twin of apple.paused-retirement-reopen: a paused rolling session
+# retired by the pause grace parks its player error and Play reopens.
+[[fixes]]
+id = "android.paused-retirement-reopen"
+commits = ["4cc2a5b7"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "if (retiredSession != null && parksPausedPlaybackError("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackPolicyTest.kt"
+test_anchor = "fun onlyAPausedRollingNonCompatibilityErrorParks()"
+
+# The PR review's gaps: an Android MediaSession Play (notification, headset,
+# Assistant) now opens the replacement for a retired paused session too.
+[[fixes]]
+id = "android.paused-retirement-mediasession-play"
+commits = ["df1b0074"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "currentPausedRetirement()?.let(::reopenAfterPausedRetirement)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackPolicyTest.kt"
+test_anchor = "fun theReplacementOpensWhereTheViewerLeftIt()"
+
+# The shared Live TV start fixture gained an encoder_capacity row, but the
+# Apple reducer drew it as owner_unavailable, so an encoder refusal told the
+# viewer the owner was unreachable instead of that its encoder was busy.
+[[fixes]]
+id = "apple.live-tv-encoder-capacity-render"
+commits = ["9c243256"]
+source = "clients/apple/Sources/LiveTv.swift"
+source_anchor = "\"encoder_capacity\", \"tuner_unavailable\","
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testTheStartReducerAnswersEverySharedCase"

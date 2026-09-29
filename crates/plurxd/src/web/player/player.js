@@ -76,6 +76,7 @@
  *
  * The session
  * @property {string|null} [sessionId]
+ * @property {{sessionId:string}|null} [pausedRetirement] the rolling session the pause grace retired; Play reopens
  * @property {string|null} [streamId]
  * @property {any} [health]                the session's last health report
  * @property {number} [healthObservedAt]   performance.now() the health report arrived
@@ -1068,6 +1069,20 @@ function onHlsError(hls,startup,video,observesCurrent){
       return;
     }
     console.warn("[cinema] hls.js fatal",d.type,d.details);
+    const paused=PLAYER;
+    if(paused&&PlaybackPolicy.parksPausedPlaybackError({wantsPlayback:paused.wantsPlayback,
+      sessionId:paused.sessionId,vod:paused.vod,
+      networkFailure:d.type===Hls.ErrorTypes.NETWORK_ERROR})){
+      // Paused on a rolling session: the pause grace retired it (§9.5). The
+      // error is for nobody; stop polling and let Play open the replacement.
+      paused.pausedRetirement={sessionId:paused.sessionId};
+      try{hls.stopLoad()}catch(e){}
+      clientLog(Object.assign({level:"info",event:"paused_retirement",
+        detail:"parked:"+String(d.details||d.type),
+        message:"paused rolling session failed its playlist — Play reopens at the saved position"},
+        playbackContext()));
+      return;
+    }
     const hlsFailure=playbackControlHlsFatal(d,!!(PLAYER&&PLAYER.started));
     const isMedia=hlsFailure.media_failure;
     const mediaAction=PlaybackPolicy.hlsMediaFatalAction({
