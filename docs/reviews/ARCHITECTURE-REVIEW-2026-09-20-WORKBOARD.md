@@ -22,6 +22,18 @@ after the remaining code PRs merge. PR #533 independently included the #524
 immutable-landing erratum and reports green fast lane #3129; draft evidence
 PR #536 adds no duplicate erratum.
 
+**S-11 live observation, 2026-09-29 22:07 UTC:** one bounded, passive
+four-node collector began on deployed runtime `1869871ce`. Its first two
+30-second ticks reached all four nodes with HTTP 200 and the same build;
+this is a start receipt, not seven-day qualification. The collector retains
+reset-aware selected metrics under a 128 MiB cap and stops by
+2026-10-06 22:10 UTC. The earliest possible seven-day completion is
+2026-10-06 22:07 UTC, subject to a gap, build, restart, and controlled-traffic
+audit. The evidence stays in the agent-owned observation workspace until the
+window is evaluated; S-11 remains blocked on that evaluation and the named
+controlled sessions. Current `main` is newer only in documentation at this
+receipt, so the deployed runtime still needs an exact-source check at closure.
+
 ## How to claim, work and finish a plan
 
 Every executing session follows this exactly. The reason for each rule is the
