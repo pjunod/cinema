@@ -3233,3 +3233,14 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
 source_anchor = "currentPausedRetirement()?.let(::reopenAfterPausedRetirement)"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackPolicyTest.kt"
 test_anchor = "fun theReplacementOpensWhereTheViewerLeftIt()"
+
+# The shared Live TV start fixture gained an encoder_capacity row, but the
+# Apple reducer drew it as owner_unavailable, so an encoder refusal told the
+# viewer the owner was unreachable instead of that its encoder was busy.
+[[fixes]]
+id = "apple.live-tv-encoder-capacity-render"
+commits = ["9c243256"]
+source = "clients/apple/Sources/LiveTv.swift"
+source_anchor = "\"encoder_capacity\", \"tuner_unavailable\","
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testTheStartReducerAnswersEverySharedCase"
