@@ -1520,6 +1520,7 @@ pub struct JobManager {
     /// Queue execution is independent of discovery cadence. This guard keeps
     /// minute scheduler ticks from stacking drain loops on the same node.
     cluster_index_working: std::sync::atomic::AtomicBool,
+    cluster_analysis_working: std::sync::atomic::AtomicBool,
     background_upkeep_running: std::sync::atomic::AtomicBool,
     /// Permanent-media conversion is a bounded queue, but one slow disc may
     /// outlive many scheduler ticks. Keep exactly one local drain loop.
@@ -2231,6 +2232,16 @@ struct ClusterIndexWorkingGuard(Arc<JobManager>);
 impl Drop for ClusterIndexWorkingGuard {
     fn drop(&mut self) {
         self.0.cluster_index_working.store(false, Ordering::Relaxed);
+    }
+}
+
+struct ClusterAnalysisWorkingGuard(Arc<JobManager>);
+
+impl Drop for ClusterAnalysisWorkingGuard {
+    fn drop(&mut self) {
+        self.0
+            .cluster_analysis_working
+            .store(false, Ordering::Release);
     }
 }
 
@@ -3113,6 +3124,7 @@ impl JobManager {
             producing: std::sync::atomic::AtomicBool::new(false),
             indexing: std::sync::atomic::AtomicBool::new(false),
             cluster_index_working: std::sync::atomic::AtomicBool::new(false),
+            cluster_analysis_working: std::sync::atomic::AtomicBool::new(false),
             background_upkeep_running: std::sync::atomic::AtomicBool::new(false),
             dv_disk_working: std::sync::atomic::AtomicBool::new(false),
             dv_disk_capabilities: crate::dv_disk::DvDiskCapabilities::default(),
@@ -5669,10 +5681,18 @@ impl JobManager {
                     .may_execute_job(JobKind::FragmentIndexBuild)
                     .await
                     && self.cluster_fragment_index_enabled().await
+                    && (!self.cluster_analysis_working.load(Ordering::Acquire)
+                        || !self.cluster_index_working.load(Ordering::Acquire))
                 {
-                    Arc::clone(&self)
-                        .work_cluster_fragment_index_queue(Arc::clone(&transcode))
-                        .await;
+                    // Keep listening for viewer wakeups while a source read or
+                    // artifact build owns its own fenced pass. The independent
+                    // local guards above and in the worker coalesce duplicate
+                    // wakes without blocking this dispatch loop for minutes.
+                    let jobs = Arc::clone(&self);
+                    let transcode = Arc::clone(&transcode);
+                    tokio::spawn(async move {
+                        jobs.work_cluster_fragment_index_queue(transcode).await;
+                    });
                 }
                 let progressed = crate::background_jobs::accepted_claims(&kinds) != before;
                 tokio::select! {
@@ -7659,13 +7679,32 @@ impl JobManager {
         self: Arc<Self>,
         transcode: Arc<TranscodeManager>,
     ) {
-        if self.cluster_index_working.swap(true, Ordering::Relaxed) {
-            return;
-        }
-        let _guard = ClusterIndexWorkingGuard(Arc::clone(&self));
         if !self.may_run_cluster_jobs().await {
             return;
         }
+        // A source attestation can take minutes. It owns its own single-consumer
+        // fence, leaving the artifact and delivery pass available to another
+        // wake while the analysis reader is active. Store claims retain their
+        // durable owner/fence and do not depend on this local pass guard.
+        let analysis = if !self.cluster_analysis_working.swap(true, Ordering::AcqRel) {
+            let analysis_state = Arc::clone(&self);
+            let analysis_transcode = Arc::clone(&transcode);
+            Some(tokio::spawn(async move {
+                let _analysis_guard = ClusterAnalysisWorkingGuard(Arc::clone(&analysis_state));
+                analysis_state
+                    .resolve_analysis_requests(analysis_transcode)
+                    .await;
+            }))
+        } else {
+            None
+        };
+        if self.cluster_index_working.swap(true, Ordering::AcqRel) {
+            if let Some(analysis) = analysis {
+                let _ = analysis.await;
+            }
+            return;
+        }
+        let _guard = ClusterIndexWorkingGuard(Arc::clone(&self));
         let fragment_engine_current = crate::ffmpeg::fragment_index_engine_is_current().await;
 
         let now = clock_ms();
@@ -7696,9 +7735,11 @@ impl JobManager {
                 }
             }
         }
-        self.resolve_analysis_requests(Arc::clone(&transcode)).await;
-
         if !fragment_engine_current {
+            drop(_guard);
+            if let Some(analysis) = analysis {
+                let _ = analysis.await;
+            }
             return;
         }
 
@@ -7706,6 +7747,10 @@ impl JobManager {
         let built = self.drain_cluster_fragment_index_slot(transcode).await;
         if built > 0 {
             tracing::info!(built, "cluster fragment-index queue pass finished");
+        }
+        drop(_guard);
+        if let Some(analysis) = analysis {
+            let _ = analysis.await;
         }
     }
 
