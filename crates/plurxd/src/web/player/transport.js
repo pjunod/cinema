@@ -465,9 +465,21 @@ function togglePlay(){
   else if(PLAYER){
     rememberPlaybackTransportIntent(v,PLAYER);
     PLAYER.wantsPlayback=!PLAYER.wantsPlayback;
-    if(PLAYER.wantsPlayback) resumeHlsStartup(v,PLAYER);
-    else pauseHlsStartup(PLAYER);
-    applyPlaybackTransportIntent(v,PLAYER);
+    if(PLAYER.wantsPlayback&&PlaybackPolicy.pausedRetirementCurrent(
+      PLAYER.pausedRetirement,PLAYER.sessionId)){
+      // The session this pause held was retired (§9.5): reopen at the saved
+      // position, or the seek made while paused. The reopen keeps Play.
+      PLAYER.pausedRetirement=null;
+      const at=PLAYER.controlSeek?.targetMs!=null
+        ? (PLAYER.controlSeek.targetMs+(PLAYER.bookOffset||0))/1000 : pbPosSec();
+      clientLog(Object.assign({level:"info",event:"paused_retirement",detail:"reopen",
+        message:`reopening the retired paused session at ${at.toFixed(1)}s`},playbackContext()));
+      seekTo(at,true,null,false);
+    }else{
+      if(PLAYER.wantsPlayback) resumeHlsStartup(v,PLAYER);
+      else pauseHlsStartup(PLAYER);
+      applyPlaybackTransportIntent(v,PLAYER);
+    }
   }
   if(PLAYER)playerActivity();
   // The pause EDGE beats (F-web-12), so the server hears where the viewer
