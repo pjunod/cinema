@@ -3213,3 +3213,13 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "if let retiredSession = sessionId, Self.parksPausedItemFailure("
 test = "clients/apple/Tests/PlayerResumeTests.swift"
 test_anchor = "testAPausedItemFailureParksBeforeFailoverOrAnySurface"
+
+# Android twin of apple.paused-retirement-reopen: a paused rolling session
+# retired by the pause grace parks its player error and Play reopens.
+[[fixes]]
+id = "android.paused-retirement-reopen"
+commits = ["4cc2a5b7"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "if (retiredSession != null && parksPausedPlaybackError("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackPolicyTest.kt"
+test_anchor = "fun onlyAPausedRollingNonCompatibilityErrorParks()"
