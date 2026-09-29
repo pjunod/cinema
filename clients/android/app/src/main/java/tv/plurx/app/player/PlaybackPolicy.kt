@@ -472,8 +472,7 @@ internal fun isPauseGraceExpiry(failure: String): Boolean =
 
 /**
  * Where the replacement opens: a seek made while paused, else the position
- * saved when the item failed, else the still-attached player's own clock. The
- * control give-up arrives off the player's thread, so it saves no position.
+ * saved when the latch was armed, else the attached player's own clock.
  */
 internal fun pausedRetirementReopenPositionMs(
     pendingSeekMs: Long?,

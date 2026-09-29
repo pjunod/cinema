@@ -744,6 +744,17 @@ function wirePlayerMedia(v){
     const err=v.error, code=err?err.code:0, msg=(err&&err.message)||"";
     const src=(v.currentSrc||"").split("?")[0];
     console.warn("[cinema] video error",{code,msg,method:PLAYER&&PLAYER.method,src});
+    // Paused on a rolling session and the network failed: the pause grace
+    // retired it (§9.5). Native HLS has no loader to stop, so this is where
+    // Safari meets the dead playlist. Park it; Play opens the replacement.
+    if(PLAYER&&code===2&&PlaybackPolicy.parksPausedPlaybackError({wantsPlayback:PLAYER.wantsPlayback,
+      sessionId:PLAYER.sessionId,vod:PLAYER.vod,networkFailure:true})){
+      PLAYER.pausedRetirement={sessionId:PLAYER.sessionId};
+      clientLog(Object.assign({level:"info",event:"paused_retirement",detail:"parked:native_network",
+        message:"paused rolling session failed its playlist — Play reopens at the saved position"},
+        playbackContext()));
+      return;
+    }
     if(finishStallRecovery("failed",msg||"video element error "+code)){
       showStallRecoveryFailure(msg||"The browser reported video error "+code+".");
       return;

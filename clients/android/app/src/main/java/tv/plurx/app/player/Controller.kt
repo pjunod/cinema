@@ -1090,6 +1090,12 @@ class Controller internal constructor(
             // writes always apply this same latest value; transient buffering
             // and audio-focus suppression do not replace viewer intent.
             if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST) {
+                // Play from the notification, a headset or the Assistant reaches
+                // the player directly rather than through `playPause()`, and
+                // must open the replacement for a retired paused session too.
+                if (playWhenReady && !playbackIntent.playbackRequested) {
+                    currentPausedRetirement()?.let(::reopenAfterPausedRetirement)
+                }
                 playbackIntent.setPlaybackRequested(playWhenReady)
                 // The client's own fact, on the edge it already listens to: no
                 // new detector and no new timer. A `buffering` fault is about a
@@ -1647,6 +1653,10 @@ class Controller internal constructor(
      */
     private fun reopenAfterPausedRetirement(retired: PausedRetirement) {
         pausedRetirement = null
+        // A MediaSession Play on an errored player has already called
+        // `prepare()` on the dead playlist. Stop cancels that load, so its
+        // 404/410 cannot reach `onPlayerError` with Play now requested.
+        player.stop()
         if (plan.isAudioOnly) PlaybackService.attach(context, mediaSession)
         playbackControl.clearVerdict()
         stallGuard.setPlaybackRequested(playbackIntent, true) {
@@ -3116,7 +3126,7 @@ class Controller internal constructor(
         if (isPauseGraceExpiry(failure) && !playbackIntent.playbackRequested &&
             retiredSession != null && !sessionIsVod && currentPausedRetirement() == null
         ) {
-            pausedRetirement = PausedRetirement(retiredSession, positionMs = null)
+            pausedRetirement = PausedRetirement(retiredSession, realPosition())
         }
     }
 
