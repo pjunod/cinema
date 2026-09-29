@@ -4021,8 +4021,10 @@ impl MetricsStore for HiqliteAuthStore {
                         'oldest_age_ms', MAX(0, $2 * 1000 - grouped.created))), '[]') \
                         FROM (SELECT kind, state, COUNT(*) AS count, MIN(created_at_ms) AS created \
                             FROM background_jobs GROUP BY kind, state LIMIT 128) grouped)), \
-                        'source_io_reservations', (SELECT COUNT(*) FROM background_job_reservations \
-                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000), \
+                        'source_io_reservations', ((SELECT COUNT(*) FROM background_job_reservations \
+                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000) \
+                            + (SELECT COUNT(*) FROM analysis_source_reservations \
+                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000)), \
                         'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))) AS background_jobs_json \
                  FROM offline_packages WHERE node_id = $1",
                 params!(node_id, now),

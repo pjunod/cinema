@@ -858,6 +858,27 @@ async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
             .unwrap_or_else(|error| panic!("{backend}: viewer claim: {error}"))
             .expect("viewer uses the other source slot");
         assert_eq!(second.request_id, requests[1].request_id, "{backend}");
+        let holders = store
+            .source_io_holders(1_007)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: observe source readers: {error}"));
+        assert_eq!(holders.len(), 2, "{backend}: both source slots are visible");
+        assert!(
+            holders
+                .iter()
+                .any(|holder| holder.work_id == first.request_id
+                    && holder.priority == "maintenance"
+                    && holder.kind == "analysis_source"),
+            "{backend}: ordinary reader remains observable"
+        );
+        assert!(
+            holders
+                .iter()
+                .any(|holder| holder.work_id == second.request_id
+                    && holder.priority == "viewer"
+                    && holder.kind == "analysis_source"),
+            "{backend}: viewer reader remains observable"
+        );
         let third_viewer = viewer(&requests[2], 2);
         assert!(
             store
@@ -900,6 +921,22 @@ async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
             .unwrap_or_else(|error| panic!("{backend}: third claim after owner death: {error}"))
             .expect("a demand reader may use the released slot");
         assert_eq!(third.request_id, requests[2].request_id, "{backend}");
+        let holders = store
+            .source_io_holders(31_012)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: observe replacement: {error}"));
+        assert!(
+            holders
+                .iter()
+                .any(|holder| holder.work_id == third.request_id),
+            "{backend}: replacement reader becomes visible"
+        );
+        assert!(
+            holders
+                .iter()
+                .all(|holder| holder.work_id != first.request_id),
+            "{backend}: expired reader disappears"
+        );
     })
     .await;
 }
