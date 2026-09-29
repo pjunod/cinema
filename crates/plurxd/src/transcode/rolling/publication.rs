@@ -120,6 +120,13 @@ pub(super) const ROLLING_RESERVE_MAX_MS: i64 = ROLLING_SERVED_WINDOW_MS
     - ROLLING_PUBLICATION_GUARD_MS
     - ROLLING_SEGMENT_MAX_MS
     - ROLLING_BACK_BUFFER_MS;
+// 48 s native holdback + 10 s useful forward seek + 24 s hard publication
+// deadline + one 16 s client reload + 10 s observation allowance = 108 s.
+// One complete 16 s segment of rounding reaches the existing 124 s reserve
+// ceiling exactly. This applies only to fresh, active 1x Web playback;
+// startup, stale demand, Apple/Android, and faster playback retain their
+// original runway.
+pub(super) const ROLLING_STEADY_RUNWAY_MS: i64 = 108_000;
 
 #[derive(Clone)]
 pub(super) struct ServedPlaylistSnapshot {
@@ -201,7 +208,9 @@ impl RollingPublicationClock {
             self.legacy_bootstrap_at = None;
             let demand = lease.demand.as_ref().expect("explicit demand checked");
             let observation_age = lease.demand_observation_age.unwrap_or_default();
-            let ends = rolling_explicit_publication_ends(demand, observation_age, media_origin_ms);
+            let steady = self.served.is_some() && !lease.startup.protects_from_time_hold();
+            let ends =
+                rolling_explicit_publication_ends(demand, observation_age, media_origin_ms, steady);
             RollingPublicationBudget {
                 demand_sequence: lease.accepted_demand_sequence,
                 consumed_end_ms: ends.consumed_end_ms,
@@ -263,13 +272,24 @@ pub(super) fn rolling_explicit_publication_ends(
     demand: &crate::playback_control::PlaybackDemandSnapshot,
     observation_age: Duration,
     media_origin_ms: i64,
+    steady: bool,
 ) -> RollingExplicitPublicationEnds {
     let consumed_absolute_ms =
         crate::playback_control::rolling_estimated_position_ms(demand, observation_age);
     let consumed_end_ms = consumed_absolute_ms.saturating_sub(media_origin_ms).max(0);
-    let desired_end_ms = consumed_end_ms.saturating_add(rolling_initial_runway_ms(
-        rolling_playback_rate(Some(demand)),
-    ));
+    let rate = rolling_playback_rate(Some(demand));
+    let steady_coverage = steady
+        && demand.platform() == Some(crate::playback_control::ClientPlatform::Web)
+        && demand.demand == crate::playback_control::PlaybackDemand::Active
+        && demand.render_state == crate::playback_control::RenderState::Rendering
+        && rate <= 1.0
+        && observation_age <= Duration::from_secs(10);
+    let runway_ms = if steady_coverage {
+        ROLLING_STEADY_RUNWAY_MS
+    } else {
+        rolling_initial_runway_ms(rate)
+    };
+    let desired_end_ms = consumed_end_ms.saturating_add(runway_ms);
     RollingExplicitPublicationEnds {
         consumed_absolute_ms,
         consumed_end_ms,

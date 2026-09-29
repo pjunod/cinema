@@ -129,7 +129,7 @@ Usage:
   scripts/playback-lab doctor [--browser chrome|safari|edge|firefox]
   scripts/playback-lab fixtures [--rebuild] [--fixtures DIR]
   scripts/playback-lab safari-seek-fixture [--port PORT] [--fixtures DIR]
-  scripts/playback-lab safari-seek-server [--observe SECONDS] [--fixtures DIR]
+  scripts/playback-lab safari-seek-server [--observe SECONDS] [--duration SECONDS] [--rate 1|2] [--fixtures DIR]
                               [--server PATH] [--json PATH]
   scripts/playback-lab plan [--suite smoke|full|stall-recovery|vod]
                              [--case TEXT] [--exclude-case TEXT]
@@ -4565,12 +4565,16 @@ for(const name of variants){const button=document.createElement('button');button
 // It stores playlist tags and timing while redacting all URI-bearing lines.
 async function safariSeekServerCommand(options) {
   const fixtureDir = path.resolve(options.fixtures || path.join(DEFAULT_FIXTURE_DIR, "safari-seek-real"));
-  const sourcePath = path.join(fixtureDir, "safari-seek-real.mp4");
+  const durationSeconds = positiveNumberOption(options, "duration", "--duration", 120);
+  if (!Number.isInteger(durationSeconds) || durationSeconds > 3_600) {
+    throw new Error("--duration must be an integer at most 3600 seconds");
+  }
+  const sourcePath = path.join(fixtureDir, `safari-seek-real-${durationSeconds}s.mp4`);
   await fsp.mkdir(fixtureDir, { recursive: true });
   if (!fs.existsSync(sourcePath)) {
     const result = spawnSync("ffmpeg", [
       "-hide_banner", "-loglevel", "error", "-y",
-      "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24", "-t", "120", "-an",
+      "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24", "-t", String(durationSeconds), "-an",
       "-c:v", "libx264", "-preset", "ultrafast", "-g", "144",
       "-keyint_min", "144", "-sc_threshold", "0", "-movflags", "+faststart",
       sourcePath,
@@ -4580,14 +4584,17 @@ async function safariSeekServerCommand(options) {
   const identity = spawnSync("ffmpeg", ["-version"], { encoding: "utf8" });
   const ffmpegIdentity = (identity.stdout || "").split("\n")[0].trim();
   const observeSeconds = positiveNumberOption(options, "observe", "--observe", 90);
+  const requestedRate = positiveNumberOption(options, "rate", "--rate", 1);
+  if (![1, 2].includes(requestedRate)) throw new Error("--rate must be 1 or 2");
   const server = await startServer({ ...options, enable_vod: false }, fixtureDir);
   let driver = null;
   const startedAt = performance.now();
   const report = {
     at: new Date().toISOString(),
     browser: "safari",
+    requested_rate: requestedRate,
     ffmpeg_identity: ffmpegIdentity,
-    source: "synthetic 120-second H.264 MP4 through isolated plurxd rolling session",
+    source: `synthetic ${durationSeconds}-second H.264 MP4 through isolated plurxd rolling session`,
     samples: [], served_manifests: [], error: null,
   };
   try {
@@ -4598,6 +4605,11 @@ async function safariSeekServerCommand(options) {
     const browserInfo = await prepareBrowser(driver, server.token);
     report.user_agent = browserInfo.user_agent || null;
     await driver.startPlayback(file.id, file.title || "Safari seek real server", file.duration_ms || 0);
+    await waitFor(() => driver.eval("(()=>{const v=document.getElementById('video');return v&&v.readyState>=2&&v.currentTime>0})()"),
+      45_000, "Safari first rolling frame", 250);
+    if (requestedRate !== 1) {
+      await driver.exec(`document.getElementById('video').playbackRate=${requestedRate}; return true;`);
+    }
     let lastManifest = "";
     for (let second = 0; second < observeSeconds; second += 1) {
       const sample = await driver.eval(`(()=>{
@@ -4611,6 +4623,13 @@ async function safariSeekServerCommand(options) {
       const sourceUrl = sample.current_src;
       delete sample.current_src;
       sample.elapsed_ms = Math.round(performance.now() - startedAt);
+      for (const delta of [10, 30]) {
+        const target = Number(sample.position_s || 0) + delta;
+        sample[`forward_${delta}_seekable`] = (sample.seekable || []).some(([start, end]) =>
+          target >= start && target <= end);
+        sample[`forward_${delta}_buffered`] = (sample.buffered || []).some(([start, end]) =>
+          target >= start && target <= end);
+      }
       report.samples.push(sample);
       if (typeof sourceUrl === "string" && /^http:\/\//.test(sourceUrl)) {
         try {
