@@ -58,12 +58,22 @@ fn summary_value(
 pub(crate) async fn activity_summary(state: &AppState) -> Result<serde_json::Value, ApiError> {
     let now_ms = crate::state::clock_ms();
     let summary = state.store.analysis_status_summary().await?;
-    Ok(summary_value(
+    let source_io_holders = state.store.source_io_holders(now_ms).await?;
+    let mut value = summary_value(
         summary,
         state.jobs.analysis_queue_enabled().await,
         now_ms,
         state.store_metrics.snapshot().queue_health,
-    ))
+    );
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "source_io_holders".to_owned(),
+            serde_json::to_value(source_io_holders).map_err(|error| {
+                ApiError::Internal(format!("source holder observation: {error}"))
+            })?,
+        );
+    }
+    Ok(value)
 }
 
 #[derive(Default, Deserialize)]

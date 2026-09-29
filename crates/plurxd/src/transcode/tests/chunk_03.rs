@@ -1330,7 +1330,7 @@
             );
             demand.playback_rate = rate;
             let age = Duration::from_secs(3);
-            let ends = rolling_explicit_publication_ends(&demand, age, 5_000);
+            let ends = rolling_explicit_publication_ends(&demand, age, 5_000, true);
             assert_eq!(
                 ends.consumed_end_ms,
                 10_000 + ((3_000.0 * rate) as i64) - 5_000,
@@ -1350,7 +1350,7 @@
         let demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
             crate::playback_control::ClientPlatform::Web,
         );
-        let ends = rolling_explicit_publication_ends(&demand, Duration::ZERO, 5_000);
+        let ends = rolling_explicit_publication_ends(&demand, Duration::ZERO, 5_000, true);
         assert_eq!(
             evaluate(&demand, Duration::ZERO, ends.desired_end_ms + 9_000),
             None,
@@ -1359,6 +1359,40 @@
         assert_eq!(
             evaluate(&demand, Duration::ZERO, ends.desired_end_ms + 10_000),
             Some(AheadHoldReason::Time)
+        );
+    }
+
+    #[test]
+    fn rolling_steady_seek_runway_waits_for_presentation_and_fresh_demand() {
+        let mut demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Web,
+        );
+        let startup = rolling_explicit_publication_ends(&demand, Duration::ZERO, 5_000, false);
+        let steady = rolling_explicit_publication_ends(&demand, Duration::ZERO, 5_000, true);
+        assert_eq!(startup.desired_end_ms - startup.consumed_end_ms, ROLLING_INITIAL_RUNWAY_MS);
+        assert_eq!(steady.desired_end_ms - steady.consumed_end_ms, ROLLING_STEADY_RUNWAY_MS);
+        assert_eq!(
+            steady.allowed_end_ms - steady.consumed_end_ms,
+            ROLLING_RESERVE_MAX_MS,
+            "one rounded segment must still fit the served window and protected history"
+        );
+
+        let stale = rolling_explicit_publication_ends(&demand, Duration::from_secs(11), 5_000, true);
+        assert_eq!(stale.desired_end_ms - stale.consumed_end_ms, ROLLING_INITIAL_RUNWAY_MS);
+        demand.demand = crate::playback_control::PlaybackDemand::Hold;
+        let paused = rolling_explicit_publication_ends(&demand, Duration::ZERO, 5_000, true);
+        assert_eq!(paused.desired_end_ms - paused.consumed_end_ms, ROLLING_INITIAL_RUNWAY_MS);
+        demand.demand = crate::playback_control::PlaybackDemand::Active;
+        demand.playback_rate = 2.0;
+        let fast = rolling_explicit_publication_ends(&demand, Duration::ZERO, 5_000, true);
+        assert_eq!(fast.desired_end_ms - fast.consumed_end_ms, 96_000);
+        let apple = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Apple,
+        );
+        let apple_ends = rolling_explicit_publication_ends(&apple, Duration::ZERO, 5_000, true);
+        assert_eq!(
+            apple_ends.desired_end_ms - apple_ends.consumed_end_ms,
+            ROLLING_INITIAL_RUNWAY_MS
         );
     }
 

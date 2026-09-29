@@ -128,6 +128,10 @@ function usage() {
 Usage:
   scripts/playback-lab doctor [--browser chrome|safari|edge|firefox]
   scripts/playback-lab fixtures [--rebuild] [--fixtures DIR]
+  scripts/playback-lab safari-seek-fixture [--port PORT] [--fixtures DIR]
+  scripts/playback-lab safari-seek-server [--observe SECONDS] [--duration SECONDS] [--rate 1|2] [--fixtures DIR]
+      [--seek-count COUNT]
+                              [--server PATH] [--json PATH]
   scripts/playback-lab plan [--suite smoke|full|stall-recovery|vod]
                              [--case TEXT] [--exclude-case TEXT]
   scripts/playback-lab run [--suite smoke|full|stall-recovery|vod]
@@ -151,6 +155,8 @@ Usage:
 Commands:
   doctor     Verify the external programs and browser automation surface.
   fixtures   Generate and ffprobe-verify the deterministic media corpus.
+  safari-seek-fixture  Serve four native-HLS seek variants over identical synthetic media.
+  safari-seek-server   Capture Safari ranges and served rolling playlists from an isolated daemon.
   plan       Print the cases without starting a server or browser.
   run        Boot an isolated server, scan the corpus, and play every case.
   normalize  Scrub a report's run-local values so two runs can be compared.
@@ -4437,6 +4443,295 @@ async function deviceRunCommand(options, dependencies = {}) {
   return evidence;
 }
 
+// A small physical-client experiment inside the playback lab. The media bytes
+// are identical for every row; only the served playlist differs. This page
+// needs a human to start playback so Safari's native media policy is real.
+async function safariSeekFixtureCommand(options) {
+  const fixtureDir = path.resolve(options.fixtures || path.join(DEFAULT_FIXTURE_DIR, "safari-seek"));
+  const mediaDir = path.join(fixtureDir, "hls");
+  const sourcePath = path.join(mediaDir, "source.m3u8");
+  await fsp.mkdir(mediaDir, { recursive: true });
+  if (!fs.existsSync(sourcePath)) {
+    const result = spawnSync("ffmpeg", [
+      "-hide_banner", "-loglevel", "error", "-y",
+      "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24", "-t", "120", "-an",
+      "-c:v", "libx264", "-preset", "ultrafast", "-g", "144",
+      "-keyint_min", "144", "-sc_threshold", "0", "-f", "hls",
+      "-hls_time", "6", "-hls_list_size", "0", "-hls_segment_type", "fmp4",
+      "-hls_playlist_type", "vod", "-hls_segment_filename", path.join(mediaDir, "seg%03d.m4s"),
+      sourcePath,
+    ], { encoding: "utf8", timeout: 180_000 });
+    if (result.status !== 0) throw new Error(`Safari fixture FFmpeg failed: ${result.stderr}`);
+  }
+  const identity = spawnSync("ffmpeg", ["-version"], { encoding: "utf8" });
+  const ffmpegIdentity = (identity.stdout || "").split("\n")[0].trim();
+  const source = await fsp.readFile(sourcePath, "utf8");
+  const mediaLines = source.split(/\r?\n/).filter((line) =>
+    line.startsWith("#EXTINF:") || line.startsWith("#EXT-X-MAP:") || /^seg\d+\.m4s$/.test(line));
+  if (mediaLines.filter((line) => line.startsWith("#EXTINF:")).length !== 20) {
+    throw new Error("Safari fixture expected twenty six-second segments");
+  }
+  const variants = {
+    live16: { target: 16, type: null, end: false },
+    event16: { target: 16, type: "EVENT", end: false },
+    vod16: { target: 16, type: "VOD", end: true },
+    live6: { target: 6, type: null, end: false },
+  };
+  const playlist = (variant) => [
+    "#EXTM3U", "#EXT-X-VERSION:7", `#EXT-X-TARGETDURATION:${variant.target}`,
+    "#EXT-X-MEDIA-SEQUENCE:0", ...(variant.type ? [`#EXT-X-PLAYLIST-TYPE:${variant.type}`] : []),
+    ...mediaLines, ...(variant.end ? ["#EXT-X-ENDLIST"] : []), "",
+  ].join("\n");
+  const page = String.raw`<!doctype html><meta charset="utf-8"><title>Safari seek fixture</title>
+<style>body{font:16px system-ui;max-width:880px;margin:2rem auto;padding:0 1rem}button{margin:.25rem;padding:.5rem}video{display:block;width:640px;max-width:100%;margin:1rem 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eee;padding:1rem}</style>
+<h1>Native Safari seek fixture</h1><p>Each button starts the same 120-second H.264/fMP4 media with a different served playlist. Let the buffer reach the end; the page then seeks to film second 100 and captures ranges before, at seeked, and one second later.</p>
+<div id="buttons"></div><video id="video" controls playsinline></video><pre id="result">Choose a playlist to start.</pre>
+<script>
+const variants=['live16','event16','vod16','live6'];
+const video=document.querySelector('#video'), result=document.querySelector('#result');
+let runId=0;
+function ranges(value){return Array.from({length:value.length},(_,i)=>[value.start(i),value.end(i)]);}
+function snapshot(){return {at_ms:performance.now(),position_s:video.currentTime,buffered:ranges(video.buffered),seekable:ranges(video.seekable),ready_state:video.readyState};}
+function waitFor(name,limitMs){return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{video.removeEventListener(name,done);reject(new Error(name+' timed out'));},limitMs);function done(){clearTimeout(timer);video.removeEventListener(name,done);resolve();}video.addEventListener(name,done);});}
+async function run(variant){
+  const own=++runId;
+  result.textContent='Starting '+variant+'…';
+  const record={variant,at:new Date().toISOString(),user_agent:navigator.userAgent,ffmpeg_identity:FFMPEG_IDENTITY,requested_position_s:100,served_manifest:null,before:null,seeked:null,after_1s:null,error:null};
+  try{
+    record.served_manifest=await (await fetch('/manifest/'+variant+'.m3u8')).text();
+    video.pause();video.removeAttribute('src');video.load();
+    video.src='/manifest/'+variant+'.m3u8';
+    await video.play();
+    const started=performance.now();
+    while(own===runId && Math.max(0,...ranges(video.buffered).map(range=>range[1]))<119.5){
+      if(performance.now()-started>120000)throw new Error('full buffer timed out');
+      await new Promise(resolve=>setTimeout(resolve,250));
+    }
+    if(own!==runId)return;
+    video.pause();record.before=snapshot();
+    const seeking=waitFor('seeked',15000);video.currentTime=100;await seeking;
+    record.seeked=snapshot();await new Promise(resolve=>setTimeout(resolve,1000));
+    record.after_1s=snapshot();
+  }catch(error){record.error=String(error);}
+  if(own!==runId)return;
+  result.textContent=JSON.stringify(record,null,2);
+  await fetch('/report',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(record)}).catch(()=>{});
+}
+
+for(const name of variants){const button=document.createElement('button');button.textContent=name;button.onclick=()=>run(name);document.querySelector('#buttons').append(button);}
+</script>`.replace("FFMPEG_IDENTITY", JSON.stringify(ffmpegIdentity));
+  const reportDir = path.join(DEFAULT_REPORT_DIR, "safari-seek");
+  await fsp.mkdir(reportDir, { recursive: true });
+  const port = Number(options.port || 8765);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("invalid port");
+  const server = http.createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url, `http://127.0.0.1:${port}`);
+      if (req.method === "GET" && url.pathname === "/") {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        res.end(page); return;
+      }
+      const variantMatch = /^\/manifest\/(live16|event16|vod16|live6)\.m3u8$/.exec(url.pathname);
+      if (req.method === "GET" && variantMatch) {
+        res.writeHead(200, { "content-type": "application/vnd.apple.mpegurl", "cache-control": "no-store" });
+        res.end(playlist(variants[variantMatch[1]])); return;
+      }
+      const mediaMatch = /^\/(?:manifest\/)?(init\.mp4|seg\d{3}\.m4s)$/.exec(url.pathname);
+      if (req.method === "GET" && mediaMatch) {
+        const bytes = await fsp.readFile(path.join(mediaDir, mediaMatch[1]));
+        res.writeHead(200, { "content-type": "video/mp4", "content-length": bytes.length });
+        res.end(bytes); return;
+      }
+      if (req.method === "POST" && url.pathname === "/report") {
+        let body = "";
+        for await (const chunk of req) {
+          body += chunk;
+          if (body.length > 200_000) throw new Error("report too large");
+        }
+        const report = JSON.parse(body);
+        if (!Object.hasOwn(variants, report.variant)) throw new Error("unknown variant");
+        const filename = `${Date.now()}-${report.variant}.json`;
+        await fsp.writeFile(path.join(reportDir, filename), `${JSON.stringify(report, null, 2)}\n`);
+        res.writeHead(200, { "content-type": "text/plain" });res.end(filename);return;
+      }
+      res.writeHead(404);res.end();
+    } catch (error) { res.writeHead(400);res.end(String(error)); }
+  });
+  await new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
+  process.stdout.write(`Safari seek fixture: http://127.0.0.1:${port}/\nFFmpeg: ${ffmpegIdentity}\nReports: ${reportDir}\n`);
+}
+
+// The static fixture establishes Safari's native clamp. This second capture
+// goes through the daemon's actual rolling session and publication endpoint.
+// It stores playlist tags and timing while redacting all URI-bearing lines.
+async function safariSeekServerCommand(options) {
+  const fixtureDir = path.resolve(options.fixtures || path.join(DEFAULT_FIXTURE_DIR, "safari-seek-real"));
+  const durationSeconds = positiveNumberOption(options, "duration", "--duration", 120);
+  if (!Number.isInteger(durationSeconds) || durationSeconds > 3_600) {
+    throw new Error("--duration must be an integer at most 3600 seconds");
+  }
+  const sourcePath = path.join(fixtureDir, `safari-seek-real-${durationSeconds}s.mp4`);
+  await fsp.mkdir(fixtureDir, { recursive: true });
+  if (!fs.existsSync(sourcePath)) {
+    const result = spawnSync("ffmpeg", [
+      "-hide_banner", "-loglevel", "error", "-y",
+      "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24", "-t", String(durationSeconds), "-an",
+      "-c:v", "libx264", "-preset", "ultrafast", "-g", "144",
+      "-keyint_min", "144", "-sc_threshold", "0", "-movflags", "+faststart",
+      sourcePath,
+    ], { encoding: "utf8", timeout: 180_000 });
+    if (result.status !== 0) throw new Error(`Safari real-server FFmpeg failed: ${result.stderr}`);
+  }
+  const identity = spawnSync("ffmpeg", ["-version"], { encoding: "utf8" });
+  const ffmpegIdentity = (identity.stdout || "").split("\n")[0].trim();
+  const observeSeconds = positiveNumberOption(options, "observe", "--observe", 90);
+  const requestedRate = positiveNumberOption(options, "rate", "--rate", 1);
+  if (![1, 2].includes(requestedRate)) throw new Error("--rate must be 1 or 2");
+  const seekCount = options.seek_count === undefined ? 0
+    : positiveNumberOption(options, "seek_count", "--seek-count", 0);
+  if (!Number.isInteger(seekCount) || seekCount > 100) throw new Error("--seek-count must be an integer at most 100");
+  const server = await startServer({ ...options, enable_vod: false }, fixtureDir);
+  let driver = null;
+  const startedAt = performance.now();
+  const report = {
+    at: new Date().toISOString(),
+    browser: "safari",
+    requested_rate: requestedRate,
+    requested_seek_count: seekCount,
+    ffmpeg_identity: ffmpegIdentity,
+    source: `synthetic ${durationSeconds}-second H.264 MP4 through isolated plurxd rolling session`,
+    samples: [], seeks: [], seek_traces: [], served_manifests: [], playback_events: [], error: null,
+  };
+  try {
+    const file = server.files.get(path.basename(sourcePath));
+    if (!file) throw new Error("isolated server did not scan Safari source");
+    driver = new SafariDriver(options, server.baseUrl, server.runtime);
+    await driver.start();
+    const browserInfo = await prepareBrowser(driver, server.token);
+    report.user_agent = browserInfo.user_agent || null;
+    await driver.startPlayback(file.id, file.title || "Safari seek real server", file.duration_ms || 0);
+    await waitFor(() => driver.eval("(()=>{const v=document.getElementById('video');return v&&v.readyState>=2&&v.currentTime>0})()"),
+      45_000, "Safari first rolling frame", 250);
+    if (requestedRate !== 1) {
+      await driver.exec(`document.getElementById('video').playbackRate=${requestedRate}; return true;`);
+    }
+    let lastManifest = "";
+    const seenEvents = new Set();
+    let pendingSeek = null;
+    for (let second = 0; second < observeSeconds; second += 1) {
+      const sample = await driver.eval(`(()=>{
+        const v=document.getElementById('video');
+        if(!v)return {video_absent:true};
+        const origin=Number((typeof PLAYER!=='undefined'&&PLAYER&&PLAYER.offset)||0);
+        const ranges=(r)=>Array.from({length:r.length},(_,i)=>[r.start(i),r.end(i)]);
+        return {position_s:origin+v.currentTime,element_position_s:v.currentTime,origin_s:origin,
+          playback_rate:v.playbackRate,
+          buffered:ranges(v.buffered),seekable:ranges(v.seekable),
+          ready_state:v.readyState,paused:v.paused,current_src:v.currentSrc};
+      })()`);
+      const sourceUrl = sample.current_src;
+      delete sample.current_src;
+      sample.elapsed_ms = Math.round(performance.now() - startedAt);
+      sample.film_buffered = (sample.buffered || []).map(([start, end]) =>
+        [start + (sample.origin_s || 0), end + (sample.origin_s || 0)]);
+      sample.film_seekable = (sample.seekable || []).map(([start, end]) =>
+        [start + (sample.origin_s || 0), end + (sample.origin_s || 0)]);
+      for (const delta of [10, 30]) {
+        const target = Number(sample.position_s || 0) + delta;
+        sample[`forward_${delta}_seekable`] = sample.film_seekable.some(([start, end]) =>
+          target >= start && target <= end);
+        sample[`forward_${delta}_buffered`] = sample.film_buffered.some(([start, end]) =>
+          target >= start && target <= end);
+      }
+      if (pendingSeek) {
+        pendingSeek.observed_at_ms = sample.elapsed_ms;
+        pendingSeek.landed_s = sample.position_s;
+        pendingSeek.landing_error_s = sample.position_s - pendingSeek.target_s;
+        pendingSeek.ready_state = sample.ready_state;
+        pendingSeek.origin_after_s = sample.origin_s;
+        pendingSeek = null;
+      }
+      report.samples.push(sample);
+      if (typeof sourceUrl === "string" && /^http:\/\//.test(sourceUrl)) {
+        try {
+          const response = await fetch(sourceUrl, { signal: AbortSignal.timeout(2_000) });
+          if (response.ok) {
+            const raw = await response.text();
+            if (raw.startsWith("#EXTM3U") && raw !== lastManifest) {
+              lastManifest = raw;
+              const safe = raw.split(/\r?\n/).map((line) =>
+                line.startsWith("#")
+                  ? line.replace(/URI="[^"]*"/g, 'URI="<redacted>"')
+                  : (line ? "<media-uri>" : "")
+              ).join("\n");
+              report.served_manifests.push({ elapsed_ms: sample.elapsed_ms, body: safe });
+            }
+          }
+        } catch (_) { /* A missing endpoint remains visible as no served manifest. */ }
+      }
+      if (second % 10 === 0) {
+        try {
+          const events = await api(server.baseUrl,
+            `/system/playback-events?since=${Date.now()-60_000}&limit=500`, { token: server.token });
+          for (const event of events) {
+            if (event.file_id !== Number(file.id) || seenEvents.has(event.id)) continue;
+            seenEvents.add(event.id);
+            let extra = null;
+            try { extra = JSON.parse(event.extra || "{}"); } catch (_) {}
+            const serverTruth = extra && extra.server || {};
+            report.playback_events.push({ id:event.id, at_unix_ms:event.at_unix_ms,
+              event:event.event, method:event.method, ms:event.ms, reason:event.reason,
+              produced_end_ms:serverTruth.produced_end_ms ?? null,
+              published_end_ms:serverTruth.published_end_ms ?? null,
+              served_end_ms:serverTruth.served_end_ms ?? null,
+              budget_anchor_sequence:serverTruth.budget_anchor_sequence ?? null,
+              demand_observation_age_ms:serverTruth.demand_observation_age_ms ?? null });
+          }
+        } catch (error) { report.events_capture_error = sanitizedError(error); }
+      }
+      if (report.seeks.length < seekCount && !pendingSeek && second % 3 === 0
+          && sample.forward_10_seekable && sample.forward_10_buffered
+          && sample.position_s + 12 < durationSeconds) {
+        const target = sample.position_s + 10;
+        const attempt = { at_ms:sample.elapsed_ms, from_s:sample.position_s,
+          target_s:target, origin_before_s:sample.origin_s, covered:true };
+        report.seeks.push(attempt);
+        await driver.exec("seekTo(arguments[0]); return true;", [target]);
+        pendingSeek = attempt;
+      }
+      await sleep(1_000);
+    }
+    try {
+      const logs = await api(server.baseUrl, "/system/logs?level=info&limit=2000", { token: server.token });
+      for (const entry of logs) {
+        const traceText = String(entry.message || "").match(/seek_trace=(\{.*?\})(?:\s|$)/)?.[1];
+        if (!traceText) continue;
+        let trace;
+        try { trace = JSON.parse(traceText); } catch (_) { continue; }
+        report.seek_traces.push({ at_unix_ms:entry.ts_ms, id:trace.id,
+          target_ms:trace.target_ms, element_ms:trace.element_ms, origin_ms:trace.origin_ms,
+          path:trace.path, mode:trace.mode, buffered_ms:trace.buffered_ms,
+          seekable_ms:trace.seekable_ms, published_ms:trace.published_ms,
+          route:trace.route, reason:trace.reason, landing_ms:trace.landing_ms ?? null,
+          outcome:trace.outcome ?? null });
+      }
+    } catch (error) { report.traces_capture_error = sanitizedError(error); }
+  } catch (error) {
+    report.error = sanitizedError(error);
+  } finally {
+    if (driver) await driver.close().catch(() => {});
+    await server.close(false);
+  }
+  const jsonPath = path.resolve(options.json || path.join(
+    DEFAULT_REPORT_DIR, `safari-seek-real-${Date.now()}.json`,
+  ));
+  await fsp.mkdir(path.dirname(jsonPath), { recursive: true });
+  await fsp.writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`);
+  process.stdout.write(`SAFARI  ${jsonPath}\nSAMPLES ${report.samples.length}\nMANIFESTS ${report.served_manifests.length}\n`);
+  if (report.error) throw new Error(report.error);
+  return report;
+}
+
 async function main() {
   const { command, options } = parseArgs(process.argv.slice(2));
   if (command === "help" || command === "--help" || command === "-h") {
@@ -4446,6 +4741,8 @@ async function main() {
   if (command === "normalize") return normalizeCommand(options);
   if (command === "device-proxy") return deviceProxyCommand(options);
   if (command === "device-run") return deviceRunCommand(options);
+  if (command === "safari-seek-fixture") return safariSeekFixtureCommand(options);
+  if (command === "safari-seek-server") return safariSeekServerCommand(options);
   if (command === "run") {
     const outcome = await executeRun(loadManifest(), options);
     if (outcome.error) throw outcome.error;

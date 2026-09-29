@@ -144,7 +144,9 @@ const SUBTITLE_RECONCILE_SCHEMA_VERSION: i64 = 62;
 const SUBTITLE_RECONCILE_SCHEMA_MIGRATION_SOURCE: i64 = LIVE_TV_RESOURCE_SCHEMA_VERSION;
 const JOB_RETENTION_SCHEMA_VERSION: i64 = 63;
 const JOB_RETENTION_SCHEMA_MIGRATION_SOURCE: i64 = SUBTITLE_RECONCILE_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = JOB_RETENTION_SCHEMA_VERSION;
+const VIEWER_ANALYSIS_SCHEMA_VERSION: i64 = 64;
+const VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE: i64 = JOB_RETENTION_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = VIEWER_ANALYSIS_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -3028,6 +3030,19 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(JOB_RETENTION_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<(String, hiqlite::Params)> =
+                        super::background_jobs::VIEWER_ANALYSIS_SCHEMA
+                            .split("-- next statement\n")
+                            .map(|sql| (sql.to_owned(), params!()))
+                            .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(VIEWER_ANALYSIS_SCHEMA_VERSION, now, VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -4006,8 +4021,10 @@ impl MetricsStore for HiqliteAuthStore {
                         'oldest_age_ms', MAX(0, $2 * 1000 - grouped.created))), '[]') \
                         FROM (SELECT kind, state, COUNT(*) AS count, MIN(created_at_ms) AS created \
                             FROM background_jobs GROUP BY kind, state LIMIT 128) grouped)), \
-                        'source_io_reservations', (SELECT COUNT(*) FROM background_job_reservations \
-                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000), \
+                        'source_io_reservations', ((SELECT COUNT(*) FROM background_job_reservations \
+                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000) \
+                            + (SELECT COUNT(*) FROM analysis_source_reservations \
+                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000)), \
                         'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))) AS background_jobs_json \
                  FROM offline_packages WHERE node_id = $1",
                 params!(node_id, now),
@@ -5069,7 +5086,8 @@ fn schema_migration_action(
         | INTEGRITY_JOBS_SCHEMA_MIGRATION_SOURCE
         | LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE
         | SUBTITLE_RECONCILE_SCHEMA_MIGRATION_SOURCE
-        | JOB_RETENTION_SCHEMA_MIGRATION_SOURCE => {
+        | JOB_RETENTION_SCHEMA_MIGRATION_SOURCE
+        | VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(

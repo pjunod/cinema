@@ -61,6 +61,8 @@ INSERT INTO background_job_commands(id, operation, request_json, result_json)
 SELECT json_extract($1, '$.id'), 'storage_domains', $1,
     CASE WHEN NOT EXISTS (SELECT 1 FROM background_jobs
         WHERE state IN ('running','cancelling') AND lease_expires_ms > json_extract($1, '$.now_ms'))
+      AND NOT EXISTS (SELECT 1 FROM analysis_source_reservations
+        WHERE expires_at_ms > json_extract($1, '$.now_ms'))
       AND NOT EXISTS (SELECT 1 FROM json_each($1, '$.mappings') mapping
         WHERE NOT EXISTS (SELECT 1 FROM libraries library, json_each(library.paths) root
             WHERE library.id = json_extract(mapping.value, '$.library_id')

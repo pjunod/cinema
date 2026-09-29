@@ -1179,6 +1179,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs_subtitle::RECONCILE_SCHEMA,
     // v85: settled job history yields to new work instead of filling the bound.
     super::background_jobs::RETENTION_SCHEMA,
+    // v86: expiring viewer interests follow exact analysis into fragment work.
+    super::background_jobs::VIEWER_ANALYSIS_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1955,8 +1957,10 @@ impl MetricsStore for SqliteStore {
                         'oldest_age_ms', MAX(0, ?2 * 1000 - grouped.created))), '[]')
                         FROM (SELECT kind, state, COUNT(*) AS count, MIN(created_at_ms) AS created
                             FROM background_jobs GROUP BY kind, state LIMIT 128) grouped)),
-                        'source_io_reservations', (SELECT COUNT(*) FROM background_job_reservations
-                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000),
+                        'source_io_reservations', ((SELECT COUNT(*) FROM background_job_reservations
+                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)
+                            + (SELECT COUNT(*) FROM analysis_source_reservations
+                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)),
                         'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import')))
                  FROM offline_packages WHERE node_id = ?1",
                 params![node_id, now],

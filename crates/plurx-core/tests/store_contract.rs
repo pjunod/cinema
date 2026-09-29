@@ -13,6 +13,7 @@ mod queue_fixture;
 mod subtitle_jobs_fixture;
 use subtitle_jobs_fixture::SubtitleFixture;
 
+use plurx_core::store::background_jobs::{AnalysisViewerInterest, CancelWaiter};
 use queue_fixture::QueueFixture;
 
 #[path = "store_contract/background_jobs.rs"]
@@ -787,6 +788,157 @@ where
             .expect("reset replicated contract state");
         contract(Arc::new(store), "hiqlite-3-voter").await;
     }
+}
+
+#[tokio::test]
+async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
+    for_each_backend(|store, backend| async move {
+        let mut requests = Vec::new();
+        for (index, node) in ["source-a", "source-b", "source-c"].into_iter().enumerate() {
+            let (_, file_id) = seed_file(&store, node).await;
+            let request = NewAnalysisRequest {
+                request_id: format!("viewer-source-{}-{index}", backend),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".to_owned(),
+                pipeline_version: "b".repeat(64),
+                video_identity: String::new(),
+                requested_generation: format!("viewer-generation-{index}"),
+                priority: "normal".to_owned(),
+                trigger: "background".to_owned(),
+                force_rebuild: false,
+                target_node_id: node.to_owned(),
+                not_before_ms: 1_000 + index as i64,
+                created_at_ms: 1_000 + index as i64,
+            };
+            let row = store
+                .enqueue_analysis_request(&request)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {node}: {error}"));
+            requests.push(row);
+        }
+        let first = store
+            .claim_analysis_request("source-a", 1_003, 31_003)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first claim: {error}"))
+            .expect("one ordinary source reader");
+        assert_eq!(first.request_id, requests[0].request_id, "{backend}");
+        assert!(
+            store
+                .claim_analysis_request("source-b", 1_004, 31_004)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: second ordinary claim: {error}"))
+                .is_none(),
+            "{backend}: ordinary work cannot borrow the viewer slot"
+        );
+
+        let viewer =
+            |request: &plurx_core::store::AnalysisRequest, user_id| AnalysisViewerInterest {
+                analysis_request_id: request.request_id.clone(),
+                requested_generation: request.requested_generation.clone(),
+                pipeline_version: request.pipeline_version.clone(),
+                video_identity: request.video_identity.clone(),
+                target_node_id: request.target_node_id.clone(),
+                user_id,
+                playback_id: format!("viewer-{user_id}"),
+                now_ms: 1_005,
+            };
+        let second_viewer = viewer(&requests[1], 1);
+        assert!(
+            store
+                .join_analysis_viewer(second_viewer.clone())
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: join viewer: {error}")),
+            "{backend}"
+        );
+        let second = store
+            .claim_analysis_request("source-b", 1_006, 31_006)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: viewer claim: {error}"))
+            .expect("viewer uses the other source slot");
+        assert_eq!(second.request_id, requests[1].request_id, "{backend}");
+        let holders = store
+            .source_io_holders(1_007)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: observe source readers: {error}"));
+        assert_eq!(holders.len(), 2, "{backend}: both source slots are visible");
+        assert!(
+            holders
+                .iter()
+                .any(|holder| holder.work_id == first.request_id
+                    && holder.priority == "maintenance"
+                    && holder.kind == "analysis_source"),
+            "{backend}: ordinary reader remains observable"
+        );
+        assert!(
+            holders
+                .iter()
+                .any(|holder| holder.work_id == second.request_id
+                    && holder.priority == "viewer"
+                    && holder.kind == "analysis_source"),
+            "{backend}: viewer reader remains observable"
+        );
+        let third_viewer = viewer(&requests[2], 2);
+        assert!(
+            store
+                .join_analysis_viewer(third_viewer)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: join third: {error}")),
+            "{backend}"
+        );
+        assert!(
+            store
+                .claim_analysis_request("source-c", 1_007, 31_007)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: third claim: {error}"))
+                .is_none(),
+            "{backend}: concurrent viewers cannot exceed two source reads"
+        );
+
+        store
+            .cancel_waiter(CancelWaiter {
+                scope: "playback-analysis".to_owned(),
+                request_id: second_viewer.consumer_id(),
+                now_ms: 1_008,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: cancel viewer: {error}"));
+        assert!(
+            store
+                .renew_analysis_request(&second.request_id, "source-b", second.fence, 1_009, 61_009)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: owner renew: {error}")),
+            "{backend}: losing urgency does not revoke a running owner"
+        );
+        store
+            .settle_analysis_requests(31_010)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: settle expired owner: {error}"));
+        let third = store
+            .claim_analysis_request("source-c", 31_011, 61_011)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: third claim after owner death: {error}"))
+            .expect("a demand reader may use the released slot");
+        assert_eq!(third.request_id, requests[2].request_id, "{backend}");
+        let holders = store
+            .source_io_holders(31_012)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: observe replacement: {error}"));
+        assert!(
+            holders
+                .iter()
+                .any(|holder| holder.work_id == third.request_id),
+            "{backend}: replacement reader becomes visible"
+        );
+        assert!(
+            holders
+                .iter()
+                .all(|holder| holder.work_id != first.request_id),
+            "{backend}: expired reader disappears"
+        );
+    })
+    .await;
 }
 
 fn analysis_queue_slot(component: &str, state: &str, priority: &str, trigger: &str) -> usize {
@@ -20198,6 +20350,86 @@ async fn analysis_source_invalidation_terminalizes_exact_attempt_through_dyn_sto
         assert_eq!(attempts[0].phase, "canceled", "backend {backend}");
         assert_eq!(
             attempts[0].terminal_code, "source_deleted",
+            "backend {backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn analysis_worker_skips_incompatible_engine_before_spending_a_claim() {
+    for_each_backend(|store, backend| async move {
+        let (_, old_file) = seed_file(&store, "analysis-old-engine").await;
+        let (_, current_file) = seed_file(&store, "analysis-current-engine").await;
+        for (id, file_id, pipeline, priority, force, created) in [
+            (
+                "old-engine-request",
+                old_file,
+                "old-engine",
+                "forced",
+                true,
+                10,
+            ),
+            (
+                "current-engine-request",
+                current_file,
+                "current-engine",
+                "normal",
+                false,
+                20,
+            ),
+        ] {
+            store
+                .enqueue_analysis_request(&NewAnalysisRequest {
+                    request_id: id.to_owned(),
+                    file_id,
+                    source_size: 10_000,
+                    source_mtime: 1,
+                    component: "fragment_index".to_owned(),
+                    pipeline_version: pipeline.to_owned(),
+                    video_identity: String::new(),
+                    requested_generation: format!("{id}-generation"),
+                    priority: priority.to_owned(),
+                    trigger: "admin".to_owned(),
+                    force_rebuild: force,
+                    target_node_id: "analysis-node".to_owned(),
+                    not_before_ms: created,
+                    created_at_ms: created,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {id}: {error}"));
+        }
+        let claimed = store
+            .claim_analysis_request_compatible("analysis-node", Some("current-engine"), 30, 1_030)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: current-engine claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: current-engine work should be eligible"));
+        assert_eq!(
+            claimed.request_id, "current-engine-request",
+            "backend {backend}"
+        );
+        let old = store
+            .analysis_request("old-engine-request")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: old request: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: old request remains queued"));
+        assert_eq!(
+            (old.state.as_str(), old.attempts),
+            ("queued", 0),
+            "backend {backend}"
+        );
+        assert!(store
+            .claim_analysis_request_compatible("analysis-node", Some("unknown-engine"), 31, 1_031)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: unrelated claim: {error}"))
+            .is_none());
+        let old_claim = store
+            .claim_analysis_request_compatible("analysis-node", Some("old-engine"), 32, 1_032)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: old-engine claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: old-engine worker can claim its work"));
+        assert_eq!(
+            old_claim.request_id, "old-engine-request",
             "backend {backend}"
         );
     })
