@@ -2652,9 +2652,9 @@ fn analysis_request_generation(
 /// Persist the exact copy recipe needed by a playback request before any
 /// source read. The existing analysis worker owns attestation, indexing and
 /// retries; playback keeps its usable rolling fallback while that work waits.
-/// Automatic preparation uses the existing background/normal request class,
-/// below foreground media production and explicit forced operator work.
-/// It does not depend on the periodic discovery cadence.
+/// A viewer joins the resulting exact generation through a separate expiring
+/// interest; ordinary discovery keeps its maintenance request class.
+#[cfg(test)]
 pub(crate) async fn enqueue_copy_preparation(
     store: &dyn Store,
     node_id: &str,
@@ -2664,12 +2664,38 @@ pub(crate) async fn enqueue_copy_preparation(
     enqueue_copy_preparation_for_object(store, node_id, file, video, None).await
 }
 
+#[cfg(test)]
 pub(crate) async fn enqueue_copy_preparation_for_object(
     store: &dyn Store,
     node_id: &str,
     file: &MediaFile,
     video: plurx_core::transcode::CopyVideoOptions,
     object_version: Option<&str>,
+) -> Result<AnalysisRequest, StoreError> {
+    enqueue_copy_preparation_for_object_with_viewer(
+        store,
+        node_id,
+        file,
+        video,
+        object_version,
+        None,
+    )
+    .await
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PlaybackViewerDemand {
+    pub user_id: i64,
+    pub playback_id: String,
+}
+
+pub(crate) async fn enqueue_copy_preparation_for_object_with_viewer(
+    store: &dyn Store,
+    node_id: &str,
+    file: &MediaFile,
+    video: plurx_core::transcode::CopyVideoOptions,
+    object_version: Option<&str>,
+    viewer: Option<&PlaybackViewerDemand>,
 ) -> Result<AnalysisRequest, StoreError> {
     let pipeline_version = crate::ffmpeg::fragment_index_engine_digest().await;
     let video_identity = crate::fragindex::identity_for(file, video).argv_fingerprint;
@@ -2703,6 +2729,20 @@ pub(crate) async fn enqueue_copy_preparation_for_object(
             created_at_ms: now,
         })
         .await?;
+    if let Some(viewer) = viewer.filter(|viewer| viewer.user_id > 0) {
+        store
+            .join_analysis_viewer(plurx_core::store::AnalysisViewerInterest {
+                analysis_request_id: request.request_id.clone(),
+                requested_generation: request.requested_generation.clone(),
+                pipeline_version: request.pipeline_version.clone(),
+                video_identity: request.video_identity.clone(),
+                target_node_id: request.target_node_id.clone(),
+                user_id: viewer.user_id,
+                playback_id: viewer.playback_id.clone(),
+                now_ms: clock_ms(),
+            })
+            .await?;
+    }
     let _ = fragment_analysis_wake().send(());
     Ok(request)
 }

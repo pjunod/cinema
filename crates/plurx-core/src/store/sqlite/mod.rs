@@ -1179,6 +1179,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs_subtitle::RECONCILE_SCHEMA,
     // v85: settled job history yields to new work instead of filling the bound.
     super::background_jobs::RETENTION_SCHEMA,
+    // v86: expiring viewer interests follow exact analysis into fragment work.
+    super::background_jobs::VIEWER_ANALYSIS_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

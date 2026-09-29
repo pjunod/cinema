@@ -57,6 +57,7 @@ pub(crate) const SCHEMA: &str = include_str!("background_jobs_schema.sql");
 // this migration replaces the enqueue and upkeep triggers. See the file's
 // header for the failure it answers.
 pub(crate) const RETENTION_SCHEMA: &str = include_str!("background_jobs_retention.sql");
+pub(crate) const VIEWER_ANALYSIS_SCHEMA: &str = include_str!("background_jobs_viewer_analysis.sql");
 
 // Both backends execute the same admission statement and schema trigger.
 // The returned snapshot is the verdict that authorized the mutation, not a
@@ -406,9 +407,52 @@ WHERE id = json_extract($1, '$.job_id')
   AND NOT EXISTS (SELECT 1 FROM background_job_attempts WHERE claim_id = json_extract($1, '$.claim_id'))
   AND (SELECT COUNT(*) FROM background_job_attempts) < 40000
   AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
-    WHERE required.job_id = background_jobs.id AND (SELECT COUNT(*) FROM background_job_reservations held
+    WHERE required.job_id = background_jobs.id AND ((SELECT COUNT(*) FROM background_job_reservations held
       WHERE held.resource_key = required.resource_key AND held.expires_at_ms > json_extract($1, '$.now_ms')
-        AND held.job_id != json_extract($1, '$.job_id')) >= 2)
+        AND held.job_id != json_extract($1, '$.job_id'))
+      + (SELECT COUNT(*) FROM analysis_source_reservations held
+          WHERE held.resource_key = required.resource_key
+            AND held.expires_at_ms > json_extract($1, '$.now_ms')))
+      >= 2)
+  -- A second source reader is reserved for live demand. Classification uses
+  -- durable consumer ownership, never the job's caller-supplied priority.
+  AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
+    WHERE required.job_id = background_jobs.id
+      AND required.resource_key LIKE 'source_io%'
+      AND NOT EXISTS (SELECT 1 FROM background_job_waiters interest
+          WHERE interest.job_id = background_jobs.id
+            AND interest.state IN ('pending','awaiting_hydration')
+            AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract($1, '$.now_ms'))
+            AND (interest.consumer_kind = 'playback_fragment'
+              OR (interest.consumer_kind = 'subtitle_source' AND EXISTS (
+                  SELECT 1 FROM analysis_requests request
+                  WHERE request.request_id = interest.consumer_ref
+                    AND request.component = 'subtitle_source'
+                    AND request.trigger = 'playback'
+                    AND request.state IN ('queued','running')))))
+      AND ((SELECT COUNT(*) FROM background_job_reservations held
+          WHERE held.resource_key = required.resource_key
+            AND held.expires_at_ms > json_extract($1, '$.now_ms')
+            AND held.job_id != background_jobs.id
+            AND NOT EXISTS (SELECT 1 FROM background_job_waiters interest
+                WHERE interest.job_id = held.job_id
+                  AND interest.state IN ('pending','awaiting_hydration')
+                  AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract($1, '$.now_ms'))
+                  AND (interest.consumer_kind = 'playback_fragment'
+                    OR (interest.consumer_kind = 'subtitle_source' AND EXISTS (
+                        SELECT 1 FROM analysis_requests request
+                        WHERE request.request_id = interest.consumer_ref
+                          AND request.component = 'subtitle_source'
+                          AND request.trigger = 'playback'
+                          AND request.state IN ('queued','running')))))
+        + (SELECT COUNT(*) FROM analysis_source_reservations held
+            WHERE held.resource_key = required.resource_key
+              AND held.expires_at_ms > json_extract($1, '$.now_ms')
+              AND NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
+                  WHERE viewer.request_scope = 'playback-analysis'
+                    AND viewer.job_id = held.request_id
+                    AND viewer.state = 'pending'
+                    AND viewer.deadline_ms > json_extract($1, '$.now_ms')))) >= 1)
 "#;
 
 const RENEW_SQL: &str = r#"
@@ -1072,10 +1116,82 @@ pub struct CancelWaiterOutcome {
     pub cancelled: bool,
 }
 
+/// A server-owned playback identity joined to one exact fragment-analysis
+/// generation. A retry of the same playback key renews the same waiter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalysisViewerInterest {
+    pub analysis_request_id: String,
+    pub requested_generation: String,
+    pub pipeline_version: String,
+    pub video_identity: String,
+    pub target_node_id: String,
+    pub user_id: i64,
+    pub playback_id: String,
+    pub now_ms: i64,
+}
+
+impl AnalysisViewerInterest {
+    pub fn consumer_id(&self) -> String {
+        crate::segplan::argv_fingerprint(&[
+            "playback-analysis-v1".to_owned(),
+            self.user_id.to_string(),
+            self.playback_id.clone(),
+            self.analysis_request_id.clone(),
+        ])
+    }
+}
+
+const JOIN_ANALYSIS_VIEWER_SQL: &str = r#"
+INSERT INTO background_job_commands (id, operation, request_json, result_json)
+SELECT json_extract($1, '$.command_id'), 'join_analysis_viewer', $1,
+  json_object('joined', json('true'))
+WHERE EXISTS (SELECT 1 FROM analysis_requests request JOIN files file
+    ON file.id = request.file_id AND file.size = request.source_size
+    AND file.mtime = request.source_mtime
+  WHERE request.request_id = json_extract($1, '$.analysis_request_id')
+    AND request.component = 'fragment_index'
+    AND request.pipeline_version = json_extract($1, '$.pipeline_version')
+    AND request.video_identity = json_extract($1, '$.video_identity')
+    AND request.requested_generation = json_extract($1, '$.requested_generation')
+    AND request.target_node_id = json_extract($1, '$.target_node_id')
+    AND request.state IN ('queued','running','submitted')
+    AND (request.state != 'submitted' OR EXISTS (
+        SELECT 1 FROM background_job_waiters
+        WHERE request_scope = 'analysis' AND request_id = request.request_id)))
+RETURNING result_json
+"#;
+
+const REFRESH_ANALYSIS_VIEWERS_NEEDED: &str = r#"
+SELECT json_object('needed', 1) AS result_json
+WHERE EXISTS (SELECT 1 FROM background_job_waiters waiter
+    JOIN media_sessions session ON session.user_id = json_extract(waiter.consumer_ref, '$.user_id')
+      AND session.playback_id = json_extract(waiter.consumer_ref, '$.playback_id')
+      AND json_extract(session.recipe_json, '$.request.file_id') = json_extract(waiter.consumer_ref, '$.file_id')
+    JOIN media_playback_pointers pointer ON pointer.user_id = session.user_id
+      AND pointer.playback_id = session.playback_id
+      AND pointer.current_incarnation_id = session.incarnation_id
+    WHERE waiter.request_scope = 'playback-analysis'
+      AND waiter.state IN ('pending','awaiting_hydration')
+      AND waiter.updated_at_ms <= json_extract($1, '$.now_ms') - 30000
+      AND waiter.deadline_ms > json_extract($1, '$.now_ms')
+      AND session.state = 'active' AND session.lease_expires_at_ms > json_extract($1, '$.now_ms'))
+"#;
+
+const REFRESH_ANALYSIS_VIEWERS_SQL: &str = r#"
+INSERT INTO background_job_commands (id, operation, request_json, result_json)
+VALUES (json_extract($1, '$.command_id'), 'refresh_analysis_viewers', $1, '{}')
+RETURNING result_json
+"#;
+
 /// No generic public enqueue endpoint is implied by this internal boundary.
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    /// Join or renew a viewer's bounded interest in an exact preparation.
+    async fn join_analysis_viewer(
+        &self,
+        interest: AnalysisViewerInterest,
+    ) -> Result<bool, StoreError>;
     async fn embedding_for(
         &self,
         item_id: i64,
@@ -1330,6 +1446,39 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn join_analysis_viewer(
+        &self,
+        interest: AnalysisViewerInterest,
+    ) -> Result<bool, StoreError> {
+        if !identifier(&interest.analysis_request_id)
+            || !identifier(&interest.target_node_id)
+            || interest.requested_generation.is_empty()
+            || interest.requested_generation.len() > 128
+            || interest.pipeline_version.is_empty()
+            || interest.pipeline_version.len() > 128
+            || interest.video_identity.len() > 128
+            || interest.user_id <= 0
+            || interest.playback_id.is_empty()
+            || interest.playback_id.len() > 128
+            || interest.now_ms < 0
+            || interest.now_ms > i64::MAX - 604_800_000
+        {
+            return Err(invalid("invalid analysis viewer interest"));
+        }
+        let mut body =
+            serde_json::to_value(&interest).map_err(|error| invalid(&error.to_string()))?;
+        body["consumer_id"] = interest.consumer_id().into();
+        body["command_id"] = uuid::Uuid::new_v4().to_string().into();
+        let rows = self
+            .queue_sql(
+                JOIN_ANALYSIS_VIEWER_SQL.to_owned(),
+                encode(&body)?,
+                true,
+                true,
+            )
+            .await?;
+        Ok(!rows.is_empty())
+    }
     async fn embedding_for(
         &self,
         item_id: i64,
@@ -1927,12 +2076,30 @@ impl<T: QueueSql> BackgroundJobStore for T {
             &serde_json::json!({"now_ms": now_ms, "command_id": uuid::Uuid::new_v4().to_string()}),
         )?;
         let reconciled = super::background_jobs_subtitle::reconcile(self, &request).await?;
+        let refreshed = !self
+            .queue_sql(
+                REFRESH_ANALYSIS_VIEWERS_NEEDED.to_owned(),
+                request.clone(),
+                false,
+                false,
+            )
+            .await?
+            .is_empty();
+        if refreshed {
+            self.queue_sql(
+                REFRESH_ANALYSIS_VIEWERS_SQL.to_owned(),
+                request.clone(),
+                true,
+                true,
+            )
+            .await?;
+        }
         if self
             .queue_sql(MAINTENANCE_NEEDED.to_owned(), request.clone(), false, false)
             .await?
             .is_empty()
         {
-            return Ok(reconciled);
+            return Ok(reconciled || refreshed);
         }
         self.queue_sql(MAINTENANCE_SQL.to_owned(), request, true, true)
             .await?;

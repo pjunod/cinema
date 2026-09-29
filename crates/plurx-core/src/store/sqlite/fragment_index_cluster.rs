@@ -336,8 +336,16 @@ fn valid_request(request: &NewAnalysisRequest) -> bool {
         )
         && (request.force_rebuild == (request.priority == "forced"))
         && !(request.component == "subtitle_source" && request.force_rebuild)
-        && (request.priority != "foreground" || request.component == "subtitle_source")
-        && (request.trigger != "playback" || request.component == "subtitle_source")
+        && (request.priority != "foreground"
+            || matches!(
+                request.component.as_str(),
+                "subtitle_source" | "fragment_index"
+            ))
+        && (request.trigger != "playback"
+            || matches!(
+                request.component.as_str(),
+                "subtitle_source" | "fragment_index"
+            ))
         && request.target_node_id.len() <= 128
         && ((matches!(
             request.component.as_str(),
@@ -824,6 +832,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
         let node_id = node_id.to_owned();
         let pipeline_version = pipeline_version.map(str::to_owned);
         self.with_conn(move |conn| {
+            let capacity = super::super::fragment_index_cluster::analysis_source_capacity_clause("?3");
             let max_attempts = configured_max_attempts(conn)?;
             let backoff_base_ms = configured_backoff_base_ms(conn)?;
             let backoff_max_ms = configured_backoff_max_ms(conn)?.max(backoff_base_ms);
@@ -876,7 +885,14 @@ impl ClusterFragmentIndexStore for SqliteStore {
                             AND component <> 'subtitle_source' AND attempts < ?2
                             AND state = 'queued' AND not_before_ms <= ?3
                             AND (?5 IS NULL OR component <> 'fragment_index' OR pipeline_version = ?5)
-                          ORDER BY CASE WHEN priority = 'foreground' THEN 0 ELSE 1 END,
+                            AND {capacity}
+                          ORDER BY CASE WHEN (component != 'fragment_index' AND priority = 'foreground')
+                            OR (component = 'fragment_index' AND EXISTS (
+                                SELECT 1 FROM background_job_waiters waiter
+                                WHERE waiter.request_scope = 'playback-analysis'
+                                  AND waiter.job_id = analysis_requests.request_id
+                                  AND waiter.state = 'pending' AND waiter.deadline_ms > ?3))
+                            THEN 0 ELSE 1 END,
                                    created_at_ms - CASE WHEN priority = 'forced'
                                      THEN ?4 ELSE 0 END,
                                    created_at_ms, request_id LIMIT 1"
@@ -896,13 +912,14 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 return Ok(None);
             };
             let changed = transaction.execute(
-                "UPDATE analysis_requests
+                &format!("UPDATE analysis_requests
                     SET state = 'running', owner_node_id = ?1, fence = fence + 1,
                         lease_expires_ms = ?2, attempts = attempts + 1,
                         last_error_code = NULL, updated_at_ms = ?3
                   WHERE request_id = ?4 AND fence = ?5
                     AND state = 'queued' AND not_before_ms <= ?3
-                    AND (?6 IS NULL OR component <> 'fragment_index' OR pipeline_version = ?6)",
+                    AND (?6 IS NULL OR component <> 'fragment_index' OR pipeline_version = ?6)
+                    AND {capacity}"),
                 params![
                     node_id,
                     lease_expires_ms,
@@ -2737,6 +2754,149 @@ mod tests {
             not_before_ms: created_at_ms,
             created_at_ms,
         }
+    }
+
+    #[tokio::test]
+    async fn playback_viewers_share_exact_analysis_and_retire_urgency_independently() {
+        use crate::store::background_jobs::{
+            AnalysisViewerInterest, BackgroundJobStore, CancelWaiter,
+        };
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        let analysis = store
+            .enqueue_analysis_request(&request("viewer-analysis", false, 1_000))
+            .await
+            .expect("analysis");
+        let viewer = |user_id: i64| AnalysisViewerInterest {
+            analysis_request_id: analysis.request_id.clone(),
+            requested_generation: analysis.requested_generation.clone(),
+            pipeline_version: analysis.pipeline_version.clone(),
+            video_identity: analysis.video_identity.clone(),
+            target_node_id: analysis.target_node_id.clone(),
+            user_id,
+            playback_id: "playback-one".to_owned(),
+            now_ms: 1_001,
+        };
+        assert!(store
+            .join_analysis_viewer(viewer(1))
+            .await
+            .expect("first viewer"));
+        assert!(store
+            .join_analysis_viewer(viewer(2))
+            .await
+            .expect("second viewer"));
+        let joined = store
+            .enqueue_analysis_request(&request("same-generation", false, 1_002))
+            .await
+            .expect("join analysis");
+        assert_eq!(joined.request_id, analysis.request_id);
+        let claimed = store
+            .claim_analysis_request("node-a", 1_003, 31_003)
+            .await
+            .expect("claim")
+            .expect("viewer analysis first");
+        assert_eq!(claimed.request_id, analysis.request_id);
+        assert_eq!(claimed.priority, "foreground");
+        assert_eq!(claimed.attempts, 1);
+
+        store
+            .cancel_waiter(CancelWaiter {
+                scope: "playback-analysis".to_owned(),
+                request_id: viewer(1).consumer_id(),
+                now_ms: 1_004,
+            })
+            .await
+            .expect("cancel first");
+        let first = store.analysis_requests(10).await.expect("requests");
+        assert_eq!(first[0].priority, "foreground");
+        store
+            .cancel_waiter(CancelWaiter {
+                scope: "playback-analysis".to_owned(),
+                request_id: viewer(2).consumer_id(),
+                now_ms: 1_005,
+            })
+            .await
+            .expect("cancel second");
+        let retired = store.analysis_requests(10).await.expect("requests");
+        assert_eq!(retired[0].priority, "normal");
+        assert_eq!(retired[0].attempts, 1);
+        assert_eq!(retired[0].fence, claimed.fence);
+    }
+
+    #[tokio::test]
+    async fn source_io_keeps_second_slot_for_playback_analysis() {
+        use crate::store::background_jobs::{AnalysisViewerInterest, BackgroundJobStore};
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        store
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO files (id, item_id, path, size, mtime)
+                VALUES (3, 2, '/three.mkv', 100, 30)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("third file");
+        let first = store
+            .enqueue_analysis_request(&request("maintenance", false, 1_000))
+            .await
+            .expect("maintenance");
+        let mut second_input = request("viewer", false, 1_001);
+        second_input.file_id = 2;
+        second_input.source_mtime = 20;
+        let second = store
+            .enqueue_analysis_request(&second_input)
+            .await
+            .expect("viewer request");
+        let mut third_input = request("third", false, 1_002);
+        third_input.file_id = 3;
+        third_input.source_mtime = 30;
+        let third = store
+            .enqueue_analysis_request(&third_input)
+            .await
+            .expect("third request");
+        let occupied = store
+            .claim_analysis_request("node-a", 1_003, 31_003)
+            .await
+            .expect("first claim")
+            .expect("maintenance claim");
+        assert_eq!(occupied.request_id, first.request_id);
+        assert!(store
+            .claim_analysis_request("node-a", 1_004, 31_004)
+            .await
+            .expect("maintenance cannot borrow second slot")
+            .is_none());
+        let interest = |request: &AnalysisRequest, user_id| AnalysisViewerInterest {
+            analysis_request_id: request.request_id.clone(),
+            requested_generation: request.requested_generation.clone(),
+            pipeline_version: request.pipeline_version.clone(),
+            video_identity: request.video_identity.clone(),
+            target_node_id: request.target_node_id.clone(),
+            user_id,
+            playback_id: format!("viewer-{user_id}"),
+            now_ms: 1_005,
+        };
+        assert!(store
+            .join_analysis_viewer(interest(&second, 1))
+            .await
+            .expect("join second"));
+        let admitted = store
+            .claim_analysis_request("node-a", 1_006, 31_006)
+            .await
+            .expect("viewer claim")
+            .expect("viewer gets second slot");
+        assert_eq!(admitted.request_id, second.request_id);
+        assert!(store
+            .join_analysis_viewer(interest(&third, 2))
+            .await
+            .expect("join third"));
+        assert!(store
+            .claim_analysis_request("node-a", 1_007, 31_007)
+            .await
+            .expect("two-slot ceiling")
+            .is_none());
     }
 
     #[tokio::test]

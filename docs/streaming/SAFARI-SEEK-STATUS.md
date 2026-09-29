@@ -14,8 +14,8 @@ exists for the named milestone; it does not imply a fleet rollout.
 | Milestone | State | Evidence and next step |
 |---|---|---|
 | M0 — browser fixture and stage diagnostics | In progress | Added bounded client route and settlement traces. The `scripts/playback-lab safari-seek-fixture` native Safari run and [four served-manifest reports](../evidence/safari-seek-native-2026-09-29.json) reproduce the clamp; growing/sliding real-server evidence and server stage diagnostics remain. |
-| M1 — viewer preparation | In progress | Both Store claims filter incompatible fragment pipeline identities before charging an attempt. A local analysis enqueue now wakes the durable consumer instead of waiting for the scheduler tick; an idle two-second admission regression is written. Expiring viewer interest, promotion and targeted hydration remain. |
-| M2 — source I/O admission | Pending | Keep one of two shared slots available for live demand. |
+| M1 — viewer preparation | In progress | Both Store claims filter incompatible engines. The playback path joins an exact, 120-second waiter through analysis, build and targeted hydration; active session ownership refreshes it at most every 30 seconds, and terminal sessions retire their own interest. Analysis priority follows live waiters without changing claim fences or attempts. Server stage diagnostics and an integrated remote hydration case remain. |
+| M2 — source I/O admission | In progress | The fenced analysis claim now reserves pre-artifact source reads by storage domain. Common job claims count those reservations and admit at most one reader without live interest across the two-slot domain; existing holders drain without revocation. Multi-node behavior, transition diagnostics and measured maintenance throughput remain. |
 | M3 — reproducible media runtime | In progress | Added a read-only `plurxd media-runtime-identity` record backed by the cache-key digest and a package manifest emitted by the image build. The release workflow retains a per-architecture image/digest/package record. Immutable runtime inputs and a two-clean-build comparison remain. |
 | M4 — bounded rolling coverage | Pending measurement | Widen only if native range and resource measurements satisfy §8 of the implementation contract. |
 | M5 — integrated evidence | Pending | Compare the same source, recipe, engine and cache state. |
@@ -27,6 +27,7 @@ exists for the named milestone; it does not imply a fleet rollout.
 | Pinned compiler | Rust 1.97.1 confirmed on the separate clone host; baseline `rustup run 1.97.1 cargo check -p plurxd --all-targets --locked` passed 2026-09-29. |
 | M0 compile and syntax | Pinned `plurxd` check, `cargo fmt --check`, and JavaScript syntax checks passed after the first trace edit. The added Rust log regression has not been executed. |
 | M1 compatibility compile | Pinned `cargo check --workspace --all-targets --locked` passed on 2026-09-29; the backend-neutral regression is written and deferred for the final review sequence. |
+| M1/M2 compile | Pinned `cargo check -p plurxd --all-targets --locked` passed after the viewer-interest wiring; a core check with `hiqlite-store` also passed. The new SQL migrations and claim behavior await the final test phase. |
 | Focused regressions | Deferred until the final adversarial review, per the requested sequence. |
 | Astra adversarial review | Pending final main candidate. |
 | Ready fast lane | Pending review fixes. |

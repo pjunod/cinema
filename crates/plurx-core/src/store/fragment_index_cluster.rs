@@ -81,6 +81,42 @@ BEGIN
 END;
 "#;
 
+/// Shared capacity predicate for the pre-artifact source read. Both Store
+/// backends place it in candidate selection and the fenced claim mutation.
+pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
+    format!(
+        r#"NOT EXISTS (SELECT 1 FROM analysis_required_resources required
+      WHERE required.request_id = analysis_requests.request_id AND (
+        (SELECT COUNT(*) FROM background_job_reservations held
+          WHERE held.resource_key = required.resource_key AND held.expires_at_ms > {now})
+        + (SELECT COUNT(*) FROM analysis_source_reservations held
+          WHERE held.resource_key = required.resource_key AND held.expires_at_ms > {now}) >= 2
+        OR (NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
+              WHERE viewer.request_scope = 'playback-analysis'
+                AND viewer.job_id = analysis_requests.request_id
+                AND viewer.state = 'pending' AND viewer.deadline_ms > {now})
+          AND (SELECT COUNT(*) FROM background_job_reservations held
+              WHERE held.resource_key = required.resource_key AND held.expires_at_ms > {now}
+                AND NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
+                    WHERE viewer.job_id = held.job_id
+                      AND viewer.state IN ('pending','awaiting_hydration')
+                      AND (viewer.deadline_ms IS NULL OR viewer.deadline_ms > {now})
+                      AND (viewer.consumer_kind = 'playback_fragment'
+                        OR (viewer.consumer_kind = 'subtitle_source' AND EXISTS (
+                            SELECT 1 FROM analysis_requests source
+                            WHERE source.request_id = viewer.consumer_ref
+                              AND source.component = 'subtitle_source'
+                              AND source.trigger = 'playback'
+                              AND source.state IN ('queued','running')))))
+            + (SELECT COUNT(*) FROM analysis_source_reservations held
+                WHERE held.resource_key = required.resource_key AND held.expires_at_ms > {now}
+                  AND NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
+                      WHERE viewer.request_scope = 'playback-analysis'
+                        AND viewer.job_id = held.request_id
+                        AND viewer.state = 'pending' AND viewer.deadline_ms > {now})) >= 1)))"#
+    )
+}
+
 /// v31/v13 schema for durable operator requests before content addressing.
 /// Kept separate from [`CLUSTER_FRAGMENT_INDEX_SCHEMA`] so migration fixtures
 /// and deployed v30/v12 databases retain their historical shape.
