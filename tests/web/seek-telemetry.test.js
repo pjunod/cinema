@@ -28,7 +28,7 @@ function harness(options={}){
     playbackSurfaceStep:()=>{},notifyPlaybackControl:()=>false,
     pbTotalSec:()=>120,playbackChangeAlreadyInFlight:()=>false,endWait:()=>{},
     restartPendingPlaybackOpen:()=>false,hasPendingPlaybackOpen:()=>false,
-    playbackSeekBufferedRangesMs:()=>[],playbackSeekPublishedRangeMs:()=>null,
+    playbackSeekBufferedRangesMs:()=>[],playbackSeekSeekableRangesMs:()=>null,playbackSeekPublishedRangeMs:()=>null,
     PlaybackPolicy:{seekRoute:({targetMs})=>({route:'local',basis:'direct',atMs:targetMs}),HLS_STARTUP:{seek_deadline_ms:8000}},
     setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearTimeout:()=>{},
     armStall:()=>{},playerActivity:()=>{},
