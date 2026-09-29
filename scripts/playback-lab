@@ -130,6 +130,7 @@ Usage:
   scripts/playback-lab fixtures [--rebuild] [--fixtures DIR]
   scripts/playback-lab safari-seek-fixture [--port PORT] [--fixtures DIR]
   scripts/playback-lab safari-seek-server [--observe SECONDS] [--duration SECONDS] [--rate 1|2] [--fixtures DIR]
+      [--seek-count COUNT]
                               [--server PATH] [--json PATH]
   scripts/playback-lab plan [--suite smoke|full|stall-recovery|vod]
                              [--case TEXT] [--exclude-case TEXT]
@@ -4586,6 +4587,9 @@ async function safariSeekServerCommand(options) {
   const observeSeconds = positiveNumberOption(options, "observe", "--observe", 90);
   const requestedRate = positiveNumberOption(options, "rate", "--rate", 1);
   if (![1, 2].includes(requestedRate)) throw new Error("--rate must be 1 or 2");
+  const seekCount = options.seek_count === undefined ? 0
+    : positiveNumberOption(options, "seek_count", "--seek-count", 0);
+  if (!Number.isInteger(seekCount) || seekCount > 100) throw new Error("--seek-count must be an integer at most 100");
   const server = await startServer({ ...options, enable_vod: false }, fixtureDir);
   let driver = null;
   const startedAt = performance.now();
@@ -4593,9 +4597,10 @@ async function safariSeekServerCommand(options) {
     at: new Date().toISOString(),
     browser: "safari",
     requested_rate: requestedRate,
+    requested_seek_count: seekCount,
     ffmpeg_identity: ffmpegIdentity,
     source: `synthetic ${durationSeconds}-second H.264 MP4 through isolated plurxd rolling session`,
-    samples: [], served_manifests: [], error: null,
+    samples: [], seeks: [], seek_traces: [], served_manifests: [], playback_events: [], error: null,
   };
   try {
     const file = server.files.get(path.basename(sourcePath));
@@ -4611,24 +4616,40 @@ async function safariSeekServerCommand(options) {
       await driver.exec(`document.getElementById('video').playbackRate=${requestedRate}; return true;`);
     }
     let lastManifest = "";
+    const seenEvents = new Set();
+    let pendingSeek = null;
     for (let second = 0; second < observeSeconds; second += 1) {
       const sample = await driver.eval(`(()=>{
         const v=document.getElementById('video');
         if(!v)return {video_absent:true};
+        const origin=Number((typeof PLAYER!=='undefined'&&PLAYER&&PLAYER.offset)||0);
         const ranges=(r)=>Array.from({length:r.length},(_,i)=>[r.start(i),r.end(i)]);
-        return {position_s:v.currentTime,playback_rate:v.playbackRate,
+        return {position_s:origin+v.currentTime,element_position_s:v.currentTime,origin_s:origin,
+          playback_rate:v.playbackRate,
           buffered:ranges(v.buffered),seekable:ranges(v.seekable),
           ready_state:v.readyState,paused:v.paused,current_src:v.currentSrc};
       })()`);
       const sourceUrl = sample.current_src;
       delete sample.current_src;
       sample.elapsed_ms = Math.round(performance.now() - startedAt);
+      sample.film_buffered = (sample.buffered || []).map(([start, end]) =>
+        [start + (sample.origin_s || 0), end + (sample.origin_s || 0)]);
+      sample.film_seekable = (sample.seekable || []).map(([start, end]) =>
+        [start + (sample.origin_s || 0), end + (sample.origin_s || 0)]);
       for (const delta of [10, 30]) {
         const target = Number(sample.position_s || 0) + delta;
-        sample[`forward_${delta}_seekable`] = (sample.seekable || []).some(([start, end]) =>
+        sample[`forward_${delta}_seekable`] = sample.film_seekable.some(([start, end]) =>
           target >= start && target <= end);
-        sample[`forward_${delta}_buffered`] = (sample.buffered || []).some(([start, end]) =>
+        sample[`forward_${delta}_buffered`] = sample.film_buffered.some(([start, end]) =>
           target >= start && target <= end);
+      }
+      if (pendingSeek) {
+        pendingSeek.observed_at_ms = sample.elapsed_ms;
+        pendingSeek.landed_s = sample.position_s;
+        pendingSeek.landing_error_s = sample.position_s - pendingSeek.target_s;
+        pendingSeek.ready_state = sample.ready_state;
+        pendingSeek.origin_after_s = sample.origin_s;
+        pendingSeek = null;
       }
       report.samples.push(sample);
       if (typeof sourceUrl === "string" && /^http:\/\//.test(sourceUrl)) {
@@ -4648,8 +4669,53 @@ async function safariSeekServerCommand(options) {
           }
         } catch (_) { /* A missing endpoint remains visible as no served manifest. */ }
       }
+      if (second % 10 === 0) {
+        try {
+          const events = await api(server.baseUrl,
+            `/system/playback-events?since=${Date.now()-60_000}&limit=500`, { token: server.token });
+          for (const event of events) {
+            if (event.file_id !== Number(file.id) || seenEvents.has(event.id)) continue;
+            seenEvents.add(event.id);
+            let extra = null;
+            try { extra = JSON.parse(event.extra || "{}"); } catch (_) {}
+            const serverTruth = extra && extra.server || {};
+            report.playback_events.push({ id:event.id, at_unix_ms:event.at_unix_ms,
+              event:event.event, method:event.method, ms:event.ms, reason:event.reason,
+              produced_end_ms:serverTruth.produced_end_ms ?? null,
+              published_end_ms:serverTruth.published_end_ms ?? null,
+              served_end_ms:serverTruth.served_end_ms ?? null,
+              budget_anchor_sequence:serverTruth.budget_anchor_sequence ?? null,
+              demand_observation_age_ms:serverTruth.demand_observation_age_ms ?? null });
+          }
+        } catch (error) { report.events_capture_error = sanitizedError(error); }
+      }
+      if (report.seeks.length < seekCount && !pendingSeek && second % 3 === 0
+          && sample.forward_10_seekable && sample.forward_10_buffered
+          && sample.position_s + 12 < durationSeconds) {
+        const target = sample.position_s + 10;
+        const attempt = { at_ms:sample.elapsed_ms, from_s:sample.position_s,
+          target_s:target, origin_before_s:sample.origin_s, covered:true };
+        report.seeks.push(attempt);
+        await driver.exec("seekTo(arguments[0]); return true;", [target]);
+        pendingSeek = attempt;
+      }
       await sleep(1_000);
     }
+    try {
+      const logs = await api(server.baseUrl, "/system/logs?level=info&limit=2000", { token: server.token });
+      for (const entry of logs) {
+        const traceText = String(entry.message || "").match(/seek_trace=(\{.*?\})(?:\s|$)/)?.[1];
+        if (!traceText) continue;
+        let trace;
+        try { trace = JSON.parse(traceText); } catch (_) { continue; }
+        report.seek_traces.push({ at_unix_ms:entry.ts_ms, id:trace.id,
+          target_ms:trace.target_ms, element_ms:trace.element_ms, origin_ms:trace.origin_ms,
+          path:trace.path, mode:trace.mode, buffered_ms:trace.buffered_ms,
+          seekable_ms:trace.seekable_ms, published_ms:trace.published_ms,
+          route:trace.route, reason:trace.reason, landing_ms:trace.landing_ms ?? null,
+          outcome:trace.outcome ?? null });
+      }
+    } catch (error) { report.traces_capture_error = sanitizedError(error); }
   } catch (error) {
     report.error = sanitizedError(error);
   } finally {
