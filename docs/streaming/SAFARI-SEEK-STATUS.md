@@ -34,7 +34,7 @@ exists for the named milestone; it does not imply a fleet rollout.
 | Focused regressions | Deferred until the final adversarial review, per the requested sequence. |
 | Astra adversarial review | Pending final main candidate. |
 | Ready fast lane | Pending review fixes. |
-| Task pull request | [#622](http://192.168.4.7:3000/noirr/plurx/pulls/622) is a draft into `effort/safari-seek`; source through `a704f0f7e` is pushed. |
+| Task pull request | [#622](http://192.168.4.7:3000/noirr/plurx/pulls/622) is ready into `effort/safari-seek`; its development gate is pending. |
 | Main merge | Pending green lane and exact-candidate qualification. |
 | Deployment | Outside this build; no production action authorized. |
 
