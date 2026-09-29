@@ -542,6 +542,10 @@ pub struct ClientServerSnapshot {
     pub suspend_count: Option<i64>,
     pub progress_idle_ms: Option<i64>,
     pub published_end_ms: Option<i64>,
+    pub produced_end_ms: Option<i64>,
+    pub playlist_target_ms: Option<i64>,
+    pub budget_anchor_sequence: Option<u64>,
+    pub demand_observation_age_ms: Option<i64>,
     pub fetched_end_ms: Option<i64>,
     pub fetched_segment: Option<i64>,
     pub first_retained_segment: Option<i64>,
@@ -997,6 +1001,8 @@ fn join_session_truth(event: &mut PlaybackEvent, info: &crate::transcode::Sessio
         "playlist_ready": info.playlist_ready,
         "published_segment": info.published_segment,
         "published_end_ms": info.published_end_ms,
+        "budget_anchor_sequence": info.budget_anchor_sequence,
+        "demand_observation_age_ms": info.demand_observation_age_ms,
         "next_media_sequence": info.next_media_sequence,
         "fetched_end_ms": info.fetched_end_ms,
         "fetched_segment": info.fetched_segment,
@@ -1022,6 +1028,14 @@ fn join_session_truth(event: &mut PlaybackEvent, info: &crate::transcode::Sessio
     let server_fields = server.as_object_mut().expect("server telemetry object");
     for (key, value) in [
         ("produced_end_ms", serde_json::json!(info.produced_end_ms)),
+        (
+            "budget_anchor_sequence",
+            serde_json::json!(info.budget_anchor_sequence),
+        ),
+        (
+            "demand_observation_age_ms",
+            serde_json::json!(info.demand_observation_age_ms),
+        ),
         ("served_end_ms", serde_json::json!(info.served_end_ms)),
         ("staged_bytes", serde_json::json!(info.staged_bytes)),
         (
@@ -1277,6 +1291,12 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
                 ("suspend_count", server.suspend_count),
                 ("progress_idle_ms", server.progress_idle_ms),
                 ("published_end_ms", server.published_end_ms),
+                ("produced_end_ms", server.produced_end_ms),
+                ("playlist_target_ms", server.playlist_target_ms),
+                (
+                    "demand_observation_age_ms",
+                    server.demand_observation_age_ms,
+                ),
                 ("fetched_end_ms", server.fetched_end_ms),
                 ("fetched_segment", server.fetched_segment),
                 ("first_retained_segment", server.first_retained_segment),
@@ -1285,6 +1305,9 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
                 if let Some(value) = value.filter(|value| *value >= 0) {
                     status.insert(key.to_owned(), value.into());
                 }
+            }
+            if let Some(sequence) = server.budget_anchor_sequence {
+                status.insert("budget_anchor_sequence".to_owned(), sequence.into());
             }
             for (key, value) in [
                 ("recent_speed", server.recent_speed),
@@ -6777,6 +6800,8 @@ mod tests {
         assert_eq!(extra["server"]["lease_state"], "active");
         assert_eq!(extra["server"]["lease_timeout_ms"], 30_000);
         assert_eq!(extra["server"]["produced_end_ms"], 48_000);
+        assert_eq!(extra["server"]["budget_anchor_sequence"], 7);
+        assert_eq!(extra["server"]["demand_observation_age_ms"], 1_000);
         assert_eq!(extra["server"]["served_end_ms"], 44_000);
         assert_eq!(extra["server"]["staged_bytes"], 400_000);
         assert_eq!(extra["server"]["playlist_target_ms"], 16_000);
@@ -6818,6 +6843,10 @@ mod tests {
                 readrate: Some(0.8),
                 progress_idle_ms: Some(11_000),
                 published_end_ms: Some(125_000),
+                produced_end_ms: Some(141_000),
+                playlist_target_ms: Some(16_000),
+                budget_anchor_sequence: Some(8),
+                demand_observation_age_ms: Some(1_500),
                 fetched_end_ms: Some(121_000),
                 playlist_shape: Some("sliding".into()),
                 last_request: Some("segment".into()),
@@ -6841,6 +6870,8 @@ mod tests {
         assert_eq!(extra["client"]["media_requests"], 17);
         assert_eq!(extra["client"]["server"]["observed_age_ms"], 2_345);
         assert_eq!(extra["client"]["server"]["progress_idle_ms"], 11_000);
+        assert_eq!(extra["client"]["server"]["produced_end_ms"], 141_000);
+        assert_eq!(extra["client"]["server"]["budget_anchor_sequence"], 8);
         assert_eq!(extra["client"]["server"]["playlist_shape"], "sliding");
 
         let line = client_log_line(&event, 0);
