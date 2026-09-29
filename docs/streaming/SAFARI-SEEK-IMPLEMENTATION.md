@@ -615,7 +615,7 @@ if adding or moving another document.
 | Implementation base / effort / task branches | `1869871ce`; `effort/safari-seek`; `codex/safari-seek-build` in a separate temporary clone |
 | Compiler version and baseline check | Rust 1.97.1; `rustup run 1.97.1 cargo check -p plurxd --all-targets --locked` passed on 2026-09-29 |
 | M0 browser fixture and stage diagnostics | Bounded client route and settlement trace implemented; `scripts/playback-lab safari-seek-fixture` generated twenty six-second fMP4 segments with FFmpeg 9.0.1 and saved [four native Safari 27.0.1 reports](../evidence/safari-seek-native-2026-09-29.json). With target duration 16, unfinished and EVENT playlists had seekable end 72 s and landed at 72 s for a 100 s request; the finished VOD playlist landed at 100 s; the unfinished target-duration-6 playlist had seekable end 102 s and landed at 100 s. Growing/sliding real-server evidence and stage diagnostics still owed. |
-| M1 demand lifetime, promotion and engine eligibility | Engine compatibility now filters candidate selection and the fenced claim on both Store backends; demand lifetime, promotion, wakeup and hydration remain |
+| M1 demand lifetime, promotion and engine eligibility | Engine compatibility filters candidate selection and the fenced claim on both Store backends. A local exact-copy enqueue broadcasts a wake to the durable fragment consumer, whose next pass now includes analysis; the idle admission regression is written but not run. Demand lifetime, promotion and hydration remain. |
 | M2 shared I/O policy and throughput trade-off | Not started |
 | M3 selected runtime inputs and per-architecture identities | Not started |
 | M4 lead calculation, implementation or bounded negative result | Not started |

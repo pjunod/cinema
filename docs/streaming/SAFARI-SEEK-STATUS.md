@@ -14,7 +14,7 @@ exists for the named milestone; it does not imply a fleet rollout.
 | Milestone | State | Evidence and next step |
 |---|---|---|
 | M0 — browser fixture and stage diagnostics | In progress | Added bounded client route and settlement traces. The `scripts/playback-lab safari-seek-fixture` native Safari run and [four served-manifest reports](../evidence/safari-seek-native-2026-09-29.json) reproduce the clamp; growing/sliding real-server evidence and server stage diagnostics remain. |
-| M1 — viewer preparation | In progress | Both Store claims now filter incompatible fragment pipeline identities before charging an attempt; expiring viewer interest, promotion, wakeup and targeted hydration remain. |
+| M1 — viewer preparation | In progress | Both Store claims filter incompatible fragment pipeline identities before charging an attempt. A local analysis enqueue now wakes the durable consumer instead of waiting for the scheduler tick; an idle two-second admission regression is written. Expiring viewer interest, promotion and targeted hydration remain. |
 | M2 — source I/O admission | Pending | Keep one of two shared slots available for live demand. |
 | M3 — reproducible media runtime | Pending | Pin immutable per-architecture runtime inputs and record actual engine digests. |
 | M4 — bounded rolling coverage | Pending measurement | Widen only if native range and resource measurements satisfy §8 of the implementation contract. |

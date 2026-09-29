@@ -10,7 +10,7 @@ mod subtitle_work;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
@@ -42,7 +42,7 @@ use plurx_core::store::{
 use plurx_core::transcode::EncoderCaps;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::job_lease::{acquire_cluster_job, ActiveJobLease};
@@ -57,6 +57,15 @@ const FRAGMENT_INDEX_VALIDATION_INTERVAL: Duration = Duration::from_secs(30);
 static FRAGMENT_INDEX_VALIDATED: AtomicU64 = AtomicU64::new(0);
 static FRAGMENT_INDEX_REFUSED: AtomicU64 = AtomicU64::new(0);
 static FRAGMENT_INDEX_GONE: AtomicU64 = AtomicU64::new(0);
+
+/// Playback may admit exact analysis before a media session has attached.
+/// A process-wide broadcast reaches the local queue consumer without making
+/// the VOD serve layer depend on a particular JobManager instance. Durable
+/// rows remain authoritative if no consumer is listening during startup.
+fn fragment_analysis_wake() -> &'static broadcast::Sender<()> {
+    static WAKE: OnceLock<broadcast::Sender<()>> = OnceLock::new();
+    WAKE.get_or_init(|| broadcast::channel(8).0)
+}
 
 pub(crate) fn fragment_index_validation_prometheus() -> String {
     format!(
@@ -2676,7 +2685,7 @@ pub(crate) async fn enqueue_copy_preparation_for_object(
         None => base,
     };
     let now = clock_ms();
-    store
+    let request = store
         .enqueue_analysis_request(&NewAnalysisRequest {
             request_id: uuid::Uuid::new_v4().to_string(),
             file_id: file.id,
@@ -2693,7 +2702,9 @@ pub(crate) async fn enqueue_copy_preparation_for_object(
             not_before_ms: now,
             created_at_ms: now,
         })
-        .await
+        .await?;
+    let _ = fragment_analysis_wake().send(());
+    Ok(request)
 }
 
 pub(crate) fn clock_ms() -> i64 {
@@ -5609,6 +5620,7 @@ impl JobManager {
         };
         let fragments = async {
             let mut pacing = crate::background_jobs::IdlePoll::new();
+            let mut wake = fragment_analysis_wake().subscribe();
             loop {
                 let kinds = [JobKind::FragmentIndexBuild, JobKind::ArtifactHydrate];
                 let before = crate::background_jobs::accepted_claims(&kinds);
@@ -5617,19 +5629,16 @@ impl JobManager {
                     .may_execute_job(JobKind::FragmentIndexBuild)
                     .await
                     && self.cluster_fragment_index_enabled().await
-                    && !self.cluster_index_working.swap(true, Ordering::AcqRel)
                 {
-                    let _guard = ClusterIndexWorkingGuard(Arc::clone(&self));
-                    // Outbox admission is still voter-owned; learners only
-                    // consume already-authorized immutable work for a target.
-                    if self.may_run_cluster_jobs().await {
-                        self.enqueue_artifact_deliveries().await;
-                    }
-                    self.drain_cluster_fragment_index_slot(Arc::clone(&transcode))
+                    Arc::clone(&self)
+                        .work_cluster_fragment_index_queue(Arc::clone(&transcode))
                         .await;
                 }
                 let progressed = crate::background_jobs::accepted_claims(&kinds) != before;
-                tokio::time::sleep(pacing.delay(progressed)).await;
+                tokio::select! {
+                    _ = wake.recv() => {},
+                    () = tokio::time::sleep(pacing.delay(progressed)) => {},
+                }
             }
         };
         let libraries = async {
@@ -10369,6 +10378,90 @@ mod tests {
                 .expect("setting")
                 .as_deref(),
             Some("0")
+        );
+    }
+
+    #[tokio::test]
+    async fn playback_preparation_wakes_idle_analysis_within_two_seconds() {
+        use plurx_core::store::ClusterFragmentIndexStore as _;
+        use plurx_core::transcode::CopyVideoOptions;
+
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store
+            .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "1")
+            .await
+            .expect("shared indexing on");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Movies".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: Vec::new(),
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Viewer demand".to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let id = store
+            .upsert_file(
+                item,
+                "/absent/viewer-demand.mkv",
+                100,
+                1,
+                &ProbeResult {
+                    video_codec: Some("h264".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("file");
+        let file = store.get_file(id).await.expect("read file").expect("file");
+        let artwork = tempfile::tempdir().expect("artwork");
+        let transcode_dir = crate::test_tempdir().expect("transcode");
+        let jobs = manager(store.clone(), artwork.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            transcode_dir.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let consumer = tokio::spawn(Arc::clone(&jobs).background_work_loop(transcode));
+        let request = enqueue_copy_preparation(
+            store.as_ref(),
+            "test-node",
+            &file,
+            CopyVideoOptions::new(false, false),
+        )
+        .await
+        .expect("enqueue");
+        let admitted = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let current = store
+                    .analysis_request(&request.request_id)
+                    .await
+                    .expect("request read")
+                    .expect("request kept");
+                if current.attempts > 0 {
+                    break current;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        consumer.abort();
+        assert!(
+            admitted.is_ok(),
+            "an idle worker must admit the exact playback request before the ordinary polling delay"
         );
     }
 
