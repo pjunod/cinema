@@ -483,6 +483,13 @@ function startPlaybackControl(v,p,bootstrap){
         if(error){
           const now=Date.now(), message=String(error.message||error);
           p.controlLastError={at:now,message};
+          // The paused presentation was retired: Play must open the one
+          // replacement rather than resume a loader into a dead playlist.
+          if(PlaybackPolicy.isPauseGraceExpiry(error)&&PlaybackPolicy.parksPausedPlaybackError(
+            {wantsPlayback:p.wantsPlayback,sessionId:p.sessionId,vod:p.vod})
+            &&!PlaybackPolicy.pausedRetirementCurrent(p.pausedRetirement,p.sessionId)){
+            p.pausedRetirement={sessionId:p.sessionId};
+          }
           if(!p.controlLastFailureLogAt||now-p.controlLastFailureLogAt>=60000){
             p.controlLastFailureLogAt=now;
             // §3.3 row 18: the reporter owns no recovery, so a refused exchange

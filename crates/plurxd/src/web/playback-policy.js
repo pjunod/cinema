@@ -1105,6 +1105,26 @@
     return (Number(used) || 0) < HLS_RETRY.per_attach;
   }
 
+  // The server retires a rolling presentation 180 s after an accepted Hold
+  // (`ROLLING_PAUSE_GRACE`) and answers `410 pause_grace_expired`; the playlist
+  // then answers 404/410. The sliding-HLS contract (§9.5): a paused client
+  // stays paused and opens one replacement at the saved position on resume.
+  // VOD and direct play are kept alive by a paused client, so only a rolling
+  // session's network failure parks.
+  function parksPausedPlaybackError({ wantsPlayback, sessionId = null, vod = false,
+    networkFailure = true } = {}) {
+    return wantsPlayback === false && !!sessionId && !vod && !!networkFailure;
+  }
+
+  function isPauseGraceExpiry(error) {
+    return !!error && Number(error.status) === 410 && error.code === "pause_grace_expired";
+  }
+
+  // The latch names its session, so a successor retires it by identity.
+  function pausedRetirementCurrent(retirement, sessionId) {
+    return !!retirement && !!sessionId && retirement.sessionId === sessionId;
+  }
+
   function hlsMediaFatalAction({
     type,
     details,
@@ -2133,6 +2153,9 @@
     hlsRetryAllowed,
     HLS_MEDIA_RECOVERY,
     hlsMediaFatalAction,
+    parksPausedPlaybackError,
+    isPauseGraceExpiry,
+    pausedRetirementCurrent,
     SEEK_LOCAL_SETTLE_MS,
     SEEK_LOCAL_LANDING_SLACK_MS,
     seekRoute,
