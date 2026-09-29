@@ -1002,7 +1002,8 @@
     if (Array.isArray(seekableMs) && !seekableMs.some(range => {
       const from = Number(range && range.from);
       const through = Number(range && range.through);
-      return Number.isFinite(from) && Number.isFinite(through)
+      // An open-ended range (duration Infinity) is still a range.
+      return Number.isFinite(from) && !Number.isNaN(through)
         && target >= from && target <= through;
     })) return { route: "reopen" };
     for (const range of Array.isArray(bufferedMs) ? bufferedMs : []) {

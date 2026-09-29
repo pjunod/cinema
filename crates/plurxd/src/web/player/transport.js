@@ -1030,7 +1030,9 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
     // was told: a clamp lands elsewhere and still fires it. Only a landing at
     // the target settles the local seek; anywhere else reopens now.
     const onSeeked=()=>{
-      if(!current()) return;
+      // A `seeked` already queued by an earlier seek arrives while this one
+      // is still seeking; only the edge that ends this seek is evidence.
+      if(!current()||/** @type {HTMLVideoElement} */(v).seeking) return;
       const landedMs=((me.offset||0)+(Number(/** @type {HTMLVideoElement} */(v).currentTime)||0))*1000;
       if(Math.abs(landedMs-atMs)>PlaybackPolicy.SEEK_LOCAL_LANDING_SLACK_MS){ fallback('landed_elsewhere'); return; }
       settled=true; cleanup(); };
@@ -1048,7 +1050,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
     // A `waiting` event may have armed an old 8 s timer during the 100 ms
     // scrub coalescing above. The committed seek replaces that observation.
     endWait(false);
-    if(!vod) try{v.addEventListener('seeked',onSeeked,{once:true});}catch(e){}
+    if(!vod) try{v.addEventListener('seeked',onSeeked);}catch(e){}
     if(vod){
       seekIntent.localVodSeek=true;
       seekIntent.localVodSeekFallbackPending=true;

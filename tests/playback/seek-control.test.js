@@ -138,6 +138,28 @@ test("a buffered target outside seekable is not local", () => {
     seekableMs:[{from:0,through:30_000}]}),{route:"reopen"});
   assert.equal(policy.seekRoute({method:"direct_play",targetMs:40_000,
     seekableMs:[{from:0,through:1_000}]}).route,"local","direct play owns its own seekable");
+  assert.deepEqual(policy.seekRoute({...base,seekableMs:[{from:0,through:Infinity}]}),
+    {route:"local",atMs:30_000,basis:"buffered"},"an open-ended seekable range admits the target");
+});
+
+test("hls.js keeps published local seeks inside its seekable range", async () => {
+  const published={fragments:[{start:0}],edge:120,targetduration:10};
+  const h=localSeekHarness({copyHls:true, published,
+    buffered:{length:1,start:()=>0,end:()=>40},
+    seekable:{length:1,start:()=>0,end:()=>120},
+  });
+  await h.api.seekTo(100);
+  assert.equal(h.video.currentTime,100);
+  assert.equal(h.api.logs[0].detail,"copy_hls:published");
+  assert.equal(h.api.changes.length,0);
+
+  const empty=localSeekHarness({copyHls:true, published,
+    buffered:{length:1,start:()=>0,end:()=>40},
+    seekable:{length:0,start:()=>0,end:()=>0},
+  });
+  await empty.api.seekTo(30);
+  assert.equal(empty.video.currentTime,10,"an element that can seek nowhere is not assigned");
+  assert.equal(empty.api.changes.length,1);
 });
 
 test("native HLS reopens a seek past seekable without touching the element", async () => {
@@ -169,6 +191,10 @@ test("a seeked landing away from the target reopens at once", async () => {
   });
   await h.api.seekTo(30);
   h.video.currentTime=11; // the element clamped
+  h.video.seeking=true;
+  h.listeners.get("seeked")();
+  assert.equal(h.api.changes.length,0,"a stale seeked during the seek is not evidence");
+  h.video.seeking=false;
   h.listeners.get("seeked")();
   await h.api.expire(0);
   assert.equal(h.api.logs[1].event,"seek_local_fallback");
@@ -186,6 +212,8 @@ test("a seeked landing away from the target reopens at once", async () => {
   await landed.api.seekTo(30);
   landed.video.currentTime=29.2; // keyframe-aligned landing
   landed.listeners.get("seeked")();
+  assert.equal(landed.listeners.has("seeked"),false,"a landing at the target settles and detaches");
+  assert.deepEqual(landed.api.timerDelays(),[],"settling retires the fallback timer");
   await landed.api.expire();
   assert.equal(landed.api.changes.length,0);
 });
