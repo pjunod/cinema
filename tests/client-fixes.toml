@@ -3223,3 +3223,13 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
 source_anchor = "if (retiredSession != null && parksPausedPlaybackError("
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackPolicyTest.kt"
 test_anchor = "fun onlyAPausedRollingNonCompatibilityErrorParks()"
+
+# The PR review's gaps: an Android MediaSession Play (notification, headset,
+# Assistant) now opens the replacement for a retired paused session too.
+[[fixes]]
+id = "android.paused-retirement-mediasession-play"
+commits = ["df1b0074"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "currentPausedRetirement()?.let(::reopenAfterPausedRetirement)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackPolicyTest.kt"
+test_anchor = "fun theReplacementOpensWhereTheViewerLeftIt()"
