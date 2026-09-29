@@ -612,7 +612,7 @@ if adding or moving another document.
 
 | Item | Result |
 |---|---|
-| Implementation base / effort / task branches | `1869871ce`; `effort/safari-seek`; `codex/safari-seek-build` in a separate temporary clone |
+| Implementation base / effort / task branches | Started at `1869871ce`; [task PR #622](http://192.168.4.7:3000/noirr/plurx/pulls/622) landed on `effort/safari-seek` as `1fa576a05`; current `main` `38c917225` merged into the effort with the implementation record retained |
 | Compiler version and baseline check | Rust 1.97.1; `rustup run 1.97.1 cargo check -p plurxd --all-targets --locked` passed on 2026-09-29 |
 | M0 browser fixture and stage diagnostics | Bounded client route and settlement trace implemented; `scripts/playback-lab safari-seek-fixture` generated twenty six-second fMP4 segments with FFmpeg 9.0.1 and saved [four native Safari 27.0.1 reports](../evidence/safari-seek-native-2026-09-29.json). With target duration 16, unfinished and EVENT playlists had seekable end 72 s and landed at 72 s for a 100 s request; the finished VOD playlist landed at 100 s; the unfinished target-duration-6 playlist had seekable end 102 s and landed at 100 s. `scripts/playback-lab safari-seek-server` now launches an isolated real daemon and captures its redacted served manifests plus Safari ranges across publication cycles; its physical run is pending. Playback events now correlate produced/published edges with the accepted demand sequence and age. Preparation stage diagnostics remain. |
 | M1 demand lifetime, promotion and engine eligibility | Engine-compatible claims and the exact enqueue wake are implemented. Expiring viewer waiters follow analysis into fragment work and targeted hydration; active playback sessions renew them and terminal sessions cancel them. Analysis source reads no longer own the artifact/delivery pass guard. Integrated delivery evidence remains. |
@@ -622,7 +622,7 @@ if adding or moving another document.
 | M5 same-source measurements and unavailable evidence | Not started |
 | Focused commands, selected counts, exit status and candidate SHA | Not started |
 | Review findings and resolution | Not started |
-| PRs, final promotion evidence and merge | Draft task [PR #622](http://192.168.4.7:3000/noirr/plurx/pulls/622) into `effort/safari-seek`; final promotion not started |
+| PRs, final promotion evidence and merge | Task [PR #622](http://192.168.4.7:3000/noirr/plurx/pulls/622) merged into `effort/safari-seek`; final draft PR, adversarial review and fast lane remain |
 | Production authorization and deployment | Not requested by this handoff |
 
 Return the implementation commit/PR links, changed behavior, exact test

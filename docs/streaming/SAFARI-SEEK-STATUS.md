@@ -1,7 +1,8 @@
 # Safari seek build — implementation and promotion status
 
-**Status:** building · **Updated:** 2026-09-29 · **Base:** `1869871ce` ·
-**Branch:** `codex/safari-seek-build` from `effort/safari-seek`
+**Status:** integrated candidate; review pending · **Updated:** 2026-09-29 ·
+**Starting base:** `1869871ce` · **Current main sync:** `38c917225` ·
+**Branch:** `effort/safari-seek`
 
 Companion to [SAFARI-SEEK-IMPLEMENTATION.md](SAFARI-SEEK-IMPLEMENTATION.md)
 (the contract and acceptance cases) and
@@ -34,7 +35,7 @@ exists for the named milestone; it does not imply a fleet rollout.
 | Focused regressions | Deferred until the final adversarial review, per the requested sequence. |
 | Astra adversarial review | Pending final main candidate. |
 | Ready fast lane | Pending review fixes. |
-| Task pull request | [#622](http://192.168.4.7:3000/noirr/plurx/pulls/622) is ready into `effort/safari-seek`; its development gate is pending. |
+| Task pull request | [#622](http://192.168.4.7:3000/noirr/plurx/pulls/622) merged into `effort/safari-seek` as `1fa576a05`, preserving its regression fields. The user directed local compile evidence here and one final test lane after review. |
 | Main merge | Pending green lane and exact-candidate qualification. |
 | Deployment | Outside this build; no production action authorized. |
 
