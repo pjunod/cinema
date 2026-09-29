@@ -7710,7 +7710,12 @@ impl JobManager {
             let now = clock_ms();
             let request = match self
                 .store
-                .claim_analysis_request(&node_id, now, now.saturating_add(retry_policy.lease_ms))
+                .claim_analysis_request_compatible(
+                    &node_id,
+                    Some(&engine_sha256),
+                    now,
+                    now.saturating_add(retry_policy.lease_ms),
+                )
                 .await
             {
                 Ok(Some(request)) => request,

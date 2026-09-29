@@ -20205,6 +20205,86 @@ async fn analysis_source_invalidation_terminalizes_exact_attempt_through_dyn_sto
 }
 
 #[tokio::test]
+async fn analysis_worker_skips_incompatible_engine_before_spending_a_claim() {
+    for_each_backend(|store, backend| async move {
+        let (_, old_file) = seed_file(&store, "analysis-old-engine").await;
+        let (_, current_file) = seed_file(&store, "analysis-current-engine").await;
+        for (id, file_id, pipeline, priority, force, created) in [
+            (
+                "old-engine-request",
+                old_file,
+                "old-engine",
+                "forced",
+                true,
+                10,
+            ),
+            (
+                "current-engine-request",
+                current_file,
+                "current-engine",
+                "normal",
+                false,
+                20,
+            ),
+        ] {
+            store
+                .enqueue_analysis_request(&NewAnalysisRequest {
+                    request_id: id.to_owned(),
+                    file_id,
+                    source_size: 10_000,
+                    source_mtime: 1,
+                    component: "fragment_index".to_owned(),
+                    pipeline_version: pipeline.to_owned(),
+                    video_identity: String::new(),
+                    requested_generation: format!("{id}-generation"),
+                    priority: priority.to_owned(),
+                    trigger: "admin".to_owned(),
+                    force_rebuild: force,
+                    target_node_id: "analysis-node".to_owned(),
+                    not_before_ms: created,
+                    created_at_ms: created,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {id}: {error}"));
+        }
+        let claimed = store
+            .claim_analysis_request_compatible("analysis-node", Some("current-engine"), 30, 1_030)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: current-engine claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: current-engine work should be eligible"));
+        assert_eq!(
+            claimed.request_id, "current-engine-request",
+            "backend {backend}"
+        );
+        let old = store
+            .analysis_request("old-engine-request")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: old request: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: old request remains queued"));
+        assert_eq!(
+            (old.state.as_str(), old.attempts),
+            ("queued", 0),
+            "backend {backend}"
+        );
+        assert!(store
+            .claim_analysis_request_compatible("analysis-node", Some("unknown-engine"), 31, 1_031)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: unrelated claim: {error}"))
+            .is_none());
+        let old_claim = store
+            .claim_analysis_request_compatible("analysis-node", Some("old-engine"), 32, 1_032)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: old-engine claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: old-engine worker can claim its work"));
+        assert_eq!(
+            old_claim.request_id, "old-engine-request",
+            "backend {backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn active_force_precedes_later_normal_requests_through_dyn_store() {
     for_each_backend(|store, backend| async move {
         let (_, file_id) = seed_file(&store, "analysis-force-precedence").await;

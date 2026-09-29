@@ -2015,13 +2015,18 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             })
     }
 
-    async fn claim_analysis_request(
+    async fn claim_analysis_request_compatible(
         &self,
         node_id: &str,
+        pipeline_version: Option<&str>,
         now_ms: i64,
         lease_expires_ms: i64,
     ) -> Result<Option<AnalysisRequest>, StoreError> {
-        if node_id.is_empty() || node_id.len() > 128 || lease_expires_ms <= now_ms {
+        if node_id.is_empty()
+            || node_id.len() > 128
+            || pipeline_version.is_some_and(str::is_empty)
+            || lease_expires_ms <= now_ms
+        {
             return Err(StoreError::Task("invalid analysis claim".to_owned()));
         }
         let max_attempts = configured_max_attempts(self).await?;
@@ -2088,6 +2093,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                               OR (component IN ('skip_markers','subtitle_source') AND target_node_id = ''))
                             AND component <> 'subtitle_source' AND attempts < $2
                             AND state = 'queued' AND not_before_ms <= $3
+                            AND ($5 IS NULL OR component <> 'fragment_index' OR pipeline_version = $5)
                           ORDER BY CASE WHEN priority = 'foreground' THEN 0 ELSE 1 END,
                                    created_at_ms - CASE WHEN priority = 'forced'
                                      THEN $4 ELSE 0 END,
@@ -2097,7 +2103,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         node_id,
                         max_attempts,
                         now_ms,
-                        super::fragment_index_cluster::ANALYSIS_FORCED_PRIORITY_BOOST_MS
+                        super::fragment_index_cluster::ANALYSIS_FORCED_PRIORITY_BOOST_MS,
+                        pipeline_version
                     ),
                 )
                 .await?
@@ -2116,14 +2123,16 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             lease_expires_ms = $2, attempts = attempts + 1,
                             last_error_code = NULL, updated_at_ms = $3
                       WHERE request_id = $4 AND fence = $5
-                        AND state = 'queued' AND not_before_ms <= $3"
+                        AND state = 'queued' AND not_before_ms <= $3
+                        AND ($6 IS NULL OR component <> 'fragment_index' OR pipeline_version = $6)"
                             .to_owned(),
                         params!(
                             node_id,
                             lease_expires_ms,
                             now_ms,
                             &candidate.request_id,
-                            candidate.fence
+                            candidate.fence,
+                            pipeline_version
                         ),
                     ),
                     (

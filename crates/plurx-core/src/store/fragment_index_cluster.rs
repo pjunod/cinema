@@ -1810,6 +1810,21 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         node_id: &str,
         now_ms: i64,
         lease_expires_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        self.claim_analysis_request_compatible(node_id, None, now_ms, lease_expires_ms)
+            .await
+    }
+
+    /// Select and fence only fragment requests this worker can execute.
+    /// `None` preserves the administrative/test claim surface; a daemon worker
+    /// passes its actual engine identity. Other analysis components retain
+    /// their own compatibility rules.
+    async fn claim_analysis_request_compatible(
+        &self,
+        node_id: &str,
+        pipeline_version: Option<&str>,
+        now_ms: i64,
+        lease_expires_ms: i64,
     ) -> Result<Option<AnalysisRequest>, StoreError>;
 
     async fn renew_analysis_request(

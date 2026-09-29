@@ -14,7 +14,7 @@ exists for the named milestone; it does not imply a fleet rollout.
 | Milestone | State | Evidence and next step |
 |---|---|---|
 | M0 — browser fixture and stage diagnostics | In progress | Added bounded client route and settlement traces with film-coordinate ranges, media origin, attempt and session. Native fixture and server stage diagnostics remain. |
-| M1 — viewer preparation | Pending | Analysis, artifact and hydration need one expiring consumer interest. |
+| M1 — viewer preparation | In progress | Both Store claims now filter incompatible fragment pipeline identities before charging an attempt; expiring viewer interest, promotion, wakeup and targeted hydration remain. |
 | M2 — source I/O admission | Pending | Keep one of two shared slots available for live demand. |
 | M3 — reproducible media runtime | Pending | Pin immutable per-architecture runtime inputs and record actual engine digests. |
 | M4 — bounded rolling coverage | Pending measurement | Widen only if native range and resource measurements satisfy §8 of the implementation contract. |
@@ -26,6 +26,7 @@ exists for the named milestone; it does not imply a fleet rollout.
 |---|---|
 | Pinned compiler | Rust 1.97.1 confirmed on the separate clone host; baseline `rustup run 1.97.1 cargo check -p plurxd --all-targets --locked` passed 2026-09-29. |
 | M0 compile and syntax | Pinned `plurxd` check, `cargo fmt --check`, and JavaScript syntax checks passed after the first trace edit. The added Rust log regression has not been executed. |
+| M1 compatibility compile | Pinned `cargo check --workspace --all-targets --locked` passed on 2026-09-29; the backend-neutral regression is written and deferred for the final review sequence. |
 | Focused regressions | Deferred until the final adversarial review, per the requested sequence. |
 | Astra adversarial review | Pending final main candidate. |
 | Ready fast lane | Pending review fixes. |
