@@ -157,6 +157,8 @@ RUN sed -i \
 # runtime assertions could report a result.
 FROM runtime-assets AS runtime
 ARG PLURX_BUILD_SHA=""
+ARG PLURX_MEDIA_RUNTIME_DIGEST=""
+ENV PLURX_MEDIA_RUNTIME_DIGEST=${PLURX_MEDIA_RUNTIME_DIGEST}
 # The fleet rollout inspects this label on the pulled image ID before it trusts
 # checkout-owned deployment policy. Redeclare the build arg in this final stage:
 # Docker build args are stage-scoped, and a label inherited only by the build

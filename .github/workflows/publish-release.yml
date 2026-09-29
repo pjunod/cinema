@@ -251,6 +251,9 @@ jobs:
           provenance: false
           sbom: false
           outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            PLURX_BUILD_SHA=${{ needs.resolve.outputs.commit_sha }}
+            PLURX_MEDIA_RUNTIME_DIGEST=${{ steps.runtime.outputs.digest }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ needs.resolve.outputs.commit_sha }}
@@ -282,8 +285,10 @@ jobs:
           fi
           release-source/scripts/container-smoke "$image_ref"
           runtime_record=$(docker run --rm --platform "linux/$ARCH" "$image_ref" media-runtime-identity)
-          printf '%s\n' "$runtime_record" | jq -e --arg sha "$SOURCE_SHA" --arg arch "$ARCH" '
+          printf '%s\n' "$runtime_record" | jq -e --arg sha "$SOURCE_SHA" --arg arch "$ARCH" \
+            --arg runtime_digest "${{ steps.runtime.outputs.digest }}" '
             .application_sha == $sha and
+            .runtime_image_digest == $runtime_digest and
             .architecture == (if $arch == "amd64" then "x86_64" else "aarch64" end) and
             (.engine_digest | test("^[0-9a-f]{64}$")) and
             (.package_manifest_sha256 | test("^[0-9a-f]{64}$")) and

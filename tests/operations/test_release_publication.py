@@ -217,6 +217,7 @@ class ReleasePublicationContractCase(unittest.TestCase):
         generated = render(source, runtime)
 
         self.assertIn(f"FROM {runtime} AS runtime-assets", generated)
+        self.assertIn("ENV PLURX_MEDIA_RUNTIME_DIGEST=${PLURX_MEDIA_RUNTIME_DIGEST}", generated)
         self.assertNotIn("apt-get update", generated)
         self.assertNotIn("repo.jellyfin.org", generated)
         self.assertIn(
@@ -225,6 +226,11 @@ class ReleasePublicationContractCase(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "immutable sha256 digest"):
             render(source, "192.168.4.7:3000/noirr/plurx-media-runtime:latest")
+
+    def test_release_binds_daemon_identity_to_published_runtime(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("PLURX_MEDIA_RUNTIME_DIGEST=${{ steps.runtime.outputs.digest }}", workflow)
+        self.assertIn(".runtime_image_digest == $runtime_digest", workflow)
 
     def test_generator_refuses_an_unrecognized_runtime_contract(self):
         with self.assertRaisesRegex(ValueError, "one Bookworm runtime stage"):
