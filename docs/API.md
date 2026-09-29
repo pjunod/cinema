@@ -716,8 +716,16 @@ subtitles" instead of guessing. `playback_defaults` is computed from the
 stored stream rows plus one settings snapshot — never from a playback decision
 and never from a live probe — so an unmounted file still reports its tracks.
 
-Also per file: `available` is one `stat` at request time, and `missing_path`
-is added **only for admins**, and only when `available` is false.
+Also per file: `availability` is `available` · `unavailable` · `unknown`,
+with `availability_observed_at_ms` giving the Unix-millisecond time of the
+observation, or `null` if no usable observation exists. A cached answer is
+returned immediately for 15 seconds; up to 120 seconds it is returned while
+a refresh starts. Older observations answer `unknown`. New probes share one
+250 ms page budget, so a blocked mount cannot hold the item response.
+The legacy `available` boolean is false only for `unavailable`; `unknown`
+allows the client to attempt playback, where the source open makes the final
+decision. `missing_path` is added **only for admins**, and only for an
+observed `unavailable` file.
 `part_offset_ms` is the running offset within a multi-file audiobook, whose
 files are sorted in natural numeric order so `Part 2` precedes `Part 10`.
 `vod_index_status` is `indexed` · `partial` · `pending` · `refused` ·
