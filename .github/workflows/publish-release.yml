@@ -20,6 +20,7 @@ concurrency:
 
 env:
   REGISTRY_IMAGE: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurxd
+  REGISTRY_RUNTIME_IMAGE: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-media-runtime
 
 jobs:
   resolve:
@@ -166,6 +167,30 @@ jobs:
           registry: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
           username: fleet
           password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+      - name: Publish the reviewed platform runtime by immutable digest
+        id: runtime
+        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: release-source
+          file: release-source/Dockerfile
+          target: runtime-assets
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          outputs: type=image,name=${{ env.REGISTRY_RUNTIME_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      - name: Check the published runtime and record its packages
+        env:
+          ARCH: ${{ matrix.arch }}
+          RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
+        run: |
+          set -euo pipefail
+          runtime_ref="$REGISTRY_RUNTIME_IMAGE@$RUNTIME_DIGEST"
+          docker pull --platform "linux/$ARCH" "$runtime_ref"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$runtime_ref")" = "linux/$ARCH"
+          docker run --rm --platform "linux/$ARCH" --entrypoint cat "$runtime_ref" \
+            /usr/share/doc/plurx/media-runtime-packages.txt > runtime-packages.txt
+          grep -q '^jellyfin-ffmpeg8=8.1.3-1-bookworm$' runtime-packages.txt
+          grep -q '^mkvtoolnix=74.0.0-1$' runtime-packages.txt
       - name: Compile and export the exact tagged binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -205,6 +230,17 @@ jobs:
               python3 -m validation.release_dockerfile --list-binaries \
               release-source/Dockerfile
           )
+      - name: Bind release packaging to the published runtime digest
+        env:
+          RUNTIME_DIGEST: ${{ steps.runtime.outputs.digest }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH="$GITHUB_WORKSPACE/trusted-packaging" \
+            python3 -m validation.release_dockerfile \
+            --runtime-image "$REGISTRY_RUNTIME_IMAGE@$RUNTIME_DIGEST" \
+            release-source/Dockerfile release-source/Dockerfile.release
+          grep -Fq "FROM $REGISTRY_RUNTIME_IMAGE@$RUNTIME_DIGEST AS runtime-assets" \
+            release-source/Dockerfile.release
       - name: Build and push the untagged platform manifest
         id: build
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -254,10 +290,14 @@ jobs:
             .engine_current == true
           ' >/dev/null
           mkdir -p runtime-record
-          printf '%s\n' "$runtime_record" | jq --arg image_digest "$DIGEST" \
-            '. + {application_image_digest: $image_digest}' > "runtime-record/$ARCH.json"
+          printf '%s\n' "$runtime_record" | jq \
+            --arg image_digest "$DIGEST" \
+            --arg runtime_digest "${{ steps.runtime.outputs.digest }}" \
+            '. + {application_image_digest: $image_digest, media_runtime_image_digest: $runtime_digest}' \
+            > "runtime-record/$ARCH.json"
           docker run --rm --platform "linux/$ARCH" --entrypoint cat "$image_ref" \
             /usr/share/doc/plurx/media-runtime-packages.txt > "runtime-record/$ARCH.packages.txt"
+          cmp runtime-packages.txt "runtime-record/$ARCH.packages.txt"
           test "$(sha256sum "runtime-record/$ARCH.packages.txt" | cut -d ' ' -f 1)" = \
             "$(printf '%s\n' "$runtime_record" | jq -r .package_manifest_sha256)"
           mkdir -p digests
