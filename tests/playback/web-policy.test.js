@@ -6527,6 +6527,7 @@ const autoQuality = require("./auto-quality-policy.json");
 const AUTO_DECISION_KEYS = new Set([
   "height", "reason", "emergency", "action", "evidence", "mildSamples",
   "upgradeSinceMs",
+  "blockedHeights",
 ]);
 
 // Design section 3.5's table, verbatim in its first column. Pinned here and
@@ -6626,6 +6627,47 @@ test("the Auto-quality fixture drives decideRung, and records every disagreement
   }
 });
 
+test("a stall-scoped verdict and a typed decode stall reach the shipped classifier", () => {
+  const classify = new Function(
+    "PlaybackPolicy", "STREAM_FAILURE", "Date",
+    `${shippedSource("autoCauseEvidence")}\nreturn autoCauseEvidence;`,
+  )(policy, null, Date);
+  const now = 10_000;
+  const p = {
+    mediaAttachment: "a1", waitAt: 1_000,
+    health: {producer_state: "held", recent_speed: 3},
+    healthObservedAt: now,
+    abr: {stallEvents: {decode: []}, recentEstimateAtMs: null,
+      controlStallVerdict: {waitAt: 1_000, atMs: 9_000, untilMs: 21_000}},
+  };
+  assert.equal(classify(p, now).kind, "control-stall-verdict");
+  p.waitAt = 2_000;
+  assert.notEqual(classify(p, now).kind, "control-stall-verdict",
+    "a verdict from the previous wait cannot suppress this one");
+  p.waitAt = 1_000;
+  assert.notEqual(classify(p, 21_000).kind, "control-stall-verdict",
+    "the verdict expires at the absolute stall deferral deadline");
+  p.abr.controlStallVerdict = null;
+  p.abr.stallEvents.decode.push(9_500);
+  assert.equal(classify(p, now).kind, "decode-failed");
+  p.abr.stallEvents.decode = [];
+  assert.notEqual(classify(p, now).kind, "control-stall-verdict",
+    "the healthy producer-paced hold is not a stall verdict");
+});
+
+test("ending a wait retires its stall-scoped verdict", () => {
+  const p = {waitAt: 1_000, waitReported: false,
+    abr: {controlStallVerdict: {waitAt: 1_000, untilMs: 21_000}}};
+  const end = new Function("PLAYER", "performance", "clearTimeout",
+    "STALL_MIN_MS", "recordWaitStall", "clientLog", "playbackContext",
+    "bufferRunway", "persistentWaitEvidence",
+    `${shippedSource("endWait")}\nreturn endWait;`,
+  )(p, {now: () => 2_000}, () => {}, 2_000, () => {}, () => {}, () => ({}),
+    () => 0, () => ({kind: "supply"}));
+  end(false);
+  assert.equal(p.abr.controlStallVerdict, null);
+});
+
 test("every controller gate the fixture names is still in the shipped tick", () => {
   const tick = shippedSource("autoControllerTick");
   // Each gate is asserted on its own side of the awaited health poll. A whole-
@@ -6641,6 +6683,14 @@ test("every controller gate the fixture names is still in the shipped tick", () 
   for (const row of autoQuality.controller_gates) {
     if (!row.viewer_state) continue;
     if (row.web_gate == null) {
+      if (row.viewer_state === "A stall-scoped control verdict") {
+        assert.match(shippedSource("autoControllerTick"),
+          /const causeEvidence=autoCauseEvidence\(p,now\)/,
+          "the tick must still pass classified stall evidence to decideRung");
+        assert.match(shippedSource("persistentWait"), /controlStallVerdict=/,
+          "a stalled ask must publish its bounded verdict to Auto");
+        continue;
+      }
       assert.ok(
         typeof row.finding === "string" && row.finding.length >= 200,
         `${row.viewer_state}: a gate the browser does not have needs a finding`,

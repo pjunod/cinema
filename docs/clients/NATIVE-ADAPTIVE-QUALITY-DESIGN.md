@@ -107,12 +107,12 @@ the other — is the single most reusable thing the browser built.
 | `severeEstimateRatio` | 0.7 | below this fraction of source bitrate the link is "bandwidth-limited" |
 | `mildHeadroom` | 1.3 | margin a rung must clear on a mild downgrade |
 | `mildSamples` | 2 | consecutive mild samples before a mild downgrade |
-| `cooldownMs` | 20 000 | minimum gap between voluntary switches; an `emergency` decision is exempt. The browser's voluntary gate is in fact `max(cooldownMs, dwellMs)` (build plan M0.2) |
+| `cooldownMs` | 20 000 | one bound on the voluntary-switch gap; the actual gap is `max(cooldownMs, dwellMs) = 60 000` ms. An `emergency` decision is exempt |
 | `upgradeHeadroom` | 1.8 | estimate margin required to go up |
 | `upgradeHoldMs` | 45 000 | how long that margin must hold |
 | `upgradeSpeedFloor` | 1.15 | predicted post-switch encode pace, x realtime |
 | `stallWindowMs` | 60 000 | window over which stall events are counted |
-| `dwellMs` | 60 000 | the horizon the restart-cost model amortises over |
+| `dwellMs` | 60 000 | the restart-cost amortisation horizon and the second bound on the voluntary-switch gap |
 | `nearEmptyRunwaySeconds` | 1.5 | runway at or under which the player counts as starving (`nearEmpty`, one input to `starvation`). Urgency, not cause: on its own it makes `decideRung` **suppress** (`insufficient-evidence`), never switch, and it never makes a decision `emergency` — only a fresh bandwidth cliff does (§3.4) |
 | `restartCostSeconds` | 2.5 | what a reopen costs the viewer |
 | `causeMaxAgeMs` | 15 000 | cause evidence older than three ticks explains nothing |
@@ -143,10 +143,12 @@ returns exactly one `{kind, ageMs, code?}`, in priority order:
 | `kind` | Source | Meaning |
 |---|---|---|
 | `loader-suspended` | `p.hlsStartup.establishedSuspension` on this attachment | the loader is parked; repair the transport, do not change quality |
+| `control-stall-verdict` | this wait's `hold`/`retry_resource` answer before the 20 s deadline | the producer is paused or restarting; do not infer link pressure |
 | `authority-refused` | HTTP 401/403/410, or a code matching `authority\|owner_(lost\|transition)\|node_removal_fenced\|learner_route_ineligible` | this client no longer owns the session |
 | `producer-failed` | a terminal startup code, or `health.producer_state == "failed"` | the encode died |
 | `delivery-refused` | a code matching `publication\|segment_\|response_` | the server declined to publish |
 | `capacity-shortfall` | `0 < health.recent_speed < 1` with `producer_state` in `{running, held}` | the encoder cannot keep up |
+| `decode-failed` | a fresh typed decode stall recorded for this playback | block this height and step down once; later failure belongs to compatibility recovery |
 | `bandwidth-limited` | a fresh throughput sample below `severeEstimateRatio` x source kb/s | the link is the constraint |
 | `stale` / `unknown` | nothing fresh enough | **not** bandwidth pressure |
 
@@ -366,10 +368,10 @@ endpoint:
 
 | Class | `detail` prefix | Fed by | What the policy does |
 |---|---|---|---|
-| **Constrained delivery** | `link:` | throughput below `severeEstimateRatio` x source, or a `publication`/`segment_`/`response_` refusal | step down by the estimate; this is the only class that may step more than one rung |
+| **Constrained delivery** | `link:` | fresh measured throughput below `severeEstimateRatio` x source | step down by the estimate; this is the only class that may step more than one rung |
 | **Producer capacity** | `encode:` | `0 < recent_speed < 1` with `producer_state` in `{running, held}` | step down one rung; **never** step up, whatever the estimate says |
 | **Decoder failure** | `decode:` | a codec error, a repeated decode stall at an unchanged presentation time with a healthy buffer | add this height to `blockedHeights` and step down **one** rung. That is the quality controller's whole response, and it never changes delivery method (§4). A rung change is not a cure for a codec the device cannot decode, so a second decode failure is **not** answered with a third rung: the controller takes no further decode move, and the item failure belongs to the platform's compatibility owner (Apple's compatibility ladder, Android's compatibility budget, the web's decode rescue), the only thing allowed to change delivery |
-| **Deliberate hold** | `hold:` | `loader-suspended`, or a `hold`/`retry_resource` verdict that answered **this client's own `stalled` ask** (fixture kind `control-stall-verdict`) | **no downward move** while it is in force, bounded by the client's stall deferral (20 s on the web). Repair the transport or wait out the verdict. Upgrades need no rule of their own: the stall that prompted the ask already refuses them through `stallFree`. **Not** fed by the routine advisory hold or by `producer_state == "held"`, which are the healthy paced steady state (below) |
+| **Deliberate hold** | `hold:` | `loader-suspended`, a `hold`/`retry_resource` verdict that answered **this client's own `stalled` ask** (fixture kind `control-stall-verdict`), or a `publication`/`segment_`/`response_` refusal (fixture kind `delivery-refused`) | **no downward move** while the stall verdict is in force, bounded by the client's stall deferral (20 s on the web). A publication refusal suppresses a rung move while that refusal is fresh; repair delivery first. Upgrades after a stall still require `stallFree`. **Not** fed by the routine advisory hold or by `producer_state == "held"`, the healthy paced steady state (below) |
 | **Denied authority** | `authority:` | 401/403/410, `owner_lost`, `owner_transition`, `node_removal_fenced`, `learner_route_ineligible` | **do nothing to quality.** Re-establish ownership; a rung change on a session you no longer own is a second session |
 | *(unknown / stale)* | `unknown:` | nothing fresher than `causeMaxAgeMs` | **do nothing.** Not bandwidth pressure (§2.3) |
 
@@ -418,12 +420,11 @@ recorded the stall (`:416` → `recordWaitStall` → `noteAutoStall`, which sets
 in `applyStallVerdict` (`Controller.kt:1849`), reached only from `onStall`
 (`:1945`). The web's deferral is capped at `CONTROL_STALL_DEFER_DEADLINE_MS
 = 20000` (`measurements.js:244`), well inside `stallWindowMs = 60000`, so
-while a web stall verdict is in force `stallFree`
-(`playback-policy.js:507-508`) already refuses every upgrade. What no
-platform does is hand the verdict to `decideRung`, so a fresh slow transfer
-during a held stall — which on a JIT server measures the paused producer,
-not the link — can still take the emergency downswitch. That downward gap
-is the fixture's `control-stall-verdict` case and the build plan's M0.1.
+while a web stall verdict is in force `stallFree` already refuses every
+upgrade. M0.1 now hands that verdict to `decideRung` for the deferral's
+lifetime. A fresh slow transfer during a held stall can measure the paused
+producer rather than the link, so the policy suppresses the emergency
+downswitch. The `control-stall-verdict` fixture pins that answer.
 
 An earlier draft of this section fed `hold:` from `producer_state == "held"`
 and any `hold`/`retry` verdict, told the policy to "do nothing to quality",
@@ -469,9 +470,10 @@ have that seam (`PlaybackIntent.adoptQuality`, `PlaybackIntent.kt:64`).
 
 ### 3.4 Hysteresis, budget, and going back up safely
 
-- **Cooldown.** No voluntary switch within `cooldownMs` of the last one
-  (the browser's gate is in fact `max(cooldownMs, dwellMs)`, build plan
-  M0.2). The one exemption is an `emergency` decision, and only a **fresh
+- **Voluntary gap.** No voluntary switch within
+  `max(cooldownMs, dwellMs) = 60 000` ms of the last one. M0.2 retains the
+  shipped browser's 60 s rule: reducing it to 20 s would change behavior
+  without a shaped trace. The one exemption is an `emergency` decision, and only a **fresh
   bandwidth cliff** makes one: a completed-transfer sample no older than
   `recentSampleMaxAgeMs` below `severeEstimateRatio` x the current rung
   (`freshBandwidthCliff`, `playback-policy.js:361-363`; `severe`, `:402`).
@@ -639,11 +641,11 @@ which changes no behaviour; nothing else under A-04 touches runtime code.
 
 ### 5.1 D1 — the shared policy artifact and its fixtures — DELIVERED
 
-`tests/playback/auto-quality-policy.json`, schema 1, 30 cases and 12
+`tests/playback/auto-quality-policy.json`, schema 1, now 31 cases and 13
 controller-gate rows, driven by `node tests/playback/web-policy.test.js`.
-Five cases (M0's four disagreements plus the unimplemented switch budget)
-and three gate rows carry a `web_current`/`finding` disagreement; they are
-summarised in §8.4 and §7.6.
+M0 settled its four `web_current` cases; the proposed switch budget still
+has one. Two gate rows retain findings for background visibility and HDR
+fidelity, which need their own evidence and implementation.
 
 Deliverable: `tests/playback/auto-quality-policy.json` at schema 1 (§3.6),
 plus `web-policy.test.js` extended to drive `decideRung` from it, so the
@@ -970,27 +972,19 @@ Android `device-run`. If the fleet ends up running this trace more than
 twice, the harness is worth building — `adb shell am start` plus the
 existing control-file protocol is most of it. Decide after D3.
 
-### 7.6 Does `link:` really carry a server's refusal to publish? — opened by D1
+### 7.6 A publication refusal is `hold:`, not `link:` — settled by A-05 M0
 
-§3.2's `link:` row is fed by "throughput below `severeEstimateRatio` x source,
-**or** a `publication`/`segment_`/`response_` refusal", and its action is to
-step down by the estimate. `decideRung` disagrees: it puts `delivery-refused`
-in its `namedSuppression` list and retains the rung, on §2.3's argument that a
-server declining to publish is not the link being slow.
+M0.4 settles the publication-refusal classification: `link:` requires fresh
+measured throughput evidence. A `publication`/`segment_`/`response_` refusal
+is `delivery-refused` in the `hold:` class, and `decideRung` retains the rung
+while the refusal is fresh. A server declining to publish does not measure
+the link.
 
-The browser is almost certainly right. `response_owner_transition` and
-`segment_pending` describe a server that is moving or still building, not a
-link that cannot carry the rung, and stepping a rung on one of them would show
-the viewer a quality drop caused by an ownership move. But this document is
-what three adapters will be written from, so the table cannot simply be
-corrected in passing by an executing session. The case is recorded in
-`tests/playback/auto-quality-policy.json` with `expect` reading the design and
-`web_current` reading the code, and it is the build plan's M0 to settle.
-
-The likely settlement, for whoever takes it: `link:` is throughput evidence
-only, and a delivery refusal becomes a sixth class or joins `hold:` — it is a
-"repair the transport, do not change quality" answer. If it joins `hold:`,
-it joins the stall-scoped half (§3.2), never the routine paced hold.
+`response_owner_transition` and `segment_pending` describe server movement
+or unfinished publication. Stepping a rung on either would turn a server
+condition into an unwarranted quality loss. The `delivery-refused` fixture
+now carries plain `expect`; the routine paced hold remains outside the
+suppression class.
 
 ### 7.7 Can Apple see a cliff at all? — opened by D2
 
@@ -1033,10 +1027,10 @@ everything below is `autoControllerTick`'s `sampleMs`, 5 s.
 | `recentSpeed` | `health.recent_speed` from `pollSessionHealth` | × realtime | per tick (the tick awaits the poll) | `null`; `predictedSpeed` returns `null` and the upgrade is **not** blocked |
 | `activeSupplyStall` | `!!p.waitAt && runway < SUPPLY_RUNWAY_SECS` | bool | per tick | false |
 | `supplyStalls` | `p.abr.stallEvents.supply.length`, pruned to `stallWindowMs` | count | per event | 0 |
-| `decodeStalls` | `p.abr.stallEvents.decode` — **collected but not passed to `decideRung`** | count | per event | see §8.4 |
+| `decodeStalls` | `p.abr.stallEvents.decode.length`, passed to `decideRung` | count | per event | 0; only a fresh typed decoder failure yields `decode-failed` |
 | `lastStallAtMs`, `lastSwitchAtMs`, `mildSamples`, `upgradeSinceMs` | `p.abr.*`, written back from the previous decision | ms / count | per tick | `null`/0 |
 | `playerHeight` | `playerPixelHeight(v)` — CSS height × `devicePixelRatio`, ratio clamped to 4, else the intrinsic decoded height | pixels | per tick | `Infinity`; a ceiling only, which is why it can never strand a downgrade |
-| `blockedHeights` | `p.abr.failedHeights`, written by `maybeDecodeRescue` | set | per decode failure | empty |
+| `blockedHeights` | `p.abr.failedHeights`, extended with the policy's returned `blockedHeights` before a rung switch | set | per decode failure | empty |
 | `cause` | `autoCauseEvidence(p, now)` | see §2.3 | per tick | `{kind:"unknown"\|"stale"}` |
 
 Tick location: `autoControllerTick`, `crates/plurxd/src/web/player/stall-diagnosis.js`.
@@ -1187,17 +1181,16 @@ never strand a downgrade from a rung above it (the fixture pins that). The
 cost of `Infinity` is that a 4K rung can be chosen for a small window, not
 that anything breaks. It is therefore the last thing to wire, not the first.
 
-#### 8.4.6 Nobody hands the stall verdict to the policy
+#### 8.4.6 The web now hands its stall verdict to the policy
 
-Every client already consumes a `hold`/`retry_resource` verdict, and only
-where it answers its own `stalled` ask: the web inside `persistentWait`,
-Android inside `applyStallVerdict`. Neither passes it to the quality policy:
-`autoCauseEvidence` has no such kind and `autoControllerTick` reads no
-verdict. Upward this costs nothing, because the stall that prompted the ask
-already refuses upgrades through `stallFree` for `stallWindowMs`, longer than
-any deferral. Downward it does: a fresh slow transfer during a held stall
-takes the emergency branch. The fixture records that as its
-`control-stall-verdict` disagreement, and it is the build plan's M0.1.
+The web's `persistentWait` now retains a `hold`/`retry_resource` answer from
+its own `stalled` ask while that wait's 20 s deferral remains active.
+`autoCauseEvidence` emits `control-stall-verdict` only for the same wait
+identity before the absolute deadline, and `decideRung` suppresses the
+downward move even if a fragment transfer appears slow. `endWait` retires
+the verdict. The stall that prompted the ask already refuses upgrades
+through `stallFree` for `stallWindowMs`. Android's adapter still belongs to
+the later build milestones.
 
 The routine advisory hold the server sends on every exchange while a paced
 producer is ahead, and `producer_state == "held"`, are deliberately **not**
