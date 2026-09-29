@@ -142,6 +142,18 @@ impl AvailabilityCache {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_test_probe<F, Fut>(probe: F) -> Arc<Self>
+    where
+        F: Fn(PathBuf) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = bool> + Send + 'static,
+    {
+        Self::with_probe(
+            Limits::default(),
+            Arc::new(move |path| Box::pin(probe(path))),
+        )
+    }
+
     /// Start all uncached stats before waiting. A stale but still honest
     /// observation answers immediately while its refresh continues.
     pub async fn observe_many(self: &Arc<Self>, paths: &[PathBuf]) -> Vec<Observation> {
@@ -214,7 +226,16 @@ impl AvailabilityCache {
             );
         }
         if inner.inflight.len() >= self.limits.inflight {
-            return (answer, None);
+            // Past TTL the old state is only useful when a refresh is in
+            // progress. At capacity no refresh can start, so even a cached
+            // Unavailable must not keep refusing a newly remounted file.
+            return (
+                Observation {
+                    state: Availability::Unknown,
+                    observed_at_ms: answer.observed_at_ms,
+                },
+                None,
+            );
         }
 
         let path = path.to_path_buf();
@@ -453,6 +474,44 @@ mod tests {
         gate.add_permits(1);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_saturated_inflight_map_demotes_stale_unavailable() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        let gate = Arc::new(Semaphore::new(0));
+        let held = Arc::clone(&gate);
+        let cache = AvailabilityCache::with_probe(
+            Limits {
+                probes: 1,
+                inflight: 1,
+                entries: 2,
+            },
+            Arc::new(move |path| {
+                seen.fetch_add(1, Ordering::Relaxed);
+                let held = Arc::clone(&held);
+                Box::pin(async move {
+                    if path == Path::new("blocked") {
+                        let _permit = held.acquire().await.expect("gate open");
+                    }
+                    false
+                })
+            }),
+        );
+        let missing = ready(&cache, "missing").await;
+        assert_eq!(missing.state, Availability::Unavailable);
+        tokio::time::advance(TTL + Duration::from_secs(1)).await;
+        assert_eq!(ready(&cache, "blocked").await.state, Availability::Unknown);
+        assert_eq!(cache.inner.lock().expect("cache mutex").inflight.len(), 1);
+
+        let saturated = ready(&cache, "missing").await;
+        assert_eq!(saturated.state, Availability::Unknown);
+        assert_eq!(saturated.observed_at_ms, missing.observed_at_ms);
+        assert!(saturated.available());
+        assert_eq!(saturated.missing_path(true, Path::new("missing")), None);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        gate.add_permits(1);
+    }
+
     #[test]
     fn unknown_does_not_set_available_false() {
         assert!(Observation::UNKNOWN.available());
@@ -478,17 +537,24 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn the_playback_start_path_never_reads_the_cache() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let seen = Arc::clone(&calls);
-        let _detail_cache = fake(Arc::new(move |_| {
-            seen.fetch_add(1, Ordering::Relaxed);
-            Box::pin(async { true })
-        }));
-        let file = tempfile::NamedTempFile::new().expect("temp file");
-        let playback_cache = crate::playstart::AvailabilityCache::new();
-        assert!(playback_cache.is_present(12, file.path()).await);
-        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    #[test]
+    fn the_playback_start_path_never_reads_the_cache() {
+        // The real GET and POST routes share `decision`; this catches a
+        // future edit that diverts either through the detail observation.
+        let routes = include_str!("http/mod.rs");
+        let decision_route = routes
+            .split_once("\"/files/{id}/decision\",")
+            .expect("playback decision route")
+            .1;
+        assert!(decision_route.contains("get(stream::decision)"));
+        assert!(decision_route.contains(".post(stream::decision_post)"));
+
+        let source = include_str!("http/stream.rs");
+        let start = source
+            .split_once("pub async fn decision(")
+            .expect("playback decision handler")
+            .1;
+        assert!(start.contains("state.availability.is_present(id, &file.path).await"));
+        assert!(!source.contains("detail_availability"));
     }
 }
