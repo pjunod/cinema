@@ -4,7 +4,7 @@
 Decision 1 taken on Paul's behalf and his to overturn: the shared read is
 128 KiB, and `TCP_NODELAY` is set on accepted connections, which removed the
 HLS p50 regression at a packet-count cost on HLS bodies (§5.1.2, Decision 6).
-M2 pending ·
+M2 implementation pending; proof-preserving contract reconciled 2026-09-30 ·
 **Executes:** §2.4, C1, F-core-1, F-stream-8, §5.1 item 3 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Implemented:** 2026-09-21 against `main` @
@@ -15,11 +15,12 @@ M2 pending ·
 Companion to [PLAYBACK.md](../PLAYBACK.md) (how a segment reaches a client)
 and [STREAMING-RELIABILITY-IMPLEMENTATION.md](STREAMING-RELIABILITY-IMPLEMENTATION.md)
 (the delivery accounting the HLS pump exists to keep honest). Read §2.2 in
-full before touching `hls.rs`: the pump is not a buffer, it is the thing
-that proves a byte left the server before the byte is counted or the object
-is marked complete. M1 changes one number at four sites and measures. M2 is
-a later milestone in this same plan PR that changes how often the pump asks
-for that proof, and it must keep every behaviour §2.2 lists. It remains
+full before touching `hls.rs`: the pump proves that the body handed bytes to
+hyper before they are counted or the object is marked complete; it does not
+prove socket delivery or client receipt. M1 changes the storage read and
+measures. M2 later groups resident data so consecutive body polls can keep
+4 KiB frames ready without a producer wakeup between them; it must keep every
+behaviour §2.2 lists. It remains
 pending until M1 has the deployment and measurement evidence in §5.2.
 
 The original instruction here was: "if M1 seems to need a change in `hls.rs`
@@ -39,13 +40,21 @@ pieces, so the read size can move without the proof moving with it.
 2. The change is measured — throughput, resident memory under concurrent
    viewers, and tail latency of segment responses — before it is credited,
    with the protocol written down so the number is reproducible.
-3. Later, and separately, the HLS pump acknowledges a batch of bytes rather
-   than every chunk, without changing what the acknowledgement proves.
+3. Later, and separately, coalesce HLS writes across consecutively ready
+   body frames, retaining independent acceptance of each at-most-4 KiB
+   piece. A resident payload cap is not the delivery-proof unit (§3.2).
 
 ## 2. Contract today
 
 Re-verify line numbers at build time; they are from `88a3957a`. Versions:
 tokio 1.53.1, tokio-util 0.7.18, hyper 1.10.1, axum 0.8.9.
+
+The historical monolithic HLS locations below moved without changing these
+owners. At effort `f319fa779` (2026-09-30), the body/channel and detached
+completion are in [hls/response.rs](../../crates/plurxd/src/http/hls/response.rs),
+both pumps in [hls/segment.rs](../../crates/plurxd/src/http/hls/segment.rs),
+and delivery accounting in
+[transcode/response.rs](../../crates/plurxd/src/transcode/response.rs).
 
 ### 2.1 Before M1, four readers used the default and two were already sized
 
@@ -113,7 +122,7 @@ The properties, each with the line that implements it:
 
    **The proof granularity, stated in bytes.** One acknowledgement covers
    exactly one `DrivenLocalChunk`, so the chunk size *is* the resolution of
-   everything that follows it: the most an abandoned body can over-credit,
+   everything that follows it: the most one body poll can credit,
    and the largest object a single body poll can make look complete. Before
    M1 that bound was 4 KiB by accident — `ReaderStream`'s undocumented
    default was also the chunk size, because the pump sends one chunk per
@@ -126,7 +135,9 @@ The properties, each with the line that implements it:
    client that then disconnected would count the whole object to the
    delivery meter, renew the playback lease, and move the fetched-segment
    frontier that pacing and scratch reclamation read. Items 1 to 3 of this
-   section are only true at the granularity this constant sets.
+   section are only true at the granularity this constant sets. This is a
+   body-acceptance resolution, not a universal 4 KiB wire-level abandonment
+   bound: hyper and the kernel may buffer several already-polled frames.
 2. **Final byte.** `delivered == len` triggers
    `settle_streamed_response_completion` (`:13530-13542`, `:14138-14150`)
    exactly once, with `completion.take()`; on the rolling site it also
@@ -220,29 +231,73 @@ ordinary spinning-disk reads after M1. This is the one line outside the
 constructors, and it is why M1 is "one number" plus one guard, not one
 number.
 
-### 3.2 M2 — batch the acknowledgement, keep what it proves
+### 3.2 M2 — coalesce writes, retain per-piece acceptance
 
-Later milestone in this PR, with its own tests. The change is in the pump
-loop only: instead of one `DrivenLocalChunk` per read, accumulate reads into
-a batch of at most
-`MEDIA_BODY_ACK_BATCH_BYTES = 1 MiB` (or until `reader.next()` would block —
-use `poll_next` with `Poll::Pending` as the batch boundary, never a timer),
-send the batch as one chunk, and wait for one ack. Then:
+Later milestone, still subject to §5.2's media1 week and lab4 acceptance.
+The 2026-09-30 contract replaces the original one-large-chunk/one-batch-ack
+recipe, which contradicted Decision 5. It does not select an implemented
+data structure or claim an unmeasured throughput or socket-write reduction.
 
-- item 1 holds: `note`/`note_read` are called once per *batch* with the
-  batch's byte count, still after the ack;
-- item 2 holds: the last batch ends at `len`; completion runs when
-  `delivered == len` after that ack, and a short read is still
-  `UnexpectedEof`;
-- items 3–6 are untouched: the selects, deadlines, terminal and ownership
-  do not move;
-- item 7: `note_read` receives the batch's elapsed time and byte count; the
-  normalised guard from §3.1 makes that meaningful.
+- **Separate storage, payload and proof.** Storage reads remain 128 KiB;
+  every public body frame is at most the literal
+  `MEDIA_BODY_ACK_GRANULARITY = 4 KiB`, including a short final piece.
+  Retain 1 MiB as the maximum resident data-payload budget across gathering,
+  queued and body-held data, not an acknowledgement size or a target to fill.
+  Preserve `LOCAL_MEDIA_BODY_CHANNEL_CAPACITY = 1`; item capacity alone does
+  not bound bytes, so account retained backing buffers against that budget.
+- **Keep ready pieces ready.** Once data is resident, successive body polls
+  can yield successive 4 KiB frames without waiting for a producer task
+  wakeup between them. Every frame independently rechecks deadline/terminal
+  fences, then advances an exact ordered accepted-byte prefix by its own
+  length before it is yielded. A notification may cover several recorded
+  acceptances, but never accept an unpolled tail. Keep acknowledgement
+  bookkeeping bounded; no unbounded queue of per-piece acknowledgements.
+  The pump/body payload representation may change: neither "pump loop only"
+  nor "driven_local_body unchanged" is a valid implementation constraint.
+- **Pending boundaries, not a timer.** Gather only bytes the reader actually
+  produced. Expose them without waiting to fill the cap; end gathering on
+  reader `Poll::Pending`, EOF, error or the cap. The body returns Pending
+  only when no next resident frame is ready. Hyper may group those frames
+  until its own buffer limits or a real body-Pending boundary; this does not
+  promise one 1 MiB write or fewer writes on every poll.
+- **Count only the accepted prefix.** `delivery.note` / `note_delivered`
+  follow each piece's acceptance once, in order. On receiver drop,
+  cancellation, deadline or producer failure, reconcile already-recorded
+  acceptances before exiting and discard the unaccepted tail. Reading or
+  queueing data never credits it. Receiver drop remains `response_dropped`,
+  not a manufactured transport error; real failures retain terminal error
+  propagation. No frame escapes after its deadline/terminal fence wins.
+- **Preserve independent deadlines and ownership.** The spawned pump still
+  owns the file, tracker, authorization and completion permit. Its absolute
+  300 s lifetime and 30 s no-progress deadlines advance even when the body
+  is unpolled; grouping does not extend either. Storage reads, enqueueing
+  and notifications without new accepted bytes are not downstream progress.
+  Downstream progress uses the monotonic time of actual piece acceptance,
+  not the later notification/producer wakeup; the no-progress deadline stays
+  capped by the absolute lifetime. Recheck fences for
+  every frame within a resident payload, not just its first frame.
+- **Exact accepted EOF, once.** Complete only when the accepted prefix equals
+  the advertised length; rolling additionally requires `delivery.finish()`.
+  A short source remains `UnexpectedEof` and never completes. A valid final
+  acceptance transfers the exact authorization and permit to the existing
+  bounded detached completion task; dropping the consumer afterward must
+  not cancel that commit. Retain its owner/release/serving fences. Grouping
+  does not authorize earlier lease renewal or fetched-frontier movement.
+- **Keep storage-read provenance.** Preserve each read's real byte count and
+  elapsed time, even when a payload spans reads. Call `note_storage_read`
+  once for that read after its first piece is accepted; keep `note_delivered`
+  per piece. A group's elapsed time includes queue/downstream delay and is
+  not a storage-rate sample. Buffered init/probe composition stays separate.
 
-What M2 must **not** do: send a batch before the reader has produced it
-(no speculative sizing), change `LOCAL_MEDIA_BODY_CHANNEL_CAPACITY`, or
-move accounting ahead of the ack. `driven_local_body` is unchanged: it
-already handles a chunk of any size.
+**Partial writes are not new acceptances.** Today's ack precedes hyper's
+socket write. A partial or Pending write neither credits bytes again nor
+accepts an unpolled tail. Hyper retains framing/order and retries only the
+unwritten suffix; no additional buffer may discard that suffix, duplicate
+accepted bytes, falsely report socket progress, or ignore `poll_flush` to
+force coalescing. This contract keeps ready body frames, not a new transport
+wrapper. Multiple body polls may precede a socket flush: neither the current
+ack nor M2 proves TCP delivery, client receipt or presentation. A strict
+4 KiB wire-level disconnect bound would need a separate explicit decision.
 
 ## 4. Guardrails (non-goals)
 
@@ -255,12 +310,14 @@ already handles a chunk of any size.
   not achievable as written. M1 separates them —
   `MEDIA_BODY_READ_BUFFER` for storage, `MEDIA_BODY_ACK_GRANULARITY` for the
   proof, `LOCAL_MEDIA_BODY_CHANNEL_CAPACITY` for the channel — and then
-  changes only the first. M2 changes the second; neither touches the third.
+  changes only the first. M2 groups ready data while retaining the second;
+  neither changes the third.
 - **No claimed magnitude.** F-stream-8: "a 64× larger buffer does not prove
   a 100× throughput win". The hop count is arithmetic; the PR body carries
   the §5.1 numbers or the PR does not merge.
-- **Bounded per-viewer memory stays bounded.** The channel stays at 1 and
-  the batch cap is a constant; no unbounded `Vec` accumulates reads.
+- **Bounded per-viewer memory stays bounded.** The channel stays at 1;
+  §3.2 bounds the resident data payload and acknowledgement bookkeeping.
+  Neither a payload cap nor item capacity alone measures total viewer RSS.
 - **Direct play validators (`ETag`/`If-Range`, C11) are not in scope.**
 - **Live TV and progressive remux bodies are not touched.** The former
   streams from a producer pipe, the latter (`stream.rs:3320-3350`) from
@@ -503,18 +560,18 @@ and full segments, about 6% of data packets and their ACKs. So the cost on a
 measured on one. §6 watches for it. Direct play and ranges hand hyper whole
 128 KiB reads and are not affected.
 
-Coalescing the HLS writes is not in this PR. hyper 1.10's HTTP/1
+Coalescing was not in the September 24 implementation. hyper 1.10's HTTP/1
 dispatcher flushes each time the body is pending, and it has no setting to
 defer that. The pump offers one 4 KiB piece at a time
-(`LOCAL_MEDIA_BODY_CHANNEL_CAPACITY = 1`), so the body is pending after
-every piece. Fewer, larger writes need the body to offer either more than
-one piece per poll or larger pieces. The first changes the channel
-capacity, which §3.2 rules out for M2. The second raises the
-delivery-proof unit, which Decision 5 rules out. M2's acknowledgement
-batching (§3.2) is where these writes would coalesce. As §3.2 is written,
-though, it acknowledges a whole batch at once, which would also raise the
-proof unit to the batch. M2 has to be reconciled with Decision 5 before it
-is built. That is a follow-up (execution log), not part of this PR.
+(`LOCAL_MEDIA_BODY_CHANNEL_CAPACITY = 1`) and waits for its acknowledgement,
+so that cross-task round trip makes the body pending between pieces. The
+September 24 draft M2 recipe would instead have acknowledged one large
+batch, raising the proof unit contrary to Decision 5. The reconciled §3.2
+(2026-09-30) keeps each frame at 4 KiB and makes resident pieces available
+on consecutive polls without that producer wakeup. This need not increase
+channel item capacity and must not enlarge a yielded frame or ignore a
+flush. Actual throughput, packet and write-count effects remain unmeasured;
+M2 implementation and §5.2 acceptance are still follow-ups.
 
 **The final state against the before side.** One release build of
 `dbcb1168f`, the final code (128 KiB with `TCP_NODELAY`), was compared with
@@ -558,21 +615,24 @@ So on these numbers M1 plus Decision 1 meets the acceptance except the
 literal "not worse" for peak RSS. That remainder is the cost Decision 1
 accepts, and Paul can overturn it.
 
-### 5.2 M2 — acknowledgement batching
+### 5.2 M2 — proof-preserving write coalescing
 
 Same plan PR, after the M1 candidate has been exercised on media1 for a week
 with no `segment_delivery` regressions in the telemetry (§6). Code: §3.2.
-Tests all run against `driven_local_body` plus a pump built from a `Cursor`
-reader, so they run in `make unit` without files:
+The six future assertions below describe required boundaries, not tests
+implemented by the September 30 documentation reconciliation. They use
+`driven_local_body` plus a pump built from a `Cursor` reader, so they can
+run in `make unit` without files. Keep §5.1's existing small-object proof
+tests and fixtures unchanged; passing larger fixtures is not acceptance.
 
 | Test | Asserts |
 |---|---|
-| `a_batch_is_counted_once_after_its_ack` | `delivery.note` called with the batch total, after the body yielded it, not before |
-| `the_final_batch_completes_exactly_once` | a 3 MiB body with a 1 MiB cap: three chunks, `settle_streamed_response_completion` once, after the third ack |
-| `a_short_source_is_still_unexpected_eof` | reader ends at 2.5 MiB of an advertised 3 MiB: terminal error `UnexpectedEof`, no completion |
-| `a_dropped_receiver_ends_the_pump_without_a_failure` | drop the body mid-batch: pump returns, terminal has no error, permit released |
-| `the_downstream_deadline_still_fires_across_a_batch` | body stops polling after the first chunk: `downstream_no_progress` at 30 s (paused time) |
-| `a_batch_never_waits_for_more_bytes_than_the_reader_has` | reader returns `Pending` after 100 KiB: that 100 KiB is sent as a batch, not held |
+| `a_batch_counts_only_its_accepted_prefix` | each body poll yields at most 4 KiB; each accepted piece is counted once, never a resident/unpolled tail; retain each storage read's real size/time and note it once after its first accepted piece |
+| `the_final_batch_completes_exactly_once` | a 3 MiB body under the 1 MiB resident-payload cap still yields 4 KiB frames; completion runs once only after the exact final acceptance, remains owned after receiver drop, and retains authorization fences |
+| `a_short_source_is_still_unexpected_eof` | reader ends at 2.5 MiB of an advertised 3 MiB: terminal `UnexpectedEof`, only accepted bytes credited, no completion |
+| `a_dropped_receiver_ends_the_pump_without_a_failure` | drop mid-payload: reconcile its accepted prefix once, discard unaccepted tail, return without terminal failure and release pump ownership/permit unless exact EOF already transferred completion; no late frame after a cancellation/terminal fence, and a partial/Pending socket write is not another acceptance |
+| `the_downstream_deadline_still_fires_across_a_batch` | after the first piece the body stops polling: `downstream_no_progress` at 30 s (paused time), regardless of queued data; absolute 300 s lifetime and per-frame deadline/terminal fences still hold across resident pieces |
+| `a_batch_never_waits_for_more_bytes_than_the_reader_has` | reader Pending after 100 KiB: expose that prefix as consecutive at-most-4 KiB frames, not one acked batch or bytes held for a timer/cap; body Pending only when no next resident frame is ready, with bounded data and ack bookkeeping |
 
 Acceptance: those six plus the M1 tests green; the §5.1 protocol re-run on
 lab4 with HLS p99 not worse than M1's.
@@ -702,6 +762,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-09-30 | gpt-6.1-sol | agent:/root/k08_upstream_receipt_sol61 | M2 contract reconciliation only | [draft #645](http://192.168.4.7:3000/noirr/plurx/pulls/645), `codex/s02-proof-preserving-batching` | Authorized by Paul's coordinating session. Direct source audit at effort `f319fa779` and original review [3667](http://192.168.4.7:3000/noirr/plurx/pulls/410#issuecomment-3667)/accepted disposition [3715](http://192.168.4.7:3000/noirr/plurx/pulls/410#issuecomment-3715) confirmed that whole-batch acknowledgement would contradict Decision 5. §3.2 now groups bounded resident data but yields and records each at-most-4 KiB acceptance separately; §5.2 retains six future boundaries without claiming implemented tests. Partial/Pending socket writes are distinct from body acceptance; exact EOF retains detached authorized completion and storage-rate provenance stays per read. Existing authors, Decisions 1/5/6 and historical measurements below are retained. This docs-only continuation implements no pump/body/transport code and claims no wire delivery, write-count/throughput gain, fleet evidence or M2 completion. **Still owed:** mandatory regression-free media1 week, M2 implementation and tests, lab4 rerun, Decisions 1/6 confirmation and §6 post-deploy telemetry/packet-rate evidence. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | `ed98c6ab` / [#410](http://192.168.4.7:3000/noirr/plurx/pulls/410) | Shared 256 KiB capacity at all six file-backed readers; rate-normalized the slow-read signal. Pinned 1.97.1 check and six focused regressions passed. Needs: lab4 before/after throughput, peak RSS/thread count, HLS p50/p95/p99, and the repaired fast-lane `make unit` evidence. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | pending in [#410](http://192.168.4.7:3000/noirr/plurx/pulls/410) | Needs: M1 candidate deployed on media1 for one week with no `segment_delivery` regression, then the §5.1 lab4 protocol re-run. No acknowledgement-batching code has been written. |
 | 2026-09-22 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 review disposition | [#410](http://192.168.4.7:3000/noirr/plurx/pulls/410) | Addressed the sole adversarial review. The 256 KiB read had carried the pump's delivery-proof granularity up with it; `MEDIA_BODY_ACK_GRANULARITY = 4 KiB` now pins the proof where it was (§2.2 item 1, §3.1, Decision 5) and the three delivery-accounting tests that failed at the merged head pass again for that reason. Added `a_media_body_is_proved_in_acknowledgement_units_not_storage_read_units` and `a_large_read_at_the_event_boundary_emits_no_storage_stall_warning`; §5.1 now measures small-object concurrency (group B) as well as large. Still needs: the lab4 groups A and B before/after, and `make unit`. |
