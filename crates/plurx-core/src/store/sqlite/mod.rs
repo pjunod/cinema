@@ -1179,6 +1179,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs_subtitle::RECONCILE_SCHEMA,
     // v85: settled job history yields to new work instead of filling the bound.
     super::background_jobs::RETENTION_SCHEMA,
+    // v86: settled internal receipts yield too, once the waiter table nears its bound.
+    super::background_jobs::RECEIPT_PRESSURE_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2902,7 +2904,7 @@ mod tests {
         // provider dispatch budgets and the subtitle adapter; v77 adds artwork holders,
         // and v78 retains portable transcode source/manifest provenance.
         assert_eq!(
-            version, 85,
+            version, 86,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

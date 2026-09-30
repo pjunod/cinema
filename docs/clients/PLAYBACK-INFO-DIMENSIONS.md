@@ -260,12 +260,13 @@ measurements stay missing. A source SAR must never fill the output SAR slot.
 sizes do not mean original quality, lossless conversion or preserved aspect.
 If reasons are absent, say `The server did not provide a conversion reason.`
 
-**Rendered previews.** The text above is the retained illustrative design.
-The source attachment referenced prototype images outside the isolated clone;
-they are not production playback evidence. The prototype's four modes and
-four example states passed browser checks at
-780, 390 and 320 px widths, without page errors or horizontal root overflow.
-These are prototype checks, not production playback evidence.
+**Rendered previews.** These prototype captures illustrate the design above:
+[overview](../mockups/playback-info-dimensions/playback-info-overview.png),
+[details](../mockups/playback-info-dimensions/playback-info-details.png), and
+[phone](../mockups/playback-info-dimensions/playback-info-mobile.png). They are
+not production playback evidence. The prototype's four modes and four example
+states passed browser checks at 780, 390 and 320 px widths, without page
+errors or horizontal root overflow.
 
 **Implementation boundary.** Existing trustworthy collectors may supply
 measured facts. Planned/unavailable output remains a completed, honest result

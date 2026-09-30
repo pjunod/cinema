@@ -76,6 +76,13 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     for result in timeout_store(client.batch(super::background_jobs::RETENTION_SCHEMA)).await? {
         result.map_err(database_error)?;
     }
+    // v64 after v63, as the upgrade chain applies them.
+    validate_sql(super::background_jobs::RECEIPT_PRESSURE_SCHEMA)?;
+    for result in
+        timeout_store(client.batch(super::background_jobs::RECEIPT_PRESSURE_SCHEMA)).await?
+    {
+        result.map_err(database_error)?;
+    }
     Ok(())
 }
 
