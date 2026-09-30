@@ -4628,7 +4628,11 @@ async function safariSeekServerCommand(options) {
       return route.method === "remux" && !route.vod && !route.hlsjs
         && route.src.includes(".m3u8") && route.ready >= 2 && route.position > 0; },
     45_000, "Safari first native rolling HLS frame", 250);
-    report.route = await rollingRoute();
+    const attached = await rollingRoute();
+    report.route = { method: attached.method, vod: attached.vod,
+      hlsjs: attached.hlsjs, copy_hls: attached.copy_hls,
+      src_kind: attached.src.includes(".m3u8") ? "m3u8" : "other",
+      ready: attached.ready, position: attached.position };
     if (requestedRate !== 1) {
       await driver.exec(`document.getElementById('video').playbackRate=${requestedRate}; return true;`);
     }
@@ -4783,7 +4787,7 @@ async function safariSeekServerCommand(options) {
   process.stdout.write(`SAFARI  ${jsonPath}\nSAMPLES ${report.samples.length}\nMANIFESTS ${report.served_manifests.length}\n`);
   if (report.error) throw new Error(report.error);
   if (!report.route || report.route.method !== "remux" || report.route.vod
-      || report.route.hlsjs || !report.route.src.includes(".m3u8")) {
+      || report.route.hlsjs || report.route.src_kind !== "m3u8") {
     throw new Error("Safari did not attach to native rolling HLS");
   }
   if (!report.served_manifests.length || !report.served_manifests.some((item) =>
