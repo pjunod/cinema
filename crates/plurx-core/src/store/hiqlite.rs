@@ -1230,6 +1230,24 @@ enum TimedClientInner {
     Connected(Client),
     #[cfg(test)]
     Disconnected,
+    #[cfg(test)]
+    InjectedConsistentRead(Arc<InjectedConsistentRead>),
+}
+
+/// Replace only consistent-query I/O in the production settings-pair path.
+/// The isolated sink receives real attempt increments, never seeded counts.
+#[cfg(test)]
+struct InjectedConsistentRead {
+    outcomes: Mutex<std::collections::VecDeque<InjectedConsistentReadOutcome>>,
+    calls: Mutex<Vec<(String, Params)>>,
+    metrics: TakeoverAuthorityReadMetrics,
+}
+
+#[cfg(test)]
+enum InjectedConsistentReadOutcome {
+    Timeout,
+    Error(&'static str),
+    Empty,
 }
 
 impl TimedClient {
@@ -1248,7 +1266,19 @@ impl TimedClient {
             TimedClientInner::Disconnected => {
                 panic!("validation test attempted hiqlite I/O")
             }
+            #[cfg(test)]
+            TimedClientInner::InjectedConsistentRead(_) => {
+                panic!("injected consistent-read client attempted unrelated hiqlite I/O")
+            }
         }
+    }
+
+    fn takeover_authority_read_metrics(&self) -> &TakeoverAuthorityReadMetrics {
+        #[cfg(test)]
+        if let TimedClientInner::InjectedConsistentRead(io) = &self.inner {
+            return &io.metrics;
+        }
+        &TAKEOVER_AUTHORITY_READ_METRICS
     }
 
     pub(super) async fn query_consistent_map<T, S>(
@@ -1278,16 +1308,41 @@ impl TimedClient {
         validate_sql(&sql)?;
         time_scoped_authority_read_with_retry(
             &STORE_OPERATION_METRICS,
-            scope.metrics(&TAKEOVER_AUTHORITY_READ_METRICS),
-            || {
+            scope.metrics(self.takeover_authority_read_metrics()),
+            || async {
                 #[cfg(feature = "cluster-read-cost-validation")]
                 self.operations
                     .consistent_query_calls
                     .fetch_add(1, Ordering::Relaxed);
+                #[cfg(test)]
+                if let TimedClientInner::InjectedConsistentRead(io) = &self.inner {
+                    io.calls
+                        .lock()
+                        .expect("injected I/O calls lock")
+                        .push((sql.to_string(), params.clone()));
+                    let outcome = io
+                        .outcomes
+                        .lock()
+                        .expect("injected I/O outcomes lock")
+                        .pop_front()
+                        .expect("unexpected additional physical attempt");
+                    return timeout_store(async {
+                        match outcome {
+                            InjectedConsistentReadOutcome::Timeout => {
+                                tokio::time::sleep(STORE_TIMEOUT + Duration::from_secs(1)).await;
+                                Ok(Vec::<T>::new())
+                            }
+                            InjectedConsistentReadOutcome::Error(error) => Err(error),
+                            InjectedConsistentReadOutcome::Empty => Ok(Vec::new()),
+                        }
+                    })
+                    .await;
+                }
                 timeout_store(
                     self.inner()
                         .query_consistent_map(sql.clone(), params.clone()),
                 )
+                .await
             },
         )
         .await
@@ -6255,6 +6310,121 @@ mod tests {
         ));
         drop(cancelled);
         assert_eq!(total(), 3, "the measured arm omitted an outcome class");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_authority_attribution_settings_pair_reaches_timed_client_retries() {
+        for (first, second) in [
+            (
+                keys::CLUSTER_MEDIA_POOL_ENABLED,
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+            ),
+            (
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+                keys::CLUSTER_MEDIA_POOL_ENABLED,
+            ),
+        ] {
+            let io = Arc::new(InjectedConsistentRead {
+                outcomes: Mutex::new(
+                    [
+                        InjectedConsistentReadOutcome::Timeout,
+                        InjectedConsistentReadOutcome::Error(
+                            "CheckIsLeaderError: not enough for a quorum; got:{1}",
+                        ),
+                        InjectedConsistentReadOutcome::Empty,
+                        InjectedConsistentReadOutcome::Timeout,
+                        InjectedConsistentReadOutcome::Error(
+                            "CheckIsLeaderError: not enough for a quorum; got:{1}",
+                        ),
+                        InjectedConsistentReadOutcome::Empty,
+                    ]
+                    .into(),
+                ),
+                calls: Mutex::new(Vec::new()),
+                metrics: TakeoverAuthorityReadMetrics::default(),
+            });
+            let store = HiqliteAuthStore {
+                client: TimedClient {
+                    inner: TimedClientInner::InjectedConsistentRead(Arc::clone(&io)),
+                    #[cfg(feature = "cluster-read-cost-validation")]
+                    operations: Arc::new(OperationCounters::default()),
+                },
+                clock: Arc::new(FixedClock(0)),
+                telemetry: NodeLocalTelemetry::open(Path::new(":memory:"))
+                    .expect("in-memory sidecar"),
+                activity_refreshes: Arc::new(ActivityRefreshGate::default()),
+                cache_touches: Arc::new(ReplaceableWriteGate::default()),
+                watch_fences: Arc::new(super::super::watch_fence::WatchWriteFences::default()),
+            };
+            let started = tokio::time::Instant::now();
+            assert_eq!(
+                store
+                    .get_setting_pair(first, second)
+                    .await
+                    .expect("the real settings-pair path recovers"),
+                (None, None)
+            );
+            assert!(
+                started.elapsed() >= STORE_TIMEOUT,
+                "the real TimedClient deadline must fire before retry"
+            );
+            assert_eq!(
+                io.metrics.started.load(Ordering::Relaxed),
+                3,
+                "settings-pair scope must reach the actual retry attempt sink in either key order"
+            );
+            assert_eq!(
+                io.metrics.outcomes[StoreOperationOutcome::Error.index()].load(Ordering::Relaxed),
+                2
+            );
+            assert_eq!(
+                io.metrics.outcomes[StoreOperationOutcome::Ok.index()].load(Ordering::Relaxed),
+                1
+            );
+
+            assert_eq!(
+                store
+                    .get_setting_pair(keys::MONARR_URL, keys::MONARR_API_KEY)
+                    .await
+                    .expect("unrelated settings pair also recovers"),
+                (None, None)
+            );
+            assert_eq!(
+                io.metrics.started.load(Ordering::Relaxed),
+                3,
+                "unrelated retried settings pairs must not enter the takeover numerator"
+            );
+            assert_eq!(
+                io.metrics.outcomes[StoreOperationOutcome::Error.index()].load(Ordering::Relaxed),
+                2
+            );
+            assert_eq!(
+                io.metrics.outcomes[StoreOperationOutcome::Ok.index()].load(Ordering::Relaxed),
+                1
+            );
+            let calls = io.calls.lock().expect("calls lock");
+            assert_eq!(
+                calls.len(),
+                6,
+                "both pairs must execute all three physical attempts"
+            );
+            for (index, (sql, bound)) in calls.iter().enumerate() {
+                assert_eq!(
+                    sql,
+                    "SELECT key, value FROM settings WHERE key = $1 OR key = $2 ORDER BY key"
+                );
+                let expected = if index < 3 {
+                    params!(first, second)
+                } else {
+                    params!(keys::MONARR_URL, keys::MONARR_API_KEY)
+                };
+                assert_eq!(
+                    *bound, expected,
+                    "the production query retains the original bound key order on every retry"
+                );
+            }
+            assert!(io.outcomes.lock().expect("outcomes lock").is_empty());
+        }
     }
 
     #[test]
