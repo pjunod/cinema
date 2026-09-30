@@ -538,8 +538,8 @@ function refreshingQueue(q,api){
     const ME={is_admin:true},location={hash:"#/activity"};
     const PAGE_RENDER_GENERATION=1;
     function paintDurableActivity(){}
-    ${["esc","nodeLabel","durableDuration","durableLeaseExpired","durableStateLabel","durableQueueHtml","refreshDurableActivity"].map(shippedSource).join("\n")}
-    return {refresh:refreshDurableActivity,html:()=>durableQueueHtml({node:"m6"})};
+    ${["esc","nodeLabel","durableDuration","durableLeaseExpired","durableStateLabel","durableQueueHtml","refreshDurableActivity","pageDurableJobs","previousDurableJobs","resizeDurableJobs","filterDurableJobs"].map(shippedSource).join("\n")}
+    return {refresh:refreshDurableActivity,page:pageDurableJobs,previous:previousDurableJobs,resize:resizeDurableJobs,filter:filterDurableJobs,html:()=>durableQueueHtml({node:"m6"})};
   `)(q,api);
 }
 test("bounded queue refresh updates the open attempt when execution completes", async () => {
@@ -569,6 +569,35 @@ test("a late detail refresh cannot reopen closed or replace newly selected detai
     await runner.refresh(true);
     assert.notEqual(q.detail?.job.id,"job");
   }
+});
+
+test("durable pagination visits every job and resets cursor history for filters and sizes", async () => {
+  const jobs=Array.from({length:105},(_,i)=>({id:String(i+1).padStart(3,"0"),kind:"fragment_index_build",state:"queued"}));
+  const q={state:"queued",epoch:0,observed:0,rows:[],counts:[],cursor:null,history:[],pageSize:20};
+  const runner=refreshingQueue(q,async url=>{
+    const query=new URL(url,"http://fixture").searchParams;
+    const rows=jobs.filter(job=>job.id>(query.get("cursor")||"")&&job.state===query.get("state"));
+    return {jobs:rows.slice(0,100),next_cursor:rows.length>100?rows[99].id:null,counts:[],observed_at_ms:Date.now()};
+  });
+  await runner.refresh(true);
+  const seen=[];
+  do{seen.push(...q.rows.map(job=>job.id));if(!q.next)break;await runner.page(q.next);}while(true);
+  assert.deepEqual(seen,jobs.map(job=>job.id));
+  await runner.previous();assert.equal(q.rows[0].id,"081");
+  await runner.page();assert.equal(q.rows[0].id,"001");assert.equal(q.history.length,0);
+  await runner.resize("10");assert.equal(q.rows.length,10);
+  await runner.page(q.next);assert.equal(q.history.length,1);
+  await runner.filter("failed");assert.equal(q.cursor,null);assert.equal(q.history.length,0);assert.equal(q.rows.length,0);
+});
+test("durable details stay directly beneath their job and the panel remains collapsed", () => {
+  const job={id:"first-job",kind:"subtitle_extract",state:"queued",priority:1,supported:true};
+  Object.assign(painter.durable,{open:false,rows:[job,{...job,id:"second-job"}],detail:{job,waiters:[],attempts:[]}});
+  const html=paint(snapshot());
+  assert.match(html,/<details class="card durable-queue" ontoggle=/);
+  assert.ok(html.indexOf('class="durable-detail"')>html.indexOf('data-durable-focus="first-job"'));
+  assert.ok(html.indexOf('class="durable-detail"')<html.indexOf('data-durable-focus="second-job"'));
+  assert.match(html,/aria-expanded="true" aria-controls="durable-job-first-job"/);
+  Object.assign(painter.durable,{open:true,rows:[],detail:null});
 });
 
 let reported = false;

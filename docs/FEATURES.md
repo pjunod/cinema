@@ -120,8 +120,12 @@ books, and home media.
   fenced ownership, retries, cancellation and verified publication. Matching
   fragment demands share one build with separate deliveries. Exact local
   offline recipes can join running preparation without another encoder.
-  Activity exposes job history and explicit retry; Developer enable controls
-  show advisory requirements. Library scan/refresh requests and results are
+  Activity exposes job history and explicit retry in a collapsible panel with
+  running, queued and failed counts. Pages show 20 jobs by default (10 or 50
+  optional), with First, Previous and Next controls; folds and the selected
+  page survive live refreshes. Job details expand directly beneath their row.
+  Pending library scans say “Queued · waiting for a worker.” Developer enable
+  controls show advisory requirements. Library scan/refresh requests and results are
   durable; ready learners can execute immutable preparation. One heavy worker
   per node, two readers per named storage domain, and shared provider pacing
   protect playback and shared resources. Nodes reuse content/model-verified
