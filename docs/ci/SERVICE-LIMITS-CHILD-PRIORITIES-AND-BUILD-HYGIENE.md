@@ -1064,7 +1064,7 @@ package; `make unit` green inside the CI image and in the retained Ubuntu
 24.04 fast lane; `grep -n "ffmpeg-6" .github/workflows/ci.yml` returns
 nothing, while VALIDATION.md names the retained lane.
 
-**Image publication sequence (not yet run).** Wait until the Mac is free of
+**Original image publication sequence (completed 2026-09-30).** Wait until the Mac is free of
 the seek gate; Docker Desktop was not running at source-preparation time.
 Build the exact committed M5 tree locally for Linux amd64, then smoke the
 image before any registry write. The CI stage builds runtime assets and
@@ -1102,6 +1102,27 @@ Resolve the registry manifest digest from that output and put the
 jobs before pushing the workflow branch. A tag, local image ID, or Dockerfile
 base digest is **not** the published CI image digest. No workflow with the
 `M5_CI_IMAGE_DIGEST_REQUIRED` placeholder is pushable.
+
+**Publication receipt, 2026-09-30.** The retained smoke-tested artifact was
+published privately at the unique `p02-m5-d1a334853a45d31ec81c6d24f96529bd8752a07a`
+tag, manifest
+`sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855`.
+All nine OCI blobs were checksum-verified before publication. Its image-input
+fingerprint remains
+`aaa581bde3e453f15e3ee5942d36cb4fb40826e53fba75a5e0c33ef1a1281701`
+on the current effort integration; the original source revision label is
+unchanged. No rebuild, source relabel, moving runtime tag or fleet deployment
+occurred. Host-only registry requests refused cross-origin redirects and
+verified the package owner's private visibility and anonymous denial before
+and after publication.
+
+The supplied Forgejo management token could read an actual private manifest;
+it was not copied into CI. A `noirr` token scoped only to `read:package` also
+read an actual private manifest (HTTP 200) and was stored as repository secret
+`CI_REGISTRY_PULL_TOKEN`. The five jobs use that secret with owner `noirr`
+and the identical published digest. No credential file or Docker login was
+created. This resolves publication and pull authorization, not the owed real
+FFmpeg 8 unit lane, campaign receipts or full plan qualification.
 
 ### 5.6 M6 — Dockerfile digests and release profile PR 1
 

@@ -2189,6 +2189,201 @@ mod tests {
         Box::leak(Box::new(QueueMetrics::new()))
     }
 
+    /// Drive the public segment handler, not only telemetry admission. A fresh
+    /// process contains fixture tasks and the real keyed sink registration;
+    /// neither the production registry nor another test's metrics are reset.
+    #[test]
+    fn hls_segment_delivery_stays_bounded_under_slow_and_failed_writer() {
+        const CHILD: &str = "PLURX_C06_HANDLER_TEST_CHILD";
+        const TEST: &str =
+            "telemetry::tests::hls_segment_delivery_stays_bounded_under_slow_and_failed_writer";
+        if std::env::var_os(CHILD).is_none() {
+            struct OwnedChild(Option<std::process::Child>);
+            impl Drop for OwnedChild {
+                fn drop(&mut self) {
+                    if let Some(child) = self.0.as_mut() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                }
+            }
+            let mut owned = OwnedChild(Some(
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+                    .env(CHILD, "1")
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("isolated handler fixture"),
+            ));
+            let deadline = std::time::Instant::now() + Duration::from_secs(35);
+            loop {
+                let child = owned.0.as_mut().expect("owned child");
+                if child.try_wait().expect("poll child").is_some() {
+                    let output = owned
+                        .0
+                        .take()
+                        .expect("finished child")
+                        .wait_with_output()
+                        .expect("collect child");
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    assert!(
+                        output.status.success(),
+                        "fixture failed: {stdout}\n{stderr}"
+                    );
+                    assert!(
+                        stdout.contains("C06 handler assertions completed"),
+                        "exact fixture did not complete: {stdout}"
+                    );
+                    print!("{stdout}");
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "handler child exceeded 35s"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            return;
+        }
+
+        struct ControlledWriter {
+            block_next: AtomicBool,
+            entered: Notify,
+            release: Notify,
+        }
+        impl WriterStore for ControlledWriter {
+            fn write_batch<'a>(
+                &'a self,
+                events: &'a [PlaybackEvent],
+                _observations: &'a [NetworkPriorObservation],
+            ) -> BoxFuture<'a, Result<u64, StoreError>> {
+                Box::pin(async move {
+                    assert!(events.len() <= BATCH, "writer clone batch bound");
+                    if self.block_next.swap(false, Ordering::AcqRel) {
+                        self.entered.notify_one();
+                        tokio::time::timeout(Duration::from_secs(15), self.release.notified())
+                            .await
+                            .expect("controlled writer must be released");
+                        return Err(StoreError::Task("injected node-local writer error".into()));
+                    }
+                    Ok(events.len() as u64)
+                })
+            }
+            fn setting_pair(&self) -> BoxFuture<'_, Result<SettingPair, StoreError>> {
+                Box::pin(async { Ok((Some("30".into()), Some("0".into()))) })
+            }
+        }
+
+        async fn samples(
+            fixture: &crate::transcode::HlsDeliveryFixture,
+            bytes: &[u8],
+        ) -> Vec<u128> {
+            use axum::extract::{Path, State};
+            let mut elapsed = Vec::with_capacity(8);
+            for _ in 0..8 {
+                let started = std::time::Instant::now();
+                tokio::time::timeout(Duration::from_millis(500), async {
+                    let response = crate::http::hls::segment(
+                        State(fixture.state.clone()),
+                        Path(("c06-pressure".to_owned(), "seg00001.m4s".to_owned())),
+                        axum::http::HeaderMap::new(),
+                    )
+                    .await
+                    .expect("actual segment handler");
+                    assert_eq!(response.status(), axum::http::StatusCode::OK);
+                    let body = axum::body::to_bytes(response.into_body(), bytes.len() + 1)
+                        .await
+                        .expect("fully drain actual body");
+                    assert_eq!(body.as_ref(), bytes);
+                })
+                .await
+                .expect("delivery must not await the blocked writer");
+                elapsed.push(started.elapsed().as_micros());
+            }
+            elapsed
+        }
+
+        tokio::runtime::Builder::new_current_thread().enable_all().build()
+            .expect("runtime").block_on(async {
+                tokio::time::timeout(Duration::from_secs(25), async {
+                    let dir = crate::test_tempdir().expect("fixture directory");
+                    let fixture = crate::transcode::HlsDeliveryFixture::publish_without_process(
+                        dir.path(), "c06-pressure").await;
+                    fixture.make_segment_window_servable().await;
+                    let bytes = vec![7_u8; 12 * 1024];
+                    tokio::fs::write(dir.path().join("seg00001.m4s"), &bytes)
+                        .await.expect("segment bytes");
+                    let metrics = isolated_metrics();
+                    let writer = Arc::new(ControlledWriter {
+                        block_next: AtomicBool::new(false), entered: Notify::new(), release: Notify::new(),
+                    });
+                    let sink = install_test_sink(&fixture.store, writer.clone(), metrics);
+                    let queue_capacity = sink.queue.locked().jobs.capacity();
+                    assert_eq!(queue_capacity, QUEUE);
+                    let _warm = samples(&fixture, &bytes).await;
+                    let baseline = samples(&fixture, &bytes).await;
+
+                    writer.block_next.store(true, Ordering::Release);
+                    emit(Arc::clone(&fixture.store), PlaybackEvent {
+                        event: "producer_pass".into(), session_id: Some("seed".into()),
+                        ..PlaybackEvent::default()
+                    });
+                    tokio::time::timeout(Duration::from_secs(2), writer.entered.notified())
+                        .await.expect("prove writer entered before pressure");
+                    let inflight_capacity = sink.inflight.lock().expect("inflight mutex").as_ref()
+                        .expect("writer owns inflight batch").capacity();
+                    assert!(inflight_capacity <= BATCH);
+                    // Distinct, bounded ordinary samples model concurrent playback
+                    // telemetry pressure; they are not handler-raised terminals.
+                    for index in 0..5_000 {
+                        emit(Arc::clone(&fixture.store), PlaybackEvent {
+                            event: "producer_pass".into(),
+                            session_id: Some(format!("pressure-{index:04}")),
+                            ..PlaybackEvent::default()
+                        });
+                    }
+                    {
+                    let queue = sink.queue.locked();
+                    assert!(queue.jobs.len() <= QUEUE);
+                    assert_eq!(queue.jobs.capacity(), queue_capacity);
+                    assert!(queue.jobs.iter().all(|job| {
+                        job.event.session_id.as_ref().is_some_and(|id| id.len() <= 13)
+                            && job.event.extra.is_none() && job.network.is_none()
+                            && serde_json::to_vec(&job.event).expect("fixture event JSON").len() <= 512
+                    }), "known bounded fixture payloads");
+                    }
+                    assert!(metrics.dropped_queue_full.load(Ordering::Relaxed) > 0);
+                    let stressed = samples(&fixture, &bytes).await;
+                    assert!(sink.inflight.lock().expect("inflight mutex").is_some(), "writer still blocked");
+                    assert_eq!(metrics.written_error.load(Ordering::Relaxed), 0);
+                    writer.release.notify_one();
+                    tokio::time::timeout(Duration::from_secs(2), async {
+                        while metrics.written_error.load(Ordering::Relaxed) == 0
+                            || sink.queue.len() != 0 || sink.inflight.lock().expect("inflight mutex").is_some() {
+                            tokio::task::yield_now().await;
+                        }
+                    }).await.expect("count error and recover the bounded queue");
+                    assert!(metrics.written_ok.load(Ordering::Relaxed) > 0);
+                    let recovered = samples(&fixture, &bytes).await;
+                    let mut base_sorted = baseline.clone(); base_sorted.sort_unstable();
+                    let mut stress_sorted = stressed.clone(); stress_sorted.sort_unstable();
+                    let noise = base_sorted[7] - base_sorted[0];
+                    let median_delta = stress_sorted[4].saturating_sub(base_sorted[4]);
+                    // Report actual distribution/noise; do not turn host scheduling
+                    // noise into a flaky correctness assertion or claim fleet latency.
+                    println!("C06 wall_us baseline={baseline:?} blocked={stressed:?} recovered={recovered:?}; baseline_span_us={noise}; median_increase_us={median_delta}; within_observed_span={}", median_delta <= noise);
+                    println!("C06 capacities queue={queue_capacity} inflight={inflight_capacity}; dropped={} error={} written={}", metrics.dropped_queue_full.load(Ordering::Relaxed), metrics.written_error.load(Ordering::Relaxed), metrics.written_ok.load(Ordering::Relaxed));
+                    drain_sink(&sink).await;
+                    assert!(sink.queue.is_closed());
+                    assert_eq!(sink.queue.len(), 0);
+                    assert!(sink.inflight.lock().expect("inflight mutex").is_none());
+                    println!("C06 handler assertions completed");
+                }).await.expect("bounded complete handler scenario");
+            });
+    }
+
     /// The reserve, exercised on the queue itself rather than on a predicate.
     ///
     /// A queue holding `QUEUE - TERMINAL_RESERVE` non-terminals refuses the

@@ -267,8 +267,12 @@ jobs:
     # the complete fan-out.
     if: needs.scope.outputs.rust == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    # Replace before push with the digest of Dockerfile's `ci` target.
-    container: M5_CI_IMAGE_DIGEST_REQUIRED
+    # Private, smoke-tested CI target; never expose the management credential.
+    container:
+      image: 192.168.4.7:3000/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 30
     steps:
       - name: Capture mounted runner workspace owner
@@ -869,7 +873,11 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.cluster_auth == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    container: M5_CI_IMAGE_DIGEST_REQUIRED
+    container:
+      image: 192.168.4.7:3000/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 30
     steps:
       - name: Capture mounted runner workspace owner
@@ -923,7 +931,11 @@ jobs:
     # Pinned for the same reason as `check`: a browser sweep still plays media
     # through ffmpeg. See .github/actions/ffmpeg.
     runs-on: [self-hosted, Linux, X64, lab, general]
-    container: M5_CI_IMAGE_DIGEST_REQUIRED
+    container:
+      image: 192.168.4.7:3000/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 30
     steps:
       - name: Capture mounted runner workspace owner
@@ -991,7 +1003,11 @@ jobs:
     needs: [scope, preflight, web_layout]
     if: needs.scope.outputs.web_layout == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general]
-    container: M5_CI_IMAGE_DIGEST_REQUIRED
+    container:
+      image: 192.168.4.7:3000/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 25
     steps:
       - name: Capture mounted runner workspace owner
@@ -1309,7 +1325,11 @@ jobs:
     # Same fast unit and SQLite-contract suite as `check`, so the same pinned
     # ffmpeg. See .github/actions/ffmpeg.
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    container: M5_CI_IMAGE_DIGEST_REQUIRED
+    container:
+      image: 192.168.4.7:3000/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     needs: [scope, check]
     timeout-minutes: 30
     # PR coverage was a second run of the Rust suite whose result was discarded;

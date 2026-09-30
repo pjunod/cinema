@@ -237,6 +237,40 @@ New series: `plurx_watched_outbox_ticks_total{outcome="skipped_hint"|
 "skipped_unconfigured"|"claimed"|"empty_claim"|"not_owner"}` (five fixed
 values) so the skip reasons are visible.
 
+**Takeover numerator (2026-09-30 source continuation).** The aggregate
+`plurx_store_operations_total{class="authority_read"}` includes unrelated
+authority work and cannot establish §5.5's takeover settings-poll bound.
+`plurx_takeover_settings_authority_reads_started_total` counts each replicated
+consistent-read attempt for exactly the unordered pair
+`CLUSTER_MEDIA_POOL_ENABLED` / `CLUSTER_SESSION_TAKEOVER_ENABLED`. The
+production `TakeoverSwitches` implementation is the only caller of this
+pair. Selection is by both exact keys, never SQL text or arbitrary caller
+labels. Other settings pairs, inventory reads and takeover CAS work are not
+included; no settings values or keys appear in metric labels.
+
+An attempt enters the numerator on its first poll, before awaiting I/O.
+Timeout and quorum retries each enter separately; failures and cancellation
+never remove starts. Unpolled futures and retry backoff do not count as
+attempts. `plurx_takeover_settings_authority_reads_total{outcome="ok"|
+"error"|"cancelled"}` reports terminal outcomes with exactly three fixed
+values. An outer deadline or caller cancellation records `cancelled`; it
+does not prove remote execution stopped. Starts count local client attempts,
+not leader executions, Raft proposals or independent fsyncs.
+
+For the disabled-state bound, retain the two switch states and show that at
+least one is off; the existing cache, 60 s refresh, local wake and 10 s idle
+cadence are unchanged. Over a fresh admitted, continuously idle 12-hour
+window compute `Δstarted × 86,400 / actual_elapsed_seconds` per node. Require
+the deployed attribution source, stable build/role, uptime/counter continuity
+and unsaturated counters; a missing series is not zero. Starts already
+include attempts in flight at the endpoint. Outcome deltas may include an
+attempt started before the window or omit one still in flight, and atomics
+are rendered independently, so summing outcomes is not a substitute for the
+started numerator. The historical aggregate readout remains aggregate;
+neither this source change nor the current uninstrumented passive capture
+retroactively supplies the new numerator or closes M4. Enabled inventory/CAS
+costs and the watched-outbox WAL attribution remain separate proof obligations.
+
 ## 4. Guardrails (non-goals)
 
 - **The replicated `UPDATE … RETURNING` claim stays** (F-sc-3, assessment
@@ -409,6 +443,8 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 | #405 | `3763395d1`. Takeover switches read as one pair cached for 60 s; 10 s idle sleep while off, woken by a local switch write; 2 s cadence and CAS unchanged when on. Paused-clock tests: 10–11 reads in ten minutes off and no inventory tick; a local flip acted on within one tick; 2 s cadence with ≤ 2 reads in two minutes on. Reverting the cache or the wake fails them. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 (review) | #405 | Review P2: the first M3 gate cached "on" too and only listened for the local write while off, so a local disable took up to 60 s (the reviewer measured 29 more acting ticks over 68 s). Now only "off" is cached, keyed on a local write generation; "on" is re-read every tick, so a disable is seen on the next 2 s tick on every node, and a wake left over from a write made while on costs no read. New paused-clock tests: `takeover_loop_stops_acting_within_one_tick_of_a_local_disable`, `takeover_loop_sees_a_remote_disable_on_the_next_tick`, `takeover_loop_ignores_a_wake_left_over_from_a_write_made_while_on`; the cadence test now asserts one pair read per enabled tick. The Curator settings-route comment now states the 60 s bound for a write on a non-owner. Merged main at `b47c5ff88`. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 | #405 | **needs: fleet** — the after-measurement runs only on a deployed build; steps below. The CLUSTER-PERFORMANCE-PLAN §6.5 rows wait for its numbers. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/remaining_executable_sol61 | M4 attribution source | #646 (draft) | Delegated continuation: fixed exact unordered settings-pair attribution through the production consistent-read retry path counts first-polled attempts, including retries and in-flight work, with fixed terminal outcomes. SQL, retry policy and M3 cache/cadence are unchanged. Pinned rustc 1.97.1 affected baseline check passed on effort base `3f4999c4` before Rust edits; After synchronizing actual effort `32561d613`, the three attribution regressions and two retained authority retry/budget tests pass with `--features hiqlite-store`; affected all-target core check and Clippy `-D warnings`, formatting and four docs-index tests pass. Initial local Clippy rejected one redundant test closure, corrected before push; macOS test linking reports a nonfatal compact-unwind size warning. Normal pinned hook remains mandatory. Future admitted deployment and a fresh attributed window are required; current passive capture cannot retroactively gain this numerator. M4 remains open. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/remaining_executable_sol61 | M4 attribution source — sole-review P2 | #646 (draft) | Review 18 / comment 6614 found the isolated selector/retry tests did not pin both production handoffs. `takeover_authority_attribution_settings_pair_reaches_timed_client_retries` now calls actual `HiqliteAuthStore::get_setting_pair` through scoped `TimedClient`, its real timeout and retry path, in both key orders and for an unrelated pair. Only consistent-query I/O is injected; the local metric sink starts at zero and receives real attempt increments. Each pair executes timeout, quorum failure and empty success; takeover starts are 3, unrelated retries add 0. Independent temporary mutations of the actual getter scope to `Unattributed` and actual TimedClient retry scope to `None` each fail this test at starts 0 versus 3 (exit 101). Neither mutation is committed; restored source SHA-256 `8efacd8ceb1285ad2730ccf655f05ffaf0ca2854a0e35127394f125f3a2e06e3` matches the positive source. Raw logs retained in agent-owned `/private/tmp/k03-attribution-mutations-20260930.c7TQYJ/`. Restored attribution tests 4/4 and retained authority retry/budget tests 2/2 pass on current effort `32561d613`; affected core `hiqlite-store` all-target check and Clippy `-D warnings`, fmt and four docs-index tests pass. Exact committed-head recheck follows the normal hook; root owns disposition, gate and integration. No fleet, capture, WAL or M4 acceptance added. |
 
 ### needs: M4 fleet after-measurement (GPT)
 

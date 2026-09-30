@@ -1,11 +1,21 @@
 # Clock-skew guard — measure the offset, bound it, and refuse the dangerous side
 
-**Status:** design-only boundary; sole review addressed; runtime work not started · **Executes:** S9 / F-sc-10 from
+**Status:** open — original design accepted; runtime handoffs unclaimed · **Executes:** S9 / F-sc-10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Revised:** 2026-09-21 against `main` @
 `9deb58a2`
 
 **Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
+**September 30 handoff:** original M0–M4 design acceptance is verified; the
+K-06 architecture issue remains open. Section 5's required separately owned
+[measurement](CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md) and
+[enforcement](CLOCK-SKEW-ENFORCEMENT-IMPLEMENTATION.md) implementation plans
+retain the release/evidence boundaries. Their future owners are unclaimed.
+The accepted no-enable-switch design below conflicts with Paul's current
+explicit Developer-switch instruction for unfinished features. The human
+ruling is pending; these handoffs neither rewrite that accepted decision nor
+authorize production implementation before its resolution.
 
 Read §2 first: every wall-clock comparison that decides ownership is listed
 there with its current line. Then §3, which is a design, not a diff — it
@@ -981,3 +991,4 @@ claim protocol). **Model** is the runtime's exact model identifier;
 |---|---|---|---|---|---|
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M0-M4 design | [#430](http://192.168.4.7:3000/noirr/plurx/pulls/430) · `1ddfe0c26` | Reconciled the existing signed request timestamp, distinct 30 s/5 s auth windows, authenticated response body, conservative upper-bound decision, discontinuity reset, no-gate rollout split and executable follow-on evidence. No runtime behaviour or fleet result is claimed. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | sole-review disposition | [#430](http://192.168.4.7:3000/noirr/plurx/pulls/430) · `1318972bb` | Added synchronous wall/monotonic continuity plus decision/state generations; split acquisition from fenced target removal; floored and time-expired the delay filter; and added executable common-mode, decision-race, removal and 0→1 ms fixtures. Runtime and fleet evidence remain unclaimed. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/dashboard_remaining_count_sol61 | original-design receipt and required runtime handoffs | `codex/k06-runtime-handoffs`, docs-only continuation | [#430](http://192.168.4.7:3000/noirr/plurx/pulls/430) final head `1fffa4dbafccc1f7ee06b0a807d482df13afb588` and landing `02c7760e2486e09e84d390e0b40b35f64449d53d` share tree `28f1ee1eda8e8f23f0d8ff4af2698f0865011aa9`; both design and Python model are unchanged at effort `f319fa779`. Sole review [3360](http://192.168.4.7:3000/noirr/plurx/pulls/430#issuecomment-3360), disposition [3368](http://192.168.4.7:3000/noirr/plurx/pulls/430#issuecomment-3368) and final CI-only timeout correction [3405](http://192.168.4.7:3000/noirr/plurx/pulls/430#issuecomment-3405) are retained. Final-head [gate UI 2533](http://192.168.4.7:3000/noirr/plurx/actions/runs/2533) / API 2551 passed scope, preflight, Rust, Windows and Main promotion; irrelevant web/mobile jobs skipped. Current baseline's design/index/status checks passed 12 tests. Section 5's two separately owned runtime handoffs are now documented; owners remain unclaimed, enabling-policy conflict awaits a human ruling, and no runtime, fleet, drill or final effort qualification is claimed. |
