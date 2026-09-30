@@ -444,6 +444,11 @@ mod tests {
         assert_eq!(cache.inner.lock().expect("cache mutex").inflight.len(), 1);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         gate.add_permits(1);
+        assert_eq!(ready(&cache, "one").await.state, Availability::Available);
+        assert!(cache.inner.lock().expect("cache mutex").inflight.is_empty());
+        assert_eq!(cache.permits.available_permits(), cache.limits.probes);
+        assert_eq!(ready(&cache, "one").await.state, Availability::Available);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test(start_paused = true)]

@@ -663,6 +663,34 @@ badge". Three independent checks, all in M2:
 
 ## Execution log
 
+**M3 ownership receipt, 2026-09-30:** Effort gate API run 3630 (UI 3609)
+stopped before Rust compilation: the module-wide inventory had not recorded
+M3's one task, two timer constructors and one Tokio time import. The
+compatibility audit names their exact sites in
+[`rolling-producer-owners.toml`](../../tests/playback/rolling-producer-owners.toml).
+`lookup_or_schedule` registers each path before spawning a task that holds
+the process-lifetime cache's `Arc`; 1,024 distinct in-flight paths bound
+queued and running tasks, and eight semaphore permits bound active metadata
+calls. These are concurrency bounds. The kernel call may remain blocked
+indefinitely. `observe_many`'s 250 ms timeout cancels the request's receiver
+wait only. `run_probe` owns the five-second warning sleep and its hourly
+reset; normal completion or runtime teardown drops that timer. Runtime
+teardown drops the async wrapper, without cancelling the kernel syscall or
+promising a live-process gauge reset.
+
+Normal completion writes the observation, evicts to the 16,384-entry bound,
+removes its in-flight path, decrements the gauge, notifies observers and
+releases its permit. The existing
+`a_timed_out_caller_leaves_one_probe_and_no_duplicate` regression now releases
+the held probe and uses the bounded `ready` helper to assert the map is empty,
+permits are restored and repeated reads use the cached observation with one
+probe call. Temporary mutations failed that same test: omitted path removal
+failed `inflight.is_empty()`; a forgotten permit failed with `0` versus `1`.
+Both mutations were removed. The inventory suite passed seven tests and 476
+subtests. Counts change only for the audited sites: task spawn 680 → 681,
+timer constructors 1,114 → 1,116, time imports 3 → 4. This is a CI ownership
+receipt, not a second formal adversarial review or fleet acceptance.
+
 Executing sessions append one row per logical milestone in the one plan PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
