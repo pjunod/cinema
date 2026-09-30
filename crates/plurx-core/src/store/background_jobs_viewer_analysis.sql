@@ -77,6 +77,80 @@ BEGIN
             AND waiter.state = 'pending'
             AND waiter.deadline_ms > json_extract(NEW.request_json, '$.now_ms'));
 
+    UPDATE background_jobs SET priority = 3
+    WHERE kind = 'artifact_hydrate' AND state IN ('queued','running')
+      AND EXISTS (SELECT 1 FROM background_job_waiters delivery
+          JOIN background_job_waiters viewer ON viewer.job_id = delivery.consumer_ref
+            AND viewer.target_node_id = delivery.target_node_id
+          WHERE delivery.job_id = background_jobs.id
+            AND delivery.consumer_kind = 'background_delivery'
+            AND viewer.request_scope = 'playback-analysis'
+            AND viewer.request_id = json_extract(NEW.request_json, '$.consumer_id')
+            AND viewer.state IN ('pending','awaiting_hydration')
+            AND viewer.deadline_ms > json_extract(NEW.request_json, '$.now_ms'));
+
+    DELETE FROM background_job_commands WHERE id = NEW.id;
+END;
+-- next statement
+CREATE TRIGGER IF NOT EXISTS background_artifact_viewer_join
+AFTER INSERT ON background_job_commands WHEN NEW.operation = 'join_artifact_viewer'
+BEGIN
+    INSERT INTO background_job_waiters (
+        request_scope, request_id, request_digest, job_id, consumer_kind,
+        consumer_ref, priority, state, target_node_id, deadline_ms,
+        receipt_expires_ms, created_at_ms, updated_at_ms)
+    SELECT 'playback-artifact', json_extract(NEW.request_json, '$.consumer_id'),
+        json_extract(NEW.request_json, '$.cache_key'), job.id, 'playback_fragment',
+        json_object('user_id', json_extract(NEW.request_json, '$.user_id'),
+            'playback_id', json_extract(NEW.request_json, '$.playback_id'),
+            'file_id', json_extract(NEW.request_json, '$.file_id')),
+        3, 'pending', json_extract(NEW.request_json, '$.target_node_id'),
+        json_extract(NEW.request_json, '$.now_ms') + 120000,
+        json_extract(NEW.request_json, '$.now_ms') + 604800000,
+        json_extract(NEW.request_json, '$.now_ms'), json_extract(NEW.request_json, '$.now_ms')
+    FROM background_jobs job JOIN background_job_waiters target
+        ON target.job_id = job.id
+        AND target.target_node_id = json_extract(NEW.request_json, '$.target_node_id')
+        AND target.state IN ('pending','awaiting_hydration')
+    WHERE job.kind = 'fragment_index_build'
+        AND job.dedupe_key = 'fragment:' || json_extract(NEW.request_json, '$.cache_key')
+        AND json_extract(job.payload_json, '$.file_id') = json_extract(NEW.request_json, '$.file_id')
+        AND job.state IN ('queued','running')
+    LIMIT 1
+    ON CONFLICT(request_scope, request_id) DO UPDATE SET
+        state = CASE WHEN background_job_waiters.state = 'cancelled'
+            OR background_job_waiters.job_id != excluded.job_id
+            THEN 'pending' ELSE background_job_waiters.state END,
+        job_id = CASE WHEN background_job_waiters.state = 'cancelled'
+            OR background_job_waiters.job_id != excluded.job_id
+            THEN excluded.job_id ELSE background_job_waiters.job_id END,
+        deadline_ms = CASE WHEN background_job_waiters.updated_at_ms <=
+            json_extract(NEW.request_json, '$.now_ms') - 30000
+            OR background_job_waiters.state = 'cancelled'
+            OR background_job_waiters.job_id != excluded.job_id
+            THEN json_extract(NEW.request_json, '$.now_ms') + 120000
+            ELSE background_job_waiters.deadline_ms END,
+        updated_at_ms = CASE WHEN background_job_waiters.updated_at_ms <=
+            json_extract(NEW.request_json, '$.now_ms') - 30000
+            OR background_job_waiters.state = 'cancelled'
+            OR background_job_waiters.job_id != excluded.job_id
+            THEN json_extract(NEW.request_json, '$.now_ms')
+            ELSE background_job_waiters.updated_at_ms END;
+
+    UPDATE background_jobs SET priority = 3
+    WHERE id = (SELECT job_id FROM background_job_waiters
+        WHERE request_scope = 'playback-artifact'
+          AND request_id = json_extract(NEW.request_json, '$.consumer_id'))
+      AND kind = 'fragment_index_build' AND state IN ('queued','running');
+    UPDATE background_jobs SET priority = 3
+    WHERE kind = 'artifact_hydrate' AND state IN ('queued','running')
+      AND EXISTS (SELECT 1 FROM background_job_waiters delivery
+          JOIN background_job_waiters viewer ON viewer.job_id = delivery.consumer_ref
+            AND viewer.target_node_id = delivery.target_node_id
+          WHERE delivery.job_id = background_jobs.id
+            AND delivery.consumer_kind = 'background_delivery'
+            AND viewer.request_scope = 'playback-artifact'
+            AND viewer.request_id = json_extract(NEW.request_json, '$.consumer_id'));
     DELETE FROM background_job_commands WHERE id = NEW.id;
 END;
 -- next statement
@@ -105,7 +179,8 @@ END;
 -- next statement
 CREATE TRIGGER IF NOT EXISTS background_analysis_viewer_retired
 AFTER UPDATE OF state ON background_job_waiters
-WHEN NEW.request_scope = 'playback-analysis' AND OLD.state IN ('pending','awaiting_hydration')
+WHEN NEW.request_scope IN ('playback-analysis','playback-artifact')
+    AND OLD.state IN ('pending','awaiting_hydration')
     AND NEW.state NOT IN ('pending','awaiting_hydration')
 BEGIN
     UPDATE analysis_requests SET priority = 'normal', trigger = 'background',
@@ -123,6 +198,22 @@ BEGIN
           AND waiter.state IN ('pending','awaiting_hydration')
           AND (waiter.deadline_ms IS NULL OR waiter.deadline_ms > NEW.updated_at_ms)), 0)
     WHERE id = NEW.job_id AND kind = 'fragment_index_build' AND state IN ('queued','running');
+    UPDATE background_jobs SET priority = COALESCE((SELECT MAX(delivery.priority)
+        FROM background_job_waiters delivery
+        WHERE delivery.job_id = background_jobs.id
+          AND delivery.state IN ('pending','awaiting_hydration')
+          AND delivery.consumer_kind = 'background_delivery'
+          AND EXISTS (SELECT 1 FROM background_job_waiters viewer
+              WHERE viewer.job_id = delivery.consumer_ref
+                AND viewer.target_node_id = delivery.target_node_id
+                AND viewer.consumer_kind = 'playback_fragment'
+                AND viewer.state IN ('pending','awaiting_hydration')
+                AND viewer.deadline_ms > NEW.updated_at_ms)), 1)
+    WHERE kind = 'artifact_hydrate' AND state IN ('queued','running')
+      AND EXISTS (SELECT 1 FROM background_job_waiters delivery
+          WHERE delivery.job_id = background_jobs.id
+            AND delivery.consumer_ref = NEW.job_id
+            AND delivery.consumer_kind = 'background_delivery');
 END;
 -- next statement
 CREATE TRIGGER IF NOT EXISTS background_analysis_viewer_refresh
@@ -131,7 +222,7 @@ BEGIN
     UPDATE background_job_waiters SET
         deadline_ms = json_extract(NEW.request_json, '$.now_ms') + 120000,
         updated_at_ms = json_extract(NEW.request_json, '$.now_ms')
-    WHERE request_scope = 'playback-analysis'
+    WHERE request_scope IN ('playback-analysis','playback-artifact')
       AND state IN ('pending','awaiting_hydration')
       AND updated_at_ms <= json_extract(NEW.request_json, '$.now_ms') - 30000
       AND deadline_ms > json_extract(NEW.request_json, '$.now_ms')
@@ -144,11 +235,21 @@ BEGIN
           JOIN media_playback_pointers pointer ON pointer.user_id = session.user_id
             AND pointer.playback_id = session.playback_id
             AND pointer.current_incarnation_id = session.incarnation_id
-          WHERE waiter.request_scope = 'playback-analysis'
+          WHERE waiter.request_scope IN ('playback-analysis','playback-artifact')
             AND waiter.state IN ('pending','awaiting_hydration')
             AND session.state = 'active'
             AND session.lease_expires_at_ms > json_extract(NEW.request_json, '$.now_ms')
           ORDER BY waiter.deadline_ms, waiter.request_id LIMIT 128);
+    UPDATE background_jobs SET priority = 3
+    WHERE kind = 'artifact_hydrate' AND state IN ('queued','running')
+      AND EXISTS (SELECT 1 FROM background_job_waiters delivery
+          JOIN background_job_waiters viewer ON viewer.job_id = delivery.consumer_ref
+            AND viewer.target_node_id = delivery.target_node_id
+          WHERE delivery.job_id = background_jobs.id
+            AND delivery.consumer_kind = 'background_delivery'
+            AND viewer.consumer_kind = 'playback_fragment'
+            AND viewer.state IN ('pending','awaiting_hydration')
+            AND viewer.deadline_ms > json_extract(NEW.request_json, '$.now_ms'));
     DELETE FROM background_job_commands WHERE id = NEW.id;
 END;
 -- next statement
@@ -156,7 +257,7 @@ CREATE TRIGGER IF NOT EXISTS background_analysis_viewer_session_ended
 AFTER UPDATE OF state ON media_sessions WHEN NEW.state = 'ended' AND OLD.state != 'ended'
 BEGIN
     UPDATE background_job_waiters SET state = 'cancelled', updated_at_ms = NEW.updated_at_ms
-    WHERE request_scope = 'playback-analysis'
+    WHERE request_scope IN ('playback-analysis','playback-artifact')
       AND state IN ('pending','awaiting_hydration')
       AND json_extract(consumer_ref, '$.user_id') = NEW.user_id
       AND json_extract(consumer_ref, '$.playback_id') = NEW.playback_id
@@ -241,15 +342,5 @@ BEGIN
     WHERE request_id = NEW.request_id AND fence = NEW.fence;
 END;
 -- next statement
-CREATE TRIGGER IF NOT EXISTS analysis_source_release
-AFTER UPDATE OF state ON analysis_requests
-WHEN OLD.state = 'running' AND NEW.state != 'running'
-BEGIN
-    DELETE FROM analysis_source_reservations WHERE request_id = NEW.request_id;
-END;
--- next statement
-CREATE TRIGGER IF NOT EXISTS analysis_source_removed
-AFTER DELETE ON analysis_requests
-BEGIN
-    DELETE FROM analysis_source_reservations WHERE request_id = OLD.request_id;
-END;
+-- A terminal row can precede physical read cancellation. Keep the fenced
+-- reservation until its lease expiry; the next claim prunes expired rows.

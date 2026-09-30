@@ -13,7 +13,9 @@ mod queue_fixture;
 mod subtitle_jobs_fixture;
 use subtitle_jobs_fixture::SubtitleFixture;
 
-use plurx_core::store::background_jobs::{AnalysisViewerInterest, CancelWaiter};
+use plurx_core::store::background_jobs::{
+    AnalysisViewerInterest, ArtifactViewerInterest, CancelWaiter, EnqueueOutcome, WaiterQuery,
+};
 use queue_fixture::QueueFixture;
 
 #[path = "store_contract/background_jobs.rs"]
@@ -936,6 +938,251 @@ async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
                 .iter()
                 .all(|holder| holder.work_id != first.request_id),
             "{backend}: expired reader disappears"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn concurrent_viewers_keep_cancelled_reader_reservation_until_expiry() {
+    for_each_backend(|store, backend| async move {
+        let mut requests = Vec::new();
+        for (index, node) in ["reader-a", "reader-b", "reader-c"].into_iter().enumerate() {
+            let (_, file_id) = seed_file(&store, node).await;
+            requests.push(
+                store
+                    .enqueue_analysis_request(&NewAnalysisRequest {
+                        request_id: format!("cancel-reader-{backend}-{index}"),
+                        file_id,
+                        source_size: 10_000,
+                        source_mtime: 1,
+                        component: "fragment_index".into(),
+                        pipeline_version: "b".repeat(64),
+                        video_identity: String::new(),
+                        requested_generation: format!("cancel-{index}"),
+                        priority: "normal".into(),
+                        trigger: "background".into(),
+                        force_rebuild: false,
+                        target_node_id: node.into(),
+                        not_before_ms: 1_000,
+                        created_at_ms: 1_000,
+                    })
+                    .await
+                    .expect("enqueue"),
+            );
+        }
+        let maintenance = store
+            .claim_analysis_request("reader-a", 1_001, 31_001)
+            .await
+            .expect("maintenance claim")
+            .expect("maintenance reader");
+        for (index, request) in requests.iter().enumerate().skip(1) {
+            assert!(store
+                .join_analysis_viewer(AnalysisViewerInterest {
+                    analysis_request_id: request.request_id.clone(),
+                    requested_generation: request.requested_generation.clone(),
+                    pipeline_version: request.pipeline_version.clone(),
+                    video_identity: request.video_identity.clone(),
+                    target_node_id: request.target_node_id.clone(),
+                    user_id: index as i64,
+                    playback_id: format!("viewer-{index}"),
+                    now_ms: 1_002,
+                })
+                .await
+                .expect("join viewer"));
+        }
+        let (left, right) = tokio::join!(
+            store.claim_analysis_request("reader-b", 1_003, 31_003),
+            store.claim_analysis_request("reader-c", 1_003, 31_003),
+        );
+        let claimed = [left.expect("left claim"), right.expect("right claim")];
+        assert_eq!(
+            claimed.iter().filter(|row| row.is_some()).count(),
+            1,
+            "{backend}: concurrent claims must share one available viewer slot"
+        );
+        let occupied = claimed.into_iter().flatten().next().expect("viewer owner");
+        let waiting_node = if occupied.target_node_id == "reader-b" {
+            "reader-c"
+        } else {
+            "reader-b"
+        };
+        store
+            .cancel_analysis_request_admin(&occupied.request_id, 1_004)
+            .await
+            .expect("admin cancel")
+            .expect("cancelled running reader");
+        assert!(
+            store
+                .claim_analysis_request(waiting_node, 1_005, 31_005)
+                .await
+                .expect("claim during cancellation")
+                .is_none(),
+            "{backend}: cancellation cannot release a still-reading slot"
+        );
+        assert!(
+            store
+                .source_io_holders(1_005)
+                .await
+                .expect("holders")
+                .iter()
+                .any(|holder| holder.work_id == occupied.request_id),
+            "{backend}: cancelled reader remains charged until its lease expires"
+        );
+        let replacement = store
+            .claim_analysis_request(waiting_node, 31_004, 61_004)
+            .await
+            .expect("claim after expiry")
+            .expect("replacement reader");
+        assert_ne!(replacement.request_id, occupied.request_id);
+        assert_ne!(replacement.request_id, maintenance.request_id);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn playback_analysis_maps_to_valid_foreground_artifact_admission() {
+    for_each_backend(|store, _backend| async move {
+        let (_, file_id) = seed_file(&store, "artifact-node").await;
+        let request = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "viewer-artifact-admission".into(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".into(),
+                pipeline_version: "b".repeat(64),
+                video_identity: String::new(),
+                requested_generation: "viewer-artifact".into(),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: "artifact-node".into(),
+                not_before_ms: 1_000,
+                created_at_ms: 1_000,
+            })
+            .await
+            .expect("enqueue analysis");
+        assert!(store
+            .join_analysis_viewer(AnalysisViewerInterest {
+                analysis_request_id: request.request_id.clone(),
+                requested_generation: request.requested_generation.clone(),
+                pipeline_version: request.pipeline_version.clone(),
+                video_identity: request.video_identity.clone(),
+                target_node_id: request.target_node_id.clone(),
+                user_id: 1,
+                playback_id: "viewer-artifact".into(),
+                now_ms: 1_001,
+            })
+            .await
+            .expect("join"));
+        let claimed = store
+            .claim_analysis_request("artifact-node", 1_002, 31_002)
+            .await
+            .expect("claim")
+            .expect("viewer analysis");
+        assert_eq!(claimed.trigger, "playback");
+        let source = "a".repeat(64);
+        let job = NewClusterFragmentIndexJob {
+            cache_key: cluster_fragment_index_key(
+                file_id,
+                10_000,
+                1,
+                &source,
+                &claimed.pipeline_version,
+            )
+            .expect("key"),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source,
+            pipeline_sha256: claimed.pipeline_version.clone(),
+            priority: claimed.priority.clone(),
+            trigger: "foreground".into(),
+            target_node_id: "artifact-node".into(),
+            not_before_ms: 1_003,
+            created_at_ms: 1_003,
+        };
+        store
+            .enqueue_fragment_job(
+                plurx_core::store::background_jobs_fragment_admission::EnqueueFragmentJob {
+                    job,
+                    analysis_request: Some(claimed),
+                    repair: false,
+                    now_ms: 1_003,
+                },
+            )
+            .await
+            .expect("playback maps to durable foreground artifact admission");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn attested_fragment_build_accepts_exact_target_viewer() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "attested-viewer").await;
+        let source = "a".repeat(64);
+        let pipeline = "b".repeat(64);
+        let key = cluster_fragment_index_key(file_id, 10_000, 1, &source, &pipeline)
+            .expect("exact fragment key");
+        let accepted = store
+            .enqueue_fragment_job(
+                plurx_core::store::background_jobs_fragment_admission::EnqueueFragmentJob {
+                    job: NewClusterFragmentIndexJob {
+                        cache_key: key.clone(),
+                        file_id,
+                        source_size: 10_000,
+                        source_mtime: 1,
+                        source_sha256: source,
+                        pipeline_sha256: pipeline,
+                        priority: "foreground".into(),
+                        trigger: "foreground".into(),
+                        target_node_id: "attested-viewer".into(),
+                        not_before_ms: 1_000,
+                        created_at_ms: 1_000,
+                    },
+                    analysis_request: None,
+                    repair: false,
+                    now_ms: 1_000,
+                },
+            )
+            .await
+            .expect("enqueue exact attested build");
+        let job_id = match accepted {
+            EnqueueOutcome::Accepted { job_id, .. } => job_id,
+            outcome => panic!("{backend}: unexpected enqueue outcome {outcome:?}"),
+        };
+        let viewer = ArtifactViewerInterest {
+            cache_key: key,
+            file_id,
+            target_node_id: "attested-viewer".into(),
+            user_id: 1,
+            playback_id: "active-playback".into(),
+            now_ms: 1_001,
+        };
+        assert!(store
+            .join_artifact_viewer(viewer.clone())
+            .await
+            .expect("viewer join"));
+        let waiters = store
+            .job_waiters(WaiterQuery {
+                job_id,
+                after: None,
+                limit: 16,
+            })
+            .await
+            .expect("job waiters");
+        assert!(
+            waiters
+                .waiters
+                .iter()
+                .any(|waiter| waiter.scope == "playback-artifact"
+                    && waiter.request_id == viewer.consumer_id()
+                    && waiter.consumer_kind == "playback_fragment"
+                    && waiter.target_node_id.as_deref() == Some("attested-viewer")
+                    && waiter.state == "pending"),
+            "{backend}: the exact target has live viewer ownership"
         );
     })
     .await;

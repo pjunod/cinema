@@ -7679,14 +7679,20 @@ impl JobManager {
         self: Arc<Self>,
         transcode: Arc<TranscodeManager>,
     ) {
-        if !self.may_run_cluster_jobs().await {
+        if !self
+            .job_authority
+            .may_execute_job(plurx_core::store::background_jobs::JobKind::FragmentIndexBuild)
+            .await
+        {
             return;
         }
         // A source attestation can take minutes. It owns its own single-consumer
         // fence, leaving the artifact and delivery pass available to another
         // wake while the analysis reader is active. Store claims retain their
         // durable owner/fence and do not depend on this local pass guard.
-        let analysis = if !self.cluster_analysis_working.swap(true, Ordering::AcqRel) {
+        let may_produce = self.may_run_cluster_jobs().await;
+        let analysis = if may_produce && !self.cluster_analysis_working.swap(true, Ordering::AcqRel)
+        {
             let analysis_state = Arc::clone(&self);
             let analysis_transcode = Arc::clone(&transcode);
             Some(tokio::spawn(async move {
@@ -7708,13 +7714,16 @@ impl JobManager {
         let fragment_engine_current = crate::ffmpeg::fragment_index_engine_is_current().await;
 
         let now = clock_ms();
-        if let Err(error) = self.store.settle_analysis_requests(now).await {
-            tracing::warn!(%error, "settling analysis requests");
+        if may_produce {
+            if let Err(error) = self.store.settle_analysis_requests(now).await {
+                tracing::warn!(%error, "settling analysis requests");
+            }
         }
         const ANALYSIS_PRUNE_INTERVAL_MS: i64 = 60 * 60 * 1_000;
         const ANALYSIS_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
         let last_prune = self.last_analysis_prune_ms.load(Ordering::Relaxed);
-        if now.saturating_sub(last_prune) >= ANALYSIS_PRUNE_INTERVAL_MS
+        if may_produce
+            && now.saturating_sub(last_prune) >= ANALYSIS_PRUNE_INTERVAL_MS
             && self
                 .last_analysis_prune_ms
                 .compare_exchange(last_prune, now, Ordering::Relaxed, Ordering::Relaxed)
@@ -7743,7 +7752,9 @@ impl JobManager {
             return;
         }
 
-        self.enqueue_artifact_deliveries().await;
+        if may_produce {
+            self.enqueue_artifact_deliveries().await;
+        }
         let built = self.drain_cluster_fragment_index_slot(transcode).await;
         if built > 0 {
             tracing::info!(built, "cluster fragment-index queue pass finished");
@@ -8723,7 +8734,13 @@ impl JobManager {
             source_sha256: attested.observation.source_sha256,
             pipeline_sha256,
             priority: request.priority.clone(),
-            trigger: request.trigger.clone(),
+            // Analysis uses `playback` to identify a live requester. Durable
+            // artifact admission uses `foreground` for the same request class.
+            trigger: if request.trigger == "playback" {
+                "foreground".to_owned()
+            } else {
+                request.trigger.clone()
+            },
             target_node_id: request.target_node_id.clone(),
             not_before_ms: now,
             created_at_ms: now,

@@ -273,7 +273,8 @@ impl VodServe {
         let cluster_index = if prepared.encoding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
-            self.try_cluster_fragment_index(file, video).await
+            self.try_cluster_fragment_index(file, video, fences.viewer.as_ref())
+                .await
         } else {
             Ok(None)
         };

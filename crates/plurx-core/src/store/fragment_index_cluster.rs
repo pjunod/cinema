@@ -102,6 +102,13 @@ pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
                       AND viewer.state IN ('pending','awaiting_hydration')
                       AND (viewer.deadline_ms IS NULL OR viewer.deadline_ms > {now})
                       AND (viewer.consumer_kind = 'playback_fragment'
+                        OR (viewer.consumer_kind = 'background_delivery' AND EXISTS (
+                            SELECT 1 FROM background_job_waiters parent
+                            WHERE parent.job_id = viewer.consumer_ref
+                              AND parent.target_node_id = viewer.target_node_id
+                              AND parent.consumer_kind = 'playback_fragment'
+                              AND parent.state IN ('pending','awaiting_hydration')
+                              AND parent.deadline_ms > {now}))
                         OR (viewer.consumer_kind = 'subtitle_source' AND EXISTS (
                             SELECT 1 FROM analysis_requests source
                             WHERE source.request_id = viewer.consumer_ref
