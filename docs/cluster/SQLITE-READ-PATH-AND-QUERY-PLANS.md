@@ -670,13 +670,36 @@ Cargo `-j1`/nice19/ionice-c3; source-only archive, no Git/credentials/keys,
 host bind/socket/ports/privilege, P02 resource or global cache. Fetch only
 public locked crates, then disconnect external networking before offline
 build and private three-voter capture. Fresh admission requires available
-RAM24GiB, Docker free48GiB, no unrelated compiler/CI and healthy production
+RAM24GiB, Docker free48GiB and healthy production
 ready200/restart baseline. Running floors are RAM12GiB/Docker free48GiB;
 owned scratch32GiB is a monitored soft ceiling with disclosed10s overshoot.
 Outer90min includes setup/fetch/build/capture/eight reports; each phase uses
 the smaller of its ceiling and remaining time, with cleanup separately
 bounded5min. One attempt, no automatic retry or cap raise; OOM/timeout/error
 preserves an incomplete receipt and exact owned cleanup evidence.
+
+Continuation amendment (agent:/root/k05_lan_lab_sol61): tooling attempts 1
+and 2 stopped before any build because the image lacked GNU time and rustup
+attempted an unavailable metadata refresh. The source-free dummy Cargo
+project smoke subsequently verified the installed explicit Rust 1.97.1,
+offline compile/check, signed GNU time package and network disconnection.
+Attempt 3 stopped after 668.410 seconds during examples compilation on an
+unidentified Cargo PID; no capture or measurement ran. Its origin is unknown:
+the PID vanished before ancestry inspection. Original receipts are preserved.
+Successful full inventories and Docker lifecycle events independently prove
+the exact owned container and volume were removed. The foreign-PID
+post-cleanup guard error does not mean owned cleanup failed.
+
+The coordinator authorizes one disclosed new bounded attempt, not a retry of
+a failed benchmark. Extraction, fetch and build may overlap a foreign compiler
+only while all unchanged resource and production guards pass and one-minute
+host load is at most 16.0; compiler
+presence alone is not pressure evidence. Before fixture/capture and throughout
+measurement, require no unrelated compiler/CI and one-minute host load at most
+2.0. Admission waits retain the owned warm target but consume the same 90-minute
+attempt deadline, with no measurement retry, cap raise or silent deadline reset.
+Earlier attempts consumed 91.481, 28.238 and 669.156 seconds respectively;
+the new 90-minute allowance is explicitly additional, not a cumulative claim.
 
 The laboratory cannot supply the M5 post-merge fleet migration, every-voter
 snapshot/index/statistics or Home/Title route evidence below. It adopts no
