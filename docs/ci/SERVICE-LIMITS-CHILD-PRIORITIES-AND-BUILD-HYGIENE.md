@@ -1242,6 +1242,85 @@ and production remained healthy/restarts zero/readiness 200. No second probe
 or cold compile is claimed. Effective-user/bind-role cleanup is pinned by
 `test_release_cost_effective_user_and_bind_roles_preserve_host_cleanup`.
 
+**PR 3 measured, 2026-09-30 — retain thin/16, not all M7 closed.** The
+delegated decision retains the existing thin LTO/default CGU 16 for fastest
+builds: every alternative took more than twice as long, and no runtime benefit
+was measured. `Cargo.toml` stays unchanged; no full unit run is needed for an
+unchanged profile. This settles this four-way build-cost comparison, not PR 2
+split-debug plumbing, M6's full release-image/debug acceptance, or PR 4's
+overflow/full-suite/seven-day acceptance. Those remain separate and open.
+
+Measured source is exactly `f523e097a5faf98aff36903308927f018468e8cb`, not
+any later documentation head. Its source-only archive SHA-256 is
+`484686532b50fa4a65e50a3c6bb1fb936008591887b5407da20c3aadcece2558`.
+The actual high-CPU runner **host** was nynuc, Intel Core Ultra 7 255H
+(16 logical CPUs), Linux `7.0.0-31-generic`, native AMD64; this was not a
+Forgejo workflow job, CI unit acceptance or complete release qualification.
+The audited tooling image ID above and Rust 1.97.1 were used as UID:GID
+1000:1000. Debug 0, strip symbols, panic unwind and overflow checks false
+were fixed throughout. One bounded fetch preceded the fixed serial order
+thin/16 → thin/1 → fat/16 → fat/1. Every build used a new empty Cargo target,
+`--offline --locked`, and network-none. Download cache was warm; host OS caches
+were not flushed. One trial per cell, no retry, and no runtime/performance
+benchmark was run. Later base refreshes must preserve this old-source scope.
+
+| LTO / CGU | GNU command wall (s) | Supervisor wall (s) | Binary bytes | GNU child/process max RSS (KiB) | Last sampled cgroup peak (bytes) |
+|---|---:|---:|---:|---:|---:|
+| thin / 16 | 285.84 | 287.061 | 92,729,688 | 9,128,072 | 10,093,047,808 |
+| thin / 1 | 620.94 | 622.748 | 69,899,352 | 7,450,692 | 8,435,294,208 |
+| fat / 16 | 612.55 | 614.364 | 81,310,968 | 10,018,608 | 11,324,690,432 |
+| fat / 1 | 709.21 | 709.785 | 67,799,608 | 7,428,308 | 8,304,152,576 |
+
+**How to read it.** Relative to thin/16, thin/1 takes 2.172× time for 24.62 %
+fewer binary bytes; fat/16 takes 2.143× for 12.31 % fewer; fat/1 takes 2.481×
+for 26.88 % fewer. Binary bytes are not compressed-image or runtime benefit.
+GNU wall is the measured timeout/Cargo command, excluding fetch; supervisor
+wall also includes preflight/start/observer time. Fetch was 3.63 s GNU wall,
+4.384 s supervisor wall. GNU max RSS is the command/child-process measure,
+not summed concurrent-process memory. Cgroup peak includes the whole
+container's memory charge (including cache), and is the **last sampled** peak,
+not an asserted exact final peak after exit. They are not interchangeable.
+
+All four cases and fetch passed with exit zero; Docker OOM flags and every
+sampled cgroup `oom`/`oom_kill`/`oom_group_kill` were zero. Observer RPC work
+was 11.115 / 21.185 / 20.848 / 23.755 s across the four cases; it overlaps the
+compiler, remains included, and is not subtracted to invent an adjusted time.
+No cooldown was needed (all waits below 0.001 s, no cause). Actual bounds
+remained 8 CPU, 24 GiB/no-swap, PID 1024, 45 minutes/case and 180 minutes total.
+Initial guard was 36 GiB available/40 GiB disk/load ≤8; ongoing floor was
+16 GiB/20 GiB/load ≤12, swap increase ≤512 MiB and unchanged production health.
+Across recorded samples including fetch: available memory ≥48,961,646,592 B,
+free disk ≥63,288,238,080 B, load ≤8.3741; swap was
+6,087,905,280–6,107,533,312 B against baseline 6,107,541,504 B (no increase).
+The conservative scratch upper bound peaked at 3,419,742,208 B, including
+full reserved tmpfs/log capacity, below the monitored 20 GiB budget.
+Health/cgroup checks were every 2 s and full scratch scans every 10 s; a
+transient scratch overshoot can exist before detection because this is not
+a filesystem quota. All exact owned containers and scratch
+`/var/tmp/p02-m7-erfoa1zt` were removed. Production remained
+healthy/restarts zero/readiness 200. M5 image inputs remain unchanged and its
+private-pull credential/publication prerequisite is still pending.
+
+After measurement, the exact source-free tooling tag/image was removed after
+checking no container referenced it; the public base was untouched. The
+checksum-verified remote staging archive/controller were removed. Compact
+remote receipts (736 KiB) and the complete local receipts remain. Controller
+session 30498 exited zero; this completes the owned measurement lifecycle.
+
+Compact raw JSON/log/time/provenance evidence is retained on the Mac at
+`/private/tmp/p02-m7-receipts.GAxzsr/receipts`. SHA-256 identities:
+
+| Case | Binary | JSON receipt | GNU time receipt | Log receipt |
+|---|---|---|---|---|
+| thin/16 | `09f54f85e4fd9dce996a86e49b01053f443ddc102d21ecb89bcbc1825a1ceb5a` | `c3069d8a7ca1cb6f72b4435e7a6d58ecab80be4bfc8deaa17223e9e5fca373d1` | `4cbd26bf1aa94d91ba34fa7b7a33c77bbcf4da8e6cea2054ec40bb1525d93077` | `4c6e22fc3e7a0f371d88b28f3ea1cf8463067a17a2eac459a086c038978694ff` |
+| thin/1 | `219060542a07ded0610bb52392882803c8eb8130494ddfeaa49969dc1db4bb02` | `aee2834ed035c805db302f1afd070f0a373af916b8839007db1c35faab6e910c` | `8807b59064f4939f6bea8f56bda098ec4cdab258daf611d21b60177bcb4bdbdd` | `cb3da10fedfd45fc16df67f873afd0eecd8dd1a8f280870dd58d37a809bbe828` |
+| fat/16 | `5335360a6858dd1f4140264ed90e2437f4f7aa30b3c8251f2d82063500057b57` | `3b366322083ca7753f481edca992d57aa74878236d4ac4e5fba615ad170f33d8` | `ec111ce1a9906d2a6855ba1ae758834f1907470a6e2ee4dc7fa4149a76b7bf9a` | `86af333079e287418a35ec11942ce7354a5388ec8dbfb0fa0dec1de34304e9e1` |
+| fat/1 | `06859af7271957ba1597c1f8ab8c0a569827e40197b40254b89648e7727df172` | `fef54615a2ff19c9c3f5a3467001733fae56f431a12b0ac777809aa84c7f47da` | `29caf094f673844288fd1881c01f90bb66378c4cdb51d88f5be1525a5fb5bea6` | `f4abda1e891f72ca29decace6dae38f2550e50c39ada6261ebd52d30419b40b3` |
+| fetch | — | `0fdb5917bda8a4e59957c02d4bf010ae5cfda375753cafa2027c5b604393d948` | `8c2d56981797aae609f08b1a704a2593128c8a4ad263c537c2e73f44fb044d67` | `66c87e6e7669220f9f777a0e4425c51eb5c3783755468f57e227dc0210961875` |
+
+Provenance JSON SHA-256:
+`32c62d69a952180480600c35e1202c0fe3e2d66cc3e3787021ceda46e961a8c4`.
+
 ### 5.8 M8 — four fuzz targets
 
 `fuzz/Cargo.toml` bins, harnesses, seed corpora, nightly steps, the
@@ -1338,6 +1417,10 @@ the whole procedure. Profile changes roll back by the `sha-` image tag.
 ---
 
 ## Execution log
+
+| Date | Model | Session | Milestone | PR | Evidence |
+|---|---|---|---|---|---|
+| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_effort_sync_sol61 | M7 PR 3 measured — retain thin/16 | [#629](http://192.168.4.7:3000/noirr/plurx/pulls/629) draft | Exact `f523e097a` source, serial native AMD64 host matrix, no retry; §5.7 records all binary/receipt hashes and bounded guard ranges. All four passed; unchanged thin/16 retained for build cost only. Owned containers, scratch and tooling image removed; production healthy/restarts0. M7 PRs 2/4, M6 image acceptance, M5 credential prerequisite and M8 post-merge campaigns remain open. |
 
 Executing sessions append one row per milestone PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
