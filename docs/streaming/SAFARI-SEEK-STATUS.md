@@ -1,6 +1,6 @@
 # Safari seek build — implementation and promotion status
 
-**Status:** integrated candidate; review pending · **Updated:** 2026-09-29 ·
+**Status:** Astra review changes in progress; tests pending · **Updated:** 2026-09-29 ·
 **Starting base:** `1869871ce` · **Current main sync:** `38c917225` ·
 **Branch:** `effort/safari-seek`
 
@@ -33,9 +33,10 @@ exists for the named milestone; it does not imply a fleet rollout.
 | Arm64 runtime evidence | One clean `runtime-assets` image built under temporary QEMU on the separate build host. Its arm64 FFmpeg SHA-256 is `10a017e55452a171a8e24287caabfbc24ce3a8d6182acdedf86a000ac8f3e929`, FFprobe `26f9a2e0b353af160ef75fcbd12d5d117cbac014a323626af5b9fe06ae79dc93`, and package manifest `f9054eac1b0e55099e53408275051d887b3288795ff7954c29d6d8f7e6aa096e`. The binary reported `ffmpeg version 8.1.3-Jellyfin`; the Dockerfile capability assertions passed. |
 | Amd64 application packages | Two clean packages from the same local runtime input reported actual daemon `engine_digest` `85e6fa5e7614ad2165fdf2e83d96542ada3f18f28fadb04d2a960f9cbf4938ab`. Both carried application binary SHA-256 `77f65bb1c86f04fba608c00a3faf622f93bd502c8343049900ad0e27d1f08b40` and the FFmpeg, FFprobe and manifest hashes above. A third local package with the amended final stage reported the same engine digest and the supplied runtime image ID through `media-runtime-identity`. The release workflow supplies and checks the published registry digest on its final image. |
 | Focused regressions | Deferred until the final adversarial review, per the requested sequence. |
-| Astra adversarial review | Pending final main candidate. |
+| Astra adversarial review | Completed as a read-only review of `6ba5c59de` against `38c917225`: seven findings on viewer artifact admission, learner execution, source reservation lifetime, attested artifact demand, hydration demand, the Safari server fixture, and waiter capacity. The reviewed candidate was rejected; fixes are being made before the single final test phase. |
 | Ready fast lane | Pending review fixes. |
 | Task pull request | [#622](http://192.168.4.7:3000/noirr/plurx/pulls/622) merged into `effort/safari-seek` as `1fa576a05`, preserving its regression fields. The user directed local compile evidence here and one final test lane after review. |
+| Main pull request | Draft [#623](http://192.168.4.7:3000/noirr/plurx/pulls/623) into `main`. It remains draft while review findings are addressed. |
 | Main merge | Pending green lane and exact-candidate qualification. |
 | Deployment | Outside this build; no production action authorized. |
 

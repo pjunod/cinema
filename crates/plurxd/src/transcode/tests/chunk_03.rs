@@ -1397,6 +1397,22 @@
     }
 
     #[test]
+    fn rolling_steady_publication_accumulates_one_extra_segment_at_a_time() {
+        let desired = ROLLING_STEADY_RUNWAY_MS;
+        assert_eq!(bounded_steady_publication_end(desired, Some(48_000), false), desired,
+            "startup keeps its existing publication rule");
+        let mut served = 48_000;
+        for expected in [80_000, 108_000] {
+            let next = bounded_steady_publication_end(desired, Some(served), true);
+            assert_eq!(next, expected);
+            assert!(next - served <= ROLLING_SEGMENT_MAX_MS * 2,
+                "a cutover cannot expose the full new runway in one playlist");
+            served = next;
+        }
+        assert_eq!(bounded_steady_publication_end(desired, Some(served), true), desired);
+    }
+
+    #[test]
     fn rolling_publication_budget_target_only_rounding_is_a_negative_control() {
         let mut frontier_ms = ROLLING_INITIAL_RUNWAY_MS;
         let mut violated = false;

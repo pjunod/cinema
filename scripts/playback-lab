@@ -1872,6 +1872,10 @@ class SafariDriver {
     return this.wd("POST", `/session/${this.sessionId}/execute/sync`, { script, args });
   }
 
+  execAsync(script, args = []) {
+    return this.wd("POST", `/session/${this.sessionId}/execute/async`, { script, args });
+  }
+
   eval(expression) {
     return this.exec(`return (${expression});`);
   }
@@ -4570,14 +4574,16 @@ async function safariSeekServerCommand(options) {
   if (!Number.isInteger(durationSeconds) || durationSeconds > 3_600) {
     throw new Error("--duration must be an integer at most 3600 seconds");
   }
-  const sourcePath = path.join(fixtureDir, `safari-seek-real-${durationSeconds}s.mp4`);
+  // Matroska with H.264 is decodable after remux but is not a Safari direct
+  // play source. This forces the ordinary policy through rolling native HLS.
+  const sourcePath = path.join(fixtureDir, `safari-seek-real-${durationSeconds}s.mkv`);
   await fsp.mkdir(fixtureDir, { recursive: true });
   if (!fs.existsSync(sourcePath)) {
     const result = spawnSync("ffmpeg", [
       "-hide_banner", "-loglevel", "error", "-y",
       "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24", "-t", String(durationSeconds), "-an",
       "-c:v", "libx264", "-preset", "ultrafast", "-g", "144",
-      "-keyint_min", "144", "-sc_threshold", "0", "-movflags", "+faststart",
+      "-keyint_min", "144", "-sc_threshold", "0", "-f", "matroska",
       sourcePath,
     ], { encoding: "utf8", timeout: 180_000 });
     if (result.status !== 0) throw new Error(`Safari real-server FFmpeg failed: ${result.stderr}`);
@@ -4599,19 +4605,30 @@ async function safariSeekServerCommand(options) {
     requested_rate: requestedRate,
     requested_seek_count: seekCount,
     ffmpeg_identity: ffmpegIdentity,
-    source: `synthetic ${durationSeconds}-second H.264 MP4 through isolated plurxd rolling session`,
+    source: `synthetic ${durationSeconds}-second H.264 Matroska through isolated plurxd rolling session`,
     samples: [], seeks: [], seek_traces: [], served_manifests: [], playback_events: [], error: null,
   };
   try {
     const file = server.files.get(path.basename(sourcePath));
     if (!file) throw new Error("isolated server did not scan Safari source");
+    await api(server.baseUrl, "/settings", { token: server.token, method: "PUT",
+      body: { vod_presentation: false, vod_index_mins: 0 } });
     driver = new SafariDriver(options, server.baseUrl, server.runtime);
     await driver.start();
     const browserInfo = await prepareBrowser(driver, server.token);
     report.user_agent = browserInfo.user_agent || null;
+    if (!browserInfo.native_hls) throw new Error("Safari native HLS is unavailable");
     await driver.startPlayback(file.id, file.title || "Safari seek real server", file.duration_ms || 0);
-    await waitFor(() => driver.eval("(()=>{const v=document.getElementById('video');return v&&v.readyState>=2&&v.currentTime>0})()"),
-      45_000, "Safari first rolling frame", 250);
+    const rollingRoute = () => driver.eval(`(()=>{const v=document.getElementById('video');
+      const p=typeof PLAYER!=='undefined'?PLAYER:null;
+      return {method:p&&p.method,vod:!!(p&&p.vod),hlsjs:!!(p&&p.hls),
+        copy_hls:!!(p&&p.copyHls),src:v&&v.currentSrc||'',
+        ready:v&&v.readyState||0,position:v&&v.currentTime||0};})()`);
+    await waitFor(async () => { const route = await rollingRoute();
+      return route.method === "remux" && !route.vod && !route.hlsjs
+        && route.src.includes(".m3u8") && route.ready >= 2 && route.position > 0; },
+    45_000, "Safari first native rolling HLS frame", 250);
+    report.route = await rollingRoute();
     if (requestedRate !== 1) {
       await driver.exec(`document.getElementById('video').playbackRate=${requestedRate}; return true;`);
     }
@@ -4625,6 +4642,8 @@ async function safariSeekServerCommand(options) {
         const origin=Number((typeof PLAYER!=='undefined'&&PLAYER&&PLAYER.offset)||0);
         const ranges=(r)=>Array.from({length:r.length},(_,i)=>[r.start(i),r.end(i)]);
         return {position_s:origin+v.currentTime,element_position_s:v.currentTime,origin_s:origin,
+          method:PLAYER&&PLAYER.method||null,vod:!!(PLAYER&&PLAYER.vod),
+          hlsjs:!!(PLAYER&&PLAYER.hls),
           playback_rate:v.playbackRate,
           buffered:ranges(v.buffered),seekable:ranges(v.seekable),
           ready_state:v.readyState,paused:v.paused,current_src:v.currentSrc};
@@ -4644,19 +4663,32 @@ async function safariSeekServerCommand(options) {
           target >= start && target <= end);
       }
       if (pendingSeek) {
+        const receipt = await driver.eval("window.__plurxSeekMetric||null");
         pendingSeek.observed_at_ms = sample.elapsed_ms;
-        pendingSeek.landed_s = sample.position_s;
-        pendingSeek.landing_error_s = sample.position_s - pendingSeek.target_s;
+        pendingSeek.landed_s = receipt?.landed_s ?? sample.position_s;
+        pendingSeek.landing_error_s = pendingSeek.landed_s - pendingSeek.target_s;
         pendingSeek.ready_state = sample.ready_state;
         pendingSeek.origin_after_s = sample.origin_s;
-        pendingSeek = null;
+        if (receipt && receipt.seeked_ms !== null) {
+          pendingSeek.seeked_latency_ms = receipt.seeked_ms;
+          pendingSeek.first_frame_latency_ms = receipt.first_frame_ms;
+          pendingSeek = null;
+        }
       }
       report.samples.push(sample);
       if (typeof sourceUrl === "string" && /^http:\/\//.test(sourceUrl)) {
         try {
-          const response = await fetch(sourceUrl, { signal: AbortSignal.timeout(2_000) });
-          if (response.ok) {
-            const raw = await response.text();
+          const raw = await driver.execAsync(`var done=arguments[arguments.length-1];
+            fetch(arguments[0],{credentials:'same-origin'})
+              .then(r=>r.ok?r.text():'')
+              .then(async text=>{
+                if(text.includes('#EXTINF:'))return text;
+                var next=text.split(/\\r?\\n/).find(line=>line&&!line.startsWith('#'));
+                if(!next)return text;
+                var response=await fetch(new URL(next,arguments[0]),{credentials:'same-origin'});
+                return response.ok?response.text():text;
+              }).then(done).catch(()=>done(''));`, [sourceUrl]);
+          if (typeof raw === "string" && raw.startsWith("#EXTM3U")) {
             if (raw.startsWith("#EXTM3U") && raw !== lastManifest) {
               lastManifest = raw;
               const safe = raw.split(/\r?\n/).map((line) =>
@@ -4696,7 +4728,24 @@ async function safariSeekServerCommand(options) {
         const attempt = { at_ms:sample.elapsed_ms, from_s:sample.position_s,
           target_s:target, origin_before_s:sample.origin_s, covered:true };
         report.seeks.push(attempt);
-        await driver.exec("seekTo(arguments[0]); return true;", [target]);
+        await driver.exec(`var v=document.getElementById('video');
+          var started=performance.now();
+          var seekTarget=arguments[0];
+          window.__plurxSeekMetric={seeked_ms:null,first_frame_ms:null,landed_s:null};
+          v.addEventListener('seeked',function once(){
+            window.__plurxSeekMetric.seeked_ms=performance.now()-started;
+            window.__plurxSeekMetric.landed_s=v.currentTime+Number((PLAYER&&PLAYER.offset)||0);
+            v.removeEventListener('seeked',once);
+          });
+          if(v.requestVideoFrameCallback){
+            var frame=function(now,metadata){
+              if(metadata.mediaTime+Number((PLAYER&&PLAYER.offset)||0)>=seekTarget-0.5){
+                window.__plurxSeekMetric.first_frame_ms=now-started;
+              }else if(now-started<15000){v.requestVideoFrameCallback(frame);}
+            };
+            v.requestVideoFrameCallback(frame);
+          }
+          seekTo(arguments[0]); return true;`, [target]);
         pendingSeek = attempt;
       }
       await sleep(1_000);
@@ -4722,6 +4771,10 @@ async function safariSeekServerCommand(options) {
     if (driver) await driver.close().catch(() => {});
     await server.close(false);
   }
+  const sorted = report.seeks.map((seek) => seek.first_frame_latency_ms)
+    .filter(Number.isFinite).sort((a,b) => a-b);
+  report.p95_first_frame_latency_ms = sorted.length
+    ? sorted[Math.ceil(sorted.length * 0.95) - 1] : null;
   const jsonPath = path.resolve(options.json || path.join(
     DEFAULT_REPORT_DIR, `safari-seek-real-${Date.now()}.json`,
   ));
@@ -4729,6 +4782,22 @@ async function safariSeekServerCommand(options) {
   await fsp.writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`);
   process.stdout.write(`SAFARI  ${jsonPath}\nSAMPLES ${report.samples.length}\nMANIFESTS ${report.served_manifests.length}\n`);
   if (report.error) throw new Error(report.error);
+  if (!report.route || report.route.method !== "remux" || report.route.vod
+      || report.route.hlsjs || !report.route.src.includes(".m3u8")) {
+    throw new Error("Safari did not attach to native rolling HLS");
+  }
+  if (!report.served_manifests.length || !report.served_manifests.some((item) =>
+    item.body.includes("#EXTINF:") && item.body.includes("<media-uri>"))) {
+    throw new Error("Safari rolling HLS served manifest was not captured");
+  }
+  if (report.seeks.length !== seekCount || report.samples.length !== observeSeconds) {
+    throw new Error(`incomplete Safari capture: ${report.seeks.length}/${seekCount} seeks, ${report.samples.length}/${observeSeconds} samples`);
+  }
+  if (seekCount && report.seeks.some((seek) =>
+    !Number.isFinite(seek.seeked_latency_ms) || !Number.isFinite(seek.first_frame_latency_ms)
+      || !Number.isFinite(seek.landing_error_s))) {
+    throw new Error("Safari seek timing or landing evidence is incomplete");
+  }
   return report;
 }
 

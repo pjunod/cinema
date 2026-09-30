@@ -211,11 +211,22 @@ impl RollingPublicationClock {
             let steady = self.served.is_some() && !lease.startup.protects_from_time_hold();
             let ends =
                 rolling_explicit_publication_ends(demand, observation_age, media_origin_ms, steady);
+            // A steady target may be much farther ahead than the startup
+            // playlist. Grow by at most one *extra* segment beyond a normal
+            // publication at each tick so the reserve can accumulate while
+            // Safari never sees the entire cutover gap at once.
+            let desired_end_ms = bounded_steady_publication_end(
+                ends.desired_end_ms,
+                self.served.as_ref().map(|served| served.end_ms),
+                steady,
+            );
             RollingPublicationBudget {
                 demand_sequence: lease.accepted_demand_sequence,
                 consumed_end_ms: ends.consumed_end_ms,
-                desired_end_ms: ends.desired_end_ms,
-                allowed_end_ms: ends.allowed_end_ms,
+                desired_end_ms,
+                allowed_end_ms: desired_end_ms
+                    .saturating_add(ROLLING_SEGMENT_MAX_MS)
+                    .min(ends.allowed_end_ms),
                 protected_position_ms: ends
                     .consumed_absolute_ms
                     .saturating_sub(ROLLING_PUBLICATION_GUARD_MS)
@@ -254,6 +265,20 @@ impl RollingPublicationClock {
             served.end_ms.saturating_sub(budget.desired_end_ms).max(0)
         });
         budget
+    }
+}
+
+pub(super) fn bounded_steady_publication_end(
+    desired_end_ms: i64,
+    served_end_ms: Option<i64>,
+    steady: bool,
+) -> i64 {
+    if steady {
+        desired_end_ms.min(served_end_ms.map_or(desired_end_ms, |served| {
+            served.saturating_add(ROLLING_SEGMENT_MAX_MS.saturating_mul(2))
+        }))
+    } else {
+        desired_end_ms
     }
 }
 
