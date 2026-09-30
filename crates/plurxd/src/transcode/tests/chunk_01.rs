@@ -2016,6 +2016,73 @@
         }
     }
 
+    /// Batch admission settings must retain all limits and the explicit
+    /// maintenance refusal; reducing Store reads cannot change the budgets.
+    #[tokio::test]
+    async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let dir = crate::test_tempdir().expect("work");
+        let manager = TranscodeManager::new(
+            Arc::clone(&store), dir.path().to_owned(), EncoderCaps::default(), Pipeline::Cpu,
+        );
+        let mut req = SessionRequest {
+            control_sequence: None,
+            file_id: 1,
+            playback_id: "snapshot-probe".to_owned(),
+            request_id: None,
+            automatic: false,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+            start_seconds: 0.0,
+            audio_index: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
+            transport: None,
+        };
+        store.put_settings(&[
+            (keys::VOD_PRESENTATION, "1"),
+            (keys::VOD_WORKING_SET_BYTES, "123456789"),
+            (keys::VOD_BLOCK_BUDGET_SECS, "12"),
+            (keys::VOD_MATERIALIZE_BUDGET_SECS, "42"),
+            (keys::CACHE_MAX_GB, "3"),
+            (keys::VOD_BLOCKED_GET_CAP, "512"),
+        ]).await.expect("one settings update");
+        req.block_budget_secs = Some(90.0);
+        let settings = manager.vod_settings(&req).await.expect("snapshot").expect("enabled");
+        assert_eq!(settings.working_set_bytes, 123456789);
+        assert_eq!(settings.completed_cache_bytes, 3 << 30);
+        assert_eq!(settings.block_budget, Duration::from_secs(12));
+        assert_eq!(settings.materialize_budget, Duration::from_secs(42));
+        assert_eq!(settings.blocked_get_cap, 512);
+
+        store.put_settings(&[
+            (keys::VOD_WORKING_SET_BYTES, "0"),
+            (keys::VOD_BLOCK_BUDGET_SECS, "NaN"),
+            (keys::VOD_MATERIALIZE_BUDGET_SECS, "999"),
+            (keys::CACHE_MAX_GB, "invalid"),
+            (keys::VOD_BLOCKED_GET_CAP, "999999"),
+        ]).await.expect("invalid and excessive budgets");
+        req.block_budget_secs = Some(2.0);
+        let settings = manager.vod_settings(&req).await.expect("snapshot").expect("enabled");
+        assert_eq!(settings.working_set_bytes, 8 << 30);
+        assert_eq!(settings.completed_cache_bytes, 0);
+        assert_eq!(settings.block_budget, Duration::from_secs(2));
+        assert_eq!(settings.materialize_budget, Duration::from_secs(300));
+        assert_eq!(settings.blocked_get_cap, 4096);
+
+        store.put_setting(keys::VOD_PRESENTATION, " 0 ").await.expect("maintenance");
+        assert!(manager.vod_settings(&req).await.expect("snapshot").is_none());
+    }
+
     #[tokio::test]
     async fn metrics_session_snapshot_does_not_wait_for_the_session_map() {
         use plurx_core::store::SqliteStore;

@@ -1,7 +1,7 @@
 # Playback startup measurements — separate readiness from continuity
 
 **Status:** M0/M1 investigation in progress; M2 policy unqualified ·
-**Written:** 2026-09-29 EDT · **Source:** `f50f9babc` plus draft PR #627.
+**Written:** 2026-09-29 EDT · **Source:** diagnostics `b3ca3a0de`; current main integrated at `af60b278c`; serving-settings correction in draft PR #627.
 
 Companion to [the build contract](PLAYBACK-STARTUP-LATENCY-BUILD.md) — this
 is retained evidence and its limits, not a proposed shipping threshold.
@@ -93,17 +93,50 @@ The first ongoing comparison uses 32 seconds of post-position runway and
 7.965 seconds of origin lead, so complete-segment rounding exposes 48
 seconds total and 40.035 seconds after the requested position. At 1.05×,
 Chrome hls.js reported first frame at 9.126 seconds and continued without a
-reported stall through the initial several-minute window. Safari native
+reported stall through a captured 23-minute window. Safari native
 reloads approximately every 16 seconds and shows moving generated video,
 but its first-frame callback remains absent; TTFF is **unavailable**.
-These preliminary results do not select a shipping policy or prove a
-30-minute continuity run.
+The original native observer counted `waiting` only after the missing frame
+callback, so its zero counter is not valid stall evidence. The tracked lab
+now counts waiting after sampled playback progress independently of TTFF.
+The native window was subsequently closed, so that run is incomplete.
+These results do not select a shipping policy or prove a 30-minute run.
 
 Bulky generated media and evolving receipts are owned by this effort under
 `/private/tmp/plurx-startup-evidence-20260929`. Retain a final sanitized
 summary and hashes before cleanup. The Mac computer-use tool briefly reported
 that the machine was locked; retry succeeded. This was an automation error,
 not a confirmed physical-device blocker.
+
+## Preparation correction — one consistent admission-settings read
+
+`TranscodeManager::vod_settings` previously issued six serial `get_setting`
+requests on every VOD attempt, including an index miss followed by rolling
+fallback. The Hiqlite backend makes each a separate consistent read. The
+correction uses the existing bounded `get_settings` contract to read exactly
+those six keys from one snapshot. That removes five Store round trips without
+caching settings or changing their defaults, clamping, request caps, or explicit
+maintenance refusal. SQLite also reads the tuple in one statement.
+
+`vod_settings_snapshot_preserves_budgets_and_maintenance_refusal` is authored,
+not run. It covers stored values, invalid values, server/request budget caps,
+and the explicit refusal. The existing blocked-GET-cap regression remains.
+Pinned all-target compilation passed for the correction. No measured TTFF
+improvement is claimed until the changed daemon is measured.
+
+## Physical-device discovery — addresses are known
+
+Xcode discovered physical Apple TV **Bedroom**, AppleTV14,1, device
+`00008110-001C19140299801E`. The effort built a signed debug client and installed
+it successfully. The existing device playback harness then failed at launch:
+`System is asleep - foreground app launch forbidden`. It did not produce a
+playback receipt. The TV must be awake before that launch can succeed.
+
+DNS-SD discovered Google TV Streamer **Bedroom TV** at `192.168.4.108`.
+The installed Android SDK reports no connected ADB devices or advertised ADB
+mDNS services; connecting its usual port 5555 failed. Cast discovery proves
+network presence, not a debugging connection. Wireless/network debugging or an
+existing alternative ADB port is required for automated client measurements.
 
 ## Decisions — preserve contracts while evidence is incomplete
 
