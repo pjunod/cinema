@@ -791,6 +791,9 @@ pub struct AppState {
     /// Keeps the click path off the NAS, and announces a start once playback
     /// is real rather than once a decision has been made.
     pub availability: Arc<crate::playstart::AvailabilityCache>,
+    /// Advisory, bounded file observations for item detail only. Playback
+    /// never consults this cache when deciding whether a source opens.
+    pub detail_availability: Arc<crate::availability::AvailabilityCache>,
     pub starts: Arc<crate::playstart::StartNotifier>,
     /// Finite-playback start attempts and how each ended (C-08 M5 row 4).
     pub start_attempts: Arc<crate::playstart::StartAttempts>,
@@ -1176,6 +1179,7 @@ impl AppState {
             progress,
             storage: Arc::new(tokio::sync::RwLock::new(Default::default())),
             availability: Arc::new(crate::playstart::AvailabilityCache::new()),
+            detail_availability: crate::availability::AvailabilityCache::new(),
             starts: Arc::new(crate::playstart::StartNotifier::new()),
             start_attempts: Arc::new(crate::playstart::StartAttempts::new()),
             streams: crate::progressive::Streams::new(),

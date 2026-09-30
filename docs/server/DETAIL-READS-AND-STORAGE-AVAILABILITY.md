@@ -663,6 +663,34 @@ badge". Three independent checks, all in M2:
 
 ## Execution log
 
+**M3 ownership receipt, 2026-09-30:** Effort gate API run 3630 (UI 3609)
+stopped before Rust compilation: the module-wide inventory had not recorded
+M3's one task, two timer constructors and one Tokio time import. The
+compatibility audit names their exact sites in
+[`rolling-producer-owners.toml`](../../tests/playback/rolling-producer-owners.toml).
+`lookup_or_schedule` registers each path before spawning a task that holds
+the process-lifetime cache's `Arc`; 1,024 distinct in-flight paths bound
+queued and running tasks, and eight semaphore permits bound active metadata
+calls. These are concurrency bounds. The kernel call may remain blocked
+indefinitely. `observe_many`'s 250 ms timeout cancels the request's receiver
+wait only. `run_probe` owns the five-second warning sleep and its hourly
+reset; normal completion or runtime teardown drops that timer. Runtime
+teardown drops the async wrapper, without cancelling the kernel syscall or
+promising a live-process gauge reset.
+
+Normal completion writes the observation, evicts to the 16,384-entry bound,
+removes its in-flight path, decrements the gauge, notifies observers and
+releases its permit. The existing
+`a_timed_out_caller_leaves_one_probe_and_no_duplicate` regression now releases
+the held probe and uses the bounded `ready` helper to assert the map is empty,
+permits are restored and repeated reads use the cached observation with one
+probe call. Temporary mutations failed that same test: omitted path removal
+failed `inflight.is_empty()`; a forgotten permit failed with `0` versus `1`.
+Both mutations were removed. The inventory suite passed seven tests and 476
+subtests. Counts change only for the audited sites: task spawn 680 → 681,
+timer constructors 1,114 → 1,116, time imports 3 → 4. This is a CI ownership
+receipt, not a second formal adversarial review or fleet acceptance.
+
 Executing sessions append one row per logical milestone in the one plan PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
@@ -673,3 +701,6 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 |---|---|---|---|---|---|
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | claim | [#435](http://192.168.4.7:3000/noirr/plurx/pulls/435) | Claimed one-plan/one-PR ownership from `main` @ `9deb58a2`; Rust 1.97.1 baseline `cargo check --locked -p plurxd --all-targets` passed before edits. M1 will be the first implementation commit and its rollout/backfill receipt remains mandatory before M2 promotion. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#435](http://192.168.4.7:3000/noirr/plurx/pulls/435) | Exact deployable M1 boundary `33e66cfd1`: standalone v66 and sidecar v10 marker, publication proof, node-local bounded backfill, refusal-without-deletion, and fixed-cardinality convergence metric. Focused Rust 1.97.1 evidence: `cargo test --locked -p plurx-core --features hiqlite-store store::fragindex -- --test-threads=1` (20 passed), `cargo test --locked -p plurx-core --features hiqlite-store store::telemetry -- --test-threads=1` (14 passed), `cargo test --locked -p plurxd prometheus_scrape_has_no_store_operation -- --test-threads=1` (1 passed), `cargo check --locked -p plurxd --all-targets`, and `cargo clippy --locked -p plurxd --all-targets -- -D warnings`. M2/M3 remain pending; M2 is deliberately not implemented or promotable until the exact M1 boundary is deployed and its backfill receipt exists. |
+| 2026-09-29 | gpt-6-sol | agent:/root/c05_m3_builder | M3 claim | [draft #621](http://192.168.4.7:3000/noirr/plurx/pulls/621) | Independent M3 branch from `main` @ `38c917225`; pinned Rust 1.97.1 compiler loop established before source edits. This branch owns only bounded detail-page availability observations, its DTO, metrics, API contract and tests. M2 and the active backfill/fleet acceptance remain open. |
+| 2026-09-29 | gpt-6-sol | agent:/root/c05_m3_builder | M3 implementation | [draft #621](http://192.168.4.7:3000/noirr/plurx/pulls/621) | Node-local bounded detail observations, tri-state FileDto, fixed-label metrics, and API §6 contract. Focused Rust 1.97.1 evidence before final base reconciliation: `cargo test --locked -p plurxd availability::tests -- --test-threads=1` (7 passed), `cargo test --locked -p plurxd browse -- --test-threads=1` (7 passed), `cargo check --locked -p plurxd --all-targets`, and `cargo clippy --locked -p plurxd --all-targets -- -D warnings`; API route doc contract (3 passed) and docs index (4 passed). No M2 projection, active backfill, lab2 unmount/remount, or fleet timing claim. |
+| 2026-09-29 | gpt-6-sol | agent:/root/c05_m3_builder | M3 sole-review corrections | [draft #621](http://192.168.4.7:3000/noirr/plurx/pulls/621) | The sole adversarial review found two P2 gaps: an in-flight-cap refusal returned a post-TTL cached state without a refresh, and the playback bypass test instantiated an unrelated cache. Saturation now demotes the stale answer to `Unknown` while retaining its timestamp; a real `/files/{id}/decision` router test injects a counted, poisoned detail probe and proves direct play still succeeds with zero detail probes. The existing source contract also pins GET/POST decision wiring. Both new tests passed on Rust 1.97.1 and failed under temporary reversions (`Unavailable` vs `Unknown`; one detail probe vs zero), after which both fixes were restored. M2 and fleet acceptance remain open. |
