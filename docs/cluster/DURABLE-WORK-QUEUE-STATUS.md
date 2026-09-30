@@ -11,6 +11,35 @@ Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md)
 This page records actual implementation and evidence. “Planned” means no
 implementation is claimed; “compiled” does not mean tests passed.
 
+## Receipt pressure follow-up — the waiter bound is the next cliff
+
+**2026-09-28:** branch `fix/queue-receipt-pressure` (PR link in
+[STATUS.md](../../STATUS.md)), on top of #608. A second read of the same
+production database (nynuc, 16:27 UTC) while #608 was being built: besides the
+10,000 job rows, `background_job_waiters` held **11,947 of 16,384** — 10,775
+succeeded, 1,110 pending, 62 cancelled — and admission refuses at 16,384
+counting settled receipts, which the upkeep trigger only retired at
+`receipt_expires_ms` (seven days). At the rate the backfills settle work the
+receipt table would have closed the queue again within days, with #608
+deployed. Upkeep now compacts the oldest settled **internal** receipts
+(`retain_identity = 0`, scope not `user:%`, job not queued/running/cancelling)
+a page per pass once the table holds ≥ 15,360 rows — replicated **v64** /
+SQLite **v86**, the maintenance trigger replaced under its own name once more,
+generated from v63's copy so the two cannot drift (pinned by
+`receipt_pressure_literals_match_constants`, which also requires v86 to be the
+last migration that creates the trigger). User-scoped receipts (`user:<id>`,
+the only user scope the code mints) and identity-retaining receipts (every
+`analysis` fragment interest, so fragment retry budgets keep their window)
+are never compacted; internal producers re-derive demand from their domain
+tables (`background_embeddings`, `analysis_requests`, cache locations), so a
+compacted internal receipt cannot re-run finished work. Evidence:
+`waiter_pressure_compacts_internal_receipts_and_spares_protected_ones` drives
+a store at the cap through refusal → one page (oldest first, the 24 protected
+receipts spared) → reopened admission → convergence → quiet.
+
+The `pipeline version unavailable` rows the report led with are the
+jellyfin-ffmpeg 8.1.2 ↔ 8.1.3 digest flip, [#604](http://192.168.4.7:3000/noirr/plurx/issues/604).
+
 ## Settled-history eviction follow-up
 
 **2026-09-28:** production observation on nynuc, m6 and nuc4 (build
