@@ -298,7 +298,7 @@ pub(super) async fn reserve_response_completion_from(
     }
 }
 
-/// Once storage has produced every advertised byte, completion owns its own
+/// Once the body has accepted every advertised byte, completion owns its own
 /// bounded task. The body consumer is allowed to stop polling immediately
 /// after the final chunk; dropping that consumer must not discard an exact
 /// EOF token or cancel it halfway through the actor/registry projection.
@@ -344,9 +344,313 @@ pub(super) type StreamedResponseCompletion = (
 
 pub(super) const LOCAL_MEDIA_BODY_CHANNEL_CAPACITY: usize = 1;
 
-pub(super) struct DrivenLocalChunk {
-    pub(super) bytes: Bytes,
-    pub(super) accepted: tokio::sync::oneshot::Sender<()>,
+// One 128 KiB storage backing already supplies 32 ready proof frames. Stop
+// gathering at this retained-backing cap, even for a short read. This avoids
+// starting another storage operation while downstream delay could pollute
+// its elapsed-time sample. ReaderStream's reservation and tokio's blocking
+// buffer still keep retained payload comfortably below the 1 MiB ceiling.
+const LOCAL_MEDIA_BATCH_READS: usize = 1;
+const _: () = assert!((LOCAL_MEDIA_BATCH_READS + 2) * MEDIA_BODY_READ_BUFFER <= 1024 * 1024);
+
+struct ResidentRead {
+    bytes: Bytes,
+    elapsed: Duration,
+}
+
+#[derive(Default)]
+struct AcceptedPrefix {
+    pieces: Vec<(usize, tokio::time::Instant)>,
+}
+
+pub(super) struct ResidentBatch {
+    reads: std::collections::VecDeque<ResidentRead>,
+    accepted: Arc<std::sync::Mutex<AcceptedPrefix>>,
+    changed: Arc<tokio::sync::Notify>,
+    progress_started: tokio::time::Instant,
+}
+
+#[cfg(test)]
+pub(super) fn test_resident_chunk(bytes: Bytes) -> (ResidentBatch, impl Fn() -> usize) {
+    let accepted = Arc::new(std::sync::Mutex::new(AcceptedPrefix::default()));
+    let probe = Arc::clone(&accepted);
+    (
+        ResidentBatch {
+            reads: [ResidentRead {
+                bytes,
+                elapsed: Duration::ZERO,
+            }]
+            .into(),
+            accepted,
+            changed: Arc::new(tokio::sync::Notify::new()),
+            progress_started: tokio::time::Instant::now(),
+        },
+        move || {
+            probe
+                .lock()
+                .expect("acceptance probe lock")
+                .pieces
+                .iter()
+                .map(|(bytes, _)| bytes)
+                .sum()
+        },
+    )
+}
+
+pub(super) enum LocalDeliveryEvent {
+    Accepted(u64),
+    StorageRead(u64, Duration),
+    Failed(std::io::Error, &'static str),
+    Finished,
+}
+
+/// One owner drives both local HLS paths. A batch is a bounded set of ready
+/// storage reads, not an acknowledgement: the body records each small frame
+/// independently, and this owner reconciles that ordered prefix on every exit.
+pub(super) async fn pump_local_media<S, D, C>(
+    mut reader: S,
+    sender: tokio::sync::mpsc::Sender<ResidentBatch>,
+    terminal: StreamedBodyTerminal,
+    body_deadline: tokio::time::Instant,
+    len: u64,
+    mut delivery: D,
+    complete: C,
+) where
+    S: futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
+    D: FnMut(LocalDeliveryEvent) -> bool,
+    C: FnOnce(),
+{
+    use std::task::Poll;
+    let mut delivered = 0_u64;
+    let mut last_progress = tokio::time::Instant::now();
+    let mut complete = Some(complete);
+    let fail = |delivery: &mut D, error: std::io::Error, class| {
+        terminal.fail(error.kind(), error.to_string());
+        delivery(LocalDeliveryEvent::Failed(error, class));
+    };
+    loop {
+        let mut reads = std::collections::VecDeque::new();
+        let mut source_end = None;
+        let mut read_started = Instant::now();
+        let gathering = futures_util::future::poll_fn(|cx| {
+            loop {
+                match std::pin::Pin::new(&mut reader).poll_next(cx) {
+                    Poll::Ready(Some(Ok(bytes))) => {
+                        if bytes.is_empty() {
+                            continue;
+                        }
+                        // Production readers reserve exactly this capacity.
+                        // Reject an oversized read rather than silently
+                        // weakening the retained-data bound for another caller.
+                        if bytes.len() > MEDIA_BODY_READ_BUFFER {
+                            source_end =
+                                Some(Some(std::io::Error::other("oversized media storage read")));
+                            return Poll::Ready(());
+                        }
+                        reads.push_back(ResidentRead {
+                            bytes,
+                            elapsed: read_started.elapsed(),
+                        });
+                        read_started = Instant::now();
+                        if reads.len() == LOCAL_MEDIA_BATCH_READS {
+                            return Poll::Ready(());
+                        }
+                    }
+                    Poll::Ready(item) => {
+                        source_end =
+                            Some(item.map(|result| result.expect_err("data handled above")));
+                        return Poll::Ready(());
+                    }
+                    Poll::Pending if reads.is_empty() => return Poll::Pending,
+                    Poll::Pending => return Poll::Ready(()),
+                }
+            }
+        });
+        let progress_deadline = (last_progress + MEDIA_BODY_NO_PROGRESS_TIMEOUT).min(body_deadline);
+        tokio::select! {
+            biased;
+            () = sender.closed() => return,
+            () = terminal.signal.cancelled() => return,
+            _ = tokio::time::sleep_until(body_deadline) => {
+                fail(&mut delivery, std::io::Error::new(std::io::ErrorKind::TimedOut,
+                    "media response exceeded its maximum admitted body lifetime"), "body_lifetime_exceeded");
+                return;
+            }
+            _ = tokio::time::sleep_until(progress_deadline) => {
+                fail(&mut delivery, std::io::Error::new(std::io::ErrorKind::TimedOut,
+                    "media response made no storage progress before its body deadline"), "storage_no_progress");
+                return;
+            }
+            () = gathering => {}
+        }
+        if !reads.is_empty() {
+            let provenance: Vec<_> = reads
+                .iter()
+                .map(|read| (read.bytes.len(), read.elapsed))
+                .collect();
+            let total: usize = provenance.iter().map(|(bytes, _)| bytes).sum();
+            let accepted = Arc::new(std::sync::Mutex::new(AcceptedPrefix::default()));
+            let changed = Arc::new(tokio::sync::Notify::new());
+            let batch = ResidentBatch {
+                reads,
+                accepted: Arc::clone(&accepted),
+                changed: Arc::clone(&changed),
+                progress_started: last_progress,
+            };
+            // No other batch is outstanding: the owner waits for this exact
+            // prefix before reading again, so channel(1) cannot double payload.
+            if sender.send(batch).await.is_err() {
+                return;
+            }
+            let mut reconciled = 0;
+            let mut batch_delivered = 0;
+            let mut read_index = 0;
+            let mut read_delivered = 0;
+            loop {
+                let downstream_deadline;
+                {
+                    // Holding the prefix lock through deadline selection makes an
+                    // acceptance race settle before failure; body polls use the
+                    // same lock for their fence and prefix recording.
+                    let prefix = accepted
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    for &(bytes, at) in &prefix.pieces[reconciled..] {
+                        delivery(LocalDeliveryEvent::Accepted(bytes as u64));
+                        if read_delivered == 0 {
+                            let (bytes, elapsed) = provenance[read_index];
+                            delivery(LocalDeliveryEvent::StorageRead(bytes as u64, elapsed));
+                        }
+                        delivered += bytes as u64;
+                        batch_delivered += bytes;
+                        read_delivered += bytes;
+                        last_progress = at;
+                        if read_delivered == provenance[read_index].0 {
+                            read_index += 1;
+                            read_delivered = 0;
+                        }
+                    }
+                    reconciled = prefix.pieces.len();
+                    if delivered == len {
+                        if delivery(LocalDeliveryEvent::Finished) {
+                            complete.take().expect("one completion")();
+                        }
+                        return;
+                    }
+                    if sender.is_closed() {
+                        return;
+                    }
+                    if terminal.signal.is_cancelled() {
+                        return;
+                    }
+                    if tokio::time::Instant::now() >= body_deadline {
+                        fail(
+                            &mut delivery,
+                            std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "media response exceeded its maximum admitted body lifetime",
+                            ),
+                            "body_lifetime_exceeded",
+                        );
+                        return;
+                    }
+                    downstream_deadline =
+                        (last_progress + MEDIA_BODY_NO_PROGRESS_TIMEOUT).min(body_deadline);
+                    if tokio::time::Instant::now() >= downstream_deadline {
+                        fail(&mut delivery, std::io::Error::new(std::io::ErrorKind::TimedOut,
+                        "media response made no downstream progress before its body deadline"), "downstream_no_progress");
+                        return;
+                    }
+                    if batch_delivered == total {
+                        break;
+                    }
+                    // The vector is bounded by one read / 4 KiB (short reads
+                    // add at most one entry each), never a channel of per-frame acks.
+                }
+                tokio::select! {
+                    biased;
+                    () = changed.notified() => {}
+                    () = sender.closed() => {}
+                    () = terminal.signal.cancelled() => {}
+                    _ = tokio::time::sleep_until(downstream_deadline) => {}
+                }
+            }
+        }
+        if let Some(end) = source_end {
+            let error =
+                end.unwrap_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::UnexpectedEof,
+                format!("media response reached EOF after {delivered} of {len} advertised bytes"))
+                });
+            fail(&mut delivery, error, "storage_error");
+            return;
+        }
+    }
+}
+
+pub(super) fn resident_local_body(
+    receiver: tokio::sync::mpsc::Receiver<ResidentBatch>,
+    terminal: StreamedBodyTerminal,
+    body_deadline: tokio::time::Instant,
+) -> Body {
+    Body::from_stream(futures_util::stream::unfold(
+        (receiver, None::<ResidentBatch>, terminal, false),
+        move |(mut receiver, mut batch, terminal, finished)| async move {
+            if finished {
+                return None;
+            }
+            if batch.as_ref().is_none_or(|batch| batch.reads.is_empty()) {
+                batch = tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep_until(body_deadline) => None,
+                    () = terminal.signal.cancelled() => None,
+                    batch = receiver.recv() => batch,
+                };
+            }
+            if let Some(current) = &mut batch {
+                let mut prefix = current
+                    .accepted
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let last_progress = prefix
+                    .pieces
+                    .last()
+                    .map_or(current.progress_started, |(_, at)| *at);
+                if tokio::time::Instant::now() >= last_progress + MEDIA_BODY_NO_PROGRESS_TIMEOUT {
+                    return Some((
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "media response made no downstream progress before its body deadline",
+                        )),
+                        (receiver, None, terminal, true),
+                    ));
+                }
+                if tokio::time::Instant::now() < body_deadline && !terminal.signal.is_cancelled() {
+                    let read = current.reads.front_mut().expect("resident data");
+                    let piece = read
+                        .bytes
+                        .split_to(read.bytes.len().min(MEDIA_BODY_ACK_GRANULARITY));
+                    prefix
+                        .pieces
+                        .push((piece.len(), tokio::time::Instant::now()));
+                    if read.bytes.is_empty() {
+                        current.reads.pop_front();
+                    }
+                    current.changed.notify_one();
+                    drop(prefix);
+                    return Some((Ok(piece), (receiver, batch, terminal, false)));
+                }
+            }
+            let error = terminal.take_error().or_else(|| {
+                (tokio::time::Instant::now() >= body_deadline).then(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "media response exceeded its maximum admitted body lifetime",
+                    )
+                })
+            });
+            error.map(|error| (Err(error), (receiver, batch, terminal, true)))
+        },
+    ))
 }
 
 #[derive(Clone)]
@@ -382,77 +686,6 @@ impl StreamedBodyTerminal {
             .take()
             .map(|(kind, message)| std::io::Error::new(kind, message))
     }
-}
-
-/// Build the public side of a driven local body. The producer task owns the
-/// file, delivery tracker, authorization, and completion permit, so socket
-/// backpressure cannot prevent either body deadline from advancing or retain
-/// those resources after the receiver disappears.
-pub(super) fn driven_local_body(
-    receiver: tokio::sync::mpsc::Receiver<DrivenLocalChunk>,
-    terminal: StreamedBodyTerminal,
-    body_deadline: tokio::time::Instant,
-) -> Body {
-    let stream = futures_util::stream::unfold(
-        (receiver, terminal, body_deadline, false),
-        |(mut receiver, terminal, body_deadline, finished)| async move {
-            if finished {
-                return None;
-            }
-            if let Some(error) = terminal.take_error() {
-                return Some((Err(error), (receiver, terminal, body_deadline, true)));
-            }
-            if tokio::time::Instant::now() >= body_deadline {
-                return Some((
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "media response exceeded its maximum admitted body lifetime",
-                    )),
-                    (receiver, terminal, body_deadline, true),
-                ));
-            }
-            let chunk = tokio::select! {
-                biased;
-                _ = tokio::time::sleep_until(body_deadline) => {
-                    return Some((
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "media response exceeded its maximum admitted body lifetime",
-                        )),
-                        (receiver, terminal, body_deadline, true),
-                    ));
-                }
-                () = terminal.signal.cancelled() => {
-                    let error = terminal
-                        .take_error()
-                        .unwrap_or_else(|| std::io::Error::other("media response producer failed"));
-                    return Some((Err(error), (receiver, terminal, body_deadline, true)));
-                }
-                chunk = receiver.recv() => chunk,
-            };
-            let Some(chunk) = chunk else {
-                if let Some(error) = terminal.take_error() {
-                    return Some((Err(error), (receiver, terminal, body_deadline, true)));
-                }
-                return None;
-            };
-            // Recheck both fences after wakeup and before acknowledging this
-            // exact chunk. If timeout/failure won concurrently with recv, the
-            // ack sender drops, so the pump cannot count or commit the bytes.
-            if tokio::time::Instant::now() >= body_deadline || terminal.signal.is_cancelled() {
-                let error = terminal.take_error().unwrap_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "media response exceeded its maximum admitted body lifetime",
-                    )
-                });
-                return Some((Err(error), (receiver, terminal, body_deadline, true)));
-            }
-            let _ = chunk.accepted.send(());
-            Some((Ok(chunk.bytes), (receiver, terminal, body_deadline, false)))
-        },
-    );
-    Body::from_stream(stream)
 }
 
 pub(super) fn segment_publication_kind(
@@ -605,4 +838,262 @@ pub(super) fn video_frame_rate(probe_json: &str) -> Option<f64> {
     ["avg_frame_rate", "r_frame_rate"]
         .into_iter()
         .find_map(|key| stream.get(key).and_then(|v| v.as_str()).and_then(fraction))
+}
+
+#[cfg(test)]
+mod batching_tests {
+    use super::*;
+    use http_body_util::BodyExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct Receipt {
+        accepted: Vec<u64>,
+        reads: Vec<(u64, Duration)>,
+        failures: Vec<(std::io::ErrorKind, &'static str)>,
+        finished: usize,
+    }
+
+    fn fixture<S>(
+        reader: S,
+        advertised: u64,
+        lifetime: Duration,
+    ) -> (
+        Body,
+        tokio::task::JoinHandle<()>,
+        Arc<std::sync::Mutex<Receipt>>,
+        Arc<AtomicUsize>,
+    )
+    where
+        S: futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Unpin + Send + 'static,
+    {
+        let (sender, receiver) = tokio::sync::mpsc::channel(LOCAL_MEDIA_BODY_CHANNEL_CAPACITY);
+        let terminal = StreamedBodyTerminal::new();
+        let deadline = tokio::time::Instant::now() + lifetime;
+        let receipt = Arc::new(std::sync::Mutex::new(Receipt::default()));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let notes = Arc::clone(&receipt);
+        let completions = Arc::clone(&completed);
+        let pump = tokio::spawn(pump_local_media(
+            reader,
+            sender,
+            terminal.clone(),
+            deadline,
+            advertised,
+            move |event| {
+                let mut notes = notes.lock().expect("receipt lock");
+                match event {
+                    LocalDeliveryEvent::Accepted(bytes) => notes.accepted.push(bytes),
+                    LocalDeliveryEvent::StorageRead(bytes, elapsed) => {
+                        notes.reads.push((bytes, elapsed))
+                    }
+                    LocalDeliveryEvent::Failed(error, class) => {
+                        notes.failures.push((error.kind(), class))
+                    }
+                    LocalDeliveryEvent::Finished => notes.finished += 1,
+                }
+                true
+            },
+            move || {
+                completions.fetch_add(1, Ordering::SeqCst);
+            },
+        ));
+        (
+            resident_local_body(receiver, terminal, deadline),
+            pump,
+            receipt,
+            completed,
+        )
+    }
+
+    fn cursor(
+        bytes: usize,
+    ) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Unpin {
+        tokio_util::io::ReaderStream::with_capacity(
+            std::io::Cursor::new(vec![7; bytes]),
+            MEDIA_BODY_READ_BUFFER,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_batch_counts_only_its_accepted_prefix() {
+        let (mut body, pump, receipt, completed) =
+            fixture(cursor(512 * 1024), 512 * 1024, Duration::from_secs(300));
+        for _ in 0..3 {
+            assert_eq!(
+                body.frame()
+                    .await
+                    .expect("body frame value")
+                    .expect("body frame value")
+                    .into_data()
+                    .expect("body frame value")
+                    .len(),
+                4096
+            );
+        }
+        drop(body);
+        pump.await.expect("pump task");
+        let notes = receipt.lock().expect("receipt lock");
+        assert_eq!(notes.accepted, vec![4096; 3]);
+        assert_eq!(notes.reads.len(), 1);
+        assert_eq!(notes.reads[0].0, 128 * 1024);
+        assert_eq!(completed.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn the_final_batch_completes_exactly_once() {
+        let bytes = 3 * 1024 * 1024;
+        let (mut body, pump, receipt, completed) =
+            fixture(cursor(bytes), bytes as u64, Duration::from_secs(300));
+        let mut taken = 0;
+        while taken < bytes {
+            let frame = body
+                .frame()
+                .await
+                .expect("body frame value")
+                .expect("body frame value")
+                .into_data()
+                .expect("body frame value");
+            assert!(frame.len() <= 4096);
+            taken += frame.len();
+        }
+        // No extra poll at EOF and no consumer remains to keep commit alive.
+        drop(body);
+        pump.await.expect("pump task");
+        let notes = receipt.lock().expect("receipt lock");
+        assert_eq!(notes.accepted.iter().sum::<u64>(), bytes as u64);
+        assert_eq!(notes.reads.len(), 24);
+        assert_eq!(notes.finished, 1);
+        assert_eq!(completed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_short_source_is_still_unexpected_eof() {
+        let bytes = 5 * 1024 * 1024 / 2;
+        let (mut body, pump, receipt, completed) =
+            fixture(cursor(bytes), 3 * 1024 * 1024, Duration::from_secs(300));
+        let mut taken = 0;
+        while let Some(frame) = body.frame().await {
+            match frame {
+                Ok(frame) => taken += frame.into_data().expect("body frame value").len(),
+                Err(_) => break,
+            }
+        }
+        pump.await.expect("pump task");
+        let notes = receipt.lock().expect("receipt lock");
+        assert_eq!(taken, bytes);
+        assert_eq!(notes.accepted.iter().sum::<u64>(), bytes as u64);
+        assert_eq!(
+            notes.failures,
+            vec![(std::io::ErrorKind::UnexpectedEof, "storage_error")]
+        );
+        assert_eq!(completed.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_receiver_ends_the_pump_without_a_failure() {
+        let (mut body, pump, receipt, _) =
+            fixture(cursor(1024 * 1024), 1024 * 1024, Duration::from_secs(300));
+        let frame = body
+            .frame()
+            .await
+            .expect("body frame value")
+            .expect("body frame value")
+            .into_data()
+            .expect("body frame value");
+        // Simulate a socket retaining a partially written frame. Neither
+        // keeping it nor retrying its suffix polls/accepts another body frame.
+        let suffix = frame.slice(100..);
+        drop(body);
+        pump.await.expect("pump task");
+        assert_eq!(suffix.len(), 3996);
+        let notes = receipt.lock().expect("receipt lock");
+        assert_eq!(notes.accepted, vec![4096]);
+        assert!(notes.failures.is_empty());
+        assert_eq!(notes.finished, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_downstream_deadline_still_fires_across_a_batch() {
+        let (mut body, pump, receipt, _) =
+            fixture(cursor(128 * 1024), 128 * 1024, Duration::from_secs(300));
+        body.frame()
+            .await
+            .expect("body frame value")
+            .expect("body frame value");
+        tokio::time::advance(Duration::from_secs(30)).await;
+        pump.await.expect("pump task");
+        assert!(body.frame().await.expect("body frame value").is_err());
+        {
+            let notes = receipt.lock().expect("receipt lock");
+            assert_eq!(notes.accepted, vec![4096]);
+            assert_eq!(notes.failures[0].1, "downstream_no_progress");
+        }
+        let (mut body, pump, receipt, _) = fixture(
+            cursor(128 * 1024),
+            128 * 1024,
+            MAX_ADMITTED_MEDIA_BODY_LIFETIME,
+        );
+        body.frame()
+            .await
+            .expect("body frame value")
+            .expect("body frame value");
+        for _ in 0..10 {
+            tokio::time::advance(Duration::from_secs(29)).await;
+            body.frame()
+                .await
+                .expect("body frame value")
+                .expect("body frame value");
+        }
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert!(body.frame().await.expect("body frame value").is_err());
+        pump.await.expect("pump task");
+        let notes = receipt.lock().expect("receipt lock");
+        assert_eq!(notes.accepted, vec![4096; 11]);
+        assert_eq!(notes.failures[0].1, "body_lifetime_exceeded");
+    }
+
+    #[tokio::test]
+    async fn a_batch_never_waits_for_more_bytes_than_the_reader_has() {
+        use std::task::Poll;
+        let mut supplied = false;
+        let reader = futures_util::stream::poll_fn(move |_cx| {
+            if supplied {
+                Poll::Pending
+            } else {
+                supplied = true;
+                Poll::Ready(Some(Ok(Bytes::from(vec![1; 100 * 1024]))))
+            }
+        });
+        let (mut body, pump, receipt, _) = fixture(reader, 200 * 1024, Duration::from_secs(300));
+        tokio::task::yield_now().await;
+        // now_or_never polls once: no producer yield is allowed between the
+        // resident frames, and a real Pending starts only after the prefix.
+        use futures_util::FutureExt;
+        for _ in 0..25 {
+            assert_eq!(
+                body.frame()
+                    .now_or_never()
+                    .expect("body frame value")
+                    .expect("body frame value")
+                    .expect("body frame value")
+                    .into_data()
+                    .expect("body frame value")
+                    .len(),
+                4096
+            );
+        }
+        assert!(body.frame().now_or_never().is_none());
+        drop(body);
+        pump.await.expect("pump task");
+        assert_eq!(
+            receipt
+                .lock()
+                .expect("receipt lock")
+                .accepted
+                .iter()
+                .sum::<u64>(),
+            100 * 1024
+        );
+    }
 }
