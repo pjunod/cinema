@@ -2356,7 +2356,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # gauge reset. a_timed_out_caller_leaves_one_probe_and_no_duplicate proves
 # released completion empties the map, restores permits and reuses the cache.
 # This observation owner creates no producer/process/recovery authority.
-expected_occurrences = 681
+# 680 -> 683 with Safari seek preparation: the background fragment consumer
+# dispatches a finite pass on each wake, coalesced by JobManager's independent
+# analysis and artifact atomic guards; the pass retains its Arc owner and uses
+# durable Store claim fences. Its nested analysis task is awaited on every
+# return path. The third spawn is the wake regression's consumer, aborted and
+# awaited before the fixture returns. None starts a producer or process.
+# Combined effort/main census: retain C-05's one owner and seek's three.
+expected_occurrences = 684
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3480,7 +3487,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # run_probe's sleep warns after five seconds and resets hourly while the same
 # metadata future remains pending. It is owned and dropped by that probe on
 # completion/runtime teardown, and imposes no syscall or worker deadline.
-expected_occurrences = 1116
+# 1114 -> 1116 with Safari seek preparation: the wake regression owns a
+# two-second timeout and a 20-ms polling sleep; both end with the fixture.
+# The production fragment consumer moves its existing pacing sleep into a
+# select with the wake receiver, so that timer is not a new constructor.
+# Combined effort/main census: retain C-05's two and seek's two timers.
+expected_occurrences = 1118
 
 [[module_structures]]
 id = "bare-time-constructor"

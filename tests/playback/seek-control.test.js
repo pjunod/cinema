@@ -99,6 +99,7 @@ function localSeekHarness({buffered, published, vod=false, seekable, copyHls=fal
     "function requestPlaybackMediaChange(p,change){changes.push({target:p.controlSeek.targetMs,change});}",
     "function play(){throw new Error('multipart route not expected');}",
     "function playbackSurfaceStep(){}function playbackSurfaceGeneration(){return 1;}",
+    "function recordPlaybackSeekRoute(){}",
     "function playbackOwnsAttachedMedia(){return true;}function samplePlaybackPresentationClock(){return 0;}",
     "function samplePreparedSwitchFrames(){}function streamHasVideo(){return true;}",
     "function completeHlsStartup(){}function clearStall(){}function finishStallRecovery(){}",

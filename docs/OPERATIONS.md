@@ -3298,6 +3298,13 @@ truth are unchanged.
 
 ## Reading the Server card (Settings)
 
+For the exact FFmpeg identity used in fragment-index cache keys, run
+`plurxd media-runtime-identity` on the same image as the server. Its JSON
+includes the application SHA when stamped, architecture, actual engine digest,
+current-engine check, and hashes of the packaged runtime manifest when present.
+An unavailable image digest or package manifest is `null`; a version string
+alone does not establish compatible index bytes.
+
 The Server card is the health-at-a-glance panel:
 
 - **ffmpeg** — the version string if it ran, or a red "not found" if the binary

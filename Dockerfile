@@ -44,6 +44,8 @@ FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2
 ARG TARGETARCH
 ARG DOVI_TOOL_VERSION=2.3.3
 ARG MKVTOOLNIX_VERSION=74.0.0-1
+ARG DEBIAN_SNAPSHOT=20260928T000000Z
+ARG JELLYFIN_FFMPEG_VERSION=8.1.3-1-bookworm
 # plurxd shells out to ffmpeg/ffprobe for scanning, remux, and transcode; TLS
 # roots are for TMDB/AniList.
 #
@@ -65,35 +67,43 @@ ARG MKVTOOLNIX_VERSION=74.0.0-1
 # overflows partway through with an error naming the apt cache rather than the
 # real cause. Cleaning between stages keeps the peak to one stack at a time.
 #
-# The jellyfin-ffmpeg install below tracks the current build in major 8, which
+# The jellyfin-ffmpeg install below pins a reviewed build in major 8, which
 # adds the AC-4 decoder required by clear ATSC 3.0 broadcasts. It is then
 # ASSERTED to carry both that decoder and `dovi_rpu`, the
 # bitstream filter (ffmpeg 7.1+) that removes a Dolby Vision configuration
 # from a remux. That is a capability, not a nicety: without it every DV film
 # is re-encoded for browsers that cannot decode Dolby Vision (Chrome cannot;
-# Safari can), so a 4K disc remux quietly plays at the automatic rung. Because
-# the install is unpinned, WHICH ffmpeg lands here depends on the day the image
-# was built, and a stale build loses the capability with no visible symptom.
+# Safari can), so a 4K disc remux quietly plays at the automatic rung.
 # The assertion turns that into a failed build instead of a mystery on
-# somebody's television.
-RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' \
+# somebody's television. Debian packages come from one immutable snapshot;
+# Jellyfin's separately published deb is verified against its repository's
+# SHA-256 metadata for each architecture before apt resolves its dependencies.
+RUN sed -i \
+        -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/'"${DEBIAN_SNAPSHOT}"'/|' \
+        -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/'"${DEBIAN_SNAPSHOT}"'/|' \
+        -e 's/Components: main/Components: main non-free non-free-firmware/' \
         /etc/apt/sources.list.d/debian.sources \
+    && printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99plurx-snapshot \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        ffmpeg ca-certificates mesa-va-drivers curl gnupg \
+        ffmpeg ca-certificates mesa-va-drivers curl \
         "mkvtoolnix=${MKVTOOLNIX_VERSION}" \
     && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
         apt-get install -y --no-install-recommends \
             intel-media-va-driver-non-free i965-va-driver; \
     fi \
     && apt-get clean \
-    && install -d /etc/apt/keyrings \
-    && curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key \
-        | gpg --dearmor -o /etc/apt/keyrings/jellyfin.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/jellyfin.gpg] https://repo.jellyfin.org/debian bookworm main" \
-        > /etc/apt/sources.list.d/jellyfin.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends jellyfin-ffmpeg8 \
+    && case "$(dpkg --print-architecture)" in \
+        amd64) jellyfin_sha=4829b34df16843ecf1aca8b1a600874b5c767396e1d1990c889c761fd143d928 ;; \
+        arm64) jellyfin_sha=3497002f1b7a7664875dd0aa71d1916a74cbee6598d8b3b413b83732cd1d8794 ;; \
+        *) echo 'FATAL: jellyfin-ffmpeg8 has no pinned artifact for this architecture' >&2; exit 1 ;; \
+       esac \
+    && jellyfin_deb="jellyfin-ffmpeg8_${JELLYFIN_FFMPEG_VERSION}_$(dpkg --print-architecture).deb" \
+    && curl -fsSL "https://repo.jellyfin.org/debian/pool/main/j/jellyfin-ffmpeg/${jellyfin_deb}" \
+        -o "/tmp/${jellyfin_deb}" \
+    && echo "${jellyfin_sha}  /tmp/${jellyfin_deb}" | sha256sum -c - \
+    && apt-get install -y --no-install-recommends "/tmp/${jellyfin_deb}" \
+    && rm -f "/tmp/${jellyfin_deb}" \
     && apt-get clean \
     && ( /usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -decoders 2>&1 \
         | grep -Eq '^[[:space:]]*A[^[:space:]]*[[:space:]]+ac4[[:space:]]' \
@@ -104,7 +114,7 @@ RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' \
       || ( echo "FATAL: this jellyfin-ffmpeg8 has no dovi_rpu bitstream filter." >&2; \
            echo "Got: $(/usr/lib/jellyfin-ffmpeg/ffmpeg -version 2>&1 | head -1)" >&2; \
            echo "dovi_rpu needs ffmpeg 7.1+; see the note above this RUN." >&2; \
-           echo "Rebuild fetching current packages: docker build --no-cache --pull" >&2; \
+           echo "Review and pin a new media runtime artifact before rebuilding." >&2; \
            exit 1 ) ) \
     && ( /usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -h filter=tonemapx 2>&1 | grep -q '^[[:space:]]*apply_dovi[[:space:]]' \
       || ( echo "FATAL: this jellyfin-ffmpeg8 has no tonemapx apply_dovi renderer." >&2; \
@@ -130,8 +140,11 @@ RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' \
     && rm -f "/tmp/${dovi_archive}" \
     && dovi_tool --version | grep -F "${DOVI_TOOL_VERSION}" \
     && mkvmerge --version | grep -F "mkvmerge v74.0.0" \
-    && apt-get purge -y curl gnupg && apt-get autoremove -y \
+    && apt-get purge -y curl && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /usr/share/doc/plurx \
+    && dpkg-query -W -f='${Package}=${Version}\n' | LC_ALL=C sort \
+        > /usr/share/doc/plurx/media-runtime-packages.txt \
     && groupadd -r plurx \
     && useradd -r -g plurx -d /var/lib/plurx plurx \
     && mkdir -p /var/lib/plurx \
@@ -144,6 +157,8 @@ RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' \
 # runtime assertions could report a result.
 FROM runtime-assets AS runtime
 ARG PLURX_BUILD_SHA=""
+ARG PLURX_MEDIA_RUNTIME_DIGEST=""
+ENV PLURX_MEDIA_RUNTIME_DIGEST=${PLURX_MEDIA_RUNTIME_DIGEST}
 # The fleet rollout inspects this label on the pulled image ID before it trusts
 # checkout-owned deployment policy. Redeclare the build arg in this final stage:
 # Docker build args are stage-scoped, and a label inherited only by the build

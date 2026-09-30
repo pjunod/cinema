@@ -114,6 +114,13 @@ class ReleasePublicationContractCase(unittest.TestCase):
         self.assertIn("plurx-cluster-check", image)
         self.assertIn("build-identity", image)
         self.assertIn("GLIBC_$max_glibc; Bookworm provides 2.36", workflow)
+        self.assertIn("target: runtime-assets", image)
+        self.assertIn("REGISTRY_RUNTIME_IMAGE@$RUNTIME_DIGEST", image)
+        self.assertIn("--runtime-image", image)
+        self.assertLess(
+            image.index("Publish the reviewed platform runtime"),
+            image.index("Build and push the untagged platform manifest"),
+        )
 
     def test_aliases_wait_for_both_smoked_platform_digests(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -203,6 +210,27 @@ class ReleasePublicationContractCase(unittest.TestCase):
         self.assertNotIn("FROM rust:", generated)
         self.assertNotIn("cargo build", generated)
         self.assertNotIn("COPY --from=build", generated)
+
+    def test_digest_bound_release_omits_mutable_runtime_install(self):
+        source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        runtime = "192.168.4.7:3000/noirr/plurx-media-runtime@sha256:" + "a" * 64
+        generated = render(source, runtime)
+
+        self.assertIn(f"FROM {runtime} AS runtime-assets", generated)
+        self.assertIn("ENV PLURX_MEDIA_RUNTIME_DIGEST=${PLURX_MEDIA_RUNTIME_DIGEST}", generated)
+        self.assertNotIn("apt-get update", generated)
+        self.assertNotIn("repo.jellyfin.org", generated)
+        self.assertIn(
+            "COPY --chmod=0755 release-bin/plurxd /usr/local/bin/plurxd",
+            generated,
+        )
+        with self.assertRaisesRegex(ValueError, "immutable sha256 digest"):
+            render(source, "192.168.4.7:3000/noirr/plurx-media-runtime:latest")
+
+    def test_release_binds_daemon_identity_to_published_runtime(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("PLURX_MEDIA_RUNTIME_DIGEST=${{ steps.runtime.outputs.digest }}", workflow)
+        self.assertIn(".runtime_image_digest == $runtime_digest", workflow)
 
     def test_generator_refuses_an_unrecognized_runtime_contract(self):
         with self.assertRaisesRegex(ValueError, "one Bookworm runtime stage"):
