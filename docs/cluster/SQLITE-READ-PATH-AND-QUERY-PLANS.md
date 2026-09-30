@@ -634,6 +634,54 @@ refusal, so M5 is deployed last and alone.
 
 ## Execution log
 
+### Bounded query-lab continuation claim — 2026-09-30
+
+gpt-6.1-sol (`agent:/root/p02_effort_sync_sol61`) claims one isolated
+source-only experiment from actual effort `8a7dbf5337584b2bb0556d0b617fef48122def2e`
+on `codex/k05-current-query-lab`, targeting that effort under the coordinator's
+integration override. This continues the existing statistics finding, not
+the original authors' merged implementation or declined policy decisions.
+The public WIP continuation is claimed before workload execution. No
+measurement result is claimed by this entry.
+
+The intended comparison uses the existing generator, SQLite statement
+capture, feature-enabled ignored `k05_capture_hiqlite_statements` (three
+real isolated loopback voters), schema/data rebuild and unchanged
+`query_plans measure`. Only each backend's exact captured `watch_rollups`
+statement/parameters are selected. Four independent owned DB copies
+(two schemas × none/`PRAGMA optimize=0x10002` advice) run in two reverse-order
+blocks: exactly eight reports. Each report emits one cold median of five
+runs and one warm median of five runs, not individual latency samples.
+No benchmark load, rewritten SQL, hint, `ANALYZE` substitute or deployed
+data is permitted. Advice absence and failure are honest outcomes.
+
+The scratch-only C executor links the exact static SQLite archive from the
+same locked Cargo query-tool build, with that crate's shipped matching
+header, no host SQLite substitution. It validates an owned canonical DB
+copy, prints version/source ID/all compile options and stat1/stat4 summaries,
+and bounds progress/busy waits/checkpoint/close. Prepared helper SHA256 is
+`f919ff8b589e0fb09bec235893d0c839c4f3f60a9a74cdebf52373d3450f39e8`;
+full source and final provenance must accompany this PR's final receipt so
+reproduction does not depend on private scratch availability.
+
+Approved ceilings: one new isolated container/volume, CPU2/shares128,
+PID512, build12GiB then runtime8GiB with equal memory-swap (no extra swap),
+Cargo `-j1`/nice19/ionice-c3; source-only archive, no Git/credentials/keys,
+host bind/socket/ports/privilege, P02 resource or global cache. Fetch only
+public locked crates, then disconnect external networking before offline
+build and private three-voter capture. Fresh admission requires available
+RAM24GiB, Docker free48GiB, no unrelated compiler/CI and healthy production
+ready200/restart baseline. Running floors are RAM12GiB/Docker free48GiB;
+owned scratch32GiB is a monitored soft ceiling with disclosed10s overshoot.
+Outer90min includes setup/fetch/build/capture/eight reports; each phase uses
+the smaller of its ceiling and remaining time, with cleanup separately
+bounded5min. One attempt, no automatic retry or cap raise; OOM/timeout/error
+preserves an incomplete receipt and exact owned cleanup evidence.
+
+The laboratory cannot supply the M5 post-merge fleet migration, every-voter
+snapshot/index/statistics or Home/Title route evidence below. It adopts no
+product statistics/pragma policy and does not close K05 or qualify main.
+
 Executing sessions append one row per milestone PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
