@@ -1506,7 +1506,14 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("./.github/actions/playwright", fast_rust)
         self.assertNotIn("uses: ./.github/actions/ffmpeg", fast_rust)
         self.assertIn("uses: ./.github/actions/ffmpeg", unit_rust)
-        self.assertIn('major: "6"', unit_rust)
+        self.assertIn('major: "8"', unit_rust)
+        self.assertIn("binary: /usr/lib/jellyfin-ffmpeg/ffmpeg", unit_rust)
+        # The shipped-runtime qualification uses FFmpeg 8; the independent
+        # main fast lane still retains FFmpeg 6 burst-honoring coverage.
+        self.assertIn(
+            'major: "6"',
+            workflow_job_blocks(".github/workflows/main-fast-lane.yml")["rust_compile"],
+        )
         # Membership alone would stay green with the step moved below the gate
         # it provisions, which is exactly the failure this contract records.
         self.assertLess(
@@ -3421,12 +3428,18 @@ assert.equal(context.ACT_TIMER, null);
                 ):
                     expected = apple
                 elif path == ".github/workflows/ci.yml" and name in {
+                    "check",
                     "cluster_daemon",
                     "coverage",
                 }:
-                    expected = high_cpu_ffmpeg6
-                elif path == ".github/workflows/ci.yml" and name == "web_layout":
-                    expected = ffmpeg6
+                    # The pinned private CI image supplies shipped FFmpeg 8;
+                    # host trust labels remain unchanged, without a FFmpeg-6
+                    # installation requirement on these image-owned jobs.
+                    expected = high_cpu
+                elif path == ".github/workflows/ci.yml" and name in {
+                    "web_layout", "vod_web"
+                }:
+                    expected = general
                 elif path == ".github/workflows/ci.yml" and name == "package_smoke":
                     expected = "    runs-on: ${{ fromJSON(matrix.runs_on) }}"
                 elif path == ".github/workflows/ci.yml" and name == "publish_main":
@@ -3458,8 +3471,6 @@ assert.equal(context.ACT_TIMER, null);
                     "cluster_transport_recovery",
                 }:
                     expected = ci_topology
-                elif path == ".github/workflows/ci.yml" and name == "check":
-                    expected = high_cpu_ffmpeg6
                 elif path == ".github/workflows/ci.yml" and name == "cluster_wal":
                     expected = high_cpu
                 elif (
