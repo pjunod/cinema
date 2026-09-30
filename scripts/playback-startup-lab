@@ -16,6 +16,14 @@ ROOT=args.evidence_dir.resolve()
 MEDIA=args.media_dir.resolve()
 HLS=pathlib.Path(__file__).resolve().parent.parent/'crates/plurxd/src/web/hls.min.js'
 runs={}
+run_locks={}
+runs_lock=threading.Lock()
+def persist(run):
+ # Caller owns the run lock through mutation, snapshot and atomic replacement.
+ target=ROOT/(run['id']+'.json')
+ temporary=target.with_suffix('.json.tmp')
+ temporary.write_text(json.dumps({k:v for k,v in run.items() if k!='start'},indent=2))
+ temporary.replace(target)
 PAGE='''<!doctype html><meta charset="utf-8"><title>Plurx startup transport experiment</title><h1>Generated media startup experiment</h1><p>Generated H264/AAC · 16-second fixed target · completed media only · unqualified harness</p><video muted controls width="480"></video><pre id="status">Starting</pre><script src="/hls.js"></script><script>
 const q=new URLSearchParams(location.search),v=document.querySelector('video'),out=document.querySelector('#status');
 const transport=q.get('transport')||'hlsjs',runway=+(q.get('runway')||32),lead=+(q.get('lead')||7.965),speed=+(q.get('speed')||1.05);
@@ -36,9 +44,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
  def do_POST(self):
   run=runs.get(self.path.split('/')[-1]);length=int(self.headers.get('Content-Length','0'))
   if run is None or length>8192:self.send('{}',status=400);return
-  data=json.loads(self.rfile.read(length));run['client'].append(data)
-  if len(run['client'])>4000:run['client']=run['client'][-4000:]
-  (ROOT/(run['id']+'.json')).write_text(json.dumps({k:v for k,v in run.items() if k!='start'},indent=2))
+  data=json.loads(self.rfile.read(length))
+  with run_locks[run['id']]:
+   run['client'].append(data)
+   if len(run['client'])>4000:run['client']=run['client'][-4000:]
+   persist(run)
   self.send('{}')
  def do_GET(self):
   u=urllib.parse.urlparse(self.path);q=urllib.parse.parse_qs(u.query);p=u.path
@@ -47,7 +57,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
   if p=='/start':
    runway=int(q.get('runway',['32'])[0]);speed=float(q.get('speed',['1.05'])[0]);id=uuid.uuid4().hex
    if runway not in (12,16,24,32,48) or speed not in (.95,1.05,1.2,2):self.send('{}',status=400);return
-   runs[id]={'id':id,'start':time.monotonic(),'runway':runway,'speed':speed,'transport':q.get('transport',[''])[0],'lead':float(q.get('lead',['0'])[0]),'client':[],'reloads':[]}
+   run={'id':id,'start':time.monotonic(),'runway':runway,'speed':speed,'transport':q.get('transport',[''])[0],'lead':float(q.get('lead',['0'])[0]),'client':[],'reloads':[]}
+   with runs_lock:
+    run_locks[id]=threading.Lock()
+    runs[id]=run
    self.send(json.dumps({'id':id}));return
   if p.startswith('/playlist/'):
    id=p.split('/')[-1].removesuffix('.m3u8');run=runs.get(id)
@@ -64,12 +77,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
    text='#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:16\n#EXT-X-MEDIA-SEQUENCE:'+str(first)+'\n#EXT-X-MAP:URI="/media/init.mp4"\n'
    for i in range(first,end):text+='#EXTINF:16.000000,\n/media/seg%05d.m4s\n'%i
    if end==120:text+='#EXT-X-ENDLIST\n'
-   run['reloads'].append({'elapsed_ms':round(elapsed*1000),'first':first,'end':end})
+   with run_locks[id]:
+    run['reloads'].append({'elapsed_ms':round(elapsed*1000),'first':first,'end':end})
+    persist(run)
    self.send(text,'application/vnd.apple.mpegurl');return
   if p.startswith('/media/'):
    file=MEDIA/p.split('/')[-1]
    if not file.is_file():self.send('{}',status=404);return
    self.send(file.read_bytes(),'video/mp4');return
-  if p=='/runs':self.send(json.dumps([{k:v for k,v in run.items() if k not in ('start','client')} for run in runs.values()]));return
+  if p=='/runs':
+   with runs_lock:current=list(runs.values())
+   snapshots=[]
+   for run in current:
+    with run_locks[run['id']]:snapshots.append({k:v for k,v in run.items() if k not in ('start','client')})
+   self.send(json.dumps(snapshots));return
   self.send('{}',status=404)
 http.server.ThreadingHTTPServer(('127.0.0.1',args.port),Handler).serve_forever()

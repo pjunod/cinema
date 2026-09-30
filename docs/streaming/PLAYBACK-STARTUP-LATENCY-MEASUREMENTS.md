@@ -1,6 +1,6 @@
 # Playback startup measurements — separate readiness from continuity
 
-**Status:** conservative implementation selected; final review in progress ·
+**Status:** conservative implementation selected; final review addressed ·
 **Written:** 2026-09-29 EDT · **Source:** diagnostics `b3ca3a0de`; current main `4cb902884` integrated; serving-settings correction in draft PR #627.
 
 Companion to [the build contract](PLAYBACK-STARTUP-LATENCY-BUILD.md) — this
@@ -196,3 +196,14 @@ smaller fixed-target policy qualified, so retain 48 seconds and ship the
 demonstrated settings-read reduction plus phase instrumentation, alongside
 the integrated preparation repair from main. This completes the bounded
 implementation decision; it does not establish a new fleet TTFF guarantee.
+
+## Final implementation review — one finding addressed
+
+The independent reviewer examined the complete diff against main `4cb902884`
+at head `45057c5aa`. No production correctness findings: settings semantics
+and all publication/decoder/attempt/scratch gates remain intact. The review
+found concurrent harness receipt writes could corrupt or lose telemetry.
+Per-run locks now cover mutation, snapshot and persistence; a temporary file
+is atomically replaced, including playlist reload records. A local concurrent
+check retained all 128 unique events plus a reload in valid JSON. Required
+fast-lane validation remains the merge prerequisite; no new TTFF claim.
