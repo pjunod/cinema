@@ -468,8 +468,18 @@ pub(super) async fn pump_local_media<S, D, C>(
         let progress_deadline = (last_progress + MEDIA_BODY_NO_PROGRESS_TIMEOUT).min(body_deadline);
         tokio::select! {
             biased;
-            () = sender.closed() => return,
-            () = terminal.signal.cancelled() => return,
+            () = sender.closed() => {
+                if let Some(class) = terminal.take_body_timeout() {
+                    fail(&mut delivery, local_body_timeout(class), class);
+                }
+                return;
+            },
+            () = terminal.signal.cancelled() => {
+                if let Some(class) = terminal.take_body_timeout() {
+                    fail(&mut delivery, local_body_timeout(class), class);
+                }
+                return;
+            },
             _ = tokio::time::sleep_until(body_deadline) => {
                 fail(&mut delivery, std::io::Error::new(std::io::ErrorKind::TimedOut,
                     "media response exceeded its maximum admitted body lifetime"), "body_lifetime_exceeded");
@@ -499,6 +509,9 @@ pub(super) async fn pump_local_media<S, D, C>(
             // No other batch is outstanding: the owner waits for this exact
             // prefix before reading again, so channel(1) cannot double payload.
             if sender.send(batch).await.is_err() {
+                if let Some(class) = terminal.take_body_timeout() {
+                    fail(&mut delivery, local_body_timeout(class), class);
+                }
                 return;
             }
             let mut reconciled = 0;
@@ -534,6 +547,13 @@ pub(super) async fn pump_local_media<S, D, C>(
                         if delivery(LocalDeliveryEvent::Finished) {
                             complete.take().expect("one completion")();
                         }
+                        return;
+                    }
+                    // The consumer may observe its timeout and drop before
+                    // this owner wakes. Reconcile its prefix first, then emit
+                    // the retained classification before ordinary drop/cancel.
+                    if let Some(class) = terminal.take_body_timeout() {
+                        fail(&mut delivery, local_body_timeout(class), class);
                         return;
                     }
                     if sender.is_closed() {
@@ -615,12 +635,15 @@ pub(super) fn resident_local_body(
                     .pieces
                     .last()
                     .map_or(current.progress_started, |(_, at)| *at);
-                if tokio::time::Instant::now() >= last_progress + MEDIA_BODY_NO_PROGRESS_TIMEOUT {
+                if !terminal.signal.is_cancelled() && tokio::time::Instant::now() >= body_deadline {
+                    let error = terminal.observe_body_timeout("body_lifetime_exceeded");
+                    return Some((Err(error), (receiver, None, terminal, true)));
+                }
+                if !terminal.signal.is_cancelled()
+                    && tokio::time::Instant::now() >= last_progress + MEDIA_BODY_NO_PROGRESS_TIMEOUT
+                {
                     return Some((
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "media response made no downstream progress before its body deadline",
-                        )),
+                        Err(terminal.observe_body_timeout("downstream_no_progress")),
                         (receiver, None, terminal, true),
                     ));
                 }
@@ -641,21 +664,29 @@ pub(super) fn resident_local_body(
                 }
             }
             let error = terminal.take_error().or_else(|| {
-                (tokio::time::Instant::now() >= body_deadline).then(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "media response exceeded its maximum admitted body lifetime",
-                    )
-                })
+                (tokio::time::Instant::now() >= body_deadline)
+                    .then(|| terminal.observe_body_timeout("body_lifetime_exceeded"))
             });
             error.map(|error| (Err(error), (receiver, batch, terminal, true)))
         },
     ))
 }
 
+fn local_body_timeout(class: &'static str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        if class == "body_lifetime_exceeded" {
+            "media response exceeded its maximum admitted body lifetime"
+        } else {
+            "media response made no downstream progress before its body deadline"
+        },
+    )
+}
+
 #[derive(Clone)]
 pub(super) struct StreamedBodyTerminal {
     failure: Arc<std::sync::Mutex<Option<(std::io::ErrorKind, String)>>>,
+    body_timeout: Arc<std::sync::Mutex<Option<&'static str>>>,
     signal: tokio_util::sync::CancellationToken,
 }
 
@@ -663,8 +694,25 @@ impl StreamedBodyTerminal {
     pub(super) fn new() -> Self {
         Self {
             failure: Arc::new(std::sync::Mutex::new(None)),
+            body_timeout: Arc::new(std::sync::Mutex::new(None)),
             signal: tokio_util::sync::CancellationToken::new(),
         }
+    }
+
+    fn observe_body_timeout(&self, class: &'static str) -> std::io::Error {
+        *self
+            .body_timeout
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(class);
+        self.signal.cancel();
+        local_body_timeout(class)
+    }
+
+    fn take_body_timeout(&self) -> Option<&'static str> {
+        self.body_timeout
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     pub(super) fn fail(&self, kind: std::io::ErrorKind, message: String) {
@@ -1095,5 +1143,85 @@ mod batching_tests {
                 .sum::<u64>(),
             100 * 1024
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_body_first_timeout_survives_drop_before_the_pump_wakes() {
+        use futures_util::FutureExt;
+        for absolute in [false, true] {
+            let lifetime = MAX_ADMITTED_MEDIA_BODY_LIFETIME;
+            let (sender, receiver) = tokio::sync::mpsc::channel(1);
+            let terminal = StreamedBodyTerminal::new();
+            let deadline = tokio::time::Instant::now() + lifetime;
+            let receipt = Arc::new(std::sync::Mutex::new(Receipt::default()));
+            let notes = Arc::clone(&receipt);
+            let completed = Arc::new(AtomicUsize::new(0));
+            let completions = Arc::clone(&completed);
+            let pump = pump_local_media(
+                cursor(128 * 1024),
+                sender,
+                terminal.clone(),
+                deadline,
+                128 * 1024,
+                move |event| {
+                    let mut notes = notes.lock().expect("receipt lock");
+                    match event {
+                        LocalDeliveryEvent::Accepted(bytes) => notes.accepted.push(bytes),
+                        LocalDeliveryEvent::Failed(error, class) => {
+                            notes.failures.push((error.kind(), class))
+                        }
+                        LocalDeliveryEvent::Finished => notes.finished += 1,
+                        LocalDeliveryEvent::StorageRead(..) => {}
+                    }
+                    true
+                },
+                move || {
+                    completions.fetch_add(1, Ordering::SeqCst);
+                },
+            );
+            tokio::pin!(pump);
+            assert!(
+                pump.as_mut().now_or_never().is_none(),
+                "queue one backing, then park the pump"
+            );
+            let mut body = resident_local_body(receiver, terminal, deadline);
+            assert_eq!(
+                body.frame()
+                    .await
+                    .expect("frame")
+                    .expect("data")
+                    .into_data()
+                    .expect("data")
+                    .len(),
+                4096
+            );
+            if absolute {
+                for _ in 0..10 {
+                    tokio::time::advance(Duration::from_secs(29)).await;
+                    body.frame().await.expect("frame").expect("data");
+                }
+                tokio::time::advance(Duration::from_secs(10)).await;
+            } else {
+                tokio::time::advance(MEDIA_BODY_NO_PROGRESS_TIMEOUT).await;
+            }
+            assert!(body.frame().await.expect("timeout frame").is_err());
+            drop(body);
+            pump.await;
+            let notes = receipt.lock().expect("receipt lock");
+            assert_eq!(notes.accepted, vec![4096; if absolute { 11 } else { 1 }]);
+            assert_eq!(
+                notes.failures,
+                [(
+                    std::io::ErrorKind::TimedOut,
+                    if absolute {
+                        "body_lifetime_exceeded"
+                    } else {
+                        "downstream_no_progress"
+                    }
+                )]
+            );
+            assert_eq!(notes.finished, 0);
+            assert_eq!(completed.load(Ordering::SeqCst), 0);
+        }
     }
 }
