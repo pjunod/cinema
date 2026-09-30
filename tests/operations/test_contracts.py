@@ -3247,6 +3247,16 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("run: make release-check", readiness)
         self.assertIn("fetch-depth: 0", readiness)
 
+    def test_effort_web_provisions_pinned_browser_before_contracts(self):
+        web = workflow_job_blocks(".github/workflows/effort-ci.yml")["web_static"]
+        provision = "uses: ./.github/actions/playwright"
+        check = "run: make web-check"
+        self.assertIn(provision, web)
+        self.assertLess(web.index(provision), web.index(check))
+        self.assertRegex(web, r'uses: \./\.github/actions/playwright\n\s+with:\n\s+version: "1\.62\.0"')
+        self.assertIn("path: ~/.cache/ms-playwright", web)
+        self.assertIn("key: playwright-${{ runner.os }}-1.62.0", web)
+
     def test_preflight_budgets_allow_full_history_and_contracts(self):
         for workflow in ("ci", "effort-ci", "main-fast-lane"):
             with self.subTest(workflow=workflow):
