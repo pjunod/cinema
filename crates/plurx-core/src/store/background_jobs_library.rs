@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::background_jobs::{
-    decode, encode, enqueue_body, EnqueueJob, EnqueueOutcome, JobPayload, JobRequest, JobToken,
-    QueueSql, ENQUEUE_SQL,
+    decode, encode, enqueue_body, EnqueueJob, EnqueueOutcome, JobPayload, JobRequest, JobState,
+    JobToken, QueueSql, ENQUEUE_SQL,
 };
 use crate::cluster::coordination::Lease;
 use crate::domain::ItemKind;
@@ -89,6 +89,8 @@ pub struct LibraryWorkRecord {
     pub request_id: String,
     pub library_id: i64,
     pub job_id: String,
+    pub job_state: Option<JobState>,
+    pub job_lease_expires_ms: Option<i64>,
     pub input: LibraryWorkInput,
     pub state: String,
     pub result: Option<LibraryWorkResult>,
@@ -201,11 +203,13 @@ pub(super) async fn list<T: QueueSql>(
     }
     store.queue_sql(r#"
 SELECT json_object('request_id', request.request_id, 'library_id', request.library_id,
-    'job_id', request.job_id, 'input', json(request.input_json), 'state', waiter.state,
+    'job_id', request.job_id, 'job_state', job.state, 'job_lease_expires_ms', job.lease_expires_ms,
+    'input', json(request.input_json), 'state', waiter.state,
     'result', json(request.result_json), 'error_code', waiter.last_error_code,
     'created_at_ms', waiter.created_at_ms, 'updated_at_ms', waiter.updated_at_ms) AS result_json
 FROM background_library_requests request JOIN background_job_waiters waiter
     ON waiter.request_scope = 'library' AND waiter.request_id = request.request_id
+LEFT JOIN background_jobs job ON job.id = request.job_id
 WHERE (json_extract($1, '$.job_id') IS NULL OR request.job_id = json_extract($1, '$.job_id'))
     AND (json_extract($1, '$.request_id') IS NULL OR request.request_id = json_extract($1, '$.request_id'))
     AND (json_extract($1, '$.pending_only') = 0 OR waiter.state = 'pending')

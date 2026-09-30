@@ -1199,6 +1199,114 @@ async fn background_jobs_settled_history_yields_to_new_work_at_the_bound() {
     assert!(!store.maintain_jobs(30_000).await.expect("idle"));
 }
 
+#[tokio::test]
+async fn scheduled_library_ticks_share_only_pending_equivalent_intents() {
+    use super::background_jobs_library::{LibraryTrigger, LibraryWorkInput};
+    use super::LibraryStore;
+    use crate::domain::{LibraryKind, NewLibrary};
+
+    let store = SqliteStore::open_in_memory().expect("store");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "DVR".into(),
+            kind: LibraryKind::Recordings,
+            paths: vec!["/dvr".into()],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    for refresh in [false, true] {
+        let input = NewLibraryWork {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            library_id: library.id,
+            input: LibraryWorkInput::Full {
+                refresh,
+                trigger: LibraryTrigger::Scheduled,
+            },
+            now_ms: 1_000,
+        };
+        let EnqueueOutcome::Accepted { job_id, .. } = store
+            .enqueue_library_work(input.clone())
+            .await
+            .expect("first tick")
+        else {
+            panic!("first tick must queue work")
+        };
+        let mut next = input.clone();
+        next.request_id = uuid::Uuid::new_v4().to_string();
+        next.now_ms += 60_000;
+        let mut peer = next.clone();
+        peer.request_id = uuid::Uuid::new_v4().to_string();
+        let (one, two) = tokio::join!(
+            store.enqueue_library_work(next.clone()),
+            store.enqueue_library_work(peer)
+        );
+        for outcome in [one, two] {
+            assert!(
+                matches!(outcome.expect("competing ticks"), EnqueueOutcome::Existing { job_id: id, .. } if id == job_id)
+            );
+        }
+        let pending = store
+            .library_work_requests(LibraryWorkQuery {
+                job_id: Some(job_id.clone()),
+                pending_only: true,
+                limit: 256,
+                ..Default::default()
+            })
+            .await
+            .expect("pending");
+        assert_eq!(pending.len(), 1, "ticks must not accumulate interests");
+        assert_eq!(pending[0].request_id, input.request_id);
+
+        let mut manual = next.clone();
+        manual.request_id = uuid::Uuid::new_v4().to_string();
+        manual.input = LibraryWorkInput::Full {
+            refresh,
+            trigger: LibraryTrigger::Manual,
+        };
+        assert!(matches!(
+            store.enqueue_library_work(manual).await.expect("manual"),
+            EnqueueOutcome::Accepted { .. }
+        ));
+        let pending = store
+            .library_work_requests(LibraryWorkQuery {
+                job_id: Some(job_id.clone()),
+                pending_only: true,
+                limit: 256,
+                ..Default::default()
+            })
+            .await
+            .expect("manual identity");
+        assert_eq!(pending.len(), 2, "manual intent remains separate");
+
+        let mut conflicting = input.clone();
+        conflicting.input = LibraryWorkInput::Full {
+            refresh: !refresh,
+            trigger: LibraryTrigger::Scheduled,
+        };
+        assert!(matches!(
+            store
+                .enqueue_library_work(conflicting)
+                .await
+                .expect("original identity"),
+            EnqueueOutcome::Conflict
+        ));
+
+        store
+            .cancel_job(CancelJob {
+                job_id: job_id.clone(),
+                now_ms: next.now_ms + 1,
+            })
+            .await
+            .expect("cancel queued job");
+        next.now_ms += 2;
+        assert!(
+            matches!(store.enqueue_library_work(next).await.expect("later tick"), EnqueueOutcome::Accepted { job_id: id, .. } if id != job_id),
+            "terminal scheduled receipts cannot suppress a future run"
+        );
+    }
+}
+
 #[test]
 fn receipt_pressure_literals_match_constants() {
     let migration = super::background_jobs::RECEIPT_PRESSURE_SCHEMA;

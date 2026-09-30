@@ -1338,7 +1338,7 @@ pub struct AppConfig {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ScanStatus {
     pub running: bool,
-    /// What the job is doing right now: "scanning" or "enriching".
+    /// Durable waiting state "queued", or active "scanning" / "enriching".
     pub phase: Option<String>,
     /// Live counters while running (sampled from the scan's atomics).
     pub progress: Option<ProgressSnapshot>,
@@ -5806,12 +5806,12 @@ impl JobManager {
             match job {
                 DueJob::Scan(id) => {
                     if self.trigger_scan_as(id, ScanTrigger::Scheduled).await {
-                        tracing::info!(library = id, "scheduled scan started");
+                        tracing::info!(library = id, "scheduled scan queued");
                     }
                 }
                 DueJob::Refresh(id) => {
                     if self.trigger_refresh_as(id, ScanTrigger::Scheduled).await {
-                        tracing::info!(library = id, "scheduled metadata refresh started");
+                        tracing::info!(library = id, "scheduled metadata refresh queued");
                     }
                 }
                 // Server-wide jobs are stamped before dispatch so one failure

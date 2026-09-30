@@ -9197,6 +9197,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_library_activity_distinguishes_queued_from_remote_execution() {
+        use plurx_core::domain::{LibraryKind, NewLibrary};
+        use plurx_core::store::background_jobs::{ClaimJob, ClaimOutcome, JobKind};
+        use plurx_core::store::background_jobs_library::LibraryWorkQuery;
+
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let root = crate::test_tempdir().expect("library root");
+        let library = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Recordings".into(),
+                kind: LibraryKind::Recordings,
+                paths: vec![root.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        assert!(state.jobs.trigger_scan(library.id).await);
+        let statuses = state.jobs.all_statuses().await;
+        assert_eq!(statuses[&library.id].phase.as_deref(), Some("queued"));
+        let (status, activities) = call(&app, get("/api/v1/activity", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(activities
+            .as_array()
+            .expect("activities")
+            .iter()
+            .any(|a| a["label"] == "Queued scan for Recordings · waiting for a worker"));
+        assert!(!activities.to_string().contains("Scanning Recordings"));
+
+        let record = state
+            .store
+            .library_work_requests(LibraryWorkQuery {
+                pending_only: true,
+                limit: 1,
+                ..Default::default()
+            })
+            .await
+            .expect("request")
+            .remove(0);
+        let job = state
+            .store
+            .background_job(&record.job_id)
+            .await
+            .expect("read")
+            .expect("job");
+        let now_ms = crate::state::clock_ms();
+        let claim = state
+            .store
+            .claim_job(ClaimJob {
+                job_id: job.id,
+                expected_revision: job.revision,
+                node_id: "remote-worker".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::LibraryScan,
+                payload_version: 1,
+                now_ms,
+                dispatched_at_ms: now_ms,
+            })
+            .await
+            .expect("remote claim");
+        assert!(matches!(claim, ClaimOutcome::Claimed { .. }), "{claim:?}");
+        // This observer has no local scanner. It must use replicated job state.
+        let statuses = state.jobs.all_statuses().await;
+        assert!(statuses[&library.id].running);
+        assert_eq!(statuses[&library.id].phase.as_deref(), Some("scanning"));
+        let (status, activities) = call(&app, get("/api/v1/activity", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(activities
+            .as_array()
+            .expect("activities")
+            .iter()
+            .any(|a| a["label"] == "Scanning Recordings"));
+        assert!(!activities.to_string().contains("waiting for a worker"));
+    }
+
+    #[tokio::test]
     async fn durable_job_api_is_admin_only_redacts_ownership_and_cancels_idempotently() {
         use plurx_core::store::background_jobs::{
             ClaimJob, EnqueueJob, JobKind, JobPayload, JobRequest,
