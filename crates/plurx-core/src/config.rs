@@ -22,6 +22,10 @@ pub const DEFAULT_SCAN_PRUNE_PERCENT: u8 = 10;
 /// until an operator explicitly enables it cluster-wide.
 pub const DEFAULT_BOUNDED_REPLICA_MAX_LAG_ENTRIES: u64 = 64;
 pub const MAX_BOUNDED_REPLICA_MAX_LAG_ENTRIES: u64 = 10_000;
+/// Preserve incumbent cadence until measured disk/replay evidence chooses N.
+pub const DEFAULT_LOGS_UNTIL_SNAPSHOT: u64 = 10_000;
+pub const MIN_LOGS_UNTIL_SNAPSHOT: u64 = 1_000;
+pub const MAX_LOGS_UNTIL_SNAPSHOT: u64 = 200_000;
 /// Deadline for one non-final Raft snapshot chunk RPC.
 pub const DEFAULT_SNAPSHOT_CHUNK_TIMEOUT_SECS: u64 = 30;
 pub const MIN_SNAPSHOT_CHUNK_TIMEOUT_SECS: u64 = 5;
@@ -149,6 +153,8 @@ pub struct ClusterConfig {
     /// Local Hiqlite read-only connection pool. Four is the measured/default
     /// baseline; the bounded knob permits retained 4/8/16 comparison runs.
     pub read_pool_size: usize,
+    /// Node-local Raft snapshot cadence; must match across voters at restart.
+    pub logs_until_snapshot: u64,
     /// Deadline for one non-final snapshot chunk RPC, including admission,
     /// frame delivery, and acknowledgement.
     pub snapshot_chunk_timeout_secs: u64,
@@ -174,6 +180,7 @@ impl Default for ClusterConfig {
             bounded_replica_reads: true,
             bounded_replica_max_lag_entries: DEFAULT_BOUNDED_REPLICA_MAX_LAG_ENTRIES,
             read_pool_size: 4,
+            logs_until_snapshot: DEFAULT_LOGS_UNTIL_SNAPSHOT,
             snapshot_chunk_timeout_secs: DEFAULT_SNAPSHOT_CHUNK_TIMEOUT_SECS,
             snapshot_transfer_timeout_secs: DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS,
             install_snapshot_timeout_secs: DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS,
@@ -252,6 +259,14 @@ impl Config {
             return Err(ConfigError::Value {
                 key: "cluster.read_pool_size".to_owned(),
                 message: "must be between 1 and 16".to_owned(),
+            });
+        }
+        if !(MIN_LOGS_UNTIL_SNAPSHOT..=MAX_LOGS_UNTIL_SNAPSHOT)
+            .contains(&config.cluster.logs_until_snapshot)
+        {
+            return Err(ConfigError::Value {
+                key: "cluster.logs_until_snapshot".to_owned(),
+                message: format!("must be between {MIN_LOGS_UNTIL_SNAPSHOT} and {MAX_LOGS_UNTIL_SNAPSHOT} entries"),
             });
         }
         if !(MIN_INSTALL_SNAPSHOT_TIMEOUT_SECS..=MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS)
@@ -375,6 +390,10 @@ impl Config {
                 message: format!("`{value}` is not an integer from 1 through 16"),
             })?;
         }
+        apply_snapshot_cadence_env(
+            &mut self.cluster,
+            env_var("PLURX_CLUSTER_LOGS_UNTIL_SNAPSHOT"),
+        )?;
         apply_install_snapshot_timeout_env(
             &mut self.cluster,
             env_var("PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS"),
@@ -402,6 +421,19 @@ fn apply_snapshot_chunk_timeout_env(
                 "`{value}` is not an integer from {MIN_SNAPSHOT_CHUNK_TIMEOUT_SECS} through \
                  {MAX_SNAPSHOT_CHUNK_TIMEOUT_SECS}"
             ),
+        })?;
+    }
+    Ok(())
+}
+
+fn apply_snapshot_cadence_env(
+    cluster: &mut ClusterConfig,
+    value: Option<String>,
+) -> Result<(), ConfigError> {
+    if let Some(value) = value {
+        cluster.logs_until_snapshot = value.parse().map_err(|_| ConfigError::Env {
+            var: "PLURX_CLUSTER_LOGS_UNTIL_SNAPSHOT".to_owned(),
+            message: "must be an integer from 1000 through 200000".to_owned(),
         })?;
     }
     Ok(())
@@ -630,6 +662,46 @@ mod tests {
                 Config::load(Some(&path)),
                 Err(ConfigError::Value { key, .. }) if key == "cluster.read_pool_size"
             ));
+        }
+    }
+
+    #[test]
+    fn snapshot_cadence_loads_default_and_validates_the_documented_range() {
+        assert_eq!(ClusterConfig::default().logs_until_snapshot, 10_000);
+        let mut cluster = ClusterConfig::default();
+        apply_snapshot_cadence_env(&mut cluster, None).expect("absent override preserves default");
+        assert_eq!(cluster.logs_until_snapshot, 10_000);
+        apply_snapshot_cadence_env(&mut cluster, Some("200000".into()))
+            .expect("parse cadence override");
+        assert_eq!(cluster.logs_until_snapshot, 200_000);
+        assert!(
+            matches!(apply_snapshot_cadence_env(&mut cluster, Some("not-an-integer".into())), Err(ConfigError::Env { var, .. }) if var == "PLURX_CLUSTER_LOGS_UNTIL_SNAPSHOT")
+        );
+        let dir = tempfile::tempdir().expect("config fixture");
+        let path = dir.path().join("plurx.toml");
+        for entries in [1_000, 10_000, 200_000] {
+            std::fs::write(
+                &path,
+                format!("[cluster]\nlogs_until_snapshot = {entries}\n"),
+            )
+            .expect("write config");
+            assert_eq!(
+                Config::load(Some(&path))
+                    .expect("valid cadence")
+                    .cluster
+                    .logs_until_snapshot,
+                entries
+            );
+        }
+        for entries in [0, 999, 200_001] {
+            std::fs::write(
+                &path,
+                format!("[cluster]\nlogs_until_snapshot = {entries}\n"),
+            )
+            .expect("write config");
+            assert!(
+                matches!(Config::load(Some(&path)), Err(ConfigError::Value { key, .. }) if key == "cluster.logs_until_snapshot")
+            );
         }
     }
 
