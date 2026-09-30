@@ -1769,6 +1769,60 @@ mod snapshot_metrics_contracts {
     }
 
     #[tokio::test]
+    async fn storage_deferral_does_not_block_incoming_receive_or_install() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+        let root = std::env::temp_dir().join(format!("hiqlite-admission-live-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).await.expect("create test root");
+        let mut state = new_test_state(root.to_str().expect("UTF-8 root"), "admission.db")
+            .await
+            .expect("create live state");
+        let snapshot = state
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .expect("build incoming snapshot fixture");
+        let source = format!("{}/{}", state.path_snapshots, snapshot.meta.snapshot_id);
+        let mut builder = state.get_snapshot_builder().await;
+        // An actual missing database probe is Unknown and enters bounded
+        // admission, without simulating filesystem success or waiting 600s.
+        builder.database_path = root.join("missing-database.db");
+        let mut deferred = Box::pin(builder.build_snapshot());
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            deferred.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+        let receive =
+            tokio::time::timeout(Duration::from_secs(2), state.begin_receiving_snapshot())
+                .await
+                .expect("storage deferral cannot block receive")
+                .expect("begin receive during deferral");
+        fs::copy(&source, format!("{}/temp", state.path_snapshots))
+            .await
+            .expect("stage incoming image");
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            state.install_snapshot(&snapshot.meta, receive),
+        )
+        .await
+        .expect("storage deferral cannot block install")
+        .expect("install during deferral");
+        assert!(matches!(
+            deferred.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+        drop(deferred);
+        drop(snapshot);
+        shutdown_state(&state).await;
+        drop(state);
+        fs::remove_dir_all(root)
+            .await
+            .expect("remove owned test fixture");
+    }
+
+    #[tokio::test]
     async fn off_writer_copy_failure_preserves_published_generation_and_live_integrity() {
         let root = std::env::temp_dir().join(format!("hiqlite-copy-failure-{}", Uuid::now_v7()));
         fs::create_dir_all(&root).await.unwrap();

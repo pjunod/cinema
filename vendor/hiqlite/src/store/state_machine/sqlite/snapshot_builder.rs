@@ -69,6 +69,10 @@ impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
     #[tracing::instrument(level = "trace", skip(self))]
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfigSqlite>, StorageError<NodeId>> {
         let timer = SnapshotTimer::start(SnapshotOperation::Build);
+        // Storage-only admission owns no publication state. Incoming receive
+        // and install must remain live throughout a bounded deferral.
+        crate::snapshot_admission::wait_for_storage(&self.database_path, self.storage_deferral)
+            .await;
         // Snapshot construction and installation both replace the current
         // state-machine image. Serialize their file publication so cleanup
         // always reads the operation that actually completed last.
@@ -90,8 +94,6 @@ impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
         // - open db snapshot file
         // - return snapshot handle
 
-        crate::snapshot_admission::wait_for_storage(&self.database_path, self.storage_deferral)
-            .await;
         let snapshot_id = Uuid::now_v7();
 
         let path = format!("{}/{}", self.path_snapshots, snapshot_id);
