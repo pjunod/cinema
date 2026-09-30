@@ -3,14 +3,14 @@
 This directory is the crates.io `hiqlite-wal` 0.14.0 package, licensed under
 Apache-2.0. Plurx carries three restart-recovery patches for replicated SQLite:
 
-**Owner:** Paul Junod (repository owner). Every repair is a generic bug;
-`pending M6` records the outstanding upstream coordination without inventing a
-public URL.
+**Owner:** Paul Junod (repository owner). Every repair is a generic bug.
+As of 2026-09-30, row 2 has an accepted upstream mechanism; the two
+`pending M6` rows still need upstream coordination and a real public URL.
 
 | # | Patch | Kind | Upstream | Drop condition |
 |---:|---|---|---|---|
 | 1 | Reconstruct missing purge boundary | generic bug | pending M6 | Upstream release derives the boundary from a retained entry above the initial range. |
-| 2 | Atomic `meta.hql` replacement | generic bug | pending M6 | Upstream release syncs and atomically renames same-directory metadata updates. |
+| 2 | Atomic `meta.hql` replacement | generic bug | https://github.com/sebadob/hiqlite/pull/357 | Upstream release syncs and atomically renames same-directory metadata updates. |
 | 3 | WAL incarnation and layout guard | generic bug | pending M6 | Upstream release rejects stale memo/mmap reuse and serializes path reuse with readers. |
 
 - Missing `last_purged_log_id` metadata is reconstructed whenever the first
@@ -41,6 +41,16 @@ surface. It refuses a live lock and exposes metadata, WAL, and decoded log-id
 boundaries without returning application payloads. `plurx-cluster-check
 inspect-wal` adds immutable SQLite snapshot/applied boundaries and file hashes
 to its versioned JSON artifact.
+
+**Upstream receipt, 2026-09-30:** row 2's PR was accepted at merge
+[`5e93f594bb955449616bcf8f4f6128998944ec42`](https://github.com/sebadob/hiqlite/commit/5e93f594bb955449616bcf8f4f6128998944ec42).
+The [v0.15.0 metadata source](https://github.com/sebadob/hiqlite/blob/v0.15.0/hiqlite-wal/src/metadata.rs)
+stages same-directory bytes, calls `sync_data()`, and publishes with one
+rename, closing the remove/create gap on POSIX. Its Unix directory sync is
+best effort. The local 0.14 repair uses file `sync_all()` and requires Linux
+directory `sync_all()` success; acceptance of the shared mechanism does not
+prove full patch or durability equivalence. No upgrade or patch removal is
+recorded here; the exit below still applies.
 
 Remove this vendor when an upstream Hiqlite release contains the same repair
 and Plurx has upgraded to it. Until then,
