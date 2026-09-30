@@ -118,7 +118,7 @@
                 .expect("fixture runtime")
                 .block_on(async {
                     let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-                    let id = seed_file(&store).await;
+                    let id = seed_file_at(&store, "/s13/catalog-only.mkv").await;
                     let file = store
                         .get_file(id)
                         .await
