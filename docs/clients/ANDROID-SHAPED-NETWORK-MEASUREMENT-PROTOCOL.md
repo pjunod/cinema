@@ -24,12 +24,17 @@ A different television, emulator or browser cannot substitute for one row.
 | Shield | Same two profiles | Same two profiles on the same Dolby Vision title |
 | Android phone | Same two profiles | Same two profiles on the same Dolby Vision title |
 
-Choose one finite baseline title/file and a fixed start position with enough
-remaining duration for 180 seconds of observation. Record source codec,
-dimensions, dynamic range, duration, audio/subtitle choices and file identity.
-The Dolby Vision pass specifically answers whether the physical picture leaves
-HDR and when; a device that cannot establish HDR at the start is unavailable
-for that evidence, not a zero-transition success. Keep its failure receipt.
+Use the same identified ordinary **4K HDR title/file** for the baseline on
+all four Android clients and both profiles, as required by design §6. Use a
+fixed start position with enough remaining duration for 180 seconds of
+observation. Record source codec, dimensions, dynamic range, duration,
+audio/subtitle choices and file identity. Retain physical HDR-output
+acquisition for this baseline and the separate Dolby Vision second pass;
+both answer whether the physical picture leaves HDR and when. A device that
+cannot establish initial HDR, or lacks output-grade acquisition, is unavailable
+for that required evidence, not a zero-transition success. Keep its failure
+receipt. Additional SDR exploratory measurements are non-qualifying and cannot
+replace either required pass.
 
 An operator must explicitly approve the named device, time slot, test traffic,
 temporary server-origin/login changes, capture method and restoration before
@@ -96,7 +101,7 @@ method and uncertainty. Keep event boundaries across session replacements.
 | Switches | Count of automatic rung changes per run, with old/new rung, cause, session/attempt and wall timestamp; keep viewer changes and same-rung reopens separately. | Retain proxy client events plus Settings → Logs entries and observer intent record. `quality_switch` alone means viewer change. No native controller today is context, not evidence for a count of zero. Missing origin/rung transitions or truncated events mean `null`. |
 | First-frame gap | For each switch/reopen, next presented frame time minus the initiating switch/reopen time; seconds, including unresolved open gaps. | Matched `ttff` attempt/reason/`ms` supports a reported attempt-to-first-frame duration when its start is the required boundary; it is not a continuous frame trace or automatically a viewer-action boundary. Require matched initiator and actual output evidence. Missing first frame is censored/missing, never 0; preserve observed lower bound through stop. |
 | Quality regained | For **each cliff**, first presented frame on a demonstrated sustainable rung minus the actual proxy cliff time; seconds. | Requires aligned frame, rung, and ladder `total_kbps`, plus evidence of sustained delivery/presentation at that rung. A target height/status response is not a frame. Predeclare the sustainability proof and retain its whole interval; do not invent a new threshold or treat the cap as observed throughput. Existing sparse events cannot guarantee this oracle. Missing frame/rung/sustainability proof yields `null`. |
-| Unexpected SDR transitions | Count of observed HDR→SDR output-grade changes not requested by the viewer; timestamp and before/after grades for each. | Capture source/delivered/rendered facts and a verified physical sink HDR indication throughout the DV pass, with its acquisition method and blind intervals. `delivered_dynamic_range` in [Models.kt](../../clients/android/app/src/main/java/tv/plurx/app/data/Models.kt) is server delivery evidence, not proof of the physical display. Source DV metadata alone is insufficient. Missing output-grade coverage means `null`; unsupported initial HDR means unavailable. SDR baseline is not applicable, not zero. |
+| Unexpected SDR transitions | Count of observed HDR→SDR output-grade changes not requested by the viewer; timestamp and before/after grades for each. | Capture source/delivered/rendered facts and a verified physical sink HDR indication throughout both the ordinary 4K HDR baseline and DV second pass, with its acquisition method and blind intervals. `delivered_dynamic_range` in [Models.kt](../../clients/android/app/src/main/java/tv/plurx/app/data/Models.kt) is server delivery evidence, not proof of the physical display. Source HDR/DV metadata alone is insufficient. Missing output-grade coverage means `null`; unsupported initial HDR means unavailable, never a pass. Only additional non-qualifying SDR exploratory runs may mark this metric not applicable, not zero. |
 | Delivered vs advertised | Media response bytes ×8 /1000 / elapsed wall seconds over the **final 60 seconds** of each post-cliff stage, compared with the attached rung's advertised `total_kbps`; decimal kb/s. | Save cumulative `shaping.stages[].media_bytes` at the window's two boundaries and subtract, retaining actual observation times/uncertainty. All requests must traverse this sole proxy. This is proxy downstream delivery, not decoder consumption. `measured_media_kbps` uses active transfer span plus first-slice correction, not this 60-second window; admission bytes are different. If boundaries, rung advertisement or attribution are missing, `null`. |
 
 Use the ladder captured from the real decision/session context: `Rung.height`,
@@ -254,7 +259,7 @@ original bytes privately with their original hashes. The following names are
   "suite": "a04-android-manual",
   "summary": {"acceptance": "incomplete", "physical_run_performed": false},
   "results": [{
-    "name": "Lenovo Android TV / 8mbps-to-1.5mbps / baseline",
+    "name": "Lenovo Android TV / 8mbps-to-1.5mbps / ordinary 4K HDR baseline",
     "status": "incomplete",
     "metrics": {
       "stalled_seconds": null,
@@ -276,8 +281,13 @@ original bytes privately with their original hashes. The following names are
 
 Each measured field replaces `null` only with its value **and** calculation,
 units, uncertainty, interval and raw references in the accompanying receipt.
-Use explicit not-applicable for SDR-baseline HDR transitions, with the source
-grade reason; it does not fill the Dolby Vision pass. Failed startup, absent
+All six metrics are required for the shared ordinary 4K HDR baseline and the
+Dolby Vision second pass. Unsupported initial HDR or unavailable physical
+output-grade acquisition leaves the transition metric `null` with its reason
+and the required run unavailable/incomplete, never passing. Only an additional
+SDR exploratory run may use explicit not-applicable for HDR transitions with
+its source-grade reason; label that run non-qualifying and do not count it
+toward either required pass. Failed startup, absent
 second cliff, unknown grade, missing intent, censored frame gap and missing
 byte window stay visible. A complete observation can still fail behavioral
 acceptance; an incomplete report can never pass D3.
