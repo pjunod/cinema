@@ -226,6 +226,10 @@ function autoCauseEvidence(p,nowMs){
     &&episode.establishedSuspension.attachment===p.mediaAttachment){
     return {kind:"loader-suspended",ageMs:0};
   }
+  const stallVerdict=p&&p.abr&&p.abr.controlStallVerdict;
+  if(stallVerdict&&p.waitAt===stallVerdict.waitAt
+    &&nowMs<stallVerdict.untilMs)
+    return {kind:"control-stall-verdict",ageMs:Math.max(0,nowMs-stallVerdict.atMs)};
   const failure=STREAM_FAILURE;
   if(failure&&(!failure.attachment||failure.attachment===p.mediaAttachment)){
     const age=Math.max(0,Date.now()-Number(failure.at||Date.now()));
@@ -240,6 +244,12 @@ function autoCauseEvidence(p,nowMs){
         return {kind:"delivery-refused",ageMs:age,code};
     }
   }
+  const abr=p&&p.abr;
+  const decodeEvents=abr&&abr.stallEvents&&abr.stallEvents.decode;
+  const decodeAt=decodeEvents&&decodeEvents.length
+    ?decodeEvents[decodeEvents.length-1]:null;
+  if(decodeAt!=null&&nowMs>=decodeAt&&nowMs-decodeAt<=maxAge)
+    return {kind:"decode-failed",ageMs:nowMs-decodeAt};
   const healthAge=p&&p.healthObservedAt!=null?Math.max(0,nowMs-p.healthObservedAt):null;
   const health=p&&p.health;
   if(health&&healthAge<=maxAge){
@@ -248,7 +258,6 @@ function autoCauseEvidence(p,nowMs){
       &&["running","held"].includes(String(health.producer_state||"")))
       return {kind:"capacity-shortfall",ageMs:healthAge};
   }
-  const abr=p&&p.abr;
   const sampleAge=abr&&abr.recentEstimateAtMs!=null
     ?Math.max(0,nowMs-abr.recentEstimateAtMs):null;
   const sourceKbps=Number(p&&p.source&&p.source.bitrate)/1000;
@@ -257,6 +266,26 @@ function autoCauseEvidence(p,nowMs){
     &&abr.recentEstimateKbps<sourceKbps*PlaybackPolicy.AUTO_DEFAULTS.severeEstimateRatio)
     return {kind:"bandwidth-limited",ageMs:sampleAge};
   return {kind:healthAge==null?"unknown":"stale",ageMs:healthAge};
+}
+// The element's typed decoder error reaches `wirePlayerMedia` before the
+// periodic stall reporter can run. Give Auto its one policy move there, before
+// the terminal compatibility owner decides whether anything else can recover.
+function autoDecodeMediaError(p,v){
+  if(!p||!p.abr||p.method!=="transcode"||qualityForce()!=="auto"
+    ||p.abr.switching||p.autoFallbackInFlight||p.pendingMediaChange
+    ||hasPendingPlaybackOpen(p)) return false;
+  const currentHeight=Number(p.health?.target_height||p.autoHeight||v.videoHeight);
+  if(!(currentHeight>0)) return false;
+  const result=PlaybackPolicy.decideRung({ladder:p.ladder,currentHeight,
+    decodeStalls:1,decodeStepConsumed:!!p.abr.decodeStepConsumed,
+    blockedHeights:p.abr.failedHeights,
+    causeEvidence:{kind:"decode-failed",ageMs:0},nowMs:performance.now()});
+  if(!result.blockedHeights||result.height===currentHeight) return false;
+  p.abr.decodeStepConsumed=true;
+  p.abr.failedHeights=p.abr.failedHeights||new Set();
+  for(const height of result.blockedHeights) p.abr.failedHeights.add(height);
+  switchAutoRung(currentHeight,result).catch(()=>{});
+  return true;
 }
 function recordAutoDecision(p,currentHeight,result,runway,throughputKbps){
   if(!p||!p.abr) return;
@@ -477,6 +506,8 @@ async function autoControllerTick(){
     previousRunwaySeconds:p.abr.previousRunway,
     recentSpeed:health.recent_speed,
     activeSupplyStall,supplyStalls:p.abr.stallEvents.supply.length,
+    decodeStalls:p.abr.stallEvents.decode.length,
+    decodeStepConsumed:!!p.abr.decodeStepConsumed,
     lastStallAtMs:p.abr.lastStallAtMs,nowMs:now,
     lastSwitchAtMs:p.abr.lastSwitchAtMs,mildSamples:p.abr.mildSamples,
     lastCliffAtMs:p.abr.lastCliffAtMs,
@@ -484,6 +515,10 @@ async function autoControllerTick(){
     blockedHeights:p.abr.failedHeights,causeEvidence
   });
   p.abr.previousRunway=runway;
+  if(result.blockedHeights){
+    p.abr.decodeStepConsumed=true;
+    for(const height of result.blockedHeights) p.abr.failedHeights.add(height);
+  }
   p.abr.mildSamples=result.mildSamples;
   p.abr.upgradeSinceMs=result.upgradeSinceMs;
   recordAutoDecision(p,currentHeight,result,runway,p.abr.recentEstimateKbps);
