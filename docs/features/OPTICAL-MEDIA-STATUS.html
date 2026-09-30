@@ -26,8 +26,8 @@
     Blu-ray playback is part of the required outcome. On 2026-09-29 the shipped
     Jellyfin FFmpeg and its Debian fallback both reported
     <code>Unknown format 'dvdvideo'</code>; the host Blu-ray read still lacks a
-    usable AACS/BD+ backend. A temporary reader lab on <code>nynuc</code> now
-    holds the same inserted disc read-only. A separate title-aware optical
+    usable AACS/BD+ backend. A temporary reader lab on <code>nynuc</code>
+    inspected the same inserted disc read-only and was then removed. A separate title-aware optical
     FFmpeg reports DVD-Video and Blu-ray inputs, while normal VOD keeps
     Jellyfin FFmpeg. MakeMKV 2.0.0 enumerated titles when its documented
     drive-specific <code>SDF_STOP</code> workaround disabled a hanging
@@ -35,7 +35,8 @@
     evaluation was not active. The vendor's September beta key was rejected
     as expired at the UTC month boundary, and a temporary virtual-display
     trial did not reach an activation prompt. Neither a first decoded frame nor application
-    playback has been proved. The running Plurx service is unchanged; no
+    playback has been proved. The lab containers, images, mount and build
+    directory were removed; the running Plurx service is unchanged. No
     fast-lane tests or adversarial review have run.</p>
   <p><strong>Latest hardening:</strong> <code>bd5280be0</code> turns every
     unsupported managed-copy recipe and missing immutable copy index into a
