@@ -10561,6 +10561,7 @@ mod tests {
         })
         .await;
         consumer.abort();
+        let _ = consumer.await;
         assert!(
             admitted.is_ok(),
             "an idle worker must admit the exact playback request before the ordinary polling delay"

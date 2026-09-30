@@ -1,6 +1,6 @@
 # Safari seek build — implementation and promotion status
 
-**Status:** reviewed candidate ready for main qualification · **Updated:** 2026-09-29 ·
+**Status:** ownership inventory corrected; ready lane rerun pending · **Updated:** 2026-09-29 ·
 **Starting base:** `1869871ce` · **Current main sync:** `38c917225` ·
 **Branch:** `effort/safari-seek`
 
@@ -34,7 +34,7 @@ exists for the named milestone; it does not imply a fleet rollout.
 | Amd64 application packages | Two clean packages from the same local runtime input reported actual daemon `engine_digest` `85e6fa5e7614ad2165fdf2e83d96542ada3f18f28fadb04d2a960f9cbf4938ab`. Both carried application binary SHA-256 `77f65bb1c86f04fba608c00a3faf622f93bd502c8343049900ad0e27d1f08b40` and the FFmpeg, FFprobe and manifest hashes above. A third local package with the amended final stage reported the same engine digest and the supplied runtime image ID through `media-runtime-identity`. The release workflow supplies and checks the published registry digest on its final image. |
 | Focused regressions | Post-review phase: 39 JavaScript seek tests passed; 17 release publication contracts passed; six exact Store regressions passed on SQLite and three-voter Hiqlite after correcting SQL scope, Hiqlite parameter order and one test's shared-reader lease timing; the analysis wake test passed. The M4 candidate failed three of 17 wider rolling budget tests, was withdrawn, then all 17 rolling budget and four MKV/HLS scheduling tests passed. Physical Safari runs remain. |
 | Astra adversarial review | Completed as a read-only review of `6ba5c59de` against `38c917225`: seven findings on viewer artifact admission, learner execution, source reservation lifetime, attested artifact demand, hydration demand, the Safari server fixture, and waiter capacity. Corrective commits `6f583c519`, `aacc9697c`, and `9b403ba2e` address them. Focused testing found SQL scope and Hiqlite parameter-order issues, corrected in `a4236f00c`. |
-| Ready fast lane | Reviewed candidate submitted for exact-tree qualification. The PR records the head SHA; no green gate is claimed yet. |
+| Ready fast lane | Run [#3583](http://192.168.4.7:3000/noirr/plurx/actions/runs/3583) on `8476b91ca` failed preflight: the task/timer structural census needed an ownership review for three spawns and two test timers. The reviewed allowlist update passed seven inventory tests; the joined consumer passed its focused Rust wake test. A new exact-head run remains. No green gate is claimed. |
 | Task pull request | [#622](http://192.168.4.7:3000/noirr/plurx/pulls/622) merged into `effort/safari-seek` as `1fa576a05`, preserving its regression fields. The user directed local compile evidence here and one final test lane after review. |
 | Main pull request | [#623](http://192.168.4.7:3000/noirr/plurx/pulls/623) into `main` was marked ready after the review fixes, focused regressions, and M4 withdrawal. |
 | Main merge | Pending green lane and exact-candidate qualification. |
