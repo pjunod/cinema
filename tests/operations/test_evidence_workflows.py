@@ -31,6 +31,12 @@ class EvidenceWorkflowCase(unittest.TestCase):
                          '"CARGO_PROFILE_RELEASE_DEBUG=0"',
                          '"CARGO_PROFILE_RELEASE_STRIP=symbols"',
                          '"CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false"',
+                         '"--user=" + f"{os.getuid()}:{os.getgid()}"',
+                         'data["Config"]["User"] == f"{os.getuid()}:{os.getgid()}"',
+                         '"HOME=/tmp/home"', 'mkdir -p "$HOME"',
+                         '"/source": (str(mounts[0]), False)',
+                         '"/target": (str(mounts[1]), True)',
+                         '"/cargo": (str(mounts[2]), True)',
                          '"archive_sha256": archive_sha', 'state["OOMKilled"]'):
             self.assertIn(required, script)
         self.assertNotIn('"--privileged"', script)
@@ -71,6 +77,28 @@ class EvidenceWorkflowCase(unittest.TestCase):
             capacity.return_value["load"] = 13
             with self.assertRaisesRegex(RuntimeError, "load/swap"):
                 module.guard(Path(directory), baseline, "http://localhost/readyz")
+
+    def test_release_cost_effective_user_and_bind_roles_preserve_host_cleanup(self) -> None:
+        spec = importlib.util.spec_from_file_location("release_cost", ROOT / "scripts/p02-release-cost.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        mounts = tuple(Path("/owned") / name for name in ("source", "target", "cargo"))
+        data = {"Config": {"User": f"{os.getuid()}:{os.getgid()}"}, "HostConfig": {
+            "NanoCpus": 8 * 10 ** 9, "Memory": 24 * module.GIB, "MemorySwap": 24 * module.GIB,
+            "PidsLimit": 1024, "Privileged": False, "Devices": [], "NetworkMode": "none",
+            "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges"], "ReadonlyRootfs": True,
+            "Tmpfs": {"/tmp": "rw,nosuid,nodev,size=1g"},
+            "LogConfig": {"Type": "local", "Config": {"max-size": "10m", "max-file": "1", "compress": "false"}}},
+            "Mounts": [{"Type": "bind", "Source": str(p), "Destination": "/" + name, "RW": name != "source"}
+                       for p, name in zip(mounts, ("source", "target", "cargo"))]}
+        module.validate_caps(data, mounts)
+        data["Config"]["User"] = ""
+        with self.assertRaises(AssertionError):
+            module.validate_caps(data, mounts)
+        data["Config"]["User"] = f"{os.getuid()}:{os.getgid()}"
+        data["Mounts"][0]["RW"] = True
+        with self.assertRaises(AssertionError):
+            module.validate_caps(data, mounts)
 
     def test_manual_fuzz_only_keeps_all_five_campaigns_and_skips_runtime_sweeps(self) -> None:
         workflow = self.read(".github/workflows/validation-nightly.yml")

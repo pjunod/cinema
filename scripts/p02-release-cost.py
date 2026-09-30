@@ -94,7 +94,10 @@ def validate_caps(data, mounts):
     assert h["ReadonlyRootfs"]
     assert h["Tmpfs"] == {"/tmp": "rw,nosuid,nodev,size=1g"}
     assert h["LogConfig"] == {"Type": "local", "Config": {"max-size": "10m", "max-file": "1", "compress": "false"}}
-    assert {x["Source"] for x in data["Mounts"] if x["Type"] == "bind"} == set(map(str, mounts))
+    assert data["Config"]["User"] == f"{os.getuid()}:{os.getgid()}"
+    assert {x["Destination"]: (x["Source"], x["RW"]) for x in data["Mounts"] if x["Type"] == "bind"} == {
+        "/source": (str(mounts[0]), False), "/target": (str(mounts[1]), True),
+        "/cargo": (str(mounts[2]), True)}
 
 
 def resource_sample(name):
@@ -125,6 +128,8 @@ def cleanup(name, receipt, receipts):
 
 
 def measure(args, context):
+    if os.getuid() == 0:
+        raise ValueError("require non-root host controller and matching compiler UID:GID")
     if os.uname().machine != "x86_64" or not re.fullmatch(r"[0-9a-f]{40}", args.source):
         raise ValueError("require native AMD64 and exact committed source")
     if not re.fullmatch(r"(?:[^\s]+@)?sha256:[0-9a-f]{64}", args.image):
@@ -170,6 +175,8 @@ def measure(args, context):
                                  "scratch_is_monitored_not_filesystem_quota": True,
                                  "scratch_detection_latency_seconds": 10},
                   "profile_fixed": {"debug": 0, "strip": "symbols", "panic": "unwind", "overflow_checks": False}}
+    provenance["compiler_user"] = f"{os.getuid()}:{os.getgid()}"
+    provenance["compiler_home"] = "/tmp/home"
     (receipts / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
     deadline = time.monotonic() + CAPS["total_seconds"]
     failed = False
@@ -194,6 +201,8 @@ def measure(args, context):
                 receipt["compiler_timeout_seconds"] = budget
                 receipt["termination_grace_seconds"] = 5
                 shell = """set -eu
+mkdir -p "$HOME"
+test -r /usr/local/rustup/settings.toml
 test "$(rustc +1.97.1 --version)" = 'rustc 1.97.1 (8bab26f4f 2026-07-14)'
 command -v cmake; command -v clang; command -v nasm; command -v pkg-config
 test -x /usr/bin/time
@@ -204,6 +213,7 @@ cd /source
                 else:
                     shell += f"exec /usr/bin/time -v -o /target/time.txt timeout --signal=TERM --kill-after=5s {budget}s cargo +1.97.1 build --offline --locked --release -p plurxd --bin plurxd\n"
                 command("docker", "create", "--name", name, "--init", "--cpus=8",
+                        "--user=" + f"{os.getuid()}:{os.getgid()}",
                         "--memory=24g", "--memory-swap=24g", "--pids-limit=1024",
                         "--cap-drop=ALL", "--security-opt=no-new-privileges",
                         "--read-only", "--tmpfs=/tmp:rw,nosuid,nodev,size=1g",
@@ -213,6 +223,7 @@ cd /source
                         "--mount", f"type=bind,src={target},dst=/target",
                         "--mount", f"type=bind,src={cargo},dst=/cargo",
                         "--env", "CARGO_HOME=/cargo", "--env", "CARGO_TARGET_DIR=/target",
+                        "--env", "HOME=/tmp/home", "--env", "RUSTUP_HOME=/usr/local/rustup",
                         "--env", "CARGO_BUILD_JOBS=8", "--env", "RUSTUP_TOOLCHAIN=1.97.1",
                         "--env", f"CARGO_PROFILE_RELEASE_LTO={lto if cgu else 'thin'}",
                         "--env", f"CARGO_PROFILE_RELEASE_CODEGEN_UNITS={cgu or 16}",

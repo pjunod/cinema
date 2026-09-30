@@ -1181,8 +1181,13 @@ timeouts/OOMs remain failures without retry. Each target is cold and removed
 after its trial; a separately bounded ten-minute fetch precedes every timed
 trial, then builds use `--offline --locked` and network-none. Only download
 cache may stay warm within the run. The container root is read-only with a
-bounded 1 GiB temporary mount; its logging driver is bounded. Host load must
-be at most 8 initially and 12 while the owned eight-CPU trial runs.
+bounded 1 GiB temporary mount; its logging driver is bounded.
+The compiler/fetch user is the host controller's numeric UID:GID (asserted
+from effective container configuration), with an owned HOME under `/tmp`.
+Source is read-only; target and download-cache binds are writable and owned
+by that same user, so host cleanup does not encounter root-owned subtrees.
+The public image's shared toolchain must be readable by this non-root user.
+Host load must be at most 8 initially and 12 while the owned eight-CPU trial runs.
 Health/cgroup samples run every two seconds and full scratch scans every ten
 seconds; observer overhead is included in wall time and recorded separately.
 The 20 GiB limit is monitored, not a filesystem quota: detection may lag ten
@@ -1220,6 +1225,17 @@ successful receipt SHA-256 is
 package-manifest SHA-256 is
 `e01501eeb5973d135ac27717984da780ed012a390c3add5a2923f5afe270c40d`.
 No four-way cold build, profile change or CI-job acceptance is claimed.
+
+**Non-root prerequisite probe, 2026-09-30 (not a build).** Root's single
+source-free probe confirmed the retained tooling image is readable as host
+UID:GID `1000:1000`: Rust 1.97.1 and Cargo 1.97.1 read back, and HOME/Cargo
+home under bounded temporary storage were writable. It used 1 CPU, 512 MiB
+with no swap, PID 64, a read-only root, network-none, all capabilities dropped,
+no-new-privileges and an internal 20-second timeout, with no source/cache bind
+or downloads. Exit was zero with no OOM; the exact owned container was removed
+and production remained healthy/restarts zero/readiness 200. No second probe
+or cold compile is claimed. Effective-user/bind-role cleanup is pinned by
+`test_release_cost_effective_user_and_bind_roles_preserve_host_cleanup`.
 
 ### 5.8 M8 — four fuzz targets
 
