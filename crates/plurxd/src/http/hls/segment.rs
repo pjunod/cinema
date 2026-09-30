@@ -742,6 +742,7 @@ async fn vod_segment_response_before(
         complete_object,
         completion_permit,
     );
+    let mut delivered = 0_u64;
     tokio::spawn(pump_local_media(
         reader,
         sender,
@@ -749,8 +750,23 @@ async fn vod_segment_response_before(
         body_deadline,
         len,
         move |event| {
-            if let LocalDeliveryEvent::Accepted(bytes) = event {
-                delivery.note(bytes);
+            match event {
+                LocalDeliveryEvent::Accepted(bytes) => {
+                    delivered += bytes;
+                    delivery.note(bytes);
+                }
+                LocalDeliveryEvent::Failed(error, cause) => {
+                    tracing::warn!(
+                        target: "plurxd::http::hls",
+                        session = %crate::transcode::session_log_id(&pump_session),
+                        delivered_bytes = delivered,
+                        expected_bytes = len,
+                        cause,
+                        error_kind = ?error.kind(),
+                        "VOD response failed before its advertised length"
+                    );
+                }
+                LocalDeliveryEvent::StorageRead(..) | LocalDeliveryEvent::Finished => {}
             }
             true
         },
