@@ -112,6 +112,7 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
         codec: "aac".into(),
         channels: Some(1),
         sample_rate: Some(48_000),
+        channel_layout: None,
         language: Some("eng".into()),
         title: None,
         default: true,

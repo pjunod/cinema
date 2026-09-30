@@ -3755,7 +3755,8 @@ assert.equal(context.ACT_TIMER, null);
                 self.assertIn('"${owner##*:}" = 0', capture)
                 self.assertIn('chown -R "$HOST_WORKSPACE_OWNER"', restore)
                 self.assertNotIn('stat -c', restore)
-                match = re.search(r"(?m)^    container: (.+)$", block)
+                self.assertIn("    container:\n", block)
+                match = re.search(r"(?m)^      image: (.+)$", block)
                 self.assertIsNotNone(match)
                 pinned = match.group(1)
                 self.assertRegex(
@@ -3765,6 +3766,11 @@ assert.equal(context.ACT_TIMER, null);
                 if image is None:
                     image = pinned
                 self.assertEqual(image, pinned)
+                self.assertIn("      credentials:\n        username: noirr\n", block)
+                self.assertIn(
+                    "        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}", block
+                )
+                self.assertNotIn("secrets.LOCAL_REGISTRY_TOKEN", block.split("    steps:", 1)[0])
 
         fast = workflow_job_blocks(".github/workflows/main-fast-lane.yml")[
             "rust_compile"

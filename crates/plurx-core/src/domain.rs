@@ -406,9 +406,42 @@ pub struct AudioStream {
     /// absence is not proof that a route can reproduce the stream unchanged.
     #[serde(default)]
     pub sample_rate: Option<i64>,
+    /// Bounded, opaque ffprobe source spelling, not a supported speaker map.
+    /// Never inferred from channel count; `5.1` and `5.1(side)` are distinct.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_source_channel_layout",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub channel_layout: Option<String>,
     pub language: Option<String>,
     pub title: Option<String>,
     pub default: bool,
+}
+
+/// Retain a source fact without interpreting positions or inventing support.
+pub(crate) fn normalize_source_channel_layout(value: &str) -> Option<String> {
+    if value.chars().any(char::is_control) {
+        return None;
+    }
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 256
+        || value.eq_ignore_ascii_case("unknown")
+        || value.eq_ignore_ascii_case("n/a")
+    {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+fn deserialize_source_channel_layout<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_str().and_then(normalize_source_channel_layout))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

@@ -43,6 +43,155 @@
             .contains("plurx_tone_map_pipeline_sessions_total{pipeline=\"dovi_passthrough\"} 1\n"));
     }
 
+    /// Re-execution gives the actual process-global warning latch a fresh
+    /// lifetime without resetting it or racing the other fallback fixtures.
+    #[test]
+    fn probe_changed_warns_once_per_process_and_counts_every_fallback() {
+        const CHILD: &str = "PLURX_PROBE_CHANGED_WARNING_TEST_CHILD";
+        const TEST: &str =
+            "transcode::tests::probe_changed_warns_once_per_process_and_counts_every_fallback";
+        if std::env::var_os(CHILD).is_none() {
+            struct OwnedChild(Option<std::process::Child>);
+            impl Drop for OwnedChild {
+                fn drop(&mut self) {
+                    if let Some(child) = self.0.as_mut() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                }
+            }
+            let child =
+                std::process::Command::new(std::env::current_exe().expect("current test executable"))
+                    .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+                    .env(CHILD, "1")
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("start isolated warning fixture");
+            let mut owned = OwnedChild(Some(child));
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                let child = owned.0.as_mut().expect("owned child");
+                if let Some(status) = child.try_wait().expect("poll warning fixture") {
+                    let output = owned
+                        .0
+                        .take()
+                        .expect("finished child")
+                        .wait_with_output()
+                        .expect("read fixture result");
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    assert!(
+                        status.success(),
+                        "isolated warning fixture failed: {status}\n{stdout}\n{stderr}"
+                    );
+                    assert!(
+                        stdout.contains("S13 warning/counter assertions completed"),
+                        "the exact child fixture must execute, not silently match zero tests: {stdout}"
+                    );
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    child.kill().expect("kill timed-out warning fixture");
+                    child.wait().expect("reap timed-out warning fixture");
+                    panic!("isolated warning fixture exceeded 30 seconds");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            return;
+        }
+
+        use crate::decode_facts::DecodeFactError;
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::PlanSourceBinding;
+        use tracing_subscriber::prelude::*;
+
+        let logs = Arc::new(crate::logbuf::LogBuffer::new(32));
+        let subscriber =
+            tracing_subscriber::registry().with(crate::logbuf::BufferLayer(Arc::clone(&logs)));
+        // All async fixture work stays on this thread so with_default captures
+        // the real production event sites, including their actual severity.
+        tracing::subscriber::with_default(subscriber, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("fixture runtime")
+                .block_on(async {
+                    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+                    let id = seed_file_at(&store, "/s13/catalog-only.mkv").await;
+                    let file = store
+                        .get_file(id)
+                        .await
+                        .expect("file lookup")
+                        .expect("file");
+                    for calls in [2, 1] {
+                        let (manager, _work, _cache) = cached_manager(&store);
+                        let options = manager.options_for_tone_map(
+                            Encoder::Software,
+                            &file,
+                            720,
+                            0.0,
+                            None,
+                            None,
+                            Some(1),
+                            ToneMap::None,
+                            OutputGrade::Sdr,
+                        );
+                        for _ in 0..calls {
+                            let plan = manager
+                                .resolve_held_movie_plan_facts(
+                                    &file,
+                                    &options,
+                                    Encoder::Software,
+                                    Err(DecodeFactError::ProbeChanged),
+                                )
+                                .await
+                                .expect("changed probe still permits catalogue fallback");
+                            assert_eq!(plan.source_binding(), PlanSourceBinding::CatalogRow);
+                        }
+                        assert!(
+                            manager
+                                .decode_facts
+                                .metrics()
+                                .prometheus()
+                                .contains(&format!(
+                            "plurx_decode_plan_fallbacks_total{{reason=\"probe_changed\"}} {calls}\n"
+                        )),
+                            "every fallback increments its manager's counter"
+                        );
+                    }
+                });
+        });
+        let entries = logs.tail("trace", 32);
+        let warnings: Vec<_> = entries.iter().filter(|entry| entry.message.contains(
+            "the configured ffprobe changed on disk after startup; bound facts are refused until plurxd restarts"
+        )).collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "one warning across manager instances: {entries:?}"
+        );
+        assert_eq!(warnings[0].level, "WARN", "operator warning severity");
+        assert_eq!(warnings[0].target, "plurxd::transcode");
+        assert!(warnings[0].message.contains("reason=\"probe_changed\""));
+        let fallbacks: Vec<_> = entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .message
+                    .contains("bound decoder planning fell back to stored probe facts")
+                    && entry.message.contains("reason=\"probe_changed\"")
+            })
+            .collect();
+        assert_eq!(
+            fallbacks.len(),
+            3,
+            "repeated fallbacks stay observable: {entries:?}"
+        );
+        assert!(fallbacks.iter().all(|entry| entry.level == "DEBUG"));
+        println!("S13 warning/counter assertions completed");
+    }
+
     #[tokio::test]
     async fn held_plan_fallback_reasons() {
         use crate::decode_facts::{DecodeFactError, DecodePlanFallbackReason};

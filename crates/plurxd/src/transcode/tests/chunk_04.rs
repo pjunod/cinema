@@ -772,6 +772,7 @@
             codec: "eac3".into(),
             channels: Some(6),
             sample_rate: Some(48_000),
+            channel_layout: None,
             language: Some("eng".into()),
             title: None,
             default: true,

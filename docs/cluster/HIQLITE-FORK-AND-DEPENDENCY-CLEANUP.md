@@ -1,6 +1,6 @@
 # The hiqlite fork and what it drags in — decide the ownership, then cut the graph
 
-**Status:** implementation in progress (M1-M3 merged, M4 merged as far as candle allows; M0 measured and M5 (d) in [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558), M5 (b)-(c) declined on M0's numbers); M6 upstream links pending · **Executes:** §4.3 / F-sc-11 / F-hist-12 /
+**Status:** implementation in progress (M1-M3 merged, M4 merged as far as candle allows; M0 measured and M5 (d) in [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558), M5 (b)-(c) declined on M0's numbers); M6 one accepted mechanism, nine generic rows pending as of 2026-09-30 · **Executes:** §4.3 / F-sc-11 / F-hist-12 /
 F-build-ops-codehealth-5, -6, -7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -1040,6 +1040,43 @@ of the above.
 Acceptance: every `generic bug` row in the three ledgers has a URL, and this
 document's Execution log records which were accepted, rejected or ignored.
 
+**M6 reconciliation, 2026-09-30 ([#642](http://192.168.4.7:3000/noirr/plurx/pulls/642)).**
+The current ledgers contain ten generic rows: Hiqlite 1, 8, 9, 10, 11, 17
+and 19, plus WAL 1, 2 and 3. One has a verified accepted mechanism; nine
+still say `pending M6`. The nine-row statements in §5.8 and the September 21
+Execution log are dated historical counts, not today's M6 inventory.
+
+WAL 2 now links [upstream PR 357](https://github.com/sebadob/hiqlite/pull/357),
+merged as
+[`5e93f594bb955449616bcf8f4f6128998944ec42`](https://github.com/sebadob/hiqlite/commit/5e93f594bb955449616bcf8f4f6128998944ec42).
+The [released v0.15.0 source](https://github.com/sebadob/hiqlite/blob/v0.15.0/hiqlite-wal/src/metadata.rs)
+matches the same-directory staging and single-rename repair of the
+remove/create gap on POSIX. It uses `sync_data()` and best-effort Unix
+directory sync; [the local repair](../../vendor/hiqlite-wal/src/metadata.rs)
+uses file `sync_all()` and requires Linux directory `sync_all()` success.
+This is an accepted mechanism receipt, not full patch or durability
+equivalence or permission to drop the patch. The
+[v0.15.0 release](https://github.com/sebadob/hiqlite/releases/tag/v0.15.0)
+warns of a breaking cache migration and forbids a rolling upgrade. This
+continuation performs no upgrade, patch removal or dependency/provider change.
+
+The bounded official scan read the latest 100 all-state issue/PR identities
+and relevant public discussions/released source. It established no exact
+disposition for the other nine rows. [Issue 372](https://github.com/sebadob/hiqlite/issues/372)
+reports node-by-id lookup, only part of Hiqlite 1: duplicate durable-id
+rejection remains unverified, so that combined row stays pending. Related
+changes and broad closed reports do not establish accepted, rejected or
+ignored dispositions, and a bounded scan cannot rule out older submissions.
+
+Next, the owner reconciles any existing submissions and extracts row-specific
+upstream-only reproductions from the existing ledger regressions, recording
+version/features, expected/observed results and disposition. Local regression
+references and source inspection are not newly executed upstream
+reproductions. Private-source disclosure and public filing/commenting require
+explicit owner authority; no public write or private-code publication occurred
+in this continuation. M6 remains incomplete. M5 (d)'s §5.6 fleet acceptance is
+separate; declined (b)/(c) and candle's forced `onig` boundary are unchanged.
+
 ### 5.8 2026-09-21 implementation boundary
 
 The safe source-only boundary is M1 plus the locally provable portion of M2.
@@ -1167,6 +1204,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 (b), (c) | [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558) | Declined on M0's numbers (§3.7(c) decision): cold workspace check 102.6 s shipped vs 101.6 s lean, warm-cache plurxd rebuild 82.1 s vs 85.9 s, and (c)'s required second check would make the lane do more work, not less. Lean probe `73acf4feb` was measurement only; its branch is deleted. `onig` stays until candle stops forcing it. |
 | 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 | [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558) | Unchanged: needs public upstream issues/PRs for the generic rows (owner). |
 | 2026-09-27 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | review ([comment 5513](http://192.168.4.7:3000/noirr/plurx/pulls/558#issuecomment-5513)) | [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558) | One P2, taken. The M5 (d) row's thread-scaling numbers were measured at opt-level 3 applied outside the tree, and a plain run of the committed test (opt-level 0) gives 802 / 360 / 225 / 166 / 129 ms per text, which argues for more threads. The exact command (`--config 'profile.dev.package."*".opt-level=3'`) is now in the test's doc comment and ignore reason and in §3.7(d), and it was rerun that way four times on the merged head: two threads keep 74% to 86% of the best throughput, not 94%. `EMBED_THREADS = 2` is now described as a chosen CPU bound whose cost is measured (3.5 to 6 ms per text), not a near-optimum. No code behaviour changed. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/k08_upstream_receipt_sol61 | M6 accepted-mechanism receipt | [#642](http://192.168.4.7:3000/noirr/plurx/pulls/642) | Claim checkpoint `2e01577d4` from exact effort base `b952246a97375909b396e0ef4588a8d138578286`. WAL 2 links accepted upstream PR 357 and released source; stronger local durability and all drop conditions remain. Ten generic rows reconcile to one verified accepted mechanism and nine pending exact matches/submissions. No upstream reproduction, public write, upgrade, patch removal or fleet acceptance. Original authors/history retained; root coordinator manages the sole independent review and exact-current Effort gate/integration. |
 
 M4 lab-corpus corroboration (optional; the structural result already covers
 every input):

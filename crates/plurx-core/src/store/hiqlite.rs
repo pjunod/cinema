@@ -791,6 +791,102 @@ impl StoreOperationMetrics {
 
 static STORE_OPERATION_METRICS: LazyLock<StoreOperationMetrics> =
     LazyLock::new(StoreOperationMetrics::default);
+
+/// Only this exact unordered pair is the production takeover switch poll.
+/// No SQL text or caller-supplied label participates in attribution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthorityReadScope {
+    Unattributed,
+    TakeoverSettings,
+}
+
+impl AuthorityReadScope {
+    fn settings_pair(first: &str, second: &str) -> Self {
+        if (first == keys::CLUSTER_MEDIA_POOL_ENABLED
+            && second == keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
+            || (second == keys::CLUSTER_MEDIA_POOL_ENABLED
+                && first == keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
+        {
+            Self::TakeoverSettings
+        } else {
+            Self::Unattributed
+        }
+    }
+
+    fn metrics(
+        self,
+        metrics: &TakeoverAuthorityReadMetrics,
+    ) -> Option<&TakeoverAuthorityReadMetrics> {
+        match self {
+            Self::Unattributed => None,
+            Self::TakeoverSettings => Some(metrics),
+        }
+    }
+}
+
+#[derive(Default)]
+struct TakeoverAuthorityReadMetrics {
+    started: AtomicU64,
+    outcomes: [AtomicU64; 3],
+}
+
+impl TakeoverAuthorityReadMetrics {
+    fn render(&self) -> String {
+        use std::fmt::Write;
+
+        let mut out = format!(
+            "# HELP plurx_takeover_settings_authority_reads_started_total Replicated takeover settings read attempts started, including retries and in-flight attempts.\n\
+             # TYPE plurx_takeover_settings_authority_reads_started_total counter\n\
+             plurx_takeover_settings_authority_reads_started_total {}\n\
+             # HELP plurx_takeover_settings_authority_reads_total Replicated takeover settings read attempts by terminal outcome.\n\
+             # TYPE plurx_takeover_settings_authority_reads_total counter\n",
+            self.started.load(Ordering::Relaxed),
+        );
+        for outcome in StoreOperationOutcome::ALL {
+            let _ = writeln!(
+                out,
+                "plurx_takeover_settings_authority_reads_total{{outcome=\"{}\"}} {}",
+                outcome.label(),
+                self.outcomes[outcome.index()].load(Ordering::Relaxed),
+            );
+        }
+        out
+    }
+}
+
+struct TakeoverAuthorityReadAttempt<'a> {
+    metrics: &'a TakeoverAuthorityReadMetrics,
+    completed: bool,
+}
+
+impl<'a> TakeoverAuthorityReadAttempt<'a> {
+    fn start(metrics: &'a TakeoverAuthorityReadMetrics) -> Self {
+        StoreOperationMetrics::saturating_add(&metrics.started, 1);
+        Self {
+            metrics,
+            completed: false,
+        }
+    }
+
+    fn complete(mut self, outcome: StoreOperationOutcome) {
+        StoreOperationMetrics::saturating_add(&self.metrics.outcomes[outcome.index()], 1);
+        self.completed = true;
+    }
+}
+
+impl Drop for TakeoverAuthorityReadAttempt<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            StoreOperationMetrics::saturating_add(
+                &self.metrics.outcomes[StoreOperationOutcome::Cancelled.index()],
+                1,
+            );
+        }
+    }
+}
+
+static TAKEOVER_AUTHORITY_READ_METRICS: LazyLock<TakeoverAuthorityReadMetrics> =
+    LazyLock::new(TakeoverAuthorityReadMetrics::default);
 static STORE_VALIDATION_REFUSALS: AtomicU64 = AtomicU64::new(0);
 
 // The named P2f runner needs a production-equivalent control arm without
@@ -978,8 +1074,9 @@ fn is_replicated_store_timeout<T>(result: &Result<T, StoreError>) -> bool {
     )
 }
 
-async fn time_authority_read_with_retry<T, F, Fut>(
+async fn time_scoped_authority_read_with_retry<T, F, Fut>(
     metrics: &'static StoreOperationMetrics,
+    scope: Option<&TakeoverAuthorityReadMetrics>,
     mut operation: F,
 ) -> Result<T, StoreError>
 where
@@ -991,12 +1088,27 @@ where
     let mut quorum_recovery_deadline = None;
     let mut last_quorum_message = None;
     loop {
-        let attempt = time_store_operation(
-            metrics,
-            StoreOperationClass::AuthorityRead,
-            operation(),
-            |_| true,
-        );
+        let attempt = async {
+            // Start at first poll, not logical invocation or completion. Every
+            // retry is another attempt; dropping an in-flight attempt keeps
+            // its start and records cancellation without awaiting store I/O.
+            let scoped_attempt = scope.map(TakeoverAuthorityReadAttempt::start);
+            let result = time_store_operation(
+                metrics,
+                StoreOperationClass::AuthorityRead,
+                operation(),
+                |_| true,
+            )
+            .await;
+            if let Some(scoped_attempt) = scoped_attempt {
+                scoped_attempt.complete(if result.is_ok() {
+                    StoreOperationOutcome::Ok
+                } else {
+                    StoreOperationOutcome::Error
+                });
+            }
+            result
+        };
         let result = if let Some(deadline) = quorum_recovery_deadline {
             match tokio::time::timeout_at(deadline, attempt).await {
                 Ok(result) => result,
@@ -1090,6 +1202,7 @@ pub fn prometheus_store_operations() -> String {
     use std::fmt::Write;
 
     let mut out = STORE_OPERATION_METRICS.render();
+    out.push_str(&TAKEOVER_AUTHORITY_READ_METRICS.render());
     out.push_str(
         "# HELP plurx_store_validation_refusals_total Replicated statements refused before store I/O.\n\
          # TYPE plurx_store_validation_refusals_total counter\n",
@@ -1117,6 +1230,24 @@ enum TimedClientInner {
     Connected(Client),
     #[cfg(test)]
     Disconnected,
+    #[cfg(test)]
+    InjectedConsistentRead(Arc<InjectedConsistentRead>),
+}
+
+/// Replace only consistent-query I/O in the production settings-pair path.
+/// The isolated sink receives real attempt increments, never seeded counts.
+#[cfg(test)]
+struct InjectedConsistentRead {
+    outcomes: Mutex<std::collections::VecDeque<InjectedConsistentReadOutcome>>,
+    calls: Mutex<Vec<(String, Params)>>,
+    metrics: TakeoverAuthorityReadMetrics,
+}
+
+#[cfg(test)]
+enum InjectedConsistentReadOutcome {
+    Timeout,
+    Error(&'static str),
+    Empty,
 }
 
 impl TimedClient {
@@ -1135,7 +1266,19 @@ impl TimedClient {
             TimedClientInner::Disconnected => {
                 panic!("validation test attempted hiqlite I/O")
             }
+            #[cfg(test)]
+            TimedClientInner::InjectedConsistentRead(_) => {
+                panic!("injected consistent-read client attempted unrelated hiqlite I/O")
+            }
         }
+    }
+
+    fn takeover_authority_read_metrics(&self) -> &TakeoverAuthorityReadMetrics {
+        #[cfg(test)]
+        if let TimedClientInner::InjectedConsistentRead(io) = &self.inner {
+            return &io.metrics;
+        }
+        &TAKEOVER_AUTHORITY_READ_METRICS
     }
 
     pub(super) async fn query_consistent_map<T, S>(
@@ -1147,18 +1290,61 @@ impl TimedClient {
         T: for<'a, 'r> From<&'a mut hiqlite::Row<'r>> + Send + 'static,
         S: Into<Cow<'static, str>>,
     {
+        self.query_consistent_map_scoped(sql, params, AuthorityReadScope::Unattributed)
+            .await
+    }
+
+    async fn query_consistent_map_scoped<T, S>(
+        &self,
+        sql: S,
+        params: hiqlite::Params,
+        scope: AuthorityReadScope,
+    ) -> Result<Vec<T>, StoreError>
+    where
+        T: for<'a, 'r> From<&'a mut hiqlite::Row<'r>> + Send + 'static,
+        S: Into<Cow<'static, str>>,
+    {
         let sql = sql.into();
         validate_sql(&sql)?;
-        time_authority_read_with_retry(&STORE_OPERATION_METRICS, || {
-            #[cfg(feature = "cluster-read-cost-validation")]
-            self.operations
-                .consistent_query_calls
-                .fetch_add(1, Ordering::Relaxed);
-            timeout_store(
-                self.inner()
-                    .query_consistent_map(sql.clone(), params.clone()),
-            )
-        })
+        time_scoped_authority_read_with_retry(
+            &STORE_OPERATION_METRICS,
+            scope.metrics(self.takeover_authority_read_metrics()),
+            || async {
+                #[cfg(feature = "cluster-read-cost-validation")]
+                self.operations
+                    .consistent_query_calls
+                    .fetch_add(1, Ordering::Relaxed);
+                #[cfg(test)]
+                if let TimedClientInner::InjectedConsistentRead(io) = &self.inner {
+                    io.calls
+                        .lock()
+                        .expect("injected I/O calls lock")
+                        .push((sql.to_string(), params.clone()));
+                    let outcome = io
+                        .outcomes
+                        .lock()
+                        .expect("injected I/O outcomes lock")
+                        .pop_front()
+                        .expect("unexpected additional physical attempt");
+                    return timeout_store(async {
+                        match outcome {
+                            InjectedConsistentReadOutcome::Timeout => {
+                                tokio::time::sleep(STORE_TIMEOUT + Duration::from_secs(1)).await;
+                                Ok(Vec::<T>::new())
+                            }
+                            InjectedConsistentReadOutcome::Error(error) => Err(error),
+                            InjectedConsistentReadOutcome::Empty => Ok(Vec::new()),
+                        }
+                    })
+                    .await;
+                }
+                timeout_store(
+                    self.inner()
+                        .query_consistent_map(sql.clone(), params.clone()),
+                )
+                .await
+            },
+        )
         .await
     }
 
@@ -4135,7 +4321,11 @@ impl SettingsStore for HiqliteAuthStore {
         validate_sql(sql)?;
         let rows = self
             .client()
-            .query_consistent_map::<SettingEntryRow, _>(sql, params!(first, second))
+            .query_consistent_map_scoped::<SettingEntryRow, _>(
+                sql,
+                params!(first, second),
+                AuthorityReadScope::settings_pair(first, second),
+            )
             .await?;
         let mut pair = (None, None);
         for row in rows {
@@ -6123,10 +6313,376 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn takeover_authority_attribution_settings_pair_reaches_timed_client_retries() {
+        for (first, second) in [
+            (
+                keys::CLUSTER_MEDIA_POOL_ENABLED,
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+            ),
+            (
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+                keys::CLUSTER_MEDIA_POOL_ENABLED,
+            ),
+        ] {
+            let io = Arc::new(InjectedConsistentRead {
+                outcomes: Mutex::new(
+                    [
+                        InjectedConsistentReadOutcome::Timeout,
+                        InjectedConsistentReadOutcome::Error(
+                            "CheckIsLeaderError: not enough for a quorum; got:{1}",
+                        ),
+                        InjectedConsistentReadOutcome::Empty,
+                        InjectedConsistentReadOutcome::Timeout,
+                        InjectedConsistentReadOutcome::Error(
+                            "CheckIsLeaderError: not enough for a quorum; got:{1}",
+                        ),
+                        InjectedConsistentReadOutcome::Empty,
+                    ]
+                    .into(),
+                ),
+                calls: Mutex::new(Vec::new()),
+                metrics: TakeoverAuthorityReadMetrics::default(),
+            });
+            let store = HiqliteAuthStore {
+                client: TimedClient {
+                    inner: TimedClientInner::InjectedConsistentRead(Arc::clone(&io)),
+                    #[cfg(feature = "cluster-read-cost-validation")]
+                    operations: Arc::new(OperationCounters::default()),
+                },
+                clock: Arc::new(FixedClock(0)),
+                telemetry: NodeLocalTelemetry::open(Path::new(":memory:"))
+                    .expect("in-memory sidecar"),
+                activity_refreshes: Arc::new(ActivityRefreshGate::default()),
+                cache_touches: Arc::new(ReplaceableWriteGate::default()),
+                watch_fences: Arc::new(super::super::watch_fence::WatchWriteFences::default()),
+            };
+            let started = tokio::time::Instant::now();
+            assert_eq!(
+                store
+                    .get_setting_pair(first, second)
+                    .await
+                    .expect("the real settings-pair path recovers"),
+                (None, None)
+            );
+            assert!(
+                started.elapsed() >= STORE_TIMEOUT,
+                "the real TimedClient deadline must fire before retry"
+            );
+            assert_eq!(
+                io.metrics.started.load(Ordering::Relaxed),
+                3,
+                "settings-pair scope must reach the actual retry attempt sink in either key order"
+            );
+            assert_eq!(
+                io.metrics.outcomes[StoreOperationOutcome::Error.index()].load(Ordering::Relaxed),
+                2
+            );
+            assert_eq!(
+                io.metrics.outcomes[StoreOperationOutcome::Ok.index()].load(Ordering::Relaxed),
+                1
+            );
+
+            assert_eq!(
+                store
+                    .get_setting_pair(keys::MONARR_URL, keys::MONARR_API_KEY)
+                    .await
+                    .expect("unrelated settings pair also recovers"),
+                (None, None)
+            );
+            assert_eq!(
+                io.metrics.started.load(Ordering::Relaxed),
+                3,
+                "unrelated retried settings pairs must not enter the takeover numerator"
+            );
+            assert_eq!(
+                io.metrics.outcomes[StoreOperationOutcome::Error.index()].load(Ordering::Relaxed),
+                2
+            );
+            assert_eq!(
+                io.metrics.outcomes[StoreOperationOutcome::Ok.index()].load(Ordering::Relaxed),
+                1
+            );
+            let calls = io.calls.lock().expect("calls lock");
+            assert_eq!(
+                calls.len(),
+                6,
+                "both pairs must execute all three physical attempts"
+            );
+            for (index, (sql, bound)) in calls.iter().enumerate() {
+                assert_eq!(
+                    sql,
+                    "SELECT key, value FROM settings WHERE key = $1 OR key = $2 ORDER BY key"
+                );
+                let expected = if index < 3 {
+                    params!(first, second)
+                } else {
+                    params!(keys::MONARR_URL, keys::MONARR_API_KEY)
+                };
+                assert_eq!(
+                    *bound, expected,
+                    "the production query retains the original bound key order on every retry"
+                );
+            }
+            assert!(io.outcomes.lock().expect("outcomes lock").is_empty());
+        }
+    }
+
+    #[test]
+    fn takeover_authority_attribution_selects_only_the_exact_pair_and_fixed_series() {
+        let metrics = TakeoverAuthorityReadMetrics::default();
+        for (first, second) in [
+            (
+                keys::CLUSTER_MEDIA_POOL_ENABLED,
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+            ),
+            (
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+                keys::CLUSTER_MEDIA_POOL_ENABLED,
+            ),
+        ] {
+            assert_eq!(
+                AuthorityReadScope::settings_pair(first, second),
+                AuthorityReadScope::TakeoverSettings
+            );
+            assert!(AuthorityReadScope::settings_pair(first, second)
+                .metrics(&metrics)
+                .is_some());
+        }
+        for (first, second) in [
+            (keys::MONARR_URL, keys::MONARR_API_KEY),
+            (keys::TRANSCODE_RATE_MODE, keys::TRANSCODE_QUALITY),
+            (keys::BACKUP_SCHEDULE_UTC, keys::BACKUP_DESTINATION),
+            (keys::TELEMETRY_RETAIN_DAYS, keys::PLAYBACK_NETWORK_PRIORS),
+            (keys::MAX_HW_SESSIONS, keys::SW_POOL_THREADS),
+            (
+                keys::CLUSTER_MEDIA_POOL_ENABLED,
+                keys::CLUSTER_MEDIA_POOL_ENABLED,
+            ),
+            (
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+            ),
+            (
+                keys::CLUSTER_MEDIA_POOL_ENABLED,
+                "cluster.session_takeover_enabled.extra",
+            ),
+            (
+                "cluster.media_pool_enabled.extra",
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+            ),
+        ] {
+            assert_eq!(
+                AuthorityReadScope::settings_pair(first, second),
+                AuthorityReadScope::Unattributed
+            );
+            assert!(AuthorityReadScope::settings_pair(first, second)
+                .metrics(&metrics)
+                .is_none());
+        }
+        let exposition = metrics.render();
+        let samples: Vec<_> = exposition
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        assert_eq!(
+            samples,
+            [
+                "plurx_takeover_settings_authority_reads_started_total 0",
+                "plurx_takeover_settings_authority_reads_total{outcome=\"ok\"} 0",
+                "plurx_takeover_settings_authority_reads_total{outcome=\"error\"} 0",
+                "plurx_takeover_settings_authority_reads_total{outcome=\"cancelled\"} 0",
+            ]
+        );
+        assert!(!exposition.contains(keys::CLUSTER_MEDIA_POOL_ENABLED));
+        assert!(!exposition.contains(keys::CLUSTER_SESSION_TAKEOVER_ENABLED));
+        let production_exposition = prometheus_store_operations();
+        assert!(production_exposition
+            .contains("# TYPE plurx_takeover_settings_authority_reads_started_total counter\n"));
+        assert!(production_exposition
+            .contains("# TYPE plurx_takeover_settings_authority_reads_total counter\n"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_authority_attribution_counts_retries_errors_and_excludes_other_pairs() {
+        let store_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
+        let metrics = TakeoverAuthorityReadMetrics::default();
+        let scope = AuthorityReadScope::settings_pair(
+            keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+            keys::CLUSTER_MEDIA_POOL_ENABLED,
+        );
+        let mut calls = 0;
+        let value =
+            time_scoped_authority_read_with_retry(store_metrics, scope.metrics(&metrics), || {
+                calls += 1;
+                let call = calls;
+                async move {
+                    match call {
+                        1 => Err(StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned())),
+                        2 | 3 => Err(StoreError::Database(
+                            "CheckIsLeaderError: not enough for a quorum; got:{1}".to_owned(),
+                        )),
+                        _ => Ok(42),
+                    }
+                }
+            })
+            .await
+            .expect("existing retry policy recovers");
+        assert_eq!((value, calls), (42, 4));
+        assert_eq!(metrics.started.load(Ordering::Relaxed), 4);
+        assert_eq!(
+            metrics.outcomes[StoreOperationOutcome::Error.index()].load(Ordering::Relaxed),
+            3
+        );
+        assert_eq!(
+            metrics.outcomes[StoreOperationOutcome::Ok.index()].load(Ordering::Relaxed),
+            1
+        );
+
+        let error = time_scoped_authority_read_with_retry(
+            store_metrics,
+            scope.metrics(&metrics),
+            || async { Err::<(), _>(StoreError::Database("bad row".to_owned())) },
+        )
+        .await
+        .expect_err("permanent error is not retried");
+        assert_eq!(error.to_string(), "database error: bad row");
+        assert_eq!(metrics.started.load(Ordering::Relaxed), 5);
+        assert_eq!(
+            metrics.outcomes[StoreOperationOutcome::Error.index()].load(Ordering::Relaxed),
+            4
+        );
+
+        let other = AuthorityReadScope::settings_pair(keys::MONARR_URL, keys::MONARR_API_KEY);
+        time_scoped_authority_read_with_retry(store_metrics, other.metrics(&metrics), || async {
+            Ok(())
+        })
+        .await
+        .expect("unrelated authority read succeeds");
+        assert_eq!(
+            metrics.started.load(Ordering::Relaxed),
+            5,
+            "unrelated authority work must never enter this numerator"
+        );
+        assert_eq!(
+            store_metrics
+                .cell(
+                    StoreOperationClass::AuthorityRead,
+                    StoreOperationOutcome::Ok
+                )
+                .count
+                .load(Ordering::Relaxed),
+            2,
+            "the unrelated read still enters the existing aggregate metric"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_authority_attribution_starts_on_poll_and_retains_cancelled_attempts() {
+        let store_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
+        let metrics = TakeoverAuthorityReadMetrics::default();
+        let scope = AuthorityReadScope::settings_pair(
+            keys::CLUSTER_MEDIA_POOL_ENABLED,
+            keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+        );
+        let unpolled =
+            time_scoped_authority_read_with_retry(store_metrics, scope.metrics(&metrics), || {
+                std::future::pending::<Result<(), StoreError>>()
+            });
+        drop(unpolled);
+        assert_eq!(metrics.started.load(Ordering::Relaxed), 0);
+        let mut pending = Box::pin(time_scoped_authority_read_with_retry(
+            store_metrics,
+            scope.metrics(&metrics),
+            std::future::pending::<Result<(), StoreError>>,
+        ));
+        assert!(matches!(
+            futures_util::poll!(&mut pending),
+            std::task::Poll::Pending
+        ));
+        assert_eq!(
+            metrics.started.load(Ordering::Relaxed),
+            1,
+            "in-flight work is already in the daily numerator"
+        );
+        assert_eq!(
+            metrics
+                .outcomes
+                .iter()
+                .map(|counter| counter.load(Ordering::Relaxed))
+                .sum::<u64>(),
+            0
+        );
+        drop(pending);
+        assert_eq!(metrics.started.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            metrics.outcomes[StoreOperationOutcome::Cancelled.index()].load(Ordering::Relaxed),
+            1
+        );
+
+        let mut backoff = Box::pin(time_scoped_authority_read_with_retry(
+            store_metrics,
+            scope.metrics(&metrics),
+            || async { Err::<(), _>(StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned())) },
+        ));
+        assert!(matches!(
+            futures_util::poll!(&mut backoff),
+            std::task::Poll::Pending
+        ));
+        drop(backoff);
+        assert_eq!(
+            metrics.started.load(Ordering::Relaxed),
+            2,
+            "cancellation during backoff cannot manufacture an unstarted retry"
+        );
+        assert_eq!(
+            metrics.outcomes[StoreOperationOutcome::Error.index()].load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            metrics.outcomes[StoreOperationOutcome::Cancelled.index()].load(Ordering::Relaxed),
+            1
+        );
+
+        let slow_attempt = STORE_TIMEOUT - Duration::from_millis(100);
+        let started = tokio::time::Instant::now();
+        time_scoped_authority_read_with_retry(store_metrics, scope.metrics(&metrics), || async {
+            tokio::time::sleep(slow_attempt).await;
+            Err::<(), _>(StoreError::Database(
+                "CheckIsLeaderError: not enough for a quorum; got:{1}".to_owned(),
+            ))
+        })
+        .await
+        .expect_err("absolute quorum deadline cancels the final attempt");
+        assert_eq!(
+            started.elapsed(),
+            slow_attempt + AUTHORITY_QUORUM_RECOVERY_BUDGET
+        );
+        assert_eq!(metrics.started.load(Ordering::Relaxed), 5);
+        assert_eq!(
+            metrics.outcomes[StoreOperationOutcome::Error.index()].load(Ordering::Relaxed),
+            3
+        );
+        assert_eq!(
+            metrics.outcomes[StoreOperationOutcome::Cancelled.index()].load(Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            store_metrics
+                .cell(
+                    StoreOperationClass::AuthorityRead,
+                    StoreOperationOutcome::Cancelled
+                )
+                .count
+                .load(Ordering::Relaxed),
+            2
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn authority_reads_retry_timeouts_once_and_quorum_failures_through_election() {
         let timeout_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let retried = time_authority_read_with_retry(timeout_metrics, {
+        let retried = time_scoped_authority_read_with_retry(timeout_metrics, None, {
             let attempts = Arc::clone(&attempts);
             move || {
                 let attempt = attempts.fetch_add(1, Ordering::Relaxed);
@@ -6167,7 +6723,7 @@ mod tests {
 
         let quorum_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
         let quorum_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let recovered = time_authority_read_with_retry(quorum_metrics, {
+        let recovered = time_scoped_authority_read_with_retry(quorum_metrics, None, {
             let attempts = Arc::clone(&quorum_attempts);
             move || {
                 let attempt = attempts.fetch_add(1, Ordering::Relaxed);
@@ -6211,7 +6767,7 @@ mod tests {
         let exhausted_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
         let exhausted_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let started = tokio::time::Instant::now();
-        let error = time_authority_read_with_retry(exhausted_metrics, {
+        let error = time_scoped_authority_read_with_retry(exhausted_metrics, None, {
             let attempts = Arc::clone(&exhausted_attempts);
             move || {
                 attempts.fetch_add(1, Ordering::Relaxed);
@@ -6250,7 +6806,7 @@ mod tests {
         let slow_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let slow_attempt = STORE_TIMEOUT - Duration::from_millis(100);
         let started = tokio::time::Instant::now();
-        let error = time_authority_read_with_retry(slow_metrics, {
+        let error = time_scoped_authority_read_with_retry(slow_metrics, None, {
             let attempts = Arc::clone(&slow_attempts);
             move || {
                 attempts.fetch_add(1, Ordering::Relaxed);
@@ -6297,7 +6853,7 @@ mod tests {
 
         let permanent_metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
         let permanent_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let error = time_authority_read_with_retry(permanent_metrics, {
+        let error = time_scoped_authority_read_with_retry(permanent_metrics, None, {
             let attempts = Arc::clone(&permanent_attempts);
             move || {
                 attempts.fetch_add(1, Ordering::Relaxed);

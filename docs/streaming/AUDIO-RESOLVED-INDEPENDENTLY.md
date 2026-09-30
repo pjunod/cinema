@@ -321,8 +321,8 @@ every lossy rolling/full-transcode and copy-conversion path now emits `-ar
 48000`, including progressive remux conversion, while copied audio remains
 untouched. The review disposition then added source and sink sample-rate facts,
 kept decoder and passthrough trust separate, and rotated recipe identity to v4.
-The remaining work is still blocked rather than guessed: normalized sources
-do not carry channel layout, M4 has not measured per-layout gains or limiter
+The remaining work is still blocked rather than guessed: the source-layout
+continuation below does not interpret speaker positions, M4 has not measured per-layout gains or limiter
 need, and no Apple/Android/web device has supplied the route evidence. No
 shipped client sends the claim, so surround delivery remains unenabled.
 
@@ -459,3 +459,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#418](http://192.168.4.7:3000/noirr/plurx/pulls/418) · `659fb6372` | Partial: lossy rolling outputs are fixed at 48 kHz. needs: normalized source channel-layout/sample-rate facts, a sink sample-rate contract and M4 matrix/clipping measurements before argv, identity, manifest, offline or prepared-handoff propagation. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M3–M5 | [#418](http://192.168.4.7:3000/noirr/plurx/pulls/418) | needs: the Apple/AVR/AirPods observations, per-layout loudness/peak/clipping measurements, then Android/web device evidence. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Sole review disposition | [#418 comment #3296](http://192.168.4.7:3000/noirr/plurx/pulls/418#issuecomment-3296) | Separated decoder/sink/passthrough authority; source/sink sample rates now fail closed; recipe v4 keys the 48 kHz decision; flat `achannels` is bounded at the request; progressive AAC remux is fixed at 48 kHz. Hardware, layout and downmix evidence remain blocked honestly. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/architecture_receipt_reconcile_sol61 | M2 source-layout prerequisite | Draft continuation on current effort `ffbbc16ce` | Claimed only optional source facts and backend round trips. `AudioStream.channel_layout` retains trimmed, opaque ffprobe spelling, bounded to 256 UTF-8 bytes; `5.1` and `5.1(side)` remain distinct. Empty, unknown/N/A, control-bearing and malformed non-string values mean no claim; unsupported bounded spellings remain opaque, not supported speaker maps. No inference from channel count. Absent/null legacy JSON remains absent on serialization, with no migration/backfill. Raw probe JSON retains rejected facts. Focused parser/serde and real SQLite plus feature-enabled three-voter Hiqlite round trips are required before push. No pan, gain, argv, recipe, client, runtime or surround-output change; M2 remains partial and M3–M5 acceptance remains owed. Current effort/focused-test workflow supersedes the older task-to-main/broad-suite instructions for this continuation. |
