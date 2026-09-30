@@ -692,14 +692,28 @@ post-cleanup guard error does not mean owned cleanup failed.
 
 The coordinator authorizes one disclosed new bounded attempt, not a retry of
 a failed benchmark. Extraction, fetch and build may overlap a foreign compiler
-only while all unchanged resource and production guards pass and one-minute
-host load is at most 16.0; compiler
+only while all unchanged resource and production guards pass; whole-host load
+is recorded as build telemetry, not an abort predicate. Compiler
 presence alone is not pressure evidence. Before fixture/capture and throughout
 measurement, require no unrelated compiler/CI and one-minute host load at most
 2.0. Admission waits retain the owned warm target but consume the same 90-minute
 attempt deadline, with no measurement retry, cap raise or silent deadline reset.
 Earlier attempts consumed 91.481, 28.238 and 669.156 seconds respectively;
 the new 90-minute allowance is explicitly additional, not a cumulative claim.
+
+Attempt 4's newly introduced whole-host build-load threshold stopped examples
+compilation at 620.852 seconds (load 16.38) despite no unrelated compiler
+observations, available RAM26.57GB/free78.17GB, healthy production/ready200/
+zero restarts and no owned OOM. No capture or measurement ran. Wall was
+622.296 seconds; exact owned container/volume absence was proved by successful
+full inventories before the independent post-health load check failed.
+Original receipts and copied checksums remain unchanged. Root authorizes one
+distinct corrected attempt 5 removing only that build-load abort predicate;
+all hard caps, resource/production/OOM guards and per-attempt deadlines stay
+unchanged. Measurement idle admission and strict runtime foreign/load checks
+remain at 2.0. Admission-only waits keep the owned warm target within the live
+deadline; terminal attempts clean their exact owned resources. The additional
+90-minute allowance is disclosed; no failed performance run is being retried.
 
 The laboratory cannot supply the M5 post-merge fleet migration, every-voter
 snapshot/index/statistics or Home/Title route evidence below. It adopts no
