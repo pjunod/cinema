@@ -384,6 +384,14 @@ async function saveBoundedCatalogueReads(btn){
     const card=document.getElementById("bounded-catalogue-settings");if(card)card.outerHTML=boundedCatalogueCard(saved,DEVELOPER_READINESS);
   }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
 }
+function clusterClockCard(readiness){
+  return setCard(`${cardHead("Cluster clock observation","Authenticated peer offset and local clock continuity.",`<span class="pill">measurement only</span>`)}
+    ${devReq(readiness,"cluster_clock","contract","Clock contract","This release observes clocks without changing acquisition or readiness.")}
+    ${devReq(readiness,"cluster_clock","coverage","Observation coverage","Every committed remote member must answer a fresh authenticated probe.")}
+    ${devReq(readiness,"cluster_clock","upper_bound","Worst observed upper bound","Absolute offset plus uncertainty; an unknown peer has no numeric offset.")}
+    ${devReq(readiness,"cluster_clock","consequence","Readiness consequence","The fixed 2,000 ms contract awaits fleet evidence before enforcement.")}
+    ${devGraduation("the identified measurement and enforcement releases have their fleet acceptance receipts.","clock diagnostics move to Settings → Cluster; there is no manual on/off control.")}`);
+}
 function developerPanel(settings,readiness){
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
     <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>Tuner, guide, recording and library channels</span></a>
@@ -397,7 +405,7 @@ function developerPanel(settings,readiness){
   return `${setHead("Developer","Experimental features still awaiting device qualification.")}
       ${destinations}
       <div class="setsection" id="enable-live-tv"><h2>Enable Live TV</h2><p>Cluster use of the network tuner, with advisory prerequisites.</p></div>${liveTvEnableCard(settings)}
-      <div class="setsection"><h2>Cluster work</h2><p>Remote media placement and replica catalogue reads.</p></div>${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}
+      <div class="setsection"><h2>Cluster work</h2><p>Remote media placement and replica catalogue reads.</p></div>${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${clusterClockCard(readiness)}
       <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
       <div class="setsection"><h2>Live TV video</h2><p>Output choices whose device and node capacity evidence remains advisory.</p></div>${liveTvDeinterlaceCard(settings)}
       <div class="setsection"><h2>Recovery</h2><p>Portable backup scheduling and visible readiness. Saving is never gated by these observations.</p></div>${clusterBackupCard(settings,readiness)}

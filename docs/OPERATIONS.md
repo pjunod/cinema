@@ -2315,6 +2315,16 @@ failure drills, or performance runs. Bounded-replica freshness uses a local
 monotonic deadline, but clock synchronization remains an operational
 prerequisite for the existing cross-node protocols and comparable evidence.
 
+The measurement release exposes `plurx_cluster_clock_offset_seconds`, its
+uncertainty and per-peer `observation_state` on `/metrics`; numeric gauges
+are absent for Unknown peers. Compare `abs(offset) + uncertainty` with the
+fixed 2,000 ms relative contract, retain the discontinuity and Unknown-round
+counters, and report `plurx_cluster_clock_authority_reads_total` to measure
+inbound probe authorization cost. This observation changes no acquisition or
+readiness decision and does not replace the absolute 250 ms discipline rule.
+See [the measurement handoff](cluster/CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md)
+for the identified one-hour idle and sixty-second loaded receipt still owed.
+
 **Prepare the existing voter.** Give each node reachable, unique Raft and
 cluster-API addresses. `advertise_host` is a host or IP, not a URL. Set
 `join_url` when the public API used for cluster admission is reached through a
