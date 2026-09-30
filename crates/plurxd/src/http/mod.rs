@@ -14105,6 +14105,41 @@ mod tests {
         );
     }
 
+    /// The real start route must keep its authoritative presence check even
+    /// when detail has a newer, bounded observation cache. A poisoned detail
+    /// probe is counted through the router, not an unused cache instance.
+    #[tokio::test]
+    async fn playback_decision_does_not_probe_detail_availability() {
+        let (_, mut state) = test_state();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        state.detail_availability =
+            crate::availability::AvailabilityCache::with_test_probe(move |_| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    false
+                }
+            });
+        let app = router(state.clone());
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let (status, body) = call(
+            &app,
+            get(
+                &format!(
+                    "/api/v1/files/{}/decision?vcodec=h264&acodec=aac&container=mp4&hdr=0",
+                    seeded.file
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["method"], "direct_play");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
     /// A big remux gets told to go through MSE; an ordinary direct play does
     /// not. Both halves matter — the second is the regression that would
     /// reroute a whole library's worth of files that were working.

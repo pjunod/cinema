@@ -47,14 +47,14 @@
   "causes": ["link", "encode", "decode", "hold", "authority", "unknown"],
   "cause_map": {
     "comment": "Design section 3.2's five classes against the kinds `autoCauseEvidence` actually emits (crates/plurxd/src/web/player/stall-diagnosis.js). `decideRung` reads the web kinds, so the cases below are written in web kinds and named by design class.",
-    "link": ["bandwidth-limited", "delivery-refused"],
+    "link": ["bandwidth-limited"],
     "encode": ["capacity-shortfall"],
-    "decode": [],
-    "hold": ["loader-suspended", "control-stall-verdict"],
+    "decode": ["decode-failed"],
+    "hold": ["loader-suspended", "control-stall-verdict", "delivery-refused"],
     "authority": ["authority-refused", "producer-failed"],
     "unknown": ["unknown", "stale"],
     "not_evidence": ["producer-paced"],
-    "hold_split": "Design section 3.2 splits what the server calls a hold in two, and the split is the point. `control-stall-verdict` is a `hold` or `retry_resource` verdict that answered this client's OWN `stalled` ask: it is trouble evidence and suppresses a downward move for as long as the stall deferral lasts. `producer-paced` is the advisory hold `resolve_action` (crates/plurxd/src/playback_control.rs) returns on EVERY control exchange while the producer's ahead window is full, together with `producer_state == \"held\"` (crates/plurxd/src/transcode.rs): that is the ordinary steady state of a paced JIT producer ahead of its viewer, it is not suppression evidence in either direction, and it is exactly the state upward recovery happens in. No platform emits either kind today; the web consumes a hold only inside `persistentWait` (crates/plurxd/src/web/player/measurements.js), after the stall is recorded."
+    "hold_split": "Design section 3.2 splits what the server calls a hold in two. `control-stall-verdict` is a `hold` or `retry_resource` verdict that answered this client's OWN `stalled` ask: it suppresses a downward move only during that stall's bounded deferral. `delivery-refused` is a server publication refusal: repair delivery, not quality. `producer-paced` is the routine advisory ahead-window hold or `producer_state == \"held\"; it is the healthy paced state and never suppression evidence."
   },
   "ladder": [
     {"height": 1080, "total_kbps": 8160, "peak_kbps": 12160},
@@ -72,6 +72,8 @@
     "recentSpeed": null,
     "activeSupplyStall": false,
     "supplyStalls": 0,
+    "decodeStalls": 0,
+    "decodeStepConsumed": false,
     "lastStallAtMs": null,
     "nowMs": 600000,
     "lastSwitchAtMs": null,
@@ -116,17 +118,15 @@
       "expect": {"height": 360, "reason": "bandwidth cliff", "emergency": true}
     },
     {
-      "name": "link: a publication refusal is constrained delivery to the design and silence to the browser",
-      "section": "3.2 link",
+      "name": "hold: a publication refusal does not implicate the link",
+      "section": "3.2 hold, 7.6 publication refusal",
       "sample": {
         "activeSupplyStall": true,
         "runwaySeconds": 0.4,
         "estimateKbps": 5000,
         "causeEvidence": {"kind": "delivery-refused", "ageMs": 2000, "code": "response_publication_timeout"}
       },
-      "expect": {"height": 480, "reason": "link"},
-      "web_current": {"height": 720, "reason": "delivery-refused", "action": "suppressed"},
-      "finding": "Design section 3.2 folds a `publication`/`segment_`/`response_` refusal into the `link:` class, which steps down. `decideRung` puts `delivery-refused` in its `namedSuppression` list and retains the rung. The browser's behaviour is the one with an argument behind it (section 2.3: a server declining to publish is not the link being slow, and stepping a rung on `response_owner_transition` would be a quality drop caused by an ownership move), so this is a defect in section 3.2's table rather than in the code. Recorded here rather than silently corrected because the decision belongs to the build plan; see design section 7.6."
+      "expect": {"height": 720, "reason": "delivery-refused", "action": "suppressed"}
     },
     {
       "name": "encode: a capacity shortfall steps exactly one rung",
@@ -177,9 +177,31 @@
         "decodeStalls": 2,
         "causeEvidence": {"kind": "decode-failed", "ageMs": 500, "code": "codec_error"}
       },
-      "expect": {"height": 480, "reason": "decode", "blockedHeights": [720]},
-      "web_current": {"height": 720, "reason": null},
-      "finding": "`decideRung` has no decode cause and no `decodeStalls` input: `autoCauseEvidence` never returns one, and `decodeStalls` is not a parameter. Decode evidence reaches the policy only as a pre-populated `blockedHeights` set, filled by `maybeDecodeRescue` and passed as `p.abr.failedHeights` from `autoControllerTick`. So the browser does the blocking, outside the policy, and the policy cannot report `decode` as a reason or tell a second decode failure from a first. Design section 3.2 requires the class to be inside the shared policy, which means `decideRung` gains a `decodeStalls` input and a `decode` cause, and the returned decision gains the height to block. That is build-plan work; the case is pinned here so it is not forgotten."
+      "expect": {"height": 480, "reason": "decode", "blockedHeights": [720]}
+    },
+    {
+      "name": "decode: a second codec failure belongs to compatibility recovery",
+      "section": "3.2 decode, 4 compatibility owner",
+      "sample": {
+        "currentHeight": 480,
+        "decodeStalls": 2,
+        "decodeStepConsumed": true,
+        "blockedHeights": [720],
+        "causeEvidence": {"kind": "decode-failed", "ageMs": 500, "code": "codec_error"}
+      },
+      "expect": {"height": 480, "reason": "decode", "action": "suppressed"}
+    },
+    {
+      "name": "decode: a failed auto-open target does not spend the decoder step",
+      "section": "3.2 decode, 4 compatibility owner",
+      "sample": {
+        "currentHeight": 1080,
+        "decodeStalls": 1,
+        "blockedHeights": [720],
+        "decodeStepConsumed": false,
+        "causeEvidence": {"kind": "decode-failed", "ageMs": 0, "code": "codec_error"}
+      },
+      "expect": {"height": 720, "reason": "decode", "blockedHeights": [1080]}
     },
     {
       "name": "hold: a suspended loader is a transport repair, not a rung change",
@@ -216,8 +238,7 @@
         "emergency": false,
         "evidence": {"kind": "control-stall-verdict"}
       },
-      "web_current": {"height": 360, "reason": "bandwidth cliff", "action": "switch", "emergency": true},
-      "finding": "The server answered this client's own `stalled` ask with `hold` or `retry_resource`, so production is paused or restarting and a fragment fetched now measures the producer, not the link: on a JIT server a transfer that waits on production reads as a cliff. `decideRung` cannot tell, because no platform hands it the verdict. The web holds the verdict only as a local inside `persistentWait` (crates/plurxd/src/web/player/measurements.js), Android only inside `applyStallVerdict` (Controller.kt), and `autoControllerTick` keeps running through the deferral, so a fresh slow transfer during a held stall takes the emergency branch and reopens a rung lower. This is a gap the fixture records, not an observed field defect: nobody has a trace of it. The build plan's M0.1 settles it by adding `control-stall-verdict` to `namedSuppression`, scoped to the stall deferral (20 s on the web, `CONTROL_STALL_DEFER_DEADLINE_MS`). Upgrades need nothing new here: the stall that prompted the ask already set `lastStallAtMs`, and `stallFree` refuses every upgrade for `stallWindowMs`."
+      "note": "The stall-scoped verdict is retained only through this wait's 20 s deferral. Routine paced holds never supply this kind."
     },
     {
       "name": "hold: a routine paced hold is the steady state and never blocks an upgrade",
@@ -308,7 +329,7 @@
       "expect": {"height": 720, "reason": null, "mildSamples": 2}
     },
     {
-      "name": "hysteresis: at exactly cooldownMs the design switches and the browser does not",
+      "name": "hysteresis: at cooldownMs a voluntary move still waits for dwellMs",
       "section": "3.4 cooldown, boundary just outside",
       "sample": {
         "estimateKbps": 5000,
@@ -317,9 +338,7 @@
         "mildSamples": 1,
         "lastSwitchAtMs": 580000
       },
-      "expect": {"height": 480, "reason": "bandwidth pressure"},
-      "web_current": {"height": 720, "reason": null, "mildSamples": 2},
-      "finding": "Design section 3.4 says `No switch within cooldownMs of the last one`, which reads as a 20 s minimum gap. `decideRung` computes `voluntaryAllowed = sinceSwitch >= cooldownMs && sinceSwitch >= dwellMs`, and `dwellMs` is 60000, so the real minimum gap between two voluntary moves is 60 s and `cooldownMs` is dead weight on this path — it binds only through the second condition it is always smaller than. One of the two has to move: either section 3.4 is corrected to say the voluntary gap is `max(cooldownMs, dwellMs)`, or `dwellMs` goes back to being only the horizon the restart-cost model amortises over, which is what its own table row in section 2.2 says it governs. Naming the wrong number to three platforms is exactly the failure a shared fixture exists to prevent, so this must be settled before any adapter is written."
+      "expect": {"height": 720, "reason": null, "mildSamples": 2}
     },
     {
       "name": "hysteresis: a full dwell after the last switch the mild downgrade is taken",
@@ -575,7 +594,7 @@
       "viewer_state": "A stall-scoped control verdict",
       "rule": "not a tick gate: the tick keeps running, and the verdict reaches decideRung as `control-stall-verdict` evidence that suppresses a downward move for the stall deferral; the routine paced hold is not this row",
       "web_gate": null,
-      "finding": "Same gap as the stall-scoped `hold:` case above, seen from the tick: nothing in `autoControllerTick` reads the verdict, which the web holds only as a local inside `persistentWait` and Android only inside `applyStallVerdict`. It is deliberately not a gate that turns the controller off: the server sends `hold` on every exchange while a paced producer is ahead, so a gate keyed on any hold would freeze Auto in exactly the healthy state upward recovery needs."
+      "note": "M0 passes this wait's bounded verdict through autoCauseEvidence into decideRung. It is deliberately not a tick gate: the routine ahead-window hold is a healthy paced state and must leave upward recovery available."
     }
   ]
 }

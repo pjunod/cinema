@@ -1,6 +1,6 @@
 # Native adaptive quality — the build plan
 
-**Status:** ready for review · **Executes:**
+**Status:** M0 implemented in draft PR #618; M1–M4 open · **Executes:**
 [NATIVE-ADAPTIVE-QUALITY-DESIGN.md](NATIVE-ADAPTIVE-QUALITY-DESIGN.md)'s D4
 · **Written:** 2026-09-23 against `main` @ `8839cc72`
 
@@ -37,7 +37,7 @@ requested before M3.
 
 - `tests/playback/auto-quality-policy.json` — the shared policy fixture at
   schema 1, driven today by `node tests/playback/web-policy.test.js`.
-  30 cases, 12 controller-gate rows; the gate rows pin all eight of the
+  32 cases, 13 controller-gate rows; the gate rows pin all eight of the
   design §8.1 tick guards.
 - The design's §8 — the per-platform adapter specification, with the six
   fields that are not simply available and the seven corrections it made to
@@ -53,10 +53,9 @@ requested before M3.
 
 ## 2. What is missing, and it is not mostly code
 
-Four disagreements between the design and the shipped browser, each pinned in
-the fixture with a written finding (design §8.4, §7.6), and **no shaped-network
-measurement on any platform**. M0 and the D3 baseline are therefore the whole
-critical path; the adapters are the easy part and must not start first.
+M0 settles the four design/browser disagreements once pinned in the fixture.
+The D3 shaped-network baseline remains incomplete across platforms; it is
+the gate before native adapters begin.
 
 ## 3. Milestones
 
@@ -88,13 +87,10 @@ that no longer needs a `web_current` is a disagreement that has been settled.
    records, not an observed field defect; no trace has shown it. It stays
    first because it is the smallest item and the one the adapters' `hold:`
    classifier copies.
-2. **The voluntary-switch gap is named once and correctly.** `voluntaryAllowed`
-   is `cooldownMs && dwellMs`, so the real minimum is 60 s while §3.4's rule
-   is written around 20 s (it now notes the gap rather than settling it). Either correct the document to `max(cooldownMs, dwellMs)` or return
-   `dwellMs` to being only the restart-cost horizon its own §2.2 row says it
-   governs. Changing the number is a behaviour change and needs a trace behind
-   it; correcting the document does not. Prefer the document unless D3 says
-   otherwise.
+2. **The voluntary-switch gap is named once and correctly.** M0 keeps the
+   shipped `voluntaryAllowed = cooldownMs && dwellMs` rule, a 60 s minimum,
+   and corrects design §2.2 and §3.4 to `max(cooldownMs, dwellMs)`. A 20 s
+   gap would change behavior without the shaped trace needed to justify it.
 3. **A decode class inside the policy.** `decideRung` gains a `decodeStalls`
    input and a `decode` cause, and its decision gains the height to block, so
    the blocking stops happening outside the policy where two platforms cannot
@@ -106,9 +102,10 @@ that no longer needs a `web_current` is a disagreement that has been settled.
    step down one rung, once; never change delivery method. A second decode
    failure takes no further rung and is left to the platform's compatibility
    owner.
-4. **Decide whether `link:` carries a publication refusal** (design §7.6).
-   The likely answer is that it does not and the refusal belongs with the
-   stall-scoped half of `hold:`, never with the routine paced hold. Whichever way it goes, §3.2's table and the fixture move together.
+4. **Classify a publication refusal.** M0 decides that `link:` needs measured
+   throughput; a fresh `delivery-refused` belongs in `hold:` and suppresses a
+   rung move while delivery is repaired. The routine paced hold remains
+   outside that class. Design §3.2, §7.6 and the fixture record the decision.
 
 **Acceptance:** all four fixture cases carry `expect` alone, with no
 `web_current`; `node tests/playback/web-policy.test.js` and `make web-check`
@@ -254,4 +251,4 @@ claim protocol). **Model** is the runtime's exact model identifier;
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-29 | gpt-6-sol | agent:/root/a05_m0_builder | M0 | [#618](http://192.168.4.7:3000/noirr/plurx/pulls/618) | Four M0 cases now use plain `expect`: bounded stall verdict, 60 s voluntary gap, typed decode, and publication refusal. `node tests/playback/web-policy.test.js`, `node tests/playback/web-control.test.js`, and `make web-check` pass. Reverting verdict suppression, decode policy, or stalled-ask publication fails the focused regression. The sole adversarial review found the absent live media-error seam and conflated blocked heights; both are corrected with a shipped error-listener regression and a separate `decodeStepConsumed` state. `transport.js` changes only at that error-listener seam. No native adapter or M1 wire change. |

@@ -3,6 +3,7 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 mod admission;
+mod availability;
 use plurx_core::process::bounded as bounded_process;
 #[cfg(test)]
 #[path = "../../plurx-core/tests/support/queue_fixture.rs"]
