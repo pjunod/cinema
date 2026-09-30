@@ -209,6 +209,12 @@ async fn background_jobs_reservations_bound_distinct_jobs_and_yield_releases_cap
     for index in 0..3 {
         let mut request = enqueue(1_000);
         request.dedupe_key = format!("fragment:{index}");
+        if index == 1 {
+            request.request.scope = "playback-artifact".to_owned();
+            request.request.consumer_kind = "playback_fragment".to_owned();
+            request.request.target_node_id = Some("node-a".to_owned());
+            request.request.deadline_ms = Some(10_000);
+        }
         store.enqueue_job(request.clone()).await.expect("enqueue");
         let attempt = claim(&request.id, 0, 1_000);
         if index < 2 {
@@ -233,7 +239,15 @@ async fn background_jobs_reservations_bound_distinct_jobs_and_yield_releases_cap
         })
         .await
         .expect("yield");
-    let job = claimed(&store, third).await;
+    let job = claimed(
+        &store,
+        ClaimJob {
+            now_ms: 2_001,
+            dispatched_at_ms: 2_001,
+            ..third
+        },
+    )
+    .await;
     assert_eq!(job.fence, 1);
 }
 

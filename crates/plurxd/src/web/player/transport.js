@@ -167,7 +167,7 @@ function finishPlaybackSeekTelemetry(p,pending,event){
   measurement.cleanup=null;
   const report=Object.assign({},measurement.context,{level:"info",event});
   if(measurement.trace){
-    const video=document.getElementById("video");
+    const video=/** @type {HTMLVideoElement|null} */ (document.getElementById("video"));
     const elementMs=Number(video&&video.currentTime);
     report.seek_trace=JSON.stringify(Object.assign({},measurement.trace,{
       landing_ms:event==="seek_resumed"&&Number.isFinite(elementMs)

@@ -2905,8 +2905,11 @@ mod tests {
         // v72–v76 add library work, domain leases, source-I/O reservations,
         // provider dispatch budgets and the subtitle adapter; v77 adds artwork holders,
         // and v78 retains portable transcode source/manifest provenance.
+        // v79–v85 add predictions, embeddings, probe/integrity work, Live TV
+        // resource claims, subtitle reconciliation and bounded job history;
+        // v86 adds expiring viewer interests through analysis and artifacts.
         assert_eq!(
-            version, 85,
+            version, 86,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

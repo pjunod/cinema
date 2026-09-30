@@ -342,5 +342,18 @@ BEGIN
     WHERE request_id = NEW.request_id AND fence = NEW.fence;
 END;
 -- next statement
+-- Submission and successful completion happen after the analysis reader has
+-- finished. Release its slot so the durable fragment build or next analysis
+-- can claim the same source domain.
+-- Cancellation and retries keep their lease-bound reservations because their
+-- physical readers may still be winding down.
+CREATE TRIGGER IF NOT EXISTS analysis_source_release_on_success
+AFTER UPDATE OF state ON analysis_requests
+WHEN OLD.state = 'running' AND NEW.state IN ('submitted','ready')
+BEGIN
+    DELETE FROM analysis_source_reservations
+    WHERE request_id = NEW.request_id AND fence = NEW.fence;
+END;
+-- next statement
 -- A terminal row can precede physical read cancellation. Keep the fenced
 -- reservation until its lease expiry; the next claim prunes expired rows.

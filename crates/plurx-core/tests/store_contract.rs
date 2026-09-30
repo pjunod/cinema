@@ -514,6 +514,10 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    "join_analysis_viewer",
+    "join_artifact_viewer",
+    "analysis_preparation_observation",
+    "source_io_holders",
     "sync_predictions",
     "embedding_for",
     "publish_embedding_job",
@@ -8518,11 +8522,43 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             })
             .await
             .unwrap_or_else(|error| panic!("{backend}: create library: {error}"));
+        let secondary = store
+            .create_library(&NewLibrary {
+                name: "Pretranscode Contract Secondary".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: vec![PathBuf::from("/contract/pretranscode-secondary")],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create secondary library: {error}"));
+        assert!(store
+            .replace_storage_domains(
+                vec![
+                    plurx_core::store::background_jobs_resources::StorageDomainMapping {
+                        library_id: library.id,
+                        root_path: "/contract/pretranscode".into(),
+                        domain_id: "pretranscode-primary".into(),
+                    },
+                    plurx_core::store::background_jobs_resources::StorageDomainMapping {
+                        library_id: secondary.id,
+                        root_path: "/contract/pretranscode-secondary".into(),
+                        domain_id: "pretranscode-secondary".into(),
+                    },
+                ],
+                100,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: map source domains: {error}")));
         let mut files = Vec::new();
         for ordinal in 1..=5 {
+            let (source_library, root) = if matches!(ordinal, 2 | 3) {
+                (secondary.id, "/contract/pretranscode-secondary")
+            } else {
+                (library.id, "/contract/pretranscode")
+            };
             let item = store
                 .insert_item(&NewItem {
-                    library_id: library.id,
+                    library_id: source_library,
                     kind: ItemKind::Movie,
                     parent_id: None,
                     title: format!("Queue Movie {ordinal}"),
@@ -8536,7 +8572,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 store
                     .upsert_file(
                         item,
-                        &format!("/contract/pretranscode/movie-{ordinal}.mkv"),
+                        &format!("{root}/movie-{ordinal}.mkv"),
                         10_000 + ordinal,
                         20_000 + ordinal,
                         &ProbeResult::default(),
@@ -8732,7 +8768,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 .collect::<BTreeSet<_>>()
                 .len(),
             2,
-            "{backend}: distinct claims must respect the two shared source-I/O slots"
+            "{backend}: one maintenance reader per independent source domain"
         );
         for job in &claimed {
             let staging = store
@@ -9092,6 +9128,10 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             paged_claim.dedupe_key, "claim-pagination-128",
             "{backend}: claim did not preserve highest-compatible ordering across pages"
         );
+        assert!(store
+            .fixture_cancel_pretranscode_job(&paged_claim, "fixture_done", queue_time(951))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: retire pagination claim: {error}")));
 
         let legacy_recipe = "1bd16d960c43953936740e772bc422612303862b77966f2e0a884bc581064078";
         assert!(store
@@ -9141,8 +9181,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 "node-legacy",
                 &capable,
                 &[],
-                queue_time(961),
-                queue_time(1_261),
+                queue_time(1_251),
+                queue_time(1_551),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim legacy reuse: {error}"))
@@ -9157,7 +9197,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 16_896,
                 Some(16_384),
                 &adopted_digest,
-                queue_time(962),
+                queue_time(1_252),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: bind legacy manifest: {error}")));
@@ -9193,7 +9233,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
 
         let wrong_digest = "f".repeat(64);
-        let verification_now = queue_time(963);
+        let verification_now = queue_time(1_253);
         let location = store
             .transcode_verification_candidates("node-legacy", None)
             .await
@@ -9312,8 +9352,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 "node-collision",
                 &capable,
                 &[],
-                queue_time(963),
-                queue_time(1_263),
+                queue_time(1_253),
+                queue_time(1_553),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim collision job: {error}"))
@@ -9329,7 +9369,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                     4_096,
                     None,
                     &"9".repeat(64),
-                    queue_time(964),
+                    queue_time(1_254),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: conflicting completion: {error}")),
@@ -9351,8 +9391,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
         let replacement_job = NewPretranscodeJob {
             id: "00000000-0000-4000-8000-000000000107".to_owned(),
-            not_before_ms: 963,
-            created_at_ms: 963,
+            not_before_ms: 1_255,
+            created_at_ms: 1_255,
             ..legacy_job
         };
         assert!(
@@ -9603,8 +9643,8 @@ async fn assert_distinct_pretranscode_claims_from_separate_handles(
                         &node,
                         &capabilities,
                         &[],
-                        200 + round,
-                        500 + round,
+                        200 + round * 1_000,
+                        500 + round * 1_000,
                     )
                     .await
             }
@@ -9630,8 +9670,8 @@ async fn assert_distinct_pretranscode_claims_from_separate_handles(
             .collect::<Vec<_>>();
         assert_eq!(
             claims.len(),
-            2,
-            "{backend}: shared I/O cap across independent handles"
+            1,
+            "{backend}: one maintenance reader across independent handles"
         );
         for job in claims {
             assert!(
@@ -9639,14 +9679,14 @@ async fn assert_distinct_pretranscode_claims_from_separate_handles(
                 "{backend}: separate clients duplicated a claim"
             );
             assert!(seed
-                .fixture_cancel_pretranscode_job(&job, "fixture_done", 201 + round)
+                .fixture_cancel_pretranscode_job(&job, "fixture_done", 201 + round * 1_000)
                 .await
                 .expect("release fixture source-I/O reservation"));
         }
     }
     assert_eq!(
         ids.len(),
-        (ROUNDS * 2) as usize,
+        ROUNDS as usize,
         "{backend}: separate clients duplicated a claim"
     );
 }
@@ -16227,7 +16267,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    // 53 with the current durable tables, including the Library channel
+    // 70 with the current durable tables, including the Library channel
     // entities, media classifications, channel subject jobs and decisions,
     // the three DVR tables, and the scoped book file grants (SQLite v68). A
     // v14 source has no rows for newer tables — each one's `minimum_schema` is
@@ -16235,7 +16275,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     // is over what the import *plans*, not over what the source happened to
     // hold. The subtitle-source ledgers are node-held facts about local files
     // and are deliberately not imported, so they are not counted here.
-    assert_eq!(report.tables.len(), 53);
+    assert_eq!(report.tables.len(), 70);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -18040,7 +18080,8 @@ fn contract_inventory_matches_every_store_method() {
     // +2: replicated root-domain observation and atomic replacement.
     // E1 adds a bounded named-settings snapshot for playback preferences.
     // E2 removes two unfenced legacy scrub methods.
-    assert_eq!(declared.len(), 445, "review the Store method count");
+    // Safari seek adds viewer joins and two source-I/O observations.
+    assert_eq!(declared.len(), 449, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -20308,22 +20349,32 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
             .unwrap_or_else(|| panic!("{backend}: retried request remains visible"));
         assert_eq!(retried.state, "queued", "backend {backend}");
         assert_ne!(retried.request_id, request_id, "backend {backend}");
+        // Cancellation revokes publication at once, but retains the physical
+        // source-read reservation through the old lease (20 ms).
+        assert!(
+            store
+                .claim_analysis_request("analysis-node", 12, 30)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: early replacement claim: {error}"))
+                .is_none(),
+            "{backend}: a cancelled reader still owns its source slot"
+        );
         let current = store
-            .claim_analysis_request("analysis-node", 12, 30)
+            .claim_analysis_request("analysis-node", 21, 30)
             .await
             .unwrap_or_else(|error| panic!("{backend}: reclaim analysis request: {error}"))
             .unwrap_or_else(|| panic!("{backend}: replacement analysis claim"));
         assert_eq!(current.request_id, retried.request_id, "backend {backend}");
         assert!(
             !store
-                .complete_analysis_request(&stale, "generation-stale", 13)
+                .complete_analysis_request(&stale, "generation-stale", 22)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: replay old publication: {error}")),
             "backend {backend}: a reclaimed request must refuse its old worker"
         );
         assert!(
             store
-                .complete_analysis_request(&current, "generation-current", 13)
+                .complete_analysis_request(&current, "generation-current", 22)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: publish current generation: {error}")),
             "backend {backend}"
@@ -20339,7 +20390,7 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
             "backend {backend}"
         );
         let still_ready = store
-            .cancel_analysis_request_admin(&retried.request_id, 14)
+            .cancel_analysis_request_admin(&retried.request_id, 23)
             .await
             .unwrap_or_else(|error| panic!("{backend}: cancel published request: {error}"))
             .unwrap_or_else(|| panic!("{backend}: published request remains visible"));
@@ -20586,18 +20637,18 @@ async fn analysis_source_invalidation_terminalizes_exact_attempt_through_dyn_sto
                 trigger: "admin".to_owned(),
                 force_rebuild: false,
                 target_node_id: String::new(),
-                not_before_ms: 20,
-                created_at_ms: 20,
+                not_before_ms: 1_011,
+                created_at_ms: 1_011,
             })
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue deleted source: {error}"));
         let deleted_claim = store
-            .claim_analysis_request("analysis-node", 20, 1_020)
+            .claim_analysis_request("analysis-node", 1_011, 2_011)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim deleted source: {error}"))
             .unwrap_or_else(|| panic!("{backend}: deleted claim"));
         assert!(store
-            .record_analysis_request_phase(&deleted_claim, "hashing", None, 21)
+            .record_analysis_request_phase(&deleted_claim, "hashing", None, 1_012)
             .await
             .unwrap_or_else(|error| panic!("{backend}: record deleted phase: {error}")));
         assert_eq!(
@@ -21702,7 +21753,7 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
             .retry_analysis_request_admin(
                 &request.request_id,
                 "admin-retry-terminal-generation",
-                21,
+                1_011,
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: retry terminal identity: {error}"))
@@ -21710,7 +21761,7 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
         assert_ne!(retry.request_id, request.request_id, "backend {backend}");
         assert!(retry.force_rebuild, "backend {backend}");
         let retry_claim = store
-            .claim_analysis_request("analysis-node", 21, 1_021)
+            .claim_analysis_request("analysis-node", 1_011, 2_011)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim terminal retry: {error}"))
             .unwrap_or_else(|| panic!("{backend}: terminal retry claim"));
@@ -21720,13 +21771,13 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
                 &retry_claim.owner_node_id,
                 retry_claim.fence,
                 "stored_probe_invalid",
-                22,
+                1_012,
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: fail explicit retry: {error}")));
         duplicate.request_id = "third-discovery-pass".to_owned();
-        duplicate.created_at_ms = 23;
-        duplicate.not_before_ms = 23;
+        duplicate.created_at_ms = 1_013;
+        duplicate.not_before_ms = 1_013;
         let retained_after_retry = store
             .enqueue_analysis_request(&duplicate)
             .await
@@ -21756,15 +21807,15 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
             priority: "normal".to_owned(),
             trigger: "background".to_owned(),
             target_node_id: String::new(),
-            not_before_ms: 30,
-            created_at_ms: 30,
+            not_before_ms: 2_012,
+            created_at_ms: 2_012,
         };
         assert!(store
             .enqueue_cluster_fragment_index(&terminal_job)
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue terminal worker: {error}")));
         let terminal_claim = store
-            .fixture_claim_cluster_fragment_index("analysis-node", &[], 30, 1_030)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 2_012, 3_012)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim terminal worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: terminal worker claim"));
@@ -21776,14 +21827,14 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
                 terminal_claim.fence,
                 "unsupported",
                 false,
-                31,
-                41,
+                2_013,
+                2_023,
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: fail terminal worker: {error}")));
         let mut repeated_job = terminal_job.clone();
-        repeated_job.not_before_ms = 100;
-        repeated_job.created_at_ms = 100;
+        repeated_job.not_before_ms = 2_100;
+        repeated_job.created_at_ms = 2_100;
         assert!(
             !store
                 .enqueue_cluster_fragment_index(&repeated_job)
@@ -21821,15 +21872,15 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
             priority: "normal".to_owned(),
             trigger: "background".to_owned(),
             target_node_id: String::new(),
-            not_before_ms: 110,
-            created_at_ms: 110,
+            not_before_ms: 3_013,
+            created_at_ms: 3_013,
         };
         assert!(store
             .enqueue_cluster_fragment_index(&transient_job)
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue transient worker: {error}")));
         let transient_claim = store
-            .fixture_claim_cluster_fragment_index("analysis-node", &[], 110, 1_110)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 3_013, 4_013)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim transient worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: transient worker claim"));
@@ -21841,19 +21892,19 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
                 transient_claim.fence,
                 "local_publish_failed",
                 true,
-                111,
-                121,
+                3_014,
+                3_024,
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: retry transient worker: {error}")));
         assert!(store
-            .fixture_claim_cluster_fragment_index("analysis-node", &[], 120, 1_120)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 3_023, 4_023)
             .await
             .unwrap_or_else(|error| panic!("{backend}: early transient claim: {error}"))
             .is_none());
         assert_eq!(
             store
-                .fixture_claim_cluster_fragment_index("analysis-node", &[], 121, 1_121)
+                .fixture_claim_cluster_fragment_index("analysis-node", &[], 4_013, 5_013)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: due transient claim: {error}"))
                 .unwrap_or_else(|| panic!("{backend}: due transient worker"))
@@ -22181,7 +22232,9 @@ async fn analysis_admin_retry_resets_attempt_budget_through_dyn_store() {
                     .unwrap_or_else(|error| panic!("{backend}: queue retry: {error}")),
                 "backend {backend}"
             );
-            now += 1;
+            // A queued retry cannot borrow the cancelled reader's source
+            // slot until its original 100 ms lease has expired.
+            now += 101;
         }
         assert!(
             store
@@ -33492,19 +33545,19 @@ async fn subtitle_source_promoted_row_uses_common_claim_and_leaves_legacy_order_
             .await
             .expect("promote");
         let first = store
-            .claim_subtitle_fixture(&stamp.generation(0), "analysis-node", 3, 1000)
+            .claim_subtitle_fixture(&stamp.generation(0), "analysis-node", 3, 4)
             .await
             .expect("claim first")
             .expect("first");
         assert_eq!(first.component, "subtitle_source", "{backend}");
         let second = store
-            .claim_analysis_request("analysis-node", 4, 1001)
+            .claim_analysis_request("analysis-node", 4, 5)
             .await
             .expect("claim second")
             .expect("second");
         assert_eq!(second.priority, "forced", "{backend}");
         let third = store
-            .claim_analysis_request("analysis-node", 5, 1002)
+            .claim_analysis_request("analysis-node", 5, 1_005)
             .await
             .expect("claim third")
             .expect("third");

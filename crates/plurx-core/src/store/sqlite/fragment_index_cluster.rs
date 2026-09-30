@@ -3678,7 +3678,10 @@ mod tests {
                 )
                 .await
                 .expect("queue charged retry"));
-            now += 2;
+            // A failed reader can outlive its request transition. Its shared
+            // source reservation remains until the original 1,000 ms lease
+            // expires, so the retry must use a later physical-admission clock.
+            now += 1_001;
         }
         assert!(store
             .claim_analysis_request("node-a", now, now + 1_000)

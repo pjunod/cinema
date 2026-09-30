@@ -7119,9 +7119,9 @@ mod tests {
             "v60 advances to the Live TV resource schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 58,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 59,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v63 step"
+            "this implementation contains every additive v5→v64 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

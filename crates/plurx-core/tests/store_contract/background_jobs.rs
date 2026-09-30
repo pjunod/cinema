@@ -9,7 +9,13 @@ use plurx_core::store::background_jobs::*;
 #[tokio::test]
 async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_fenced() {
     for_each_backend(|store, backend| async move {
-        for scenario in ["published", "source_replaced", "cancelled"] {
+        for (index, scenario) in ["published", "source_replaced", "cancelled"]
+            .into_iter()
+            .enumerate()
+        {
+            // A failed or cancelled source reader keeps its physical slot for
+            // the original 30-second lease. Give each scenario a later clock.
+            let now_ms = 1_000 + index as i64 * 40_000;
             let (_, file_id) = seed_file(&store, &format!("background-{scenario}")).await;
             let file = store.get_file(file_id).await.expect("file").expect("file");
             let job_id = uuid::Uuid::new_v4().to_string();
@@ -42,8 +48,8 @@ async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_f
                     },
                     dedupe_key: format!("transcode:{recipe}"),
                     priority: 1,
-                    not_before_ms: 1_000,
-                    now_ms: 1_000,
+                    not_before_ms: now_ms,
+                    now_ms,
                     request: JobRequest {
                         scope: "internal:pretranscode".to_owned(),
                         request_id: job_id.clone(),
@@ -67,8 +73,8 @@ async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_f
                     claim_id: uuid::Uuid::new_v4().to_string(),
                     kind: JobKind::TranscodePrepare,
                     payload_version: 1,
-                    now_ms: 1_000,
-                    dispatched_at_ms: 1_000,
+                    now_ms,
+                    dispatched_at_ms: now_ms,
                 })
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: claim: {error}"));
@@ -105,7 +111,7 @@ async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_f
                     expected_previous_bytes: None,
                     manifest_digest: "d".repeat(64),
                 },
-                now_ms: 2_000,
+                now_ms: now_ms + 1_000,
             };
             if scenario == "source_replaced" {
                 store
@@ -122,7 +128,7 @@ async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_f
                 store
                     .cancel_job(CancelJob {
                         job_id,
-                        now_ms: 1_500,
+                        now_ms: now_ms + 500,
                     })
                     .await
                     .expect("cancel");
@@ -1877,7 +1883,7 @@ async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
             let outcome = store.claim_job(claim.clone()).await.expect("claim");
             assert_eq!(
                 matches!(outcome, ClaimOutcome::Claimed { .. }),
-                index != 2,
+                matches!(index, 0 | 3),
                 "{backend}: alias {index}"
             );
             if index == 2 {
@@ -1920,8 +1926,8 @@ async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
             matches!(
                 store
                     .claim_job(ClaimJob {
-                        now_ms: 1_003,
-                        dispatched_at_ms: 1_003,
+                        now_ms: 31_001,
+                        dispatched_at_ms: 31_001,
                         ..claims[2].clone()
                     })
                     .await
@@ -2009,8 +2015,9 @@ async fn background_provider_contention_does_not_reserve_independent_storage() {
                 "{backend}"
             );
         }
-        // Both independent storage slots must remain available after the third
-        // metadata claim lost provider contention in its all-or-none transaction.
+        // The failed provider claim leaves the independent source unreserved.
+        // One maintenance probe can claim it; the second physical slot stays
+        // reserved for a viewer under the shared source-I/O policy.
         for index in 0..2 {
             let id = uuid::Uuid::new_v4().to_string();
             store
@@ -2034,7 +2041,7 @@ async fn background_provider_contention_does_not_reserve_independent_storage() {
                 })
                 .await
                 .expect("probe enqueue");
-            assert!(
+            assert_eq!(
                 matches!(
                     store
                         .claim_job(ClaimJob {
@@ -2052,6 +2059,7 @@ async fn background_provider_contention_does_not_reserve_independent_storage() {
                         .expect("probe claim"),
                     ClaimOutcome::Claimed { .. }
                 ),
+                index == 0,
                 "{backend}"
             );
         }
@@ -3540,12 +3548,16 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                 .expect("coordinator"),
             backend,
         );
-        for scenario in [
+        for (index, scenario) in [
             "published",
             "source_changed",
             "cancelled",
             "wrong_coordinator",
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let now_ms = 1_000 + index as i64 * 40_000;
             let (_, file_id) = seed_file(&store, &format!("leaf-{scenario}")).await;
             let file = store.get_file(file_id).await.expect("file").expect("file");
             let payload = probe_fixture(&store, file_id).await;
@@ -3556,8 +3568,8 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                     payload: payload.clone(),
                     dedupe_key: format!("leaf:{file_id}"),
                     priority: 1,
-                    not_before_ms: 1000,
-                    now_ms: 1000,
+                    not_before_ms: now_ms,
+                    now_ms,
                     request: JobRequest {
                         scope: "probe-contract".into(),
                         request_id: id.clone(),
@@ -3584,8 +3596,8 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                     claim_id: uuid::Uuid::new_v4().to_string(),
                     kind: JobKind::MediaProbe,
                     payload_version: 1,
-                    now_ms: 1000,
-                    dispatched_at_ms: 1000,
+                    now_ms,
+                    dispatched_at_ms: now_ms,
                 })
                 .await
                 .expect("claim")
@@ -3603,7 +3615,7 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                         ..Default::default()
                     },
                 },
-                now_ms: 1100,
+                now_ms: now_ms + 100,
             };
             if scenario == "source_changed" {
                 store
@@ -3620,7 +3632,7 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                 store
                     .cancel_job(CancelJob {
                         job_id: id.clone(),
-                        now_ms: 1050,
+                        now_ms: now_ms + 50,
                     })
                     .await
                     .expect("cancel");
@@ -3632,7 +3644,7 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
             let mut apply = ApplyProbeJob {
                 job_id: id,
                 lease: coordinator.clone(),
-                now_ms: 1200,
+                now_ms: now_ms + 200,
             };
             if matches!(scenario, "source_changed" | "cancelled") {
                 assert!(
@@ -3648,7 +3660,7 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                         settlement: JobSettlement::Stop {
                             error_code: "source_or_interest_changed".into(),
                         },
-                        now_ms: 1200,
+                        now_ms: now_ms + 200,
                     })
                     .await
                     .expect("retire refused publication");
