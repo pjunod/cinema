@@ -100,6 +100,30 @@ class EvidenceWorkflowCase(unittest.TestCase):
         with self.assertRaises(AssertionError):
             module.validate_caps(data, mounts)
 
+    def test_release_cost_cooldown_is_passive_bounded_and_keeps_original_preflight(self) -> None:
+        spec = importlib.util.spec_from_file_location("release_cost", ROOT / "scripts/p02-release-cost.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        clock = [0]
+        def sleep(seconds):
+            clock[0] += seconds
+        receipt = {}
+        with mock.patch.object(module.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(module.time, "sleep", side_effect=sleep), \
+                mock.patch.object(module, "guard") as guard:
+            guard.side_effect = [RuntimeError("host load/swap pressure crossed"), {}, {}]
+            module.preflight(Path("/owned"), {}, "http://localhost/readyz", 10800, receipt, True)
+            self.assertEqual(receipt["preflight_wait"]["seconds"], 2)
+            self.assertEqual(guard.call_args.kwargs, {"initial": True})
+            clock[0] = 0
+            guard.side_effect = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("load")) if k.get("initial") else {}
+            with self.assertRaisesRegex(RuntimeError, "bounded cooldown"):
+                module.preflight(Path("/owned"), {}, "http://localhost/readyz", 10800, receipt, True)
+            self.assertEqual(receipt["preflight_wait"]["seconds"], 60)
+            clock[0] = 0
+            with self.assertRaisesRegex(RuntimeError, "bounded cooldown"):
+                module.preflight(Path("/owned"), {}, "http://localhost/readyz", 10800, receipt, False)
+            self.assertEqual(clock[0], 0)
     def test_manual_fuzz_only_keeps_all_five_campaigns_and_skips_runtime_sweeps(self) -> None:
         workflow = self.read(".github/workflows/validation-nightly.yml")
         inputs = workflow.split("    inputs:\n", 1)[1].split("\nenv:", 1)[0]

@@ -1188,6 +1188,11 @@ Source is read-only; target and download-cache binds are writable and owned
 by that same user, so host cleanup does not encounter root-owned subtrees.
 The public image's shared toolchain must be readable by this non-root user.
 Host load must be at most 8 initially and 12 while the owned eight-CPU trial runs.
+After the first fetch, a subsequent case may wait passively at most 60 seconds
+for the original 36 GiB/40 GiB/load-8 preflight to recover, within the unchanged
+180-minute cumulative deadline. Ongoing pressure/health guards remain blocking.
+Wait duration/cause is recorded; failed recovery stops further cases without
+retrying a compiler. The first fetch preflight is immediate.
 Health/cgroup samples run every two seconds and full scratch scans every ten
 seconds; observer overhead is included in wall time and recorded separately.
 The 20 GiB limit is monitored, not a filesystem quota: detection may lag ten

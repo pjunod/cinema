@@ -127,6 +127,27 @@ def cleanup(name, receipt, receipts):
         raise RuntimeError("owned container cleanup failed")
 
 
+def preflight(root, baseline, ready_url, deadline, receipt, cooldown):
+    # Passive load decay after a previous owned case is not a compile retry.
+    began = time.monotonic()
+    limit = min(deadline, began + (60 if cooldown else 0))
+    receipt["preflight_wait"] = {"seconds": 0, "causes": []}
+    while True:
+        receipt["preflight_wait"]["seconds"] = time.monotonic() - began
+        try:
+            guard(root, baseline, ready_url, initial=True)
+            return
+        except RuntimeError as error:
+            cause = str(error)
+            if cause not in receipt["preflight_wait"]["causes"]:
+                receipt["preflight_wait"]["causes"].append(cause)
+            if not cooldown or time.monotonic() >= limit:
+                raise RuntimeError("preflight did not recover within bounded cooldown: " + cause) from error
+            # Less restrictive ongoing pressure/health floors remain blocking.
+            guard(root, baseline, ready_url, check_scratch=False)
+            time.sleep(min(2, max(0, limit - time.monotonic())))
+
+
 def measure(args, context):
     if os.getuid() == 0:
         raise ValueError("require non-root host controller and matching compiler UID:GID")
@@ -174,6 +195,7 @@ def measure(args, context):
                                  "observer_overhead_included_in_wall_time": True,
                                  "scratch_is_monitored_not_filesystem_quota": True,
                                  "scratch_detection_latency_seconds": 10},
+                  "passive_case_cooldown_seconds_max": 60,
                   "profile_fixed": {"debug": 0, "strip": "symbols", "panic": "unwind", "overflow_checks": False}}
     provenance["compiler_user"] = f"{os.getuid()}:{os.getgid()}"
     provenance["compiler_home"] = "/tmp/home"
@@ -193,8 +215,8 @@ def measure(args, context):
             receipt = {"lto": lto, "codegen_units": cgu, "status": "failed", "samples": []}
             created = False
             try:
-                guard(root, baseline, args.ready_url, initial=True)
-                budget = min(CAPS["trial_seconds" if cgu else "fetch_seconds"],
+                preflight(root, baseline, args.ready_url, deadline, receipt, cooldown=bool(cgu))
+                budget = min(int(started + CAPS["trial_seconds" if cgu else "fetch_seconds"] - time.monotonic()),
                              int(deadline - time.monotonic()))
                 if budget <= 0:
                     raise TimeoutError("cumulative deadline before container creation")
