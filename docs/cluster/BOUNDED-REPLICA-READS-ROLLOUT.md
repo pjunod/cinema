@@ -408,7 +408,7 @@ extended to the watch methods, and (c) has no
 named §5.1 lab readout in this record. The changed default is therefore a
 merged behavior, not evidence that every M4 acceptance step passed.
 
-**2026-09-29 unverified source checkpoint.** The separate K-04 branch extends
+**2026-09-29 focused source proof.** The separate K-04 branch extends
 `plurx-cluster-check`'s existing three-process apply-pause and follower-
 partition case through `watch_map`, `watch_rollup`, `watch_summary`, and
 `progress_rails`. It seeds a real watch write, carries the acknowledged Raft
@@ -416,10 +416,15 @@ index into each read, checks Authority fallback and the returned watch state
 while apply is paused, then checks that a partitioned follower cannot return
 its stale local state after the one-second watermark lease expires. The
 focused harness mode is `cargo run --locked -p plurx-cluster-check --
-bounded-watch-failure`. This source has not been compiled or executed; #623
-currently owns the Mac Rust compiler and changes Store code. Merge current
-`main` after #623, run the pinned compiler and focused mode, and only then
-record a passing M4 failure proof.
+bounded-watch-failure`. On the `9c094da0` source checkpoint plus the harness
+count correction, Rust 1.97.1 (`8bab26f4f`) compiled the crate and this focused
+mode passed. Healthy reads issue two local statements: the replicated
+preference lookup and the catalogue/watch query. Paused or expired proof
+still issues no local SQL and attempts one Authority statement. This is a
+source-level failure proof, not the named lab or rolling-upgrade acceptance.
+Merge current `main` after #623 and repeat the pinned checks against that
+exact candidate before pushing; the earlier snapshot cannot qualify a moved
+base.
 
 ## 4. Guardrails (non-goals)
 

@@ -2766,12 +2766,16 @@ async fn read_bounded_watch_kind(
     read_after: u64,
 ) -> Result<serde_json::Value> {
     let value = match kind {
-        BoundedWatchKind::Map => {
-            serde_json::to_value(reader.watch_map(user_id, &[item_id], Some(read_after)).await?)?
-        }
-        BoundedWatchKind::Rollup => {
-            serde_json::to_value(reader.watch_rollup(user_id, item_id, Some(read_after)).await?)?
-        }
+        BoundedWatchKind::Map => serde_json::to_value(
+            reader
+                .watch_map(user_id, &[item_id], Some(read_after))
+                .await?,
+        )?,
+        BoundedWatchKind::Rollup => serde_json::to_value(
+            reader
+                .watch_rollup(user_id, item_id, Some(read_after))
+                .await?,
+        )?,
         BoundedWatchKind::Summary => serde_json::to_value(
             reader
                 .watch_summary(user_id, &[item_id], &[item_id], Some(read_after))
@@ -2830,7 +2834,8 @@ async fn wait_for_local_catalogue_read(
         if observation.error.is_none()
             && observation.title.as_deref() == Some(expected_title)
             && observation.consistent_query_calls == 0
-            && observation.non_consistent_query_calls == 1
+            // The replicated preference and catalogue row each use local SQL.
+            && observation.non_consistent_query_calls == 2
             && observation.watermark_valid
             && observation
                 .watermark_age_millis
@@ -2922,7 +2927,8 @@ async fn wait_for_local_watch_reads(
                 bounded_watch_read(cluster, node_id, kind, user_id, item_id, read_after).await?;
             if observation.error.is_none()
                 && observation.consistent_query_calls == 0
-                && observation.non_consistent_query_calls == 1
+                // One preference lookup plus the one watch-state statement.
+                && observation.non_consistent_query_calls == 2
                 && observation.watermark_valid
                 && observation.serving_ready
             {
@@ -3114,11 +3120,11 @@ async fn run_bounded_catalogue_failure_case() -> Result<()> {
     if before_expiry.error.is_some()
         || before_expiry.title.as_deref() != Some(EXPECTED_TITLE)
         || before_expiry.consistent_query_calls != 0
-        || before_expiry.non_consistent_query_calls != 1
+        || before_expiry.non_consistent_query_calls != 2
         || !before_expiry.watermark_valid
         || before_expiry.apply_lag_entries != Some(0)
     {
-        bail!("partition precondition did not execute one zero-gap local read: {before_expiry:?}");
+        bail!("partition precondition did not execute preference and zero-gap local reads: {before_expiry:?}");
     }
     let isolated = loop {
         let observation = bounded_read(&mut cluster, follower, item_id).await?;
@@ -11231,7 +11237,9 @@ async fn handle_request(
         }
         Request::SeedBoundedWatchItem => {
             let store = store_ref(store)?;
-            let user = store.create_user("bounded-watch-reader", "hash", false).await?;
+            let user = store
+                .create_user("bounded-watch-reader", "hash", false)
+                .await?;
             let library = store
                 .create_library(&NewLibrary {
                     name: "Bounded watch failure fixture".to_owned(),
@@ -11266,7 +11274,9 @@ async fn handle_request(
             plurx_core::store::scope_http_watch_write_ack(ack.clone(), async {
                 match write {
                     BoundedWatchWrite::Progress => {
-                        store.put_progress(user_id, item_id, 1_000, Some(10_000)).await?;
+                        store
+                            .put_progress(user_id, item_id, 1_000, Some(10_000))
+                            .await?;
                     }
                     BoundedWatchWrite::Watched(watched) => {
                         store.set_watched(user_id, item_id, watched).await?;
