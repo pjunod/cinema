@@ -169,6 +169,8 @@ ENV CARGO_HOME=/usr/local/cargo \
 # only the repository-pinned 1.97.1 toolchain belongs in this CI layer.
 COPY --from=ci-rust-toolchain /usr/local/cargo/bin /usr/local/cargo/bin
 COPY --from=ci-node-toolchain /usr/local/bin/node /usr/local/bin/node
+COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/doc/plurx/
+COPY licenses/ /usr/share/doc/plurx/licenses/
 # Keep both the daemon's explicit path and shell-invoked fixture generation on
 # jellyfin-ffmpeg 8. Debian bookworm's /usr/bin/ffmpeg remains the release
 # fallback, but must never answer an M5 CI job's bare `ffmpeg` invocation.

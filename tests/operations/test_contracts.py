@@ -3723,6 +3723,11 @@ assert.equal(context.ACT_TIMER, null);
     def test_m5_shipped_ffmpeg_jobs_use_one_digest_and_keep_burst_coverage(self):
         dockerfile = read("Dockerfile")
         self.assertIn("FROM runtime-assets AS ci", dockerfile)
+        ci_stage = dockerfile.split("FROM runtime-assets AS ci", 1)[1].split(
+            "FROM runtime-assets AS runtime", 1
+        )[0]
+        self.assertIn("COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/doc/plurx/", ci_stage)
+        self.assertIn("COPY licenses/ /usr/share/doc/plurx/licenses/", ci_stage)
         self.assertIn("PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers", dockerfile)
         self.assertLess(
             dockerfile.index("PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers"),
