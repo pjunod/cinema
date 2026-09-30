@@ -49,6 +49,15 @@ pub const MAX_USER_WAITERS: usize = 128;
 pub const MAX_ATTEMPTS: usize = 40_000;
 pub const RESOLVED_ATTEMPT_HISTORY: usize = 16;
 pub const MAX_PAGE_SIZE: usize = 128;
+/// Receipt pressure. Admission refuses at `MAX_WAITERS` rows of
+/// `background_job_waiters` counting settled receipts, and ordinary
+/// retirement waits the seven-day window, so one busy day of finished work
+/// closes the queue a second way (the first, retained job rows, is v63).
+/// Within eight pages of the cap, upkeep compacts the oldest terminal
+/// internal receipts a page per pass — never a user-scoped or
+/// identity-retaining receipt, nor one whose job is still active. The SQL
+/// carries the literal; `receipt_pressure_literals_match_constants` pins it.
+pub const WAITERS_PRESSURE: usize = MAX_WAITERS - 8 * MAX_PAGE_SIZE;
 pub const MAX_RENEW_BATCH: usize = 64;
 pub const MAX_PAYLOAD_BYTES: usize = 16 * 1_024;
 pub const MAX_CHECKPOINT_BYTES: usize = 4 * 1_024;
@@ -59,6 +68,11 @@ pub(crate) const SCHEMA: &str = include_str!("background_jobs_schema.sql");
 // this migration replaces the enqueue and upkeep triggers. See the file's
 // header for the failure it answers.
 pub(crate) const RETENTION_SCHEMA: &str = include_str!("background_jobs_retention.sql");
+/// Replicated v64 / SQLite v86: the maintenance trigger with receipt
+/// pressure (see `WAITERS_PRESSURE`).
+pub(crate) const RECEIPT_PRESSURE_SCHEMA: &str =
+    include_str!("background_jobs_receipt_pressure.sql");
+/// Replicated v65 / SQLite v87: exact viewer interest and source reservations.
 pub(crate) const VIEWER_ANALYSIS_SCHEMA: &str = include_str!("background_jobs_viewer_analysis.sql");
 
 // Both backends execute the same admission statement and schema trigger.

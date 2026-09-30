@@ -1179,7 +1179,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs_subtitle::RECONCILE_SCHEMA,
     // v85: settled job history yields to new work instead of filling the bound.
     super::background_jobs::RETENTION_SCHEMA,
-    // v86: expiring viewer interests follow exact analysis into fragment work.
+    // v86: settled internal receipts yield too, once the waiter table nears its bound.
+    super::background_jobs::RECEIPT_PRESSURE_SCHEMA,
+    // v87: expiring viewer interests follow exact analysis into fragment work.
     super::background_jobs::VIEWER_ANALYSIS_SCHEMA,
 ];
 
@@ -2907,9 +2909,10 @@ mod tests {
         // and v78 retains portable transcode source/manifest provenance.
         // v79–v85 add predictions, embeddings, probe/integrity work, Live TV
         // resource claims, subtitle reconciliation and bounded job history;
-        // v86 adds expiring viewer interests through analysis and artifacts.
+        // v86 compacts settled receipts under waiter pressure; v87 adds
+        // expiring viewer interests through analysis and artifacts.
         assert_eq!(
-            version, 86,
+            version, 87,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

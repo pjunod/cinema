@@ -27,6 +27,15 @@ bump may break compatibility and a **patch** bump never does.
   the enqueue and upkeep triggers. A refused admission on
   `POST /api/v1/scan` is now a 503 naming the refusal, so a caller retries
   instead of reading a crash that never happened.
+- **Settled receipts yield too.** The same day of work left
+  `background_job_waiters` at 11,947 of its 16,384-row bound, which counts
+  settled receipts that only expired after seven days — the same refusal one
+  table over, days away. Upkeep now compacts the oldest settled *internal*
+  receipts a page per pass once the table is within eight pages of the bound;
+  user-scoped and identity-retaining receipts (every fragment interest) keep
+  their seven-day window, and a receipt whose job is still active is never
+  touched. SQLite migration 86 and replicated schema 64 replace the upkeep
+  trigger again.
 
 - **The web watch view's menus and Playback info are no longer trapped in the
   picture, and the picture no longer scrolls over the header.** The player on

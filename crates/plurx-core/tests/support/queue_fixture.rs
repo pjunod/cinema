@@ -529,7 +529,7 @@ pub(crate) trait QueueFixture: Store {
 impl<T: Store + ?Sized> QueueFixture for T {}
 
 /// Wind a current test database back across the durable-queue introduction.
-/// This touches the common queue and its v86 analysis-source reservations,
+/// This touches the common queue and its v87 analysis-source reservations,
 /// never production migration.
 #[allow(dead_code)]
 pub(crate) fn remove_common_queue_schema(connection: &rusqlite::Connection) {
