@@ -391,6 +391,12 @@ not built.
 
 ## 5. Milestones
 
+**2026-09-30 continuation:** the warning/latch regression continuation is a
+separate task PR into current `effort/architecture-review-2026-09-20`, not
+`main`. It owns only `transcode/tests/chunk_01.rs`, this plan's dated record
+and the S-13 workboard note; production fallback policy, latch and metrics
+are unchanged. Original milestone and author history below remains intact.
+
 One whole-plan draft PR into `main` under the fast lane. Milestones are
 logical commits in that PR, following the work board's canonical rule. M3 and
 M4 remain conditional on the fleet measurements named below; a source-only
@@ -530,6 +536,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_effort_sync_sol61 | M1 warning/latch coverage continuation | Draft pending, `codex/s13-probe-warning-coverage` | Based on effort `86aca9863` after S09 #636. `probe_changed_warns_once_per_process_and_counts_every_fallback` exercises the existing actual fallback seam in a fresh test process: one real WARN across two managers, three DEBUG fallbacks, per-manager counters 2/1 and `CatalogRow` plans. WARN→DEBUG fails severity; a latch that never stores true fails warning count (3 versus 1). Production `manager/plan.rs` restored byte-identically (SHA-256 `0b431e6ffbce4cf90c795fc8985ba4ed23b559da11dcb1ccc03189b1b9784fb2`); no production seam/reset. Owned child has a 30-second bound, kill/reap on failure and explicit completed-assertions proof. Lab2 ffprobe mutation, production-static-binary media1 cold/warm latency and conditional M3/M4 remain unproved. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | claim | [#424](http://192.168.4.7:3000/noirr/plurx/pulls/424) | Claimed `plan/S-13` for one whole-plan draft PR. Rust 1.97.1 compiler loop established; M3/M4 remain closed until M0 fleet evidence opens them. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M0 | [#424](http://192.168.4.7:3000/noirr/plurx/pulls/424) / `a4682e5d` | Added fixed-cardinality phase histograms and lookup counters to `/metrics`; the real miss-then-hit fixture asserts every phase and result. Focused test, Rust 1.97.1 check, format and Clippy are green. Needs: deploy this exact branch artifact on media1 and run the §6 production-static-binary cold/warm measurement; no p50/p95 or binary size was inferred locally. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M1 | [#424](http://192.168.4.7:3000/noirr/plurx/pulls/424) / `8432e9bc` | Every `DecodeFactError` maps exhaustively to a bounded reason, severity and counter. `ProbeChanged` warns once per process, while existing catalogue fallback disposition remains unchanged. Focused classification test is green. Needs: the lab2 deliberate ffprobe-change log/counter observation. |
