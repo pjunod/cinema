@@ -557,6 +557,19 @@ wall time as before the change (three runs, reported in the PR body).
 
 ## 6. Verification and rollout
 
+**2026-09-30 local-proof continuation:** coordinator assignment reuses the
+merged M1–M4 implementation and original authors. A separate draft task targets
+current `effort/architecture-review-2026-09-20`, overriding historical main
+routing for this continuation. Owned files: `telemetry.rs` test module, necessary
+explicit child/process census rows in `tests/playback/rolling-producer-owners.toml`,
+this existing plan and the C-06 workboard note. No production visibility,
+reset, API, queue/batch behavior, HLS or transcode fixture change is authorized.
+Intended proof is §6.2 actual segment handler and fully drained body under
+entered-write controlled sleep→error, bounded allocation capacities and counted
+drops/recovery, plus the existing enabled three-voter batch contract. These
+tests are planned, not executed evidence; final execution waits for current
+K-07 integration. Fleet §6.3 and restart/RSS/device acceptance remain open.
+
 ### 6.1 Lanes
 
 Per milestone the focused `cargo test` above, then `make unit` once before
@@ -653,3 +666,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | [PR #434](http://192.168.4.7:3000/noirr/plurx/pulls/434) | Seeded the paired effective settings before listener acceptance, cached them for 30 seconds, preserved the last good values on refresh failure, and invalidated the cache immediately after either local telemetry setting changes; focused tests cover seed, cache window, and invalidation. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [PR #434](http://192.168.4.7:3000/noirr/plurx/pulls/434) | Moved bounded playback metric recording ahead of queue admission and retention decisions. The focused regression disables retention, emits TTFF, proves the metric rises, and proves no raw playback row is stored. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M4 | [PR #434](http://192.168.4.7:3000/noirr/plurx/pulls/434) | Added the 128-slot terminal reserve, exhaustive current durable-outcome/error classification, consecutive-sample coalescing, all four fixed drop reasons, and a two-second shutdown drain wired before Live TV cleanup. Focused tests cover classification, terminal non-coalescing, sample replacement, and the drain bound. Fleet restart timing and injected real-playback sidecar-stall evidence remain pending under §6.3. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_effort_sync_sol61 | §6.2 local-proof claim | draft pending | Assigned by coordinator on Paul's behalf from effort bc39bcb31, preserving merged M1–M4 and original Sol/Opus authors. Four-file narrow ownership above. Pinned 1.97.1 pre-edit compiler loop established; no new behavioral test or three-voter execution yet. Final proof waits for K-07 current-base integration; no fleet/qualification claim. |
