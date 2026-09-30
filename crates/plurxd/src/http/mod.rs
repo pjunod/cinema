@@ -10636,11 +10636,13 @@ mod tests {
                 "scans",
                 "sessions",
                 "trakt",
+                // Local worker observations are useful on SQLite too.
+                "workers",
             ]
             .into_iter()
             .map(str::to_owned)
             .collect(),
-            "SQLite gains analysis health but no clustered-only field"
+            "SQLite includes local analysis and worker health"
         );
         assert_eq!(detail["analysis"]["enabled"], false);
         assert_eq!(detail["analysis"]["total"], 0);
@@ -10672,6 +10674,10 @@ mod tests {
         assert!(
             viewer_detail.get("analysis").is_none(),
             "operator queue health stays out of ordinary household responses"
+        );
+        assert!(
+            viewer_detail.get("workers").is_none(),
+            "worker capacity and process observations remain admin-only"
         );
     }
 
