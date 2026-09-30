@@ -2633,7 +2633,7 @@ test_anchor = "assert.equal(video.src, `/api/live-tv/sessions/${session.session_
 [[fixes]]
 id = "apple.library-paging-target-merge"
 commits = ["12331fb3"]
-source = "clients/apple/Sources/LibraryView.swift"
+source = "clients/apple/Sources/LibraryGridCoordinator.swift"
 source_anchor = "requestedThrough = max(requestedThrough, through)"
 test = "clients/apple/Tests/LibraryMergeTests.swift"
 test_anchor = "testFirstPaintNeedsOnePagePerLibrary"
