@@ -403,8 +403,9 @@ a node that lost its serving proof (`serving_fence.rs`); the lag budget
 `true` and added a replicated Developer preference whose readiness is
 advisory. The env/TOML value seeds the initial preference; after a Developer
 choice is saved, that replicated value overrides the seed. The source and
-focused web/config contracts are present. Precondition (b) has not been
-extended to the watch methods, and (c) has no
+focused web/config contracts are present. On merged `main`, precondition (b)
+has not been extended to the watch methods; the K-04 branch proof below covers
+that extension. Precondition (c) has no
 named §5.1 lab readout in this record. The changed default is therefore a
 merged behavior, not evidence that every M4 acceptance step passed.
 
@@ -422,9 +423,12 @@ mode passed. Healthy reads issue two local statements: the replicated
 preference lookup and the catalogue/watch query. Paused or expired proof
 still issues no local SQL and attempts one Authority statement. This is a
 source-level failure proof, not the named lab or rolling-upgrade acceptance.
-Merge current `main` after #623 and repeat the pinned checks against that
-exact candidate before pushing; the earlier snapshot cannot qualify a moved
-base.
+The K-04 candidate targets `effort/architecture-review-2026-09-20`, whose
+2026-09-30 base is `38c91722`. Repeat the pinned checks against that exact
+candidate before pushing. Independent seek PR #623 still targets `main`;
+its eventual merge must be synchronized into the effort and the resulting
+tree qualified before final promotion. Earlier snapshot evidence cannot
+qualify a moved base.
 
 ## 4. Guardrails (non-goals)
 
@@ -497,14 +501,21 @@ Acceptance: the `config.rs` test asserts the merged default; the
 watch-method paused/partitioned-follower `cluster-check` case must pass;
 the M0 readout repeated on the lab must show `home`'s authority reads per
 request ≤ 2 and `library`/`item` ≤ 1 with the switch at its normal default.
-The first is merged source evidence. The cluster-check extension is a source
-checkpoint without a run; the named lab readout remains open. Rollout and
+The first is merged source evidence. The K-04 branch's cluster-check
+extension passed the focused pinned-toolchain mode recorded in §3.5; that
+branch proof does not yet describe merged `main`. The named lab readout
+remains open. Rollout and
 rolling-upgrade observations are
 separate from source acceptance.
 
 ## 6. Verification and rollout
 
-Fast lane per PR: `make unit`; M2/M3/M4 also `make cluster-store-check`
+The 2026-09-30 effort integration override on the work board governs remaining
+plan PRs: use the focused `bounded-watch-failure` regression and the blocking
+Effort development gate, without task-to-main unit sweeps. The final effort
+promotion requires qualification of the synchronized tree and its receipt.
+
+Historical main fast lane per PR: `make unit`; M2/M3/M4 also `make cluster-store-check`
 (the P3 contracts live there). Node gate for M2's client change:
 `node tests/web/read-after.test.js`. The normal default and Developer
 preference are merged; the saved preference can turn bounded reads off or on
