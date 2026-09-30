@@ -66,6 +66,8 @@ pub struct ActivitySnapshot {
 pub struct ActivityWorkers {
     pub observed_at_ms: i64,
     pub heavy_limit: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_batch_limit: Option<usize>,
     pub heavy_in_use: usize,
     pub heavy_available: usize,
     pub accepting_work: bool,
@@ -85,6 +87,7 @@ pub(super) async fn local_workers(state: &AppState) -> ActivityWorkers {
     ActivityWorkers {
         observed_at_ms: crate::state::clock_ms(),
         heavy_limit: crate::transcode::BACKGROUND_HEAVY_LIMIT,
+        probe_batch_limit: Some(state.transcode.software_budget().await.clamp(1, 2)),
         heavy_in_use,
         heavy_available: usize::from(
             heavy_in_use == 0 && accepting_work && state.transcode.fragment_worker_may_start(),
@@ -531,6 +534,9 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
                 && workers.children.iter().all(|child| child.len() <= 256)
                 && workers.child_count >= workers.children.len()
                 && workers.heavy_in_use <= workers.heavy_limit
+                && workers
+                    .probe_batch_limit
+                    .is_none_or(|limit| (1..=2).contains(&limit))
                 && workers.heavy_available
                     <= workers.heavy_limit.saturating_sub(workers.heavy_in_use)
         })
@@ -576,6 +582,13 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
         && snapshot.analysis.iter().all(|progress| {
             !progress.job_id.is_empty()
                 && progress.job_id.len() <= 128
+                && match (&progress.durable_job_id, progress.durable_fence) {
+                    (None, None) => true,
+                    (Some(id), Some(fence)) => {
+                        uuid::Uuid::parse_str(id).is_ok() && id.len() <= 36 && fence > 0
+                    }
+                    _ => false,
+                }
                 && progress.component.len() <= 32
                 && progress.stage.len() <= 32
                 && progress.title.len() <= MAX_TITLE_BYTES
@@ -1070,6 +1083,36 @@ mod tests {
         };
         assert!(snapshot_is_bounded(&snapshot, "node-b"));
         assert!(!snapshot_is_bounded(&snapshot, "node-c"));
+    }
+
+    #[test]
+    fn durable_progress_wire_identity_is_paired_and_bounded() {
+        let mut row = crate::state::AnalysisProgress::test_row("artifact-key", "Title");
+        let mut snapshot = ActivitySnapshot {
+            workers: None,
+            node_id: "node".into(),
+            deliveries: vec![],
+            analysis: vec![row.clone()],
+            live_tv: vec![],
+            dvr: None,
+        };
+        assert!(
+            snapshot_is_bounded(&snapshot, "node"),
+            "old peers remain readable"
+        );
+        row.durable_job_id = Some(uuid::Uuid::new_v4().to_string());
+        snapshot.analysis[0] = row.clone();
+        assert!(!snapshot_is_bounded(&snapshot, "node"), "unpaired identity");
+        row.durable_fence = Some(1);
+        snapshot.analysis[0] = row.clone();
+        assert!(snapshot_is_bounded(&snapshot, "node"));
+        row.durable_fence = Some(0);
+        snapshot.analysis[0] = row.clone();
+        assert!(!snapshot_is_bounded(&snapshot, "node"));
+        row.durable_fence = Some(1);
+        row.durable_job_id = Some("x".repeat(1024));
+        snapshot.analysis[0] = row;
+        assert!(!snapshot_is_bounded(&snapshot, "node"));
     }
 
     #[test]

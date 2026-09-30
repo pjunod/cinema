@@ -4319,9 +4319,13 @@ leases identify a previous owner awaiting recovery, not a running worker.
 The assignment list is bounded to 100 running and 100 cancelling jobs and
 labels itself partial when either page has more results.
 
-Each node admits **one heavy background media job** at a time. Preparation,
+Each node admits **one heavy background pipeline** at a time. Preparation,
 indexing, subtitles, probing, artwork, semantic indexing, verification and
-transcode copies share this permit. Other worker loops, playback and transfers
+transcode copies share this permit. A media-probe batch may execute up to two
+one-thread probes within that admission when its reserved CPU budget permits.
+Each probe still claims its own shared storage reader; a scan parent also
+occupies a reader, so the same domain often has room for just one probe. The
+node detail panel reports the batch ceiling. Other worker loops, playback and transfers
 have their own admission limits. An available heavy slot still needs eligible
 work, enabled settings, compatible tools, source access and storage capacity.
 An occupied slot is retained until its physical work exits. A blocked free
@@ -4330,6 +4334,19 @@ CPU figures are reservations, not utilization: indexing conservatively reserves
 the whole configured software budget. Raising the heavy-slot count alone would
 not let two such jobs run. Child-process disclosures show observed work on each
 reporting node; a job can also be active without a child process.
+
+Probe, artwork and transcode-copy consumers wait 100–250 ms after confirmed
+publication. Empty, refused, retrying and yielding passes retain the 5–30 second
+backoff. Claim-based orchestration loops retain their prior pacing. Candidate
+pages and supported payloads are checked before taking the heavy permit;
+capability subprocesses remain admitted. A refused admission preserves the
+candidate cursor so compatible work is retried.
+
+Select a job's Stages section for exact attempt observations. Fragment indexing
+and media probes carry durable job/fence identity; an expired lease, different
+owner, completed job or stale observation is never displayed as active progress.
+See the [reviewed design and validation record](cluster/CLUSTER-WORK-CAPACITY-IMPLEMENTATION.md)
+for the constraints and fleet measurement procedure.
 
 The analysis and speculative-preparation preferences are ordinary settings:
 Settings → Analysis enables the analysis workers and Settings → Maintenance

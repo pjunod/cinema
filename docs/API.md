@@ -579,8 +579,17 @@ program, the requested and kernel-reported `nice` / I/O / `oom_score_adj`,
 whether the class was applied, and whether it can be stopped. It lists this
 node's children only, not its peers'.
 
+Analysis progress may include paired `durable_job_id` and `durable_fence`
+fields for an explicitly correlated execution attempt. Job summaries include
+`fence`, the monotonic attempt number, without claim or boot tokens. A stage
+belongs to the job only while ID, fence and owner match, the lease is still
+live, and the observation is fresh. Old peers omit the correlation fields.
+Media probes report stage and elapsed time; they do not measure byte progress
+or ETA.
+
 The admin-only `workers` map is keyed by node id. Each observation contains
 `observed_at_ms`, `heavy_limit`, `heavy_in_use`, `heavy_available`,
+optional `probe_batch_limit` (one or two probes within one heavy admission),
 `accepting_work`, `hardware_used`, `hardware_limit`, `software_used`,
 `software_limit`, `child_count` and up to 32 bounded child-purpose strings in
 `children`. Software counts are reserved threads. Availability is an

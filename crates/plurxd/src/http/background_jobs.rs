@@ -36,6 +36,7 @@ fn summary(job: &BackgroundJob, now_ms: i64) -> Value {
     json!({
         "id": job.id, "kind": kind, "state": job.state, "priority": job.priority,
         "file_id": file_id.map(|id| id.to_string()),
+        "fence": job.fence,
         "owner_node_id": job.token.as_ref().map(|token| &token.node_id),
         "target_node_id": job.supported_payload().ok().and_then(|payload| payload.target_node_id().map(str::to_owned)),
         "lease_expires_ms": job.token.as_ref().map(|token| token.lease_expires_ms),

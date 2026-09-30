@@ -4535,3 +4535,43 @@ async fn background_jobs_replicated_settled_history_yields_after_the_v63_upgrade
         .expect("read")
         .is_some());
 }
+
+#[tokio::test]
+async fn probe_batches_respect_scan_parent_and_shared_domain_reservations() {
+    use plurx_core::store::background_jobs_resources::StorageDomainMapping;
+    for_each_backend(|store, backend| async move {
+        let mut files = Vec::new();
+        let mut mappings = Vec::new();
+        for (index, domain) in ["nas", "nas", "other"].into_iter().enumerate() {
+            let prefix = format!("probe-batch-{index}");
+            let (_, file_id) = seed_file(&store, &prefix).await;
+            let file = store.get_file(file_id).await.expect("file").expect("file");
+            let item = store.get_item(file.item_id).await.expect("item").expect("item");
+            mappings.push(StorageDomainMapping { library_id: item.library_id,
+                root_path: format!("/{prefix}"), domain_id: domain.into() });
+            files.push(file_id);
+        }
+        assert!(store.replace_storage_domains(mappings.clone(), 1_000).await.expect("map"));
+        let mut payloads = vec![JobPayload::LibraryScan {
+            library_id: mappings[0].library_id, generation: "batch-parent".into(),
+        }];
+        for file in files { payloads.push(probe_fixture(&store, file).await); }
+        for (index, payload) in payloads.into_iter().enumerate() {
+            let id = uuid::Uuid::new_v4().to_string();
+            let kind = payload.kind();
+            store.enqueue_job(EnqueueJob { id: id.clone(), payload,
+                dedupe_key: format!("probe-batch:{index}"), priority: 1, not_before_ms: 1_000, now_ms: 1_000,
+                request: JobRequest { scope: "probe-batch".into(), request_id: id.clone(), request_digest: "b".repeat(64),
+                    consumer_kind: "probe-test".into(), consumer_ref: id.clone(), target_node_id: None,
+                    deadline_ms: None, retain_identity: false },
+            }).await.expect("enqueue");
+            let outcome = store.claim_job(ClaimJob { job_id: id.clone(), expected_revision: 0,
+                node_id: "worker".into(), boot_id: uuid::Uuid::new_v4().to_string(), claim_id: uuid::Uuid::new_v4().to_string(),
+                kind, payload_version: 1, now_ms: 1_000, dispatched_at_ms: 1_000,
+            }).await.expect("claim");
+            assert_eq!(matches!(outcome, ClaimOutcome::Claimed { .. }), index != 2,
+                "{backend}: parent + one NAS child; second NAS child refused; independent domain allowed");
+            if index == 2 { assert!(store.job_attempts(&id).await.expect("attempts").is_empty(), "{backend}"); }
+        }
+    }).await;
+}

@@ -93,7 +93,7 @@ an observation, not a promise that a particular queued job is compatible.
 ### 3.3 Execution-stage correlation
 
 Extend `AnalysisProgress` with optional `durable_job_id` and `durable_fence`.
-At fragment execution start, attach the exact fence token's job ID and
+At fragment execution start and for each media probe, attach the exact fence token's job ID and
 monotonic fence number to that progress guard. Keep the existing legacy key
 for producer updates. Guard epoch checking prevents an older execution from
 attaching its identity to a replacement row.
@@ -123,7 +123,7 @@ loops that bypass the delay after success must still reset backoff.
 
 ### 4.2 Candidate-first admission
 
-Probe, artwork and semantic workers read a bounded candidate page and check
+Probe, artwork, transcode-copy and semantic workers read a bounded candidate page and check
 payload compatibility before requesting the heavy permit. A pipeline digest
 may launch a bounded capability child: keep that child admitted, or reuse
 an already cached identity; never move subprocess work outside admission.
@@ -135,9 +135,9 @@ Keep source identity revalidation, claim resolution, lease heartbeats and
 fenced publication unchanged. Capacity remains owned until physical work
 has stopped and the active attempt has finished.
 
-### 4.3 Bounded probe batches — review decision required
+### 4.3 Bounded probe batches
 
-Proposal: execute up to two compatible media probes within one heavy
+Execute up to two compatible media probes within one heavy
 admission, only when the configured CPU budget is at least two. Each probe
 has its own durable claim and heartbeat; both share ownership of the physical
 admission. Force a one-thread probe invocation. Collect all children before

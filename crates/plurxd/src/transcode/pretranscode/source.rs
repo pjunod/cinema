@@ -622,6 +622,13 @@ pub(crate) struct FragmentAdmission {
     pub(super) _permit: crate::admission::TranscodePermit,
 }
 
+impl FragmentAdmission {
+    /// A batch shares the already-reserved CPU budget and heavy permit.
+    pub(crate) fn probe_parallelism(&self) -> usize {
+        self.threads.clamp(1, 2)
+    }
+}
+
 pub(crate) struct PretranscodeAdmission {
     pub(super) encoder: Encoder,
     pub(super) _heavy: tokio::sync::OwnedSemaphorePermit,

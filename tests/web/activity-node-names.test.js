@@ -660,11 +660,16 @@ test("watching stays above both tabs and the selected workspace survives polling
   painter.view.tab="status";
 });
 test("job details reject stale and unrelated execution progress", () => {
-  const job={id:"j",kind:"fragment_index_build",state:"running",owner_node_id:"n",observed_at_ms:Date.now(),lease_expires_ms:Date.now()+30000};
+  const now=Date.now(),job={id:"j",fence:2,kind:"fragment_index_build",state:"running",owner_node_id:"n",observed_at_ms:now-5000,lease_expires_ms:now+30000};
+  const row={job_id:"legacy-artifact",durable_job_id:"j",durable_fence:2,node_id:"n",updated_at_ms:now,stage:"fragment_index",bytes_read:100,total_bytes:200};
   painter.durable.detail={job,waiters:[],attempts:[]};painter.view.inspector={kind:"job",id:"j"};painter.view.detailTab="stages";
-  for(const row of [{job_id:"other",node_id:"n",updated_at_ms:Date.now()},{job_id:"j",node_id:"other",updated_at_ms:Date.now()},{job_id:"j",node_id:"n",updated_at_ms:Date.now()-60000}]){
-    painter.snapshot({analysis:{progress:[{...row,stage:"must_not_show"}]}});
-    assert.match(painter.inspect(), /Not reported/);assert.doesNotMatch(painter.inspect(), /must not show/);
+  painter.snapshot({analysis:{progress:[row]}});assert.match(painter.inspect(), /fragment index/);
+  for(const change of [{durable_job_id:"other"},{durable_fence:1},{node_id:"other"},{updated_at_ms:now-60000},{updated_at_ms:now+60000},{durable_fence:undefined}]){
+    painter.snapshot({analysis:{progress:[{...row,...change}]}});assert.match(painter.inspect(), /Not reported/);
+  }
+  painter.snapshot({analysis:{progress:[row]}});
+  for(const change of [{state:"succeeded"},{lease_expires_ms:now-1}]){
+    painter.durable.detail.job={...job,...change};assert.match(painter.inspect(), /Not reported/);
   }
   painter.view.inspector=null;painter.durable.detail=null;
 });
