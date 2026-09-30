@@ -45,7 +45,12 @@ more were found while executing it; they follow the five.
    identity" is therefore not a status quo to preserve — it has to be restored
    first, which is
    [RUST-TEST-EXECUTION-POLICY.md](RUST-TEST-EXECUTION-POLICY.md) §3.1(b)'s
-   `publish_main` widening. M7 depends on it.
+   `publish_main` widening. M7 depends on it. **2026-09-29 continuation:**
+   Paul delegated the remaining trigger choice. P-01 chose option (a), whose
+   no-schedule rule still holds, so `publish_main` is instead reachable only
+   from an operator's `workflow_dispatch` on `refs/heads/main`. A merge alone
+   still builds and publishes nothing. The full CI fan-out must pass before
+   that dispatch publishes the `sha-` image.
 2. **There *is* a server-side release gate; it is the weekly cadence that
    does not exist.** §4.5 says "nothing equivalent exists for the server".
    `make release-check` (`Makefile:1584-1592`) refuses a dirty tree, an
@@ -675,10 +680,11 @@ ledger keeps growing.
    deploy. Recorded on the work board's P-03 row. M7's buildable half is
    implemented against it (`scripts/release-cut`, the Monday schedule and a
    tag job that only a green scheduled run of a pending release reaches).
-   The first tag still waits: `publish_main` has no trigger that can fire it
-   (correction 1, re-verified 2026-09-24), which belongs to
-   [RUST-TEST-EXECUTION-POLICY.md](RUST-TEST-EXECUTION-POLICY.md), and
-   `v0.3.0` stands until that is fixed.
+   The `sha-` publisher is now reachable by a deliberate full-CI dispatch on
+   `main` (correction 1's 2026-09-29 continuation). It is not an automatic
+   schedule. The first tag still waits for that exact-tree dispatch and
+   qualification, a release pull request, and an operator-provided
+   `RELEASE_TAG_TOKEN`; `v0.3.0` stands until those steps are complete.
 
 3. **Whether a Rust path may be named in the field before the fast lane runs
    Rust tests.** §3.1 step 3 accepts it with a warning. If
@@ -754,3 +760,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | review fixes (M3, M4, M7) | [#485](http://192.168.4.7:3000/noirr/plurx/pulls/485) (draft) | The single adversarial review ([comment 4256](http://192.168.4.7:3000/noirr/plurx/pulls/485#issuecomment-4256)) raised one P1 and three P2s; all four are fixed, each pinned by a test that fails with its production hunk reverted. **P1:** `--pending` names the release commit, not HEAD (correction 9); the workflow checks it out before `make release-check` and the tag job re-resolves it (`test_pending_names_the_release_commit_never_main_s_tip`, the reviewer's own reproduction). **P2:** the cut rewrites every status line quoting the version or a build counter, the Apple ones through `validation/apple_build.py`, whose status-line anchors now follow the tree being read (`test_the_cut_real_tree_passes_the_build_claim_sweeps`); `scripts/release-cut` run on this head in a scratch worktree, lockfiles included, leaves `make operations-check` and `make spike-lock-check` green. **P2:** phase B asks a landing line only of corrective commits (correction 8, `test_an_anchored_commit_that_is_not_corrective_needs_no_landing_line`); with the boundary at `99d4abf8c` on this head the pre-fix checker reports 28 errors and the fixed one 27, and the one difference is the anchored `refactor(apple)` commit `d49a079b`. **P2:** the test-marker rule (correction 10, three tests in `tests/validation/test_test_markers.py`). `origin/main` @ `07fe785d3` merged (one conflict, the work board). |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | phase B | `ci/p03-enforce` | **Phase B in force**, on Paul's 2026-09-25 approval. `validation/merge-errata.toml` sets `enforce_after = "8251d14f7…"` and the fast lane's field step loses `continue-on-error` in the same change (`test_the_lane_blocks_on_the_field_exactly_when_a_boundary_is_set`). **Deviation from §7.4:** the boundary is `main`'s tip at the switch-on, not #489's landing commit `995b60f3e`; with `995b60f3e` `make history-check` exits 2 on `main` with 62 errors (34 fragment mappings past it that the freeze refuses and no erratum excuses, 28 corrective commits landed without a line), all made while phase A was in force (§7.4's note). With `8251d14f7`: `make history-check` EXIT=0 (`0 landing commits past the boundary`). No errata rows. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | phase B boundary | [PR #514](http://192.168.4.7:3000/noirr/plurx/pulls/514) | **Boundary moved from `8251d14f7` to `448e803da`** on merging `origin/main` into the branch. #500 (`259d087ed`) and #496 (`11d1f3d7c`) then landed while phase A was still in force: their pull request bodies carried `Regression-Test:` lines, but their landing messages did not (they were merged with the default title-only message) and both added `validation/regressions.d/` fragments for their fixes, all correct under phase A. With `8251d14f7` the merged branch gave 7 errors (4 fragment mappings past it, 3 corrective commits without a landing line), so before merging the boundary moved to `448e803da`, `main`'s tip after them, for the same reason (this question's own reason). With `448e803da`: `make history-check` EXIT=0. No errata rows. Whoever merges from now on puts `--landing-lines` output in the landing message; the promotion helper does it from the pull request body. |
+| 2026-09-29 | gpt-6-sol | agent:/root/next_independent_work | M7 `sha-` prerequisite | local source checkpoint, not pushed | **Paul's delegated trigger decision:** P-01 option (a) forbids a runtime-test schedule, so only a manual `ci.yml` dispatch on `refs/heads/main` may reach `publish_main`; a tag push, a dispatch on another branch, and an ordinary merge may not. The publisher retains its validation fan-out and registry authentication. A static operations regression pins the exact condition and the no-main-push/no-schedule triggers. No workflow ran, registry image was published, release cut was made, or tag was pushed. M7 still needs a qualified `main` dispatch and operator-provisioned `RELEASE_TAG_TOKEN` before the first scheduled tag can fire. |

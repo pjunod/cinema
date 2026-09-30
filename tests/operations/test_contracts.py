@@ -3247,15 +3247,23 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("run: make release-check", readiness)
         self.assertIn("fetch-depth: 0", readiness)
 
-    def test_main_push_builds_once_and_publishes_only_after_validation(self):
+    def test_only_manual_main_dispatch_publishes_after_validation(self):
         workflow = read(".github/workflows/ci.yml")
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
         publish = jobs["publish_main"]
         script = read("scripts/registry-push")
 
         self.assertIn("name: publish merged image (Forgejo registry)", publish)
-        self.assertIn("github.event_name == 'push'", publish)
-        self.assertIn("github.ref == 'refs/heads/main'", publish)
+        condition = publish.split("    if: >-\n", 1)[1].split("\n    runs-on:", 1)[0]
+        self.assertEqual(
+            " ".join(condition.split()),
+            "always() && github.event_name == 'workflow_dispatch' && "
+            "github.ref == 'refs/heads/main'",
+        )
+        triggers = workflow.split("on:\n", 1)[1].split("\njobs:", 1)[0]
+        self.assertIn("workflow_dispatch:", triggers)
+        self.assertNotIn("branches: [main]", triggers)
+        self.assertNotIn("  schedule:", triggers)
         for dependency in (
             "check",
             "cluster_store",

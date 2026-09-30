@@ -1449,10 +1449,11 @@ jobs:
     with:
       release_tag: ${{ github.ref_name }}
 
-  # A merged main commit is already qualified by its pull request, but the
-  # post-merge run still has to prove the merge tree before changing the fleet
-  # image alias. Build on one X64 runner because every deployed voter is X64;
-  # versioned release tags keep their separate multi-architecture publisher.
+  # Only an operator's manual dispatch on main may publish a sha- image.
+  # Merging allocates no runtime sweep or image build (P-01 option (a)); the
+  # dispatch proves that exact main tree before moving the fleet image alias.
+  # Build on one X64 runner because every deployed voter is X64; versioned
+  # release tags keep their separate multi-architecture publisher.
   publish_main:
     name: publish merged image (Forgejo registry)
     needs:
@@ -1473,7 +1474,7 @@ jobs:
       - android_device
       - package_smoke
     if: >-
-      always() && github.event_name == 'push' &&
+      always() && github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main'
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     timeout-minutes: 90
