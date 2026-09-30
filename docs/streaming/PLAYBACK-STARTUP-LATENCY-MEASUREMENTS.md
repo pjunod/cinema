@@ -151,9 +151,27 @@ improvement is claimed until the changed daemon is measured.
 
 Xcode discovered physical Apple TV **Bedroom**, AppleTV14,1, device
 `00008110-001C19140299801E`. The effort built a signed debug client and installed
-it successfully. The existing device playback harness then failed at launch:
-`System is asleep - foreground app launch forbidden`. It did not produce a
-playback receipt. The TV must be awake before that launch can succeed.
+it successfully. The first launch was refused because the TV was asleep;
+a later retry launched and produced real physical-device telemetry.
+
+On September 29 EDT (receipt timestamps September 30 UTC), the current
+production H.264-to-AAC remux cold start reported **11,259 ms to first frame**.
+The run used the existing device harness at 100 Mb/s; its later 99 Mb/s stage
+was scheduled beyond the observation window and never applied. This is a
+production baseline, not a measurement of the new settings correction.
+
+At 03:49:58.914 UTC the node logged serving-authority expiry and, at
+03:49:59.186, self-fenced the exact transcode session after quorum loss.
+The Apple client reported `503:serving_fenced`, then HTTP 410 and terminal
+AVPlayer failure at 03:50:27.162. Authority recovered at 03:50:08.885, after
+the session had been fenced. Thus this run is not a continuity pass and does
+not authorize a lower startup runway. An earlier authority expiry/recovery
+also occurred at 03:47:03; the instability is observed more than once.
+
+Receipt: `/private/tmp/plurx-startup-evidence-20260929/apple-current-policy.json`,
+SHA-256 `18524ebe57824454cf9eb7e8ccc36dda035e0597fe74e1abea36616c2f00a1c9`.
+The harness restored the app to its normal launch after collecting the failure.
+No production queue or serving-fence rule was changed.
 
 DNS-SD discovered Google TV Streamer **Bedroom TV** at `192.168.4.108`.
 The installed Android SDK reports no connected ADB devices or advertised ADB
