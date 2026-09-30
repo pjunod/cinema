@@ -226,7 +226,6 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [HEVC-IN-BAND-PARAMETER-SETS.md](streaming/HEVC-IN-BAND-PARAMETER-SETS.md) | Why a chunk-encoded WEB-DL copies with pink and green blotches, why PR #535 never shipped, and the per-file census that keeps redefined parameter sets in band. | open |
 | [HEVC-SAMPLE-ENTRY-STATUS.md](streaming/HEVC-SAMPLE-ENTRY-STATUS.md) | Live execution ledger for the HEVC sample-entry admission repair: implementation, evidence, review, and promotion state. | open |
 | [SAFARI-DIAGNOSIS-AND-FIX.md](streaming/SAFARI-DIAGNOSIS-AND-FIX.md) | Why HEVC-in-MP4 admission fails on Safari, the decoder evidence behind the repair, and the accepted review findings. | open |
-| [SAFARI-SEEK-IMPLEMENTATION.md](streaming/SAFARI-SEEK-IMPLEMENTATION.md) | Sol build handoff for native Safari seek clamping, viewer-priority VOD preparation, shared I/O admission, reproducible engines and bounded rolling seek coverage. | open |
 | [HEVC-SAMPLE-ENTRY-IMPLEMENTATION.md](streaming/HEVC-SAMPLE-ENTRY-IMPLEMENTATION.md) | Executable contract for source sample-entry facts, compatible packaging, client admission, downgrade safety, and focused acceptance. | open |
 | [HEVC sample-entry qualification receipt](evidence/hevc-sample-entry-qualification-2026-09-16.md) | Exact reviewed head, focused commands and counts, F1–F10 disposition, rollout order, and physical-evidence limits for PR #337. | built |
 | [TCL-PROBE-MISMATCH-RCA-AND-FIX.md](streaming/TCL-PROBE-MISMATCH-RCA-AND-FIX.md) | Why one added E-AC-3 Atmos profile refused a whole movie, what shipped to admit it, and why report equality is the wrong source-verification contract. | built |
@@ -255,6 +254,9 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [WEB-HELD-SEEK-STALL-RCA.md](streaming/WEB-HELD-SEEK-STALL-RCA.md) | Why one held Right Arrow became two client commits but one source change, how a refilled presentation wait spent recovery too early, and the live implementation status. | open |
 | [NATIVE-HLS-STARTUP-RCA.md](streaming/NATIVE-HLS-STARTUP-RCA.md) | Why native Safari turned a temporarily unavailable playlist into a codec failure and source-rescan refusal. | open |
 | [NATIVE-HLS-STARTUP-IMPLEMENTATION.md](streaming/NATIVE-HLS-STARTUP-IMPLEMENTATION.md) | Build contract for native-HLS readiness, bounded reload, joinable source preparation, and three-client parity. | open |
+| [SAFARI-SEEK-IMPLEMENTATION.md](streaming/SAFARI-SEEK-IMPLEMENTATION.md) | Build contract for native seek evidence, viewer preparation, shared I/O admission, reproducible runtime inputs, and bounded rolling coverage. | open |
+| [SAFARI-SEEK-STATUS.md](streaming/SAFARI-SEEK-STATUS.md) | Current Safari seek implementation, validation, review, and promotion state. | open |
+| [Native Safari seek fixture evidence](evidence/safari-seek-native-2026-09-29.json) | Served playlists, media generator identity, and native buffered/seekable/landing snapshots for four synthetic variants. | done |
 | [Native startup replay](evidence/native-startup-replay.cjs) | Replays the native-HLS startup controller against delayed publication without private media or a running server. | open |
 | [STREAMING-RELIABILITY-HANDOFF.md](streaming/STREAMING-RELIABILITY-HANDOFF.md) | The remaining work, for the next streaming agent. | open |
 | [STREAMING-CONTINUATION-HANDOFF.md](streaming/STREAMING-CONTINUATION-HANDOFF.md) | The continuation-session workflow, branch state, and integration queue for streaming reliability. | open |

@@ -16586,6 +16586,17 @@ mod tests {
         .await;
         assert_eq!(filtered["reopened"], 0, "{filtered}");
 
+        // The earlier control scenario intentionally left a fragment request
+        // queued. Retire it before letting this test's worker run; otherwise
+        // that unrelated source read owns the sole maintenance slot while the
+        // semantic rebuild below waits behind it.
+        let (status, retired) = call(
+            &app,
+            delete(&format!("/api/v1/analysis/jobs/{successor}"), Some(&admin)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{retired}");
+
         // Manual semantic boundaries are a separate, revision-fenced admin
         // action. A rebuild cannot implicitly opt into discarding one.
         let manual_url = format!("/api/v1/files/{}/timeline-annotations/credits", s.file);
@@ -16645,7 +16656,13 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert_eq!(marker_status["state"], "published", "{marker_status}");
+        let all_analysis = call(&app, get("/api/v1/analysis/jobs", Some(&admin)))
+            .await
+            .1;
+        assert_eq!(
+            marker_status["state"], "published",
+            "{marker_status}; all={all_analysis}"
+        );
         let marker_offers = || {
             crate::telemetry::prometheus()
                 .lines()

@@ -9,6 +9,7 @@ impl VodServe {
     /// VOD-presented returns a stable refusal; it never changes presentation.
     /// `start_seconds` positions the first demand (the entry containing it),
     /// not the plan.
+    #[cfg(test)]
     pub(crate) async fn try_create<'a>(
         &self,
         req: impl Into<VodRecipeRequest<'a>>,
@@ -26,6 +27,7 @@ impl VodServe {
             VodCreateFences {
                 release_fence: None,
                 serving_admission: None,
+                viewer: None,
             },
         )
         .await
@@ -34,6 +36,7 @@ impl VodServe {
     /// Cluster-only VOD creation. Unlike the legacy local entrypoint, this
     /// carries a serving admission captured before preparation and fences the
     /// final attachment against the corresponding quorum-loss transition.
+    #[cfg(test)]
     pub(crate) async fn try_create_cluster<'a>(
         &self,
         req: impl Into<VodRecipeRequest<'a>>,
@@ -52,6 +55,57 @@ impl VodServe {
             VodCreateFences {
                 release_fence: None,
                 serving_admission: Some(serving_admission),
+                viewer: None,
+            },
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn try_create_cluster_for_viewer<'a>(
+        &self,
+        req: impl Into<VodRecipeRequest<'a>>,
+        file: &MediaFile,
+        settings: &VodSettings,
+        attribution: VodAttribution<'_>,
+        session_id: String,
+        serving_admission: VodServingAdmission,
+        viewer: crate::state::PlaybackViewerDemand,
+    ) -> Result<VodStart, String> {
+        self.try_create_with_release_fence(
+            req.into(),
+            file,
+            settings,
+            attribution,
+            session_id,
+            VodCreateFences {
+                release_fence: None,
+                serving_admission: Some(serving_admission),
+                viewer: Some(viewer),
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn try_create_for_viewer<'a>(
+        &self,
+        req: impl Into<VodRecipeRequest<'a>>,
+        file: &MediaFile,
+        settings: &VodSettings,
+        attribution: VodAttribution<'_>,
+        session_id: String,
+        viewer: crate::state::PlaybackViewerDemand,
+    ) -> Result<VodStart, String> {
+        self.try_create_with_release_fence(
+            req.into(),
+            file,
+            settings,
+            attribution,
+            session_id,
+            VodCreateFences {
+                release_fence: None,
+                serving_admission: None,
+                viewer: Some(viewer),
             },
         )
         .await
@@ -80,6 +134,7 @@ impl VodServe {
             VodCreateFences {
                 release_fence: Some(release_fence),
                 serving_admission: None,
+                viewer: None,
             },
         )
         .await
@@ -218,7 +273,8 @@ impl VodServe {
         let cluster_index = if prepared.encoding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
-            self.try_cluster_fragment_index(file, video).await
+            self.try_cluster_fragment_index(file, video, fences.viewer.as_ref())
+                .await
         } else {
             Ok(None)
         };
@@ -299,22 +355,24 @@ impl VodServe {
                 };
                 if reason.is_none() && cluster_cache_enabled {
                     if let Some(node) = self.shared.cluster_node_id.as_deref() {
-                        preparation = match crate::state::enqueue_copy_preparation_for_object(
-                            self.shared.store.as_ref(),
-                            node,
-                            file,
-                            video,
-                            Some(&current),
-                        )
-                        .await
-                        {
-                            Ok(request) => {
-                                format!("HEVC exact copy preparation is {}", request.state)
-                            }
-                            Err(error) => {
-                                format!("HEVC copy preparation could not be queued: {error}")
-                            }
-                        };
+                        preparation =
+                            match crate::state::enqueue_copy_preparation_for_object_with_viewer(
+                                self.shared.store.as_ref(),
+                                node,
+                                file,
+                                video,
+                                Some(&current),
+                                fences.viewer.as_ref(),
+                            )
+                            .await
+                            {
+                                Ok(request) => {
+                                    format!("HEVC exact copy preparation is {}", request.state)
+                                }
+                                Err(error) => {
+                                    format!("HEVC copy preparation could not be queued: {error}")
+                                }
+                            };
                     }
                 }
                 let detail = reason.map(str::to_owned).unwrap_or_else(|| {
@@ -338,27 +396,31 @@ impl VodServe {
         if index.is_none() && prepared.encoding.is_none() {
             let reason = if needs_attestation {
                 match self.shared.cluster_node_id.as_deref() {
-                    Some(node_id) => match crate::state::enqueue_copy_preparation(
-                        self.shared.store.as_ref(),
-                        node_id,
-                        file,
-                        video,
-                    )
-                    .await
-                    {
-                        Ok(request) => format!(
-                            "exact copy preparation is {}{}",
-                            request.state,
-                            if request.last_error_code.is_empty() {
-                                String::new()
-                            } else {
-                                format!(": {}", request.last_error_code)
+                    Some(node_id) => {
+                        match crate::state::enqueue_copy_preparation_for_object_with_viewer(
+                            self.shared.store.as_ref(),
+                            node_id,
+                            file,
+                            video,
+                            None,
+                            fences.viewer.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(request) => format!(
+                                "exact copy preparation is {}{}",
+                                request.state,
+                                if request.last_error_code.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(": {}", request.last_error_code)
+                                }
+                            ),
+                            Err(error) => {
+                                format!("exact copy preparation could not be queued: {error}")
                             }
-                        ),
-                        Err(error) => {
-                            format!("exact copy preparation could not be queued: {error}")
                         }
-                    },
+                    }
                     None => "this process has no cluster index identity".to_owned(),
                 }
             } else {

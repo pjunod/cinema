@@ -83,6 +83,13 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     {
         result.map_err(database_error)?;
     }
+    // v65 follows v64 on both fresh and upgraded clusters.
+    validate_sql(super::background_jobs::VIEWER_ANALYSIS_SCHEMA)?;
+    for result in
+        timeout_store(client.batch(super::background_jobs::VIEWER_ANALYSIS_SCHEMA)).await?
+    {
+        result.map_err(database_error)?;
+    }
     Ok(())
 }
 

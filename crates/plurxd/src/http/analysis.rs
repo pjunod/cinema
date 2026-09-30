@@ -58,12 +58,22 @@ fn summary_value(
 pub(crate) async fn activity_summary(state: &AppState) -> Result<serde_json::Value, ApiError> {
     let now_ms = crate::state::clock_ms();
     let summary = state.store.analysis_status_summary().await?;
-    Ok(summary_value(
+    let source_io_holders = state.store.source_io_holders(now_ms).await?;
+    let mut value = summary_value(
         summary,
         state.jobs.analysis_queue_enabled().await,
         now_ms,
         state.store_metrics.snapshot().queue_health,
-    ))
+    );
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "source_io_holders".to_owned(),
+            serde_json::to_value(source_io_holders).map_err(|error| {
+                ApiError::Internal(format!("source holder observation: {error}"))
+            })?,
+        );
+    }
+    Ok(value)
 }
 
 #[derive(Default, Deserialize)]
@@ -574,6 +584,53 @@ async fn request_value(
         }
     }
     let durable_state = durable_state(&storage_state, not_before_ms, &last_error_code, now_ms);
+    let preparation = if request.component == "fragment_index" {
+        let observation = state
+            .store
+            .analysis_preparation_observation(&request.request_id, now_ms)
+            .await?;
+        observation.map(|observation| {
+            let local_capacity = state.transcode.pretranscode_worker_idle();
+            let (stage, reason_code) = if observation.local_available {
+                ("local_available", "ready")
+            } else if observation.hydration_state.as_deref() == Some("running") {
+                ("hydration_running", "target_delivery")
+            } else if observation.hydration_state.as_deref() == Some("queued") {
+                ("hydration_queued", "target_delivery")
+            } else if observation.artifact_state.as_deref() == Some("running") {
+                ("artifact_building", "artifact_worker")
+            } else if observation.artifact_state.as_deref() == Some("queued") {
+                ("artifact_queued", "artifact_worker")
+            } else if observation.artifact_state.as_deref() == Some("succeeded") {
+                ("artifact_ready", "target_delivery_pending")
+            } else if request.state == "running" {
+                ("awaiting_attestation", "source_reader")
+            } else if request.state == "queued" && not_before_ms > now_ms {
+                ("analysis_retry_wait", "backoff")
+            } else if request.state == "queued" && !observation.shared_io_eligible {
+                ("shared_io_refused", "source_io_capacity")
+            } else if request.state == "queued" && !local_capacity {
+                ("local_capacity_refused", "live_or_heavy_worker")
+            } else if request.state == "queued" {
+                ("analysis_eligible", "dispatch_pending")
+            } else {
+                ("analysis_terminal", "request_settled")
+            };
+            serde_json::json!({
+                "stage": stage,
+                "reason_code": reason_code,
+                "observed_at_ms": now_ms,
+                "request_id": request.request_id.clone(),
+                "artifact_job_id": observation.artifact_job_id,
+                "hydration_job_id": observation.hydration_job_id,
+                "local_capacity": local_capacity,
+                "shared_io_eligible": observation.shared_io_eligible,
+                "local_available": observation.local_available,
+            })
+        })
+    } else {
+        None
+    };
     Ok(serde_json::json!({
         "job_id": request.request_id,
         "file_id": request.file_id.to_string(),
@@ -600,6 +657,7 @@ async fn request_value(
         "created_at_ms": request.created_at_ms,
         "updated_at_ms": updated_at_ms,
         "phase": phase,
+        "preparation": preparation,
         "attempt_history": attempts,
     }))
 }

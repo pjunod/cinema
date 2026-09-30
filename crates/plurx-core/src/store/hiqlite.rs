@@ -146,7 +146,9 @@ const JOB_RETENTION_SCHEMA_VERSION: i64 = 63;
 const JOB_RETENTION_SCHEMA_MIGRATION_SOURCE: i64 = SUBTITLE_RECONCILE_SCHEMA_VERSION;
 const RECEIPT_PRESSURE_SCHEMA_VERSION: i64 = 64;
 const RECEIPT_PRESSURE_SCHEMA_MIGRATION_SOURCE: i64 = JOB_RETENTION_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = RECEIPT_PRESSURE_SCHEMA_VERSION;
+const VIEWER_ANALYSIS_SCHEMA_VERSION: i64 = 65;
+const VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE: i64 = RECEIPT_PRESSURE_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = VIEWER_ANALYSIS_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -1365,6 +1367,22 @@ impl TimedClient {
             &STORE_OPERATION_METRICS,
             StoreOperationClass::Write,
             timeout_store(self.inner().txn(statements)),
+            |results| results.iter().all(Result::is_ok),
+        )
+        .await
+    }
+
+    pub(super) async fn batch(
+        &self,
+        sql: &'static str,
+    ) -> Result<Vec<Result<usize, hiqlite::Error>>, StoreError> {
+        validate_sql(sql)?;
+        #[cfg(feature = "cluster-read-cost-validation")]
+        self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
+        time_store_operation(
+            &STORE_OPERATION_METRICS,
+            StoreOperationClass::Write,
+            timeout_store(self.inner().batch(sql)),
             |results| results.iter().all(Result::is_ok),
         )
         .await
@@ -3046,6 +3064,24 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    // Hiqlite rejects this mix of DDL and a source-reservation
+                    // backfill in one transaction. Each statement is replay-safe
+                    // (IF NOT EXISTS or ON CONFLICT DO NOTHING), so a crash
+                    // before the marker advance resumes the same batch.
+                    for result in self
+                        .client()
+                        .batch(super::background_jobs::VIEWER_ANALYSIS_SCHEMA)
+                        .await?
+                    {
+                        result.map_err(database_error)?;
+                    }
+                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(VIEWER_ANALYSIS_SCHEMA_VERSION, now, VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE))]).await;
+                    self.settle_migration_attempt(VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -3135,7 +3171,9 @@ impl HiqliteAuthStore {
             );
             Ok(())
         } else {
-            Err(failure)
+            Err(StoreError::Migration(format!(
+                "cluster schema migration from v{predecessor} failed: {failure}"
+            )))
         }
     }
 
@@ -4024,8 +4062,10 @@ impl MetricsStore for HiqliteAuthStore {
                         'oldest_age_ms', MAX(0, $2 * 1000 - grouped.created))), '[]') \
                         FROM (SELECT kind, state, COUNT(*) AS count, MIN(created_at_ms) AS created \
                             FROM background_jobs GROUP BY kind, state LIMIT 128) grouped)), \
-                        'source_io_reservations', (SELECT COUNT(*) FROM background_job_reservations \
-                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000), \
+                        'source_io_reservations', ((SELECT COUNT(*) FROM background_job_reservations \
+                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000) \
+                            + (SELECT COUNT(*) FROM analysis_source_reservations \
+                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > $2 * 1000)), \
                         'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import'))) AS background_jobs_json \
                  FROM offline_packages WHERE node_id = $1",
                 params!(node_id, now),
@@ -5088,7 +5128,8 @@ fn schema_migration_action(
         | LIVE_TV_RESOURCE_SCHEMA_MIGRATION_SOURCE
         | SUBTITLE_RECONCILE_SCHEMA_MIGRATION_SOURCE
         | JOB_RETENTION_SCHEMA_MIGRATION_SOURCE
-        | RECEIPT_PRESSURE_SCHEMA_MIGRATION_SOURCE => {
+        | RECEIPT_PRESSURE_SCHEMA_MIGRATION_SOURCE
+        | VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -7125,9 +7166,14 @@ mod tests {
             "v63 advances to the receipt-pressure schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 59,
+            RECEIPT_PRESSURE_SCHEMA_VERSION + 1,
+            VIEWER_ANALYSIS_SCHEMA_VERSION,
+            "v64 advances to the viewer-analysis schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 60,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v64 step"
+            "this implementation contains every additive v5→v65 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
