@@ -408,6 +408,19 @@ extended to the watch methods, and (c) has no
 named §5.1 lab readout in this record. The changed default is therefore a
 merged behavior, not evidence that every M4 acceptance step passed.
 
+**2026-09-29 unverified source checkpoint.** The separate K-04 branch extends
+`plurx-cluster-check`'s existing three-process apply-pause and follower-
+partition case through `watch_map`, `watch_rollup`, `watch_summary`, and
+`progress_rails`. It seeds a real watch write, carries the acknowledged Raft
+index into each read, checks Authority fallback and the returned watch state
+while apply is paused, then checks that a partitioned follower cannot return
+its stale local state after the one-second watermark lease expires. The
+focused harness mode is `cargo run --locked -p plurx-cluster-check --
+bounded-watch-failure`. This source has not been compiled or executed; #623
+currently owns the Mac Rust compiler and changes Store code. Merge current
+`main` after #623, run the pinned compiler and focused mode, and only then
+record a passing M4 failure proof.
+
 ## 4. Guardrails (non-goals)
 
 - **No ordinary-auth cache.** Not the admin proof, not a variant of it. A
@@ -479,8 +492,9 @@ Acceptance: the `config.rs` test asserts the merged default; the
 watch-method paused/partitioned-follower `cluster-check` case must pass;
 the M0 readout repeated on the lab must show `home`'s authority reads per
 request ≤ 2 and `library`/`item` ≤ 1 with the switch at its normal default.
-The first is merged source evidence. The cluster-check extension and named
-lab readout remain open; the rollout and rolling-upgrade observations are
+The first is merged source evidence. The cluster-check extension is a source
+checkpoint without a run; the named lab readout remains open. Rollout and
+rolling-upgrade observations are
 separate from source acceptance.
 
 ## 6. Verification and rollout
