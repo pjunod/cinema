@@ -282,6 +282,7 @@ mod tests {
             codec: codec.to_owned(),
             channels: Some(channels),
             sample_rate: None,
+            channel_layout: None,
             language: Some("eng".into()),
             title: None,
             default,

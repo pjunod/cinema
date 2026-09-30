@@ -5522,6 +5522,85 @@ async fn prometheus_store_snapshot_is_one_backend_neutral_aggregate() {
 }
 
 #[tokio::test]
+async fn source_audio_layout_facts_round_trip_without_inventing_legacy_layout() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: format!("Source audio layout {backend}"),
+                kind: LibraryKind::Movies,
+                paths: Vec::new(),
+                anime: false,
+            })
+            .await
+            .expect("create source-layout library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Source layouts".to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("create source-layout item");
+        let legacy = serde_json::json!({"index": 2, "codec": "aac", "channels": 6,
+            "language": null, "title": null, "default": false});
+        let legacy: plurx_core::domain::AudioStream =
+            serde_json::from_value(legacy).expect("legacy audio JSON");
+        let streams = vec![
+            plurx_core::domain::AudioStream {
+                index: 0,
+                channels: Some(6),
+                channel_layout: Some("5.1".to_owned()),
+                ..Default::default()
+            },
+            plurx_core::domain::AudioStream {
+                index: 1,
+                channels: Some(6),
+                channel_layout: Some("5.1(side)".to_owned()),
+                ..Default::default()
+            },
+            legacy,
+            plurx_core::domain::AudioStream {
+                index: 3,
+                channel_layout: Some("future-layout".to_owned()),
+                ..Default::default()
+            },
+        ];
+        let file_id = store
+            .upsert_file(
+                item,
+                &format!("/{backend}/layouts.mkv"),
+                1_024,
+                1,
+                &ProbeResult {
+                    audio_streams: streams.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("store source-layout facts");
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("read source-layout facts")
+            .expect("source-layout file");
+        assert_eq!(file.audio_streams, streams, "{backend}");
+        assert_eq!(file.audio_streams[2].channel_layout, None, "{backend}");
+        assert!(
+            serde_json::to_value(&file.audio_streams[2])
+                .expect("serialize legacy source-layout fact")
+                .get("channel_layout")
+                .is_none(),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn stored_chapter_projection_does_not_materialize_unrelated_probe_metadata() {
     for_each_backend(|store, backend| async move {
         let library = store
