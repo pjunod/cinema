@@ -15,6 +15,8 @@ use serde_json::{json, Value};
 pub struct ListQuery {
     state: Option<JobState>,
     kind: Option<JobKind>,
+    node_id: Option<String>,
+    limit: Option<usize>,
     cursor: Option<String>,
 }
 
@@ -35,6 +37,7 @@ fn summary(job: &BackgroundJob, now_ms: i64) -> Value {
         "id": job.id, "kind": kind, "state": job.state, "priority": job.priority,
         "file_id": file_id.map(|id| id.to_string()),
         "owner_node_id": job.token.as_ref().map(|token| &token.node_id),
+        "target_node_id": job.supported_payload().ok().and_then(|payload| payload.target_node_id().map(str::to_owned)),
         "lease_expires_ms": job.token.as_ref().map(|token| token.lease_expires_ms),
         "created_at_ms": job.created_at_ms, "updated_at_ms": job.updated_at_ms,
         "age_ms": now_ms.saturating_sub(job.created_at_ms).max(0),
@@ -58,42 +61,84 @@ pub async fn list(
     if let Some(cursor) = &query.cursor {
         valid_id(cursor)?;
     }
+    let limit = query.limit.unwrap_or(100);
+    if limit == 0
+        || limit > 100
+        || query.node_id.as_ref().is_some_and(|id| {
+            id.is_empty()
+                || id.len() > 256
+                || !id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+        })
+    {
+        return Err(ApiError::BadRequest(
+            "invalid job page or node filter".into(),
+        ));
+    }
     let now_ms = crate::state::clock_ms();
-    let (page, counts, migration, repairs) = tokio::try_join!(
+    let (page, counts, migration, repairs, running, cancelling) = tokio::try_join!(
         state.store.list_jobs(JobQuery {
+            node_id: query.node_id,
             state: query.state,
             kind: query.kind,
             after_id: query.cursor,
-            limit: 100
+            limit
         }),
         state.store.job_counts(now_ms),
         state.store.job_migration_status(),
         state.store.artifact_repairs(false),
+        state.store.list_jobs(JobQuery {
+            node_id: None,
+            state: Some(JobState::Running),
+            kind: None,
+            after_id: None,
+            limit: 100
+        }),
+        state.store.list_jobs(JobQuery {
+            node_id: None,
+            state: Some(JobState::Cancelling),
+            kind: None,
+            after_id: None,
+            limit: 100
+        }),
     )?;
     let ids = page
         .jobs
         .iter()
+        .chain(running.jobs.iter())
+        .chain(cancelling.jobs.iter())
         .map(|job| job.id.clone())
         .collect::<Vec<_>>();
-    let labels = state.store.job_labels(&ids).await?;
-    let jobs = page
+    // Keep label reads below the Store's 128-identity bound. The three
+    // independently filtered pages can contain up to 300 identities.
+    let mut labels = Vec::new();
+    for page_ids in ids.chunks(100) {
+        labels.extend(state.store.job_labels(page_ids).await?);
+    }
+    let labeled = |job: &BackgroundJob| {
+        let mut row = summary(job, now_ms);
+        if let Some(label) = labels.iter().find(|label| label.id == job.id) {
+            row["title"] = json!(label.title);
+            row["library"] = json!(label.library);
+        }
+        row
+    };
+    let jobs = page.jobs.iter().map(&labeled).collect::<Vec<_>>();
+    let active_jobs = running
         .jobs
         .iter()
-        .map(|job| {
-            let mut row = summary(job, now_ms);
-            if let Some(label) = labels.iter().find(|label| label.id == job.id) {
-                row["title"] = json!(label.title);
-                row["library"] = json!(label.library);
-            }
-            row
-        })
+        .chain(cancelling.jobs.iter())
+        .map(labeled)
         .collect::<Vec<_>>();
+    let active_truncated = running.next_after_id.is_some() || cancelling.next_after_id.is_some();
     let repairs = repairs.iter().map(|repair| json!({
         "id":repair.id, "kind":repair.original_key.split(':').next().unwrap_or("artifact"),
         "target_node_id":repair.target_node_id, "phase":repair.phase, "job_id":repair.job_id,
         "age_ms":now_ms.saturating_sub(repair.created_at_ms).max(0), "updated_at_ms":repair.updated_at_ms,
     })).collect::<Vec<_>>();
     Ok(Json(json!({"jobs": jobs, "repairs":repairs,
+        "active_jobs": active_jobs, "active_truncated": active_truncated,
         "counts": counts, "migration": migration, "next_cursor": page.next_after_id, "observed_at_ms": now_ms})))
 }
 
@@ -108,26 +153,30 @@ pub async fn detail(
         .background_job(&id)
         .await?
         .ok_or(ApiError::NotFound("background job"))?;
-    let (attempts, waiters) = tokio::try_join!(
+    let (attempts, waiters, labels) = tokio::try_join!(
         state.store.job_attempts(&id),
         state.store.job_waiters(WaiterQuery {
             job_id: id.clone(),
             after: None,
             limit: 100,
-        })
+        }),
+        state.store.job_labels(std::slice::from_ref(&id))
     )?;
+    let mut observed = summary(&job, crate::state::clock_ms());
+    if let Some(label) = labels.first() {
+        observed["title"] = json!(label.title);
+        observed["library"] = json!(label.library);
+    }
     // Request identifiers, payloads, diagnostics, checkpoints, boot IDs and
     // publication references are not part of this operator response.
-    Ok(Json(
-        json!({"job": summary(&job, crate::state::clock_ms()), "attempts": attempts,
+    Ok(Json(json!({"job": observed, "attempts": attempts,
         "waiters": waiters.waiters.iter().map(|waiter| json!({"state": waiter.state,
             "consumer_kind": waiter.consumer_kind, "target_node_id": waiter.target_node_id,
             "priority": waiter.priority, "deadline_ms": waiter.deadline_ms,
             "updated_at_ms": waiter.updated_at_ms, "failed_attempts": waiter.failed_attempts,
             "attempt_limit": waiter.attempt_limit, "not_before_ms": waiter.not_before_ms,
             "retry_deadline_ms": waiter.retry_deadline_ms, "error_code": waiter.last_error_code})).collect::<Vec<_>>(),
-        "more_waiters": waiters.next.is_some()}),
-    ))
+        "more_waiters": waiters.next.is_some()})))
 }
 
 pub async fn cancel(

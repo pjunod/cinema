@@ -973,6 +973,10 @@ pub enum ClaimResolution {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobQuery {
+    /// Current/previous assignment or explicit execution destination. Shared
+    /// unassigned jobs are not attributed to every eligible worker.
+    #[serde(default)]
+    pub node_id: Option<String>,
     pub state: Option<JobState>,
     pub kind: Option<JobKind>,
     pub after_id: Option<String>,
@@ -2481,6 +2485,7 @@ impl<T: QueueSql> BackgroundJobStore for T {
     async fn list_jobs(&self, query: JobQuery) -> Result<JobPage, StoreError> {
         if query.limit == 0
             || query.limit > MAX_PAGE_SIZE
+            || query.node_id.as_ref().is_some_and(|node| !identifier(node))
             || query
                 .after_id
                 .as_ref()
@@ -2494,6 +2499,9 @@ impl<T: QueueSql> BackgroundJobStore for T {
                     "SELECT {JOB_JSON} AS result_json FROM background_jobs
               WHERE (json_extract($1, '$.state') IS NULL OR state = json_extract($1, '$.state'))
                 AND (json_extract($1, '$.kind') IS NULL OR kind = json_extract($1, '$.kind'))
+                AND (json_extract($1, '$.node_id') IS NULL
+                     OR owner_node_id = json_extract($1, '$.node_id')
+                     OR target_node_id = json_extract($1, '$.node_id'))
                 AND (json_extract($1, '$.after_id') IS NULL OR id > json_extract($1, '$.after_id'))
               ORDER BY id LIMIT json_extract($1, '$.limit') + 1"
                 ),

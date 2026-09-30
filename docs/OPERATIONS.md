@@ -4299,13 +4299,37 @@ abandoned queue bytes remain reclaimable after restart even when there are no
 cache-location rows. Rename-to-publication holds both the recipe eviction
 guard and final-directory orphan guard until fenced completion.
 
-Settings → Activity lists durable work separately from live playback and offers
-admin cancellation and explicit retry. A cancelled interest does not cancel
+Settings → Activity keeps Watching above its Status and Jobs tabs. Status
+shows the node matrix and collapsible activity sections. Jobs offers global
+job-type counts, state and owner/destination filters, 25-row pages, and admin
+cancellation and explicit retry. Select a node or job for its detail dialog;
+job details separate Summary, Stages and History. Unknown stages stay unknown. A cancelled interest does not cancel
 another viewer's demand. Running children keep their physical permits until
 they have exited. Offline packages retain their own quota and download
 permissions; an exact recipe already preparing on their delivery node can be
 joined at priority 2 without starting another encoder. Cross-node offline
 transcode delivery is not yet provided by this queue adapter.
+
+**How to read Cluster workers:** Activity shows each known node, its shared
+heavy-background slot, GPU sessions and reserved CPU threads. The totals
+include only fresh capacity reports; unreachable peers and older servers are
+unknown, never idle. Capacity refreshes with Activity; durable assignments
+refresh separately every 15 seconds and show their observation time. Expired
+leases identify a previous owner awaiting recovery, not a running worker.
+The assignment list is bounded to 100 running and 100 cancelling jobs and
+labels itself partial when either page has more results.
+
+Each node admits **one heavy background media job** at a time. Preparation,
+indexing, subtitles, probing, artwork, semantic indexing, verification and
+transcode copies share this permit. Other worker loops, playback and transfers
+have their own admission limits. An available heavy slot still needs eligible
+work, enabled settings, compatible tools, source access and storage capacity.
+An occupied slot is retained until its physical work exits. A blocked free
+slot means media resources are allocated or foreground/offline work is waiting.
+CPU figures are reservations, not utilization: indexing conservatively reserves
+the whole configured software budget. Raising the heavy-slot count alone would
+not let two such jobs run. Child-process disclosures show observed work on each
+reporting node; a job can also be active without a child process.
 
 The analysis and speculative-preparation preferences are ordinary settings:
 Settings → Analysis enables the analysis workers and Settings → Maintenance

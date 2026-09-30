@@ -1085,6 +1085,7 @@ async fn background_evicted_transcode_gets_one_new_interest_without_resetting_fa
         assert_eq!(
             store
                 .list_jobs(JobQuery {
+                    node_id: None,
                     state: None,
                     kind: Some(JobKind::TranscodePrepare),
                     after_id: None,

@@ -68,7 +68,13 @@ const BORROWED = [
   "durableDuration",
   "durableLeaseExpired",
   "durableStateLabel",
+  "durableTypeBreakdownHtml",
+  "activityTabsHtml",
+  "activityInspectorHtml",
+  "activityJobProgress",
+  "fmtDur",
   "durableQueueHtml",
+  "clusterWorkersHtml",
   "paintActivityBody",
 ];
 
@@ -77,6 +83,10 @@ const BORROWED = [
 const PRELUDE = `
   let PAINTED = null;
   let ACTIVITY_VIEWING_ID = null;
+  let ACTIVITY_SNAPSHOT = {};
+  const ACTIVITY_VIEW={tab:"status",inspector:null,detailTab:"summary"};
+  const DVR_PAGE={selectedId:null};
+  function paintActivityInspector(){}
   // The painter reads the open disclosures back out of #main before it
   // repaints; a string-backed stand-in has none unless a test plants some.
   const main = { innerHTML: "", openStreams: [], querySelectorAll(){ return main.openStreams.map((key) => ({ dataset: { stream: key } })); } };
@@ -98,7 +108,7 @@ const painter = new Function(
   "return (function(){" +
     PRELUDE +
     BORROWED.map(shippedSource).join("\n") +
-    "\nreturn {paintActivityBody, main, nodeLabel, durable:DURABLE_ACTIVITY, select:(key)=>{ACTIVITY_VIEWING_ID=key;}};})()",
+    "\nreturn {paintActivityBody, main, nodeLabel, durable:DURABLE_ACTIVITY, view:ACTIVITY_VIEW, inspect:activityInspectorHtml, snapshot:(d)=>{ACTIVITY_SNAPSHOT=d;}, select:(key)=>{ACTIVITY_VIEWING_ID=key;}};})()",
 )(require("../../crates/plurxd/src/web/live-tv.js"));
 
 const NODE_A = "5deeeebc-8f39-4cb5-8e4a-aa5f912f327f";
@@ -130,6 +140,7 @@ function snapshot(overrides) {
 }
 
 function paint(d) {
+  painter.snapshot(d);
   painter.paintActivityBody(d);
   return painter.main.innerHTML;
 }
@@ -488,7 +499,7 @@ test("durable work renders escaped observations beside current activity", () => 
     title:"<hostile-title>",library:"<hostile-library>",owner_node_id:"<hostile-owner>",
     priority:1,age_ms:120000,not_before_ms:0,supported:true,error_code:"<hostile-error>"}];
   const html = paint(snapshot());
-  assert.match(html, /Durable cluster work/);
+  assert.match(html, /<h2 class="section">Jobs/);
   assert.match(html, /fragment index build/);
   for(const field of ["title","library","owner","error"]){
     assert.ok(html.includes(`&lt;hostile-${field}&gt;`));
@@ -509,7 +520,8 @@ test("durable owners, attempts and repair destinations use roster names", () => 
   const html=paint(snapshot({node_hostnames:{"owner-id":"m6"}}));
   assert.match(html, /title="owner-id">m6<\/span>/);
   assert.match(html, /<td>m6<\/td><td>copying/);
-  assert.match(html, /m6 · running · .*2 min this attempt/);
+  painter.view.inspector={kind:"job",id:"job"};painter.view.detailTab="history";
+  assert.match(painter.inspect(), /m6<\/b> · running[\s\S]*2 min elapsed/);painter.view.inspector=null;
   assert.match(html, /Since requested/);
   assert.match(html, /23h 47m/);
   assert.doesNotMatch(html, /1427 min/);
@@ -528,7 +540,8 @@ test("expired durable leases do not masquerade as live executions", () => {
   const html=paint(snapshot({node_hostnames:{"owner-id":"<m6>"}}));
   assert.match(html, /Lease expired · awaiting recovery/);
   assert.match(html, /previous owner/);
-  assert.match(html, /&lt;m6&gt; · lease expired · .*2 min until lease expired/);
+  painter.view.inspector={kind:"job",id:"expired"};painter.view.detailTab="history";
+  assert.match(painter.inspect(), /&lt;m6&gt;<\/b> · lease expired[\s\S]*2 min elapsed/);painter.view.inspector=null;
   assert.doesNotMatch(html, /<m6>/);
   Object.assign(painter.durable,{rows:[],detail:null});
 });
@@ -536,10 +549,14 @@ test("expired durable leases do not masquerade as live executions", () => {
 function refreshingQueue(q,api){
   return new Function("DURABLE_ACTIVITY","api",`
     const ME={is_admin:true},location={hash:"#/activity"};
-    const PAGE_RENDER_GENERATION=1;
+    let PAGE_RENDER_GENERATION=1;
+    const document={getElementById:()=>null};
+    function closeActivityInspector(){DURABLE_ACTIVITY.selectedId=null;}
+    const ACTIVITY_VIEW={inspector:{kind:"job",id:"job"},detailTab:"history"};
+    const ACTIVITY_SNAPSHOT={node_hostnames:{node:"m6"}};
     function paintDurableActivity(){}
-    ${["esc","nodeLabel","durableDuration","durableLeaseExpired","durableStateLabel","durableQueueHtml","refreshDurableActivity"].map(shippedSource).join("\n")}
-    return {refresh:refreshDurableActivity,html:()=>durableQueueHtml({node:"m6"})};
+    ${["esc","nodeLabel","durableDuration","durableLeaseExpired","durableStateLabel","durableTypeBreakdownHtml","durableQueueHtml","activityInspectorHtml","activityJobProgress","refreshDurableActivity","resetActivityWork"].map(shippedSource).join("\n")}
+    return {refresh:refreshDurableActivity,reset:()=>{resetActivityWork();PAGE_RENDER_GENERATION++;},html:()=>activityInspectorHtml()};
   `)(q,api);
 }
 test("bounded queue refresh updates the open attempt when execution completes", async () => {
@@ -554,8 +571,8 @@ test("bounded queue refresh updates the open attempt when execution completes", 
       attempts:[{node_id:"node",started_at_ms:now-120000,finished_at_ms:now,outcome:"succeeded"}]};
   });
   await runner.refresh(true);
-  assert.deepEqual(calls,["/cluster/jobs?state=running","/cluster/jobs/job"]);
-  assert.match(runner.html(), /m6 · succeeded · .*2 min elapsed/);
+  assert.deepEqual(calls,["/cluster/jobs?state=running&limit=25","/cluster/jobs/job"]);
+  assert.match(runner.html(), /m6<\/b> · succeeded[\s\S]*2 min elapsed/);
   assert.doesNotMatch(runner.html(), /this attempt|awaiting recovery/);
 });
 test("a late detail refresh cannot reopen closed or replace newly selected details", async () => {
@@ -569,6 +586,87 @@ test("a late detail refresh cannot reopen closed or replace newly selected detai
     await runner.refresh(true);
     assert.notEqual(q.detail?.job.id,"job");
   }
+});
+
+test("a pending old session cannot block or release a new queue request", async () => {
+  const q={state:"queued",epoch:0,rows:[],counts:[],observed:0,retries:new Map()};
+  const pending=[];const runner=refreshingQueue(q,()=>new Promise(resolve=>pending.push(resolve)));
+  const old=runner.refresh(true);assert.equal(pending.length,1);
+  runner.reset();const fresh=runner.refresh(true);assert.equal(pending.length,2);
+  pending[0]({jobs:[{id:"old"}],counts:[],observed_at_ms:Date.now()});await old;
+  assert.equal(q.busy,true);assert.deepEqual(q.rows,[]);
+  pending[1]({jobs:[{id:"new"}],counts:[],observed_at_ms:Date.now()});await fresh;
+  assert.equal(q.busy,false);assert.equal(q.rows[0].id,"new");
+});
+test("polling recovers an inspector whose first detail read failed", async () => {
+  const q={state:"queued",epoch:0,rows:[],counts:[],observed:0,selectedId:"job",detail:null,detailError:"unavailable"};
+  const calls=[];const runner=refreshingQueue(q,async url=>{calls.push(url);return url.includes("?")?{jobs:[],counts:[],observed_at_ms:Date.now()}:{job:{id:"job"},waiters:[],attempts:[]};});
+  await runner.refresh(true);assert.equal(calls.length,2);assert.equal(q.detail.job.id,"job");assert.equal(q.detailError,null);
+});
+
+function workerObservation(overrides={}) {
+  return {observed_at_ms:Date.now(),heavy_limit:1,heavy_in_use:0,heavy_available:1,
+    accepting_work:true,hardware_used:0,hardware_limit:3,software_used:0,software_limit:8,
+    children:[],child_count:0,...overrides};
+}
+
+test("cluster capacity counts fresh nodes and never counts missing or stale peers as idle", () => {
+  const html=paint(snapshot({node_hostnames:{a:"alpha",b:"beta",c:"gamma",d:"delta"},
+    activity_nodes:[{node_id:"a",status:"answered"},{node_id:"b",status:"timed_out"}],
+    workers:{a:workerObservation(),b:workerObservation(),c:workerObservation({observed_at_ms:Date.now()-60000})}}));
+  assert.match(html, /<b>1 \/ 4<\/b><span>nodes reporting capacity/);
+  assert.match(html, /<b>1<\/b><span>heavy slots available now/);
+  assert.equal((html.match(/Capacity unknown/g)||[]).length,3);
+  assert.match(html, /Last capacity report is stale/);
+  assert.match(html, /partial total/);
+});
+
+test("cluster workers distinguish heavy occupancy, foreground blocking and maintenance", () => {
+  const html=paint(snapshot({workers:{busy:workerObservation({heavy_in_use:1,heavy_available:0,software_used:8}),
+    blocked:workerObservation({heavy_available:0}),maintenance:workerObservation({heavy_available:0,accepting_work:false})}}));
+  assert.match(html, /Heavy worker busy/);
+  assert.match(html, /Waiting for media capacity/);
+  assert.match(html, /Not accepting work/);
+  assert.match(html, /<td>8 \/ 8<\/td>/);
+  assert.match(html, /<b>1 \/ 3<\/b><span>heavy slots occupied/);
+  assert.match(html, /<b>0<\/b><span>heavy slots available now/);
+});
+
+test("node assignments are independent of queue filters and expired ownership stays explicit", () => {
+  const now=Date.now();
+  Object.assign(painter.durable,{state:"failed",rows:[],observed:now,activeTruncated:true,
+    activeJobs:[{id:"j",kind:"subtitle_extract",title:"<unsafe>",owner_node_id:"worker",state:"running",lease_expires_ms:now-1,observed_at_ms:now}]});
+  const html=paint(snapshot({workers:{worker:workerObservation({children:["<child>"],child_count:1})}}));
+  assert.match(html, /&lt;unsafe&gt;/);
+  assert.match(html, /Lease expired · awaiting recovery · previous owner/);
+  assert.match(html, /Assignment list is partial/);
+  painter.view.inspector={kind:"node",id:"worker"};
+  assert.match(painter.inspect(), /&lt;child&gt;/);painter.view.inspector=null;
+  assert.doesNotMatch(html, /<unsafe>|<child>/);
+  Object.assign(painter.durable,{activeJobs:[],activeTruncated:false});
+});
+
+
+test("watching stays above both tabs and the selected workspace survives polling", () => {
+  for(const tab of ["status","jobs"]){
+    painter.view.tab=tab;
+    const html=paint(snapshot());
+    assert.ok(html.indexOf("Happening now · Watching") < html.indexOf('aria-label="Activity views"'));
+    const hidden=tab==="jobs"?"status":"jobs";
+    assert.match(html,new RegExp(`id="activity-${hidden}"[^>]* hidden`));
+    assert.match(html,new RegExp(`id="activity-tab-${tab}"[^>]*aria-selected="true"`));
+    assert.match(html, /data-activity-section="recordings"><summary>/);
+  }
+  painter.view.tab="status";
+});
+test("job details reject stale and unrelated execution progress", () => {
+  const job={id:"j",kind:"fragment_index_build",state:"running",owner_node_id:"n",observed_at_ms:Date.now(),lease_expires_ms:Date.now()+30000};
+  painter.durable.detail={job,waiters:[],attempts:[]};painter.view.inspector={kind:"job",id:"j"};painter.view.detailTab="stages";
+  for(const row of [{job_id:"other",node_id:"n",updated_at_ms:Date.now()},{job_id:"j",node_id:"other",updated_at_ms:Date.now()},{job_id:"j",node_id:"n",updated_at_ms:Date.now()-60000}]){
+    painter.snapshot({analysis:{progress:[{...row,stage:"must_not_show"}]}});
+    assert.match(painter.inspect(), /Not reported/);assert.doesNotMatch(painter.inspect(), /must not show/);
+  }
+  painter.view.inspector=null;painter.durable.detail=null;
 });
 
 let reported = false;

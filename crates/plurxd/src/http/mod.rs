@@ -11564,6 +11564,7 @@ mod tests {
         let page = state
             .store
             .list_jobs(plurx_core::store::background_jobs::JobQuery {
+                node_id: None,
                 state: None,
                 kind: Some(plurx_core::store::background_jobs::JobKind::LibraryScan),
                 after_id: None,

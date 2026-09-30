@@ -139,6 +139,7 @@ pub(crate) trait QueueFixture: Store {
         loop {
             let page = self
                 .list_jobs(JobQuery {
+                    node_id: None,
                     state: None,
                     kind: Some(JobKind::TranscodePrepare),
                     after_id,
@@ -366,6 +367,7 @@ pub(crate) trait QueueFixture: Store {
         loop {
             let page = self
                 .list_jobs(JobQuery {
+                    node_id: None,
                     state: Some(JobState::Running),
                     kind: None,
                     after_id,

@@ -33,6 +33,7 @@ const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 // string, fit this reservation even when deliveries saturate the response.
 const LIVE_TV_RESPONSE_RESERVE_BYTES: usize = 24 * 1024;
 const DVR_RESPONSE_RESERVE_BYTES: usize = 64 * 1024;
+const WORKER_RESPONSE_RESERVE_BYTES: usize = 64 * 1024;
 // A saturated delivery list must not erase every analysis row from a peer's
 // Activity snapshot. Reserve one quarter of the shared wire budget whenever
 // progress exists; unused space remains available when it does not.
@@ -47,6 +48,8 @@ const PEER_CONCURRENCY: usize = 8;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ActivitySnapshot {
     pub node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers: Option<Box<ActivityWorkers>>,
     pub deliveries: Vec<ActivityDelivery>,
     #[serde(default)]
     pub analysis: Vec<crate::state::AnalysisProgress>,
@@ -56,6 +59,48 @@ pub struct ActivitySnapshot {
     /// empty snapshot means the peer supports them and currently owns no sink.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) dvr: Option<crate::live_tv::dvr::DvrObservationSnapshot>,
+}
+
+/// Bounded physical observations, not a promise that a particular job can run.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivityWorkers {
+    pub observed_at_ms: i64,
+    pub heavy_limit: usize,
+    pub heavy_in_use: usize,
+    pub heavy_available: usize,
+    pub accepting_work: bool,
+    pub hardware_used: usize,
+    pub hardware_limit: usize,
+    pub software_used: usize,
+    pub software_limit: usize,
+    pub children: Vec<String>,
+    pub child_count: usize,
+}
+
+pub(super) async fn local_workers(state: &AppState) -> ActivityWorkers {
+    let runtime = state.transcode.media_node_runtime().await;
+    let accepting_work = state.serving.is_ready() && !state.membership.local_maintenance_active();
+    let children = plurx_core::process::priority::running();
+    let heavy_in_use = usize::from(state.transcode.background_worker_in_use());
+    ActivityWorkers {
+        observed_at_ms: crate::state::clock_ms(),
+        heavy_limit: crate::transcode::BACKGROUND_HEAVY_LIMIT,
+        heavy_in_use,
+        heavy_available: usize::from(
+            heavy_in_use == 0 && accepting_work && state.transcode.fragment_worker_may_start(),
+        ),
+        accepting_work,
+        hardware_used: runtime.hardware_slots_used,
+        hardware_limit: runtime.hardware_slots_max,
+        software_used: runtime.software_threads_used,
+        software_limit: runtime.software_threads_max,
+        child_count: children.len(),
+        children: children
+            .into_iter()
+            .take(32)
+            .map(|child| bounded_text(format!("{} · {}", child.class.as_str(), child.purpose), 256))
+            .collect(),
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -481,6 +526,14 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
     snapshot.node_id == expected_node_id
         && !snapshot.node_id.is_empty()
         && snapshot.node_id.len() <= MAX_NODE_ID_BYTES
+        && snapshot.workers.as_ref().is_none_or(|workers| {
+            workers.children.len() <= 32
+                && workers.children.iter().all(|child| child.len() <= 256)
+                && workers.child_count >= workers.children.len()
+                && workers.heavy_in_use <= workers.heavy_limit
+                && workers.heavy_available
+                    <= workers.heavy_limit.saturating_sub(workers.heavy_in_use)
+        })
         && snapshot.deliveries.len() <= MAX_DELIVERIES
         && snapshot.analysis.len() <= MAX_ANALYSIS_PROGRESS
         && snapshot.live_tv.len() <= 4
@@ -673,6 +726,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
         }
     }
     let mut snapshot = bounded_snapshot(state.node_id.clone(), deliveries, analysis);
+    snapshot.workers = Some(Box::new(local_workers(state).await));
     snapshot.live_tv = state.live_tv.activities().into_iter().take(4).collect();
     attach_dvr_snapshot(&mut snapshot, state.live_tv.capture_observation_snapshot());
     snapshot
@@ -758,6 +812,7 @@ fn bounded_snapshot(
 ) -> ActivitySnapshot {
     let node_id = bounded_text(node_id, MAX_NODE_ID_BYTES);
     let mut snapshot = ActivitySnapshot {
+        workers: None,
         node_id,
         deliveries: Vec::new(),
         analysis: Vec::new(),
@@ -768,12 +823,16 @@ fn bounded_snapshot(
         .map(|encoded| encoded.len())
         .unwrap_or(MAX_RESPONSE_BYTES);
     let delivery_budget = if analysis.is_empty() {
-        MAX_RESPONSE_BYTES - LIVE_TV_RESPONSE_RESERVE_BYTES - DVR_RESPONSE_RESERVE_BYTES
+        MAX_RESPONSE_BYTES
+            - LIVE_TV_RESPONSE_RESERVE_BYTES
+            - DVR_RESPONSE_RESERVE_BYTES
+            - WORKER_RESPONSE_RESERVE_BYTES
     } else {
         MAX_RESPONSE_BYTES.saturating_sub(
             ANALYSIS_RESPONSE_RESERVE_BYTES
                 + LIVE_TV_RESPONSE_RESERVE_BYTES
-                + DVR_RESPONSE_RESERVE_BYTES,
+                + DVR_RESPONSE_RESERVE_BYTES
+                + WORKER_RESPONSE_RESERVE_BYTES,
         )
     };
     for delivery in deliveries.into_iter().take(MAX_DELIVERIES) {
@@ -795,7 +854,10 @@ fn bounded_snapshot(
         let separator = usize::from(!snapshot.analysis.is_empty());
         let added = encoded.len().saturating_add(separator);
         if encoded_bytes.saturating_add(added)
-            > MAX_RESPONSE_BYTES - LIVE_TV_RESPONSE_RESERVE_BYTES - DVR_RESPONSE_RESERVE_BYTES
+            > MAX_RESPONSE_BYTES
+                - LIVE_TV_RESPONSE_RESERVE_BYTES
+                - DVR_RESPONSE_RESERVE_BYTES
+                - WORKER_RESPONSE_RESERVE_BYTES
         {
             continue;
         }
@@ -863,6 +925,34 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn worker_observations_are_bounded_and_old_peers_remain_unknown() {
+        let (_, state) = crate::http::tests::test_app_with_state();
+        let mut workers = local_workers(&state).await;
+        assert_eq!(
+            workers.heavy_limit,
+            crate::transcode::BACKGROUND_HEAVY_LIMIT
+        );
+        assert_eq!(workers.heavy_in_use, 0);
+        workers.children = vec!["\u{0000}".repeat(256); 32];
+        workers.child_count = 32;
+        assert!(
+            serde_json::to_vec(&workers).expect("worker wire").len()
+                < WORKER_RESPONSE_RESERVE_BYTES
+        );
+        let mut snapshot = bounded_snapshot("node-a".into(), Vec::new(), Vec::new());
+        snapshot.workers = Some(Box::new(workers.clone()));
+        assert!(snapshot_is_bounded(&snapshot, "node-a"));
+        workers.children.push("overflow".into());
+        snapshot.workers = Some(Box::new(workers));
+        assert!(!snapshot_is_bounded(&snapshot, "node-a"));
+        let old: ActivitySnapshot = serde_json::from_value(serde_json::json!({
+            "node_id":"old-node", "deliveries":[]
+        }))
+        .expect("old peer wire remains supported");
+        assert!(old.workers.is_none());
+    }
 
     #[test]
     fn authenticated_snapshot_is_never_share_cacheable() {
@@ -971,6 +1061,7 @@ mod tests {
         }
 
         let snapshot = ActivitySnapshot {
+            workers: None,
             node_id: "node-b".to_owned(),
             deliveries: Vec::new(),
             analysis: Vec::new(),
@@ -984,6 +1075,7 @@ mod tests {
     #[test]
     fn initial_dvr_serving_generation_is_a_valid_peer_snapshot() {
         let snapshot = ActivitySnapshot {
+            workers: None,
             node_id: "node-b".to_owned(),
             deliveries: Vec::new(),
             analysis: Vec::new(),
@@ -1221,6 +1313,7 @@ mod tests {
     #[test]
     fn http_failures_are_not_reported_as_transport_failures() {
         let body = serde_json::to_vec(&ActivitySnapshot {
+            workers: None,
             node_id: "node-b".to_owned(),
             deliveries: Vec::new(),
             analysis: Vec::new(),

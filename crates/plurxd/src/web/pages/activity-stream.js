@@ -233,6 +233,9 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
   const m=document.getElementById("main"); if(!m) return;
   const dvrUi=dvrRememberUi(m);
   const activityFocus=document.activeElement?.dataset?.activityView;
+  const openSections=new Set([...m.querySelectorAll("details[data-activity-section][open]")].map(el=>el.dataset.activitySection));
+  const previousSections=new Set([...m.querySelectorAll("details[data-activity-section]")].map(el=>el.dataset.activitySection));
+  const section=(key,title,body,defaultOpen=false)=>`<details class="activity-section" data-activity-section="${key}"${openSections.has(key)||(!previousSections.has(key)&&defaultOpen)?" open":""}><summary>${title}</summary>${body}</details>`;
   const open=new Set([...m.querySelectorAll("details.stream-diag[open]")].map(el=>el.dataset.stream));
   // And the disclosure a keyboard reader is standing on: `innerHTML=` below
   // destroys the focused summary, so it is found again after the paint.
@@ -278,21 +281,24 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
     <h2 class="section">Happening now · Watching</h2>
     ${missing.length?`<div class="clrefusal" role="status" aria-live="polite"><b>Activity is incomplete</b> ${esc(missing.map(node=>activityNodeFailureText(node,nodeNames)).join("; "))}. Streams on those nodes may be missing.</div>`:""}
     ${activityWatchingHtml(dels,d.live_tv,nodeNames,sessionsById,open)}
-    ${dvrActivityRows(recording,nodeNames,dvrState)}
-    ${d.analysis?`<h2 class="section">Content analysis</h2>${analysisSummaryCard(d.analysis,"activity")}${analysisLiveProgress(d.analysis,nodeNames)}`:""}
+    ${activityTabsHtml()}
+    <section id="activity-status" ${ME?.is_admin?'role="tabpanel" aria-labelledby="activity-tab-status"':'aria-label="Activity status"'}${ACTIVITY_VIEW.tab!=="status"?" hidden":""}>
+    <div id="cluster-workers">${clusterWorkersHtml(d)}</div>
+    ${section("recordings",`Recording activity · ${recording.length} active`,dvrActivityRows(recording,nodeNames,dvrState),!!DVR_PAGE.selectedId)}
+    ${d.analysis?section("analysis","Content analysis",analysisSummaryCard(d.analysis,"activity")+analysisLiveProgress(d.analysis,nodeNames)):""}
     ${p?`<h2 class="section">Preparing media</h2>${produce}`:""}
     ${offline.length
       ? `<h2 class="section">Offline downloads</h2>`:""}
     ${offline.length
       ? `<table><thead><tr><th>Title</th><th>Profile</th><th>Work</th><th>Progress</th><th>Requested</th><th></th></tr></thead><tbody>${offlineRows}</tbody></table>`
       : ""}
-    ${d.scans.length? `<h2 class="section">Library scans</h2><table><tbody>${scans}</tbody></table>` : ""}
-    ${activityProcessesHtml(d.processes)}
+    ${d.scans.length?section("scans",`Library scans · ${d.scans.length}`,`<table><tbody>${scans}</tbody></table>`):""}
+    ${section("processes","Processes on this server",activityProcessesHtml(d.processes))}
     <div class="activity-idle">${[!d.scans.length?"No scans running":"",!p?"No media preparation running":"",!offline.length?"No downloads in progress":""].filter(Boolean).join(" · ")}</div>
-    <div id="durable-activity">${durableQueueHtml(nodeNames)}</div>
-    <h2 class="section">Trakt</h2>
-    <div class="card">${trakt}</div>`;
+    ${section("trakt","Trakt",trakt)}</section>
+    ${ME?.is_admin?`<section id="activity-jobs" role="tabpanel" aria-labelledby="activity-tab-jobs"${ACTIVITY_VIEW.tab!=="jobs"?" hidden":""}><div id="durable-activity">${durableQueueHtml(nodeNames)}</div></section>`:""}`;
   dvrRestoreUi(m,dvrUi);
+  paintActivityInspector();
   if(activityFocus)[...m.querySelectorAll("[data-activity-view]")].find(el=>el.dataset.activityView===activityFocus)?.focus({preventScroll:true});
   if(focusKey!=null){
     const again=[...m.querySelectorAll("details.stream-diag")].find(el=>el.dataset.stream===focusKey);
