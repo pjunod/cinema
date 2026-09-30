@@ -156,6 +156,11 @@ test('watch browser folds episodes without disrupting playback',async()=>{
   await page.evaluate(()=>window.watchClosing);
   await page.waitForFunction(()=>!document.getElementById('watch-browser'));
   assert.equal(new URL(page.url()).hash,'#/item/3');
+  await page.waitForFunction(()=>WATCH_ITEM_PAGE?.item.id==='3');
+  await page.evaluate(()=>{const p=WATCH_ITEM_PAGE;return play(p.playable.id,p.item.title,p.playStart,p.playable.duration_ms,playbackMetaFor(p,p.playable));});
+  await page.waitForFunction(()=>WATCH?.accepted==='3');
+  assert.equal(await episodeDisclosure.evaluate(e=>e.open),false,'a new playback session resets episodes to collapsed');
+  await page.evaluate(()=>closePlayer());
   await page.goto('http://watch.test/#/item/20');await page.waitForFunction(()=>WATCH_ITEM_PAGE?.item.id==='20');
   await page.evaluate(()=>{const p=WATCH_ITEM_PAGE;return play(p.playable.id,p.item.title,0,p.playable.duration_ms,playbackMetaFor(p,p.playable));});
   await page.waitForFunction(()=>WATCH?.accepted==='20');
