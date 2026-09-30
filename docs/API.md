@@ -2157,6 +2157,10 @@ Runtime reads aggregate current observations from all workers and match the
 durable recording attempt. Stop preserves useful bytes through independently
 claimed finalization. Delete prevents publication; file cleanup remains pending
 until a worker with the recording's storage identity removes its artifacts.
+The worker then removes that recording's catalog file and empty item, clears
+`item_id`/`file_id`, and finally clears `path`. Deleted recording history is
+retained. Older already-purged rows with catalog links are repaired by the
+same worker; this explicit deletion does not consume the scan prune budget.
 
 | Method | Path | Auth | What it does |
 |---|---|---|---|

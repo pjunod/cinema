@@ -3285,6 +3285,16 @@ percentage is a hard ceiling rounded down. A refused scan still records new and
 changed files, but keeps every apparently missing row and reports the refusal
 in library status and logs.
 
+The limit counts catalog file entries missing from disk, not files still in
+the directory. An empty directory can therefore trigger the limit when the
+catalog still contains older entries. Explicit DVR deletions take a separate
+path: after removing the recording artifacts, the DVR worker removes that
+recording's catalog file and empty item and clears its catalog links. It also
+repairs already-purged recordings left linked by older versions. Recording
+history remains available. An empty Recordings library is normal and does not
+produce the generic “no video files found” warning; unexpected missing catalog
+entries still receive the same scan deletion protection as other libraries.
+
 The first verified, non-empty scan records the library's canonical path-set
 identity. Changing a library's paths clears that identity automatically. For a
 deliberate storage replacement at the same configured path, an admin can call

@@ -2565,6 +2565,12 @@ pub trait DvrStore: Send + Sync + 'static {
         transition: &crate::dvr::DvrTransition<'_>,
     ) -> Result<bool, StoreError>;
 
+    /// After physical deletion succeeds, atomically remove this deleted
+    /// recording's catalog file and empty item, then clear its catalog links.
+    /// Also repairs older purged rows whose path is already NULL. This is an
+    /// explicit DVR deletion, independent of the scanner's missing-file budget.
+    async fn purge_dvr_recording_catalog(&self, id: &str) -> Result<(), StoreError>;
+
     /// Apply a conditional transition and allocate its event sequence in one
     /// transaction. A rejected transition writes no event.
     async fn transition_dvr_recording_with_event(
