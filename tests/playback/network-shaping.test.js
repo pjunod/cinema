@@ -104,10 +104,10 @@ test("D3 overflow preserves the head and makes loss and censored absence explici
 
 test("D3 skipped and backward composition frames never become an exact zero stall", () => {
   const capture = { stopped: true, records: [
-    { kind: "start", at_ms: 0, wants_playback: true, visible: true, element_id: 1, current_time: 1 },
+    { kind: "start", at_ms: 0, wants_playback: true, visible: true, seeking: false, ended: false, element_id: 1, current_time: 1 },
     { kind: "composition_submission", at_ms: 10, visible: true, element_id: 1, media_time: 1, presented_frames: 1 },
     { kind: "composition_submission", at_ms: 50, visible: true, element_id: 1, media_time: .9, presented_frames: 4 },
-    { kind: "stop", at_ms: 100, wants_playback: true, visible: true, element_id: 1, current_time: 1 },
+    { kind: "stop", at_ms: 100, wants_playback: true, visible: true, seeking: false, ended: false, element_id: 1, current_time: 1 },
     { kind: "censor", at_ms: 100, reason: "terminal" },
   ] };
   const result = lab.d3PresentationEvidence(capture);
@@ -166,6 +166,84 @@ test("D3 ambiguous or missing rung evidence stays missing instead of using the c
   const result = lab.d3FinalDeliveryWindow(stage, [{ at_ms: 20_000, media: true, bytes: 123, session_id: null }]);
   assert.equal(result.advertised_total_kbps, null);
   assert.ok(result.missing.some(reason => reason.includes("cannot be attributed")));
+});
+
+test("D3 write acquisition timestamps callback completion without changing limiter settlement", async () => {
+  const { Writable } = require("node:stream");
+  const shaper = new lab.ShapingProxy(lab.parseNetworkProfile("8mbps-to-1.5mbps"), "http://127.0.0.1:1");
+  let now = 27_001, complete;
+  shaper.startedAt = 0;
+  shaper.now = () => now;
+  shaper.reserveSlice = async () => null;
+  const sink = new Writable({ highWaterMark: 64 * 1024,
+    write(_chunk, _encoding, callback) { complete = callback; } });
+  await shaper.writeShaped(Buffer.alloc(1024), sink, true, () => false, "session");
+  assert.equal(sink.writableLength, 1024);
+  assert.equal(shaper.deliverySamples[0][0].at_ms, 27_001, "legacy accepted-write accounting stays unchanged");
+  assert.equal(shaper.d3DeliverySamples[0].length, 0, "buffer admission is not completion");
+  assert.equal(shaper.d3WriteRecords[0].status, "pending");
+  const stage = { index: 0, entered_at_ms: 12_000, left_at_ms: 87_000 };
+  let evidence = { records: shaper.d3WriteRecords, dropped: 0 };
+  assert.equal(lab.d3FinalDeliveryWindow(stage, [], 0, null, evidence).socket_completion_media_bytes, null);
+  now = 87_001; shaper.stageIndex = 1; complete();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(shaper.d3WriteRecords[0].completed_at_ms, 87_001);
+  assert.equal(shaper.d3DeliverySamples[1][0].at_ms, 87_001);
+  assert.equal(lab.d3FinalDeliveryWindow(stage, shaper.d3DeliverySamples.flat(), 0, null, evidence)
+    .socket_completion_media_bytes, 0, "completion past the window is excluded");
+  await shaper.writeShaped(Buffer.alloc(100), { writable: true, destroyed: false,
+    write(_slice, callback) { callback(Object.assign(new Error("fixture failure"), { code: "EPIPE" })); return true; } },
+  true, () => false, "session");
+  assert.equal(shaper.d3WriteRecords.at(-1).status, "failed");
+  assert.equal(shaper.d3WriteRecords.at(-1).callback_at_ms, 87_001);
+  const later = { index: 1, entered_at_ms: 87_000, left_at_ms: 162_000 };
+  assert.equal(lab.d3FinalDeliveryWindow(later, shaper.d3DeliverySamples[1], 0, null, evidence)
+    .socket_completion_media_bytes, null, "failed completion cannot mean zero lost bytes");
+  assert.equal(lab.d3FinalDeliveryWindow(later, [], 0, null, { records: [], dropped: 1 })
+    .socket_completion_media_bytes, null);
+  sink.destroy(); shaper.agent.destroy();
+});
+
+test("D3 automatic event provenance separates method-only reopens from proven rung changes", () => {
+  const vm = require("node:vm");
+  let now = 0, tick;
+  const element = { currentTime: 1, seeking: false, ended: false, videoHeight: 720 };
+  const context = { performance: { now: () => now }, WeakMap, AUTO_SWITCH_SEQ: 0,
+    PLAYER: { wantsPlayback: true, sessionId: "session", attemptId: "attempt", abr: { switches: [] } },
+    document: { visibilityState: "visible", getElementById: () => element,
+      addEventListener() {}, removeEventListener() {} },
+    setInterval: fn => { tick = fn; return 1; }, clearInterval() {} };
+  vm.createContext(context);
+  vm.runInContext(`(${lab.installD3Acquisition.toString()})(32,100)`, context);
+  context.__plurxLabD3.appendFrame(element, 0, { mediaTime: 1, presentedFrames: 1, height: 720 }, context.PLAYER);
+  now = 100; context.AUTO_SWITCH_SEQ = 2;
+  context.PLAYER.abr.switches = [
+    { seq: 1, at_ms: 90, from: "copy_hls", to: "transcode", reason: "auto supply",
+      target_method: "transcode", position: 10, from_height: null, to_height: null },
+    { seq: 2, at_ms: 99, from: "720p", to: "360p", reason: "bandwidth cliff", from_height: 720, to_height: 360 },
+  ];
+  tick(); now = 200; context.__plurxLabD3.stop("observation-end");
+  const capture = JSON.parse(JSON.stringify(context.__plurxLabD3));
+  let measured = lab.d3PresentationEvidence(capture);
+  assert.equal(measured.automatic_event_sequence_complete, true);
+  assert.equal(measured.automatic_events, 2);
+  assert.equal(measured.proven_automatic_rung_changes, 1);
+  assert.equal(measured.automatic_switches, null, "unknown Auto heights must not be counted as rung changes");
+  const method = capture.records.find(r => r.kind === "automatic_switch");
+  assert.equal(method.from, "copy_hls"); assert.equal(method.to, "transcode");
+  assert.equal(method.reason, "auto supply"); assert.equal(method.position, 10);
+  assert.equal(method.target_method, "transcode");
+  const knownOnly = { ...capture, auto_switch_baseline: 1,
+    records: capture.records.filter(r => r.kind !== "automatic_switch" || r.switch_seq === 2) };
+  assert.equal(lab.d3PresentationEvidence(knownOnly).automatic_switches, 1);
+  assert.equal(lab.d3PresentationEvidence({ ...knownOnly, stopped: false }).automatic_switches, null,
+    "a last sample is not a completed observation boundary");
+  for (const record of capture.records) if (Object.hasOwn(record, "current_time")) record.current_time = null;
+  measured = lab.d3PresentationEvidence(capture);
+  assert.equal(measured.sampled_equal_clock_seconds, null, "missing sampled clocks are not zero stationary seconds");
+  assert.ok(measured.missing.includes("sampled media clock unavailable"));
+  capture.records.find(r => r.kind === "start").wants_playback = null;
+  assert.equal(lab.d3PresentationEvidence(capture).sampled_intent_eligible_seconds, null);
 });
 
 test("D3 normalization preserves failed raw acquisition, null metrics and provenance verbatim", () => {

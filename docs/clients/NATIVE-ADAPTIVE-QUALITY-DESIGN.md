@@ -804,14 +804,20 @@ rather than silently replacing early evidence. Callback `mediaTime`,
 and expected display times, **not physical-display acknowledgements**. Skipped
 submission counters, missing clocks and lost capture remain acquisition gaps.
 
-Equal sampled clocks are reported only as `sampled_equal_clock_seconds`.
+Equal sampled clocks are reported only as `sampled_equal_clock_seconds`;
+missing clock/intent/lifecycle records make that sampled estimate null too.
 They do not prove stationary presentation between samples. The exact D3
 `stalled_seconds` remains null; a complete sampled interval has only the
 conservative bound zero to its whole observation duration, with sample gaps
 and sampled intent-eligible duration recorded separately. Missing capture or
 overflow makes even that bound unavailable. Terminal/no-frame tails are not
-discarded. Automatic-switch counts require a complete sequence from the
-existing switch records; absent or overflowed evidence is not zero.
+discarded. Automatic-event sequence completeness is separate from the
+automatic rung-change metric. Original from/to labels, heights, reason,
+position, target method and target identities survive capture. Only unequal
+positive numeric heights prove a rung change; a method-only Auto reopen with
+unknown heights does not. `proven_automatic_rung_changes` retains the observed
+subset, but `automatic_switches` is null if the sequence is incomplete or any
+event has ambiguous heights. Absent or overflowed evidence is not zero.
 
 Controller/browser round-trip anchors retain send, browser and receive
 timestamps. Each anchor gives an offset interval; first/last intervals give
@@ -821,8 +827,14 @@ outside coverage or across a discontinuity it has no aligned value. The
 shaper's controller origin and actual transition timestamps remain separate
 so relative cliff times cannot be mistaken for absolute controller times.
 
-Each completed downstream socket write has a separate bounded delivery
-ledger, including classified playlists and session attribution. For each
+Each successful downstream `write` callback has a separate bounded delivery
+ledger, including classified playlists and session attribution. Returning
+`true` from `write` is buffer admission, not its completion. The legacy
+accepted/drained limiter settlement, refunds and carry-over are unchanged;
+the D3 callback timestamps are acquired separately. Up to 32,768 write
+records retain request/callback times, stage identities and pending/failed
+status; failed, absent callbacks or overflow make affected completion totals
+unavailable rather than zero. For each
 post-cliff stage, the final 60 seconds are exactly `(end - 60000, end]`, using
 **socket-completion timestamps**. This is not an application-read
 acknowledgement or client-consumption proof. Admission, refund and carry-over
@@ -832,6 +844,13 @@ ambiguous rungs keep the raw socket aggregate but leave the D3 delivered-rate
 field null. Advertised total bitrate requires one composition-observed
 session/height with an unambiguous ladder advertisement; it is not inferred
 from the shaping cap or proof of sustained playback.
+
+**Review correction, 2026-09-30:** sole review 8 on [#635](http://192.168.4.7:3000/noirr/plurx/pulls/635)
+reproduced premature accepted-write timestamps and method-only events counted
+as rung changes. Both acquisition paths now have pure regressions; the
+original limiter conservation tests still pass. Nine D3 contracts and seven
+adjacent in-memory limiter contracts pass without media or socket traffic.
+The missing-media-clock diagnostic is also explicit null, not a sampled zero.
 
 No acquisition-only run can close D3. Sustainable-rung first-frame latency
 and physical HDR-to-SDR count remain null without their required evidence;

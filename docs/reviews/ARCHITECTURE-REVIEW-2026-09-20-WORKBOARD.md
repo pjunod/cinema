@@ -218,12 +218,16 @@ seek-scratch repair effort and is tracked there.
 lab/normalizer with bounded raw intent/lifecycle/composition records, clock
 uncertainty and final-60-second downstream socket-completion accounting.
 The [A-04 dated acquisition entry](../clients/NATIVE-ADAPTIVE-QUALITY-DESIGN.md#browser-acquisition-continuation-2026-09-30)
-defines the nulls and bounds; seven pure focused contracts are not playback
+defines the nulls and bounds; nine pure focused contracts are not playback
 or physical qualification. D3 remains incomplete and A-05 M1–M4 still wait
 for the six-metric nine-client/two-profile plus Dolby Vision evidence.
 [Protocol #632](http://192.168.4.7:3000/noirr/plurx/pulls/632) is now integrated
 at `7ede9fc2d` after eight green Effort jobs (UI 3620/API 3641); its earlier
 draft receipt is preserved and its merge does not close D3.
+Sole review 8 of draft [#635](http://192.168.4.7:3000/noirr/plurx/pulls/635)
+corrected actual write-completion timing and automatic-event versus proven
+rung-change counting; seven adjacent pure limiter contracts preserve the
+existing conservation/seek accounting. No traffic or acceptance followed.
 
 `unclaimed` rows with `week` priority and no `Notes` dependency are what a
 new session should take first, in id order within the `week` set: S-01,

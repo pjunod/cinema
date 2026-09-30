@@ -65,6 +65,8 @@ function installD3Acquisition(limit, sampleMs) {
       capture.missing.push("automatic switch sequence incomplete");
     for (const change of switches) append({ kind: "automatic_switch",
       at_ms: change.at_ms ?? null, switch_seq: change.seq,
+      from: change.from ?? null, to: change.to ?? null, reason: change.reason ?? null,
+      position: change.position ?? null, target_method: change.target_method ?? null,
       from_height: change.from_height ?? null, to_height: change.to_height ?? null,
       target_session_id: change.target_session_id ?? null,
       target_attempt_id: change.target_attempt_id ?? null });
@@ -159,6 +161,24 @@ function d3PresentationEvidence(capture) {
   if (!capture.stopped) missing.push("stop boundary missing");
   const states = records.filter(r => Object.hasOwn(r, "wants_playback"));
   if (!states.length || states.some(r => r.wants_playback === null)) missing.push("independent viewer intent unavailable");
+  const sampledClockMissing = !states.length || states.some(r => !Number.isFinite(r.current_time));
+  if (sampledClockMissing) missing.push("sampled media clock unavailable");
+  const sampledIntentMissing = states.some(r => typeof r.wants_playback !== "boolean"
+    || typeof r.visible !== "boolean" || typeof r.seeking !== "boolean" || typeof r.ended !== "boolean"
+    || r.element_id == null || !Number.isFinite(r.at_ms));
+  if (sampledIntentMissing) missing.push("sampled intent/lifecycle coverage unavailable");
+  const events = records.filter(r => r.kind === "automatic_switch");
+  const eventCount = capture.auto_switch_end - capture.auto_switch_baseline;
+  const eventSequenceComplete = Number.isFinite(capture.auto_switch_baseline)
+    && Number.isFinite(capture.auto_switch_end) && eventCount >= 0 && capture.stopped && !capture.dropped
+    && events.length === eventCount && events.every((r, i) => r.switch_seq === capture.auto_switch_baseline + i + 1)
+    && !(capture.missing || []).includes("automatic switch sequence incomplete");
+  const provenRungChanges = events.filter(r => Number.isFinite(r.from_height) && r.from_height > 0
+    && Number.isFinite(r.to_height) && r.to_height > 0 && r.from_height !== r.to_height).length;
+  const ambiguousEvents = events.filter(r => !Number.isFinite(r.from_height) || r.from_height <= 0
+    || !Number.isFinite(r.to_height) || r.to_height <= 0);
+  if (!eventSequenceComplete) missing.push("automatic event sequence incomplete");
+  if (ambiguousEvents.length) missing.push("automatic events lack proven numeric rung-change evidence");
   const frames = records.filter(r => r.kind === "composition_submission" && r.visible);
   if (!frames.length) missing.push("no visible composition submissions");
   if (frames.some(r => !Number.isFinite(r.media_time) || !Number.isFinite(r.presented_frames)))
@@ -194,26 +214,35 @@ function d3PresentationEvidence(capture) {
     oracle: "rVFC composition submission, not physical display",
     stalled_seconds: null, stationary_integral_bounds_seconds: missing.length || !states.length ? null
       : [0, Math.max(0, states[states.length - 1].at_ms - states[0].at_ms) / 1000],
-    sampled_intent_eligible_seconds: eligibleMs / 1000,
-    sampled_equal_clock_seconds: equalClockMs / 1000,
+    sampled_intent_eligible_seconds: sampledIntentMissing || capture.dropped || !capture.stopped
+      || missing.includes("backward browser timestamp") ? null : eligibleMs / 1000,
+    sampled_equal_clock_seconds: sampledClockMissing || sampledIntentMissing || capture.dropped || !capture.stopped
+      || missing.includes("backward browser timestamp") ? null : equalClockMs / 1000,
     maximum_sample_gap_ms: maximumSampleGapMs, skipped_submissions: skipped,
     backward_frames: backwards, terminal_censor: records.filter(r => r.kind === "censor" || r.ended || r.media_error), missing,
-    automatic_switches: missing.length || capture.auto_switch_baseline === null || capture.auto_switch_end === null
-      ? null : capture.auto_switch_end - capture.auto_switch_baseline,
+    automatic_event_sequence_complete: eventSequenceComplete,
+    automatic_events: eventSequenceComplete ? eventCount : null,
+    proven_automatic_rung_changes: provenRungChanges,
+    ambiguous_automatic_events: ambiguousEvents.length,
+    automatic_switches: eventSequenceComplete && !ambiguousEvents.length ? provenRungChanges : null,
     raw: capture };
 }
 
-function d3FinalDeliveryWindow(stage, samples, dropped = 0, capture = null) {
+function d3FinalDeliveryWindow(stage, samples, dropped = 0, capture = null, writeEvidence = null) {
   const end = stage.left_at_ms, start = end - 60_000;
   const missing = [];
   if (!Number.isFinite(end) || !Number.isFinite(stage.entered_at_ms)
       || start < stage.entered_at_ms) missing.push("stage shorter than final 60 seconds");
   if (dropped) missing.push("downstream delivery ledger exceeded limit");
+  const unresolved = (writeEvidence?.records || []).filter(r => r.media && r.requested_at_ms <= end
+    && r.status !== "completed");
+  if (writeEvidence?.dropped) missing.push("downstream write acquisition exceeded limit");
+  if (unresolved.length) missing.push("downstream write completion missing or failed");
   const selected = samples.filter(s => s.media && s.at_ms > start && s.at_ms <= end);
   const sessions = [...new Set(selected.map(s => s.session_id))];
   if (!selected.length || sessions.includes(null) || sessions.length !== 1)
     missing.push("media delivery cannot be attributed to one session/rung");
-  const bytes = missing.some(m => /shorter|limit/.test(m)) ? null
+  const bytes = missing.some(m => /shorter|limit|completion missing/.test(m)) ? null
     : selected.reduce((sum, s) => sum + s.bytes, 0);
   const sessionId = sessions.length === 1 ? sessions[0] : null;
   const records = capture?.records || [];
@@ -233,6 +262,7 @@ function d3FinalDeliveryWindow(stage, samples, dropped = 0, capture = null) {
     session_id: sessionId, advertised_total_kbps: advertised,
     rung_attribution: advertised === null ? "missing" : "one composition-observed session/height; not physical display proof",
     missing,
+    unresolved_writes: unresolved,
     samples: selected };
 }
 
@@ -1010,6 +1040,9 @@ class ShapingProxy {
     this.deliverySamples = profile.stages.map(() => []);
     this.d3DeliverySamples = profile.stages.map(() => []);
     this.d3DeliveryDropped = profile.stages.map(() => 0);
+    this.d3WriteRecords = [];
+    this.d3WriteDropped = 0;
+    this.d3WriteSequence = 0;
     this.admissionSamples = profile.stages.map(() => []);
     // Claims priced by the bucket but not yet delivered or refunded. Held by
     // identity, not as a count, so the evidence seam below can exempt exactly
@@ -1295,8 +1328,9 @@ class ShapingProxy {
       this.carriedOverBytes += Math.min(bytes, claim.bytes);
     }
     this.settleClaim(claim);
-    // Downstream socket-completion bytes, billed to the current stage. This is
-    // not an application-read acknowledgement or physical presentation proof.
+    // Legacy accepted-or-drained limiter settlement, billed to this stage.
+    // Actual write-callback completion is a separate D3 acquisition below;
+    // neither is an application-read or physical presentation acknowledgement.
     // Reservations are priced when they are claimed and recorded only once
     // their own connection drains, so this series says when bytes landed, not
     // when the link released them: at a cliff every still-draining slice
@@ -1310,9 +1344,37 @@ class ShapingProxy {
     stage.bytes += bytes;
     if (media) stage.media_bytes += bytes;
     this.deliverySamples[this.stageIndex].push({ at_ms: at, bytes, media });
-    const rows = this.d3DeliverySamples[this.stageIndex];
-    if (rows.length < D3_RECORD_LIMIT) rows.push({ at_ms: at, bytes, media, session_id: sessionId });
-    else this.d3DeliveryDropped[this.stageIndex]++;
+  }
+
+  // Separate acquisition from the legacy limiter's accepted/drained commit.
+  // write(true) only admits bytes into a buffer; the callback is the completion
+  // signal. Neither acknowledges an application read or physical presentation.
+  beginD3Write(bytes, media, sessionId) {
+    if (this.d3WriteRecords.length >= D3_RECORD_LIMIT) {
+      this.d3WriteDropped++;
+      return () => {};
+    }
+    const row = { seq: ++this.d3WriteSequence, requested_at_ms: this.now() - this.startedAt,
+      request_stage_index: this.stageIndex, bytes, media, session_id: sessionId,
+      status: "pending", completed_at_ms: null, completion_stage_index: null, error: null };
+    this.d3WriteRecords.push(row);
+    return error => {
+      if (row.status !== "pending") return;
+      row.callback_at_ms = this.now() - this.startedAt;
+      row.callback_stage_index = this.stageIndex;
+      if (error) {
+        row.status = "failed";
+        row.error = error.code || "downstream-write-error";
+        return;
+      }
+      row.status = "completed";
+      row.completed_at_ms = row.callback_at_ms;
+      row.completion_stage_index = this.stageIndex;
+      const rows = this.d3DeliverySamples[this.stageIndex];
+      if (rows.length < D3_RECORD_LIMIT) rows.push({ at_ms: row.completed_at_ms, bytes, media,
+        session_id: sessionId, write_seq: row.seq });
+      else this.d3DeliveryDropped[this.stageIndex]++;
+    };
   }
 
   handle(request, response) {
@@ -1392,7 +1454,11 @@ class ShapingProxy {
       if (cancelled() || sink.destroyed || !sink.writable) {
         throw new Error("client cancelled the transfer");
       }
-      if (!sink.write(slice)) await this.waitForDrain(sink, cancelled);
+      const completion = this.beginD3Write(slice.length, media, sessionId);
+      let accepted;
+      try { accepted = sink.write(slice, completion); }
+      catch (error) { completion(error); throw error; }
+      if (!accepted) await this.waitForDrain(sink, cancelled);
       // The downstream has taken the slice: either the write was accepted
       // outright or `drain` reported the buffer emptied behind it. That is the
       // commit point, and it is deliberately reached before the cancellation
@@ -3824,6 +3890,8 @@ async function runOneCase(driver, server, manifest, fixture, testCase, browserIn
     try { anchors.push(await d3ClockAnchor(driver)); } catch (_) {}
     if (result || failure) {
       const shaping = shaper?.telemetry();
+      const writeEvidence = shaper ? { dropped: shaper.d3WriteDropped,
+        records: shaper.d3WriteRecords.map(r => ({ ...r })) } : null;
       const alignment = d3ClockAlignment(anchors);
       if (driver.d3ClockDropped) {
         alignment.status = "missing";
@@ -3835,8 +3903,9 @@ async function runOneCase(driver, server, manifest, fixture, testCase, browserIn
         clock_alignment: alignment,
         shaper_controller_origin_ms: shaper?.startedAt ?? null,
         cliffs: shaper?.transitions ?? [],
+        downstream_write_acquisition: writeEvidence,
         final_60s_delivery: shaper ? shaping.stages.slice(1).map(stage =>
-          d3FinalDeliveryWindow(stage, shaper.d3DeliverySamples[stage.index], shaper.d3DeliveryDropped[stage.index], capture)) : [],
+          d3FinalDeliveryWindow(stage, shaper.d3DeliverySamples[stage.index], shaper.d3DeliveryDropped[stage.index], capture, writeEvidence)) : [],
         composition_time_bounds: (capture?.records || []).filter(r => r.kind === "composition_submission" && r.visible)
           .map(r => ({ seq: r.seq, controller_at_ms_bounds: alignment.status === "bracketed"
             ? d3ControllerTimeBounds(r.at_ms, anchors) : null })),
