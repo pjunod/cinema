@@ -182,6 +182,7 @@ function fullOpenHarness() {
       "finishPlayAttach","play"].map(shippedSource),
     shippedSource("setQuality"),
     shippedSource("playbackSeekBufferedRangesMs"),
+    shippedSource("playbackSeekSeekableRangesMs"),
     shippedSource("playbackSeekPublishedRangeMs"),
     shippedSource("playbackSeekBufferCovers"),
     shippedSource("seekTo"), shippedSource("switchAudio"), shippedSource("setSub"),shippedSource("burnSub"),
@@ -2628,7 +2629,12 @@ async function main() {
       (fn, ms) => { const id = nextTimer++; timers.set(id, { fn, ms }); return id; },
       (id) => { timers.delete(id); },
       8_000,
-      options.policy || { stallRecoveryAction: () => "reconnect", stallRecoveryTargetHeight: () => 720 },
+      Object.assign({
+        // The paused-retirement latch (§9.5) is not what this harness drives.
+        isPauseGraceExpiry: () => false,
+        parksPausedPlaybackError: () => false,
+        pausedRetirementCurrent: () => false,
+      }, options.policy || { stallRecoveryAction: () => "reconnect", stallRecoveryTargetHeight: () => 720 }),
       () => "auto",
       (player, kind, ms, startedRunway, currentRunway, detail) =>
         stalls.push({ kind, startedRunway, currentRunway, detail }),

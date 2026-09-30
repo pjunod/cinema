@@ -3175,6 +3175,9 @@
   /* Library channels reuse the guide card language, not the tuner controller. */
   .lc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
   .lc-card{display:flex;flex-direction:column;gap:10px;min-height:190px}
+  .lc-card.lc-picked{border-color:var(--bad)}.lc-card .lc-select{width:18px;height:18px;margin:0 4px 0 0;flex:none}
+  .lc-card .lc-delete{color:var(--bad)}
+  .lc-bulk{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 14px;min-height:40px}.lc-bulk label{display:flex;align-items:center;gap:8px}
   .lc-programme>span{min-width:0;overflow-wrap:anywhere}
   .lc-now{font-size:18px;font-weight:700}.lc-next,.lc-time{color:var(--muted);font-size:13px}
   .lc-guide{display:grid;gap:8px}.lc-programme{display:grid;grid-template-columns:100px minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px;border-top:1px solid var(--line)}
@@ -3269,6 +3272,9 @@
 .watch-browser .watch-trks button.watch-fold,.watch-details .watch-trks button.watch-fold,.watch-browser .watch-rail-head button.watch-fold{font:inherit;font-size:11px;color:var(--muted);background:none;border:0;box-shadow:none;letter-spacing:0;min-height:0;padding:2px 6px;cursor:pointer;line-height:1}
 .watch-browser .watch-trks button.watch-fold:hover,.watch-details .watch-trks button.watch-fold:hover,.watch-browser .watch-rail-head button.watch-fold:hover{color:var(--text);background:none;box-shadow:none!important}
 .watch-lower{margin-top:28px;min-width:0}
+.watch-episode-disclosure>summary{cursor:pointer;font-size:18px;font-weight:600;min-height:44px;display:list-item;align-content:center}
+.watch-episode-disclosure>summary:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:4px}
+.watch-episode-disclosure[open]>summary{margin-bottom:12px}
 .watch-season select{margin-left:8px;max-width:200px}
 .watch-episodes{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:18px}
 /* Chapter rail */

@@ -2173,6 +2173,39 @@ final class PlayerController: ObservableObject {
     /// it is never collapsed into the timer-only same-delivery route.
     private var resumePendingFailedItem: AVPlayerItem?
     private var pauseBeganAt: TimeInterval?
+    /// The server retired this presentation while the viewer was paused.
+    ///
+    /// A rolling session ends 180 s after an accepted Hold
+    /// (`ROLLING_PAUSE_GRACE`): the control exchange then answers
+    /// `410 pause_grace_expired`, and AVPlayer — which keeps reloading a live
+    /// playlist while paused — fails the item on the next reload with a
+    /// 404/410 it reports as "resource unavailable". Nobody is watching, so
+    /// that is not a failure to show. The sliding-HLS contract (§9.5) says a
+    /// paused client stays paused and opens one replacement at the saved
+    /// position on resume; this is that latch. `setPlaybackRequested(true)`
+    /// consumes it and `stop()` clears it.
+    ///
+    /// It names the session it is about and is honoured only while that
+    /// session is still the attached one. It is deliberately NOT cleared at
+    /// the top of `open()`: a create that fails puts the dead item back
+    /// (`restoreAfterFailedChange`) with `sessionId` unchanged, and a latch
+    /// cleared there would leave Play starting a dead item. A successor that
+    /// attaches replaces `sessionId`, which retires the latch by identity.
+    private var pausedRetirement: PausedRetirement?
+    struct PausedRetirement: Equatable {
+        /// The rolling session the server retired.
+        var sessionId: String
+        /// The film position to reopen at, when the item that knew it is
+        /// already dead. Nil means the item is still attached and its own
+        /// clock is read at resume.
+        var positionMs: Int?
+    }
+
+    /// The latch, only while it still describes the attached session.
+    private var currentPausedRetirement: PausedRetirement? {
+        guard let retired = pausedRetirement, retired.sessionId == sessionId else { return nil }
+        return retired
+    }
     private var seekPresentationLifecycle: [AnyCancellable] = []
     private var seekPresentationBackgrounded = false
     private var seekVideoOutput: AVPlayerItemVideoOutput?
@@ -3039,6 +3072,35 @@ final class PlayerController: ObservableObject {
             player.pause()
             isPlaying = false
             pauseBeganAt = requestedAt
+        } else if let retired = currentPausedRetirement, !isChangingStream {
+            // The presentation this pause was holding no longer exists on the
+            // server, so there is nothing to resume in place: the buffered
+            // runway ends in a playlist that now answers 404/410. Open the one
+            // replacement at the saved position instead. `open()` keeps the
+            // viewer's intent, which is Play from here on. The latch stays:
+            // the successor's `sessionId` retires it, and if the create fails
+            // the dead item comes back and the next Play must reopen again.
+            wantsPlayback = true
+            pauseBeganAt = nil
+            isPlaying = false
+            let position = Self.pausedRetirementReopenPositionMs(
+                pendingSeekMs: seekState.pendingMs,
+                retired: retired,
+                attachedPositionMs: player.currentItem?.status == .failed
+                    ? nil
+                    : realPositionMs(),
+                lastObservedMs: currentMs
+            )
+            noteSurfaceLogOnly("paused_retirement_reopen:\(position)")
+            updateNowPlaying()
+            // Deliberately not `resumeIntentTask`: a Pause cancels that task,
+            // and a cancelled create surfaces through `fail()`. A Pause during
+            // this open is honoured by `open()` itself, which reads the intent.
+            Task { @MainActor [weak self] in
+                guard let self, self.started else { return }
+                await self.reopen(at: position)
+            }
+            return
         } else {
             wantsPlayback = true
             let pauseDurationMs = pauseBeganAt.map {
@@ -4336,7 +4398,10 @@ final class PlayerController: ObservableObject {
         deliveryStarvation.reset()
         ttffMeasurement.reset()
         seekState.clear()
-        let position = realPositionMs()
+        // A dead item reads 0:00; closing a parked player must not save that
+        // over the viewer's place in the film.
+        let position = currentPausedRetirement?.positionMs ?? realPositionMs()
+        pausedRetirement = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
         #if os(tvOS)
@@ -7468,6 +7533,27 @@ final class PlayerController: ObservableObject {
             eventDomain: detail?.eventDomain,
             eventStatus: detail?.eventStatus
         )
+        if let retiredSession = sessionId, Self.parksPausedItemFailure(
+            started: started,
+            wantsPlayback: wantsPlayback,
+            isRollingSession: !isVOD && !isDirectPlayback,
+            isCompatibilityFailure: isCompatibilityFailure,
+            resumeInFlight: resumeAttempt != nil
+        ) {
+            // Paused, and the item died under a viewer who is not watching —
+            // on a rolling session this is the pause grace retiring the
+            // presentation (§9.5). Walking the node list or raising
+            // "Playback stopped." here is what this latch replaces: every
+            // node answers the same 404/410, and the error is for nobody.
+            // The dead item's clock is unreliable, so the position is the
+            // last one the periodic observer saw.
+            pausedRetirement = PausedRetirement(
+                sessionId: retiredSession,
+                positionMs: Self.compatibilityRetryPositionMs(lastObservedMs: currentMs)
+            )
+            noteSurfaceLogOnly("paused_item_failure:\(detail?.eventStatus.map(String.init) ?? "none")")
+            return
+        }
         if let attempt = resumeAttempt {
             guard attempt.publicationCompleted else {
                 // Preserve the failed item until the urgent Resume publication
@@ -9103,6 +9189,49 @@ final class PlayerController: ObservableObject {
         max(lastObservedMs, 0)
     }
 
+    /// Whether an item failure is parked for resume instead of surfaced.
+    ///
+    /// Only for a paused viewer on a rolling session — the one kind the
+    /// server retires on a pause timer. VOD and direct play are kept alive by
+    /// a paused client and keep their ordinary ladder and surface. A
+    /// compatibility rejection is still a verdict about the media; an explicit
+    /// resume already in flight owns its own repair.
+    ///
+    /// Not gated on established playback: a replacement opened while paused
+    /// (a paused seek) never establishes, and it is retired the same way.
+    nonisolated static func parksPausedItemFailure(
+        started: Bool,
+        wantsPlayback: Bool,
+        isRollingSession: Bool,
+        isCompatibilityFailure: Bool,
+        resumeInFlight: Bool
+    ) -> Bool {
+        started && !wantsPlayback && isRollingSession
+            && !isCompatibilityFailure && !resumeInFlight
+    }
+
+    /// The control reporter's rendering of the server's pause-grace refusal
+    /// (`http/hls/control.rs`, `410 pause_grace_expired`).
+    nonisolated static func isPauseGraceExpiry(_ failure: String) -> Bool {
+        failure == "transport:410:pause_grace_expired"
+    }
+
+    /// Where the replacement for a presentation retired during a pause opens.
+    /// A seek the viewer made while paused wins; then the position saved when
+    /// the item died; then the still-attached item's own clock; then the last
+    /// observed position.
+    nonisolated static func pausedRetirementReopenPositionMs(
+        pendingSeekMs: Int?,
+        retired: PausedRetirement,
+        attachedPositionMs: Int?,
+        lastObservedMs: Int
+    ) -> Int {
+        if let pendingSeekMs { return max(pendingSeekMs, 0) }
+        if let saved = retired.positionMs { return max(saved, 0) }
+        if let attachedPositionMs, attachedPositionMs > 0 { return attachedPositionMs }
+        return max(lastObservedMs, 0)
+    }
+
     /// Whether this open has to go through an HLS session for no reason other
     /// than making the file's text subtitles selectable. The whole of the
     /// `SubtitleReadiness` setting is this function; nothing else branches on
@@ -9446,7 +9575,18 @@ extension PlayerController {
                 self?.preparedReplacement.acknowledgementDelivered(acknowledgement)
             },
             onExchangeFailure: { [weak self] failure in
-                self?.noteSurfaceLogOnly("control_exchange:\(failure)")
+                guard let self else { return }
+                self.noteSurfaceLogOnly("control_exchange:\(failure)")
+                if Self.isPauseGraceExpiry(failure), !self.wantsPlayback,
+                   !self.isChangingStream, self.currentPausedRetirement == nil,
+                   let retiredSession = self.sessionId {
+                    // The item is still attached and may keep playing out its
+                    // buffer, but the session behind it is gone. Resume must
+                    // open the replacement rather than play into a 404.
+                    self.pausedRetirement = PausedRetirement(
+                        sessionId: retiredSession, positionMs: nil
+                    )
+                }
             }
         )
         playbackControlSummary = "Owner epoch \(bootstrap.controlEpoch) · reporting"
