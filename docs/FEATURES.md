@@ -396,6 +396,10 @@ the physical Apple/Android device matrix remains a release acceptance step.
 **What it does:** decides how each file must be delivered to the current device,
 and delivers it. Full decision logic is [ARCHITECTURE.md](ARCHITECTURE.md) §3.
 
+- **Collapsible episode browser:** web TV playback starts with Episodes closed.
+  Open it by mouse or keyboard to select a season, browse cards or rows, and
+  play another episode. Folding it preserves the selection and playback;
+  starting a new watch session closes it again.
 - **Three methods, chosen automatically** and reported at `/decision`:
   - **Direct play** — HTTP range serving of the untouched file; zero transcode
     CPU. The goal state.

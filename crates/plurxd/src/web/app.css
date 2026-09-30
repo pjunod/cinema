@@ -3272,6 +3272,9 @@
 .watch-browser .watch-trks button.watch-fold,.watch-details .watch-trks button.watch-fold,.watch-browser .watch-rail-head button.watch-fold{font:inherit;font-size:11px;color:var(--muted);background:none;border:0;box-shadow:none;letter-spacing:0;min-height:0;padding:2px 6px;cursor:pointer;line-height:1}
 .watch-browser .watch-trks button.watch-fold:hover,.watch-details .watch-trks button.watch-fold:hover,.watch-browser .watch-rail-head button.watch-fold:hover{color:var(--text);background:none;box-shadow:none!important}
 .watch-lower{margin-top:28px;min-width:0}
+.watch-episode-disclosure>summary{cursor:pointer;font-size:18px;font-weight:600;min-height:44px;display:list-item;align-content:center}
+.watch-episode-disclosure>summary:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:4px}
+.watch-episode-disclosure[open]>summary{margin-bottom:12px}
 .watch-season select{margin-left:8px;max-width:200px}
 .watch-episodes{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:18px}
 /* Chapter rail */
