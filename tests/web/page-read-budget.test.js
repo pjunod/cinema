@@ -1621,6 +1621,9 @@ test("Settings drops a node-local scan error superseded by replicated success", 
     "currentScanStatus", "esc", "fmtAgo",
     `${shippedSource("statusText")}; return statusText;`,
   )(currentScanStatus, (value) => String(value), () => "now");
+  assert.equal(statusText({running:true,phase:"queued"}), "Queued · waiting for a worker");
+  assert.equal(statusText({running:true,phase:"queued",error:"Library root unavailable"}), "Queued · waiting for a worker — Library root unavailable");
+  assert.equal(statusText({running:true,phase:"scanning"}), "scanning…");
   assert.equal(statusText(failed, 101), "Last scan now · result unavailable");
   assert.match(statusText(failed, 99), /error: replicated store operation timed out/);
   assert.match(shippedSource("libRow"),

@@ -71,6 +71,9 @@ pub(crate) const RETENTION_SCHEMA: &str = include_str!("background_jobs_retentio
 pub(crate) const RECEIPT_PRESSURE_SCHEMA: &str =
     include_str!("background_jobs_receipt_pressure.sql");
 
+// Scheduled full-library ticks reuse an equivalent pending request inside this
+// same admission statement. Reads on individual schedulers cannot deduplicate
+// competing voters, and terminal receipts must not suppress the next scan.
 // Both backends execute the same admission statement and schema trigger.
 // The returned snapshot is the verdict that authorized the mutation, not a
 // follow-up read which might observe a different concurrent request.
@@ -91,6 +94,19 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
        AND consumer_ref = json_extract(body, '$.request.consumer_ref')
        AND (state IN ('pending','awaiting_hydration') OR updated_at_ms > json_extract(body, '$.now_ms') - 3600000)
      ORDER BY updated_at_ms DESC, request_id DESC LIMIT 1), json_extract(body, '$.request.request_id')))
+ WHEN json_extract(body, '$.request.scope') = 'library'
+   AND json_extract(body, '$.library_request.kind') = 'full'
+   AND json_extract(body, '$.library_request.trigger') = 'scheduled'
+   AND NOT EXISTS (SELECT 1 FROM background_job_waiters
+     WHERE request_scope = 'library' AND request_id = json_extract(body, '$.request.request_id'))
+ THEN json_set(body, '$.request.request_id', COALESCE((
+   SELECT waiter.request_id FROM background_library_requests intent
+   JOIN background_job_waiters waiter ON waiter.request_scope = 'library' AND waiter.request_id = intent.request_id
+   JOIN background_jobs job ON job.id = intent.job_id
+   WHERE intent.library_id = json_extract(body, '$.payload.library_id')
+     AND waiter.request_digest = json_extract(body, '$.request.request_digest')
+     AND waiter.state = 'pending' AND job.state IN ('queued','running')
+   ORDER BY waiter.created_at_ms, waiter.request_id LIMIT 1), json_extract(body, '$.request.request_id')))
  ELSE body END AS body FROM input
 ), snapshot AS MATERIALIZED (
   SELECT body,
