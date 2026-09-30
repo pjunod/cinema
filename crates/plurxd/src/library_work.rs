@@ -27,7 +27,7 @@ impl JobManager {
             })
             .await
         {
-            Ok(()) => true,
+            Ok(accepted) => accepted,
             Err(error) => {
                 tracing::warn!(library_id, %error, "library intent was not accepted");
                 false
@@ -72,15 +72,15 @@ impl JobManager {
         }
     }
 
-    async fn admit_library(&self, input: NewLibraryWork) -> Result<(), TargetError> {
+    async fn admit_library(&self, input: NewLibraryWork) -> Result<bool, TargetError> {
         match self.store.enqueue_library_work(input).await? {
-            EnqueueOutcome::Accepted { .. }
-            | EnqueueOutcome::Existing {
-                cancelled: false, ..
-            } => {
+            EnqueueOutcome::Accepted { .. } => {
                 self.library_wake.notify_one();
-                Ok(())
+                Ok(true)
             }
+            EnqueueOutcome::Existing {
+                cancelled: false, ..
+            } => Ok(false),
             // Full, or the same request is still being cancelled: nothing is
             // wrong and trying again is the answer. A conflict, a library that
             // vanished, or fenced producer is not — those stay failures.
@@ -547,6 +547,47 @@ mod tests {
     use plurx_core::domain::NewLibrary;
     use plurx_core::store::{SqliteStore, Store};
     use plurx_core::transcode::{EncoderCaps, Pipeline};
+
+    #[tokio::test]
+    async fn repeated_scheduled_ticks_do_not_report_new_scan_admissions() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let root = crate::test_tempdir().expect("root");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Waiting DVR".into(),
+                kind: LibraryKind::Recordings,
+                paths: vec![root.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let jobs = Arc::new(JobManager::new(
+            Arc::clone(&store),
+            root.path().join("artwork"),
+        ));
+        assert!(
+            jobs.trigger_scan_as(library.id, ScanTrigger::Scheduled)
+                .await
+        );
+        assert!(
+            !jobs
+                .trigger_scan_as(library.id, ScanTrigger::Scheduled)
+                .await
+        );
+        let records = store
+            .library_work_requests(LibraryWorkQuery {
+                pending_only: true,
+                limit: 256,
+                ..Default::default()
+            })
+            .await
+            .expect("pending");
+        assert_eq!(records.len(), 1);
+        assert!(
+            jobs.trigger_scan(library.id).await,
+            "manual scan remains an explicit new request"
+        );
+    }
 
     #[tokio::test]
     async fn busy_library_yields_without_a_failure_or_physical_reservation() {

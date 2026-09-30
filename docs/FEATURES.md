@@ -126,7 +126,9 @@ books, and home media.
   page survive live refreshes. Job details expand directly beneath their row.
   Pending library scans say “Queued · waiting for a worker.” Developer enable
   controls show advisory requirements. Library scan/refresh requests and results are
-  durable; ready learners can execute immutable preparation. One heavy worker
+  durable; repeated scheduled ticks share one pending request while waiting for
+  a worker. Manual and targeted requests keep separate identities. Ready
+  learners can execute immutable preparation. One heavy worker
   per node, two readers per named storage domain, and shared provider pacing
   protect playback and shared resources. Nodes reuse content/model-verified
   semantic vectors and distribute pure leaf probes while each scan retains

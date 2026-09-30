@@ -5726,12 +5726,12 @@ impl JobManager {
             match job {
                 DueJob::Scan(id) => {
                     if self.trigger_scan_as(id, ScanTrigger::Scheduled).await {
-                        tracing::info!(library = id, "scheduled scan started");
+                        tracing::info!(library = id, "scheduled scan queued");
                     }
                 }
                 DueJob::Refresh(id) => {
                     if self.trigger_refresh_as(id, ScanTrigger::Scheduled).await {
-                        tracing::info!(library = id, "scheduled metadata refresh started");
+                        tracing::info!(library = id, "scheduled metadata refresh queued");
                     }
                 }
                 // Server-wide jobs are stamped before dispatch so one failure
