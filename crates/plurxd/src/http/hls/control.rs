@@ -307,38 +307,6 @@ pub(super) fn preparation_settlement_slots() -> Arc<tokio::sync::Semaphore> {
     )
 }
 
-#[cfg(test)]
-fn preparation_settlement_faults(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, usize>> {
-    static FAULTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> =
-        std::sync::OnceLock::new();
-    FAULTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-#[cfg(test)]
-pub(super) fn fail_next_preparation_settlements(incarnation_id: &str, count: usize) {
-    preparation_settlement_faults()
-        .lock()
-        .expect("preparation settlement faults")
-        .insert(incarnation_id.to_owned(), count);
-}
-
-#[cfg(test)]
-fn consume_preparation_settlement_fault(incarnation_id: &str) -> bool {
-    let mut faults = preparation_settlement_faults()
-        .lock()
-        .expect("preparation settlement faults");
-    let Some(remaining) = faults.get_mut(incarnation_id) else {
-        return false;
-    };
-    if *remaining == 0 {
-        faults.remove(incarnation_id);
-        return false;
-    }
-    *remaining -= 1;
-    true
-}
-
 pub(super) struct DurablePreparationSettlementAdmission {
     pub(super) state: AppState,
     pub(super) gate: Arc<dyn crate::playback_control::PreparationGate>,
@@ -541,17 +509,11 @@ async fn settle_preparation_control(
     );
     let now = tokio::time::Instant::now();
     let deadline = now + PREPARATION_SETTLEMENT_RETRY_BUDGET;
-    #[cfg(test)]
-    let settlement_delay = {
-        preparation_settlement_delays()
-            .lock()
-            .expect("preparation settlement delays")
-            .remove(&route.incarnation_id)
-    };
-    #[cfg(test)]
-    if let Some(delay) = settlement_delay {
-        tokio::time::sleep(delay).await;
-    }
+    state
+        .hls_route_hooks
+        .get()
+        .before_preparation_settlement(&route.incarnation_id)
+        .await;
     let staged_incarnation_id = match &outcome.preparation_directive {
         crate::playback_control::PreparationDirective::Commit {
             staged_incarnation_id,
@@ -696,8 +658,11 @@ async fn settle_preparation_control(
                         Err(_) => return PreparationSettlement::Unavailable,
                     }
                 }
-                #[cfg(test)]
-                if consume_preparation_settlement_fault(&route.incarnation_id) {
+                if state
+                    .hls_route_hooks
+                    .get()
+                    .preparation_settlement_fault(&route.incarnation_id)
+                {
                     let wake = (tokio::time::Instant::now() + delay).min(deadline);
                     tokio::time::sleep_until(wake).await;
                     delay = delay
@@ -1834,135 +1799,6 @@ pub(super) fn control_start_response(route: &MediaSessionRoute) -> Option<StartR
         .filter(|response| response.control.is_some())
 }
 
-#[cfg(test)]
-fn staged_read_faults() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
-    static FAULTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-        std::sync::OnceLock::new();
-    FAULTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
-}
-
-#[cfg(test)]
-pub(super) fn fail_next_staged_read(incarnation_id: &str) {
-    staged_read_faults()
-        .lock()
-        .expect("staged read faults")
-        .insert(incarnation_id.to_owned());
-}
-
-#[cfg(test)]
-fn preparation_settlement_delays(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, Duration>> {
-    static DELAYS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, Duration>>,
-    > = std::sync::OnceLock::new();
-    DELAYS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-#[cfg(test)]
-pub(super) fn delay_next_preparation_settlement(incarnation_id: &str, delay: Duration) {
-    preparation_settlement_delays()
-        .lock()
-        .expect("preparation settlement delays")
-        .insert(incarnation_id.to_owned(), delay);
-}
-
-/// Test-only seam at a preparation candidate's planning step.
-///
-/// `plan_preparation_candidate` is the last thing a candidate does before it
-/// can reach either the ledger or the registry, so the window in which a
-/// client's exchange finds neither is the one this widens far enough to drive
-/// real exchanges through. The refusal half stands in for a candidate that
-/// turns out to be unplannable, without needing a source row contrived to make
-/// the planner fail for some unrelated reason.
-#[cfg(test)]
-fn preparation_planning_faults(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, (Duration, bool)>> {
-    static FAULTS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, (Duration, bool)>>,
-    > = std::sync::OnceLock::new();
-    FAULTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-#[cfg(test)]
-pub(super) fn fault_preparation_planning(playback_id: &str, delay: Duration, refuse: bool) {
-    preparation_planning_faults()
-        .lock()
-        .expect("preparation planning faults")
-        .insert(playback_id.to_owned(), (delay, refuse));
-}
-
-#[cfg(test)]
-pub(super) fn take_preparation_planning_fault(playback_id: &str) -> Option<(Duration, bool)> {
-    preparation_planning_faults()
-        .lock()
-        .expect("preparation planning faults")
-        .remove(playback_id)
-}
-
-/// Test-only seam immediately before `register_active_preparation`.
-///
-/// Production has no suspension point between a staging task's last await and
-/// that registration, which is exactly why the supersession flag is read once
-/// more *after* it. A test cannot land a supersession inside a window that does
-/// not exist, so this makes one: the task parks here, the ordinary
-/// `cancel_preparations_for_superseded_predecessor` runs, and the read after
-/// registration is then the only thing in the process that can still see it.
-#[cfg(test)]
-fn preparation_registration_delays(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, Duration>> {
-    static DELAYS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, Duration>>,
-    > = std::sync::OnceLock::new();
-    DELAYS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-#[cfg(test)]
-pub(super) fn delay_preparation_registration(playback_id: &str, delay: Duration) {
-    preparation_registration_delays()
-        .lock()
-        .expect("preparation registration delays")
-        .insert(playback_id.to_owned(), delay);
-}
-
-#[cfg(test)]
-pub(super) fn take_preparation_registration_delay(playback_id: &str) -> Option<Duration> {
-    preparation_registration_delays()
-        .lock()
-        .expect("preparation registration delays")
-        .remove(playback_id)
-}
-
-/// Test-only seam between a dispatch and the answer that same exchange gives.
-///
-/// The first `staging` clause covers a race the emit rule has with the task it
-/// just spawned: the candidate can finish, and its guard drop, before the emit
-/// rule reads the pending map. In production that window is a few instructions
-/// wide and cannot be widened from outside. Arming this makes the exchange wait
-/// for exactly that to have happened, which is the only way the clause is under
-/// test rather than merely present.
-#[cfg(test)]
-fn dispatch_settle_waits() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
-    static WAITS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-        std::sync::OnceLock::new();
-    WAITS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
-}
-
-#[cfg(test)]
-pub(super) fn wait_for_the_dispatched_candidate(playback_id: &str) {
-    dispatch_settle_waits()
-        .lock()
-        .expect("dispatch settle waits")
-        .insert(playback_id.to_owned());
-}
-
-#[cfg(test)]
-fn take_dispatch_settle_wait(playback_id: &str) -> bool {
-    dispatch_settle_waits()
-        .lock()
-        .expect("dispatch settle waits")
-        .remove(playback_id)
-}
-
 /// Resolve the staged successor this predecessor may announce now.
 ///
 /// The ledger is the wanted-work authority: a route at the publication
@@ -2364,11 +2200,10 @@ pub(super) async fn control_local_with_settlement_capacity(
             .store
             .staged_media_session_for_playback(route.user_id, &route.playback_id)
             .await;
-        #[cfg(test)]
-        let read = if staged_read_faults()
-            .lock()
-            .expect("staged read faults")
-            .remove(&route.incarnation_id)
+        let read = if state
+            .hls_route_hooks
+            .get()
+            .staged_read_fault(&route.incarnation_id)
         {
             Err(plurx_core::error::StoreError::Database(
                 "injected staged ledger read failure".into(),
@@ -2968,12 +2803,11 @@ pub(super) async fn control_local_with_settlement_capacity(
     // dispatched says `staging` is a fact about that exchange, not a fact about
     // a map another thread owns, and a client told `none` on the very exchange
     // that started its successor reopens immediately and orphans it.
-    #[cfg(test)]
-    if take_dispatch_settle_wait(&route.playback_id) {
-        while pending_candidate_for_playback(&route.playback_id).is_some() {
-            tokio::task::yield_now().await;
-        }
-    }
+    state
+        .hls_route_hooks
+        .get()
+        .before_dispatch_answer(&route.playback_id)
+        .await;
     // Only on a body this exchange composed. On a durable-receipt body the
     // field stays absent, which is the tri-state's documented "not evaluated
     // here" — the honest answer for a response written before this exchange

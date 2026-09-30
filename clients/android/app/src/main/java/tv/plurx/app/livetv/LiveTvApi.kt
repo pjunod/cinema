@@ -400,7 +400,8 @@ class LiveTvFailure(
  */
 internal fun liveTvKnownMessage(code: String): String? = when (code) {
     "live_tv_disabled" -> "Live TV is disabled. An administrator can enable it in Settings → Developer."
-    "tuner_capacity" -> "All Live TV slots are busy. Stop another session and try again."
+    "tuner_capacity" -> "Live TV is at capacity. Choose an offered channel or try again."
+    "encoder_capacity" -> "The tuner owner's video encoder is busy, so this channel cannot be converted right now. Try again in a moment."
     "tuner_unavailable" -> "Every tuner is busy. Stop another session and try again."
     "owner_unavailable" -> "The session server is unavailable. Check its network and cluster health."
     "no_answer" -> "The server did not answer. Press the channel again."
@@ -735,6 +736,15 @@ class LiveTvApi(origin: String, private val token: String, context: Context? = n
         request(url("settings"), "PUT", authenticated = true, body = change.body(settings.live_tv_config_generation)),
     )
     suspend fun readiness(): LiveTvReadiness = Net.json.decodeFromString(request(url("live-tv", "readiness", "refresh"), "POST", authenticated = true))
+
+    /**
+     * The enable card's prerequisites as the server last observed them — the
+     * same `GET /live-tv/readiness` the web's Enable Live TV card reads when it
+     * renders. Advisory: nothing reads it back into the enable.
+     */
+    suspend fun currentReadiness(): LiveTvReadiness = Net.json.decodeFromString(
+        request(url("live-tv", "readiness"), authenticated = true),
+    )
 
     /**
      * The guide's advisory rows. A read, never a refresh: it answers with

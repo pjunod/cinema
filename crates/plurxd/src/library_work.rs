@@ -1,6 +1,6 @@
 //! Durable library admission and execution; the existing scanner owns identity.
 use super::*;
-use plurx_core::store::background_jobs::{EnqueueOutcome, JobPayload, JobSettlement};
+use plurx_core::store::background_jobs::{EnqueueOutcome, JobPayload, JobSettlement, JobState};
 use plurx_core::store::background_jobs_library::{
     LibraryTrigger, LibraryWorkInput, LibraryWorkQuery, LibraryWorkRecord, LibraryWorkResult,
     NewLibraryWork, MAX_LIBRARY_RESULT_BYTES,
@@ -27,7 +27,7 @@ impl JobManager {
             })
             .await
         {
-            Ok(()) => true,
+            Ok(accepted) => accepted,
             Err(error) => {
                 tracing::warn!(library_id, %error, "library intent was not accepted");
                 false
@@ -72,18 +72,28 @@ impl JobManager {
         }
     }
 
-    async fn admit_library(&self, input: NewLibraryWork) -> Result<(), StoreError> {
+    async fn admit_library(&self, input: NewLibraryWork) -> Result<bool, TargetError> {
         match self.store.enqueue_library_work(input).await? {
-            EnqueueOutcome::Accepted { .. }
-            | EnqueueOutcome::Existing {
-                cancelled: false, ..
-            } => {
+            EnqueueOutcome::Accepted { .. } => {
                 self.library_wake.notify_one();
-                Ok(())
+                Ok(true)
             }
-            outcome => Err(StoreError::Task(format!(
+            EnqueueOutcome::Existing {
+                cancelled: false, ..
+            } => Ok(false),
+            // Full, or the same request is still being cancelled: nothing is
+            // wrong and trying again is the answer. A conflict, a library that
+            // vanished, or fenced producer is not — those stay failures.
+            outcome @ (EnqueueOutcome::QueueFull
+            | EnqueueOutcome::JobCancelling { .. }
+            | EnqueueOutcome::Existing {
+                cancelled: true, ..
+            }) => Err(TargetError::Refused(format!(
                 "library work was not accepted: {outcome:?}"
             ))),
+            outcome => Err(TargetError::Store(StoreError::Task(format!(
+                "library work was not accepted: {outcome:?}"
+            )))),
         }
     }
 
@@ -138,6 +148,7 @@ impl JobManager {
             }
         };
         let mut statuses = HashMap::new();
+        let now_ms = clock_ms();
         for record in records {
             if !matches!(record.input, LibraryWorkInput::Full { .. })
                 || statuses.contains_key(&record.library_id)
@@ -145,19 +156,37 @@ impl JobManager {
                 continue;
             }
             let pending = record.state == "pending";
+            let executing = pending
+                && matches!(
+                    record.job_state,
+                    Some(JobState::Running | JobState::Cancelling)
+                )
+                && record
+                    .job_lease_expires_ms
+                    .is_some_and(|expires| expires > now_ms);
+            let phase = pending.then(|| {
+                if !executing {
+                    "queued"
+                } else if matches!(record.input, LibraryWorkInput::Full { refresh: true, .. }) {
+                    "enriching"
+                } else {
+                    "scanning"
+                }
+                .into()
+            });
             let (last_scan, mut error) = match record.result {
                 Some(LibraryWorkResult::Completed { scan }) => (Some(scan.report), None),
                 Some(LibraryWorkResult::Failed { error }) => (None, Some(error)),
                 None => (None, record.error_code),
             };
-            if pending && error.is_none() {
+            if pending && !executing && error.is_none() {
                 error = self.library_readiness.problem(record.library_id);
             }
             statuses.insert(
                 record.library_id,
                 ScanStatus {
                     running: pending,
-                    phase: pending.then(|| "queued".into()),
+                    phase,
                     started_at: Some(record.created_at_ms / 1_000),
                     finished_at: (!pending).then_some(record.updated_at_ms / 1_000),
                     last_scan,
@@ -425,6 +454,9 @@ impl JobManager {
                         error: error.to_string(),
                     },
                     Err(TargetError::Store(error)) => return Err(error),
+                    Err(error @ TargetError::Refused(_)) => LibraryWorkResult::Failed {
+                        error: error.to_string(),
+                    },
                 };
                 for (id, _) in requests {
                     self.complete_library_request(publisher, fence, id, result.clone())
@@ -534,6 +566,47 @@ mod tests {
     use plurx_core::domain::NewLibrary;
     use plurx_core::store::{SqliteStore, Store};
     use plurx_core::transcode::{EncoderCaps, Pipeline};
+
+    #[tokio::test]
+    async fn repeated_scheduled_ticks_do_not_report_new_scan_admissions() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let root = crate::test_tempdir().expect("root");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Waiting DVR".into(),
+                kind: LibraryKind::Recordings,
+                paths: vec![root.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let jobs = Arc::new(JobManager::new(
+            Arc::clone(&store),
+            root.path().join("artwork"),
+        ));
+        assert!(
+            jobs.trigger_scan_as(library.id, ScanTrigger::Scheduled)
+                .await
+        );
+        assert!(
+            !jobs
+                .trigger_scan_as(library.id, ScanTrigger::Scheduled)
+                .await
+        );
+        let records = store
+            .library_work_requests(LibraryWorkQuery {
+                pending_only: true,
+                limit: 256,
+                ..Default::default()
+            })
+            .await
+            .expect("pending");
+        assert_eq!(records.len(), 1);
+        assert!(
+            jobs.trigger_scan(library.id).await,
+            "manual scan remains an explicit new request"
+        );
+    }
 
     #[tokio::test]
     async fn busy_library_yields_without_a_failure_or_physical_reservation() {

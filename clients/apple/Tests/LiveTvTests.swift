@@ -5,6 +5,156 @@ import XCTest
 
 @MainActor
 final class LiveTvTests: XCTestCase {
+    func testCapacityOffersResolveOnlyKnownPlayableChannels() {
+        let protected = LiveTvChannel(id: "protected", guideNumber: "10.1", guideName: "Protected",
+                                      favorite: false, drm: true, support: "drm_unsupported",
+                                      hd: nil, videoCodec: nil, audioCodec: nil)
+        func holder(_ id: String) -> LiveTvTunerHolder {
+            LiveTvTunerHolder(channelId: id, guideNumber: "999.1", channelName: "Stale name", sinks: [])
+        }
+        let failure = LiveTvFailure(code: "tuner_capacity", watchable: [
+            holder(channel.id), holder("missing"), holder(protected.id), holder(channel.id),
+        ])
+        let resolved = LiveTvCapacityOffer.resolve(failure, lineup: [channel, protected], generation: 4)
+        XCTAssertEqual(resolved.map(\.channel), [channel], "use the known identity and metadata, not guessed guide numbers")
+        XCTAssertEqual(resolved.first?.generation, 4)
+        XCTAssertTrue(LiveTvCapacityOffer.resolve(
+            LiveTvFailure(code: "owner_unavailable", watchable: failure.watchable),
+            lineup: [channel], generation: 4
+        ).isEmpty, "only an explicit capacity offer can supply actions")
+    }
+
+    func testLeasePreservesStructuredCapacityOffers() async throws {
+        let holder = LiveTvTunerHolder(channelId: channel.id, guideNumber: channel.guideNumber,
+                                      channelName: channel.guideName, sinks: [])
+        let requests = LiveTvMockRequests(result: started())
+        requests.startFailure = LiveTvFailure(code: "tuner_capacity", retry: "never",
+                                             ownerDecided: true, status: 409,
+                                             holders: [holder], watchable: [holder])
+        let lease = LiveTvLease(requests: requests, hints: LiveTvMemoryHintStore())
+        do {
+            _ = try await lease.start(channel.id)
+            XCTFail("capacity must remain a refusal until a user chooses an alternative")
+        } catch let failure as LiveTvFailure {
+            XCTAssertEqual(failure.watchable, [holder])
+            XCTAssertEqual(failure.holders, [holder])
+            XCTAssertTrue(failure.ownerDecided)
+            XCTAssertEqual(failure.status, 409)
+        }
+        XCTAssertEqual(requests.events, ["start:\(channel.id)"])
+        XCTAssertNil(lease.current)
+    }
+
+    func testWatchableCapacityOfferNeedsAnExplicitCurrentAction() async throws {
+        let offered = LiveTvChannel(id: "offered-id", guideNumber: "6.1", guideName: "Shared",
+                                    favorite: false, drm: false, support: "ready",
+                                    hd: nil, videoCodec: nil, audioCodec: nil)
+        let requests = LiveTvMockRequests(result: started())
+        requests.startFailure = LiveTvFailure(code: "tuner_capacity", ownerDecided: true, status: 409,
+                                             watchable: [LiveTvTunerHolder(channelId: offered.id,
+                                                 guideNumber: offered.guideNumber,
+                                                 channelName: offered.guideName, sinks: [])])
+        let controller = LiveTvPlayerController.testing(requests: requests, channels: [channel, offered])
+        await controller.watch(channel)
+        XCTAssertEqual(requests.events, ["start:\(channel.id)"], "publishing an offer cannot tune automatically")
+        let old = try XCTUnwrap(controller.capacityOffers.first)
+        await controller.stop()
+        await controller.watch(channel)
+        await controller.watchOffer(old)
+        XCTAssertEqual(requests.events, ["start:\(channel.id)", "start:\(channel.id)"],
+                       "an older capacity button cannot act on a newer refusal")
+        let current = try XCTUnwrap(controller.capacityOffers.first)
+        requests.startFailure = nil
+        requests.result = LiveTvStarted(sessionId: "own-shared-viewer",
+                                        playlistUrl: "/api/v1/live-tv/sessions/own-shared-viewer/master.m3u8",
+                                        channel: offered, live: true)
+        await controller.watchOffer(current)
+        XCTAssertEqual(requests.events, ["start:\(channel.id)", "start:\(channel.id)", "start:\(offered.id)"])
+        XCTAssertEqual(controller.watching?.id, offered.id)
+        await controller.watchOffer(current)
+        XCTAssertEqual(requests.events.count, 3, "an offer is consumed by the user's first tune")
+        await controller.stop()
+        XCTAssertEqual(requests.events.last, "release:own-shared-viewer", "cleanup names only this viewer's grant")
+        XCTAssertTrue(controller.capacityOffers.isEmpty)
+    }
+
+    func testLiveCaptionsRejectSyntheticUnadvertisedCC() {
+        XCTAssertFalse(LiveTvCaptions.isSelectable(mediaType: .closedCaption, captionsAdvertised: false))
+        XCTAssertTrue(LiveTvCaptions.isSelectable(mediaType: .closedCaption, captionsAdvertised: true))
+        XCTAssertTrue(LiveTvCaptions.isSelectable(mediaType: .subtitle, captionsAdvertised: false))
+        XCTAssertFalse(LiveTvCaptions.isSelectable(mediaType: .audio, captionsAdvertised: true))
+    }
+
+    func testLiveCaptionChoicesCannotChangeTheNextChannel() {
+        let captions = LiveTvCaptions()
+        let player = AVPlayer()
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        player.replaceCurrentItem(with: item)
+        captions.attach(item: item, player: player, captionsAdvertised: true)
+        let oldOff = captions.makeSelectionAction(.off)
+        oldOff()
+        XCTAssertEqual(captions.selection, .off)
+        let next = AVPlayerItem(asset: AVMutableComposition())
+        player.replaceCurrentItem(with: next)
+        captions.attach(item: next, player: player, captionsAdvertised: true)
+        oldOff()
+        XCTAssertEqual(captions.selection, .automatic, "an open predecessor menu cannot change the new channel")
+        let currentOff = captions.makeSelectionAction(.off)
+        currentOff()
+        XCTAssertEqual(captions.selection, .off, "the current menu remains enabled")
+        captions.detach()
+        player.replaceCurrentItem(with: next)
+        captions.attach(item: next, player: player, captionsAdvertised: true)
+        currentOff()
+        XCTAssertEqual(captions.selection, .automatic, "even the same item gets a new menu capability after stop")
+        captions.detach()
+    }
+
+    func testLiveCaptionNotificationsFollowOnlyCurrentAttachment() {
+        let captions = LiveTvCaptions()
+        let player = AVPlayer()
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        player.replaceCurrentItem(with: item)
+        captions.attach(item: item, player: player, captionsAdvertised: true)
+        let predecessor = captions.makeSelectionObservation(item)
+        XCTAssertTrue(predecessor())
+        captions.select(.off)
+        XCTAssertEqual(captions.summary, "Off")
+        let successor = AVPlayerItem(asset: AVMutableComposition())
+        player.replaceCurrentItem(with: successor)
+        captions.attach(item: successor, player: player, captionsAdvertised: true)
+        let successorStatus = captions.summary
+        XCTAssertFalse(predecessor(), "queued metadata must not change a new channel's caption status")
+        XCTAssertEqual(captions.summary, successorStatus)
+        captions.detach()
+        player.replaceCurrentItem(with: item)
+        captions.attach(item: item, player: player, captionsAdvertised: true)
+        XCTAssertFalse(predecessor(), "reattaching the same item cannot revive an old observation")
+        captions.detach()
+    }
+
+    func testLiveCaptionSelectionDoesNotReplaceOrResumeTheStream() {
+        let captions = LiveTvCaptions()
+        let player = AVPlayer()
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        player.replaceCurrentItem(with: item)
+        captions.attach(item: item, player: player, captionsAdvertised: true)
+        captions.select(.off)
+        XCTAssertEqual(captions.selection, .off)
+        XCTAssertEqual(captions.summary, "Off")
+        XCTAssertFalse(player.appliesMediaSelectionCriteriaAutomatically, "Off must disable system selection before tracks load")
+        captions.select(.track(0))
+        XCTAssertEqual(captions.selection, .off, "an absent service is never invented")
+        captions.select(.automatic)
+        XCTAssertEqual(captions.selection, .automatic)
+        XCTAssertTrue(player.appliesMediaSelectionCriteriaAutomatically)
+        XCTAssertTrue(player.currentItem === item, "selecting captions cannot reopen the transport")
+        XCTAssertEqual(player.rate, 0, "caption selection cannot resume a viewer pause")
+        captions.detach()
+        XCTAssertTrue(captions.choices.isEmpty)
+        XCTAssertEqual(captions.summary, "No live stream")
+    }
+
     func testLibraryChannelProgressCallbacksFollowCurrentAttachment() async {
         let controller = LibraryChannelPlayerController()
         let item = AVPlayerItem(asset: AVMutableComposition())
@@ -493,11 +643,44 @@ final class LiveTvTests: XCTestCase {
     /// tab says what is needed and whether each part is met, and never refuses
     /// the enable. These two tests are that rule, pinned.
     func testTheDeveloperCardDrawsEveryReadinessRowTheServerSendsAndGatesNothing() throws {
-        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        let source = try String(
-            contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvDeveloperView.swift")
-                .standardizedFileURL,
-            encoding: .utf8)
+        // The Developer enable card: what is needed to turn Live TV on safely
+        // and whether each part is met right now, from the same
+        // `/live-tv/readiness` read the web card makes — beside the button,
+        // never in its way.
+        let developer = try Self.appleSource("LiveTvDeveloperView.swift")
+        let model = try Self.appleSource("LiveTvAdminModel.swift")
+        let section = try XCTUnwrap(developer.range(of: "Section(\"Enable Live TV · advisory enablement\")"))
+        let card = String(developer[section.lowerBound...])
+        XCTAssertEqual(card.components(separatedBy: "ForEach(prerequisites.checks) { check in").count - 1, 1,
+                       "every row the server sends, drawn on the Developer card")
+        XCTAssertTrue(card.contains("Label(\"\\(check.ready ? \"Met\" : \"Not met\"): \\(check.message)\","))
+        XCTAssertTrue(card.contains("Readiness unavailable: \\(error). You can still enable Live TV."))
+        XCTAssertTrue(card.contains("await admin.loadPrerequisites()"))
+        XCTAssertFalse(card.contains("check.id =="))
+        for gate in ["disabled(!admin.prerequisites", "disabled(admin.prerequisites", "prerequisites.ready",
+                     "prerequisitesError == nil"] {
+            XCTAssertFalse(developer.contains(gate), "\(gate) would let an advisory check block the enable")
+        }
+        // The enable gates on an in-flight request only.
+        XCTAssertTrue(card.contains("Button(saved.liveTvEnabled ? \"Disable Live TV and drain sessions\" : \"Enable Live TV\")"))
+        XCTAssertTrue(card.contains("}.disabled(admin.busy)"))
+        // Loaded when the card opens, re-read after a save, and read from GET
+        // /live-tv/readiness — never the refresh the Live TV screen's check makes.
+        XCTAssertTrue(model.contains("await loadPrerequisites()\n            message = surface.loadedMessage"))
+        XCTAssertTrue(model.contains("prerequisites = try await api.currentReadiness()"))
+        XCTAssertTrue(LiveTvAdminSurface.developer.readsEnablePrerequisites)
+        XCTAssertFalse(LiveTvAdminSurface.liveTvSettings.readsEnablePrerequisites)
+        XCTAssertTrue(developer.contains("LiveTvAdminModel(surface: .developer)"))
+        let api = try Self.appleSource("LiveTv.swift")
+        XCTAssertTrue(api.contains("request(\"live-tv/readiness\", method: \"GET\""))
+    }
+
+    func testTheLiveTvSettingsReadinessCardsDrawEveryRowAndGateNothing() throws {
+        // The saved-configuration and guide cards moved to Settings → Live TV
+        // with their owner model. The rule is the same there.
+        let source = try Self.appleSource("LiveTvSettingsView.swift")
+        let model = try Self.appleSource("LiveTvAdminModel.swift")
+        let developer = try Self.appleSource("LiveTvDeveloperView.swift")
         // Both cards iterate the server's array rather than naming rows. That
         // is what makes `start_recovery` — and the next row nobody has written
         // yet — appear without a client change.
@@ -517,12 +700,103 @@ final class LiveTvTests: XCTestCase {
                      "disabled(guideReadiness", "readiness.ready ||", "!readiness.ready"] {
             XCTAssertFalse(source.contains(gate), "\(gate) would let an advisory check block an operator")
         }
-        // The enable and save controls gate on exactly what they always did:
-        // an in-flight request and unsaved edits. Never on a check.
-        XCTAssertTrue(source.contains("Button(saved.liveTvEnabled ? \"Disable Live TV and drain sessions\" : \"Enable Live TV\")"))
-        XCTAssertTrue(source.contains("}.disabled(busy || dirty)"))
+        // The save controls gate on exactly what they always did: an in-flight
+        // request and unsaved edits. Never on a check.
+        XCTAssertTrue(source.contains("}.disabled(admin.busy || admin.dirty)"))
+        for file in [developer, model] {
+            for gate in ["disabled(!readiness", "disabled(readiness", "readiness.ready ||", "!readiness.ready"] {
+                XCTAssertFalse(file.contains(gate), "\(gate) would let an advisory check block an operator")
+            }
+        }
         // And a guide card that cannot be read is an empty card.
-        XCTAssertTrue(source.contains("guideReadiness = try? await api.guideReadiness()"))
+        XCTAssertTrue(model.contains("guideReadiness = try? await api.guideReadiness()"))
+    }
+
+    private static func appleSource(_ name: String) throws -> String {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        return try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/\(name)").standardizedFileURL,
+            encoding: .utf8)
+    }
+
+    // ---- where the server Live TV settings are drawn --------------------
+
+    /// The web moved the tuner, guide, recording and Library channel cards
+    /// from Developer to Settings → Live TV, and Paul's Developer rule says a
+    /// finished setting does not wait in Developer. Settings → Live TV draws
+    /// the four cards and their saves; Developer draws none of them.
+    func testLiveTvSettingsOwnTheFourCardsTheWebMovedAndDeveloperListsNoneOfThem() throws {
+        XCTAssertEqual(LiveTvSettingsPlacement.liveTvSettings,
+                       ["HDHomeRun Live TV", "Programme guide", "Recording", "Library channels"])
+        let settings = try Self.appleSource("LiveTvSettingsView.swift")
+        let developer = try Self.appleSource("LiveTvDeveloperView.swift")
+        let moved: [String: [String]] = [
+            "HDHomeRun Live TV": ["write(.configure(", "admin.checkReadiness()", "ForEach(readiness.checks)"],
+            "Programme guide": ["admin.loadGuideReadiness()", "ForEach(guideReadiness.checks)"],
+            "Recording": ["Toggle(\"Enable recording\"", "write(.dvrEnabled("],
+            "Library channels": ["Toggle(\"Enable Library channels\"", "write(.libraryChannelsEnabled("],
+        ]
+        var previous = settings.startIndex
+        for title in LiveTvSettingsPlacement.liveTvSettings {
+            // In the web's order, each exactly once.
+            let header = "Section(\"\(title)\")"
+            XCTAssertEqual(settings.components(separatedBy: header).count - 1, 1, title)
+            let at = try XCTUnwrap(settings.range(of: header), title)
+            XCTAssertGreaterThanOrEqual(at.lowerBound, previous, "\(title) is out of the web's order")
+            previous = at.lowerBound
+            XCTAssertFalse(developer.contains(header), "Developer still lists \(title)")
+            for call in moved[title] ?? [] {
+                XCTAssertTrue(settings.contains(call), "Settings → Live TV must draw \(title) (\(call))")
+                XCTAssertFalse(developer.contains(call), "Developer must not draw \(title) (\(call))")
+            }
+        }
+        // The Developer view no longer reads the guide it no longer draws.
+        XCTAssertTrue(developer.contains("LiveTvAdminModel(surface: .developer)"))
+        XCTAssertTrue(settings.contains("LiveTvAdminModel(surface: .liveTvSettings)"))
+        XCTAssertFalse(LiveTvAdminSurface.developer.readsGuide)
+        XCTAssertTrue(LiveTvAdminSurface.liveTvSettings.readsGuide)
+    }
+
+    /// Every Developer card that stays says what it is waiting on — the web's
+    /// `devGraduation` line — and the Live TV enable is one of them.
+    func testEveryDeveloperCardThatStaysSaysWhatItWaitsOn() throws {
+        let developer = try Self.appleSource("LiveTvDeveloperView.swift")
+        XCTAssertEqual(LiveTvSettingsPlacement.developer.count, 3)
+        for title in LiveTvSettingsPlacement.developer {
+            XCTAssertTrue(developer.contains("Section(\"\(title)\")"), title)
+        }
+        XCTAssertEqual(developer.components(separatedBy: "Section(\"").count - 1,
+                       LiveTvSettingsPlacement.developer.count,
+                       "a Developer card must be listed in LiveTvSettingsPlacement.developer")
+        for line in [LiveTvSettingsPlacement.enableLiveTvGraduation,
+                     LiveTvSettingsPlacement.boundedResumeGraduation,
+                     LiveTvSettingsPlacement.preparedHandoffGraduation] {
+            XCTAssertTrue(line.hasPrefix("Leaves Developer when: "))
+            XCTAssertTrue(line.contains(" Then: "))
+        }
+        XCTAssertTrue(LiveTvSettingsPlacement.enableLiveTvGraduation
+            .hasSuffix("Then: the switch moves to Settings → Live TV as a permanent on/off."))
+        for name in ["enableLiveTvGraduation", "boundedResumeGraduation", "preparedHandoffGraduation"] {
+            XCTAssertTrue(developer.contains("Text(LiveTvSettingsPlacement.\(name))"), name)
+        }
+    }
+
+    /// Settings reaches Live TV the way it reaches Developer: one focusable
+    /// row that pushes the screen, on iOS and tvOS alike.
+    func testSettingsReachesLiveTvSettingsLikeDeveloper() throws {
+        let settings = try Self.appleSource("SettingsView.swift")
+        let link = "NavigationLink(\"Tuner, guide, recording and Library channels\") { LiveTvSettingsView() }"
+        XCTAssertEqual(settings.components(separatedBy: link).count - 1, 1)
+        let section = try XCTUnwrap(settings.range(of: link))
+        let before = settings[..<section.lowerBound]
+        let lastCondition = before.range(of: "#if os(", options: .backwards)
+        let lastEnd = before.range(of: "#endif", options: .backwards)
+        if let lastCondition {
+            XCTAssertNotNil(lastEnd)
+            XCTAssertGreaterThan(lastEnd!.lowerBound, lastCondition.lowerBound,
+                                 "the Live TV settings row must not be platform-conditional")
+        }
+        XCTAssertTrue(settings.contains("NavigationLink(\"Enable Live TV and other features awaiting evidence\") { LiveTvDeveloperView() }"))
     }
 
     func testTheGuideReadinessCardSurvivesAServerThatSendsMoreThanThisBuildKnows() throws {
@@ -1111,10 +1385,10 @@ final class LiveTvTests: XCTestCase {
             .components(separatedBy: "private var fullscreenSurface: some View {")[1]
             .components(separatedBy: "private func applyLiveOutcome")[0]
         XCTAssertTrue(fullscreen.contains(
-            ".onAppear { focusedControl = overlayVisible ? .play : .reveal }"
+            ".onAppear { focusedControl = overlayVisible ? .pillPlay : .reveal }"
         ))
         XCTAssertTrue(fullscreen.contains(
-            "target == .reveal { focusedControl = .play }"
+            "target == .reveal { focusedControl = .pillPlay }"
         ))
         for guardPart in [
             "guard fullscreen",
@@ -1127,15 +1401,175 @@ final class LiveTvTests: XCTestCase {
         ] {
             XCTAssertTrue(fullscreen.contains(guardPart), guardPart)
         }
+        // Info, More and Layout all return focus to the pill that opened them,
+        // through one deferred write from each sheet's `onDismiss` — not from
+        // the flag's `onChange`, which fires while the sheet still covers.
         let infoDismissal = fullscreen
             .components(separatedBy: ".onChange(of: showingInfo)")[1]
             .components(separatedBy: ".onChange(of: showingMore)")[0]
-        XCTAssertTrue(infoDismissal.contains(
-            "guard !visible, fullscreen, overlayVisible else { return }"
-        ))
-        XCTAssertTrue(infoDismissal.contains("focusedControl = nil"))
-        XCTAssertTrue(infoDismissal.contains("await Task.yield()"))
-        XCTAssertTrue(infoDismissal.contains("focusedControl = .play"))
+        XCTAssertFalse(infoDismissal.contains("focusedControl"))
+        let opener = source
+            .components(separatedBy: "private func returnFocusToCoverSheetOpener()")[1]
+            .components(separatedBy: "#endif")[0]
+        XCTAssertTrue(opener.contains("let opener = coverSheetOpener ?? .pillPlay"))
+        XCTAssertTrue(opener.contains("focusedControl = nil"))
+        XCTAssertTrue(opener.contains("await Task.yield()"))
+        XCTAssertTrue(opener.contains("focusedControl = opener"))
+        XCTAssertTrue(source.contains("Button { coverSheetOpener = .pillInfo; showStreamInfo() }"))
+        XCTAssertTrue(source.contains("Button { coverSheetOpener = .pillMore; showingMore = true }"))
+    }
+
+    /// The defects the 2026-09-27 report ("navigation is so bad it is almost
+    /// broken") came down to, each pinned to the line that fixes it. These
+    /// are source assertions because the behaviour lives in `@FocusState`
+    /// writes that no unit test can drive; the physical pass is in
+    /// docs/features/LIVE-TV-APPLE-TV-NAVIGATION.md.
+    func testAppleTvLiveNavigationIsReversibleAndReachesEverything() throws {
+        let source = try liveTvViewSource()
+
+        // 1. Info and More on the fullscreen pills did nothing: their sheets
+        //    hung off the root, which was already presenting the cover. Every
+        //    sheet the cover can open now hangs off the cover, and the root
+        //    copies are gated off while it is up.
+        let cover = source
+            .components(separatedBy: ".fullScreenCover(isPresented: $fullscreen, onDismiss: {")[1]
+            .components(separatedBy: "#if os(iOS)")[0]
+        for sheet in ["coverSheet($showingInfo)", "coverSheet($showingLayout)", "coverSheet($showingMore)"] {
+            XCTAssertTrue(cover.contains(".sheet(isPresented: \(sheet),\n                       onDismiss: { returnFocusToCoverSheetOpener() })"),
+                          "\(sheet) returns focus from onDismiss, after the sheet has gone")
+        }
+        XCTAssertEqual(cover.components(separatedBy: "onDismiss: { returnGuideFocusAfterProgrammeSheet() }").count - 1, 1)
+        XCTAssertTrue(source.contains(".sheet(item: rootProgrammeDetail, onDismiss: { returnGuideFocusAfterProgrammeSheet() })"))
+        // Closing the cover clears anything it was still showing.
+        let coverClosed = source
+            .components(separatedBy: ".onChange(of: fullscreen) { _, presented in")[1]
+            .components(separatedBy: ".onAppear {")[0]
+        for cleared in ["showingInfo = false", "showingMore = false", "showingLayout = false", "coverSheetOpener = nil"] {
+            XCTAssertTrue(coverClosed.contains(cleared), cleared)
+        }
+        for sheet in ["rootSheet($showingInfo)", "rootSheet($showingLayout)", "rootSheet($showingMore)"] {
+            XCTAssertTrue(source.contains(".sheet(isPresented: \(sheet))"), sheet)
+        }
+        XCTAssertTrue(source.contains("Binding(get: { !fullscreen && flag.wrappedValue }"))
+        XCTAssertTrue(source.contains("Binding(get: { fullscreen && flag.wrappedValue }"))
+
+        // 2. One key per focusable: the page toolbar and the cover's pills no
+        //    longer share `.guide` / `.channels` / `.more`.
+        for pill in [".pillPlay", ".pillGuide", ".pillChannels", ".pillInfo", ".pillMore", ".pillActivity"] {
+            XCTAssertEqual(source.components(separatedBy: ".focused($focusedControl, equals: \(pill))").count - 1,
+                           1, pill)
+        }
+        XCTAssertEqual(source.components(separatedBy: ".focused($focusedControl, equals: .guide)").count - 1, 1)
+        XCTAssertEqual(source.components(separatedBy: ".focused($focusedControl, equals: .channels)").count - 1, 1)
+        XCTAssertEqual(source.components(separatedBy: ".focused($focusedControl, equals: .more)").count - 1, 1)
+        XCTAssertTrue(source.contains("guard let target, !target.isOnCover else { return }"),
+                      "a pill taking focus is not the viewer leaving the page's list or grid")
+
+        // 3. Selecting a channel disabled every row while the tune ran and
+        //    threw focus onto the toolbar. `busy` is checked in the action.
+        XCTAssertTrue(source.contains("Button { if !live.busy { selectAiring(channel) } } label: {"))
+        let tvList = source
+            .components(separatedBy: "private var tvChannelList: some View {")[1]
+            .components(separatedBy: "private var channelFocusIdentity: String {")[0]
+        XCTAssertFalse(tvList.contains("live.busy)"), "the touch List may disable rows; the focused one may not")
+        XCTAssertTrue(source.contains("let candidates = visibleChannels.filter(\\.watchable)"),
+                      "a restore aimed at a disabled row is dropped")
+
+        // 4. The detail region (picture + Watch/Record/Record series/Remind
+        //    me) is moved by name, so Left from it returns to the row the
+        //    viewer came from, and every one of its focusables has a key.
+        for key in [".picture", ".watch", ".record", ".recordSeries", ".remind"] {
+            XCTAssertTrue(source.contains(".focused($focusedControl, equals: \(key))"), key)
+        }
+        XCTAssertTrue(source.contains("return moveDetailFocus(input, region: .onNow)"))
+        XCTAssertTrue(source.contains("return moveDetailFocus(input, region: .guideStage)"))
+        XCTAssertTrue(source.contains("programmeActions(channel, programme, keyed: true)"))
+        let region = source
+            .components(separatedBy: "private func moveDetailFocus(")[1]
+            .components(separatedBy: "private func returnToToolbar()")[0]
+        XCTAssertTrue(region.contains("case (.picture, .left):\n            if region == .onNow { requestChannelFocus() }"),
+                      "left from the picture returns to the channel row the viewer left")
+        XCTAssertTrue(region.contains("requestGuideFocus()"),
+                      "down from the stage returns to the cell the grid last held")
+
+        // 5. Up from the grid goes to what is directly above it — the stage's
+        //    Watch, the temporary guide's Close, the Over picture Close — not
+        //    always to the toolbar.
+        XCTAssertTrue(source.contains("onTopBoundary: { edge in"))
+        XCTAssertTrue(source.contains("focusedControl = .guideClose"))
+        XCTAssertTrue(source.contains("focusedControl = .overClose"))
+        XCTAssertTrue(source.contains("guidePageTopBoundary(edge)"))
+        XCTAssertTrue(source.contains(".focused($focusedControl, equals: .guideClose)"))
+        XCTAssertTrue(source.contains(".focused($focusedControl, equals: .overClose)"))
+        XCTAssertFalse(source.contains("onToolbarBoundary"))
+
+        // 6. The paging chips are never `.disabled` on television: a focused
+        //    chip that becomes disabled loses focus.
+        let chip = source
+            .components(separatedBy: "@ViewBuilder private func pagingChip(")[1]
+            .components(separatedBy: "@discardableResult")[0]
+        XCTAssertTrue(chip.contains("Button(action: { if enabled { action() } })"))
+        XCTAssertTrue(chip.contains("#else\n        .buttonStyle(.plain)\n        .disabled(!enabled)"),
+                      "only the touch grid may disable a chip")
+        XCTAssertTrue(source.contains("case .pageLater(let channelId):"))
+        XCTAssertTrue(source.contains("case .pageEarlier(let channelId):"))
+        XCTAssertTrue(source.contains("case .focusPagingChips:"))
+
+        // 7. The restore is applied from `onChange`, against the current view,
+        //    never from the task's stale copy.
+        XCTAssertTrue(source.contains("restoreTick &+= 1"))
+        XCTAssertTrue(source.contains(".onChange(of: restoreTick) { _, _ in restoreFocus() }"))
+        let task = source
+            .components(separatedBy: ".task(id: gridRestoreIdentity) {")[1]
+            .components(separatedBy: ".onChange(of: restoreTick)")[0]
+        XCTAssertFalse(task.contains("\n            restoreFocus()"), "the task bumps the tick; it does not restore")
+
+        // 8. Leaving the cover restores the page's focus from `onDismiss`,
+        //    after the cover has gone; the temporary guide restores the browse
+        //    view it switched away from; closing it returns to the Guide pill
+        //    through a deferred write.
+        XCTAssertTrue(source.contains("restoreBrowseFocusAfterCover()"))
+        XCTAssertTrue(source.contains("Button { browse = .list; fullscreen = false } label: {"))
+        XCTAssertFalse(source.contains("Button { requestChannelFocus(); fullscreen = false }"))
+        XCTAssertTrue(source.contains("if browseBeforeTemporaryGuide == nil { browseBeforeTemporaryGuide = browse }"))
+        XCTAssertTrue(source.contains("focusedControl = overlayVisible ? .pillGuide : .reveal"))
+        XCTAssertFalse(source.contains("focusedControl = .guide\n"),
+                       "no undeferred write to a segment that may be under the cover")
+        // Neither request resigns the toolbar's focus first — that handed the
+        // engine a moment to cancel the very restore just requested.
+        let requests = source
+            .components(separatedBy: "private func requestGuideFocus()")[1]
+            .components(separatedBy: "private func cancelBrowseFocusRestoration()")[0]
+        XCTAssertFalse(requests.contains("focusedControl = nil"))
+        // Toggling Favorites keeps focus on Favorites.
+        XCTAssertFalse(source.contains("favoritesOnly.toggle(); requestChannelFocus()"))
+        // Selecting the playing channel inside the temporary guide closes it.
+        XCTAssertTrue(source.contains("if fullscreen && temporaryGuide {\n                closeTemporaryGuide()"))
+        // A programme sheet opened from a cell hands focus back to that cell.
+        XCTAssertTrue(source.contains("guard browse == .guide, focusedGuideChannelId != nil else { return }"))
+        // The grid holds the requested position itself: an engine-driven
+        // arrival in between rewrites the parent's memory.
+        XCTAssertTrue(source.contains("@State private var requestedTarget: LiveTvGuideFocusPosition?"))
+        XCTAssertTrue(source.contains("if restoreRequest > lastRequestSeen {"))
+        XCTAssertTrue(source.contains("guard requestedTarget == nil else { return }"))
+        // The temporary guide opens on the current window, on what is playing.
+        let opening = source
+            .components(separatedBy: "private func openTemporaryGuide() {")[1]
+            .components(separatedBy: "private func closeTemporaryGuide()")[0]
+        XCTAssertTrue(opening.contains("returnGuideToNow()"))
+        XCTAssertTrue(opening.contains("focusedGuideChannelId = watching.id"))
+        // Recordings is not the list.
+        XCTAssertTrue(source.contains("case .recordings:\n            // A schedule page has no row to return to"))
+        // An arrival on a page key right after a request is the engine's.
+        XCTAssertTrue(source.contains("if let at = browseFocusRequestedAt, Date().timeIntervalSince(at) < 1 { return }"))
+        // The list still lets a press during its yield win; the grid does not.
+        let guideSource = try String(
+            contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+                .appendingPathComponent("../Sources/LiveTvGuide.swift").standardizedFileURL,
+            encoding: .utf8)
+        XCTAssertTrue(guideSource.contains("LiveTvFocusRestoreCoordinator(arrivalInvalidates: false)"))
+        XCTAssertTrue(source.contains("@State private var channelFocusCoordinator = LiveTvFocusRestoreCoordinator()"),
+                      "the list keeps arrival-invalidates: its arrivals are presses")
     }
 
     func testTheProgressRowSurvivesAMissingNextProgramme() {
@@ -1693,6 +2127,91 @@ final class LiveTvTests: XCTestCase {
         )
     }
 
+    /// Every edge of the grid answers a press. Before this, Right past the
+    /// last programme and Left from the channel header were dead, Up from the
+    /// header column skipped the paging chips that sit directly above it, and
+    /// the only way out of the grid was Up from a first-row cell.
+    func testGuideFocusEdgesPageTheWindowAndReachTheChips() throws {
+        func guideChannel(_ id: String) -> LiveTvChannel {
+            LiveTvChannel(id: id, guideNumber: id, guideName: "Channel \(id)",
+                          favorite: false, drm: false, support: "ready",
+                          hd: nil, videoCodec: nil, audioCodec: nil)
+        }
+        func cell(_ start: Int, _ end: Int, _ title: String) -> LiveTvGridCell {
+            let programme = LiveTvProgramme(start: start, end: end, title: title)
+            return LiveTvGridCell(programme: programme, left: Double(start),
+                                  width: Double(end - start), airing: false, clipped: false)
+        }
+        let layout = LiveTvGridLayout(rows: [
+            LiveTvGridRow(channel: guideChannel("1"), cells: [cell(0, 1_800, "A"), cell(1_800, 3_600, "B")]),
+            LiveTvGridRow(channel: guideChannel("2"), cells: []),
+        ], totalWidth: 3_600, nowX: nil)
+
+        let last = LiveTvGuideFocusPosition(
+            channelId: "1", programmeStart: 1_800, channelHeader: false, anchorTime: 2_700)
+        XCTAssertEqual(
+            LiveTvGuideFocusNavigator.move(layout: layout, current: last, direction: .right, fallbackAnchor: 0),
+            .pageLater, "right past the window's last programme asks for the later window")
+
+        let header = LiveTvGuideFocusPosition(
+            channelId: "1", programmeStart: nil, channelHeader: true, anchorTime: 900)
+        XCTAssertEqual(
+            LiveTvGuideFocusNavigator.move(layout: layout, current: header, direction: .left, fallbackAnchor: 0),
+            .pageEarlier, "left from the header asks for the earlier window")
+        XCTAssertEqual(
+            LiveTvGuideFocusNavigator.move(layout: layout, current: header, direction: .up, fallbackAnchor: 0),
+            .pagingChips, "the chips sit in the header column, directly above the first header")
+
+        // A row with no data has one placeholder cell; it is a cell for the
+        // window's edges too.
+        let emptyHeader = LiveTvGuideFocusPosition(
+            channelId: "2", programmeStart: nil, channelHeader: true, anchorTime: nil)
+        guard case .focus(let placeholder) = LiveTvGuideFocusNavigator.move(
+            layout: layout, current: emptyHeader, direction: .right, fallbackAnchor: 0)
+        else { return XCTFail("right from an empty row's header enters its placeholder") }
+        XCTAssertFalse(placeholder.channelHeader)
+        XCTAssertNil(placeholder.programmeStart)
+        XCTAssertEqual(
+            LiveTvGuideFocusNavigator.move(layout: layout, current: placeholder, direction: .right, fallbackAnchor: 0),
+            .pageLater)
+
+        // Where the paged window lands: the row's first cell after later,
+        // its last after earlier, a placeholder when it has none, and the
+        // first row if the channel is no longer in the layout.
+        XCTAssertEqual(
+            LiveTvGuideFocusNavigator.landing(layout: layout, channelId: "1", edge: .first)?.programmeStart, 0)
+        XCTAssertEqual(
+            LiveTvGuideFocusNavigator.landing(layout: layout, channelId: "1", edge: .last)?.programmeStart, 1_800)
+        let empty = try XCTUnwrap(LiveTvGuideFocusNavigator.landing(layout: layout, channelId: "2", edge: .first))
+        XCTAssertNil(empty.programmeStart)
+        XCTAssertFalse(empty.channelHeader)
+        XCTAssertEqual(
+            LiveTvGuideFocusNavigator.landing(layout: layout, channelId: "gone", edge: .first)?.channelId, "1")
+
+        // The coordinator keeps the grid as owner across a page so the restore
+        // that lands the new window is permitted, and hands the chips off
+        // without claiming a cell.
+        var coordinator = LiveTvGuideFocusCoordinator()
+        XCTAssertEqual(
+            coordinator.move(layout: layout, current: last, direction: .right, fallbackAnchor: 0),
+            [.pageLater(channelId: "1")])
+        XCTAssertEqual(
+            coordinator.move(layout: layout, current: header, direction: .left, fallbackAnchor: 0),
+            [.pageEarlier(channelId: "1")])
+        XCTAssertEqual(
+            coordinator.move(layout: layout, current: header, direction: .up, fallbackAnchor: 0),
+            [.focusPagingChips])
+        // Request 0: the viewer entered the grid through the engine (Down
+        // from the toolbar) and no explicit request was ever made. The page
+        // still lands, because the grid owns focus.
+        let ticket = try XCTUnwrap(coordinator.beginRestore(request: 0, ownerRequested: true))
+        XCTAssertTrue(coordinator.permits(ticket, ownerRequested: true),
+                      "the window change restores from the grid's own ownership")
+        var fresh = LiveTvGuideFocusCoordinator()
+        XCTAssertNil(fresh.beginRestore(request: 0, ownerRequested: true),
+                     "a grid that never had focus cannot take it from a data refresh")
+    }
+
     func testFocusCoordinatorRejectsStaleRestoresAndTransfersTheBoundaryAtomically() throws {
         func guideChannel(_ id: String) -> LiveTvChannel {
             LiveTvChannel(id: id, guideNumber: id, guideName: "Channel \(id)",
@@ -1714,10 +2233,24 @@ final class LiveTvTests: XCTestCase {
         let entry = try XCTUnwrap(guide.beginRestore(request: 1, ownerRequested: true))
         XCTAssertTrue(guide.permits(entry, ownerRequested: true))
 
-        // Applying focus changes the revision. A task that captured the entry
-        // ticket before a newer focus event can no longer write FocusState.
+        // Focus ARRIVING in the grid does not cancel a requested restore. It
+        // used to, and that is how a guide opened from fullscreen landed on an
+        // arbitrary cell: the engine dropped focus onto some cell when the
+        // pill went away, that arrival killed the ticket, and the requested
+        // cell was never focused. The restore is applied from `onChange`
+        // against the current view, so letting it run after an accidental
+        // arrival only moves focus to where it was asked to go.
         guide.focusChanged(active: true)
+        XCTAssertTrue(guide.permits(entry, ownerRequested: true),
+                      "an engine-driven arrival must not defeat the viewer's request")
+        // A remote press inside the grid is the viewer's own intent, and wins.
+        _ = guide.move(layout: layout, current: position, direction: .right, fallbackAnchor: 0)
         XCTAssertFalse(guide.permits(entry, ownerRequested: true))
+        // Focus LEAVING the grid still cancels.
+        let leaving = try XCTUnwrap(guide.beginRestore(request: 1, ownerRequested: true))
+        guide.focusChanged(active: false)
+        XCTAssertFalse(guide.permits(leaving, ownerRequested: true))
+        guide.focusChanged(active: true)
         let refresh = try XCTUnwrap(guide.beginRestore(request: 1, ownerRequested: true))
 
         // Up from the first row is one ordered adapter transition: clear the

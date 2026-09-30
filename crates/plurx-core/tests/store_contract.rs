@@ -13,6 +13,9 @@ mod queue_fixture;
 mod subtitle_jobs_fixture;
 use subtitle_jobs_fixture::SubtitleFixture;
 
+use plurx_core::store::background_jobs::{
+    AnalysisViewerInterest, ArtifactViewerInterest, CancelWaiter, EnqueueOutcome, WaiterQuery,
+};
 use queue_fixture::QueueFixture;
 
 #[path = "store_contract/background_jobs.rs"]
@@ -511,6 +514,10 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    "join_analysis_viewer",
+    "join_artifact_viewer",
+    "analysis_preparation_observation",
+    "source_io_holders",
     "sync_predictions",
     "embedding_for",
     "publish_embedding_job",
@@ -787,6 +794,420 @@ where
             .expect("reset replicated contract state");
         contract(Arc::new(store), "hiqlite-3-voter").await;
     }
+}
+
+#[tokio::test]
+async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
+    for_each_backend(|store, backend| async move {
+        let mut requests = Vec::new();
+        for (index, node) in ["source-a", "source-b", "source-c"].into_iter().enumerate() {
+            let (_, file_id) = seed_file(&store, node).await;
+            let request = NewAnalysisRequest {
+                request_id: format!("viewer-source-{}-{index}", backend),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".to_owned(),
+                pipeline_version: "b".repeat(64),
+                video_identity: String::new(),
+                requested_generation: format!("viewer-generation-{index}"),
+                priority: "normal".to_owned(),
+                trigger: "background".to_owned(),
+                force_rebuild: false,
+                target_node_id: node.to_owned(),
+                not_before_ms: 1_000 + index as i64,
+                created_at_ms: 1_000 + index as i64,
+            };
+            let row = store
+                .enqueue_analysis_request(&request)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {node}: {error}"));
+            requests.push(row);
+        }
+        let first = store
+            .claim_analysis_request("source-a", 1_003, 31_003)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first claim: {error}"))
+            .expect("one ordinary source reader");
+        assert_eq!(first.request_id, requests[0].request_id, "{backend}");
+        assert_eq!(
+            store
+                .source_io_holders(1_004)
+                .await
+                .expect("first holder")
+                .len(),
+            1,
+            "{backend}: the first claim must reserve its source domain"
+        );
+        let availability = store
+            .analysis_preparation_observation(&requests[1].request_id, 1_004)
+            .await
+            .expect("capacity observation")
+            .expect("second request");
+        assert!(
+            !availability.shared_io_eligible,
+            "{backend}: a maintenance candidate must see the held viewer slot: {availability:?}"
+        );
+        assert!(
+            store
+                .claim_analysis_request("source-b", 1_004, 31_004)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: second ordinary claim: {error}"))
+                .is_none(),
+            "{backend}: ordinary work cannot borrow the viewer slot"
+        );
+
+        let viewer =
+            |request: &plurx_core::store::AnalysisRequest, user_id| AnalysisViewerInterest {
+                analysis_request_id: request.request_id.clone(),
+                requested_generation: request.requested_generation.clone(),
+                pipeline_version: request.pipeline_version.clone(),
+                video_identity: request.video_identity.clone(),
+                target_node_id: request.target_node_id.clone(),
+                user_id,
+                playback_id: format!("viewer-{user_id}"),
+                now_ms: 1_005,
+            };
+        let second_viewer = viewer(&requests[1], 1);
+        assert!(
+            store
+                .join_analysis_viewer(second_viewer.clone())
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: join viewer: {error}")),
+            "{backend}"
+        );
+        let second = store
+            .claim_analysis_request("source-b", 1_006, 31_006)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: viewer claim: {error}"))
+            .expect("viewer uses the other source slot");
+        assert_eq!(second.request_id, requests[1].request_id, "{backend}");
+        let holders = store
+            .source_io_holders(1_007)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: observe source readers: {error}"));
+        assert_eq!(holders.len(), 2, "{backend}: both source slots are visible");
+        assert!(
+            holders
+                .iter()
+                .any(|holder| holder.work_id == first.request_id
+                    && holder.priority == "maintenance"
+                    && holder.kind == "analysis_source"),
+            "{backend}: ordinary reader remains observable"
+        );
+        assert!(
+            holders
+                .iter()
+                .any(|holder| holder.work_id == second.request_id
+                    && holder.priority == "viewer"
+                    && holder.kind == "analysis_source"),
+            "{backend}: viewer reader remains observable"
+        );
+        let third_viewer = viewer(&requests[2], 2);
+        assert!(
+            store
+                .join_analysis_viewer(third_viewer)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: join third: {error}")),
+            "{backend}"
+        );
+        assert!(
+            store
+                .claim_analysis_request("source-c", 1_007, 31_007)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: third claim: {error}"))
+                .is_none(),
+            "{backend}: concurrent viewers cannot exceed two source reads"
+        );
+
+        store
+            .cancel_waiter(CancelWaiter {
+                scope: "playback-analysis".to_owned(),
+                request_id: second_viewer.consumer_id(),
+                now_ms: 1_008,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: cancel viewer: {error}"));
+        assert!(
+            store
+                .renew_analysis_request(&second.request_id, "source-b", second.fence, 1_009, 61_009)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: owner renew: {error}")),
+            "{backend}: losing urgency does not revoke a running owner"
+        );
+        store
+            .settle_analysis_requests(31_010)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: settle expired owner: {error}"));
+        let third = store
+            .claim_analysis_request("source-c", 31_011, 61_011)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: third claim after owner death: {error}"))
+            .expect("a demand reader may use the released slot");
+        assert_eq!(third.request_id, requests[2].request_id, "{backend}");
+        let holders = store
+            .source_io_holders(31_012)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: observe replacement: {error}"));
+        assert!(
+            holders
+                .iter()
+                .any(|holder| holder.work_id == third.request_id),
+            "{backend}: replacement reader becomes visible"
+        );
+        assert!(
+            holders
+                .iter()
+                .all(|holder| holder.work_id != first.request_id),
+            "{backend}: expired reader disappears"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn concurrent_viewers_keep_cancelled_reader_reservation_until_expiry() {
+    for_each_backend(|store, backend| async move {
+        let mut requests = Vec::new();
+        for (index, node) in ["reader-a", "reader-b", "reader-c"].into_iter().enumerate() {
+            let (_, file_id) = seed_file(&store, node).await;
+            requests.push(
+                store
+                    .enqueue_analysis_request(&NewAnalysisRequest {
+                        request_id: format!("cancel-reader-{backend}-{index}"),
+                        file_id,
+                        source_size: 10_000,
+                        source_mtime: 1,
+                        component: "fragment_index".into(),
+                        pipeline_version: "b".repeat(64),
+                        video_identity: String::new(),
+                        requested_generation: format!("cancel-{index}"),
+                        priority: "normal".into(),
+                        trigger: "background".into(),
+                        force_rebuild: false,
+                        target_node_id: node.into(),
+                        not_before_ms: 1_000,
+                        created_at_ms: 1_000,
+                    })
+                    .await
+                    .expect("enqueue"),
+            );
+        }
+        let maintenance = store
+            .claim_analysis_request("reader-a", 1_001, 31_001)
+            .await
+            .expect("maintenance claim")
+            .expect("maintenance reader");
+        for (index, request) in requests.iter().enumerate().skip(1) {
+            assert!(store
+                .join_analysis_viewer(AnalysisViewerInterest {
+                    analysis_request_id: request.request_id.clone(),
+                    requested_generation: request.requested_generation.clone(),
+                    pipeline_version: request.pipeline_version.clone(),
+                    video_identity: request.video_identity.clone(),
+                    target_node_id: request.target_node_id.clone(),
+                    user_id: index as i64,
+                    playback_id: format!("viewer-{index}"),
+                    now_ms: 1_002,
+                })
+                .await
+                .expect("join viewer"));
+        }
+        let (left, right) = tokio::join!(
+            store.claim_analysis_request("reader-b", 1_003, 31_003),
+            store.claim_analysis_request("reader-c", 1_003, 31_003),
+        );
+        let claimed = [left.expect("left claim"), right.expect("right claim")];
+        assert_eq!(
+            claimed.iter().filter(|row| row.is_some()).count(),
+            1,
+            "{backend}: concurrent claims must share one available viewer slot"
+        );
+        let occupied = claimed.into_iter().flatten().next().expect("viewer owner");
+        let waiting_node = if occupied.target_node_id == "reader-b" {
+            "reader-c"
+        } else {
+            "reader-b"
+        };
+        store
+            .cancel_analysis_request_admin(&occupied.request_id, 1_004)
+            .await
+            .expect("admin cancel")
+            .expect("cancelled running reader");
+        assert!(
+            store
+                .claim_analysis_request(waiting_node, 1_005, 31_005)
+                .await
+                .expect("claim during cancellation")
+                .is_none(),
+            "{backend}: cancellation cannot release a still-reading slot"
+        );
+        assert!(
+            store
+                .source_io_holders(1_005)
+                .await
+                .expect("holders")
+                .iter()
+                .any(|holder| holder.work_id == occupied.request_id),
+            "{backend}: cancelled reader remains charged until its lease expires"
+        );
+        let replacement = store
+            .claim_analysis_request(waiting_node, 31_004, 61_004)
+            .await
+            .expect("claim after expiry")
+            .expect("replacement reader");
+        assert_ne!(replacement.request_id, occupied.request_id);
+        assert_ne!(replacement.request_id, maintenance.request_id);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn playback_analysis_maps_to_valid_foreground_artifact_admission() {
+    for_each_backend(|store, _backend| async move {
+        let (_, file_id) = seed_file(&store, "artifact-node").await;
+        let request = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "viewer-artifact-admission".into(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".into(),
+                pipeline_version: "b".repeat(64),
+                video_identity: String::new(),
+                requested_generation: "viewer-artifact".into(),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: "artifact-node".into(),
+                not_before_ms: 1_000,
+                created_at_ms: 1_000,
+            })
+            .await
+            .expect("enqueue analysis");
+        assert!(store
+            .join_analysis_viewer(AnalysisViewerInterest {
+                analysis_request_id: request.request_id.clone(),
+                requested_generation: request.requested_generation.clone(),
+                pipeline_version: request.pipeline_version.clone(),
+                video_identity: request.video_identity.clone(),
+                target_node_id: request.target_node_id.clone(),
+                user_id: 1,
+                playback_id: "viewer-artifact".into(),
+                now_ms: 1_001,
+            })
+            .await
+            .expect("join"));
+        let claimed = store
+            .claim_analysis_request("artifact-node", 1_002, 31_002)
+            .await
+            .expect("claim")
+            .expect("viewer analysis");
+        assert_eq!(claimed.trigger, "playback");
+        let source = "a".repeat(64);
+        let job = NewClusterFragmentIndexJob {
+            cache_key: cluster_fragment_index_key(
+                file_id,
+                10_000,
+                1,
+                &source,
+                &claimed.pipeline_version,
+            )
+            .expect("key"),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source,
+            pipeline_sha256: claimed.pipeline_version.clone(),
+            priority: claimed.priority.clone(),
+            trigger: "foreground".into(),
+            target_node_id: "artifact-node".into(),
+            not_before_ms: 1_003,
+            created_at_ms: 1_003,
+        };
+        store
+            .enqueue_fragment_job(
+                plurx_core::store::background_jobs_fragment_admission::EnqueueFragmentJob {
+                    job,
+                    analysis_request: Some(claimed),
+                    repair: false,
+                    now_ms: 1_003,
+                },
+            )
+            .await
+            .expect("playback maps to durable foreground artifact admission");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn attested_fragment_build_accepts_exact_target_viewer() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "attested-viewer").await;
+        let source = "a".repeat(64);
+        let pipeline = "b".repeat(64);
+        let key = cluster_fragment_index_key(file_id, 10_000, 1, &source, &pipeline)
+            .expect("exact fragment key");
+        let accepted = store
+            .enqueue_fragment_job(
+                plurx_core::store::background_jobs_fragment_admission::EnqueueFragmentJob {
+                    job: NewClusterFragmentIndexJob {
+                        cache_key: key.clone(),
+                        file_id,
+                        source_size: 10_000,
+                        source_mtime: 1,
+                        source_sha256: source,
+                        pipeline_sha256: pipeline,
+                        priority: "foreground".into(),
+                        trigger: "foreground".into(),
+                        target_node_id: "attested-viewer".into(),
+                        not_before_ms: 1_000,
+                        created_at_ms: 1_000,
+                    },
+                    analysis_request: None,
+                    repair: false,
+                    now_ms: 1_000,
+                },
+            )
+            .await
+            .expect("enqueue exact attested build");
+        let job_id = match accepted {
+            EnqueueOutcome::Accepted { job_id, .. } => job_id,
+            outcome => panic!("{backend}: unexpected enqueue outcome {outcome:?}"),
+        };
+        let viewer = ArtifactViewerInterest {
+            cache_key: key,
+            file_id,
+            target_node_id: "attested-viewer".into(),
+            user_id: 1,
+            playback_id: "active-playback".into(),
+            now_ms: 1_001,
+        };
+        assert!(store
+            .join_artifact_viewer(viewer.clone())
+            .await
+            .expect("viewer join"));
+        let waiters = store
+            .job_waiters(WaiterQuery {
+                job_id,
+                after: None,
+                limit: 16,
+            })
+            .await
+            .expect("job waiters");
+        assert!(
+            waiters
+                .waiters
+                .iter()
+                .any(|waiter| waiter.scope == "playback-artifact"
+                    && waiter.request_id == viewer.consumer_id()
+                    && waiter.consumer_kind == "playback_fragment"
+                    && waiter.target_node_id.as_deref() == Some("attested-viewer")
+                    && waiter.state == "pending"),
+            "{backend}: the exact target has live viewer ownership"
+        );
+    })
+    .await;
 }
 
 fn analysis_queue_slot(component: &str, state: &str, priority: &str, trigger: &str) -> usize {
@@ -8101,11 +8522,43 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             })
             .await
             .unwrap_or_else(|error| panic!("{backend}: create library: {error}"));
+        let secondary = store
+            .create_library(&NewLibrary {
+                name: "Pretranscode Contract Secondary".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: vec![PathBuf::from("/contract/pretranscode-secondary")],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create secondary library: {error}"));
+        assert!(store
+            .replace_storage_domains(
+                vec![
+                    plurx_core::store::background_jobs_resources::StorageDomainMapping {
+                        library_id: library.id,
+                        root_path: "/contract/pretranscode".into(),
+                        domain_id: "pretranscode-primary".into(),
+                    },
+                    plurx_core::store::background_jobs_resources::StorageDomainMapping {
+                        library_id: secondary.id,
+                        root_path: "/contract/pretranscode-secondary".into(),
+                        domain_id: "pretranscode-secondary".into(),
+                    },
+                ],
+                100,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: map source domains: {error}")));
         let mut files = Vec::new();
         for ordinal in 1..=5 {
+            let (source_library, root) = if matches!(ordinal, 2 | 3) {
+                (secondary.id, "/contract/pretranscode-secondary")
+            } else {
+                (library.id, "/contract/pretranscode")
+            };
             let item = store
                 .insert_item(&NewItem {
-                    library_id: library.id,
+                    library_id: source_library,
                     kind: ItemKind::Movie,
                     parent_id: None,
                     title: format!("Queue Movie {ordinal}"),
@@ -8119,7 +8572,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 store
                     .upsert_file(
                         item,
-                        &format!("/contract/pretranscode/movie-{ordinal}.mkv"),
+                        &format!("{root}/movie-{ordinal}.mkv"),
                         10_000 + ordinal,
                         20_000 + ordinal,
                         &ProbeResult::default(),
@@ -8315,7 +8768,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 .collect::<BTreeSet<_>>()
                 .len(),
             2,
-            "{backend}: distinct claims must respect the two shared source-I/O slots"
+            "{backend}: one maintenance reader per independent source domain"
         );
         for job in &claimed {
             let staging = store
@@ -8675,6 +9128,10 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             paged_claim.dedupe_key, "claim-pagination-128",
             "{backend}: claim did not preserve highest-compatible ordering across pages"
         );
+        assert!(store
+            .fixture_cancel_pretranscode_job(&paged_claim, "fixture_done", queue_time(951))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: retire pagination claim: {error}")));
 
         let legacy_recipe = "1bd16d960c43953936740e772bc422612303862b77966f2e0a884bc581064078";
         assert!(store
@@ -8724,8 +9181,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 "node-legacy",
                 &capable,
                 &[],
-                queue_time(961),
-                queue_time(1_261),
+                queue_time(1_251),
+                queue_time(1_551),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim legacy reuse: {error}"))
@@ -8740,7 +9197,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 16_896,
                 Some(16_384),
                 &adopted_digest,
-                queue_time(962),
+                queue_time(1_252),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: bind legacy manifest: {error}")));
@@ -8776,7 +9233,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
 
         let wrong_digest = "f".repeat(64);
-        let verification_now = queue_time(963);
+        let verification_now = queue_time(1_253);
         let location = store
             .transcode_verification_candidates("node-legacy", None)
             .await
@@ -8895,8 +9352,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 "node-collision",
                 &capable,
                 &[],
-                queue_time(963),
-                queue_time(1_263),
+                queue_time(1_253),
+                queue_time(1_553),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim collision job: {error}"))
@@ -8912,7 +9369,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                     4_096,
                     None,
                     &"9".repeat(64),
-                    queue_time(964),
+                    queue_time(1_254),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: conflicting completion: {error}")),
@@ -8934,8 +9391,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
         let replacement_job = NewPretranscodeJob {
             id: "00000000-0000-4000-8000-000000000107".to_owned(),
-            not_before_ms: 963,
-            created_at_ms: 963,
+            not_before_ms: 1_255,
+            created_at_ms: 1_255,
             ..legacy_job
         };
         assert!(
@@ -9186,8 +9643,8 @@ async fn assert_distinct_pretranscode_claims_from_separate_handles(
                         &node,
                         &capabilities,
                         &[],
-                        200 + round,
-                        500 + round,
+                        200 + round * 1_000,
+                        500 + round * 1_000,
                     )
                     .await
             }
@@ -9213,8 +9670,8 @@ async fn assert_distinct_pretranscode_claims_from_separate_handles(
             .collect::<Vec<_>>();
         assert_eq!(
             claims.len(),
-            2,
-            "{backend}: shared I/O cap across independent handles"
+            1,
+            "{backend}: one maintenance reader across independent handles"
         );
         for job in claims {
             assert!(
@@ -9222,14 +9679,14 @@ async fn assert_distinct_pretranscode_claims_from_separate_handles(
                 "{backend}: separate clients duplicated a claim"
             );
             assert!(seed
-                .fixture_cancel_pretranscode_job(&job, "fixture_done", 201 + round)
+                .fixture_cancel_pretranscode_job(&job, "fixture_done", 201 + round * 1_000)
                 .await
                 .expect("release fixture source-I/O reservation"));
         }
     }
     assert_eq!(
         ids.len(),
-        (ROUNDS * 2) as usize,
+        ROUNDS as usize,
         "{backend}: separate clients duplicated a claim"
     );
 }
@@ -15810,7 +16267,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    // 53 with the current durable tables, including the Library channel
+    // 70 with the current durable tables, including the Library channel
     // entities, media classifications, channel subject jobs and decisions,
     // the three DVR tables, and the scoped book file grants (SQLite v68). A
     // v14 source has no rows for newer tables — each one's `minimum_schema` is
@@ -15818,7 +16275,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     // is over what the import *plans*, not over what the source happened to
     // hold. The subtitle-source ledgers are node-held facts about local files
     // and are deliberately not imported, so they are not counted here.
-    assert_eq!(report.tables.len(), 53);
+    assert_eq!(report.tables.len(), 70);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -17623,7 +18080,8 @@ fn contract_inventory_matches_every_store_method() {
     // +2: replicated root-domain observation and atomic replacement.
     // E1 adds a bounded named-settings snapshot for playback preferences.
     // E2 removes two unfenced legacy scrub methods.
-    assert_eq!(declared.len(), 445, "review the Store method count");
+    // Safari seek adds viewer joins and two source-I/O observations.
+    assert_eq!(declared.len(), 449, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -19891,22 +20349,32 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
             .unwrap_or_else(|| panic!("{backend}: retried request remains visible"));
         assert_eq!(retried.state, "queued", "backend {backend}");
         assert_ne!(retried.request_id, request_id, "backend {backend}");
+        // Cancellation revokes publication at once, but retains the physical
+        // source-read reservation through the old lease (20 ms).
+        assert!(
+            store
+                .claim_analysis_request("analysis-node", 12, 30)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: early replacement claim: {error}"))
+                .is_none(),
+            "{backend}: a cancelled reader still owns its source slot"
+        );
         let current = store
-            .claim_analysis_request("analysis-node", 12, 30)
+            .claim_analysis_request("analysis-node", 21, 30)
             .await
             .unwrap_or_else(|error| panic!("{backend}: reclaim analysis request: {error}"))
             .unwrap_or_else(|| panic!("{backend}: replacement analysis claim"));
         assert_eq!(current.request_id, retried.request_id, "backend {backend}");
         assert!(
             !store
-                .complete_analysis_request(&stale, "generation-stale", 13)
+                .complete_analysis_request(&stale, "generation-stale", 22)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: replay old publication: {error}")),
             "backend {backend}: a reclaimed request must refuse its old worker"
         );
         assert!(
             store
-                .complete_analysis_request(&current, "generation-current", 13)
+                .complete_analysis_request(&current, "generation-current", 22)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: publish current generation: {error}")),
             "backend {backend}"
@@ -19922,7 +20390,7 @@ async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
             "backend {backend}"
         );
         let still_ready = store
-            .cancel_analysis_request_admin(&retried.request_id, 14)
+            .cancel_analysis_request_admin(&retried.request_id, 23)
             .await
             .unwrap_or_else(|error| panic!("{backend}: cancel published request: {error}"))
             .unwrap_or_else(|| panic!("{backend}: published request remains visible"));
@@ -20169,18 +20637,18 @@ async fn analysis_source_invalidation_terminalizes_exact_attempt_through_dyn_sto
                 trigger: "admin".to_owned(),
                 force_rebuild: false,
                 target_node_id: String::new(),
-                not_before_ms: 20,
-                created_at_ms: 20,
+                not_before_ms: 1_011,
+                created_at_ms: 1_011,
             })
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue deleted source: {error}"));
         let deleted_claim = store
-            .claim_analysis_request("analysis-node", 20, 1_020)
+            .claim_analysis_request("analysis-node", 1_011, 2_011)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim deleted source: {error}"))
             .unwrap_or_else(|| panic!("{backend}: deleted claim"));
         assert!(store
-            .record_analysis_request_phase(&deleted_claim, "hashing", None, 21)
+            .record_analysis_request_phase(&deleted_claim, "hashing", None, 1_012)
             .await
             .unwrap_or_else(|error| panic!("{backend}: record deleted phase: {error}")));
         assert_eq!(
@@ -20198,6 +20666,97 @@ async fn analysis_source_invalidation_terminalizes_exact_attempt_through_dyn_sto
         assert_eq!(attempts[0].phase, "canceled", "backend {backend}");
         assert_eq!(
             attempts[0].terminal_code, "source_deleted",
+            "backend {backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn analysis_worker_skips_incompatible_engine_before_spending_a_claim() {
+    for_each_backend(|store, backend| async move {
+        let (_, old_file) = seed_file(&store, "analysis-old-engine").await;
+        let (_, current_file) = seed_file(&store, "analysis-current-engine").await;
+        for (id, file_id, pipeline, priority, force, created) in [
+            (
+                "old-engine-request",
+                old_file,
+                "old-engine",
+                "forced",
+                true,
+                10,
+            ),
+            (
+                "current-engine-request",
+                current_file,
+                "current-engine",
+                "normal",
+                false,
+                20,
+            ),
+        ] {
+            store
+                .enqueue_analysis_request(&NewAnalysisRequest {
+                    request_id: id.to_owned(),
+                    file_id,
+                    source_size: 10_000,
+                    source_mtime: 1,
+                    component: "fragment_index".to_owned(),
+                    pipeline_version: pipeline.to_owned(),
+                    video_identity: String::new(),
+                    requested_generation: format!("{id}-generation"),
+                    priority: priority.to_owned(),
+                    trigger: "admin".to_owned(),
+                    force_rebuild: force,
+                    target_node_id: "analysis-node".to_owned(),
+                    not_before_ms: created,
+                    created_at_ms: created,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue {id}: {error}"));
+        }
+        let claimed = store
+            .claim_analysis_request_compatible("analysis-node", Some("current-engine"), 30, 1_030)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: current-engine claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: current-engine work should be eligible"));
+        assert_eq!(
+            claimed.request_id, "current-engine-request",
+            "backend {backend}"
+        );
+        let old = store
+            .analysis_request("old-engine-request")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: old request: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: old request remains queued"));
+        assert_eq!(
+            (old.state.as_str(), old.attempts),
+            ("queued", 0),
+            "backend {backend}"
+        );
+        assert!(store
+            .claim_analysis_request_compatible("analysis-node", Some("unknown-engine"), 31, 1_031)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: unrelated claim: {error}"))
+            .is_none());
+        assert!(
+            store
+                .complete_analysis_request(&claimed, "current-generation", 31)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: complete current-engine work: {error}")),
+            "backend {backend}: current-engine work completes"
+        );
+        // The source reservation conservatively remains through its original
+        // lease, so exercise the second engine after that physical-reader
+        // allowance expires rather than bypassing the one-maintenance-reader
+        // policy this compatibility test is independent of.
+        let old_claim = store
+            .claim_analysis_request_compatible("analysis-node", Some("old-engine"), 1_031, 2_031)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: old-engine claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: old-engine worker can claim its work"));
+        assert_eq!(
+            old_claim.request_id, "old-engine-request",
             "backend {backend}"
         );
     })
@@ -21194,7 +21753,7 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
             .retry_analysis_request_admin(
                 &request.request_id,
                 "admin-retry-terminal-generation",
-                21,
+                1_011,
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: retry terminal identity: {error}"))
@@ -21202,7 +21761,7 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
         assert_ne!(retry.request_id, request.request_id, "backend {backend}");
         assert!(retry.force_rebuild, "backend {backend}");
         let retry_claim = store
-            .claim_analysis_request("analysis-node", 21, 1_021)
+            .claim_analysis_request("analysis-node", 1_011, 2_011)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim terminal retry: {error}"))
             .unwrap_or_else(|| panic!("{backend}: terminal retry claim"));
@@ -21212,13 +21771,13 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
                 &retry_claim.owner_node_id,
                 retry_claim.fence,
                 "stored_probe_invalid",
-                22,
+                1_012,
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: fail explicit retry: {error}")));
         duplicate.request_id = "third-discovery-pass".to_owned();
-        duplicate.created_at_ms = 23;
-        duplicate.not_before_ms = 23;
+        duplicate.created_at_ms = 1_013;
+        duplicate.not_before_ms = 1_013;
         let retained_after_retry = store
             .enqueue_analysis_request(&duplicate)
             .await
@@ -21248,15 +21807,15 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
             priority: "normal".to_owned(),
             trigger: "background".to_owned(),
             target_node_id: String::new(),
-            not_before_ms: 30,
-            created_at_ms: 30,
+            not_before_ms: 2_012,
+            created_at_ms: 2_012,
         };
         assert!(store
             .enqueue_cluster_fragment_index(&terminal_job)
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue terminal worker: {error}")));
         let terminal_claim = store
-            .fixture_claim_cluster_fragment_index("analysis-node", &[], 30, 1_030)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 2_012, 3_012)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim terminal worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: terminal worker claim"));
@@ -21268,14 +21827,14 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
                 terminal_claim.fence,
                 "unsupported",
                 false,
-                31,
-                41,
+                2_013,
+                2_023,
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: fail terminal worker: {error}")));
         let mut repeated_job = terminal_job.clone();
-        repeated_job.not_before_ms = 100;
-        repeated_job.created_at_ms = 100;
+        repeated_job.not_before_ms = 2_100;
+        repeated_job.created_at_ms = 2_100;
         assert!(
             !store
                 .enqueue_cluster_fragment_index(&repeated_job)
@@ -21313,15 +21872,15 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
             priority: "normal".to_owned(),
             trigger: "background".to_owned(),
             target_node_id: String::new(),
-            not_before_ms: 110,
-            created_at_ms: 110,
+            not_before_ms: 3_013,
+            created_at_ms: 3_013,
         };
         assert!(store
             .enqueue_cluster_fragment_index(&transient_job)
             .await
             .unwrap_or_else(|error| panic!("{backend}: enqueue transient worker: {error}")));
         let transient_claim = store
-            .fixture_claim_cluster_fragment_index("analysis-node", &[], 110, 1_110)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 3_013, 4_013)
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim transient worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: transient worker claim"));
@@ -21333,19 +21892,19 @@ async fn exact_terminal_analysis_is_not_automatically_reopened_through_dyn_store
                 transient_claim.fence,
                 "local_publish_failed",
                 true,
-                111,
-                121,
+                3_014,
+                3_024,
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: retry transient worker: {error}")));
         assert!(store
-            .fixture_claim_cluster_fragment_index("analysis-node", &[], 120, 1_120)
+            .fixture_claim_cluster_fragment_index("analysis-node", &[], 3_023, 4_023)
             .await
             .unwrap_or_else(|error| panic!("{backend}: early transient claim: {error}"))
             .is_none());
         assert_eq!(
             store
-                .fixture_claim_cluster_fragment_index("analysis-node", &[], 121, 1_121)
+                .fixture_claim_cluster_fragment_index("analysis-node", &[], 4_013, 5_013)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: due transient claim: {error}"))
                 .unwrap_or_else(|| panic!("{backend}: due transient worker"))
@@ -21673,7 +22232,9 @@ async fn analysis_admin_retry_resets_attempt_budget_through_dyn_store() {
                     .unwrap_or_else(|error| panic!("{backend}: queue retry: {error}")),
                 "backend {backend}"
             );
-            now += 1;
+            // A queued retry cannot borrow the cancelled reader's source
+            // slot until its original 100 ms lease has expired.
+            now += 101;
         }
         assert!(
             store
@@ -32984,19 +33545,19 @@ async fn subtitle_source_promoted_row_uses_common_claim_and_leaves_legacy_order_
             .await
             .expect("promote");
         let first = store
-            .claim_subtitle_fixture(&stamp.generation(0), "analysis-node", 3, 1000)
+            .claim_subtitle_fixture(&stamp.generation(0), "analysis-node", 3, 4)
             .await
             .expect("claim first")
             .expect("first");
         assert_eq!(first.component, "subtitle_source", "{backend}");
         let second = store
-            .claim_analysis_request("analysis-node", 4, 1001)
+            .claim_analysis_request("analysis-node", 4, 5)
             .await
             .expect("claim second")
             .expect("second");
         assert_eq!(second.priority, "forced", "{backend}");
         let third = store
-            .claim_analysis_request("analysis-node", 5, 1002)
+            .claim_analysis_request("analysis-node", 5, 1_005)
             .await
             .expect("claim third")
             .expect("third");

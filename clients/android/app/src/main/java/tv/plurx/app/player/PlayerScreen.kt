@@ -90,6 +90,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -833,6 +834,9 @@ private fun PlayerContent(
     var repeatCount by remember { mutableIntStateOf(0) }
     val controlFocus = remember { PlayerControlFocus() }
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
+    val screenOn = remember(controller) {
+        PlayerScreenOn(view = { playerView }, player = { controller.player }, isVideo = !plan.isAudioOnly)
+    }
     var isInPip by remember(activity) {
         mutableStateOf(
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
@@ -1133,25 +1137,17 @@ private fun PlayerContent(
         onDispose { lifecycle.removeObserver(observer) }
     }
     DisposableEffect(controller) {
-        fun updateScreenOn() {
-            val current = controller.player
-            playerView?.keepScreenOn = !plan.isAudioOnly &&
-                (current.isPlaying ||
-                    (current.playWhenReady && current.playbackState == Player.STATE_BUFFERING))
-        }
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
-                updateScreenOn()
                 isPlaying = playing
-                if (!playing) vm.postProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs)
+                if (!playing) vm.postProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs, method = controller.deliveryMode)
             }
 
             override fun onPlaybackStateChanged(state: Int) {
-                updateScreenOn()
                 // No screen-held copy of "the player is buffering": that is the
                 // presenter's `media_waiting` now, and one of it is the point.
                 if (state == Player.STATE_ENDED) {
-                    vm.postProgress(itemId, plan.globalPosition(plan.durationMs), plan.progressDurationMs)
+                    vm.postProgress(itemId, plan.globalPosition(plan.durationMs), plan.progressDurationMs, method = controller.deliveryMode)
                     controlsVisible = true
                     if (plan.nextAudiobookPartId != null) {
                         playNext(PlaybackTarget(itemId, plan.nextAudiobookPartId, 0))
@@ -1164,10 +1160,6 @@ private fun PlayerContent(
                         }
                     }
                 }
-            }
-
-            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-                updateScreenOn()
             }
 
             override fun onVideoSizeChanged(videoSize: VideoSize) {
@@ -1186,11 +1178,13 @@ private fun PlayerContent(
         // prepared replacement swaps the ExoPlayer instance, and a listener
         // bound directly to the one that was current here would silently stop
         // firing at exactly the moment the screen most needs to hear from it.
+        controller.addPlayerListener(screenOn)
         controller.addPlayerListener(listener)
         controller.startAt(startMs, startReason, attemptOpenedAtMs)
         onDispose {
-            vm.postProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs)
+            vm.postProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs, method = controller.deliveryMode)
             controller.removePlayerListener(listener)
+            controller.removePlayerListener(screenOn)
             controller.release()
         }
     }
@@ -1297,7 +1291,7 @@ private fun PlayerContent(
     LaunchedEffect(controller) {
         while (true) {
             delay(10_000)
-            if (isPlaying) vm.reportProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs)
+            if (isPlaying) vm.reportProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs, method = controller.deliveryMode)
         }
     }
     LaunchedEffect(lastInteraction, isPlaying, panel, pendingMs, blockingFault) {
@@ -1356,6 +1350,8 @@ private fun PlayerContent(
 
     Box(
         Modifier.fillMaxSize()
+            .semantics { testTagsAsResourceId = true }
+            .testTag(controller.lastTimeToFirstFrameMs?.let { "plurx-first-frame-$it" } ?: "plurx-first-frame-pending")
             .focusRequester(surfaceFocusRequester)
             .focusable()
             .playerInputAdapter(surface = playerSurface, state = ::inputState) { outcome, input, repeats ->
@@ -1370,10 +1366,7 @@ private fun PlayerContent(
                     useController = false
                     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                     setShutterBackgroundColor(android.graphics.Color.BLACK)
-                    keepScreenOn = !plan.isAudioOnly &&
-                        (controller.player.isPlaying ||
-                            (controller.player.playWhenReady &&
-                                controller.player.playbackState == Player.STATE_BUFFERING))
+                    screenOn.sync(this)
                     playerView = this
                 }
             },
@@ -1389,10 +1382,7 @@ private fun PlayerContent(
                     // parks the predecessor and waits to be told.
                     controller.collectRetiredPlayer()
                 }
-                val current = controller.player
-                view.keepScreenOn = !plan.isAudioOnly &&
-                    (current.isPlaying ||
-                        (current.playWhenReady && current.playbackState == Player.STATE_BUFFERING))
+                screenOn.sync(view)
                 playerView = view
             },
             modifier = Modifier.fillMaxSize(),

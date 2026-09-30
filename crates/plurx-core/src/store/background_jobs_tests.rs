@@ -209,6 +209,12 @@ async fn background_jobs_reservations_bound_distinct_jobs_and_yield_releases_cap
     for index in 0..3 {
         let mut request = enqueue(1_000);
         request.dedupe_key = format!("fragment:{index}");
+        if index == 1 {
+            request.request.scope = "playback-artifact".to_owned();
+            request.request.consumer_kind = "playback_fragment".to_owned();
+            request.request.target_node_id = Some("node-a".to_owned());
+            request.request.deadline_ms = Some(10_000);
+        }
         store.enqueue_job(request.clone()).await.expect("enqueue");
         let attempt = claim(&request.id, 0, 1_000);
         if index < 2 {
@@ -233,7 +239,15 @@ async fn background_jobs_reservations_bound_distinct_jobs_and_yield_releases_cap
         })
         .await
         .expect("yield");
-    let job = claimed(&store, third).await;
+    let job = claimed(
+        &store,
+        ClaimJob {
+            now_ms: 2_001,
+            dispatched_at_ms: 2_001,
+            ..third
+        },
+    )
+    .await;
     assert_eq!(job.fence, 1);
 }
 
@@ -896,4 +910,575 @@ async fn background_jobs_global_history_pressure_preserves_resolution_and_restor
     let job = claimed(&store, claim(&request.id, 32, 121_002)).await;
     assert_eq!(job.fence, 17);
     assert_eq!(job.failed_attempts, 0);
+}
+
+#[tokio::test]
+async fn background_subtitles_reconcile_historical_ready_demand_without_overwriting_history() {
+    use super::{ClusterFragmentIndexStore, LibraryStore, MediaStore};
+    use crate::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    let dir = tempfile::tempdir().expect("subtitle reconciliation fixture");
+    let path = dir.path().join("subtitle-reconcile.db");
+    let store = SqliteStore::open(&path).expect("subtitle reconciliation fixture");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Subtitles".into(),
+            kind: LibraryKind::Movies,
+            paths: vec!["/media".into()],
+            anime: false,
+        })
+        .await
+        .expect("subtitle reconciliation fixture");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "Source".into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("subtitle reconciliation fixture");
+    let file_id = store
+        .upsert_file(item, "/media/source.mkv", 100, 1, &ProbeResult::default())
+        .await
+        .expect("subtitle reconciliation fixture");
+    let request = store
+        .enqueue_or_promote_subtitle_source(
+            &super::SubtitleSourceStamp {
+                file_id,
+                source_size: 100,
+                source_mtime: 1,
+                pipeline_version: "subtitle-source-v1".into(),
+            },
+            "foreground",
+            1_000,
+        )
+        .await
+        .expect("subtitle reconciliation fixture")
+        .expect("subtitle reconciliation fixture");
+    let EnqueueOutcome::Accepted { job_id, .. } = store
+        .enqueue_subtitle_job(request.clone(), 1_000)
+        .await
+        .expect("subtitle reconciliation fixture")
+    else {
+        panic!("admission")
+    };
+    let mut claim = claim(&job_id, 0, 1_001);
+    claim.kind = JobKind::SubtitleExtract;
+    let ClaimOutcome::Claimed { job } = store
+        .claim_artifact_job(claim)
+        .await
+        .expect("subtitle reconciliation fixture")
+    else {
+        panic!("claim")
+    };
+    let token = job.token.expect("subtitle reconciliation fixture");
+    let query = CandidateQuery {
+        node_id: "node-b".into(),
+        kinds: vec![JobKind::SubtitleExtract],
+        after: None,
+        now_ms: token.lease_expires_ms,
+        limit: 100,
+    };
+    // A valid abandoned owner remains reclaimable; upkeep must not discard it.
+    assert!(!store
+        .maintain_jobs(token.lease_expires_ms)
+        .await
+        .expect("subtitle reconciliation fixture"));
+    assert_eq!(
+        store
+            .job_candidates(query.clone())
+            .await
+            .expect("subtitle reconciliation fixture")
+            .jobs
+            .len(),
+        1
+    );
+    // Reproduce historical independent publication without modifying the common
+    // lease, then prove retirement preserves both the result and its history.
+    let body = serde_json::json!({"request_id":request.request_id}).to_string();
+    store.queue_transaction(vec![
+        ("UPDATE analysis_requests SET state='ready', result_cache_key='published-source' WHERE request_id=json_extract($1,'$.request_id')".into(), body.clone()),
+        ("UPDATE analysis_attempts SET phase='published', terminal_code=NULL WHERE request_id=json_extract($1,'$.request_id')".into(), body.clone()),
+    ]).await.expect("subtitle reconciliation fixture");
+    // Reopen the predecessor database with its old projection trigger so this
+    // also exercises the SQLite upgrade, not only a fresh bootstrap.
+    drop(store);
+    {
+        let connection =
+            rusqlite::Connection::open(&path).expect("subtitle reconciliation fixture");
+        connection
+            .execute_batch("DROP TRIGGER background_subtitle_settled;")
+            .expect("subtitle reconciliation fixture");
+        connection
+            .execute_batch(super::background_jobs_subtitle::SCHEMA)
+            .expect("subtitle reconciliation fixture");
+        // A literal, not `SQLITE_SCHEMA_VERSION - 1`: the fixture is the v83
+        // shape, and every later migration (v84's own trigger, v85's queue
+        // retention) must replay from there.
+        connection
+            .pragma_update(None, "user_version", 83)
+            .expect("subtitle reconciliation fixture");
+    }
+    let store = SqliteStore::open(&path).expect("subtitle reconciliation fixture");
+    assert!(
+        !store
+            .maintain_jobs(2_000)
+            .await
+            .expect("subtitle reconciliation fixture"),
+        "live owner retained"
+    );
+    assert!(store
+        .job_candidates(query)
+        .await
+        .expect("subtitle reconciliation fixture")
+        .jobs
+        .is_empty());
+    let mut retry = claim_for_subtitle(&job_id, job.revision, token.lease_expires_ms);
+    retry.node_id = "node-b".into();
+    assert!(!matches!(
+        store
+            .claim_artifact_job(retry)
+            .await
+            .expect("subtitle reconciliation fixture"),
+        ClaimOutcome::Claimed { .. }
+    ));
+    assert!(store
+        .maintain_jobs(token.lease_expires_ms)
+        .await
+        .expect("subtitle reconciliation fixture"));
+    let retired = store
+        .background_job(&job_id)
+        .await
+        .expect("subtitle reconciliation fixture")
+        .expect("subtitle reconciliation fixture");
+    assert_eq!(retired.state, JobState::Cancelled);
+    assert!(retired.token.is_none());
+    assert_eq!(
+        store
+            .job_attempts(&job_id)
+            .await
+            .expect("subtitle reconciliation fixture")[0]
+            .outcome
+            .as_deref(),
+        Some("cancelled")
+    );
+    let preserved = store
+        .analysis_request(&request.request_id)
+        .await
+        .expect("subtitle reconciliation fixture")
+        .expect("subtitle reconciliation fixture");
+    assert_eq!(preserved.state, "ready");
+    assert_eq!(preserved.result_cache_key, "published-source");
+    let rows = store.queue_sql("SELECT json_object('phase',phase,'terminal_code',terminal_code) AS result_json FROM analysis_attempts WHERE request_id=json_extract($1,'$.request_id')".into(), body, false, false).await.expect("subtitle reconciliation fixture");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&rows[0])
+            .expect("subtitle reconciliation fixture"),
+        serde_json::json!({"phase":"published","terminal_code":null})
+    );
+    assert!(
+        !store
+            .maintain_jobs(token.lease_expires_ms + 1)
+            .await
+            .expect("subtitle reconciliation fixture"),
+        "idle upkeep stays read-only"
+    );
+}
+
+fn claim_for_subtitle(id: &str, revision: i64, now: i64) -> ClaimJob {
+    let mut request = claim(id, revision, now);
+    request.kind = JobKind::SubtitleExtract;
+    request
+}
+
+/// The seeded settled rows are UUID-shaped, as the job id validator requires.
+fn history_id(i: usize) -> String {
+    format!("00000000-0000-4000-8000-{i:012}")
+}
+
+#[tokio::test]
+async fn background_jobs_settled_history_yields_to_new_work_at_the_bound() {
+    // 2026-09-28: one day of embedding and subtitle work settled 10,000 jobs,
+    // and from then on every enqueue — library scans, Monarr's targeted
+    // scans — answered QueueFull for what would have been a week, with five
+    // jobs actually running. The bound is a table bound; history must yield.
+    let store = SqliteStore::open_in_memory().expect("store");
+    let template = enqueue(1_000);
+    store.enqueue_job(template.clone()).await.expect("enqueue");
+    store
+        .cancel_job(CancelJob {
+            job_id: template.id.clone(),
+            now_ms: 1_001,
+        })
+        .await
+        .expect("settle the template");
+    async fn count(store: &SqliteStore) -> usize {
+        QueueSql::queue_sql(
+            store,
+            "SELECT CAST(COUNT(*) AS TEXT) FROM background_jobs WHERE $1 IS NOT NULL".into(),
+            "{}".into(),
+            false,
+            false,
+        )
+        .await
+        .expect("count")[0]
+            .parse()
+            .expect("integer")
+    }
+    // Settled history up to the bound, oldest first: history-1 settled at
+    // 2,001 ms, history-9999 at 11,999 ms — all younger than the template.
+    QueueSql::queue_sql(
+        &store,
+        "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<9999)
+        INSERT INTO background_jobs (id, kind, payload_version, payload_json, dedupe_key, priority,
+            state, not_before_ms, created_at_ms, updated_at_ms)
+        SELECT '00000000-0000-4000-8000-'||printf('%012d', i), kind, payload_version, payload_json, 'history-'||i, priority,
+            'succeeded', 1000, 1000, 2000+i FROM n, background_jobs WHERE id = json_extract($1, '$.id')"
+            .into(),
+        serde_json::json!({"id": template.id}).to_string(),
+        true,
+        true,
+    )
+    .await
+    .expect("seed history");
+    assert_eq!(count(&store).await, MAX_RETAINED_JOBS);
+
+    let fresh = enqueue(20_000);
+    assert!(
+        matches!(
+            store.enqueue_job(fresh.clone()).await.expect("admit"),
+            EnqueueOutcome::Accepted { .. }
+        ),
+        "settled history must not refuse live work"
+    );
+    // The 128 oldest evictable rows went: the template and history-1..127.
+    assert_eq!(count(&store).await, MAX_RETAINED_JOBS - MAX_PAGE_SIZE + 1);
+    assert!(store
+        .background_job(&template.id)
+        .await
+        .expect("read")
+        .is_none());
+    assert!(store
+        .background_job(&history_id(127))
+        .await
+        .expect("read")
+        .is_none());
+    assert!(store
+        .background_job(&history_id(128))
+        .await
+        .expect("read")
+        .is_some());
+    assert!(store
+        .background_job(&fresh.id)
+        .await
+        .expect("read")
+        .is_some());
+
+    // Upkeep drains history from the 9,000 watermark, 128 per pass, then
+    // goes idle without a consensus write once it is below.
+    assert!(store.maintain_jobs(20_001).await.expect("pressure upkeep"));
+    assert_eq!(
+        count(&store).await,
+        MAX_RETAINED_JOBS - 2 * MAX_PAGE_SIZE + 1
+    );
+    let mut passes = 0;
+    while store.maintain_jobs(20_002 + passes).await.expect("upkeep") {
+        passes += 1;
+        assert!(passes < 16, "upkeep must converge below the watermark");
+    }
+    let settled_below_watermark = count(&store).await;
+    assert!(settled_below_watermark < 9_000);
+    assert!(settled_below_watermark >= 9_000 - MAX_PAGE_SIZE);
+    assert!(store
+        .background_job(&fresh.id)
+        .await
+        .expect("read")
+        .is_some());
+    assert!(!store.maintain_jobs(30_000).await.expect("idle"));
+}
+
+#[tokio::test]
+async fn scheduled_library_ticks_share_only_pending_equivalent_intents() {
+    use super::background_jobs_library::{LibraryTrigger, LibraryWorkInput};
+    use super::LibraryStore;
+    use crate::domain::{LibraryKind, NewLibrary};
+
+    let store = SqliteStore::open_in_memory().expect("store");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "DVR".into(),
+            kind: LibraryKind::Recordings,
+            paths: vec!["/dvr".into()],
+            anime: false,
+        })
+        .await
+        .expect("library");
+    for refresh in [false, true] {
+        let input = NewLibraryWork {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            library_id: library.id,
+            input: LibraryWorkInput::Full {
+                refresh,
+                trigger: LibraryTrigger::Scheduled,
+            },
+            now_ms: 1_000,
+        };
+        let EnqueueOutcome::Accepted { job_id, .. } = store
+            .enqueue_library_work(input.clone())
+            .await
+            .expect("first tick")
+        else {
+            panic!("first tick must queue work")
+        };
+        let mut next = input.clone();
+        next.request_id = uuid::Uuid::new_v4().to_string();
+        next.now_ms += 60_000;
+        let mut peer = next.clone();
+        peer.request_id = uuid::Uuid::new_v4().to_string();
+        let (one, two) = tokio::join!(
+            store.enqueue_library_work(next.clone()),
+            store.enqueue_library_work(peer)
+        );
+        for outcome in [one, two] {
+            assert!(
+                matches!(outcome.expect("competing ticks"), EnqueueOutcome::Existing { job_id: id, .. } if id == job_id)
+            );
+        }
+        let pending = store
+            .library_work_requests(LibraryWorkQuery {
+                job_id: Some(job_id.clone()),
+                pending_only: true,
+                limit: 256,
+                ..Default::default()
+            })
+            .await
+            .expect("pending");
+        assert_eq!(pending.len(), 1, "ticks must not accumulate interests");
+        assert_eq!(pending[0].request_id, input.request_id);
+
+        let mut manual = next.clone();
+        manual.request_id = uuid::Uuid::new_v4().to_string();
+        manual.input = LibraryWorkInput::Full {
+            refresh,
+            trigger: LibraryTrigger::Manual,
+        };
+        assert!(matches!(
+            store.enqueue_library_work(manual).await.expect("manual"),
+            EnqueueOutcome::Accepted { .. }
+        ));
+        let pending = store
+            .library_work_requests(LibraryWorkQuery {
+                job_id: Some(job_id.clone()),
+                pending_only: true,
+                limit: 256,
+                ..Default::default()
+            })
+            .await
+            .expect("manual identity");
+        assert_eq!(pending.len(), 2, "manual intent remains separate");
+
+        let mut conflicting = input.clone();
+        conflicting.input = LibraryWorkInput::Full {
+            refresh: !refresh,
+            trigger: LibraryTrigger::Scheduled,
+        };
+        assert!(matches!(
+            store
+                .enqueue_library_work(conflicting)
+                .await
+                .expect("original identity"),
+            EnqueueOutcome::Conflict
+        ));
+
+        store
+            .cancel_job(CancelJob {
+                job_id: job_id.clone(),
+                now_ms: next.now_ms + 1,
+            })
+            .await
+            .expect("cancel queued job");
+        next.now_ms += 2;
+        assert!(
+            matches!(store.enqueue_library_work(next).await.expect("later tick"), EnqueueOutcome::Accepted { job_id: id, .. } if id != job_id),
+            "terminal scheduled receipts cannot suppress a future run"
+        );
+    }
+}
+
+#[test]
+fn receipt_pressure_literals_match_constants() {
+    let migration = super::background_jobs::RECEIPT_PRESSURE_SCHEMA;
+    let needed = super::background_jobs_maintenance::MAINTENANCE_NEEDED;
+    for sql in [migration, needed] {
+        assert!(
+            sql.contains(&format!(
+                "(SELECT COUNT(*) FROM background_job_waiters) >= {WAITERS_PRESSURE}"
+            )),
+            "waiter pressure literal drifted from WAITERS_PRESSURE"
+        );
+    }
+    assert!(ENQUEUE_SQL.contains(&format!(
+        "(SELECT COUNT(*) FROM background_job_waiters) >= {MAX_WAITERS}"
+    )));
+    assert_eq!(WAITERS_PRESSURE, 15_360);
+    // v86 replaces v85's maintenance trigger, so it must carry every
+    // statement of that trigger; and it must be the last migration that
+    // creates the trigger.
+    let trigger = |source: &str| {
+        let start = source
+            .find("CREATE TRIGGER IF NOT EXISTS background_job_maintenance_command\n")
+            .expect("maintenance trigger");
+        let end = source[start..].find("\nEND;\n").expect("trigger end") + start;
+        source[start..end].to_owned()
+    };
+    let (previous, current) = (
+        trigger(super::background_jobs::RETENTION_SCHEMA),
+        trigger(migration),
+    );
+    for line in previous
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        assert!(
+            current.contains(line),
+            "v85 upkeep statement missing from v86: {line}"
+        );
+    }
+    let creators: Vec<usize> = super::sqlite::MIGRATIONS
+        .iter()
+        .enumerate()
+        .filter(|(_, sql)| {
+            sql.contains("CREATE TRIGGER IF NOT EXISTS background_job_maintenance_command")
+        })
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        creators.len(),
+        3,
+        "another migration redefines the maintenance trigger"
+    );
+    assert!(std::ptr::eq(
+        super::sqlite::MIGRATIONS[creators[2]],
+        migration
+    ));
+}
+
+/// Internal terminal receipts compact under waiter pressure, oldest first;
+/// user-scoped receipts, identity-retaining receipts and receipts of jobs
+/// that are still active keep their full window.
+#[tokio::test]
+async fn waiter_pressure_compacts_internal_receipts_and_spares_protected_ones() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("waiters.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let template = enqueue(1_000);
+    store.enqueue_job(template.clone()).await.expect("template");
+    let connection = rusqlite::Connection::open(&path).expect("fixture connection");
+    let transaction = connection.unchecked_transaction().expect("transaction");
+    // One active job whose old cancelled receipt must survive, plus one
+    // terminal job carrying every other receipt.
+    transaction
+        .execute(
+            "INSERT INTO background_jobs (id, kind, payload_version, payload_json, dedupe_key, priority,
+            state, fence, revision, not_before_ms, created_at_ms, updated_at_ms)
+        SELECT 'terminal', kind, payload_version, payload_json, 'terminal', priority,
+            'succeeded', 1, 2, 1000, 1000, 1000 FROM background_jobs WHERE id=?1",
+            [&template.id],
+        )
+        .expect("terminal job");
+    let seed = |scope: &str,
+                prefix: &str,
+                job: &str,
+                state: &str,
+                retain: i64,
+                n: i64,
+                base: i64| {
+        transaction
+            .execute(
+                "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<?1)
+            INSERT INTO background_job_waiters
+            (request_scope, request_id, request_digest, job_id, consumer_kind, consumer_ref, priority,
+             state, retain_identity, receipt_expires_ms, created_at_ms, updated_at_ms)
+            SELECT ?2, ?3||printf('%05d', i), ?4, ?5, 'analysis', ?3||i, 1, ?6, ?7,
+                ?8 + i + 604800000, ?8 + i, ?8 + i FROM n",
+                rusqlite::params![n, scope, prefix, "b".repeat(64), job, state, retain, base],
+            )
+            .expect("receipts");
+    };
+    // Oldest of all: 8 user receipts, 8 identity-retaining receipts and 8
+    // receipts of the still-active template job — all protected.
+    seed("user:7", "user-", "terminal", "succeeded", 0, 8, 0);
+    seed("analysis", "keep-", "terminal", "succeeded", 1, 8, 100);
+    seed("subtitle", "live-", &template.id, "cancelled", 0, 8, 200);
+    // Then enough internal terminal receipts to reach the cap exactly.
+    let internal = MAX_WAITERS as i64 - 1 - 24;
+    seed(
+        "semantic",
+        "done-",
+        "terminal",
+        "succeeded",
+        0,
+        internal,
+        1_000,
+    );
+    transaction.commit().expect("commit fixture");
+    let count = |sql: &str| {
+        connection
+            .query_row(sql, [], |row| row.get::<_, i64>(0))
+            .expect("count")
+    };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM background_job_waiters"),
+        MAX_WAITERS as i64
+    );
+
+    let mut fresh = enqueue(5_000);
+    fresh.dedupe_key = "fragment:2".to_owned();
+    assert!(matches!(
+        store.enqueue_job(fresh.clone()).await.expect("closed"),
+        EnqueueOutcome::QueueFull
+    ));
+    assert!(store.maintain_jobs(5_001).await.expect("pressure upkeep"));
+    assert_eq!(
+        count("SELECT COUNT(*) FROM background_job_waiters"),
+        MAX_WAITERS as i64 - MAX_PAGE_SIZE as i64,
+        "one bounded page"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM background_job_waiters WHERE request_scope = 'user:7'"),
+        8
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM background_job_waiters WHERE request_id LIKE 'keep-%'"),
+        8
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM background_job_waiters WHERE request_id LIKE 'live-%'"),
+        8
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM background_job_waiters WHERE request_id LIKE 'done-%' AND request_id <= 'done-00128'"),
+        0,
+        "the oldest internal receipts went first"
+    );
+    fresh.now_ms = 5_002;
+    fresh.not_before_ms = 5_002;
+    assert!(matches!(
+        store.enqueue_job(fresh).await.expect("reopened"),
+        EnqueueOutcome::Accepted { .. }
+    ));
+    let mut remaining = count("SELECT COUNT(*) FROM background_job_waiters");
+    let mut ticks = 0;
+    while remaining >= WAITERS_PRESSURE as i64 {
+        assert!(store.maintain_jobs(5_010 + ticks).await.expect("paging"));
+        let next = count("SELECT COUNT(*) FROM background_job_waiters");
+        assert!(next < remaining);
+        remaining = next;
+        ticks += 1;
+        assert!(ticks < 16, "pressure paging must converge");
+    }
+    assert!(!store.maintain_jobs(5_100).await.expect("settled"));
 }

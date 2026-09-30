@@ -10,6 +10,33 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **A day of settled background work no longer stops every new job for a
+  week.** The durable queue keeps finished jobs for seven days as receipts,
+  and its 10,000-row bound counted them. On 2026-09-28 an embedding backfill
+  and a subtitle sweep settled 10,000 jobs in seven hours; from then on every
+  library scan, every targeted scan from Monarr and every artwork request was
+  refused as `QueueFull` on three of four nodes, with five jobs actually
+  running, and Monarr's health page showed every import as
+  `plurx returned 500: internal server error`. Settled history now yields:
+  admission evicts the oldest evictable settled rows when the table is at its
+  bound, upkeep drains history from 9,000 rows so admission rarely has to,
+  and the queue refuses for size only when nothing is evictable. Rows a
+  pending waiter or a legacy fragment import still needs are never evicted;
+  waiters keep their seven-day receipts, so under pressure a receipt can now
+  outlive its job row. SQLite migration 85 and replicated schema 63 replace
+  the enqueue and upkeep triggers. A refused admission on
+  `POST /api/v1/scan` is now a 503 naming the refusal, so a caller retries
+  instead of reading a crash that never happened.
+- **Settled receipts yield too.** The same day of work left
+  `background_job_waiters` at 11,947 of its 16,384-row bound, which counts
+  settled receipts that only expired after seven days — the same refusal one
+  table over, days away. Upkeep now compacts the oldest settled *internal*
+  receipts a page per pass once the table is within eight pages of the bound;
+  user-scoped and identity-retaining receipts (every fragment interest) keep
+  their seven-day window, and a receipt whose job is still active is never
+  touched. SQLite migration 86 and replicated schema 64 replace the upkeep
+  trigger again.
+
 - **The web watch view's menus and Playback info are no longer trapped in the
   picture, and the picture no longer scrolls over the header.** The player on
   the watch page outranked the sticky header and clipped everything to its

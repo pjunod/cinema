@@ -746,7 +746,7 @@ struct DvrRecordingsPanel: View {
     private var serverLine: String? {
         guard let status = dvr.status else { return nil }
         guard status.enabled else {
-            return "Recording is off. An administrator can enable it in Settings → Developer."
+            return "Recording is off. An administrator can turn it on in Settings → Live TV → Recording."
         }
         var facts = [
             "\(status.slots.recording) of \(status.slots.max) tuners recording",

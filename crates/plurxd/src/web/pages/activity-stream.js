@@ -239,6 +239,7 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
   const focusedDiag=document.activeElement&&document.activeElement.closest
     ?document.activeElement.closest("details.stream-diag"):null;
   const focusKey=focusedDiag?focusedDiag.dataset.stream:null;
+  const durableFocus=(/** @type {HTMLElement} */ (document.activeElement))?.dataset?.durableFocus||(document.activeElement===document.body?DURABLE_ACTIVITY.pendingFocus:null);
   const scans=d.scans.map(sc=>`<tr><td style="width:200px"><b>${esc(sc.library)}</b></td><td class="muted">${statusText(sc.status)}</td></tr>`).join("");
   const t=d.trakt||{};
   const trakt = t.configured
@@ -289,10 +290,11 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
     ${d.scans.length? `<h2 class="section">Library scans</h2><table><tbody>${scans}</tbody></table>` : ""}
     ${activityProcessesHtml(d.processes)}
     <div class="activity-idle">${[!d.scans.length?"No scans running":"",!p?"No media preparation running":"",!offline.length?"No downloads in progress":""].filter(Boolean).join(" · ")}</div>
-    <div id="durable-activity">${durableQueueHtml()}</div>
+    <div id="durable-activity">${durableQueueHtml(nodeNames)}</div>
     <h2 class="section">Trakt</h2>
     <div class="card">${trakt}</div>`;
   dvrRestoreUi(m,dvrUi);
+  if(durableFocus)restoreDurableFocus(m,durableFocus);
   if(activityFocus)[...m.querySelectorAll("[data-activity-view]")].find(el=>el.dataset.activityView===activityFocus)?.focus({preventScroll:true});
   if(focusKey!=null){
     const again=[...m.querySelectorAll("details.stream-diag")].find(el=>el.dataset.stream===focusKey);

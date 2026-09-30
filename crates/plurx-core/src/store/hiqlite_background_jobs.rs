@@ -36,6 +36,12 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     for result in timeout_store(client.batch(super::background_jobs_subtitle::SCHEMA)).await? {
         result.map_err(database_error)?;
     }
+    validate_sql(super::background_jobs_subtitle::RECONCILE_SCHEMA)?;
+    for result in
+        timeout_store(client.batch(super::background_jobs_subtitle::RECONCILE_SCHEMA)).await?
+    {
+        result.map_err(database_error)?;
+    }
     validate_sql(super::background_jobs_provider::SCHEMA)?;
     for result in timeout_store(client.batch(super::background_jobs_provider::SCHEMA)).await? {
         result.map_err(database_error)?;
@@ -62,6 +68,26 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     }
     validate_sql(super::background_jobs_predictions::SCHEMA)?;
     for result in timeout_store(client.batch(super::background_jobs_predictions::SCHEMA)).await? {
+        result.map_err(database_error)?;
+    }
+    // Last, as the v62→v63 upgrade applies it, so a fresh cluster and an
+    // upgraded one load the replaced triggers in the same order.
+    validate_sql(super::background_jobs::RETENTION_SCHEMA)?;
+    for result in timeout_store(client.batch(super::background_jobs::RETENTION_SCHEMA)).await? {
+        result.map_err(database_error)?;
+    }
+    // v64 after v63, as the upgrade chain applies them.
+    validate_sql(super::background_jobs::RECEIPT_PRESSURE_SCHEMA)?;
+    for result in
+        timeout_store(client.batch(super::background_jobs::RECEIPT_PRESSURE_SCHEMA)).await?
+    {
+        result.map_err(database_error)?;
+    }
+    // v65 follows v64 on both fresh and upgraded clusters.
+    validate_sql(super::background_jobs::VIEWER_ANALYSIS_SCHEMA)?;
+    for result in
+        timeout_store(client.batch(super::background_jobs::VIEWER_ANALYSIS_SCHEMA)).await?
+    {
         result.map_err(database_error)?;
     }
     Ok(())

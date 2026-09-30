@@ -2553,6 +2553,22 @@ their codec/HDR fallback ladders. Counters and latency are exported as
 `plurx_media_session_takeovers_total{method,outcome}` and
 `plurx_media_session_takeover_seconds{method}`.
 
+The one-second media-session route cache that authorizes segment GETs is
+measured, not tuned, by four families (plan
+[PLEX-FACADE-PAGING](server/PLEX-FACADE-PAGING.md) §3.5):
+`plurx_media_session_route_lookups_total{result}` splits the cache's lookups
+(HLS media and status GETs and session DELETEs; direct plays never reach it)
+into
+`cache_hit`, `single_flight_hit` (answered by the cache after waiting on
+another lookup's Store read for the same session) and `store`;
+`plurx_media_session_route_lock_seconds{site}` is the wait for the cache's map
+lock at each of its four call sites; `plurx_media_session_route_prune_entries`
+is how many entries each expired-entry sweep walks; and
+`plurx_media_session_route_cache_entries` is the cache's size against its
+4,096 ceiling. Control mutations and final-status reads bypass the cache and
+are not in the lookup counts. None of these changes the cache; the plan's §6.4
+says how to read them.
+
 Backups do not become interchangeable merely because the database is
 replicated. Preserve the data directory, node identity, and cluster secrets for
 each voter in host/storage backups so the original majority can be restored.
@@ -3282,6 +3298,13 @@ the index from authoritative item rows across the cluster; library and watch
 truth are unchanged.
 
 ## Reading the Server card (Settings)
+
+For the exact FFmpeg identity used in fragment-index cache keys, run
+`plurxd media-runtime-identity` on the same image as the server. Its JSON
+includes the application SHA when stamped, architecture, actual engine digest,
+current-engine check, and hashes of the packaged runtime manifest when present.
+An unavailable image digest or package manifest is `null`; a version string
+alone does not establish compatible index bytes.
 
 The Server card is the health-at-a-glance panel:
 
@@ -4181,7 +4204,7 @@ fragment indexing share one ownership queue, one heavy worker per node and two
 reader slots per shared storage domain. Unmapped roots use one global domain. Spare nodes can prepare different titles
 without duplicating the same computation or multiplying NAS reads by node count.
 
-Settings → Developer → Shared storage budgets assigns the same domain name to
+Settings → Libraries → Shared storage budgets assigns the same domain name to
 mount paths on the same NAS. Independent storage may use different names. A
 multi-root library conservatively reserves all of its domains, even for a
 file-specific job. Save mapping changes while background jobs are idle; an
@@ -4281,10 +4304,12 @@ permissions; an exact recipe already preparing on their delivery node can be
 joined at priority 2 without starting another encoder. Cross-node offline
 transcode delivery is not yet provided by this queue adapter.
 
-Settings → Developer contains enable controls and timestamped advisory
-requirements for the existing analysis and speculative-preparation preferences.
-Unknown or unmet observations do not prevent saving the choice. There is no
-queue certification or fleet receipt to obtain. The first schema conversion
+The analysis and speculative-preparation preferences are ordinary settings:
+Settings → Analysis enables the analysis workers and Settings → Maintenance
+sets the pre-transcoding cadence. Their Developer card graduated on
+2026-09-28; `GET /api/v1/developer/readiness` still reports the advisory
+`durable_cluster_work` requirements. There is no queue certification or
+fleet receipt to obtain. The first schema conversion
 requires the stopped-writer maintenance procedure in the
 [queue migration contract](cluster/DURABLE-WORK-QUEUE-IMPLEMENTATION.md#7-migration-and-rollback--one-ownership-system-after-cutover);
 do not perform a mixed-version rolling cutover or a binary-only downgrade.
@@ -5368,7 +5393,9 @@ the loading overlay a few seconds longer, then playback).
 | Web HLS says playback did not start | Manifest and media arrived, but neither an advancing audio clock nor the required clock-plus-frame evidence appeared | Check browser decoder/media errors and presentation telemetry. This generic exhaustion is deliberately not `decoder_failed` without decoder evidence |
 | Master playlist returns `hls_init_invalid` or `hls_init_unsupported` | The exact published init contradicts the session's codec claim, is incomplete/malformed, or uses a valid layout plurx cannot describe | Treat the session as terminal. Inspect the producer/muxer and init publication; repeated client polling cannot change immutable invalid bytes |
 | Master playlist returns `init_inspection_unavailable` | Storage or inspection capacity prevented a trustworthy bounded read | Retry within the client startup allowance, then inspect storage and node-capacity logs. Unlike an invalid init, this response does not convict the media |
-| A transcode start returns HTTP 503 with `transcode capacity is temporarily unavailable` | The five-second foreground admission window expired before a background encoder yielded, or before configured live hardware/software capacity became available | Retry after the named work releases. If the response says background encoding did not yield, read `pre-transcode yielded` and session-end lines in `plurxd::transcode`; absence after five seconds means that worker is stuck rather than permission to start beside it |
+| A transcode start returns HTTP 503 with `transcode capacity is temporarily unavailable` | The five-second foreground admission window expired before configured **live** hardware/software capacity became available, or the class cannot run in software and every hardware slot is held | Retry after the named work releases. Background ownership no longer produces this: a live start that waits out the window with only background work in the way is admitted over it (since 2026-09-28, [LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA](streaming/LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md)), so if the sentence says background encoding did not yield the start was speculative, not a viewer's |
+| `plurx_transcode_background_overrun_total{pool}` is rising | A background worker (pre-transcode producer, subtitle backfill, fragment indexing, probes) held an encoder permit through a phase that never looks at the pool, and a live start was admitted over it after the five-second window | Zero is the design. Each increment has a WARN `background work did not yield within the cooperative window; starting the viewer over it` in `plurxd::transcode` naming the pool; the worker to fix is whatever `plurxd::background_jobs` / `plurxd::state` was doing at that second. The viewer (VOD or Live TV) paid five seconds of delay, not a refusal. The take is bounded by live usage: a pool other viewers have spent is still refused with `spent by live sessions` |
+| Live TV answers `encoder_capacity` ("the tuner owner's encoder is busy") | The tuners were free but the owner's video encoder pool refused the transcode this route needs. Distinct from `tuner_capacity`, which lists what holds the tuners | `GET /api/v1/system` → `hw_slots_in_use` / `hw_slots_max` on the owner; a copy route on the same channel (a client that decodes MPEG-2 or HEVC itself) starts without this |
 | 4K HDR is slow but plays | The tone-map is running on the CPU. `GET /api/v1/system` → `tone_map` names the graph in use and why each candidate was rejected — no GPU device, a driver that refused the filter, output that didn't match the reference, or a graph that wasn't faster than the CPU chain | A rejection naming a missing device is usually a container passthrough (`--device /dev/dri`) or a missing driver package. HLG and Dolby Vision always use the CPU chain by design |
 | "All hardware transcode slots are in use" | The cap (`transcode.max_hw_sessions`, default 2) is doing its job. A start waits up to 5 s for a slot, then runs in software *only if this server has measured that class of stream above realtime there* — never because the output is small, since the decode and the tone-map happen at source resolution whatever size you ask for | `GET /api/v1/system` → `hw_slots_in_use` / `hw_slots_max`. Refused at 0 of 2 is a bug; refused at 2 of 2 is the design. A 4K HDR source is the shape software cannot carry, so it is refused rather than started to stall |
 | A GPU tone-map worked and then stopped | The pipeline downgrades once, per session, to the CPU chain and logs it | Look for `pipeline=` on the session's ffmpeg log line: it names what actually ran, not what the box can do |

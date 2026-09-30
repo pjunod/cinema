@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const test = require("node:test");
 const fs = require("node:fs");
 const path = require("node:path");
 const control = require("../../crates/plurxd/src/web/playback-control.js");
@@ -20,6 +21,14 @@ function shippedSource(name) {
   const rest = SHIPPED_UI.slice(start + 1);
   const ends = TERMINATORS.map((kind) => rest.indexOf(kind, 1)).filter((at) => at !== -1);
   return (ends.length ? rest.slice(0, Math.min(...ends)) : rest).trimEnd();
+}
+// The sliced owners now call these production telemetry edges. Keep their
+// dependencies in each owner harness, rather than replacing the beacons by
+// no-ops that would hide command/presentation regressions.
+function seekTelemetrySources(){
+  return ["dispatchPlaybackSeekTelemetry","playbackSeekTraceRanges",
+    "recordPlaybackSeekRoute","finishPlaybackSeekTelemetry",
+    "watchPlaybackSeekTelemetry"].map(shippedSource).join("\n");
 }
 // A shipped top-level constant, so a scope built out of source cannot drift
 // from the value the page actually uses.
@@ -117,7 +126,7 @@ function fullOpenHarness() {
     shippedSource("beginPlaybackPreparation"),
     shippedSource("takePlaybackAttemptReason"), shippedSource("playbackSelection"),
     shippedSource("positionForPlaybackIntent"), shippedSource("supersedePlaybackControlIntent"),
-    shippedSource("beginPlaybackControlSeek"), shippedSource("rememberPlaybackSelection"),
+    seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"), shippedSource("rememberPlaybackSelection"),
     shippedSource("noSegments"), shippedSource("copyHlsMseOk"),
     shippedSource("playbackInitialRoute"), shippedSource("restartPendingPlaybackOpen"),
     shippedSource("unexecutedPlaybackDestinationSec"),
@@ -174,6 +183,7 @@ function fullOpenHarness() {
       "finishPlayAttach","play"].map(shippedSource),
     shippedSource("setQuality"),
     shippedSource("playbackSeekBufferedRangesMs"),
+    shippedSource("playbackSeekSeekableRangesMs"),
     shippedSource("playbackSeekPublishedRangeMs"),
     shippedSource("playbackSeekBufferCovers"),
     shippedSource("seekTo"), shippedSource("switchAudio"), shippedSource("setSub"),shippedSource("burnSub"),
@@ -830,7 +840,7 @@ async function main() {
     "function clearPlaybackControlWaiters(){}",
     "function notifyPlaybackControl(){notifications+=1;}",
     shippedSource("supersedePlaybackControlIntent"),
-    shippedSource("beginPlaybackControlSeek"),
+    seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"),
     shippedSource("markPlaybackControlSeekExecuted"),
     shippedSource("samplePlaybackPresentationClock"),
     shippedSource("settlePlaybackControlSeek"),
@@ -1075,7 +1085,7 @@ async function main() {
       "function remuxUrl(path,audio,pos){calls.push({kind:'remux',position:pos*1000});return '/remux';}",
       shippedSource("supersedePlaybackControlIntent"),
       shippedSource("positionForPlaybackIntent"),
-      shippedSource("beginPlaybackControlSeek"),
+      seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"),
       shippedSource("markPlaybackControlSeekExecuted"),
       shippedSource("samplePlaybackPresentationClock"),
       shippedSource("streamGeneration"),
@@ -1833,7 +1843,7 @@ async function main() {
       shippedSource("streamHasVideo"),shippedSource("persistentWaitEvidence"),shippedSource("endWait"),
       shippedSource("samplePlaybackPresentationClock"),shippedSource("pausePlaybackInternally"),
       shippedSource("playbackTransportEvents"),
-      shippedSource("playbackProgressTick"),shippedSource("playbackWaitNeedsProgress"),shippedSource("handlePlaybackPlaying"),
+      seekTelemetrySources(), shippedSource("playbackProgressTick"),shippedSource("playbackWaitNeedsProgress"),shippedSource("handlePlaybackPlaying"),
       shippedSource("samplePreparedSwitchFrames"),shippedConst("SWITCH_FRAME_SAMPLES_MAX"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       "return {p,v,tick(time){now=time;playbackProgressTick(v,p);},playing(){handlePlaybackPlaying(v,p);},attempts:()=>attempts,recovered:()=>recovered};",
@@ -2589,7 +2599,7 @@ async function main() {
         "function playbackExhaustedActions(){return ['keep_waiting','retry','close'];}",
         shippedSource("streamHasVideo"),
         shippedSource("samplePlaybackPresentationClock"),
-        shippedSource("playbackProgressTick"),
+        seekTelemetrySources(), shippedSource("playbackProgressTick"),
         shippedSource("samplePreparedSwitchFrames"),shippedConst("SWITCH_FRAME_SAMPLES_MAX"),
         shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
         "return {",
@@ -2620,7 +2630,12 @@ async function main() {
       (fn, ms) => { const id = nextTimer++; timers.set(id, { fn, ms }); return id; },
       (id) => { timers.delete(id); },
       8_000,
-      options.policy || { stallRecoveryAction: () => "reconnect", stallRecoveryTargetHeight: () => 720 },
+      Object.assign({
+        // The paused-retirement latch (§9.5) is not what this harness drives.
+        isPauseGraceExpiry: () => false,
+        parksPausedPlaybackError: () => false,
+        pausedRetirementCurrent: () => false,
+      }, options.policy || { stallRecoveryAction: () => "reconnect", stallRecoveryTargetHeight: () => 720 }),
       () => "auto",
       (player, kind, ms, startedRunway, currentRunway, detail) =>
         stalls.push({ kind, startedRunway, currentRunway, detail }),
@@ -4049,7 +4064,7 @@ async function main() {
         shippedSource("playbackControlSelection"),
         shippedSource("positionForPlaybackIntent"),
         shippedSource("supersedePlaybackControlIntent"),
-        shippedSource("beginPlaybackControlSeek"),
+        seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"),
         shippedSource("clearPlaybackControlWaiters"),
         shippedSource("settlePlaybackControlWaiters"),
         shippedSource("settlePreparedOfferWaiter"),
@@ -4176,6 +4191,9 @@ async function main() {
     offset: 0, vod: true, hls: null, prepared: null, priorKbps: 0,
     controlAcknowledgement: null, pendingMediaChange: null, wantsPlayback: true,
   }, overrides);
+
+  await test("prepared HLS buffer readiness follows incumbent clock and releases listener ownership",
+    ()=>preparedBufferObservationTests(preparedHarness,preparedPlayer,prepareAction));
 
   // A warmed successor remains under the incumbent until aligned advancing
   // successor frames meet a fresh incumbent frame.
@@ -6270,6 +6288,114 @@ async function main() {
 // length and the chained-buffer gap. Each one is written so that changing the
 // arithmetic it pins makes it fail -- the mutation checks in the PR name which
 // constant each case is holding.
+// A buffered successor can earn overlap by the incumbent advancing, without
+// another append. Exercise the shipped attach, gate and cleanup functions.
+function preparedBufferObservationTests(preparedHarness,preparedPlayer,prepareAction){
+  const stage=()=>{
+    const h=preparedHarness();
+    h.live.currentTime=20;
+    h.live.paused=false;
+    h.live.ranges=[[18,30]];
+    const incumbent={stopLoad(){},startLoad(){},destroy(){}};
+    const p=h.set(preparedPlayer({hls:incumbent}));
+    const state=h.handle(prepareAction());
+    h.instances[0].events.manifest();
+    h.spare.currentTime=23;
+    h.spare.readyState=4;
+    h.spare.ranges=[[23,29]];
+    const readiness=(state.overlapListeners||[]).slice();
+    return {h,p,state,readiness};
+  };
+  const removed=({h,readiness})=>{
+    for(const [name,listener] of readiness)
+      assert.ok(!(h.live.listeners[name]||[]).includes(listener),
+        `${name}: preparation must release its readiness listener`);
+  };
+  {
+    const f=stage(),{h,p,state}=f;
+    h.instances[0].events.append();
+    assert.equal(state.buffered,false,'an ahead range cannot skip the incumbent');
+    h.live.currentTime=22;
+    h.live.emit('timeupdate');
+    assert.equal(state.buffered,false,'the clock still has not reached overlap');
+    h.live.currentTime=23;
+    h.live.emit('timeupdate');
+    assert.equal(state.buffered,true,'existing buffer becomes ready without another append');
+    assert.equal(state.state,'committing');
+    assert.equal(p.hls,state.incumbentHls,'frame proof still owns exposure');
+    removed(f);
+    const frameListeners=state.overlapListeners;
+    for(const [,callback] of f.readiness) callback();
+    assert.equal(state.overlapListeners,frameListeners,
+      'queued readiness callbacks cannot clear the later frame-proof owner');
+    h.provePrepared();
+    assert.equal(state.state,'committed');
+    removed(f);
+  }
+  {
+    const f=stage(),{h,state}=f;
+    h.live.currentTime=23;
+    h.spare.ranges=[[23,24.5]];
+    h.live.emit('progress');
+    assert.equal(state.buffered,false,'clock observations still require two seconds of lead');
+    h.abandon('aborted','insufficient lead');
+    removed(f);
+  }
+  for(const terminal of ['failure','abandon','supersede','teardown']){
+    const f=stage(),{h,state}=f;
+    if(terminal==='failure') h.failPrepared('fixture failure');
+    else if(terminal==='abandon') h.abandon('aborted','fixture abort');
+    else if(terminal==='supersede')
+      h.handle(prepareAction({action_id:'817334fb-1472-4be4-9240-fc890a346cf8'}));
+    else h.teardown();
+    removed(f);
+    const next=h.current().prepared;
+    const nextListeners=next&&next.overlapListeners;
+    h.live.currentTime=23;
+    for(const [,callback] of f.readiness) callback();
+    h.instances[0].events.append();
+    assert.equal(state.buffered,false,`${terminal}: stale callbacks cannot commit`);
+    assert.equal(next&&next.overlapListeners,nextListeners,
+      `${terminal}: stale callbacks cannot detach a newer listener owner`);
+    if(next) h.abandon('aborted','fixture cleanup');
+  }
+  {
+    const f=stage(),{h,state}=f;
+    h.set(preparedPlayer());
+    h.live.currentTime=23;
+    h.live.emit('timeupdate');
+    removed(f);
+    assert.equal(state.buffered,false,'a replaced player cannot earn buffer readiness');
+  }
+  for(const stale of ['incumbent-element','successor-element','pending-media-change']){
+    const f=stage(),{h,p,state}=f;
+    if(stale==='incumbent-element'){
+      h.live.id='retired-video';
+      h.attached.push({id:'video'});
+    }else if(stale==='successor-element'){
+      h.spare.id='orphaned-prepared';
+      h.attached.push({id:'video-prepared'});
+    }else p.pendingMediaChange={};
+    h.live.currentTime=23;
+    h.live.emit('timeupdate');
+    removed(f);
+    assert.equal(state.buffered,false,`${stale}: stale media cannot earn readiness`);
+  }
+  {
+    const f=stage(),{h,p,state}=f;
+    h.live.currentTime=23;
+    h.live.emit('timeupdate');
+    h.provePrepared(false);
+    assert.equal(p.preparedCommitting,state);
+    removed(f);
+    h.cancelFrame();
+    assert.equal(state.state,'failed');
+    removed(f);
+    for(const [,callback] of f.readiness) callback();
+    assert.equal(p.prepared,null,'canceled exposure cannot restart preparation');
+  }
+}
+
 function preparedSwitchMeasurementTests(){
   const delta=(options)=>control.preparedSwitchCounterDelta(options);
 
@@ -6571,7 +6697,7 @@ function terminalHlsStopTests(){
     "function pausePlaybackInternally(){calls.push(['pause']);}function stopPlayerTimers(){calls.push(['timers']);}",
     shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),
     shippedSource("abortHlsStartupLoaders"),shippedSource("retireHlsTerminalAttempt"),
-    shippedSource("stopPlayerForExhaustion"),shippedSource("scheduleHlsNetworkRetry"),
+    seekTelemetrySources(), shippedSource("stopPlayerForExhaustion"),shippedSource("scheduleHlsNetworkRetry"),
     shippedSource("beginPlaybackMediaAttachment"),
     "const owned=()=>attachment.current()&&player.hls===hls&&!playbackAttemptTerminallyStopped(player,token);",
     "return {calls,player,episode,stop:stopPlayerForExhaustion,current:()=>hlsStartupCurrent(player,episode),retry:()=>scheduleHlsNetworkRetry(video,player,'late fatal'),late(){if(owned())surface='recovering';return surface;},reopen(){player.attemptId='a2';const next=beginPlaybackMediaAttachment(player);return {current:next.current(),terminal:player.terminalStop};}};",

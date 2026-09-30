@@ -358,24 +358,20 @@
         let dir = crate::test_tempdir().expect("tempdir");
         seeded_session_dir(dir.path(), 2, 2.0).await;
         let session = Arc::new(test_session(dir.path().to_path_buf()));
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .refresh_after_read_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let pause = session.test_hooks().refresh_after_read.arm("refresh_after_read");
 
         let older = tokio::spawn({
             let session = Arc::clone(&session);
             async move { session.refresh_segments().await }
         });
-        pause.wait().await;
+        let pause_held = pause.reached().await;
 
         // The first refresh already owns the two-second bytes but has not
         // merged them. A second refresh observes a rewritten three-second
         // timeline and must be the only one allowed to spend revision zero.
         seeded_session_dir(dir.path(), 2, 3.0).await;
         session.refresh_segments().await;
-        pause.wait().await;
+        pause_held.release();
         older.await.expect("older refresh task");
 
         let index = session.segments.lock().await;
@@ -392,17 +388,8 @@
         let manager_dir = crate::test_tempdir().expect("manager tempdir");
         seeded_session_dir(dir.path(), 2, 2.0).await;
         let session = Arc::new(test_session(dir.path().to_path_buf()));
-        let owner_pause = Arc::new(tokio::sync::Barrier::new(2));
-        let replacement_pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .path_owner_sample_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&owner_pause));
-        *session
-            .replacement_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(Arc::clone(&replacement_pause));
+        let owner_pause = session.test_hooks().path_owner_sample.arm("path_owner_sample");
+        let replacement_pause = session.test_hooks().replacement.arm("replacement");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let mgr = Arc::new(TranscodeManager::new(
             store,
@@ -419,7 +406,7 @@
             let mgr = Arc::clone(&mgr);
             async move { mgr.playlist_with_owner("playlist-aba").await }
         });
-        owner_pause.wait().await;
+        let owner_pause_held = owner_pause.reached().await;
         let successor = tokio::spawn(complete_seeded_replacement(
             Arc::clone(&session),
             dir.path().to_path_buf(),
@@ -427,9 +414,9 @@
             3.0,
             None,
         ));
-        replacement_pause.wait().await;
-        owner_pause.wait().await;
-        replacement_pause.wait().await;
+        let replacement_pause_held = replacement_pause.reached().await;
+        owner_pause_held.release();
+        replacement_pause_held.release();
         let successor = successor.await.expect("replacement task");
 
         let (bytes, owner) = playlist
@@ -460,17 +447,8 @@
             .await
             .expect("predecessor segment");
         let session = Arc::new(test_session(dir.path().to_path_buf()));
-        let owner_pause = Arc::new(tokio::sync::Barrier::new(2));
-        let replacement_pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .path_owner_sample_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&owner_pause));
-        *session
-            .replacement_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(Arc::clone(&replacement_pause));
+        let owner_pause = session.test_hooks().path_owner_sample.arm("path_owner_sample");
+        let replacement_pause = session.test_hooks().replacement.arm("replacement");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let mgr = Arc::new(TranscodeManager::new(
             store,
@@ -487,7 +465,7 @@
             let mgr = Arc::clone(&mgr);
             async move { mgr.segment("segment-aba", "seg00000.ts").await }
         });
-        owner_pause.wait().await;
+        let owner_pause_held = owner_pause.reached().await;
         let successor = tokio::spawn(complete_seeded_replacement(
             Arc::clone(&session),
             dir.path().to_path_buf(),
@@ -495,9 +473,9 @@
             3.0,
             Some(b"successor"),
         ));
-        replacement_pause.wait().await;
-        owner_pause.wait().await;
-        replacement_pause.wait().await;
+        let replacement_pause_held = replacement_pause.reached().await;
+        owner_pause_held.release();
+        replacement_pause_held.release();
         let successor = successor.await.expect("replacement task");
 
         let mut segment = segment
@@ -677,23 +655,14 @@
         let dir = crate::test_tempdir().expect("tempdir");
         seeded_session_dir(dir.path(), 2, 2.0).await;
         let session = Arc::new(test_session(dir.path().to_path_buf()));
-        let owner_pause = Arc::new(tokio::sync::Barrier::new(2));
-        let replacement_pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .path_owner_sample_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&owner_pause));
-        *session
-            .replacement_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(Arc::clone(&replacement_pause));
+        let owner_pause = session.test_hooks().path_owner_sample.arm("path_owner_sample");
+        let replacement_pause = session.test_hooks().replacement.arm("replacement");
 
         let refresh = tokio::spawn({
             let session = Arc::clone(&session);
             async move { session.refresh_segments().await }
         });
-        owner_pause.wait().await;
+        let owner_pause_held = owner_pause.reached().await;
         let successor = tokio::spawn(complete_seeded_replacement(
             Arc::clone(&session),
             dir.path().to_path_buf(),
@@ -701,11 +670,11 @@
             3.0,
             None,
         ));
-        replacement_pause.wait().await;
-        owner_pause.wait().await;
+        let replacement_pause_held = replacement_pause.reached().await;
+        owner_pause_held.release();
         refresh.await.expect("stale refresh task");
         assert!(session.segments.lock().await.segs.is_empty());
-        replacement_pause.wait().await;
+        replacement_pause_held.release();
         let successor = successor.await.expect("replacement task");
 
         session.refresh_segments().await;
@@ -742,16 +711,13 @@
         session.fetched_end_ms.store(300_000, Relaxed);
         expire_seeded_prefix(&session, 30).await;
 
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .retention_delete_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let pause = session.test_hooks().retention_unlink.arm("retention_unlink");
+        let pause_batch = session.test_hooks().retention_batch.arm("retention_batch");
         let gc = tokio::spawn({
             let session = Arc::clone(&session);
             async move { gc_expired_segments(&session).await }
         });
-        pause.wait().await;
+        let pause_held = pause.reached().await;
         let queued_during_pause = session
             .retention_cleanup_queue
             .lock()
@@ -796,8 +762,13 @@
             .await
             .expect("slow garbage deletion cannot hold the path transition")
             .expect("replacement task");
-        pause.wait().await;
-        pause.wait().await;
+        pause_held.release();
+        let batch_held = pause_batch.reached().await;
+        assert!(
+            !session.retention_cleanup_active.load(Acquire),
+            "the batch point follows the worker clearing its active flag"
+        );
+        batch_held.release();
         assert_eq!(session.control.current_producer_attempt(), successor);
         assert!(dir.path().join("seg00000.ts").exists());
         assert!(dir.path().join("seg00001.ts").exists());
@@ -832,14 +803,11 @@
         session.refresh_segments().await;
         session.fetched_end_ms.store(300_000, Relaxed);
         expire_seeded_prefix(&session, 30).await;
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .retention_delete_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let pause = session.test_hooks().retention_unlink.arm("retention_unlink");
+        let pause_batch = session.test_hooks().retention_batch.arm("retention_batch");
 
         gc_expired_segments(&session).await;
-        pause.wait().await;
+        let pause_held = pause.reached().await;
         let garbage = session
             .retention_cleanup_queue
             .lock()
@@ -853,8 +821,13 @@
         tokio::fs::create_dir(&garbage)
             .await
             .expect("force remove_file failure");
-        pause.wait().await;
-        pause.wait().await;
+        pause_held.release();
+        let batch_held = pause_batch.reached().await;
+        assert!(
+            !session.retention_cleanup_active.load(Acquire),
+            "the batch point follows the worker clearing its active flag"
+        );
+        batch_held.release();
 
         assert!(!dir.path().join("seg00000.ts").exists());
         assert!(session
@@ -1207,6 +1180,173 @@
             output.status.success(),
             "HEVC fixture encode failed — this test needs an ffmpeg with libx265: {}",
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// M8's shipped-shape test for the rolling session: `start_copy`, the
+    /// production start path, leaves the session's hook slot on
+    /// [`NoopSessionHooks`], every awaited point is ready at its first poll,
+    /// and the running session passes through its points to a published
+    /// playlist, a served segment, an activity read and a stop whose retirement
+    /// finishes its cleanup. Nothing in it arms a point, so the slot is still
+    /// the no-op at the end.
+    #[tokio::test]
+    async fn session_shipped_shape() {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+
+        let media = crate::test_tempdir().expect("media dir");
+        let src = media.path().join("clip.mp4");
+        write_real_video(&src, 60);
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file_with_probe_at(
+            &store,
+            &src.to_string_lossy(),
+            plurx_core::domain::ProbeResult {
+                duration_ms: Some(60_000),
+                container: Some("mp4".into()),
+                video_codec: Some("h264".into()),
+                width: Some(160),
+                height: Some(120),
+                ..Default::default()
+            },
+        )
+        .await;
+        let work = crate::test_tempdir().expect("work");
+        let mgr = Arc::new(TranscodeManager::new(
+            Arc::clone(&store),
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        // Unpaced, so the first playlist does not wait on real time.
+        store.put_setting(keys::HLS_READRATE, "0").await.expect("s");
+        let info = tokio::time::timeout(
+            Duration::from_secs(30),
+            mgr.start_copy(
+                file_id,
+                0.0,
+                None,
+                CopySessionOptions {
+                    convert_dolby_vision: false,
+                    transcode_audio: false,
+                    preserve_dolby_vision: false,
+                },
+                "paul",
+                "pb-shipped-shape",
+            ),
+        )
+        .await
+        .expect("the production start answers")
+        .expect("copy session");
+        let session = mgr
+            .sessions
+            .lock()
+            .await
+            .get(&info.session_id)
+            .cloned()
+            .expect("session is tracked");
+
+        let hooks = session.hooks.get();
+        let installed: &dyn std::any::Any = hooks;
+        assert!(
+            installed.is::<NoopSessionHooks>(),
+            "the production start leaves the session on the no-op hooks"
+        );
+        let waker = futures_util::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        for (point, mut hook) in [
+            ("before_path_owner_sample", hooks.before_path_owner_sample()),
+            ("before_playlist_publication", hooks.before_playlist_publication()),
+            (
+                "after_producer_install_authorized",
+                hooks.after_producer_install_authorized(),
+            ),
+            ("after_refresh_playlist_read", hooks.after_refresh_playlist_read()),
+            ("after_activity_snapshot", hooks.after_activity_snapshot()),
+            ("after_control_applied", hooks.after_control_applied()),
+            ("before_flow_completion", hooks.before_flow_completion()),
+            ("after_media_committed", hooks.after_media_committed()),
+            (
+                "before_first_media_owner_claim",
+                hooks.before_first_media_owner_claim(),
+            ),
+            (
+                "after_retirement_cleanup_handoff",
+                hooks.after_retirement_cleanup_handoff(),
+            ),
+            ("before_scratch_cleanup", hooks.before_scratch_cleanup()),
+            ("before_retention_unlink", hooks.before_retention_unlink()),
+            ("after_retention_batch", hooks.after_retention_batch()),
+        ] {
+            assert!(
+                hook.as_mut().poll(&mut context).is_ready(),
+                "the production {point} point is ready at its first poll"
+            );
+        }
+
+        let playlist = tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                if let Ok((bytes, _)) = mgr.playlist_with_owner(&info.session_id).await {
+                    break bytes;
+                }
+                assert!(
+                    !session.failed.load(Acquire),
+                    "the copy failed: {:?}",
+                    session.failure_reason()
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the running session publishes its playlist");
+        let playlist = String::from_utf8(playlist).expect("UTF-8 playlist");
+        let first = playlist
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with('#'))
+            .expect("the published playlist names a segment")
+            .to_owned();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), mgr.segment(&info.session_id, &first))
+                .await
+                .expect("the segment request answers")
+                .expect("segment open")
+                .is_some(),
+            "the published segment is served"
+        );
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                mgr.delivery_details_bounded(std::slice::from_ref(&info.session_id), 1),
+            )
+            .await
+            .expect("the activity read answers")
+            .len(),
+            1
+        );
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                mgr.stop_session(&info.session_id, "shipped-shape")
+            )
+            .await
+            .expect("the stop answers"),
+            "the stop retires the session"
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !session.retirement_cleanup_finished.load(Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("retirement passes its handoff point and finishes its cleanup");
+        assert!(!mgr.sessions.lock().await.contains_key(&info.session_id));
+        let installed: &dyn std::any::Any = session.hooks.get();
+        assert!(
+            installed.is::<NoopSessionHooks>(),
+            "no production path fills the slot"
         );
     }
 
@@ -1652,11 +1792,302 @@
     }
 
     /// A background process that ignores the yield signal cannot turn a Play
-    /// request into an unbounded spinner. The production path uses five
-    /// seconds; this focused test supplies a small window to prove the same
-    /// deadline and error classification without sleeping for the full one.
+    /// request into an unbounded spinner — and it cannot refuse the viewer
+    /// either. The cooperative window is the worker's chance to checkpoint;
+    /// when it passes with the permit still held, the viewer is started over
+    /// it: within the hardware cap (the stuck slot still counts), as a live
+    /// permit (so the stuck worker is `background_blocked` from then on).
+    /// The production window is five seconds; this focused test supplies a
+    /// small one to prove the same deadline without sleeping for the full one.
     #[tokio::test]
-    async fn live_admission_fails_retryably_when_background_does_not_release() {
+    async fn live_admission_starts_over_a_background_permit_that_does_not_release() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work_dir = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work_dir.path().to_path_buf(),
+            EncoderCaps {
+                nvenc: true,
+                ..Default::default()
+            },
+            Pipeline::Cpu,
+        );
+        let producer = mgr
+            .admissions
+            .try_acquire(3, Priority::Background)
+            .expect("background permit");
+        let overruns_before = background_overruns("hardware");
+        let wait = Duration::from_millis(25);
+        let began = Instant::now();
+        let admission = mgr
+            .admit_live(
+                Encoder::Nvenc,
+                None,
+                Workload {
+                    source_height: 1080,
+                    codec: "h264",
+                    hdr: None,
+                    target_height: 720,
+                },
+                wait,
+                Priority::Live,
+            )
+            .await
+            .expect("the viewer starts over the stuck background permit");
+        let elapsed = began.elapsed();
+        assert!(elapsed >= wait, "started before the worker's cooperative window");
+        assert!(
+            elapsed < Duration::from_millis(150),
+            "polling overshot the bounded window: {elapsed:?}"
+        );
+        assert_eq!(admission.encoder, Encoder::Nvenc);
+        assert_eq!(
+            mgr.admissions.in_use(),
+            2,
+            "the stuck background slot still counts toward the cap"
+        );
+        assert!(
+            !mgr.admissions.live_is_waiting(),
+            "the admitted request kept its waiter registered"
+        );
+        // Cap 3, two held: numerically a slot remains, so the refusal below
+        // can only be the live permit parking background work.
+        assert!(
+            mgr.admissions
+                .try_acquire(3, Priority::Background)
+                .is_none(),
+            "a live permit now parks every background start"
+        );
+        assert!(
+            background_overruns("hardware") > overruns_before,
+            "the overrun is counted on the hardware pool"
+        );
+        drop(producer);
+        drop(admission);
+        assert_eq!(mgr.admissions.in_use(), 0, "both guards returned");
+    }
+
+    /// The `plurx_transcode_background_overrun_total{pool}` sample from the
+    /// live exposition. The counter is node-wide, so tests compare before and
+    /// after rather than asserting an absolute value.
+    fn background_overruns(pool: &str) -> u64 {
+        let prefix = format!("plurx_transcode_background_overrun_total{{pool=\"{pool}\"}} ");
+        crate::telemetry::prometheus()
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()))
+            .and_then(|value| value.trim().parse().ok())
+            .expect("the overrun counter is exposed")
+    }
+
+    /// Hardware capped by the stuck background hold itself: the ordinary
+    /// software decision is taken over the background reservation — the
+    /// `Admission::Software` arm of `admit_over_background`, not the pure
+    /// software loop.
+    #[tokio::test]
+    async fn live_admission_over_background_falls_to_software_when_the_cap_is_held() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work_dir = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work_dir.path().to_path_buf(),
+            EncoderCaps {
+                nvenc: true,
+                ..Default::default()
+            },
+            Pipeline::Cpu,
+        );
+        // The manager admits against its configured cap (the default, 2),
+        // so the stuck worker has to hold every slot of it.
+        let producers = (0..DEFAULT_MAX_HW_SESSIONS)
+            .map(|_| {
+                mgr.admissions
+                    .try_acquire(DEFAULT_MAX_HW_SESSIONS, Priority::Background)
+                    .expect("background permit")
+            })
+            .collect::<Vec<_>>();
+        let overruns_before = background_overruns("software");
+        let admission = mgr
+            .admit_live(
+                Encoder::Nvenc,
+                None,
+                Workload {
+                    source_height: 1080,
+                    codec: "h264",
+                    hdr: None,
+                    target_height: 720,
+                },
+                Duration::from_millis(25),
+                Priority::Live,
+            )
+            .await
+            .expect("the cap is held by the stuck worker; software carries the viewer");
+        assert_eq!(admission.encoder, Encoder::Software);
+        assert_eq!(
+            mgr.admissions.in_use(),
+            DEFAULT_MAX_HW_SESSIONS,
+            "no hardware slot was taken past the cap"
+        );
+        assert!(mgr.admissions.software_in_use() > 0, "the take is recorded");
+        assert!(background_overruns("software") > overruns_before);
+        drop(producers);
+        drop(admission);
+        assert_eq!(mgr.admissions.software_in_use(), 0);
+    }
+
+    /// The take over a background hold discounts that hold and nothing else:
+    /// a pool other viewers have spent is refused, bounded, exactly as it is
+    /// with no background worker in the picture. Otherwise one stuck worker
+    /// would let forced permits pile up until every session ran below
+    /// realtime.
+    #[tokio::test]
+    async fn live_admission_over_background_is_still_bounded_by_live_usage() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work_dir = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work_dir.path().to_path_buf(),
+            EncoderCaps {
+                nvenc: true,
+                ..Default::default()
+            },
+            Pipeline::Cpu,
+        );
+        let budget = mgr.software_budget().await;
+        let producers = (0..DEFAULT_MAX_HW_SESSIONS)
+            .map(|_| {
+                mgr.admissions
+                    .try_acquire(DEFAULT_MAX_HW_SESSIONS, Priority::Background)
+                    .expect("background permit")
+            })
+            .collect::<Vec<_>>();
+        // Live sessions already own the whole CPU budget (forced, because the
+        // ordinary take would wait out the background hold in this fixture).
+        let viewers = mgr.admissions.software_pool().take_forced(budget.max(1));
+        let error = mgr
+            .admit_live(
+                Encoder::Nvenc,
+                None,
+                Workload {
+                    source_height: 1080,
+                    codec: "h264",
+                    hdr: None,
+                    target_height: 720,
+                },
+                Duration::from_millis(25),
+                Priority::Live,
+            )
+            .await
+            .err()
+            .expect("a pool spent by live sessions is refused, background hold or not");
+        assert!(is_retryable_capacity_error(&error), "{error}");
+        assert!(error.contains("spent by live sessions"), "{error}");
+        assert!(
+            !mgr.admissions.live_is_waiting(),
+            "the refused request released its waiter"
+        );
+        drop(viewers);
+        drop(producers);
+        assert_eq!(mgr.admissions.in_use(), 0);
+        assert_eq!(mgr.admissions.software_in_use(), 0);
+    }
+
+    /// The software route's guard: only a live viewer starts over a
+    /// background CPU hold; a speculative start keeps the bounded refusal.
+    #[tokio::test]
+    async fn speculative_software_admission_is_still_refused_while_background_holds() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work_dir = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work_dir.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let budget = mgr.software_budget().await;
+        let hog = mgr
+            .admissions
+            .try_admit_software(budget, budget.max(1), Priority::Background)
+            .expect("background CPU permit");
+        let error = mgr
+            .admit_live(
+                Encoder::Software,
+                None,
+                Workload {
+                    source_height: 1080,
+                    codec: "h264",
+                    hdr: None,
+                    target_height: 720,
+                },
+                Duration::from_millis(25),
+                Priority::Speculative,
+            )
+            .await
+            .err()
+            .expect("a speculative start does not cross a background CPU hold");
+        assert!(error.contains("background encoding did not yield"), "{error}");
+        drop(hog);
+        assert_eq!(mgr.admissions.software_in_use(), 0);
+    }
+
+    /// The same stuck permit with no hardware headroom left: the live start
+    /// takes the ordinary software decision, forced, because the background
+    /// permit still reserves CPU it is not using. The overcommit is visible in
+    /// the pool rather than hidden.
+    #[tokio::test]
+    async fn live_admission_over_background_takes_software_forced_when_hardware_is_capped() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work_dir = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work_dir.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let budget = mgr.software_budget().await;
+        let hog = mgr
+            .admissions
+            .try_admit_software(budget, budget.max(1), Priority::Background)
+            .expect("background CPU permit");
+        let before = mgr.admissions.software_in_use();
+        let admission = mgr
+            .admit_live(
+                Encoder::Software,
+                None,
+                Workload {
+                    source_height: 1080,
+                    codec: "h264",
+                    hdr: None,
+                    target_height: 720,
+                },
+                Duration::from_millis(25),
+                Priority::Live,
+            )
+            .await
+            .expect("the viewer starts over the stuck CPU permit");
+        assert_eq!(admission.encoder, Encoder::Software);
+        assert!(
+            mgr.admissions.software_in_use() > before,
+            "the forced take is recorded, not hidden"
+        );
+        drop(hog);
+        drop(admission);
+        assert_eq!(mgr.admissions.software_in_use(), 0);
+    }
+
+    /// Nobody is waiting on a speculative start, so it keeps the bounded
+    /// refusal: only a live viewer earns a start over background ownership.
+    #[tokio::test]
+    async fn speculative_admission_is_still_refused_while_background_holds() {
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
@@ -1674,9 +2105,7 @@
             .admissions
             .try_acquire(2, Priority::Background)
             .expect("background permit");
-        let wait = Duration::from_millis(25);
-        let began = Instant::now();
-        let error = match mgr
+        let error = mgr
             .admit_live(
                 Encoder::Nvenc,
                 None,
@@ -1686,31 +2115,19 @@
                     hdr: None,
                     target_height: 720,
                 },
-                wait,
-                Priority::Live,
+                Duration::from_millis(25),
+                Priority::Speculative,
             )
             .await
-        {
-            Err(error) => error,
-            Ok(_) => panic!("live admission overlapped a stuck background permit"),
-        };
-        let elapsed = began.elapsed();
-        assert!(elapsed >= wait, "returned before the configured window");
-        assert!(
-            elapsed < Duration::from_millis(150),
-            "polling overshot the bounded window: {elapsed:?}"
-        );
+            .err()
+            .expect("a speculative start does not cross background ownership");
         assert!(is_retryable_capacity_error(&error), "{error}");
         assert!(
             error.contains("background encoding did not yield"),
             "{error}"
         );
-        assert!(
-            !mgr.admissions.live_is_waiting(),
-            "the failed request leaked its waiter"
-        );
         drop(producer);
-        assert_eq!(mgr.admissions.in_use(), 0, "the background guard returned");
+        assert_eq!(mgr.admissions.in_use(), 0);
     }
 
     /// Cancelling the HTTP request while it is waiting must withdraw the

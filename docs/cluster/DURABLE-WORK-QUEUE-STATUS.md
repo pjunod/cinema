@@ -1,7 +1,7 @@
 # Durable cluster work — build status
 
 **Status:** M1–M3 and E0–E3 merged into main · **Updated:** 2026-09-27 ·
-**Final implementation:** `82df7f59e` · **Production:** unchanged ·
+**Final implementation:** `82df7f59e` · **Production:** deployed in `55aa430fd` on all four nodes, 2026-09-27 (A-04 board row, exact-55aa fleet point) ·
 **Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) ·
 **E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) ·
 **E1–E3:** [#572 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/572) ·
@@ -10,6 +10,119 @@
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
 implementation is claimed; “compiled” does not mean tests passed.
+
+## Receipt pressure follow-up — the waiter bound is the next cliff
+
+**2026-09-28:** branch `fix/queue-receipt-pressure` (PR link in
+[STATUS.md](../../STATUS.md)), on top of #608. A second read of the same
+production database (nynuc, 16:27 UTC) while #608 was being built: besides the
+10,000 job rows, `background_job_waiters` held **11,947 of 16,384** — 10,775
+succeeded, 1,110 pending, 62 cancelled — and admission refuses at 16,384
+counting settled receipts, which the upkeep trigger only retired at
+`receipt_expires_ms` (seven days). At the rate the backfills settle work the
+receipt table would have closed the queue again within days, with #608
+deployed. Upkeep now compacts the oldest settled **internal** receipts
+(`retain_identity = 0`, scope not `user:%`, job not queued/running/cancelling)
+a page per pass once the table holds ≥ 15,360 rows — replicated **v64** /
+SQLite **v86**, the maintenance trigger replaced under its own name once more,
+generated from v63's copy so the two cannot drift (pinned by
+`receipt_pressure_literals_match_constants`, which also requires v86 to be the
+last migration that creates the trigger). User-scoped receipts (`user:<id>`,
+the only user scope the code mints) and identity-retaining receipts (every
+`analysis` fragment interest, so fragment retry budgets keep their window)
+are never compacted; internal producers re-derive demand from their domain
+tables (`background_embeddings`, `analysis_requests`, cache locations), so a
+compacted internal receipt cannot re-run finished work. Evidence:
+`waiter_pressure_compacts_internal_receipts_and_spares_protected_ones` drives
+a store at the cap through refusal → one page (oldest first, the 24 protected
+receipts spared) → reopened admission → convergence → quiet.
+
+The `pipeline version unavailable` rows the report led with are the
+jellyfin-ffmpeg 8.1.2 ↔ 8.1.3 digest flip, [#604](http://192.168.4.7:3000/noirr/plurx/issues/604).
+
+## Settled-history eviction follow-up
+
+**2026-09-28:** production observation on nynuc, m6 and nuc4 (build
+`g86d516219`): every enqueue answered `QueueFull` from three seconds after
+startup, `library intent was not accepted` once a minute per library, and
+Monarr's `POST /api/v1/scan` came back 500 for every import for a day. The
+replicated `background_jobs` table held exactly 10,000 rows: 6,219 succeeded
+semantic embeddings, 2,700 succeeded subtitle extractions, 971 queued and 5
+running — all created after the 2026-09-27 02:32 reset. The table bound
+(`MAX_RETAINED_JOBS`) counted settled history, and history is only retired
+after seven days, 128 rows per upkeep pass, so the queue would have stayed
+wedged until the prune began retiring rows on 2026-10-04, with almost nothing
+running. nuc3 logged no admissions at all in the same window.
+
+The fix (SQLite migration 85, replicated schema 63) replaces the enqueue and
+upkeep triggers: admission evicts the oldest evictable settled rows (no pending
+waiter, not fragment history a legacy import still needs) when the table is at
+its bound, upkeep evicts from 9,000 rows so the enqueue path rarely has to, and
+the admission statement answers `queue_full` for size only when nothing is
+evictable. Waiters keep their receipts; a settled row going early is the state
+the seven-day prune already produces. `POST /api/v1/scan` maps a refused
+admission to 503 with the refusal in the body instead of 500.
+
+Regression coverage: SQLite admission at the bound with eviction order and
+upkeep convergence below the watermark; the replicated store upgraded from the
+exact v62 predecessor with 10,000 settled rows present; the per-library bound
+still refuses and does so as `TargetError::Refused`; and the HTTP contract
+that a refused admission is a 503 naming `QueueFull`.
+
+## Activity and subtitle throughput follow-up
+
+**2026-09-27:** implemented in [PR #588](http://192.168.4.7:3000/noirr/plurx/pulls/588); final review addressed.
+The existing programme is merged; this follow-up addresses the production
+observation that one old job appears to run indefinitely.
+
+Read-only observations found four reachable workers (nynuc, m6, nuc4, nuc3),
+with successful subtitle attempts on m6, nuc4 and nuc3. Eight queued subtitle
+jobs referred to already-ready analysis requests. Their claim trigger rejected
+ownership, but the worker conservatively treated each database error as an
+uncertain commit and spent up to 30 seconds resolving it while holding local
+heavy-work admission. An older running row had an expired lease. The displayed
+age was time since enqueue, including waiting, rather than execution duration.
+
+The patch filters obsolete subtitle demand during candidate selection and
+rechecks it in the atomic claim. Ordinary refusal therefore does not enter the
+lost-reply wait. Bounded upkeep retires up to 128 obsolete queued or expired
+jobs per pass while preserving live leases, published results and terminal
+analysis history. SQLite migration 84 and replicated schema 62 preserve that
+history when the compatibility trigger settles obsolete work.
+
+Activity uses roster hostnames for owners, attempt history and repair targets.
+It labels total age **Since requested**, shows each attempt's duration, and
+labels an expired lease **awaiting recovery** with its previous owner.
+
+Concurrency remains one heavy background transform per node and two readers
+per storage domain. With no storage-domain mappings, the fallback source budget
+is shared cluster-wide. Foreground media admission can pause background work
+on a busy node; short jobs can finish between the queue's 15-second observations.
+This patch fixes obstructed workers and misleading observations; it does not
+increase storage or CPU admission limits. No production state was modified.
+
+Regression coverage includes a source change between selection and claim,
+obsolete request cleanup, preservation of live leases and terminal history,
+valid expired-job takeover eligibility, and rendered names/timing/expired leases.
+The final adversarial review found two issues: missing registration of the new
+replicated migration source, and stale open-detail observations. Both are
+addressed, including a running-to-terminal refresh regression. Current main
+was integrated before qualification; its Live TV migrations remain intact.
+Focused web rendering/refresh tests, the web type ratchet, documentation index,
+SQLite reconciliation/upgrade and the migration-selector regression passed.
+Subtitle source-change, orphan-demand and ownership/publication contracts passed
+against SQLite and real three-voter Hiqlite. The source-change fixture was
+corrected to respect existing automatic cancellation; historical ready-request
+orphans are independently reproduced through the replicated SQL log.
+The first fast-lane run caught the maintained downgrade-fixture census still
+counting 39 post-baseline migrations. It now accounts for v84; the existing
+queue-schema removal helper already removes the replacement trigger in both
+fixtures. The census and the actual v43 downgrade/reopen test passed locally.
+The current PR and its checks are the promotion record. A broader historical
+v10 migration test failed while constructing its old fixture: it drops
+`cluster_fragment_index_jobs.index_diagnostic_json` while a later queue trigger
+still references it. That unrelated fixture was not changed. The focused
+replicated regression upgrades the exact v61 predecessor with the orphan present.
 
 ## Delivery progress
 

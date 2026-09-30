@@ -3175,6 +3175,9 @@
   /* Library channels reuse the guide card language, not the tuner controller. */
   .lc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
   .lc-card{display:flex;flex-direction:column;gap:10px;min-height:190px}
+  .lc-card.lc-picked{border-color:var(--bad)}.lc-card .lc-select{width:18px;height:18px;margin:0 4px 0 0;flex:none}
+  .lc-card .lc-delete{color:var(--bad)}
+  .lc-bulk{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 14px;min-height:40px}.lc-bulk label{display:flex;align-items:center;gap:8px}
   .lc-programme>span{min-width:0;overflow-wrap:anywhere}
   .lc-now{font-size:18px;font-weight:700}.lc-next,.lc-time{color:var(--muted);font-size:13px}
   .lc-guide{display:grid;gap:8px}.lc-programme{display:grid;grid-template-columns:100px minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px;border-top:1px solid var(--line)}
@@ -3269,6 +3272,9 @@
 .watch-browser .watch-trks button.watch-fold,.watch-details .watch-trks button.watch-fold,.watch-browser .watch-rail-head button.watch-fold{font:inherit;font-size:11px;color:var(--muted);background:none;border:0;box-shadow:none;letter-spacing:0;min-height:0;padding:2px 6px;cursor:pointer;line-height:1}
 .watch-browser .watch-trks button.watch-fold:hover,.watch-details .watch-trks button.watch-fold:hover,.watch-browser .watch-rail-head button.watch-fold:hover{color:var(--text);background:none;box-shadow:none!important}
 .watch-lower{margin-top:28px;min-width:0}
+.watch-episode-disclosure>summary{cursor:pointer;font-size:18px;font-weight:600;min-height:44px;display:list-item;align-content:center}
+.watch-episode-disclosure>summary:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:4px}
+.watch-episode-disclosure[open]>summary{margin-bottom:12px}
 .watch-season select{margin-left:8px;max-width:200px}
 .watch-episodes{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:18px}
 /* Chapter rail */
@@ -3409,3 +3415,57 @@
 /* Bootstrap failures need a surface even when the application never renders. */
 .boot-sentinel{position:fixed;z-index:10000;left:16px;right:16px;top:16px;padding:14px 18px;border:1px solid #a64b58;border-radius:10px;background:#28171c;color:#fff;box-shadow:0 8px 30px #0008;font:600 15px/1.4 system-ui,sans-serif}
 .boot-sentinel button{margin-left:12px;padding:6px 12px;border:1px solid #fff6;border-radius:7px;background:#fff1;color:#fff;font:inherit;cursor:pointer}
+
+/* Durable work stays compact while the live activity above it refreshes. */
+.durable-queue{margin:24px 0;padding:0;min-width:0}
+.durable-queue>summary{cursor:pointer;padding:20px 24px;list-style-position:inside}
+.durable-heading{display:inline-flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;width:calc(100% - 24px);vertical-align:middle}
+.durable-heading-title{font-size:20px;font-weight:650}
+.durable-overview{display:flex;flex-wrap:wrap;gap:16px;color:var(--muted);font-size:13px}
+.durable-count b{color:var(--text);font-variant-numeric:tabular-nums}
+.durable-body{padding:0 24px 20px;border-top:1px solid var(--line)}
+.durable-toolbar{display:flex;flex-wrap:wrap;align-items:end;gap:12px;padding-top:18px}
+.durable-toolbar label{display:flex;flex-direction:column;gap:5px;color:var(--muted);font-size:12px}
+.durable-toolbar select{min-width:100px}
+.durable-toolbar>button{margin-left:auto}
+.durable-table{overflow-x:auto}
+.durable-table table{width:100%;font-size:13px}
+.durable-table td{vertical-align:top;padding-top:14px;padding-bottom:14px}
+.durable-work{min-width:220px;max-width:380px}
+.durable-title{display:block;text-align:left;white-space:normal;overflow-wrap:anywhere;font-size:14px;font-weight:600;padding:0;border:0}
+.durable-meta{color:var(--muted);font-size:12px;margin-top:5px;overflow-wrap:anywhere}
+.durable-state{white-space:normal}
+.durable-state.running,.durable-state.succeeded{color:var(--good);border-color:var(--good)}
+.durable-state.failed,.durable-state.expired{color:var(--bad);border-color:var(--bad)}
+.durable-state.cancelling{color:var(--warn);border-color:var(--warn)}
+.durable-age{white-space:nowrap;font-variant-numeric:tabular-nums}
+.durable-reason{max-width:240px;overflow-wrap:anywhere;color:var(--muted)}
+.durable-pagination{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid var(--line);padding-top:16px;margin-top:12px}
+.durable-pagination>span{font-size:12px;color:var(--muted)}
+.durable-empty{padding:24px 0;color:var(--muted)}
+.durable-repairs,.durable-detail{margin-top:20px;padding:16px;background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius);overflow-wrap:anywhere}
+.durable-repairs>summary{cursor:pointer}
+.durable-detail{font-size:13px;line-height:1.7}
+.durable-queue summary:focus-visible{outline:2px solid var(--accent);outline-offset:-3px}
+@media(max-width:600px){
+  .durable-queue>summary{padding:16px}
+  .durable-body{padding:0 16px 16px}
+  .durable-heading{gap:8px}
+  .durable-heading-title{font-size:18px}
+  .durable-overview{gap:10px}
+  .durable-pagination>.row{width:100%;justify-content:space-between}
+}
+
+.durable-detail-row .durable-detail{margin-top:0}
+@media(max-width:600px){
+  .durable-queue table,.durable-queue tbody{display:block;width:100%}
+  .durable-queue thead{display:none}
+  .durable-queue tr{display:block;border-bottom:1px solid var(--line);padding:12px 0}
+  .durable-queue tr[hidden]{display:none}
+  .durable-queue td{display:block;border:0;padding:5px 0;min-width:0;max-width:none;overflow-wrap:anywhere}
+  .durable-queue td[data-label]{display:grid;grid-template-columns:100px minmax(0,1fr);gap:8px;align-items:start}
+  .durable-queue td[data-label]::before{content:attr(data-label);color:var(--muted);font-size:12px}
+  .durable-queue td[data-label]>.pill{justify-self:start}
+  .durable-queue td[data-label]>small{grid-column:2}
+  .durable-queue .durable-detail-row{padding:0 0 12px}
+}

@@ -53,6 +53,7 @@ import tv.plurx.app.ui.theme.PlurxTheme
 import tv.plurx.app.livetv.LiveTvPlayer
 import tv.plurx.app.livetv.LiveTvScreen
 import tv.plurx.app.livetv.LiveTvDeveloperScreen
+import tv.plurx.app.livetv.LiveTvSettingsScreen
 import tv.plurx.app.livetv.DvrApi
 import tv.plurx.app.livetv.DvrController
 import tv.plurx.app.livetv.DvrRecordingsScreen
@@ -268,7 +269,12 @@ private fun MainNav(
             )
         }
         composable("settings") { entry ->
-            SettingsScreen(vm = vm, onBack = { nav.popBackStackFrom(entry) }, onOpenDeveloper = { nav.navigate("developer") })
+            SettingsScreen(
+                vm = vm,
+                onBack = { nav.popBackStackFrom(entry) },
+                onOpenDeveloper = { nav.navigate("developer") },
+                onOpenLiveTvSettings = { nav.navigate("live-tv-settings") },
+            )
         }
         composable(
             "live-tv?channel={channel}",
@@ -338,6 +344,9 @@ private fun MainNav(
         }
         composable("developer") { entry ->
             LiveTvDeveloperScreen(origin = vm.origin, onBack = { nav.popBackStackFrom(entry) })
+        }
+        composable("live-tv-settings") { entry ->
+            LiveTvSettingsScreen(origin = vm.origin, onBack = { nav.popBackStackFrom(entry) })
         }
         composable("downloads") { entry ->
             DownloadsScreen(

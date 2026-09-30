@@ -422,7 +422,41 @@ function librariesPanel(libs,status,settings,dv){
     <div class="card" style="padding:8px 10px 4px">
       <table><thead><tr><th>Name</th><th>Kind</th><th>Paths</th><th>Status</th><th></th></tr></thead>
       <tbody>${rows}</tbody></table>
-    </div>`;
+    </div>${storageDomainsCard()}`;
+}
+// Shared storage budgets. Graduated from Developer on 2026-09-28 under Paul's
+// Developer lifecycle: durable cluster work is deployed and its plan has no
+// fleet receipt to wait for, so the editor lives beside the roots it names.
+function storageDomainsCard(){
+  return setCard(`${cardHead("Shared storage budgets","Give mount paths on the same disk or NAS the same domain name.",'<span class="pill">2 readers per domain</span>')}
+    <p class="hint">An empty domain uses the shared default. A library with multiple roots reserves each domain before starting. Library jobs also share provider concurrency. Maintenance requests are paced across nodes: TMDB at most one dispatch per 100 ms, AniList one per 2.1 seconds, with shared server cooldowns.</p>
+    <div id="storage-domain-roots"><button type="button" class="ghost" onclick="loadStorageDomains(this)">Load library roots</button></div>
+    <p class="hint">Save identity changes while background jobs are idle so existing reservations keep their meaning. Two readers share each domain.</p>
+    <div id="storage-domain-error" class="err" role="alert"></div>
+    <button type="button" class="ghost" onclick="saveStorageDomains(this)">Save storage domains</button>`);
+}
+async function loadStorageDomains(btn){
+  btn.disabled=true;
+  const error=document.getElementById("storage-domain-error");if(error)error.textContent="";
+  try{
+    const data=await api("/cluster/work/storage-domains");
+    const roots=document.getElementById("storage-domain-roots");if(!roots)return;
+    roots.innerHTML=(data.libraries||[]).flatMap(library=>(library.paths||[]).map(root=>{
+      const mapping=(data.mappings||[]).find(row=>String(row.library_id)===String(library.id)&&row.root_path===root);
+      return `<label class="field">${esc(library.name)} · ${esc(root)}<input class="storage-domain-input" data-library="${esc(String(library.id))}" data-root="${esc(root)}" maxlength="64" value="${esc(mapping?mapping.domain_id:"")}" placeholder="Shared default"></label>`;
+    })).join("")||'<p class="hint">No library roots configured.</p>';
+    roots.dataset.loaded="true";
+  }catch(e){if(error)error.textContent=e.message||String(e);btn.disabled=false;}
+}
+async function saveStorageDomains(btn){
+  const roots=document.getElementById("storage-domain-roots"),error=document.getElementById("storage-domain-error");
+  if(error)error.textContent="";
+  if(!roots||roots.dataset.loaded!=="true"){if(error)error.textContent="Load library roots before saving.";return;}
+  const mappings=Array.from(roots.querySelectorAll(".storage-domain-input")).map(element=>{const input=/** @type {HTMLInputElement} */(element);return {library_id:Number(input.dataset.library),root_path:input.dataset.root,domain_id:input.value.trim()};}).filter(row=>row.domain_id);
+  btn.disabled=true;
+  try{await api("/cluster/work/storage-domains",{method:"PUT",body:mappings});toast("Storage domains saved");}
+  catch(e){if(error)error.textContent=e.message||String(e);}
+  finally{btn.disabled=false;}
 }
 // Which row has its drawer open: a library id, "new" for the add form, or
 // null. One at a time. Module state, so a status tick cannot shut it; reset
@@ -597,7 +631,9 @@ function playbackPanel(settings,readiness){
       ${togRow("autonext","Auto-play the next episode when one finishes","",autoNextOn(),'onchange="setAutoNext(this.checked)"')}
       <div class="tog"><span>Measured playback limits<small>When an original stream loses visible frames, this browser remembers that exact media load — codec/profile, resolution, bit depth, dynamic range, and a 10 Mb/s bitrate band — and lets <b>Auto</b> transcode it next time instead of stuttering first. A measurement expires after 30 days; <b>Quality → Original</b> always bypasses it.</small></span></div>
       <div class="row" id="dlrow">${decodeLimitsSummary()}</div>`,{local:true});
-  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${local}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}${liveHlsRecoveryCard(settings,readiness)}${playbackProtocolCard(settings,readiness)}</details>`;
+  // Chapter thumbnails and both decoder controls graduated from Developer on
+  // 2026-09-28 (Paul's Developer lifecycle); each keeps its own Save.
+  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${local}${chapterThumbnailsCard(settings,readiness)}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}${liveHlsRecoveryCard(settings,readiness)}${playbackProtocolCard(settings,readiness)}${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}</details>`;
 }
 
 function searchSettingsCard(readiness){

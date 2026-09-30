@@ -27,11 +27,11 @@ merges after it. Once merged, the native tick reads `playback_auto_abr`, the
 replicated setting that already exists, exactly as the web tick does.
 
 At the design baseline, `playback_auto_abr` was a Playback-panel toggle
-with no readiness information. Follow-up F-1 (§4a) moves that existing
-replicated setting to Developer and adds dated advisory evidence on the
-`codex/adaptive-developer-advisory` branch (2026-09-25). The branch has not
-merged yet. Readiness does not disable the toggle or alter the controller's
-runtime checks; this is the location Paul requested before M3.
+with no readiness information. Follow-up F-1 (§4a) moved that existing
+replicated setting to Settings → Developer with dated advisory evidence; it
+merged through PR #506 (`44cdfccc7`). Readiness does not disable the toggle
+or alter the controller's runtime checks; this is the location Paul
+requested before M3.
 
 ## 1. What is already here
 
@@ -212,14 +212,20 @@ Two more, specific to the sequence:
 ## 4a. Follow-ups
 
 - **F-1 — put `playback_auto_abr` in Settings → Developer with advisory
-  readiness (implemented 2026-09-25 on `codex/adaptive-developer-advisory`).**
+  readiness (merged through PR #506 as `44cdfccc7`).**
   The project rule places optional functionality in Developer
   with readiness information that informs and never gates. The Developer
-  card now reports the browser controller and dated native/trace evidence;
+  card reports the browser controller and dated native/trace evidence;
   the same server setting remains the one enable path. The dated rows must be
-  refreshed when new platform traces or native controllers ship. This is
-  Paul's requested location and does not add a code gate. It remains
-  unmerged and awaits the consolidated PR's review and fast lane.
+  refreshed when new platform traces or native controllers ship (last
+  rechecked against the workboard on 2026-09-28). This is Paul's requested
+  location and does not add a code gate.
+- **F-2 — graduation out of Developer.** Under Paul's Developer lifecycle
+  (2026-09-28), the card leaves Developer when A-04's D3 matrix is complete
+  (Safari, HDR, Apple and Android physical traces) and this plan's native
+  controllers ship. Paul then chooses the destination: back to Playback as a
+  permanent toggle, or no toggle at all because adjusting while playing is
+  simply how Auto works. The card prints this condition.
 
 ## 5. Verification
 

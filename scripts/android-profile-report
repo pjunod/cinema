@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Bind paired release Macrobenchmark/Media3 samples; never synthesize evidence."""
+import argparse
+import base64
+import hashlib
+import json
+import math
+import pathlib
+import re
+import statistics
+
+
+def samples(values):
+    if not isinstance(values, list) or len(values) != 5:
+        raise ValueError("Require exactly five raw samples per metric/mode")
+    if any(isinstance(v, bool) or not isinstance(v, (float, int)) or
+           not math.isfinite(v) or v < 0 for v in values):
+        raise ValueError("Samples must be finite nonnegative milliseconds")
+    return values
+
+
+def build_report(without, required, macrobenchmark, signed, macrobenchmark_sha256):
+    identity = ("source_sha", "apk_sha256", "package", "version_code", "device_alias", "device_model", "sdk", "device_fingerprint", "device_build_device", "run_id")
+    if any(without.get(k) != required.get(k) for k in identity):
+        raise ValueError("Pair must use identical source, APK, release counter and physical device")
+    if (without.get("schema") != "plurx_release_profile_ttff_v2" or
+            required.get("schema") != without.get("schema") or
+            without.get("compilation_mode") != "none" or required.get("compilation_mode") != "required" or
+            without.get("startup_mode") != "COLD" or required.get("startup_mode") != "COLD" or
+            without.get("iterations") != 5 or required.get("iterations") != 5):
+        raise ValueError("Require five cold iterations for None and Partial(Require,warmup=0)")
+    for key in ("device_alias", "device_model", "device_fingerprint", "device_build_device", "first_frame_boundary"):
+        if not isinstance(without.get(key), str) or not without[key].strip():
+            raise ValueError(f"Require nonempty {key}")
+    if required.get("first_frame_boundary") != without["first_frame_boundary"]:
+        raise ValueError("Pair must use the same measured first-frame boundary")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", without["device_alias"]):
+        raise ValueError("Require a non-secret device alias")
+    for key, minimum in (("sdk", 28), ("version_code", 1)):
+        value = without.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ValueError(f"Require valid integer {key}")
+    if (without.get("package") != "tv.plurx.app" or signed.get("package") != without["package"] or
+            signed.get("version_code") != without["version_code"] or
+            signed.get("artifact_sha256") != without["apk_sha256"] or
+            signed.get("source_candidate") != without["source_sha"] or
+            signed.get("signature_verified") is not True or signed.get("debuggable") is not False):
+        raise ValueError("Samples must bind the independently signed non-debuggable release receipt")
+    if (not isinstance(without.get("source_sha"), str) or not isinstance(without.get("apk_sha256"), str) or
+            not re.fullmatch(r"[0-9a-f]{40}", without["source_sha"]) or not re.fullmatch(r"[0-9a-f]{64}", without["apk_sha256"])):
+        raise ValueError("Require full source and APK identities")
+    if not isinstance(without.get("run_id"), str) or not re.fullmatch(r"[0-9a-f]{32}", without["run_id"]):
+        raise ValueError("Require the generated benchmark invocation ID")
+    fields = [str(without[k]) for k in ("source_sha", "apk_sha256", "package", "version_code", "device_alias",
+                                        "device_model", "sdk", "device_fingerprint", "device_build_device")]
+    binding = hashlib.sha256("".join(f"{len(v.encode('utf-8'))}:{v}" for v in fields).encode("utf-8")).hexdigest()
+    benchmark_binding = base64.urlsafe_b64encode(bytes.fromhex(binding)).decode("ascii").rstrip("=")
+    for ttff in (without, required):
+        if ttff.get("invocation_binding_sha256") != binding:
+            raise ValueError("Invocation binding does not match full source/APK/device identity")
+        if (not isinstance(macrobenchmark_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", macrobenchmark_sha256) or
+                ttff.get("macrobenchmark_sha256") != macrobenchmark_sha256):
+            raise ValueError("Actual original Macrobenchmark bytes differ from harness-sealed invocation")
+    try:
+        build = macrobenchmark["context"]["build"]
+        observed = (build["model"], build["fingerprint"], build["device"], build["version"]["sdk"])
+    except (KeyError, TypeError):
+        raise ValueError("Require actual Macrobenchmark device context") from None
+    if observed != (without["device_model"], without["device_fingerprint"], without["device_build_device"], without["sdk"]):
+        raise ValueError("Actual Macrobenchmark device context differs from paired measurements")
+    if isinstance(observed[3], bool) or not isinstance(observed[3], int):
+        raise ValueError("Require integer SDK in actual Macrobenchmark context")
+    if not isinstance(macrobenchmark.get("benchmarks"), list) or len(macrobenchmark["benchmarks"]) != 2:
+        raise ValueError("Require exactly this invocation's two original benchmark results")
+    modes = {}
+    for mode, ttff, name in (("none", without, "withoutProfileFiveColdIterations"),
+                            ("required", required, "requiredProfileFiveColdIterations")):
+        runs = [b for b in macrobenchmark.get("benchmarks", [])
+                if b.get("className") == "tv.plurx.profile.ReleaseProfileMeasurement" and
+                b.get("name") == f"{name}[run={without['run_id']},binding={benchmark_binding}]" and
+                b.get("params") == {"run": without["run_id"], "binding": benchmark_binding}]
+        if len(runs) != 1:
+            raise ValueError("Missing or ambiguous matching Macrobenchmark result")
+        if (type(runs[0].get("repeatIterations")) is not int or type(runs[0].get("warmupIterations")) is not int or
+                runs[0]["repeatIterations"] != 5 or runs[0]["warmupIterations"] != 0):
+            raise ValueError("Require original five measured iterations and zero warmups")
+        try:
+            startup = samples(runs[0]["metrics"]["timeToInitialDisplayMs"]["runs"])
+        except (KeyError, TypeError):
+            raise ValueError("Require original startup metric samples") from None
+        first_frame = samples(ttff.get("media3_ttff_ms"))
+        modes[mode] = {"startup_initial_display_ms": startup, "startup_median_ms": statistics.median(startup),
+                       "media3_ttff_ms": first_frame, "media3_ttff_median_ms": statistics.median(first_frame)}
+    return {"schema": "plurx_release_profile_measurement_v2",
+            "identity": {k: without[k] for k in identity}, "iterations_per_mode": 5,
+            "invocation_binding_sha256": binding, "macrobenchmark_sha256": macrobenchmark_sha256,
+            "modes": modes, "first_frame_boundary": without.get("first_frame_boundary"),
+            "acceptance": "requires physical Lenovo attestation, generated app profile provenance and retained traces",
+            "measured_gain_claimed": False}
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    for option in ("without_ttff", "required_ttff", "macrobenchmark", "signed_artifact_receipt", "output"):
+        p.add_argument("--" + option.replace("_", "-"), type=pathlib.Path, required=True)
+    a = p.parse_args()
+    inputs = [a.without_ttff, a.required_ttff, a.macrobenchmark, a.signed_artifact_receipt]
+    raw_inputs = [f.read_bytes() for f in inputs]
+    report = build_report(*(json.loads(blob) for blob in raw_inputs),
+                          hashlib.sha256(raw_inputs[2]).hexdigest())
+    report["inputs"] = [{"path": str(f), "sha256": hashlib.sha256(blob).hexdigest()}
+                        for f, blob in zip(inputs, raw_inputs)]
+    with a.output.open("x") as f:
+        json.dump(report, f, indent=2, allow_nan=False)
+        f.write("\n")
+
+
+if __name__ == "__main__":
+    main()

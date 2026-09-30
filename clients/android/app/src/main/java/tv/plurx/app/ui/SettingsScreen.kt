@@ -19,6 +19,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.LaunchedEffect
+import tv.plurx.app.diagnostics.readReleaseProfileStatus
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -67,7 +69,12 @@ internal fun appVersionLabel(versionName: String, versionCode: Int): String =
     "$versionName ($versionCode)"
 
 @Composable
-fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDeveloper: () -> Unit = {}) {
+fun SettingsScreen(
+    vm: AppViewModel,
+    onBack: () -> Unit,
+    onOpenDeveloper: () -> Unit = {},
+    onOpenLiveTvSettings: () -> Unit = {},
+) {
     val preferences by vm.preferences.collectAsStateWithLifecycle()
     val offlineRecords by vm.offlineRecords.collectAsStateWithLifecycle()
     val offlineBookRecords by vm.offlineBookRecords.collectAsStateWithLifecycle()
@@ -76,6 +83,8 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDeveloper: () -> 
     var audio by remember { mutableStateOf(LANGS.firstOrNull { it.first == vm.audioLang } ?: LANGS.first()) }
     var sub by remember { mutableStateOf(SUB_LANGS.firstOrNull { it.first == vm.subLang } ?: SUB_LANGS.first()) }
     var confirmingSignOut by remember { mutableStateOf(false) }
+    var profileStatus by remember { mutableStateOf("Checking release profile status…") }
+    LaunchedEffect(Unit) { profileStatus = readReleaseProfileStatus() }
     val context = LocalContext.current
     val deviceSettings = remember(context) { SettingsStore(context) }
     val liveTvLayoutValue by deviceSettings.liveTvLayout.collectAsStateWithLifecycle(initialValue = null)
@@ -215,6 +224,16 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDeveloper: () -> 
                 }
             }
 
+            // Server Live TV settings, as on the web's Settings → Live TV. The
+            // tuner, guide, recording and Library channel cards used to sit in
+            // Developer; they are finished settings, so they live here.
+            SettingsSection(
+                "Live TV",
+                "Tuner, programme guide, recording and Library channels for this server. Administrator access is required.",
+            ) {
+                PreferenceAction("Tuner, guide, recording and Library channels", onClick = onOpenLiveTvSettings)
+            }
+
             SettingsSection("Account", null) {
                 LabeledValueRow("Signed in as", vm.username ?: "—")
                 LabeledValueRow("Server", vm.serverName ?: vm.origin)
@@ -229,7 +248,11 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDeveloper: () -> 
             }
 
             SettingsSection("Developer", "Runtime enablement with the requirements needed to use each feature safely.") {
-                PreferenceAction("HDHomeRun Live TV setup and enablement", onClick = onOpenDeveloper)
+                PreferenceAction("Enable Live TV and match television refresh rate", onClick = onOpenDeveloper)
+                Text("Release startup profile", style = MaterialTheme.typography.titleMedium)
+                Text(profileStatus, style = MaterialTheme.typography.bodySmall, color = Muted)
+                Text("Profile capture needs a dedicated paired account, a controlled movie and physical release measurements. Profile readiness is advisory and changes no feature enablement.", style = MaterialTheme.typography.bodySmall, color = Muted)
+                Text(RELEASE_PROFILE_GRADUATION, style = MaterialTheme.typography.bodySmall, color = Muted)
                 PreparedReplacementEnable(
                     enabled = preferences.preparedReplacement,
                     isTelevision = isTelevision(LocalContext.current),
@@ -250,6 +273,22 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDeveloper: () -> 
         }
     }
 }
+
+/** The web's line for the same device-local permission, adapted to a device. */
+internal const val PREPARED_REPLACEMENT_GRADUATION: String =
+    "Leaves Developer when: prepared quality handoff graduates (the quality-switch continuity " +
+        "build finishes M2-Android, M1-web and M3). Then: this device's switch moves with it to " +
+        "Settings → Playback."
+
+/**
+ * What the Release startup profile entry waits on: D-03's M10 (the Baseline
+ * Profile measured on the release APK, ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-
+ * BUILD §5.10). The entry has no switch, so it is removed when that lands.
+ */
+internal const val RELEASE_PROFILE_GRADUATION: String =
+    "Leaves Developer when: D-03's M10 Baseline Profile is measured on the Lenovo release APK " +
+        "(five-run cold-start and first-frame medians with and without the profile). " +
+        "Then: this entry is removed; the profile ships in every release build and has no switch."
 
 /**
  * Settings → Developer → "Prepared replacement".
@@ -322,6 +361,12 @@ private fun PreparedReplacementEnable(
                     modifier = Modifier.padding(horizontal = 8.dp),
                 )
             }
+        Text(
+            PREPARED_REPLACEMENT_GRADUATION,
+            color = Muted,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(horizontal = 8.dp),
+        )
         preparedReplacementRequirements(
             isTelevision = isTelevision,
             // The successor inherits the incumbent's tunneling, and tunneling

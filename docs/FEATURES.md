@@ -120,9 +120,16 @@ books, and home media.
   fenced ownership, retries, cancellation and verified publication. Matching
   fragment demands share one build with separate deliveries. Exact local
   offline recipes can join running preparation without another encoder.
-  Activity exposes job history and explicit retry; Developer enable controls
-  show advisory requirements. Library scan/refresh requests and results are
-  durable; ready learners can execute immutable preparation. One heavy worker
+  Activity exposes job history and explicit retry in a collapsible panel with
+  running, queued and failed counts. Pages show 20 jobs by default (10 or 50
+  optional), with First, Previous and Next controls; folds and the selected
+  page survive live refreshes. Job details expand directly beneath their row.
+  Pending library scans say “Queued · waiting for a worker” in Settings and the
+  activity indicator; remote execution uses the replicated job state. Developer enable
+  controls show advisory requirements. Library scan/refresh requests and results are
+  durable; repeated scheduled ticks share one pending request while waiting for
+  a worker. Manual and targeted requests keep separate identities. Ready
+  learners can execute immutable preparation. One heavy worker
   per node, two readers per named storage domain, and shared provider pacing
   protect playback and shared resources. Nodes reuse content/model-verified
   semantic vectors and distribute pure leaf probes while each scan retains
@@ -389,6 +396,10 @@ the physical Apple/Android device matrix remains a release acceptance step.
 **What it does:** decides how each file must be delivered to the current device,
 and delivers it. Full decision logic is [ARCHITECTURE.md](ARCHITECTURE.md) §3.
 
+- **Collapsible episode browser:** web TV playback starts with Episodes closed.
+  Open it by mouse or keyboard to select a season, browse cards or rows, and
+  play another episode. Folding it preserves the selection and playback;
+  starting a new watch session closes it again.
 - **Three methods, chosen automatically** and reported at `/decision`:
   - **Direct play** — HTTP range serving of the untouched file; zero transcode
     CPU. The goal state.
@@ -866,17 +877,20 @@ browse and play directly against plurx — validated end-to-end with
 
 **Web settings:** Live TV owns tuner enablement, owner recovery, guide
 configuration, recording, library-channel playback and subject matching.
-Playback owns player defaults and advanced server delivery, including Live
-HLS recovery and protocol compatibility. Analysis owns the durable index queue.
+Playback owns player defaults, chapter thumbnails, and advanced server
+delivery, including Live HLS recovery, protocol compatibility, verified decode
+artifacts and automatic decode recovery. Analysis owns the durable index queue.
 Metadata owns search and classification settings. Maintenance owns Windows
 conversion and runtime readiness alongside Dolby Vision disk conversion.
 Cluster owns automatic transport-recovery guidance.
 
-Developer contains only experiments awaiting device qualification: prepared
-quality handoff (including the browser's second-player permission), subtitle
-failure refusal, verified decode artifacts and automatic decoder recovery.
-The recently shipped seek-scratch diagnostic card remains while native-device
-evidence is incomplete. Always-on startup recovery, HEVC admission, source verification and the playback
+Developer holds only features that are not yet fully active or fully
+tested, and every card there says what it is waiting on before it leaves:
+to its proper settings section when a permanent on/off makes sense,
+otherwise by losing its toggle once the feature is simply on. The current
+cards and what each waits on are audited in
+[SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md](features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md#developer-lifecycle--every-card-graduates).
+Always-on startup recovery, HEVC admission, source verification and the playback
 surface contract need no rollout cards or enable switches. Each server card
 saves only its own settings; the browser override saves locally. Readiness is
 expandable and advisory: missing or failed evidence never disables a toggle,

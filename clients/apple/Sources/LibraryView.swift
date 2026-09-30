@@ -20,6 +20,8 @@ struct LibraryView: View {
     @State private var filterGeneration = 0
     @State private var pageGeneration = 0
     @State private var driveTask: Task<Void, Never>?
+    @State private var gridColumns = 1
+    @State private var visibleIndices: Set<Int> = []
 
 
     private var sorts: [LibrarySort] {
@@ -70,6 +72,7 @@ struct LibraryView: View {
             fetchTask?.cancel()
             pageGeneration += 1
             requestedThrough = 0
+            visibleIndices.removeAll()
         }
     }
 
@@ -128,8 +131,19 @@ struct LibraryView: View {
                     }
                     .posterButtonStyle()
                     .onAppear {
-                        Task { await fetchUntil(index + 12) }
+                        visibleIndices.insert(index)
+                        Task { await fetchUntil(LibraryGridPrefetch.exclusiveCount(lastVisibleIndex: index, columns: gridColumns)) }
                     }
+                    .onDisappear { visibleIndices.remove(index) }
+                }
+            }
+            .onGeometryChange(for: Int.self) { geometry in
+                LibraryGridPrefetch.columns(width: Double(geometry.size.width),
+                                            minimumWidth: Double(model.posterSize.posterWidth), spacing: 18)
+            } action: { columns in
+                gridColumns = columns
+                if let last = visibleIndices.max() {
+                    Task { await fetchUntil(LibraryGridPrefetch.exclusiveCount(lastVisibleIndex: last, columns: columns)) }
                 }
             }
         }

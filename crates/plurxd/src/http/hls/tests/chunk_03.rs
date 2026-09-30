@@ -450,7 +450,7 @@
             crate::playback_control::ControlAction::Prepare { .. }
         ));
 
-        fail_next_staged_read(&route.incarnation_id);
+        fail_next_staged_read(&fixture.state, &route.incarnation_id);
         let (status, body) = control_body(
             control_local_inner(
                 &fixture.state,
@@ -469,7 +469,7 @@
 
         tokio::time::sleep(std::time::Duration::from_millis(260)).await;
         request.sequence = 2;
-        fail_next_staged_read(&route.incarnation_id);
+        fail_next_staged_read(&fixture.state, &route.incarnation_id);
         let (status, body) = control_body(
             control_local_inner(
                 &fixture.state,
@@ -525,7 +525,7 @@
         .await;
 
         let mut request = control_request(route.incarnation_id.clone());
-        fail_next_staged_read(&route.incarnation_id);
+        fail_next_staged_read(&fixture.state, &route.incarnation_id);
         let (status, body) = control_body(
             control_local_inner(
                 &fixture.state,
@@ -852,7 +852,7 @@
         // spawned future receives its first poll.
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
-                if take_preparation_candidate_completion(&route.incarnation_id) {
+                if take_preparation_candidate_completion(&fixture.state, &route.incarnation_id) {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -1036,7 +1036,7 @@
                 .then(unix_ms),
         });
         if transient_failures > 0 {
-            fail_next_preparation_settlements(&route.incarnation_id, transient_failures);
+            fail_next_preparation_settlements(&fixture.state, &route.incarnation_id, transient_failures);
         }
         let (status, body) = control_body(
             control_local_inner(
@@ -1179,6 +1179,11 @@
         )
         .await;
         assert_eq!(
+            untaken_preparation_settlement_faults(&fixture.state, &route.incarnation_id),
+            0,
+            "the settlement on this state took the armed transient failure and retried"
+        );
+        assert_eq!(
             fixture
                 .state
                 .store
@@ -1246,7 +1251,7 @@
             committed_media_origin_ms: prepare_body["action"]["media_origin_ms"].as_i64(),
             first_frame_unix_ms: Some(unix_ms()),
         });
-        delay_next_preparation_settlement(&route.incarnation_id, Duration::from_millis(300));
+        delay_next_preparation_settlement(&fixture.state, &route.incarnation_id, Duration::from_millis(300));
         let first = control_local_inner(
             &fixture.state,
             &route,
@@ -1840,7 +1845,7 @@
                 2,
                 &staged.staged_incarnation_id,
             );
-            delay_next_preparation_settlement(&route.incarnation_id, Duration::from_millis(400));
+            delay_next_preparation_settlement(&fixture.state, &route.incarnation_id, Duration::from_millis(400));
             let task_state = fixture.state.clone();
             let task_route = route.clone();
             let waiter = tokio::spawn(async move {
@@ -2130,7 +2135,7 @@
             committed_media_origin_ms: prepare_body["action"]["media_origin_ms"].as_i64(),
             first_frame_unix_ms: Some(unix_ms()),
         });
-        delay_next_preparation_settlement(&route.incarnation_id, Duration::from_millis(700));
+        delay_next_preparation_settlement(&fixture.state, &route.incarnation_id, Duration::from_millis(700));
         let request_body =
             Bytes::from(serde_json::to_vec(&request).expect("serialize timed-out acknowledgement"));
         let (failed_status, _) = control_body(

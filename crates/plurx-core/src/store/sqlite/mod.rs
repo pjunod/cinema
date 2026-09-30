@@ -1175,6 +1175,14 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // Distributed Live TV intents, ingest claims, and capture authority.
     // v83: durable cluster tuner admission, capture claims and fenced output.
     crate::live_tv_resource::SCHEMA,
+    // v84: preserve published subtitle history when obsolete common work retires.
+    super::background_jobs_subtitle::RECONCILE_SCHEMA,
+    // v85: settled job history yields to new work instead of filling the bound.
+    super::background_jobs::RETENTION_SCHEMA,
+    // v86: settled internal receipts yield too, once the waiter table nears its bound.
+    super::background_jobs::RECEIPT_PRESSURE_SCHEMA,
+    // v87: expiring viewer interests follow exact analysis into fragment work.
+    super::background_jobs::VIEWER_ANALYSIS_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1951,8 +1959,10 @@ impl MetricsStore for SqliteStore {
                         'oldest_age_ms', MAX(0, ?2 * 1000 - grouped.created))), '[]')
                         FROM (SELECT kind, state, COUNT(*) AS count, MIN(created_at_ms) AS created
                             FROM background_jobs GROUP BY kind, state LIMIT 128) grouped)),
-                        'source_io_reservations', (SELECT COUNT(*) FROM background_job_reservations
-                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000),
+                        'source_io_reservations', ((SELECT COUNT(*) FROM background_job_reservations
+                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)
+                            + (SELECT COUNT(*) FROM analysis_source_reservations
+                            WHERE (resource_key = 'source_io' OR resource_key GLOB 'source_io:*') AND expires_at_ms > ?2 * 1000)),
                         'legacy_pending', (SELECT COUNT(*) FROM background_job_legacy WHERE state = 'awaiting_import')))
                  FROM offline_packages WHERE node_id = ?1",
                 params![node_id, now],
@@ -2897,8 +2907,12 @@ mod tests {
         // v72–v76 add library work, domain leases, source-I/O reservations,
         // provider dispatch budgets and the subtitle adapter; v77 adds artwork holders,
         // and v78 retains portable transcode source/manifest provenance.
+        // v79–v85 add predictions, embeddings, probe/integrity work, Live TV
+        // resource claims, subtitle reconciliation and bounded job history;
+        // v86 compacts settled receipts under waiter pressure; v87 adds
+        // expiring viewer interests through analysis and artifacts.
         assert_eq!(
-            version, 83,
+            version, 87,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

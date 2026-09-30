@@ -126,6 +126,7 @@ jobs:
           node tests/playback/player-input-contract.test.js
           node tests/playback/web-policy.test.js
           node tests/playback/web-control.test.js
+          node --test tests/web/seek-telemetry.test.js
           node tests/web/player-dom.test.js
           node tests/web/read-after.test.js
           node tests/web/live-tv.test.js

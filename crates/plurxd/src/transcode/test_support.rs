@@ -180,6 +180,7 @@ impl HlsDeliveryFixture {
             None,
             false,
             false,
+            false,
         )
         .await
     }
@@ -198,8 +199,17 @@ impl HlsDeliveryFixture {
             takeover,
             copy,
             actor_managed,
+            false,
         )
         .await
+    }
+
+    /// [`Self::publish`], with the state built by
+    /// [`crate::state::AppState::new_unhooked`]: every HLS route point reads
+    /// the no-op production installs.
+    pub(crate) async fn publish_unhooked(dir: &std::path::Path, session_id: &str) -> Self {
+        Self::publish_with_takeover_and_state_root(dir, dir, session_id, None, false, false, true)
+            .await
     }
 
     async fn publish_with_takeover_and_state_root(
@@ -209,6 +219,7 @@ impl HlsDeliveryFixture {
         takeover: Option<SessionTakeoverStart>,
         copy: bool,
         actor_managed: bool,
+        production_route_hooks: bool,
     ) -> Self {
         use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
         use plurx_core::store::SqliteStore;
@@ -344,7 +355,12 @@ impl HlsDeliveryFixture {
                 .store(true, Release);
         }
         let session = Arc::new(raw_session);
-        let state = crate::state::AppState::new(
+        let construct = if production_route_hooks {
+            crate::state::AppState::new_unhooked
+        } else {
+            crate::state::AppState::new
+        };
+        let state = construct(
             "test".into(),
             Arc::clone(&store),
             crate::state::Dirs {
@@ -532,28 +548,25 @@ impl HlsDeliveryFixture {
         self.session.child_transition.lock().await
     }
 
-    pub(crate) fn pause_response_projection(&self, pause: Arc<tokio::sync::Barrier>) {
-        *self
-            .session
-            .response_projection_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    pub(crate) fn pause_response_projection(&self) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.session
+            .test_hooks()
+            .media_committed
+            .arm("media_committed")
     }
 
-    pub(crate) fn pause_playlist_publication(&self, pause: Arc<tokio::sync::Barrier>) {
-        *self
-            .session
-            .playlist_publication_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    pub(crate) fn pause_playlist_publication(&self) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.session
+            .test_hooks()
+            .playlist_publication
+            .arm("playlist_publication")
     }
 
-    pub(crate) fn pause_control_after_acceptance(&self, pause: Arc<tokio::sync::Barrier>) {
-        *self
-            .session
-            .control_applied_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    pub(crate) fn pause_control_after_acceptance(&self) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.session
+            .test_hooks()
+            .control_applied
+            .arm("control_applied")
     }
 
     pub(crate) async fn worker_is_registered(&self, session_id: &str) -> bool {
@@ -676,25 +689,9 @@ fn test_session_with_control(
         child: Mutex::new(Some(AttemptChild::new(0, child, control.clone(), None))),
         child_transition: Mutex::new(()),
         replacing_child: AtomicBool::new(false),
-        replacement_pause: std::sync::Mutex::new(None),
-        activity_detail_pause: std::sync::Mutex::new(None),
-        control_applied_pause: std::sync::Mutex::new(None),
         terminal_response_pending: Arc::new(AtomicBool::new(false)),
         terminal_control: std::sync::Mutex::new(None),
-        flow_completion_pause: std::sync::Mutex::new(None),
-        playlist_publication_pause: std::sync::Mutex::new(None),
-        producer_install_pause: std::sync::Mutex::new(None),
-        refresh_after_read_pause: std::sync::Mutex::new(None),
-        path_owner_sample_pause: std::sync::Mutex::new(None),
-        retention_delete_pause: std::sync::Mutex::new(None),
-        response_projection_pause: std::sync::Mutex::new(None),
-        #[cfg(test)]
-        first_media_owner_claim_pause: std::sync::Mutex::new(None),
-        retirement_started: AtomicBool::new(false),
-        #[cfg(test)]
-        retirement_cleanup_handoff_pause: std::sync::Mutex::new(None),
-        #[cfg(test)]
-        scratch_cleanup_pause: std::sync::Mutex::new(None),
+        hooks: crate::seam_hooks::HookSlot::new(&NoopSessionHooks),
         cached: false,
         _cache_reader: None,
         subtitle_handle: None,
@@ -758,5 +755,35 @@ fn test_session_with_control(
         suspend_count: AtomicU64::new(0),
         takeover: None,
         first_slide_logged: AtomicBool::new(false),
+    }
+}
+
+/// Fail in terms of the dependency that is actually missing.
+///
+/// Several tests here and in [`crate::http`] drive the real spawn path. They
+/// don't need ffmpeg to *succeed* — the fixtures are placeholder bytes, so it
+/// always exits with an error — they need it to *start*, because what they
+/// assert on is the session bookkeeping that only exists once there is a child
+/// process to track. Absent ffmpeg that arrives as `No such file or directory
+/// (os error 2)` under twenty frames of tokio, or, having been through the HTTP
+/// layer first, as nothing more informative than `left: 500, right: 200`.
+///
+/// plurxd shells out to ffmpeg at runtime, so this is a dependency to install
+/// rather than a test to skip: skipping would let CI report green on the
+/// transcode paths without having run any of them.
+#[cfg(test)]
+pub(crate) fn require_ffmpeg() {
+    let bin = ffmpeg_bin();
+    if let Err(err) = std::process::Command::new(&bin)
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        panic!(
+            "this test needs ffmpeg, and running `{bin}` failed: {err}\n\
+             install it (`apt-get install ffmpeg`, `brew install ffmpeg`) or point \
+             PLURX_FFMPEG at a build — plurxd requires it at runtime too"
+        );
     }
 }

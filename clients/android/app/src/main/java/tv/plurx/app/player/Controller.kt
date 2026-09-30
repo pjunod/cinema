@@ -484,6 +484,16 @@ class Controller internal constructor(
 
     /** The HLS session this player owns, if the plan opened one. */
     private var sessionId: String? = null
+
+    /**
+     * Set while paused when the server retired this rolling session (see
+     * [PausedRetirement]). [playPause] consumes it; it is honoured only while
+     * it names the attached session, so any successor retires it by identity.
+     */
+    private var pausedRetirement: PausedRetirement? = null
+
+    private fun currentPausedRetirement(): PausedRetirement? =
+        pausedRetirement?.takeIf { it.sessionId == sessionId }
     private var activeMediaPath: String? = null
 
     private val playbackTelemetry = ControllerPlaybackTelemetry(
@@ -504,12 +514,12 @@ class Controller internal constructor(
         },
         context = {
             PlaybackTelemetryContext(
-                method = if (deliveryMode == "direct") "direct_play" else deliveryMode,
+                method = normalizedPlaybackMethod(deliveryMode) ?: "unknown",
                 encoder = encoder,
                 sessionId = sessionId,
             )
         },
-        emit = { event -> postPlaybackClientLog(scope, event) },
+        emit = vm::postPlaybackDiagnostic,
     )
     private val stallWatchdogJob: Job
     private val targetPresentationWatchdogJob: Job
@@ -574,7 +584,10 @@ class Controller internal constructor(
                     // resulting `onPlayWhenReadyChanged` before this setter has
                     // returned, and that callback is where the owner's own stop
                     // has to be told apart from a viewer's pause.
-                    if (!value) viewerTransport.ownerStopping()
+                    if (!value) {
+                        playbackTelemetry.cancelPending()
+                        viewerTransport.ownerStopping()
+                    }
                     if (value && lifecyclePaused) applyEffectivePlayWhenReady()
                     else player.playWhenReady = value
                 }
@@ -815,6 +828,29 @@ class Controller internal constructor(
             // still own success/failure; failover must not steal the request.
             if (stallGuard.defersPredecessorRecovery(recipeOwnership.needsMediaReplacement(currentRecipe()))) return
             val mediaCompatibilityFailure = isCompatibilityPlaybackError(error.errorCode)
+            // Paused on a rolling session: this is the pause grace retiring the
+            // presentation (§9.5), not a failure anyone is watching. Walking the
+            // node list or raising "Playback stopped" here is what the latch
+            // replaces — every node answers the same 404/410. Play reopens.
+            val retiredSession = sessionId
+            if (retiredSession != null && parksPausedPlaybackError(
+                    playbackRequested = playbackIntent.playbackRequested,
+                    rollingSession = !sessionIsVod,
+                    compatibilityFailure = mediaCompatibilityFailure,
+                )
+            ) {
+                val parkedAt = realPosition()
+                pausedRetirement = PausedRetirement(retiredSession, parkedAt)
+                playbackTelemetry.report(
+                    event = "playback_paused_retirement",
+                    level = "info",
+                    message = error.errorCodeName,
+                    code = error.errorCode,
+                    detail = "parked at ${parkedAt}ms; Play reopens",
+                )
+                surfaceOwner.logOnly(mediaMutationEpoch, "paused error parked (${error.errorCodeName})")
+                return
+            }
             // Only a transport failure can be answered by another node, and
             // for 2004 only some of them: `nodeFailoverEligible` reads the
             // status the exception carries, so an ended session's 404 or a
@@ -1054,6 +1090,12 @@ class Controller internal constructor(
             // writes always apply this same latest value; transient buffering
             // and audio-focus suppression do not replace viewer intent.
             if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST) {
+                // Play from the notification, a headset or the Assistant reaches
+                // the player directly rather than through `playPause()`, and
+                // must open the replacement for a retired paused session too.
+                if (playWhenReady && !playbackIntent.playbackRequested) {
+                    currentPausedRetirement()?.let(::reopenAfterPausedRetirement)
+                }
                 playbackIntent.setPlaybackRequested(playWhenReady)
                 // The client's own fact, on the edge it already listens to: no
                 // new detector and no new timer. A `buffering` fault is about a
@@ -1103,9 +1145,10 @@ class Controller internal constructor(
         // Audio-only destinations settle from two advancing player-clock
         // samples; they will never render a video frame.
         if (plan.videoCodec == null) return
+        val presentationAttempt = playbackTelemetry.presentationAttempt()
         val captured = object : Player.Listener {
             override fun onRenderedFirstFrame() {
-                if (!playbackIntent.isCurrent(sequence)) return
+                if (presentationListener !== this || !playbackIntent.isCurrent(sequence)) return
                 val position = realPosition()
                 firstVideoFrameForSeek = Triple(
                     sequence,
@@ -1119,7 +1162,10 @@ class Controller internal constructor(
                 }
                 val recipe = selectionRecipe ?: return
                 if (!recipeOwnership.canPresent(recipe)) return
-                if (!playbackIntent.presentedVideoFrame(position, sequence)) return
+                if (!playbackTelemetry.presentedVideoFrame(
+                        playbackIntent, position, sequence, monotonicNowMs(), presentationAttempt,
+                    )
+                ) return
                 playbackControl.playerChanged()
                 removePlayerListener(this)
                 if (presentationListener === this) presentationListener = null
@@ -1162,7 +1208,7 @@ class Controller internal constructor(
             playbackIntent.presentedInPlace(sequence)
         } else {
             recipePresentationFrame?.takeIf { it.first == sequence }
-                ?.let { playbackIntent.presentedVideoFrame(it.second, sequence) } == true
+                ?.let { playbackTelemetry.presentedVideoFrame(playbackIntent, it.second, sequence, monotonicNowMs()) } == true
         }
         if (presented) {
             playbackControl.playerChanged()
@@ -1308,7 +1354,7 @@ class Controller internal constructor(
     ): PlaybackAttempt {
         establishedPlayback = false
         openStallTracker.reset()
-        return playbackTelemetry.begin(reason, observedAtMs)
+        return playbackTelemetry.begin(reason, observedAtMs, playbackIntent.pendingSeek?.sequence)
     }
 
     fun seekTo(targetMs: Long) {
@@ -1369,6 +1415,7 @@ class Controller internal constructor(
         mediaMutationEpoch += 1
         attachSurfaceGeneration()
         if (planReplacement.route(playbackIntent)) return
+        val attempt = beginPlaybackAttempt("seek")
         val recipe = currentRecipe()
         if (recipeOwnership.needsMediaReplacement(recipe)) {
             restartAt(t, "selection")
@@ -1377,12 +1424,11 @@ class Controller internal constructor(
         armTrackSelections(recipe)
         when (recipe.recipe.desiredTransport) {
             PlaybackMediaTransport.Direct -> {
-                beginPlaybackAttempt("seek")
                 player.seekTo(t)
+                playbackTelemetry.prepared(attempt)
                 markIntentExecuted(sequence)
             }
             PlaybackMediaTransport.ProgressiveRemux -> {
-                val attempt = beginPlaybackAttempt("seek")
                 leaveSessionPlayback()
                 Session.resetMediaFailover()
                 baseMs = t
@@ -1401,11 +1447,10 @@ class Controller internal constructor(
             // session churn. A live one can't be range-sought, so it reopens.
             PlaybackMediaTransport.HlsCopy,
             PlaybackMediaTransport.HlsTranscode -> if (sessionIsVod) {
-                beginPlaybackAttempt("seek")
                 player.seekTo(t)
+                playbackTelemetry.prepared(attempt)
                 markIntentExecuted(sequence)
             } else {
-                val attempt = beginPlaybackAttempt("seek")
                 openSession(t, attempt, sequence)
             }
         }
@@ -1585,6 +1630,12 @@ class Controller internal constructor(
 
     fun playPause() {
         if (!playbackControlBootstrapFence.isActive()) return
+        if (!playbackIntent.playbackRequested) {
+            currentPausedRetirement()?.let { retired ->
+                reopenAfterPausedRetirement(retired)
+                return
+            }
+        }
         if (plan.isAudioOnly && !playbackIntent.playbackRequested) {
             PlaybackService.attach(context, mediaSession)
         }
@@ -1595,8 +1646,34 @@ class Controller internal constructor(
         playbackControl.playerChanged()
     }
 
+    /**
+     * The presentation this pause held no longer exists on the server, so there
+     * is nothing to resume in place. Record Play, then open the one replacement
+     * at the saved position (or the seek the viewer made while paused).
+     */
+    private fun reopenAfterPausedRetirement(retired: PausedRetirement) {
+        pausedRetirement = null
+        // A MediaSession Play on an errored player has already called
+        // `prepare()` on the dead playlist. Stop cancels that load, so its
+        // 404/410 cannot reach `onPlayerError` with Play now requested.
+        player.stop()
+        if (plan.isAudioOnly) PlaybackService.attach(context, mediaSession)
+        playbackControl.clearVerdict()
+        stallGuard.setPlaybackRequested(playbackIntent, true) {
+            player.playWhenReady = it && !lifecyclePaused
+        }
+        val position = pausedRetirementReopenPositionMs(
+            playbackIntent.pendingSeek?.targetMs,
+            retired,
+        ) { realPosition() }
+        surfaceOwner.logOnly(mediaMutationEpoch, "paused retirement reopen at ${position}ms")
+        restartAt(position, "paused-retirement")
+        playbackControl.playerChanged()
+    }
+
     fun release() {
         if (!playbackControlBootstrapFence.isActive()) return
+        playbackTelemetry.cancelPending()
         playbackControlBootstrapFence.release()
         displayModeOwner?.let { owner -> displayModeMatcher?.reset(owner) }
         seekJob?.cancel()
@@ -2806,8 +2883,11 @@ class Controller internal constructor(
     /** Audio-only playback has no video-frame callback; an advancing active clock is presentation. */
     private fun settleAudioPlaybackIntentIfPresented() {
         if (plan.videoCodec != null) return
-        if (playbackIntent.presentedAudio(
+        val sequence = playbackIntent.pendingSeek?.sequence ?: return
+        if (playbackTelemetry.presentedAudio(
+                playbackIntent,
                 realPosition(),
+                sequence,
                 observedAtMs = monotonicNowMs(),
                 playbackActive = player.isPlaying,
                 playbackRate = player.playbackParameters.speed.toDouble(),
@@ -2854,6 +2934,7 @@ class Controller internal constructor(
 
     private fun sampleTargetPresentationDeadline() {
         if (!playbackControlBootstrapFence.isActive()) return
+        playbackTelemetry.supersedeForIntent(playbackIntent.pendingSeek?.sequence)
         settleVideoPlaybackIntentIfPresented()
         val now = monotonicNowMs()
         val event = targetPresentationDeadline.sample(
@@ -2908,7 +2989,7 @@ class Controller internal constructor(
             selectionRecipe?.let(recipeOwnership::canPresent) != true ||
             (player.videoDecoderCounters?.renderedOutputBufferCount ?: 0) <= first.third
         ) return
-        if (playbackIntent.presentedVideoProgress(realPosition(), pending.sequence)) {
+        if (playbackTelemetry.presentedVideoProgress(playbackIntent, realPosition(), pending.sequence, monotonicNowMs())) {
             playbackControl.playerChanged()
             disarmVideoPresentation()
             firstVideoFrameForSeek = null
@@ -3038,6 +3119,15 @@ class Controller internal constructor(
      */
     private fun controlReportingGaveUp(failure: String) {
         surfaceOwner.logOnly(mediaMutationEpoch, "control reporting stopped ($failure)")
+        // The item may still be attached and able to play out its buffer, but
+        // the session behind it is gone: Play must open the replacement rather
+        // than run into the playlist's 404.
+        val retiredSession = sessionId
+        if (isPauseGraceExpiry(failure) && !playbackIntent.playbackRequested &&
+            retiredSession != null && !sessionIsVod && currentPausedRetirement() == null
+        ) {
+            pausedRetirement = PausedRetirement(retiredSession, realPosition())
+        }
     }
 
     /** The contract's client-log events (§3.6), on the reporter that already exists. */
@@ -3196,6 +3286,7 @@ class Controller internal constructor(
      * Sign in. Anything else is the owner's `stopped` with today's sentence.
      */
     private fun stopAndRaisePlaybackFailure(refusal: MediaRefusal?, sentence: String) {
+        playbackTelemetry.cancelPending()
         val attached = mediaMutationEpoch
         if (refusal != null && refusal.source == SurfaceSources.MEDIA_OWNER_LOST_410) {
             surfaceOwner.recoveringMediaOwnerLost(

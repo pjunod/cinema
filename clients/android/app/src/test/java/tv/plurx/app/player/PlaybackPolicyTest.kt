@@ -514,3 +514,49 @@ class LadderVerdictTest {
         assertFalse(nodeFailoverEligible(2004, 302))
     }
 }
+
+/**
+ * The server retires a paused rolling session after 180 s. Before this the
+ * viewer came back to "Playback stopped (…)" over a player nobody had touched;
+ * the contract (§9.5) says stay paused and reopen at the saved position on Play.
+ */
+class PausedRetirementPolicyTest {
+    @Test
+    fun onlyAPausedRollingNonCompatibilityErrorParks() {
+        assertTrue(parksPausedPlaybackError(false, rollingSession = true, compatibilityFailure = false))
+        assertFalse(
+            "a viewer who is watching keeps the ladder and its surface",
+            parksPausedPlaybackError(true, rollingSession = true, compatibilityFailure = false),
+        )
+        assertFalse(
+            "VOD and direct play stay alive while paused; their error is real",
+            parksPausedPlaybackError(false, rollingSession = false, compatibilityFailure = false),
+        )
+        assertFalse(
+            "a media rejection is a verdict, not a retired session",
+            parksPausedPlaybackError(false, rollingSession = true, compatibilityFailure = true),
+        )
+    }
+
+    @Test
+    fun thePauseGraceRefusalIsRecognisedExactly() {
+        assertTrue(isPauseGraceExpiry("transport:410:pause_grace_expired"))
+        assertFalse(isPauseGraceExpiry("transport:410:media_session_ended"))
+        assertFalse(isPauseGraceExpiry("transport:404:session_gone"))
+        assertFalse(isPauseGraceExpiry("transport:none:-"))
+    }
+
+    @Test
+    fun theReplacementOpensWhereTheViewerLeftIt() {
+        val retired = PausedRetirement(sessionId = "s1", positionMs = 40_000)
+        val clock = { 41_500L }
+        assertEquals(90_000L, pausedRetirementReopenPositionMs(90_000, retired, clock))
+        assertEquals(40_000L, pausedRetirementReopenPositionMs(null, retired, clock))
+        assertEquals(
+            "a still-attached player's own clock when nothing was saved",
+            41_500L,
+            pausedRetirementReopenPositionMs(null, retired.copy(positionMs = null), clock),
+        )
+        assertEquals(0L, pausedRetirementReopenPositionMs(null, retired.copy(positionMs = -5), clock))
+    }
+}

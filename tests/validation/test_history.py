@@ -16,6 +16,7 @@ from validation.history import (
     _write_report,
     audit_history,
     landing_commit_title,
+    load_client_fixes,
     load_coverage,
     load_merge_ledger,
     verify_migration_fidelity,
@@ -90,6 +91,81 @@ class RepositoryFixture(unittest.TestCase):
             ["git", "rev-parse", "HEAD"], cwd=root, check=True, text=True,
             stdout=subprocess.PIPE
         ).stdout.strip()
+
+
+class ClientFixSupplementsCase(RepositoryFixture):
+    def fixture(self):
+        root, catalog, coverage = self.repository()
+        (root / "clients").mkdir()
+        (root / "clients/app.swift").write_text("func primaryPolicy() {}\nfunc extraPolicy() {}\n")
+        (root / "tests/client.swift").write_text("func testPrimaryPolicy() {}\nfunc testExtraPolicy() {}\n")
+        sha = self.commit(root, "fix(client): restore policy and extra observation")
+        path = root / "tests/client-fixes.toml"
+        return root, catalog, coverage, path, sha
+
+    @staticmethod
+    def row(identifier, commits, supplements=None, extra=False):
+        relation = "" if supplements is None else f'supplements = "{supplements}"\n'
+        source = "extraPolicy" if extra else "primaryPolicy"
+        test = "testExtraPolicy" if extra else "testPrimaryPolicy"
+        return (
+            f'[[fixes]]\nid = "{identifier}"\ncommits = {json.dumps(commits)}\n'
+            + relation
+            + f'source = "clients/app.swift"\nsource_anchor = "{source}"\n'
+            + f'test = "tests/client.swift"\ntest_anchor = "{test}"\n'
+        )
+
+    def test_supplement_retains_live_obligations_and_one_commit_owner(self):
+        root, catalog, coverage, path, sha = self.fixture()
+        path.write_text("version = 1\n" + self.row("primary", [sha[:12]])
+                        + self.row("extra", [], "primary", extra=True))
+        ledger = load_client_fixes(path)
+        self.assertEqual(ledger.fixes[1].supplements, "primary")
+        report = audit_history(root, catalog, coverage)
+        self.assertEqual(report.errors, ())
+        self.assertEqual(report.anchored_count, 1)
+
+    def test_supplement_relationship_rejects_missing_self_chain_empty_and_owned_commits(self):
+        root, catalog, coverage, path, sha = self.fixture()
+        primary = self.row("primary", [sha[:12]])
+        cases = {
+            "missing parent": primary + self.row("extra", [], "missing"),
+            "self": primary + self.row("extra", [], "extra"),
+            "chain": primary + self.row("extra", [], "primary") + self.row("next", [], "extra"),
+            "cycle": self.row("one", [], "two") + self.row("two", [], "one"),
+            "orphan empty": primary + self.row("extra", []),
+            "owned commits": primary + self.row("extra", [sha[:12]], "primary"),
+            "empty parent id": primary + self.row("extra", [], ""),
+            "ambiguous parent": primary + primary + self.row("extra", [], "primary"),
+        }
+        for name, rows in cases.items():
+            with self.subTest(relationship=name):
+                path.write_text("version = 1\n" + rows)
+                with self.assertRaises(HistoryError):
+                    load_client_fixes(path)
+
+    def test_supplement_lost_source_and_test_anchors_still_fail_audit(self):
+        root, catalog, coverage, path, sha = self.fixture()
+        path.write_text("version = 1\n" + self.row("primary", [sha[:12]])
+                        + self.row("extra", [], "primary", extra=True))
+        for target, kept, kind in (
+            (root / "clients/app.swift", "func primaryPolicy() {}\n", "source"),
+            (root / "tests/client.swift", "func testPrimaryPolicy() {}\n", "test"),
+        ):
+            with self.subTest(anchor=kind):
+                original = target.read_text()
+                target.write_text(kept)
+                report = audit_history(root, catalog, coverage)
+                self.assertTrue(any(f"lost {kind} anchor" in error for error in report.errors))
+                target.write_text(original)
+
+    def test_supplement_does_not_allow_duplicate_primary_commit_ownership(self):
+        root, catalog, coverage, path, sha = self.fixture()
+        path.write_text("version = 1\n" + self.row("primary", [sha[:8]])
+                        + self.row("second", [sha[:12]])
+                        + self.row("extra", [], "primary", extra=True))
+        report = audit_history(root, catalog, coverage)
+        self.assertTrue(any("anchored more than once" in error for error in report.errors))
 
 
 class HistoryAuditCase(RepositoryFixture):

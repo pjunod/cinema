@@ -138,7 +138,9 @@ test_anchor = "testTheRevealLayerIsNotFocusableWhileTheOverlayOrTheGuideIsVisibl
 id = "apple.live-tv-info-focus-review"
 commits = ["90c18453"]
 source = "clients/apple/Sources/LiveTvView.swift"
-source_anchor = "guard !visible, fullscreen, overlayVisible else { return }"
+# The Info dismissal's deferred write moved into returnFocusToCoverSheetOpener
+# (PR #589), which every cover sheet's onDismiss now calls.
+source_anchor = "let opener = coverSheetOpener ?? .pillPlay"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testFullscreenFocusDefaultsToPauseAndReturnsThereFromTheRevealLayer"
 
@@ -1239,7 +1241,7 @@ test_anchor = "testTheTenFootSurfaceKeepsSomethingFocusableWhileTheOverlayIsHidd
 # A transient settings request may not disable the Library-channel switch.
 id = "apple.library-channel-enablement-remains-advisory"
 commits = ["9bfef968"]
-source = "clients/apple/Sources/LiveTvDeveloperView.swift"
+source = "clients/apple/Sources/LiveTvSettingsView.swift"
 source_anchor = "Toggle(\"Enable Library channels\""
 test = "tests/operations/test_evidence_workflows.py"
 test_anchor = "test_apple_prepared_enablement_is_visible_and_advisory"
@@ -2716,13 +2718,14 @@ source_anchor = "internal class LiveEdgeRecovery"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/BehindLiveWindowRecoveryTest.kt"
 test_anchor = "theSecondOneOnTheSameAttachDoesNothingAtAll"
 
+# M3 moved the guarded flag assignment into the owned PlayerScreenOn listener.
 # Lifecycle tests establish video versus audio background behavior, not the
 # new view's keepScreenOn flag on a physical device.
 [[fixes]]
 id = "android.video-screen-awake-ownership"
 commits = ["bfb24591"]
-source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
-source_anchor = "playerView?.keepScreenOn = !plan.isAudioOnly &&"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreenOn.kt"
+source_anchor = "target?.keepScreenOn = isVideo &&"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackLifecycleTest.kt"
 test_anchor = "audioOnlyContinuesWhenActivityStops"
 
@@ -2745,16 +2748,17 @@ test = "clients/android/app/src/test/java/tv/plurx/app/player/AudioSinkPolicyTes
 test_anchor = "changedRouteGetsOneNewDecisionBeforeAnyTranscodeRescue"
 
 [[fixes]]
-# The Live TV PlayerView is moved between the inline box and the fullscreen
-# box with movableContentOf; a moved View keeps its last measured size, so
-# on tablets the fullscreen picture stayed the inline strip in the top-left
-# corner. The surface forces a layout pass whenever its host box resizes.
+# The Live TV PlayerView was moved between the inline box and the fullscreen
+# box with movableContentOf, and on tablets the fullscreen picture stayed the
+# inline strip in the top-left corner. A forced relayout and surface rebind
+# (a825be23, b7c72861) did not fix it on hardware; every host box now builds
+# its own PlayerView and a released view unbinds the shared player.
 id = "android.live-tv-surface-relayout-on-host-resize"
-commits = ["a825be23", "b7c72861"]
-source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvSurfaceRelayout.kt"
-source_anchor = "fun hostResized(previousWidth: Int, previousHeight: Int, width: Int, height: Int): Boolean"
-test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvSurfaceRelayoutTest.kt"
-test_anchor = "theSurfaceRelaysOutWhenItsHostBoxChangesSize"
+commits = ["a825be23", "b7c72861", "726f1241"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
+source_anchor = "onRelease = { view -> view.player = null }"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvPlayerSurfaceTest.kt"
+test_anchor = "everyHostBoxBuildsItsOwnPlayerView"
 
 [[fixes]]
 # 2026-09-24: the watch slot's player host outranked the sticky header and
@@ -2819,6 +2823,84 @@ source_anchor = "return value.addingPercentEncoding(withAllowedCharacters: unres
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "func testRealCapabilityMasterIsAcceptedAfterStartAndResume() throws"
 
+# The shared start-cases fixture names `encoder_capacity`, so every client's
+# render-key test demands copy of its own for it; the Android table is the
+# anchor here, the Apple and web tables are held by the same fixture row.
+[[fixes]]
+id = "clients.live-tv-encoder-capacity-copy"
+commits = ["3e689e23"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvApi.kt"
+source_anchor = "\"encoder_capacity\" -> \"The tuner owner's video encoder is busy, so this channel cannot be converted right now. Try again in a moment.\""
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvStartCasesTest.kt"
+test_anchor = "fun everyRenderKeyTheFixtureNamesHasCopyOfItsOwn()"
+
+# Seek attachment pictures belong to the dispatched seek, not a title startup.
+[[fixes]]
+id = "web.seek-picture-does-not-inflate-ttff"
+commits = ["3dc5464a5"]
+source = "crates/plurxd/src/web/player/measurements.js"
+source_anchor = 'if(p.attemptReason==="seek"||p.controlSeek?.seekTelemetry){'
+test = "tests/web/seek-telemetry.test.js"
+test_anchor = "seek attachment startup cannot inflate TTFF before or after its target frame"
+
+# Seek first-frame measurements must not enter startup TTFF histograms.
+[[fixes]]
+id = "android.seek-picture-does-not-inflate-ttff"
+commits = ["5fd2c0ce8"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
+source_anchor = 'if (ttffTracker.currentAttempt()?.reason == "seek") return null'
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "fun seekReportsPresentedPictureOnceWithoutInflatingTtff()"
+
+# A player dismissal cannot cancel the terminal seek beacon or rebind its identity.
+[[fixes]]
+id = "android.seek-abandonment-survives-dismissal"
+commits = ["70df10111"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/AppViewModel.kt"
+source_anchor = "postPlaybackClientLog(viewModelScope, event)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "fun dismissalCannotCancelQueuedAbandonmentOrRebindItToTheNextProfile() = runTest {"
+
+# A title replacement retires the outgoing seek unless its exact command continues.
+[[fixes]]
+id = "web.title-replacement-abandons-outgoing-seek"
+commits = ["5733161de"]
+source = "crates/plurxd/src/web/player/decode-tiers.js"
+source_anchor = 'if(outgoing.controlSeek?.seekTelemetry!==incoming?.controlSeek?.seekTelemetry)'
+test = "tests/web/seek-telemetry.test.js"
+test_anchor = "another title abandons the outgoing dispatched seek when its decoder retires"
+
+# The batched Apple late-delivery correction shares commit5733161de with the
+# title-retirement correction above; its named Swift regression is carried by
+# the commit and PR regression trailers rather than a duplicate prefix row.
+
+# Repairing the same destination retains its original seek clock and outcome.
+[[fixes]]
+id = "android.same-intent-recovery-retains-seek"
+commits = ["714ee9e40"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
+source_anchor = "if (pendingSeekSequence != null && pendingSeekSequence == intentSequence) {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "fun sameIntentRecoveryKeepsTheOriginalSeekClockAndCannotBecomeStartupTtff()"
+
+# The serializer must emit initialized live delivery labels rather than treating them as defaults.
+[[fixes]]
+id = "android.live-progress-method-is-encoded"
+commits = ["c6127e068"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "@kotlinx.serialization.EncodeDefault"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "fun liveProgressNamesNormalizedDeliveryWhileRecordedReplayAlwaysOmitsMethod()"
+
+# Seek telemetry cleanup is fenced by its destination, independently of Pause.
+[[fixes]]
+id = "apple.seek-telemetry-cleanup-follows-destination"
+commits = ["f50e56ef7"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "!self.attemptStillCurrent(telemetryOwner, fence: .seekTelemetrySupersession)"
+test = "clients/apple/Tests/AttemptScopesTests.swift"
+test_anchor = "func testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid()"
+
 # Missing AVPlayer callbacks must not keep a viewer seek pending forever.
 [[fixes]]
 id = "apple.native-seek-completion-deadline"
@@ -2827,3 +2909,338 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "case .finished(false), .timedOut:"
 test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
 test_anchor = "func testNativeSeekDeadlineRecoversASeekThatNeverCompletes()"
+
+# The Apple TV Live TV page moves focus by name in three regions and defers
+# every write aimed at a view being inserted; Info and More sheets hang off
+# the fullscreen cover. The test pins each of the report's defects to the
+# line that fixes it.
+[[fixes]]
+id = "apple.live-tv-appletv-navigation"
+commits = ["17ab5f50e"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "private func moveDetailFocus(_ input: LiveTvContractInput, region: DetailRegion) -> Bool {"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testAppleTvLiveNavigationIsReversibleAndReachesEverything() throws"
+
+# The grid restores a requested position from its own copy; the parent's
+# memory is rewritten by whatever the engine landed on in between.
+[[fixes]]
+id = "apple.live-tv-guide-requested-target"
+commits = ["3ca76b929"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "@State private var requestedTarget: LiveTvGuideFocusPosition?"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testFocusCoordinatorRejectsStaleRestoresAndTransfersTheBoundaryAtomically() throws"
+
+# The sheet onDismiss handlers are shared code with tvOS-only bodies.
+[[fixes]]
+id = "apple.live-tv-sheet-focus-returns-ios"
+commits = ["1b48c0091"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "private func returnGuideFocusAfterProgrammeSheet() {"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testAppleTvLiveNavigationIsReversibleAndReachesEverything() throws"
+
+# Prepared readiness must be re-observed when the incumbent clock enters a
+# successor range that was already appended. This combined commit also carries
+# physical focus navigation; its two Swift cases are in the landing trailers.
+[[fixes]]
+id = "web.prepared-readiness-follows-incumbent-clock"
+commits = ["b06b2b2d1"]
+source = "crates/plurxd/src/web/player/prepared-replacement.js"
+source_anchor = "if(state.overlapListeners!==readinessListeners) return;"
+test = "tests/playback/web-control.test.js"
+test_anchor = "prepared HLS buffer readiness follows incumbent clock and releases listener ownership"
+
+# The category fixture is established through observed UI and the original
+# saved grouping is restored by this physical paging regression's defer.
+[[fixes]]
+id = "apple.physical-paging-restores-grouping"
+commits = ["cb8985317"]
+source = "clients/apple/UITests/TVPhysicalInputTests.swift"
+source_anchor = "private func setLibraryGrouping(_ label: String, in app: XCUIApplication) -> Bool {"
+test = "clients/apple/UITests/TVPhysicalInputTests.swift"
+test_anchor = "func testLibraryPagingWithRemote() throws {"
+
+# Retained failed focused-owner attempts are covered by the final regression:
+# the physical menu opens only after its unique leaf Other proxy is observed.
+[[fixes]]
+id = "apple.physical-picker-observed-focus-owner"
+commits = ["3c1e8d9be", "a007eab51", "72d69a329"]
+source = "clients/apple/UITests/TVPhysicalInputTests.swift"
+source_anchor = "if current.elementType == .other && !target.identifier.isEmpty"
+test = "clients/apple/UITests/TVPhysicalInputTests.swift"
+test_anchor = "func testSettingsChoicesOpenAsMenusOnAppleTV() throws {"
+
+# Live TV exposes actual discovered text services and keeps stale menu rows
+# from changing the replacement player; Off retains the audio selection.
+[[fixes]]
+id = "android.live-tv-caption-selection"
+commits = ["7592def8587b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvCaptions.kt"
+source_anchor = "internal fun liveTvCaptionSelection("
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvCaptionsTest.kt"
+test_anchor = "fun selectionDisablesOnlyTextAndPinsTheObservedService()"
+
+# A selected track is not proof that captions reached the screen.
+[[fixes]]
+id = "android.live-tv-caption-cue-observation"
+# Additional live obligation belonging to the primary corrective fix.
+supplements = "android.live-tv-caption-selection"
+commits = []
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvCaptions.kt"
+source_anchor = "internal fun liveTvCaptionSummary(tracks: Tracks, cuesPresent: Boolean): String {"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvCaptionsTest.kt"
+test_anchor = "fun captionSummarySeparatesSelectionFromCueDelivery()"
+
+# Owner-decided watchable rows survive the reducer without issuing a tune.
+[[fixes]]
+id = "android.live-tv-capacity-offer-payload"
+commits = ["367f65f2df89"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvLease.kt"
+source_anchor = "watchable = if (decision.render == \"tuner_capacity\") typed?.watchable.orEmpty() else emptyList()"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvStartCasesTest.kt"
+test_anchor = "fun capacityOffersSurviveTheActualLeaseWithoutStartingUntilChosen()"
+
+# Only the explicit current refusal can choose a known playable channel.
+[[fixes]]
+id = "android.live-tv-capacity-offer-explicit-choice"
+# Additional live obligation belonging to the primary corrective fix.
+supplements = "android.live-tv-capacity-offer-payload"
+commits = []
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt"
+source_anchor = "internal fun liveTvCapacityChoice("
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvCapacityOffersTest.kt"
+test_anchor = "fun capacityChoiceRequiresSameRefusalGenerationAndIdleState()"
+
+# Ordinary Release Live TV has a native selector independent of the finite
+# player's Debug acceptance launch route. Runtime caption text remains a
+# separate physical M4 acceptance check.
+[[fixes]]
+id = "apple.live-caption-menu-attachment-ownership"
+commits = ["18326122d"]
+source = "clients/apple/Sources/LiveTvCaptions.swift"
+source_anchor = "func makeSelectionAction(_ choice: Selection)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLiveCaptionChoicesCannotChangeTheNextChannel"
+
+[[fixes]]
+id = "apple.live-caption-advertised-options"
+# Additional live obligation belonging to the primary corrective fix.
+supplements = "apple.live-caption-menu-attachment-ownership"
+commits = []
+source = "clients/apple/Sources/LiveTvCaptions.swift"
+source_anchor = "static func isSelectable(mediaType: AVMediaType, captionsAdvertised: Bool)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLiveCaptionsRejectSyntheticUnadvertisedCC"
+
+# M2 alternatives stay structured through admission and require a current,
+# explicit viewer action; no guessed tuning or shared-session cleanup.
+[[fixes]]
+id = "apple.live-capacity-offer-actions"
+commits = ["09d3abfbf"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "func watchOffer(_ offer: LiveTvCapacityOffer)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testWatchableCapacityOfferNeedsAnExplicitCurrentAction"
+
+[[fixes]]
+id = "apple.live-capacity-offer-envelope"
+# Additional live obligation belonging to the primary corrective fix.
+supplements = "apple.live-capacity-offer-actions"
+commits = []
+source = "clients/apple/Sources/LiveTv.swift"
+source_anchor = "if verdict.render == \"tuner_capacity\", let capacityFailure"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testLeasePreservesStructuredCapacityOffers"
+
+[[fixes]]
+id = "apple.live-capacity-offer-known-identity"
+# Additional live obligation belonging to the primary corrective fix.
+supplements = "apple.live-capacity-offer-actions"
+commits = []
+source = "clients/apple/Sources/LiveTvCapacityOffer.swift"
+source_anchor = "static func resolve("
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testCapacityOffersResolveOnlyKnownPlayableChannels"
+
+# Real Media3 track models need faithful Android string semantics on the host JVM.
+[[fixes]]
+id = "android.live-caption-host-text-operations"
+commits = ["677d7c499dfc"]
+source = "clients/android/app/src/test/java/android/text/TextUtils.java"
+source_anchor = "public static boolean isEmpty(CharSequence value)"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvCaptionsTest.kt"
+test_anchor = "fun captionOptionsNameOnlyActualTextTracksAndServices()"
+
+# Successful early reports complete in order; one failed request cannot hold
+# later diagnostics forever or survive an authenticated account change.
+[[fixes]]
+id = "web.early-error-report-delivery-order"
+commits = ["06cd95adad128"]
+source = "crates/plurxd/src/web/core/errors.js"
+source_anchor = "function drainReports()"
+test = "tests/web/error-reporter.test.js"
+test_anchor = "report delivery waits for completion so an early error precedes its boot sentinel"
+
+[[fixes]]
+id = "lab.handoff-frame-timestamp-ownership"
+commits = ["86f0c0471c82"]
+source = "scripts/playback-lab"
+source_anchor = "function diagnosticSwitchCommit(commit, stageAtMs)"
+test = "tests/playback/frame-diagnostics.test.js"
+test_anchor = "frame diagnostics never attribute a previous switch to the next preparation"
+
+# D-03 M5 measures the existing shared debug network path before any split.
+[[fixes]]
+id = "android.debug-dispatcher-observation-wiring"
+commits = ["07a78b030"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Net.kt"
+source_anchor = "if (BuildConfig.DEBUG) eventListenerFactory(NetCallDiagnostics.factory())"
+test = "tests/operations/test_android_credential_exposure.py"
+test_anchor = "test_debug_timing_is_installed_without_a_dispatcher_split"
+
+# Exact native Live diagnostics retain static cause/state within wire limits.
+[[fixes]]
+id = "android.live-terminal-observation-wire-boundary"
+commits = ["afd07b31a", "e1f1c14faaa047e058afa064acdc5554149efb74"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvTerminalDiagnostics.kt"
+source_anchor = "internal class LiveTvTerminalDiagnostics"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvTerminalDiagnosticsTest.kt"
+test_anchor = "terminalWireKeepsActualMedia3CodeButNeverExceptionPayloadOrDynamicClassName"
+
+[[fixes]]
+id = "android.release-profile-capture-signing"
+commits = ["cc4bcb9c1", "127c7f1fb", "067c0d31d6d20dcee408429535a249cd7b440c34"]
+source = "clients/android/app/build.gradle.kts"
+source_anchor = "create(\"profileCapture\") {"
+test = "tests/operations/test_android_profile_report.py"
+test_anchor = "test_capture_tasks_require_release_signing_and_non_debuggable_target"
+
+[[fixes]]
+id = "android.release-profile-paired-evidence"
+commits = []
+supplements = "android.release-profile-capture-signing"
+source = "scripts/android-profile-report"
+source_anchor = "def build_report(without, required, macrobenchmark, signed, macrobenchmark_sha256):"
+test = "tests/operations/test_android_profile_report.py"
+test_anchor = "test_missing_or_malformed_device_identity_and_boundary_is_rejected"
+
+[[fixes]]
+id = "android.release-profile-advisory-scope"
+commits = []
+supplements = "android.release-profile-capture-signing"
+source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/ReleaseProfileStatus.kt"
+source_anchor = "internal fun releaseProfileSummary(facts: ReleaseProfileFacts): String"
+test = "clients/android/app/src/test/java/tv/plurx/app/diagnostics/ReleaseProfileStatusTest.kt"
+test_anchor = "compiledDifferentProfileNeverClaimsMeasuredAppJourney"
+
+[[fixes]]
+id = "clients.library-two-measured-rows"
+commits = ["b0933f3a5"]
+source = "clients/apple/Sources/LibraryGridPrefetch.swift"
+source_anchor = "enum LibraryGridPrefetch"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testLibraryPrefetchIncludesVisibleCardAndTwoRowsAtExclusiveBoundary"
+
+[[fixes]]
+id = "android.library-two-measured-rows"
+commits = []
+supplements = "clients.library-two-measured-rows"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryPrefetch.kt"
+source_anchor = "internal fun libraryPrefetchExclusive"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/LibraryPrefetchTest.kt"
+test_anchor = "lastVisibleCardAndTwoCompleteRowsUseAnExclusiveBoundary"
+
+[[fixes]]
+id = "android.screen-on-owned-callback-wiring"
+commits = ["b5c745c0b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "controller.addPlayerListener(screenOn)"
+test = "tests/operations/test_android_player_builder.py"
+test_anchor = "test_screen_on_binder_follows_the_owned_player_and_view_lifecycle"
+
+[[fixes]]
+id = "android.screen-on-real-player-callbacks"
+commits = []
+supplements = "android.screen-on-owned-callback-wiring"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreenOn.kt"
+source_anchor = "internal class PlayerScreenOn"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerScreenOnTest.kt"
+test_anchor = "actualPlayerCallbacksHoldVideoScreenDuringBufferingAndPlayButNotPause"
+
+[[fixes]]
+id = "android.profile-owned-playback-cleanup"
+commits = ["ec259aff6"]
+source = "clients/android/baselineprofile/src/main/java/tv/plurx/profile/ReleaseJourney.kt"
+source_anchor = "fun closeOwnedPlayback() {"
+test = "tests/operations/test_android_profile_cleanup.py"
+test_anchor = "test_cleanup_confirms_owned_player_exit_and_exact_detail_before_home"
+
+[[fixes]]
+id = "android.profile-owned-detail-boundary"
+commits = []
+supplements = "android.profile-owned-playback-cleanup"
+source = "clients/android/baselineprofile/src/main/java/tv/plurx/profile/ReleaseJourney.kt"
+source_anchor = "private fun isOwnedDetail(): Boolean ="
+test = "tests/operations/test_android_profile_cleanup.py"
+test_anchor = "test_owned_fixture_and_pending_player_markers_fence_navigation"
+
+[[fixes]]
+id = "android.profile-benchmark-run-binding"
+commits = ["fb04e202a"]
+source = "scripts/android-profile-report"
+source_anchor = "Invocation binding does not match full source/APK/device identity"
+test = "tests/operations/test_android_profile_report.py"
+test_anchor = "test_stale_or_mixed_startup_run_and_apk_are_rejected"
+
+[[fixes]]
+id = "android.profile-benchmark-harness-binding"
+commits = []
+supplements = "android.profile-benchmark-run-binding"
+source = "clients/android/baselineprofile/src/main/java/tv/plurx/profile/ReleaseProfileMeasurement.kt"
+source_anchor = "@JvmStatic @AfterClass fun sealCompletedInvocation()"
+test = "tests/operations/test_android_profile_report.py"
+test_anchor = "test_real_macrobenchmark_device_context_and_binding_are_required"
+
+# A rolling session retired by the 180 s pause grace failed the paused item
+# with "resource unavailable" and raised "Playback stopped." for nobody. The
+# failure now parks while paused and Play reopens at the saved position.
+[[fixes]]
+id = "apple.paused-retirement-reopen"
+commits = ["f06062c1"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "if let retiredSession = sessionId, Self.parksPausedItemFailure("
+test = "clients/apple/Tests/PlayerResumeTests.swift"
+test_anchor = "testAPausedItemFailureParksBeforeFailoverOrAnySurface"
+
+# Android twin of apple.paused-retirement-reopen: a paused rolling session
+# retired by the pause grace parks its player error and Play reopens.
+[[fixes]]
+id = "android.paused-retirement-reopen"
+commits = ["4cc2a5b7"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "if (retiredSession != null && parksPausedPlaybackError("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackPolicyTest.kt"
+test_anchor = "fun onlyAPausedRollingNonCompatibilityErrorParks()"
+
+# The PR review's gaps: an Android MediaSession Play (notification, headset,
+# Assistant) now opens the replacement for a retired paused session too.
+[[fixes]]
+id = "android.paused-retirement-mediasession-play"
+commits = ["df1b0074"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "currentPausedRetirement()?.let(::reopenAfterPausedRetirement)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackPolicyTest.kt"
+test_anchor = "fun theReplacementOpensWhereTheViewerLeftIt()"
+
+# The shared Live TV start fixture gained an encoder_capacity row, but the
+# Apple reducer drew it as owner_unavailable, so an encoder refusal told the
+# viewer the owner was unreachable instead of that its encoder was busy.
+[[fixes]]
+id = "apple.live-tv-encoder-capacity-render"
+commits = ["9c243256"]
+source = "clients/apple/Sources/LiveTv.swift"
+source_anchor = "\"encoder_capacity\", \"tuner_unavailable\","
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testTheStartReducerAnswersEverySharedCase"

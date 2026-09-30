@@ -65,7 +65,11 @@ const BORROWED = [
   "liveTvActivityRows",
   // DVR cards/details have a full-browser regression in dvr-ui.browser.cjs.
   "liveTvNowSeconds",
+  "durableDuration",
+  "durableLeaseExpired",
+  "durableStateLabel",
   "durableQueueHtml",
+  "restoreDurableFocus",
   "paintActivityBody",
 ];
 
@@ -494,6 +498,107 @@ test("durable work renders escaped observations beside current activity", () => 
   assert.match(html, /cancelDurableJob/);
   assert.match(html, /2 min/);
   painter.durable.rows = [];
+});
+
+test("durable owners, attempts and repair destinations use roster names", () => {
+  const now=Date.now();
+  const job={id:"job",kind:"subtitle_extract",state:"running",owner_node_id:"owner-id",
+    priority:0,age_ms:1427*60000,not_before_ms:0,supported:true,
+    lease_expires_ms:now+30000,observed_at_ms:now};
+  Object.assign(painter.durable,{observed:now,rows:[job],repairs:[{kind:"subtitle",target_node_id:"owner-id",phase:"copying",age_ms:1000}],
+    detail:{job,waiters:[],attempts:[{node_id:"owner-id",started_at_ms:now-120000,outcome:null}]}});
+  const html=paint(snapshot({node_hostnames:{"owner-id":"m6"}}));
+  assert.match(html, /title="owner-id">m6<\/span>/);
+  assert.match(html, /<td data-label="Destination">m6<\/td><td data-label="Phase">copying/);
+  assert.match(html, /m6 · running · .*2 min this attempt/);
+  assert.match(html, /Since requested/);
+  assert.match(html, /23h 47m/);
+  assert.doesNotMatch(html, /1427 min/);
+  const missing=paint(snapshot());
+  assert.match(missing, /title="owner-id">owner-id<\/span>/);
+  Object.assign(painter.durable,{rows:[],repairs:[],detail:null});
+});
+
+test("expired durable leases do not masquerade as live executions", () => {
+  const now=Date.now();
+  const job={id:"expired",kind:"subtitle_extract",state:"running",owner_node_id:"owner-id",
+    priority:0,age_ms:1427*60000,not_before_ms:0,supported:true,
+    lease_expires_ms:now-3600000,observed_at_ms:now};
+  Object.assign(painter.durable,{observed:now,rows:[job],detail:{job,waiters:[],
+    attempts:[{node_id:"owner-id",started_at_ms:job.lease_expires_ms-120000,outcome:null}]}});
+  const html=paint(snapshot({node_hostnames:{"owner-id":"<m6>"}}));
+  assert.match(html, /Lease expired · awaiting recovery/);
+  assert.match(html, /previous owner/);
+  assert.match(html, /&lt;m6&gt; · lease expired · .*2 min until lease expired/);
+  assert.doesNotMatch(html, /<m6>/);
+  Object.assign(painter.durable,{rows:[],detail:null});
+});
+
+function refreshingQueue(q,api){
+  return new Function("DURABLE_ACTIVITY","api",`
+    const ME={is_admin:true},location={hash:"#/activity"};
+    const PAGE_RENDER_GENERATION=1;
+    function paintDurableActivity(){}
+    ${["esc","nodeLabel","durableDuration","durableLeaseExpired","durableStateLabel","durableQueueHtml","refreshDurableActivity","pageDurableJobs","previousDurableJobs","resizeDurableJobs","filterDurableJobs"].map(shippedSource).join("\n")}
+    return {refresh:refreshDurableActivity,page:pageDurableJobs,previous:previousDurableJobs,resize:resizeDurableJobs,filter:filterDurableJobs,html:()=>durableQueueHtml({node:"m6"})};
+  `)(q,api);
+}
+test("bounded queue refresh updates the open attempt when execution completes", async () => {
+  const now=Date.now(),job={id:"job",kind:"subtitle_extract",state:"running",observed_at_ms:now-60000,lease_expires_ms:now-30000};
+  const q={state:"running",epoch:0,observed:0,rows:[],counts:[],selectedId:"job",
+    detail:{job,waiters:[],attempts:[{node_id:"node",started_at_ms:now-120000,outcome:null}]}};
+  const calls=[];
+  const runner=refreshingQueue(q,async url=>{
+    calls.push(url);
+    if(url.includes("?"))return {jobs:[],counts:[],observed_at_ms:now};
+    return {job:{...job,state:"succeeded",observed_at_ms:now,lease_expires_ms:null},waiters:[],
+      attempts:[{node_id:"node",started_at_ms:now-120000,finished_at_ms:now,outcome:"succeeded"}]};
+  });
+  await runner.refresh(true);
+  assert.deepEqual(calls,["/cluster/jobs?state=running","/cluster/jobs/job"]);
+  assert.match(runner.html(), /m6 · succeeded · .*2 min elapsed/);
+  assert.doesNotMatch(runner.html(), /this attempt|awaiting recovery/);
+});
+test("a late detail refresh cannot reopen closed or replace newly selected details", async () => {
+  for(const change of [q=>{q.detail=null;q.selectedId=null;},q=>{q.detail={job:{id:"other"}};q.selectedId="other";}]){
+    const q={state:"running",epoch:0,observed:0,rows:[],counts:[],selectedId:"job",detail:{job:{id:"job"}}};
+    const runner=refreshingQueue(q,async url=>{
+      if(url.includes("?"))return {jobs:[],counts:[],observed_at_ms:Date.now()};
+      change(q);
+      return {job:{id:"job",state:"succeeded"}};
+    });
+    await runner.refresh(true);
+    assert.notEqual(q.detail?.job.id,"job");
+  }
+});
+
+test("durable pagination visits every job and resets cursor history for filters and sizes", async () => {
+  const jobs=Array.from({length:105},(_,i)=>({id:String(i+1).padStart(3,"0"),kind:"fragment_index_build",state:"queued"}));
+  const q={state:"queued",epoch:0,observed:0,rows:[],counts:[],cursor:null,history:[],pageSize:20};
+  const runner=refreshingQueue(q,async url=>{
+    const query=new URL(url,"http://fixture").searchParams;
+    const rows=jobs.filter(job=>job.id>(query.get("cursor")||"")&&job.state===query.get("state"));
+    return {jobs:rows.slice(0,100),next_cursor:rows.length>100?rows[99].id:null,counts:[],observed_at_ms:Date.now()};
+  });
+  await runner.refresh(true);
+  const seen=[];
+  do{seen.push(...q.rows.map(job=>job.id));if(!q.next)break;await runner.page(q.next);}while(true);
+  assert.deepEqual(seen,jobs.map(job=>job.id));
+  await runner.previous();assert.equal(q.rows[0].id,"081");
+  await runner.page();assert.equal(q.rows[0].id,"001");assert.equal(q.history.length,0);
+  await runner.resize("10");assert.equal(q.rows.length,10);
+  await runner.page(q.next);assert.equal(q.history.length,1);
+  await runner.filter("failed");assert.equal(q.cursor,null);assert.equal(q.history.length,0);assert.equal(q.rows.length,0);
+});
+test("durable details stay directly beneath their job and the panel remains collapsed", () => {
+  const job={id:"first-job",kind:"subtitle_extract",state:"queued",priority:1,supported:true};
+  Object.assign(painter.durable,{open:false,rows:[job,{...job,id:"second-job"}],detail:{job,waiters:[],attempts:[]}});
+  const html=paint(snapshot());
+  assert.match(html,/<details class="card durable-queue" ontoggle=/);
+  assert.ok(html.indexOf('class="durable-detail"')>html.indexOf('data-durable-focus="first-job"'));
+  assert.ok(html.indexOf('class="durable-detail"')<html.indexOf('data-durable-focus="second-job"'));
+  assert.match(html,/aria-expanded="true" aria-controls="durable-job-first-job"/);
+  Object.assign(painter.durable,{open:true,rows:[],detail:null});
 });
 
 let reported = false;

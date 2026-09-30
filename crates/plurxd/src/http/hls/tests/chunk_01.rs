@@ -159,8 +159,9 @@
     /// added to `http/hls/` without being listed here fails each scan instead
     /// of going unread by it. Test children (`tests.rs`, `tests/`) quote
     /// production code as literals and are not product sources.
-    const HLS_PRODUCT_SOURCES: [(&str, &str); 15] = [
+    const HLS_PRODUCT_SOURCES: [(&str, &str); 16] = [
         ("../hls.rs", include_str!("../../hls.rs")),
+        ("hooks.rs", include_str!("../hooks.rs")),
         ("session_guard.rs", include_str!("../session_guard.rs")),
         ("create.rs", include_str!("../create.rs")),
         ("relay.rs", include_str!("../relay.rs")),
@@ -1239,11 +1240,7 @@
         )
         .await;
 
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        release_after_tombstone_pauses()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(session_id.clone(), Arc::clone(&pause));
+        let pause = pause_release_after_tombstone(&fixture.state, &session_id);
         let detach_pause = fixture
             .state
             .transcode
@@ -1254,9 +1251,7 @@
             async move { delete(State(state), AxPath(session_id)).await }
         });
         let detach_held = detach_pause.reached().await;
-        tokio::time::timeout(Duration::from_secs(5), pause.wait())
-            .await
-            .expect("release reached its post-tombstone seam");
+        let tombstone_held = pause.reached().await;
         assert!(
             fixture
                 .state
@@ -1285,17 +1280,11 @@
         );
 
         detach_held.release();
-        tokio::time::timeout(Duration::from_secs(5), pause.wait())
-            .await
-            .expect("release durable deletion");
+        tombstone_held.release();
         assert_eq!(
             deletion.await.expect("delete gap task"),
             StatusCode::NO_CONTENT
         );
-        release_after_tombstone_pauses()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&session_id);
     }
 
     #[tokio::test]
@@ -1364,11 +1353,7 @@
         let session_id = uuid::Uuid::new_v4().to_string();
         let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
         assert!(fixture.worker_is_registered(&session_id).await);
-        let lookups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        status_telemetry_observers()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(session_id.clone(), Arc::clone(&lookups));
+        let lookups = observe_status_lookups(&fixture.state, &session_id);
 
         let result = status_local_before_with_relay(
             &fixture.state,
@@ -1383,10 +1368,22 @@
             0,
             "an unowned capability must not query a lingering local actor"
         );
-        status_telemetry_observers()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&session_id);
+
+        // The same observer counts a lookup once the route is owned here, so
+        // the zero above is an absence, not a point that never records.
+        activate_fixture_route(&fixture, &session_id, "status-lookup-owned").await;
+        let _ = status_local_before_with_relay(
+            &fixture.state,
+            &session_id,
+            Instant::now() + Duration::from_secs(1),
+            false,
+        )
+        .await;
+        assert_eq!(
+            lookups.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "an owned local route queries its actor once"
+        );
     }
 
     async fn assert_rolling_status_before_and_after_media(
@@ -1586,24 +1583,20 @@
         let dir = crate::test_tempdir().expect("state dir");
         let session_id = uuid::Uuid::new_v4().to_string();
         let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        release_pauses()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(session_id.clone(), Arc::clone(&pause));
+        let pause = pause_release_after_fence(&fixture.state, &session_id);
 
         let request = tokio::spawn({
             let state = fixture.state.clone();
             let session_id = session_id.clone();
             async move { delete(State(state), AxPath(session_id)).await }
         });
-        pause.wait().await;
+        let held = pause.reached().await;
         request.abort();
         assert!(request
             .await
             .expect_err("public DELETE request cancelled")
             .is_cancelled());
-        pause.wait().await;
+        held.release();
 
         tokio::time::timeout(Duration::from_secs(2), async {
             while fixture.worker_is_registered(&session_id).await {
@@ -1612,10 +1605,6 @@
         })
         .await
         .expect("detached DELETE cleanup survives caller cancellation");
-        release_pauses()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&session_id);
     }
 
     #[tokio::test]
@@ -1623,7 +1612,7 @@
         let dir = crate::test_tempdir().expect("state dir");
         let session_id = uuid::Uuid::new_v4().to_string();
         let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
-        inject_release_error(&session_id);
+        inject_release_error(&fixture.state, &session_id);
         let settlement = match fixture
             .state
             .media_sessions
@@ -2136,15 +2125,14 @@
             .expect("ack after unpolled control")
             .is_none());
 
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        fixture.pause_control_after_acceptance(Arc::clone(&pause));
+        let pause = fixture.pause_control_after_acceptance();
         let control = tokio::spawn({
             let state = fixture.state.clone();
             let route = route.clone();
             let request = request.clone();
             async move { control_local(&state, &route, request, i64::MAX).await }
         });
-        pause.wait().await;
+        let held = pause.reached().await;
 
         let retry_a = tokio::spawn({
             let state = fixture.state.clone();
@@ -2168,7 +2156,7 @@
         assert!(fixture.worker_is_registered(&session_id).await);
         control.abort();
         assert!(matches!(control.await, Err(error) if error.is_cancelled()));
-        pause.wait().await;
+        held.release();
 
         let retry_a = retry_a.await.expect("first retry task");
         let retry_b = retry_b.await.expect("second retry task");

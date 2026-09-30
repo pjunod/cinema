@@ -675,7 +675,8 @@ function closePlayer(options={}){
   // Disarm the pending seek as well as clearing it: a skip's self-commit is a
   // timer, and PLAYER survives the close, so an armed one would have fired
   // seekTo on a player the viewer had already left.
-  if(PLAYER){ PLAYER.aoffset=0; PLAYER._seekDragging=false; PLAYER.controlSeek=null;
+  if(PLAYER){ finishPlaybackSeekTelemetry(PLAYER,PLAYER.controlSeek,"seek_abandoned");
+    PLAYER.aoffset=0; PLAYER._seekDragging=false; PLAYER.controlSeek=null;
     PLAYER.wantsPlayback=false; PLAYER.pendingOpenAttempt=null; PLAYER.pendingMediaChange=null;
     PLAYER.inFlightChangeKey=null;
     cancelPendingSeek(); }

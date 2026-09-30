@@ -1032,4 +1032,12 @@ struct ProgressRequest: Codable {
     let positionMs: Int
     var durationMs: Int?
     var recordedAt: Int? = nil
+    var method: String? = nil
+
+    init(positionMs: Int, durationMs: Int? = nil, recordedAt: Int? = nil, method: String? = nil) {
+        self.positionMs = positionMs
+        self.durationMs = durationMs
+        self.recordedAt = recordedAt
+        self.method = recordedAt == nil ? method : nil
+    }
 }

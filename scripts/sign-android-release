@@ -66,10 +66,19 @@ def cert_digest(apksigner: str, apk: Path, api: int) -> str:
         "--min-sdk-version", str(api), "--max-sdk-version", str(api),
         str(apk), output=True,
     ).decode("utf-8", "replace")
-    digests = re.findall(r"Signer #\d+ certificate SHA-256 digest:\s*([0-9a-fA-F]+)", report)
+    # build-tools ≤ 36 print the effective signer once as `Signer #1 …`;
+    # 37.0.0 prints one block per scheme that verified (`V2 Signer: …`,
+    # `V3 Signer: …`), so the same certificate can appear more than once and
+    # the count that matters is distinct certificates.
+    digests = {
+        digest.lower() for digest in re.findall(
+            r"(?:Signer #\d+|V\d(?:\.\d)? Signer:) certificate SHA-256 digest:\s*([0-9a-fA-F]+)",
+            report,
+        )
+    }
     if len(digests) != 1:
         fail(f"expected one effective signer at API {api}; got {len(digests)}")
-    return digests[0].lower()
+    return digests.pop()
 
 
 def validate_lineage(apksigner: str, lineage: Path, expected_new: str) -> None:

@@ -369,6 +369,26 @@ impl ObservedFfmpeg {
     }
 }
 
+#[cfg(test)]
+impl ObservedFfmpeg {
+    /// A stand-in producer for the install-path tests: `child` under its own
+    /// job, with no diagnostic readers.
+    pub(super) fn for_test(child: Child) -> Self {
+        let child_job = crate::process_control::ChildJob::attach(&child)
+            .expect("attach the stand-in producer's job");
+        Self {
+            child,
+            child_job,
+            diagnostics: crate::decoder_health::ObservedDiagnostics::new(
+                "test".to_owned(),
+                None,
+                None,
+                None,
+            ),
+        }
+    }
+}
+
 /// The binary a transcode producer runs: the configured FFmpeg, except where a
 /// test on this thread has put a stand-in in its place (see
 /// [`with_producer_ffmpeg_for_test`]).

@@ -316,8 +316,14 @@ setup, libraries, users, metadata keys, integrations, scan control, and system
 logs. Keeping those mutations in one surface avoids reproducing high-impact
 server administration on a TV remote. The Android Settings screen is primarily
 for device-local viewer and playback preferences plus sign-out/change-server.
-HDHomeRun is the deliberate exception: Settings → Developer exposes its safety
-requirements, saved configuration, readiness and separate runtime enablement.
+HDHomeRun is the deliberate exception, split the way the web splits it:
+Settings → Live TV holds the tuner's saved configuration and readiness check,
+the programme guide's readiness, recording and Library channels; Settings →
+Developer holds only the separate runtime enablement with its safety
+requirements and their current Met / Not met rows from `/live-tv/readiness`
+(advisory; none disables the button), and says what that switch is waiting on before it moves to
+Settings → Live TV (see
+[SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS](../features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md#developer-lifecycle--every-card-graduates)).
 Every mutation requires server-enforced administrator access and an exact
 settings generation. Previous-owner recovery carries the original owner and
 drain cutoff, and requires an explicit physical-fencing attestation. No build

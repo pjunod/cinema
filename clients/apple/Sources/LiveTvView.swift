@@ -12,6 +12,7 @@ final class LiveTvPlayerController: ObservableObject {
     /// actually reached the server rather than assert a constant.
     static func testing(
         requests: LiveTvRequests,
+        channels: [LiveTvChannel] = [],
         activateAudioSession: @escaping () -> Void = {},
         deactivateAudioSession: @escaping () -> Void = {}
     ) -> LiveTvPlayerController {
@@ -22,10 +23,11 @@ final class LiveTvPlayerController: ObservableObject {
         // A real client only so `watch` gets past its own guard; it is never
         // asked for the network, because the stub lease answers first.
         controller.api = LiveTvAPI(origin: "http://127.0.0.1:1", token: nil)
-        controller.channels = []
+        controller.channels = channels
         return controller
     }
     @Published private(set) var channels: [LiveTvChannel] = []
+    @Published private(set) var capacityOffers: [LiveTvCapacityOffer] = []
     @Published private(set) var message = "Choose a channel to watch live."
     @Published private(set) var title: String?
     @Published private(set) var busy = false
@@ -54,6 +56,7 @@ final class LiveTvPlayerController: ObservableObject {
     @Published private(set) var status: LiveTvStatus?
     @Published private(set) var delivery: LiveTvDelivery?
     let player = AVPlayer()
+    let captions = LiveTvCaptions()
     private var api: LiveTvAPI?
     private var lease: LiveTvLease?
     private var profileOrigin: String?
@@ -109,6 +112,9 @@ final class LiveTvPlayerController: ObservableObject {
             channels = lineup.channels.map { channel in
                 watching?.id == channel.id ? (watching ?? channel) : channel
             }
+            capacityOffers = capacityOffers.filter { offer in
+                channels.contains { $0.id == offer.channel.id && $0.watchable }
+            }
             expireSourceFormats(now: Int(Date().timeIntervalSince1970))
             startGuideRefresh(loading)
             message = lineup.freshness == "stale"
@@ -161,10 +167,29 @@ final class LiveTvPlayerController: ObservableObject {
             message = error.localizedDescription
             // A URL/attachment failure after acquiring a capability must also
             // release it. The lease retains ownership if cleanup cannot finish.
-            do { try await lease.stop() } catch { message += " Cleanup is unconfirmed; use Stop to retry." }
+            do {
+                try await lease.stop()
+                guard serial == expected else { return }
+                if let failure = error as? LiveTvFailure {
+                    capacityOffers = LiveTvCapacityOffer.resolve(failure, lineup: channels, generation: expected)
+                }
+            } catch {
+                guard serial == expected else { return }
+                message += " Cleanup is unconfirmed; use Stop to retry."
+            }
             endAudioSession()
         }
         if serial == expected { busy = false }
+    }
+
+    /// Only a current, explicit offer can invoke the normal start path. The
+    /// lease releases this viewer's prior session; no shared stop or tuner
+    /// reclamation endpoint exists on this action.
+    func watchOffer(_ offer: LiveTvCapacityOffer) async {
+        guard !busy, offer.generation == serial, capacityOffers.contains(offer),
+              let channel = channels.first(where: { $0.id == offer.channel.id && $0.watchable })
+        else { return }
+        await watch(channel)
     }
 
     /// Everything a granted session does after the POST answers: the player
@@ -193,6 +218,8 @@ final class LiveTvPlayerController: ObservableObject {
         title = channel.title
         watching = info.channel
         delivery = info.delivery
+        captions.attach(item: item, player: player,
+                        captionsAdvertised: info.delivery?.reasons?.contains { $0.code == "captions_advertised" } == true)
         attachedAt = Date()
         playing = true
         player.play()
@@ -222,6 +249,8 @@ final class LiveTvPlayerController: ObservableObject {
                 switch event {
                 case .timeControl(let status, let reason):
                     self.applyTimeControl(status: status, reason: reason)
+                case .status(.readyToPlay):
+                    self.captions.refresh()
                 case .status(.failed):
                     self.itemDidFail = true
                     self.itemFailure = item.error as NSError?
@@ -586,6 +615,8 @@ final class LiveTvPlayerController: ObservableObject {
     }
 
     private func detach() {
+        capacityOffers = []
+        captions.detach()
         remoteCommands.stop()
         heartbeat?.cancel()
         heartbeat = nil
@@ -772,6 +803,7 @@ struct LiveTvPlayerFacts: Equatable {
     let asOf: Date
     var resolution: String? = nil
     var playerState: String = "Not reported"
+    var captionStatus: String = "Not reported"
 
     static func capture(
         item: AVPlayerItem?,
@@ -779,7 +811,8 @@ struct LiveTvPlayerFacts: Equatable {
         bufferedSeconds: Double?,
         attachedAt: Date?,
         asOf: Date = Date(),
-        playerState: String = "Not reported"
+        playerState: String = "Not reported",
+        captionStatus: String = "Not reported"
     ) -> Self {
         let events = item?.accessLog()?.events.map {
             LiveTvAccessEventFacts(
@@ -799,6 +832,7 @@ struct LiveTvPlayerFacts: Equatable {
             facts.resolution = "\(Int(size.width))×\(Int(size.height))"
         }
         facts.playerState = playerState
+        facts.captionStatus = captionStatus
         return facts
     }
 
@@ -1056,7 +1090,7 @@ struct LiveTvStreamInfoPanel: View {
             PlaybackInfoFact(id: "status", label: "Server state", value: status?.state ?? "Not reported", note: playbackInfoExplanation("status"), group: "Server work"),
             PlaybackInfoFact(id: "device_audio", label: "Device audio output", value: "Not reported", note: "Track metadata does not confirm speaker or HDMI output."),
             PlaybackInfoFact(id: "decode_audio", label: "Stream audio track", value: plan?.audioDescription ?? "Not reported", note: playbackInfoExplanation("decode_audio")),
-            PlaybackInfoFact(id: "subtitles", label: "Subtitles", value: "Not reported"),
+            PlaybackInfoFact(id: "subtitles", label: "Subtitles", value: player.captionStatus, note: "Selected stream track; does not confirm rendered caption text."),
             PlaybackInfoFact(id: "player_state", label: "Player state", value: player.playerState),
             PlaybackInfoFact(id: "client_loaded", label: "Buffered on device", value: seconds(player.bufferedSeconds), note: playbackInfoExplanation("client_loaded"), group: "Buffer & delivery"),
             PlaybackInfoFact(id: "live_edge", label: "Behind stream live edge", value: seconds(player.behindEdgeSeconds), note: "Behind latest available media; not broadcast delay.", group: "Live stream & reception"),
@@ -1306,6 +1340,15 @@ struct LiveTvGuidePaging {
     let later: () -> Void
 }
 
+/// Which part of the grid Up left from, so the page can put focus on what
+/// sits directly above it rather than on one fixed control. Cells are under
+/// the stage's actions; the paging chips (and the header column beneath them)
+/// are under the picture.
+enum LiveTvGuideTopEdge: Equatable {
+    case cells
+    case pagingChips
+}
+
 /// The half-hour grid. One horizontal offset shared by every row, so the
 /// channel column and the times cannot drift apart from the cells.
 struct LiveTvGuideGrid: View {
@@ -1342,7 +1385,9 @@ struct LiveTvGuideGrid: View {
     let restoreChannelHeader: Bool
     let restoreAnchorTime: Int?
     let onFocus: (LiveTvChannel, LiveTvProgramme?, Bool, Int?) -> Void
-    let onToolbarBoundary: () -> Void
+    /// Up from the first row. The grid has already released focus; the page
+    /// names what is directly above the edge the press left from.
+    let onTopBoundary: (LiveTvGuideTopEdge) -> Void
     let restoreRequest: Int
     let restoreAllowed: Bool
     let onFocusOwnershipChanged: (Bool) -> Void
@@ -1353,6 +1398,26 @@ struct LiveTvGuideGrid: View {
     @State private var anchorTime: Int?
     @State private var preserveAnchorForNextFocus = false
     @State private var focusCoordinator = LiveTvGuideFocusCoordinator()
+    /// A restore the coordinator has permitted. Bumped by the yielded task and
+    /// applied by `onChange`, because the task body holds the view value it
+    /// was created with: after a window change its `layout` and `restore*`
+    /// inputs are the OLD ones, and a restore written from there put focus on
+    /// a cell that no longer existed — or on the header the press had just
+    /// left. `onChange` runs against the current view, so it sees the layout
+    /// the restore is meant for.
+    @State private var restoreTick = 0
+    /// The position an explicit request asked for, copied when the request
+    /// arrives and held until the restore lands. The parent's `restore*`
+    /// inputs cannot be read for this at restore time: an engine-driven
+    /// arrival on some cell in between — the Guide pill removed under the
+    /// finger that pressed it — runs `onFocus`, and the parent then
+    /// remembers THAT cell. Restoring from the parent would write the
+    /// accident back and call it a success.
+    @State private var requestedTarget: LiveTvGuideFocusPosition?
+    @State private var lastRequestSeen = 0
+    /// Right past the last cell / left past the header asked for the next
+    /// window; when the new layout arrives, land on this row's edge cell.
+    @State private var pendingLanding: (channelId: String, edge: LiveTvGuidePageLanding)?
     @FocusState private var focusedCell: FocusKey?
     private let headerHeight: CGFloat = 34
 
@@ -1548,12 +1613,24 @@ struct LiveTvGuideGrid: View {
             // owning a cell: claiming ownership here would arm the restore
             // pass, which would then take the focus straight back off the chip.
             guard let target, target.paging == nil else {
+                // A landing is for the row it left from; leaving the cells
+                // (to the chips, the stage, or nothing) ends it.
+                pendingLanding = nil
+                // While a requested restore is outstanding, an arrival on a
+                // chip is the engine's accident, not the viewer leaving:
+                // reporting it would drop `restoreAllowed` and deny the
+                // restore that is about to correct it.
+                guard requestedTarget == nil else { return }
                 focusCoordinator.focusChanged(active: false)
                 onFocusOwnershipChanged(false)
                 return
             }
             focusCoordinator.focusChanged(active: true)
             onFocusOwnershipChanged(true)
+            // Once focus is on a programme cell again — the landing itself,
+            // or a press the viewer made in the meantime — a landing has
+            // nothing left to do.
+            if !target.channelHeader { pendingLanding = nil }
             guard
                   let row = layout.rows.first(where: { $0.channel.id == target.channelId })
             else { return }
@@ -1577,29 +1654,54 @@ struct LiveTvGuideGrid: View {
             }
         )
         .onChange(of: restoreAllowed) { _, allowed in
-            if !allowed { focusCoordinator.leave() }
+            if !allowed {
+                focusCoordinator.leave()
+                pendingLanding = nil
+                requestedTarget = nil
+            }
         }
         // Content changes may reconcile the currently focused cell, but they
         // cannot create focus ownership. Only a new explicit request or a
         // grid that still owns focus receives a valid post-yield ticket.
         .task(id: gridRestoreIdentity) {
+            // The task starts in the render that carried the new request, so
+            // the parent's inputs are the requested position right now — and
+            // only right now. Copy them (see `requestedTarget`).
+            if restoreRequest > lastRequestSeen {
+                lastRequestSeen = restoreRequest
+                requestedTarget = LiveTvGuideFocusPosition(
+                    channelId: restoreChannelId ?? "",
+                    programmeStart: restoreProgrammeStart,
+                    channelHeader: restoreChannelHeader,
+                    anchorTime: restoreAnchorTime
+                )
+            }
             guard let ticket = focusCoordinator.beginRestore(
                 request: restoreRequest,
                 ownerRequested: restoreAllowed
             ) else { return }
             await Task.yield()
-            guard !Task.isCancelled,
-                  focusCoordinator.permits(ticket, ownerRequested: restoreAllowed)
-            else { return }
-            restoreFocus()
+            guard !Task.isCancelled else { return }
+            guard focusCoordinator.permits(ticket, ownerRequested: restoreAllowed) else {
+                // A press or a departure overtook the request; it is done.
+                requestedTarget = nil
+                return
+            }
+            // Not the restore itself from here: see `restoreTick`.
+            restoreTick &+= 1
         }
+        .onChange(of: restoreTick) { _, _ in restoreFocus() }
         #endif
     }
 
     @ViewBuilder private func pagingChip(
         _ label: String, index: Int, enabled: Bool, action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
+        // Dimmed and inert at the limit, never `.disabled`: a focused chip
+        // that becomes disabled — which is exactly what pressing ‹ does when
+        // it reaches the guide's first hour — loses focus, and the engine
+        // puts it somewhere the viewer did not ask for.
+        Button(action: { if enabled { action() } }) {
             Text(label)
                 .font(LiveTvType.badge)
                 .padding(.horizontal, 8)
@@ -1614,9 +1716,10 @@ struct LiveTvGuideGrid: View {
         ))
         #else
         .buttonStyle(.plain)
-        #endif
         .disabled(!enabled)
+        #endif
         .opacity(enabled ? 1 : 0.4)
+        .accessibilityHint(enabled ? "" : "No more guide in this direction")
     }
 
     #if os(tvOS)
@@ -1642,34 +1745,62 @@ struct LiveTvGuideGrid: View {
         for effect in effects {
             switch effect {
             case .focus(let next):
-            anchorTime = next.anchorTime
-            preserveAnchorForNextFocus = true
-            focusedCell = FocusKey(
-                channelId: next.channelId,
-                programmeStart: next.programmeStart,
-                channelHeader: next.channelHeader
-            )
+                anchorTime = next.anchorTime
+                preserveAnchorForNextFocus = true
+                focusedCell = FocusKey(
+                    channelId: next.channelId,
+                    programmeStart: next.programmeStart,
+                    channelHeader: next.channelHeader
+                )
             case .clearGrid:
                 focusedCell = nil
             case .focusToolbar:
-                onToolbarBoundary()
+                onTopBoundary(.cells)
+            case .focusPagingChips:
+                focusedCell = pagingKey(1)
+            case .pageLater(let channelId):
+                guard let paging, paging.canLater else { break }
+                // The header survives the window change; the cells do not.
+                // Park focus there so the engine never gets to choose, and
+                // land on the new first cell when the layout arrives.
+                focusedCell = FocusKey(channelId: channelId, programmeStart: nil, channelHeader: true)
+                pendingLanding = (channelId, .first)
+                paging.later()
+            case .pageEarlier(let channelId):
+                guard let paging, paging.canEarlier else { break }
+                pendingLanding = (channelId, .last)
+                paging.earlier()
             }
         }
         return true
     }
 
-    /// Left and right walk the three chips; up hands the press to the toolbar
-    /// and down enters the grid, exactly as a cell in the first row would.
+    private func pagingKey(_ index: Int) -> FocusKey {
+        FocusKey(channelId: "", programmeStart: nil, channelHeader: false, paging: index)
+    }
+
+    private func pagingChipEnabled(_ index: Int) -> Bool {
+        guard let paging else { return false }
+        switch index {
+        case 0: return paging.canEarlier
+        case 2: return paging.canLater
+        default: return true
+        }
+    }
+
+    /// Left and right walk the three chips, stepping over one that is at its
+    /// limit; up leaves the grid by the chips' edge and down re-enters the
+    /// grid at the position it last held, so up-then-down is a round trip.
     private func movePagingFocus(_ index: Int, _ direction: LiveTvContractInput) -> Bool {
         switch direction {
         case .left where index > 0:
-            focusedCell = FocusKey(channelId: "", programmeStart: nil,
-                                   channelHeader: false, paging: index - 1)
+            let target = (0..<index).reversed().first(where: pagingChipEnabled)
+            if let target { focusedCell = pagingKey(target) }
         case .right where index < 2:
-            focusedCell = FocusKey(channelId: "", programmeStart: nil,
-                                   channelHeader: false, paging: index + 1)
+            let target = ((index + 1)...2).first(where: pagingChipEnabled)
+            if let target { focusedCell = pagingKey(target) } else { focusGridCandidate() }
         case .up:
-            onToolbarBoundary()
+            onTopBoundary(.pagingChips)
         case .down, .right:
             focusGridCandidate()
         case .left:
@@ -1699,6 +1830,49 @@ struct LiveTvGuideGrid: View {
     }
 
     private func focusGridCandidate() {
+        if let requested = requestedTarget {
+            requestedTarget = nil
+            pendingLanding = nil
+            if let row = layout.rows.first(where: { $0.channel.id == requested.channelId }) {
+                anchorTime = requested.anchorTime
+                if requested.channelHeader {
+                    focusedCell = FocusKey(channelId: row.channel.id, programmeStart: nil, channelHeader: true)
+                    return
+                }
+                let candidate = requested.programmeStart.flatMap { start in
+                    row.cells.first(where: { $0.programme.start == start })
+                } ?? requested.anchorTime.flatMap { anchor in
+                    row.cells.first(where: { $0.programme.start <= anchor && anchor < $0.programme.end })
+                        ?? row.cells.min {
+                            abs(($0.programme.start + $0.programme.end) / 2 - anchor)
+                                < abs(($1.programme.start + $1.programme.end) / 2 - anchor)
+                        }
+                } ?? row.cells.first
+                focusedCell = FocusKey(
+                    channelId: row.channel.id,
+                    programmeStart: candidate?.programme.start,
+                    channelHeader: false
+                )
+                return
+            }
+            // The requested channel is not in this layout (filtered away):
+            // fall through to the parent's memory, then the first row.
+        }
+        if let landing = pendingLanding {
+            pendingLanding = nil
+            if let position = LiveTvGuideFocusNavigator.landing(
+                layout: layout, channelId: landing.channelId, edge: landing.edge
+            ) {
+                anchorTime = position.anchorTime
+                preserveAnchorForNextFocus = true
+                focusedCell = FocusKey(
+                    channelId: position.channelId,
+                    programmeStart: position.programmeStart,
+                    channelHeader: false
+                )
+                return
+            }
+        }
         guard let row = restoreChannelId.flatMap({ id in
             layout.rows.first(where: { $0.channel.id == id })
         }) ?? layout.rows.first else { return }
@@ -1774,11 +1948,49 @@ struct LiveTvView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
     #if os(tvOS)
-    /// The one focusable thing on the ten-foot surface while the overlay is
-    /// hidden. Its only job is to exist, so the remote has somewhere to send
-    /// a press that the routing table can then decide.
+    /// Every keyed focusable on the television page and on its fullscreen
+    /// cover. One key per view: the page toolbar and the cover's pills used to
+    /// share `.guide`/`.channels`/`.more`, so a write meant for a pill could
+    /// land on a segment under the cover (and be dropped), and a pill taking
+    /// focus ran the page's toolbar bookkeeping.
     private enum FocusTarget: Hashable {
-        case reveal, guide, channels, recordings, play, info, layout, more
+        // Page toolbar.
+        case channels, guide, recordings, favorites, search, layout, more
+        // The detail region — the picture and the programme actions beside
+        // the On now list, or in the stage above the guide grid. Reached and
+        // left by explicit moves (`moveDetailFocus`), so a viewer who goes
+        // right from a channel row and then left lands on that same row.
+        case picture, watch, record, recordSeries, remind
+        // The Over picture layout's panel header.
+        case overFavorites, overClose
+        // The cover. `reveal` is the one focusable thing on the ten-foot
+        // surface while the overlay is hidden: its only job is to exist, so
+        // the remote has somewhere to send a press the routing table decides.
+        case reveal, pillPlay, pillGuide, pillChannels, pillInfo, pillMore, pillActivity
+        // The temporary guide's Close, the only thing above its grid.
+        case guideClose
+
+        var isToolbar: Bool {
+            switch self {
+            case .channels, .guide, .recordings, .favorites, .search, .layout, .more: true
+            default: false
+            }
+        }
+
+        var isDetailAction: Bool {
+            switch self {
+            case .watch, .record, .recordSeries, .remind: true
+            default: false
+            }
+        }
+
+        var isOnCover: Bool {
+            switch self {
+            case .reveal, .pillPlay, .pillGuide, .pillChannels, .pillInfo, .pillMore,
+                 .pillActivity, .guideClose: true
+            default: false
+            }
+        }
     }
     @FocusState private var focusedControl: FocusTarget?
     @FocusState private var focusedChannelId: String?
@@ -1787,6 +1999,19 @@ struct LiveTvView: View {
     @State private var channelFocusRequest = 0
     @State private var channelFocusRequested = false
     @State private var channelFocusCoordinator = LiveTvFocusRestoreCoordinator()
+    /// The toolbar control focus most recently left, so Up from the detail
+    /// region returns to it rather than to one fixed segment.
+    @State private var lastToolbarFocus: FocusTarget?
+    /// The pill that opened Info, More or Layout over fullscreen, so closing
+    /// the sheet puts focus back on its opener.
+    @State private var coverSheetOpener: FocusTarget?
+    /// The browse view the page showed before the temporary guide switched it
+    /// to Guide, restored when the guide closes so "return to browser" returns
+    /// to the page the viewer actually left.
+    @State private var browseBeforeTemporaryGuide: LiveTvBrowseView?
+    /// When the page last asked the list or the grid to take focus; see
+    /// `onChange(of: focusedControl)`.
+    @State private var browseFocusRequestedAt: Date?
     #endif
     @State private var now = Int(Date().timeIntervalSince1970)
 
@@ -1967,12 +2192,33 @@ struct LiveTvView: View {
         // `stop`. Releasing here meant "Exit" cost a full tuner re-acquisition
         // to get back to the channel you were on two seconds earlier, and made
         // the tvOS `back → exit` row destructive.
-        .fullScreenCover(isPresented: $fullscreen) {
+        .fullScreenCover(isPresented: $fullscreen, onDismiss: {
+            #if os(tvOS)
+            restoreBrowseFocusAfterCover()
+            #endif
+        }) {
+            // Every sheet the cover can open hangs off the cover. A view that
+            // is presenting the cover cannot present a second thing, so the
+            // root copies below are inert while `fullscreen` is up — Info and
+            // More on the ten-foot pills did nothing at all until these three
+            // joined `detail` and the DVR activity here.
+            //
+            // Focus returns through each sheet's `onDismiss` — after the sheet
+            // has gone — because a write made while it is still animating out
+            // targets a covered presentation and is dropped.
             fullscreenSurface
-                .sheet(item: $detail) { programme in programmeDetail(programme) }
+                .sheet(item: $detail, onDismiss: { returnGuideFocusAfterProgrammeSheet() }) {
+                    programme in programmeDetail(programme)
+                }
                 .sheet(isPresented: $showingDvrActivity) {
                     NavigationStack { DvrCaptureActivityView() }
                 }
+                .sheet(isPresented: coverSheet($showingInfo),
+                       onDismiss: { returnFocusToCoverSheetOpener() }) { streamInfoPanel }
+                .sheet(isPresented: coverSheet($showingLayout),
+                       onDismiss: { returnFocusToCoverSheetOpener() }) { layoutPanel }
+                .sheet(isPresented: coverSheet($showingMore),
+                       onDismiss: { returnFocusToCoverSheetOpener() }) { morePanel }
         }
         #if os(iOS)
         .sheet(isPresented: $showingTouchRecordings) {
@@ -1987,34 +2233,15 @@ struct LiveTvView: View {
                 .sheet(item: $detail) { programme in programmeDetail(programme) }
         }
         #endif
-        .sheet(item: rootProgrammeDetail) { programme in
+        .sheet(item: rootProgrammeDetail, onDismiss: { returnGuideFocusAfterProgrammeSheet() }) { programme in
             programmeDetail(programme)
         }
         .sheet(isPresented: rootDvrActivity) {
             NavigationStack { DvrCaptureActivityView() }
         }
-        .sheet(isPresented: $showingInfo) {
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                if let channel = live.watching {
-                    let state = live.player.currentItem?.status == .failed ? "Failed"
-                        : live.player.timeControlStatus == .waitingToPlayAtSpecifiedRate ? "Buffering"
-                        : live.player.timeControlStatus == .playing ? "Playing" : "Paused"
-                    let player = LiveTvPlayerFacts.capture(
-                        item: live.player.currentItem,
-                        behindEdgeSeconds: live.behindEdgeSeconds,
-                        bufferedSeconds: live.bufferedSeconds,
-                        attachedAt: live.attachedAt, asOf: context.date, playerState: state
-                    )
-                    LiveTvStreamInfoPanel(
-                        programme: live.airing(channel, now: Int(context.date.timeIntervalSince1970)),
-                        channel: channel, status: live.status, delivery: live.delivery,
-                        player: player, onClose: { showingInfo = false }
-                    )
-                }
-            }
-        }
-        .sheet(isPresented: $showingLayout) { layoutPanel }
-        .sheet(isPresented: $showingMore) { morePanel }
+        .sheet(isPresented: rootSheet($showingInfo)) { streamInfoPanel }
+        .sheet(isPresented: rootSheet($showingLayout)) { layoutPanel }
+        .sheet(isPresented: rootSheet($showingMore)) { morePanel }
         #if os(tvOS)
         .sheet(isPresented: $showingSearch) {
             VStack(alignment: .leading, spacing: 28) {
@@ -2046,7 +2273,19 @@ struct LiveTvView: View {
         }
         #if os(tvOS)
         .onChange(of: focusedControl) { _, target in
-            if target != nil { cancelBrowseFocusRestoration() }
+            // Page keys only: a pill taking focus on the cover is not the
+            // viewer leaving the list or the grid.
+            guard let target, !target.isOnCover else { return }
+            if target.isToolbar { lastToolbarFocus = target }
+            // An arrival in the second after a request is the engine, not the
+            // viewer: the cover's dismissal hands focus back to the picture
+            // that opened it, and a Close button that just vanished sends it
+            // to whatever is nearest. Cancelling then would defeat the very
+            // restore the press asked for. A viewer's own move to the toolbar
+            // comes later, or leaves through a boundary that clears the flags
+            // itself.
+            if let at = browseFocusRequestedAt, Date().timeIntervalSince(at) < 1 { return }
+            cancelBrowseFocusRestoration()
         }
         #endif
         #if os(iOS)
@@ -2061,7 +2300,19 @@ struct LiveTvView: View {
         .onChange(of: browse) { _, _ in normalizeTabletBrowse() }
         #endif
         .onChange(of: fullscreen) { _, presented in
-            if !presented { temporaryGuide = false }
+            guard !presented else { return }
+            #if os(tvOS)
+            closeTemporaryGuide()
+            // A sheet still open when the session ended would otherwise
+            // re-present on the page — an Info panel with nothing to show —
+            // and a stale opener would send the next Info close to More.
+            showingInfo = false
+            showingMore = false
+            showingLayout = false
+            coverSheetOpener = nil
+            #else
+            temporaryGuide = false
+            #endif
         }
         .onAppear {
             onScreen = true
@@ -2097,6 +2348,38 @@ struct LiveTvView: View {
 
     private var rootDvrActivity: Binding<Bool> {
         Binding(get: { !fullscreen && showingDvrActivity }, set: { showingDvrActivity = $0 })
+    }
+
+    /// The root's copy of a sheet that the cover also presents: shown only
+    /// while the cover is down, so the two never both claim it.
+    private func rootSheet(_ flag: Binding<Bool>) -> Binding<Bool> {
+        Binding(get: { !fullscreen && flag.wrappedValue }, set: { flag.wrappedValue = $0 })
+    }
+
+    private func coverSheet(_ flag: Binding<Bool>) -> Binding<Bool> {
+        Binding(get: { fullscreen && flag.wrappedValue }, set: { flag.wrappedValue = $0 })
+    }
+
+    private var streamInfoPanel: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            if let channel = live.watching {
+                let state = live.player.currentItem?.status == .failed ? "Failed"
+                    : live.player.timeControlStatus == .waitingToPlayAtSpecifiedRate ? "Buffering"
+                    : live.player.timeControlStatus == .playing ? "Playing" : "Paused"
+                let player = LiveTvPlayerFacts.capture(
+                    item: live.player.currentItem,
+                    behindEdgeSeconds: live.behindEdgeSeconds,
+                    bufferedSeconds: live.bufferedSeconds,
+                    attachedAt: live.attachedAt, asOf: context.date, playerState: state,
+                    captionStatus: live.captions.summary
+                )
+                LiveTvStreamInfoPanel(
+                    programme: live.airing(channel, now: Int(context.date.timeIntervalSince1970)),
+                    channel: channel, status: live.status, delivery: live.delivery,
+                    player: player, onClose: { showingInfo = false }
+                )
+            }
+        }
     }
 
     private var liveInputState: LiveTvInputState {
@@ -2177,6 +2460,9 @@ struct LiveTvView: View {
                 .background(Palette.surface.opacity(0.94))
                 .accessibilityIdentifier("live-tv-status")
         }
+        if !live.capacityOffers.isEmpty {
+            LiveTvCapacityOfferActions(live: live)
+        }
     }
 
     private var toolbarSummary: String {
@@ -2251,6 +2537,7 @@ struct LiveTvView: View {
             .focusEffectDisabled()
             #endif
             if live.playing {
+                LiveTvCaptionMenu(captions: live.captions)
                 Button(muted ? "Unmute" : "Mute") {
                     muted.toggle()
                     live.player.isMuted = muted
@@ -2306,16 +2593,21 @@ struct LiveTvView: View {
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(Palette.outline, lineWidth: 1))
             Text(toolbarSummary).font(LiveTvType.secondary).foregroundStyle(Palette.muted)
             Spacer(minLength: 8)
-            Button { favoritesOnly.toggle(); requestChannelFocus() } label: {
+            // Toggling a filter keeps focus on the button that was pressed.
+            // It used to jump into the list — from the Guide page too — so
+            // pressing it twice meant finding it twice.
+            Button { favoritesOnly.toggle() } label: {
                 Label("Favorites", systemImage: favoritesOnly ? "star.fill" : "star")
             }
             .buttonStyle(TVReadableButtonStyle(prominent: favoritesOnly, compact: true))
             .focusEffectDisabled()
+            .focused($focusedControl, equals: .favorites)
             Button { showingSearch = true } label: {
                 Label(query.isEmpty ? "Search" : "Search: \(query)", systemImage: "magnifyingglass")
             }
             .buttonStyle(TVReadableButtonStyle(prominent: !query.isEmpty, compact: true))
             .focusEffectDisabled()
+            .focused($focusedControl, equals: .search)
             Button { showingLayout = true } label: {
                 Label("Layout", systemImage: "rectangle.3.group")
             }
@@ -2532,6 +2824,7 @@ struct LiveTvView: View {
                 Text(detail).font(.system(size: 12)).foregroundStyle(Palette.muted).lineLimit(1)
             }
             Spacer(minLength: 4)
+            LiveTvCaptionMenu(captions: live.captions).labelStyle(.iconOnly)
             Button { muted.toggle(); live.player.isMuted = muted } label: {
                 Image(systemName: muted ? "speaker.slash" : "speaker.wave.2")
                     .frame(width: 32, height: 32)
@@ -2724,7 +3017,7 @@ struct LiveTvView: View {
                 restoreChannelHeader: focusedGuideChannelHeader,
                 restoreAnchorTime: guideAnchorTime,
                 onFocus: rememberGuideFocus,
-                onToolbarBoundary: {},
+                onTopBoundary: { _ in },
                 restoreRequest: 0,
                 restoreAllowed: false,
                 onFocusOwnershipChanged: { _ in })
@@ -2846,6 +3139,14 @@ struct LiveTvView: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
+        .liveTvRemoteAdapter(
+            .guide,
+            state: { .browser },
+            apply: { outcome, input in
+                guard outcome == .delegate else { return false }
+                return moveDetailFocus(input, region: .onNow)
+            }
+        )
     }
 
     /// A 302 pt stage: 16:9 picture on the left, what is focused on the right.
@@ -2856,6 +3157,120 @@ struct LiveTvView: View {
                 .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .frame(height: 302)
+        .liveTvRemoteAdapter(
+            .guide,
+            state: { .browser },
+            apply: { outcome, input in
+                guard outcome == .delegate else { return false }
+                return moveDetailFocus(input, region: .guideStage)
+            }
+        )
+    }
+
+    private enum DetailRegion { case onNow, guideStage }
+
+    /// The detail region's actions that can take focus, in row order. Watch
+    /// is disabled on a channel that cannot be watched and Remind me on a
+    /// programme that has begun; a move that lands on a disabled button is
+    /// dropped by the platform, so those are simply not in the row.
+    private var detailActionTargets: [FocusTarget] {
+        guard let channel = focusedTvChannel, let programme = detailProgramme else { return [] }
+        var targets: [FocusTarget] = []
+        if channel.watchable { targets.append(.watch) }
+        targets.append(.record)
+        targets.append(.recordSeries)
+        if programme.start > now { targets.append(.remind) }
+        return targets
+    }
+
+    /// The programme the detail region describes and acts on: the focused
+    /// guide cell's on the Guide page, what is on now otherwise.
+    private var detailProgramme: LiveTvProgramme? {
+        guard let channel = focusedTvChannel else { return nil }
+        let airing = live.airing(channel, now: now)
+        if browse == .guide, channel.id == focusedGuideChannelId,
+           let start = focusedGuideProgrammeStart {
+            return live.guide?.channels.first(where: { $0.id == channel.id })?
+                .programmes.first(where: { $0.start == start }) ?? airing.now
+        }
+        return airing.now
+    }
+
+    /// The detail region under the routing table's `browser` row: the page's
+    /// own navigator performs the move, because the engine's geometric answer
+    /// to "left from the picture" is whichever list row happens to sit at the
+    /// picture's height, never the row the viewer came from. Every focusable
+    /// in the region has a key; a direction that has nowhere to go is a dead
+    /// press rather than an escape into the engine's guesswork.
+    ///
+    /// Returns whether the press was used — the adapter consumes it either way.
+    private func moveDetailFocus(_ input: LiveTvContractInput, region: DetailRegion) -> Bool {
+        guard let current = focusedControl else { return false }
+        let actions = detailActionTargets
+        let pictureFocusable = live.playing
+        switch (current, input) {
+        case (.picture, .left):
+            if region == .onNow { requestChannelFocus() }
+        case (.picture, .right):
+            if let first = actions.first { focusedControl = first }
+        case (.picture, .up):
+            returnToToolbar()
+        case (.picture, .down):
+            switch region {
+            case .onNow:
+                if let first = actions.first { focusedControl = first }
+            case .guideStage:
+                requestGuideFocus()
+            }
+        case (let action, .left) where action.isDetailAction:
+            if let at = actions.firstIndex(of: action), at > 0 {
+                focusedControl = actions[at - 1]
+            } else if pictureFocusable {
+                focusedControl = .picture
+            } else if region == .onNow {
+                requestChannelFocus()
+            }
+        case (let action, .right) where action.isDetailAction:
+            if let at = actions.firstIndex(of: action), at + 1 < actions.count {
+                focusedControl = actions[at + 1]
+            }
+        case (let action, .up) where action.isDetailAction:
+            if region == .onNow, pictureFocusable {
+                focusedControl = .picture
+            } else {
+                returnToToolbar()
+            }
+        case (let action, .down) where action.isDetailAction:
+            if region == .guideStage { requestGuideFocus() }
+        default:
+            return false
+        }
+        return true
+    }
+
+    /// Up out of the content: the toolbar control focus most recently left,
+    /// or the segment for the page being shown.
+    private func returnToToolbar() {
+        focusedControl = lastToolbarFocus ?? (browse == .guide ? .guide : .channels)
+    }
+
+    /// Up from the first row of the grid on the Guide page. Cells sit under
+    /// the stage's actions; the chips and header column sit under the picture.
+    /// Whatever is absent falls through to the next thing up, ending at the
+    /// toolbar.
+    private func guidePageTopBoundary(_ edge: LiveTvGuideTopEdge) {
+        let actions = detailActionTargets
+        let pictureFocusable = live.playing
+        switch edge {
+        case .cells:
+            if let first = actions.first { focusedControl = first }
+            else if pictureFocusable { focusedControl = .picture }
+            else { returnToToolbar() }
+        case .pagingChips:
+            if pictureFocusable { focusedControl = .picture }
+            else if let first = actions.first { focusedControl = first }
+            else { returnToToolbar() }
+        }
     }
 
     /// Fullscreen video with one opaque panel along the bottom. The panel
@@ -2870,14 +3285,22 @@ struct LiveTvView: View {
                 HStack(spacing: 12) {
                     Text(overPictureHeadline).font(LiveTvType.primary).lineLimit(1)
                     Spacer(minLength: 8)
-                    Button { favoritesOnly.toggle(); requestChannelFocus() } label: {
+                    Button { favoritesOnly.toggle() } label: {
                         Label("Favorites", systemImage: favoritesOnly ? "star.fill" : "star")
                     }
                     .buttonStyle(TVReadableButtonStyle(prominent: favoritesOnly, compact: true))
                     .focusEffectDisabled()
-                    Button("Close") { tvLayout = .guidePreview }
-                        .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
-                        .focusEffectDisabled()
+                    .focused($focusedControl, equals: .overFavorites)
+                    Button("Close") {
+                        // The panel this button lives in is about to go; put
+                        // focus into the layout that replaces it rather than
+                        // leaving the engine to pick.
+                        tvLayout = .guidePreview
+                        if browse == .guide { requestGuideFocus() } else { requestChannelFocus() }
+                    }
+                    .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
+                    .focusEffectDisabled()
+                    .focused($focusedControl, equals: .overClose)
                 }
                 tvBrowseContent(contentWidth: max(640, contentWidth - 40), rows: rows)
             }
@@ -2962,21 +3385,13 @@ struct LiveTvView: View {
         }
         .buttonStyle(LiveTvPictureButtonStyle())
         .focusEffectDisabled()
+        .focused($focusedControl, equals: .picture)
         .disabled(!live.playing)
     }
 
     private func focusedProgrammeDetails(synopsisLines: Int, eyebrow: Bool) -> some View {
         let channel = focusedTvChannel
-        let airing = channel.map { live.airing($0, now: now) } ?? .none
-        let programme = if browse == .guide,
-                           let channel,
-                           channel.id == focusedGuideChannelId,
-                           let start = focusedGuideProgrammeStart {
-            live.guide?.channels.first(where: { $0.id == channel.id })?
-                .programmes.first(where: { $0.start == start }) ?? airing.now
-        } else {
-            airing.now
-        }
+        let programme = detailProgramme
         let meta = [
             programme.map { "\(liveTvTime($0.start))–\(liveTvTime($0.end))" },
             programme.flatMap { $0.end > now ? "\(max(0, ($0.end - now) / 60)) min left" : nil }
@@ -3002,10 +3417,9 @@ struct LiveTvView: View {
                     .font(LiveTvType.secondary).foregroundStyle(Palette.accent)
             }
             if let channel { LiveTvFormatBadges(channel: channel) }
-            // Reached the way anything above the grid is reached: up from the
-            // top row hands focus to the toolbar, and down from there walks
-            // back through these before entering the cells again.
-            if let channel, let programme { programmeActions(channel, programme) }
+            // Up from the grid's first row lands on Watch; down from any of
+            // these returns to the cell the grid last held.
+            if let channel, let programme { programmeActions(channel, programme, keyed: true) }
             if eyebrow, let footer = guideStageFooter {
                 Text(footer).font(LiveTvType.tertiary).foregroundStyle(Palette.muted).lineLimit(1)
             }
@@ -3053,9 +3467,17 @@ struct LiveTvView: View {
                 restoreChannelHeader: focusedGuideChannelHeader,
                 restoreAnchorTime: guideAnchorTime,
                 onFocus: rememberGuideFocus,
-                onToolbarBoundary: {
+                onTopBoundary: { edge in
                     guideFocusRequested = false
-                    focusedControl = .guide
+                    if fullscreen {
+                        // The temporary guide: nothing above the grid but the
+                        // panel's Close, and the pills are not drawn.
+                        focusedControl = .guideClose
+                    } else if tvLayout.presented == .guideOverlay {
+                        focusedControl = .overClose
+                    } else {
+                        guidePageTopBoundary(edge)
+                    }
                 },
                 restoreRequest: guideFocusRequest,
                 restoreAllowed: guideFocusRequested && browse == .guide,
@@ -3085,7 +3507,11 @@ struct LiveTvView: View {
         ScrollView {
             LazyVStack(spacing: 4) {
                 ForEach(visibleChannels) { channel in
-                    Button { selectAiring(channel) } label: {
+                    // `busy` is checked in the action, not in `.disabled`:
+                    // disabling every row while a tune ran took focus off
+                    // the row that was just selected and dropped it on the
+                    // toolbar, where it stayed after the picture came up.
+                    Button { if !live.busy { selectAiring(channel) } } label: {
                         LiveTvChannelRow(
                             channel: channel,
                             airing: live.airing(channel, now: now),
@@ -3093,9 +3519,10 @@ struct LiveTvView: View {
                         )
                     }
                     .buttonStyle(LiveTvChannelButtonStyle())
+                    .accessibilityIdentifier("live-tv-channel-\(channel.guideNumber)")
                     .focusEffectDisabled()
                     .focused($focusedChannelId, equals: channel.id)
-                    .disabled(!channel.watchable || live.busy)
+                    .disabled(!channel.watchable)
                     .id(channel.id)
                 }
             }
@@ -3133,22 +3560,26 @@ struct LiveTvView: View {
             + "#\(tvLayout.rawValue)#\(visibleChannels.map(\.id).joined(separator: ","))"
     }
 
+    // Neither request clears `focusedControl`. Resigning the toolbar's focus
+    // first handed the engine a moment to pick some other keyed control, and
+    // that arrival cancelled the very restore the press had just requested.
+    // The restore's own write moves focus; nothing needs to give it up first.
     private func requestGuideFocus() {
         browse = .guide
         channelFocusRequested = false
         channelFocusCoordinator.leave()
         focusedChannelId = nil
-        focusedControl = nil
         guideFocusRequest &+= 1
         guideFocusRequested = true
+        browseFocusRequestedAt = Date()
     }
 
     private func requestChannelFocus() {
         browse = .list
         guideFocusRequested = false
-        focusedControl = nil
         channelFocusRequest &+= 1
         channelFocusRequested = true
+        browseFocusRequestedAt = Date()
     }
 
     private func cancelBrowseFocusRestoration() {
@@ -3157,15 +3588,73 @@ struct LiveTvView: View {
         channelFocusCoordinator.leave()
     }
 
+    /// The cover is gone: put focus back where the viewer was. On the list,
+    /// that is the channel now playing — the reason they went fullscreen — and
+    /// on the guide, the cell the grid last held. Requested from `onDismiss`
+    /// rather than before `fullscreen = false`, because a write made while
+    /// the cover is still on screen targets a covered presentation and is
+    /// dropped.
+    private func restoreBrowseFocusAfterCover() {
+        closeTemporaryGuide()
+        switch browse {
+        case .guide:
+            guideFocusRequest &+= 1
+            guideFocusRequested = true
+            browseFocusRequestedAt = Date()
+        case .list:
+            if let watching = live.watching?.id { tvFocusedChannelId = watching }
+            requestChannelFocus()
+        case .recordings:
+            // A schedule page has no row to return to; the engine's own
+            // restoration is as good as anything the page could name.
+            break
+        }
+    }
+
+    /// Opening the temporary guide switches the page under the cover to Guide
+    /// so the one grid serves both; closing it puts the page back, so leaving
+    /// the cover later returns to the view the viewer actually left.
+    private func openTemporaryGuide() {
+        if browseBeforeTemporaryGuide == nil { browseBeforeTemporaryGuide = browse }
+        // Open on what is playing, not on whichever cell the page's grid last
+        // held — that could be any channel, or none.
+        if let watching = live.watching {
+            focusedGuideChannelId = watching.id
+            focusedGuideProgrammeStart = live.airing(watching, now: now).now?.start
+            focusedGuideChannelHeader = false
+            guideAnchorTime = now
+        }
+        // The window is shared with the page's grid, which may have been
+        // paged into the evening; what is playing is on now.
+        returnGuideToNow()
+        temporaryGuide = true
+        overlayGeneration &+= 1
+        requestGuideFocus()
+    }
+
+    private func closeTemporaryGuide() {
+        guard temporaryGuide || browseBeforeTemporaryGuide != nil else { return }
+        temporaryGuide = false
+        guideFocusRequested = false
+        if let before = browseBeforeTemporaryGuide {
+            browse = before
+            browseBeforeTemporaryGuide = nil
+        }
+    }
+
+    /// The row a restore lands on. Never a row that cannot be watched: those
+    /// are disabled, and a write aimed at a disabled row is dropped, leaving
+    /// the page with nothing focused.
     private func nearestVisibleChannel(to previousId: String?) -> LiveTvChannel? {
-        if let previousId, let retained = visibleChannels.first(where: { $0.id == previousId }) {
+        let candidates = visibleChannels.filter(\.watchable)
+        if let previousId, let retained = candidates.first(where: { $0.id == previousId }) {
             return retained
         }
-        guard let first = visibleChannels.first else { return nil }
+        guard let first = candidates.first else { return nil }
         guard let previousId,
               let oldIndex = live.channels.firstIndex(where: { $0.id == previousId })
         else { return first }
-        return visibleChannels.min { left, right in
+        return candidates.min { left, right in
             let leftIndex = live.channels.firstIndex(where: { $0.id == left.id }) ?? 0
             let rightIndex = live.channels.firstIndex(where: { $0.id == right.id }) ?? 0
             return abs(leftIndex - oldIndex) < abs(rightIndex - oldIndex)
@@ -3238,8 +3727,13 @@ struct LiveTvView: View {
     /// phone. Each of the last three reads the state the marks are already
     /// drawn from, which is why Record can offer to take a scheduled airing
     /// back off the plan without another read.
+    ///
+    /// `keyed` is the television detail region, whose navigator moves among
+    /// these by name. The programme sheet draws the same four unkeyed: it is a
+    /// separate presentation with the engine in charge, and a second view
+    /// answering to `.watch` would make the page's writes ambiguous.
     @ViewBuilder private func programmeActions(
-        _ channel: LiveTvChannel, _ programme: LiveTvProgramme
+        _ channel: LiveTvChannel, _ programme: LiveTvProgramme, keyed: Bool = false
     ) -> some View {
         #if os(iOS)
         // Two rows on the phone. Four controls and a "Watch at 10:30 PM" label
@@ -3256,11 +3750,20 @@ struct LiveTvView: View {
             }
         }
         #else
-        HStack(spacing: 8) {
-            watchAction(channel, programme)
-            recordAction(channel, programme)
-            recordSeriesAction(channel, programme)
-            remindAction(channel, programme)
+        if keyed {
+            HStack(spacing: 8) {
+                watchAction(channel, programme).focused($focusedControl, equals: .watch)
+                recordAction(channel, programme).focused($focusedControl, equals: .record)
+                recordSeriesAction(channel, programme).focused($focusedControl, equals: .recordSeries)
+                remindAction(channel, programme).focused($focusedControl, equals: .remind)
+            }
+        } else {
+            HStack(spacing: 8) {
+                watchAction(channel, programme)
+                recordAction(channel, programme)
+                recordSeriesAction(channel, programme)
+                remindAction(channel, programme)
+            }
         }
         #endif
     }
@@ -3332,6 +3835,15 @@ struct LiveTvView: View {
         }
         #endif
         if live.playing && live.watching?.id == channel.id {
+            #if os(tvOS)
+            // Selecting the playing channel in the temporary guide: the
+            // picture is already fullscreen behind it, so the answer is to
+            // get out of the way. `fullscreen = true` was a dead press here.
+            if fullscreen && temporaryGuide {
+                closeTemporaryGuide()
+                return
+            }
+            #endif
             fullscreen = true
         } else {
             Task { await live.watch(channel) }
@@ -3518,6 +4030,7 @@ struct LiveTvView: View {
                 }
                 .buttonStyle(LiveSurfacePillStyle())
                 .focusEffectDisabled()
+                .focused($focusedControl, equals: .pillActivity)
             }
             liveSurfaceButtons
         }
@@ -3534,27 +4047,25 @@ struct LiveTvView: View {
                     systemImage: live.paused ? "play.fill" : "pause.fill"
                 )
             }
-            .focused($focusedControl, equals: .play)
-            Button {
-                temporaryGuide = true
-                overlayGeneration &+= 1
-                requestGuideFocus()
-            } label: {
+            .focused($focusedControl, equals: .pillPlay)
+            Button { openTemporaryGuide() } label: {
                 Label("Guide", systemImage: "rectangle.grid.3x2")
             }
-            .focused($focusedControl, equals: .guide)
-            Button { requestChannelFocus(); fullscreen = false } label: {
+            .focused($focusedControl, equals: .pillGuide)
+            // Focus on the list is requested when the cover has gone
+            // (`restoreBrowseFocusAfterCover`), not here while it is still up.
+            Button { browse = .list; fullscreen = false } label: {
                 Label("Channels", systemImage: "list.bullet")
             }
-            .focused($focusedControl, equals: .channels)
-            Button { showStreamInfo() } label: {
+            .focused($focusedControl, equals: .pillChannels)
+            Button { coverSheetOpener = .pillInfo; showStreamInfo() } label: {
                 Label("Info", systemImage: "info.circle")
             }
-            .focused($focusedControl, equals: .info)
-            Button { showingMore = true } label: {
+            .focused($focusedControl, equals: .pillInfo)
+            Button { coverSheetOpener = .pillMore; showingMore = true } label: {
                 Label("More", systemImage: "ellipsis")
             }
-            .focused($focusedControl, equals: .more)
+            .focused($focusedControl, equals: .pillMore)
             Spacer()
             Text("MENU hides · PLAY/PAUSE \(live.paused ? "resumes" : "pauses")")
                 .font(LiveTvType.surfaceHint)
@@ -3707,13 +4218,13 @@ struct LiveTvView: View {
                             HStack(spacing: 12) {
                                 Text(overPictureHeadline).font(LiveTvType.primary).lineLimit(1)
                                 Spacer(minLength: 8)
-                                Button("Close") {
-                                    temporaryGuide = false
-                                    guideFocusRequested = false
-                                    focusedControl = .guide
-                                }
+                                // Focus returns to the Guide pill through
+                                // `onChange(of: temporaryGuide)`, deferred past
+                                // the update that re-inserts the pills.
+                                Button("Close") { closeTemporaryGuide() }
                                     .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
                                     .focusEffectDisabled()
+                                    .focused($focusedControl, equals: .guideClose)
                             }
                             tvBrowseContent(
                                 contentWidth: max(640, Double(geometry.size.width) - 40),
@@ -3767,7 +4278,7 @@ struct LiveTvView: View {
             overlayVisible = false
         }
         #if os(tvOS)
-        .onAppear { focusedControl = overlayVisible ? .play : .reveal }
+        .onAppear { focusedControl = overlayVisible ? .pillPlay : .reveal }
         .onChange(of: overlayVisible) { _, visible in
             if visible {
                 // Deferred like the hide direction below, and for the same
@@ -3780,7 +4291,7 @@ struct LiveTvView: View {
                 Task { @MainActor in
                     await Task.yield()
                     guard fullscreen, overlayVisible else { return }
-                    focusedControl = .play
+                    focusedControl = .pillPlay
                 }
             } else {
                 focusedControl = nil
@@ -3795,27 +4306,24 @@ struct LiveTvView: View {
         }
         .onChange(of: focusedControl) { _, target in
             if overlayVisible { overlayGeneration &+= 1 }
-            if overlayVisible, target == .reveal { focusedControl = .play }
+            if overlayVisible, target == .reveal { focusedControl = .pillPlay }
         }
         .onChange(of: temporaryGuide) { _, up in
             overlayGeneration &+= 1
-            if !up, fullscreen { focusedControl = overlayVisible ? .play : .reveal }
-        }
-        #endif
-        .onChange(of: showingInfo) { _, visible in
-            overlayGeneration &+= 1
-            #if os(tvOS)
-            guard !visible, fullscreen, overlayVisible else { return }
+            // Closing the guide returns to the pill that opened it. The pills
+            // are re-inserted by this same update, so the write is deferred
+            // like every other write aimed at a view that is being inserted.
+            guard !up, fullscreen else { return }
             focusedControl = nil
             Task { @MainActor in
                 await Task.yield()
-                guard fullscreen, overlayVisible, !temporaryGuide,
-                      !showingInfo, !showingMore, !showingLayout, detail == nil
-                else { return }
-                focusedControl = .play
+                guard fullscreen, !temporaryGuide else { return }
+                focusedControl = overlayVisible ? .pillGuide : .reveal
             }
-            #endif
         }
+        #endif
+        // Focus after a cover sheet closes is the sheet's `onDismiss`, above.
+        .onChange(of: showingInfo) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: showingMore) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: showingLayout) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: live.paused) { _, _ in overlayGeneration &+= 1 }
@@ -3841,6 +4349,44 @@ struct LiveTvView: View {
         temporaryGuide = false
     }
 
+    /// A sheet over the cover has closed: focus goes back to the pill that
+    /// opened it (Pause/Play if nothing recorded one), deferred past the
+    /// dismissal for the same reason every other cover write is. Called from
+    /// the sheets' `onDismiss`, which is shared code; touch has no focus to
+    /// return, so it is a no-op there.
+    private func returnFocusToCoverSheetOpener() {
+        #if os(tvOS)
+        // More → Layout: More's dismissal arrives with Layout already open.
+        // The opener is Layout's to restore, so it is kept.
+        guard fullscreen, overlayVisible, !temporaryGuide,
+              !showingInfo, !showingMore, !showingLayout, detail == nil
+        else { return }
+        let opener = coverSheetOpener ?? .pillPlay
+        coverSheetOpener = nil
+        focusedControl = nil
+        Task { @MainActor in
+            await Task.yield()
+            guard fullscreen, overlayVisible, !temporaryGuide,
+                  !showingInfo, !showingMore, !showingLayout, detail == nil
+            else { return }
+            focusedControl = opener
+        }
+        #endif
+    }
+
+    /// A programme sheet opened from a grid cell hands focus back to that
+    /// cell once the sheet has gone — the cell the sheet was about, which the
+    /// page remembered as it was focused. Left to the engine, the dismissal
+    /// put focus at the top of the page.
+    private func returnGuideFocusAfterProgrammeSheet() {
+        #if os(tvOS)
+        guard browse == .guide, focusedGuideChannelId != nil else { return }
+        guideFocusRequest &+= 1
+        guideFocusRequested = true
+        browseFocusRequestedAt = Date()
+        #endif
+    }
+
     /// Every ten-foot press lands here, already decided by the shared table.
     /// The one ruling this must preserve: a direction on a hidden overlay only
     /// reveals it — it never changes channel behind a picture nobody can see.
@@ -3861,18 +4407,26 @@ struct LiveTvView: View {
             live.togglePause()
             return true
         case .returnBrowser:
+            // Focus on the page is restored by the cover's `onDismiss`.
             fullscreen = false
+            #if os(tvOS)
+            closeTemporaryGuide()
+            #else
             temporaryGuide = false
+            #endif
             return true
         case .closePanel:
+            // Each panel's own `onChange` returns focus to its opener once the
+            // panel has actually gone; a write here would race the dismissal.
+            #if os(tvOS)
+            closeTemporaryGuide()
+            #else
             temporaryGuide = false
+            #endif
             showingInfo = false
             showingMore = false
             showingLayout = false
             detail = nil
-            #if os(tvOS)
-            focusedControl = .guide
-            #endif
             return true
         case .exit:
             Task { await live.stop(); onLeave() }

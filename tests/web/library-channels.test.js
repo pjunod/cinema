@@ -312,3 +312,131 @@ test("late title search responses cannot replace a newer query or another draft"
   await third;
   assert.equal(c.LIBRARY_CHANNELS.search[0].title, "Second");
 });
+
+function listPage() {
+  const h = editor();
+  vm.runInContext(source, h.context); // restore the real painter the harness stubs out
+  const main = {innerHTML: ""};
+  h.nodes.set("main", main);
+  const toasts = [], confirms = [];
+  h.context.toast = message => toasts.push(message);
+  h.context.confirm = message => {confirms.push(message); return true;};
+  h.context.viewLibraryChannels = async () => {h.context.LIBRARY_CHANNELS.viewed = true;};
+  Object.assign(h.context.LIBRARY_CHANNELS, {editor: false, draft: null, guide: [], channels: [
+    {id: "a", name: "Alpha", revision: 3, can_edit: true, enabled: true},
+    {id: "b", name: "Bravo", revision: 5, can_edit: true, enabled: true},
+    {id: "c", name: "Charlie", revision: 1, can_edit: false, enabled: true},
+  ]});
+  const requests = [];
+  h.context.api = async (url, options) => {requests.push({url, options}); return null;};
+  return {...h, main, toasts, confirms, requests};
+}
+
+test("deleting from the editor returns to the list and says so", async () => {
+  const {context: c, storage, toasts, requests} = listPage();
+  c.LIBRARY_CHANNELS.editor = true;
+  c.LIBRARY_CHANNELS.draft = {...LibraryChannelCore.emptyDraft({server: "test-server", user: 1}),
+    id: "a", name: "Alpha", expected_revision: 3, dirty: true};
+  storage.set(c.libraryChannelDraftKey("a"), "{}");
+  // The restored draft was opened at revision 3; the server now holds 4.
+  c.api = async (url, options) => {requests.push({url, options}); return options ? null : {id: "a", revision: 4};};
+  await c.deleteLibraryChannel();
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].url, "/library-channels/a");
+  assert.match(requests[1].url, /^\/library-channels\/a\?expected_revision=4&request_id=/);
+  assert.equal(requests[1].options.method, "DELETE");
+  assert.equal(c.LIBRARY_CHANNELS.editor, false);
+  assert.equal(c.LIBRARY_CHANNELS.draft, null);
+  assert.equal(c.LIBRARY_CHANNELS.viewed, true);
+  assert.equal(storage.has(c.libraryChannelDraftKey("a")), false);
+  assert.deepEqual(toasts, ["Channel deleted"]);
+});
+
+test("an editor delete the server refuses stays in the editor with the reason", async () => {
+  const {context: c, nodes, toasts} = listPage();
+  c.LIBRARY_CHANNELS.editor = true;
+  c.LIBRARY_CHANNELS.draft = {...LibraryChannelCore.emptyDraft({server: "test-server", user: 1}),
+    id: "a", name: "Alpha", expected_revision: 3};
+  const errorNode = {textContent: ""};
+  nodes.set("lc-error", errorNode);
+  c.api = async (url, options) => {
+    if (!options) return {id: "a", revision: 3};
+    const e = new Error("Channel changed; reload"); e.status = 409; throw e;
+  };
+  const draft = c.LIBRARY_CHANNELS.draft;
+  await c.deleteLibraryChannel();
+  assert.equal(c.LIBRARY_CHANNELS.editor, true);
+  assert.equal(c.LIBRARY_CHANNELS.draft, draft);
+  assert.equal(c.LIBRARY_CHANNELS.viewed, undefined);
+  assert.match(errorNode.textContent, /Alpha was not deleted: Channel changed; reload/);
+  assert.equal(toasts.length, 1);
+});
+
+test("a channel that is already gone counts as deleted", async () => {
+  const {context: c, toasts} = listPage();
+  c.api = async () => {const e = new Error("not found"); e.status = 404; throw e;};
+  await c.deleteLibraryChannelFromList("a");
+  assert.deepEqual(toasts, ["Channel deleted"]);
+  assert.equal(c.LIBRARY_CHANNELS.viewed, true);
+});
+
+test("the list offers delete and selection only on channels the viewer can edit", () => {
+  const {context: c, main} = listPage();
+  c.libraryChannelsPaint();
+  assert.match(main.innerHTML, /deleteLibraryChannelFromList\('a'\)/);
+  assert.match(main.innerHTML, /deleteLibraryChannelFromList\('b'\)/);
+  assert.doesNotMatch(main.innerHTML, /deleteLibraryChannelFromList\('c'\)/);
+  assert.doesNotMatch(main.innerHTML, /toggleLibraryChannelSelected\('c'/);
+  assert.match(main.innerHTML, /Select all you can edit/);
+  assert.doesNotMatch(main.innerHTML, /Delete selected/);
+  c.toggleLibraryChannelSelected("a", true);
+  assert.match(main.innerHTML, /1 selected/);
+  assert.match(main.innerHTML, /deleteSelectedLibraryChannels\(\)/);
+});
+
+test("bulk delete removes every selected editable channel and reports partial failure", async () => {
+  const {context: c, toasts, confirms, requests} = listPage();
+  c.selectAllLibraryChannels(true);
+  assert.deepEqual([...c.LIBRARY_CHANNELS.selected].sort(), ["a", "b"]);
+  c.api = async (url, options) => {
+    requests.push({url, options});
+    if (url.startsWith("/library-channels/b")) {const e = new Error("Channel changed"); e.status = 409; throw e;}
+    return null;
+  };
+  await c.deleteSelectedLibraryChannels();
+  assert.match(confirms[0], /Delete 2 channels \(Alpha, Bravo\)/);
+  assert.deepEqual(requests.map(r => r.url.split("?")[0]), ["/library-channels/a", "/library-channels/b"]);
+  assert.deepEqual(toasts, ["1 deleted. Bravo was not deleted: Channel changed"]);
+  assert.deepEqual([...c.LIBRARY_CHANNELS.selected], ["b"]);
+  assert.equal(c.LIBRARY_CHANNELS.viewed, true);
+});
+
+test("a delete that finishes after the viewer left does not repaint the channels page", async () => {
+  const {context: c, toasts} = listPage();
+  let finish;
+  c.api = () => new Promise(resolve => {finish = resolve;});
+  const pending = c.deleteLibraryChannelFromList("a");
+  await new Promise(resolve => setImmediate(resolve));
+  c.PAGE_RENDER_GENERATION = 2; c.location.hash = "#/home";
+  finish(null);
+  await pending;
+  assert.deepEqual(toasts, ["Channel deleted"]);
+  assert.equal(c.LIBRARY_CHANNELS.viewed, undefined);
+});
+
+test("a second delete while one is running is ignored", async () => {
+  const {context: c, confirms, requests, main} = listPage();
+  let finish;
+  c.api = (url, options) => {requests.push({url, options}); return new Promise(resolve => {finish = resolve;});};
+  c.selectAllLibraryChannels(true);
+  const first = c.deleteSelectedLibraryChannels();
+  assert.match(main.innerHTML, /Deleting…/);
+  assert.doesNotMatch(main.innerHTML, /deleteSelectedLibraryChannels\(\)/);
+  await c.deleteSelectedLibraryChannels();
+  await c.deleteLibraryChannelFromList("b");
+  assert.equal(confirms.length, 1);
+  finish(null); await new Promise(resolve => setImmediate(resolve)); finish(null);
+  await first;
+  assert.equal(requests.length, 2);
+  assert.equal(c.LIBRARY_CHANNELS.deleting, false);
+});

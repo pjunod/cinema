@@ -995,8 +995,9 @@ final class AppModel: ObservableObject {
     }
 
     /// Best-effort — a dropped progress beat shouldn't surface an error.
-    func reportProgress(itemId: Int, positionMs: Int, durationMs: Int?) async {
-        try? await requireAPI().progress(itemId: itemId, positionMs: positionMs, durationMs: durationMs)
+    func reportProgress(itemId: Int, positionMs: Int, durationMs: Int?, method: String? = nil) async {
+        try? await requireAPI().progress(itemId: itemId, positionMs: positionMs,
+                                         durationMs: durationMs, method: method)
     }
 
     nonisolated static func normalizeOrigin(_ raw: String) -> String {

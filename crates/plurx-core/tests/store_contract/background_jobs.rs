@@ -9,7 +9,13 @@ use plurx_core::store::background_jobs::*;
 #[tokio::test]
 async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_fenced() {
     for_each_backend(|store, backend| async move {
-        for scenario in ["published", "source_replaced", "cancelled"] {
+        for (index, scenario) in ["published", "source_replaced", "cancelled"]
+            .into_iter()
+            .enumerate()
+        {
+            // A failed or cancelled source reader keeps its physical slot for
+            // the original 30-second lease. Give each scenario a later clock.
+            let now_ms = 1_000 + index as i64 * 40_000;
             let (_, file_id) = seed_file(&store, &format!("background-{scenario}")).await;
             let file = store.get_file(file_id).await.expect("file").expect("file");
             let job_id = uuid::Uuid::new_v4().to_string();
@@ -42,8 +48,8 @@ async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_f
                     },
                     dedupe_key: format!("transcode:{recipe}"),
                     priority: 1,
-                    not_before_ms: 1_000,
-                    now_ms: 1_000,
+                    not_before_ms: now_ms,
+                    now_ms,
                     request: JobRequest {
                         scope: "internal:pretranscode".to_owned(),
                         request_id: job_id.clone(),
@@ -67,8 +73,8 @@ async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_f
                     claim_id: uuid::Uuid::new_v4().to_string(),
                     kind: JobKind::TranscodePrepare,
                     payload_version: 1,
-                    now_ms: 1_000,
-                    dispatched_at_ms: 1_000,
+                    now_ms,
+                    dispatched_at_ms: now_ms,
                 })
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: claim: {error}"));
@@ -105,7 +111,7 @@ async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_f
                     expected_previous_bytes: None,
                     manifest_digest: "d".repeat(64),
                 },
-                now_ms: 2_000,
+                now_ms: now_ms + 1_000,
             };
             if scenario == "source_replaced" {
                 store
@@ -122,7 +128,7 @@ async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_f
                 store
                     .cancel_job(CancelJob {
                         job_id,
-                        now_ms: 1_500,
+                        now_ms: now_ms + 500,
                     })
                     .await
                     .expect("cancel");
@@ -465,6 +471,18 @@ async fn background_jobs_one_fragment_build_keeps_remote_delivery_durable() {
             })
             .await
             .expect("cancel one interest");
+        let viewer = ArtifactViewerInterest {
+            cache_key: cache_key.clone(),
+            file_id,
+            target_node_id: "node-b".into(),
+            user_id: 1,
+            playback_id: "remote-fragment-viewer".into(),
+            now_ms: 1_001,
+        };
+        assert!(store
+            .join_artifact_viewer(viewer.clone())
+            .await
+            .expect("join remote viewer"));
         let revision = store
             .background_job(&id)
             .await
@@ -528,18 +546,22 @@ async fn background_jobs_one_fragment_build_keeps_remote_delivery_durable() {
             .await
             .expect("receipts")
             .waiters;
-        assert_eq!(
+        assert_eq!(waiters.len(), 4, "{backend}");
+        assert!(
             waiters
                 .iter()
-                .map(|waiter| waiter.state.as_str())
-                .collect::<Vec<_>>(),
-            ["succeeded", "awaiting_hydration", "cancelled"],
-            "{backend}"
+                .any(|waiter| waiter.request_id == viewer.consumer_id()
+                    && waiter.state == "awaiting_hydration"),
+            "{backend}: the viewer follows the exact parent into target hydration"
         );
         // A scheduler restart needs no in-memory callback to recover this intent.
         let intents = store.delivery_intents(1_004).await.expect("durable outbox");
         assert_eq!(intents.len(), 1, "{backend}");
         assert_eq!(intents[0].target_node_id, "node-b");
+        assert_eq!(
+            intents[0].priority, 3,
+            "{backend}: viewer priority reaches hydration"
+        );
         let EnqueueOutcome::Accepted {
             job_id: hydration_id,
             ..
@@ -550,6 +572,16 @@ async fn background_jobs_one_fragment_build_keeps_remote_delivery_durable() {
         else {
             panic!("{backend}: hydration not admitted")
         };
+        assert_eq!(
+            store
+                .background_job(&hydration_id)
+                .await
+                .expect("hydration job")
+                .expect("hydration exists")
+                .priority,
+            3,
+            "{backend}: hydration retains its viewer priority"
+        );
         assert!(store
             .delivery_intents(1_005)
             .await
@@ -599,13 +631,13 @@ async fn background_jobs_one_fragment_build_keeps_remote_delivery_durable() {
             .await
             .expect("delivered receipts")
             .waiters;
-        assert_eq!(
+        assert_eq!(waiters.len(), 4, "{backend}");
+        assert!(
             waiters
                 .iter()
-                .map(|waiter| waiter.state.as_str())
-                .collect::<Vec<_>>(),
-            ["succeeded", "succeeded", "cancelled"],
-            "{backend}"
+                .any(|waiter| waiter.request_id == viewer.consumer_id()
+                    && waiter.state == "succeeded"),
+            "{backend}: target delivery settles the viewer independently"
         );
         assert_eq!(
             store
@@ -1851,7 +1883,7 @@ async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
             let outcome = store.claim_job(claim.clone()).await.expect("claim");
             assert_eq!(
                 matches!(outcome, ClaimOutcome::Claimed { .. }),
-                index != 2,
+                matches!(index, 0 | 3),
                 "{backend}: alias {index}"
             );
             if index == 2 {
@@ -1894,8 +1926,8 @@ async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
             matches!(
                 store
                     .claim_job(ClaimJob {
-                        now_ms: 1_003,
-                        dispatched_at_ms: 1_003,
+                        now_ms: 31_001,
+                        dispatched_at_ms: 31_001,
                         ..claims[2].clone()
                     })
                     .await
@@ -1983,8 +2015,9 @@ async fn background_provider_contention_does_not_reserve_independent_storage() {
                 "{backend}"
             );
         }
-        // Both independent storage slots must remain available after the third
-        // metadata claim lost provider contention in its all-or-none transaction.
+        // The failed provider claim leaves the independent source unreserved.
+        // One maintenance probe can claim it; the second physical slot stays
+        // reserved for a viewer under the shared source-I/O policy.
         for index in 0..2 {
             let id = uuid::Uuid::new_v4().to_string();
             store
@@ -2008,7 +2041,7 @@ async fn background_provider_contention_does_not_reserve_independent_storage() {
                 })
                 .await
                 .expect("probe enqueue");
-            assert!(
+            assert_eq!(
                 matches!(
                     store
                         .claim_job(ClaimJob {
@@ -2026,6 +2059,7 @@ async fn background_provider_contention_does_not_reserve_independent_storage() {
                         .expect("probe claim"),
                     ClaimOutcome::Claimed { .. }
                 ),
+                index == 0,
                 "{backend}"
             );
         }
@@ -3514,12 +3548,16 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                 .expect("coordinator"),
             backend,
         );
-        for scenario in [
+        for (index, scenario) in [
             "published",
             "source_changed",
             "cancelled",
             "wrong_coordinator",
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let now_ms = 1_000 + index as i64 * 40_000;
             let (_, file_id) = seed_file(&store, &format!("leaf-{scenario}")).await;
             let file = store.get_file(file_id).await.expect("file").expect("file");
             let payload = probe_fixture(&store, file_id).await;
@@ -3530,8 +3568,8 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                     payload: payload.clone(),
                     dedupe_key: format!("leaf:{file_id}"),
                     priority: 1,
-                    not_before_ms: 1000,
-                    now_ms: 1000,
+                    not_before_ms: now_ms,
+                    now_ms,
                     request: JobRequest {
                         scope: "probe-contract".into(),
                         request_id: id.clone(),
@@ -3558,8 +3596,8 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                     claim_id: uuid::Uuid::new_v4().to_string(),
                     kind: JobKind::MediaProbe,
                     payload_version: 1,
-                    now_ms: 1000,
-                    dispatched_at_ms: 1000,
+                    now_ms,
+                    dispatched_at_ms: now_ms,
                 })
                 .await
                 .expect("claim")
@@ -3577,7 +3615,7 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                         ..Default::default()
                     },
                 },
-                now_ms: 1100,
+                now_ms: now_ms + 100,
             };
             if scenario == "source_changed" {
                 store
@@ -3594,7 +3632,7 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                 store
                     .cancel_job(CancelJob {
                         job_id: id.clone(),
-                        now_ms: 1050,
+                        now_ms: now_ms + 50,
                     })
                     .await
                     .expect("cancel");
@@ -3606,7 +3644,7 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
             let mut apply = ApplyProbeJob {
                 job_id: id,
                 lease: coordinator.clone(),
-                now_ms: 1200,
+                now_ms: now_ms + 200,
             };
             if matches!(scenario, "source_changed" | "cancelled") {
                 assert!(
@@ -3622,7 +3660,7 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                         settlement: JobSettlement::Stop {
                             error_code: "source_or_interest_changed".into(),
                         },
-                        now_ms: 1200,
+                        now_ms: now_ms + 200,
                     })
                     .await
                     .expect("retire refused publication");
@@ -4148,4 +4186,389 @@ async fn artwork_repair_contract(holder_disappears: bool) {
         );
     })
     .await;
+}
+
+#[tokio::test]
+async fn background_subtitles_source_changes_cancel_selected_candidates() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "subtitle-obsolete").await;
+        let request = store
+            .enqueue_or_promote_subtitle_source(
+                &super::subtitle_source_stamp(file_id),
+                "foreground",
+                1_000,
+            )
+            .await
+            .expect("subtitle reconciliation fixture")
+            .expect("subtitle reconciliation fixture");
+        let admitted = store
+            .enqueue_subtitle_job(request, 1_000)
+            .await
+            .expect("subtitle reconciliation fixture");
+        let EnqueueOutcome::Accepted { job_id, .. } = admitted else {
+            panic!("{backend}: admission")
+        };
+        let query = CandidateQuery {
+            node_id: "node-a".into(),
+            kinds: vec![JobKind::SubtitleExtract],
+            after: None,
+            now_ms: 1_001,
+            limit: 100,
+        };
+        assert_eq!(
+            store
+                .job_candidates(query.clone())
+                .await
+                .expect("subtitle reconciliation fixture")
+                .jobs
+                .len(),
+            1
+        );
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("subtitle reconciliation fixture")
+            .expect("subtitle reconciliation fixture");
+        store
+            .upsert_file(
+                file.item_id,
+                &file.path.to_string_lossy(),
+                file.size + 1,
+                file.mtime + 1,
+                &plurx_core::domain::ProbeResult::default(),
+            )
+            .await
+            .expect("subtitle reconciliation fixture");
+        // The source can change after candidate selection. The atomic claim must
+        // return an ordinary refusal, not throw the subtitle projection trigger.
+        let job = store
+            .background_job(&job_id)
+            .await
+            .expect("subtitle reconciliation fixture")
+            .expect("subtitle reconciliation fixture");
+        let outcome = store
+            .claim_artifact_job(ClaimJob {
+                job_id: job_id.clone(),
+                expected_revision: job.revision,
+                node_id: "node-a".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::SubtitleExtract,
+                payload_version: 1,
+                now_ms: 1_001,
+                dispatched_at_ms: 1_001,
+            })
+            .await
+            .expect("obsolete demand is not an ambiguous database error");
+        assert!(
+            !matches!(outcome, ClaimOutcome::Claimed { .. }),
+            "{backend}"
+        );
+        assert!(store
+            .job_candidates(query)
+            .await
+            .expect("subtitle reconciliation fixture")
+            .jobs
+            .is_empty());
+        store
+            .maintain_jobs(1_002)
+            .await
+            .expect("source-change upkeep");
+        let retired = store
+            .background_job(&job_id)
+            .await
+            .expect("subtitle reconciliation fixture")
+            .expect("subtitle reconciliation fixture");
+        assert_eq!(retired.state, JobState::Cancelled, "{backend}");
+        assert_eq!(
+            retired.last_error_code.as_deref(),
+            Some("subtitle_request_cancelled")
+        );
+        assert!(store
+            .job_attempts(&job_id)
+            .await
+            .expect("subtitle reconciliation fixture")
+            .is_empty());
+    })
+    .await;
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test]
+async fn background_subtitles_replicated_ready_orphans_are_refused_and_retired() {
+    use plurx_core::store::Store;
+    use std::sync::Arc;
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store: Arc<dyn Store> = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    let (_, file_id) = seed_file(&store, "subtitle-ready-orphan").await;
+    let request = store
+        .enqueue_or_promote_subtitle_source(
+            &super::subtitle_source_stamp(file_id),
+            "foreground",
+            1_000,
+        )
+        .await
+        .expect("request")
+        .expect("request");
+    let EnqueueOutcome::Accepted { job_id, .. } = store
+        .enqueue_subtitle_job(request.clone(), 1_000)
+        .await
+        .expect("admit")
+    else {
+        panic!("admission")
+    };
+    let query = CandidateQuery {
+        node_id: "node-a".into(),
+        kinds: vec![JobKind::SubtitleExtract],
+        after: None,
+        now_ms: 1_001,
+        limit: 100,
+    };
+    assert_eq!(
+        store
+            .job_candidates(query.clone())
+            .await
+            .expect("candidate")
+            .jobs
+            .len(),
+        1
+    );
+    // Manufacture the historical split projection through the replicated log.
+    // Ordinary source changes already cancel both records together.
+    let client = hiqlite::Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        super::CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("fixture client");
+    client.execute("UPDATE analysis_requests SET state='ready', result_cache_key='published-source' WHERE request_id=$1",
+        hiqlite::params!(request.request_id.clone())).await.expect("historical ready demand");
+    // v61 differs only in this trigger. Upgrade the exact predecessor with the
+    // historical orphan present, rather than reconstructing unrelated v10 DDL.
+    drop(store);
+    let old_projection = include_str!("../../src/store/background_jobs_subtitle.sql")
+        .split("-- next statement\n")
+        .find(|sql| sql.contains("CREATE TRIGGER IF NOT EXISTS background_subtitle_settled"))
+        .expect("predecessor projection trigger");
+    for result in client
+        .txn(vec![
+            (
+                "DROP TRIGGER background_subtitle_settled".to_owned(),
+                hiqlite::params!(),
+            ),
+            (old_projection.to_owned(), hiqlite::params!()),
+            (
+                "UPDATE cluster_meta SET schema_version=61 WHERE singleton=1".to_owned(),
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("install predecessor fixture")
+    {
+        result.expect("predecessor statement");
+    }
+    let store: Arc<dyn Store> = Arc::new(
+        plurx_core::store::HiqliteAuthStore::open_or_migrate(
+            client.clone(),
+            &cluster._root.path().join("subtitle-upgrade-telemetry.db"),
+        )
+        .await
+        .expect("upgrade v61 to current schema"),
+    );
+    let job = store
+        .background_job(&job_id)
+        .await
+        .expect("job")
+        .expect("job");
+    let outcome = store
+        .claim_artifact_job(ClaimJob {
+            job_id: job_id.clone(),
+            expected_revision: job.revision,
+            node_id: "node-a".into(),
+            boot_id: uuid::Uuid::new_v4().to_string(),
+            claim_id: uuid::Uuid::new_v4().to_string(),
+            kind: JobKind::SubtitleExtract,
+            payload_version: 1,
+            now_ms: 1_001,
+            dispatched_at_ms: 1_001,
+        })
+        .await
+        .expect("obsolete demand must not raise an ambiguous SQL error");
+    assert!(matches!(outcome, ClaimOutcome::Contended));
+    assert!(store
+        .job_candidates(query)
+        .await
+        .expect("candidates")
+        .jobs
+        .is_empty());
+    assert!(store.maintain_jobs(1_002).await.expect("reconcile"));
+    let retired = store
+        .background_job(&job_id)
+        .await
+        .expect("read")
+        .expect("retained job");
+    assert_eq!(retired.state, JobState::Cancelled);
+    assert_eq!(
+        retired.last_error_code.as_deref(),
+        Some("subtitle_demand_obsolete")
+    );
+    let preserved = store
+        .analysis_request(&request.request_id)
+        .await
+        .expect("read")
+        .expect("retained request");
+    assert_eq!(preserved.state, "ready");
+    assert_eq!(preserved.result_cache_key, "published-source");
+    assert!(store
+        .job_attempts(&job_id)
+        .await
+        .expect("no fabricated attempt")
+        .is_empty());
+    assert!(!store.maintain_jobs(1_003).await.expect("idle upkeep"));
+}
+
+/// The seeded settled rows are UUID-shaped, as the job id validator requires.
+#[cfg(feature = "hiqlite-contract-tests")]
+fn history_id(i: usize) -> String {
+    format!("00000000-0000-4000-8000-{i:012}")
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+fn settled_history_fixture(now_ms: i64) -> EnqueueJob {
+    EnqueueJob {
+        id: uuid::Uuid::new_v4().to_string(),
+        payload: JobPayload::FragmentIndexBuild {
+            file_id: 1,
+            source_generation: "source:1".to_owned(),
+            source_size: 100,
+            source_mtime: 1,
+            source_sha256: "d".repeat(64),
+            cache_key: "c".repeat(64),
+            pipeline_digest: "a".repeat(64),
+        },
+        dedupe_key: "fragment:history".to_owned(),
+        priority: 1,
+        not_before_ms: now_ms,
+        now_ms,
+        request: JobRequest {
+            scope: "user:1".to_owned(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            request_digest: "b".repeat(64),
+            consumer_kind: "analysis".to_owned(),
+            consumer_ref: "analysis:1".to_owned(),
+            target_node_id: None,
+            deadline_ms: None,
+            retain_identity: false,
+        },
+    }
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test]
+async fn background_jobs_replicated_settled_history_yields_after_the_v63_upgrade() {
+    use plurx_core::store::Store;
+    use std::sync::Arc;
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store: Arc<dyn Store> = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    let template = settled_history_fixture(1_000);
+    store.enqueue_job(template.clone()).await.expect("enqueue");
+    store
+        .cancel_job(CancelJob {
+            job_id: template.id.clone(),
+            now_ms: 1_001,
+        })
+        .await
+        .expect("settle the template");
+    let client = hiqlite::Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        super::CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("fixture client");
+    // Put the v62 enqueue and upkeep triggers back and stamp v62, so the
+    // migration every deployed node takes is the one under test.
+    drop(store);
+    let base = include_str!("../../src/store/background_jobs_schema.sql");
+    let predecessor = |name: &str| {
+        base.split("-- next statement\n")
+            .find(|sql| sql.contains(&format!("CREATE TRIGGER IF NOT EXISTS {name}\n")))
+            .expect("predecessor trigger")
+            .to_owned()
+    };
+    for result in client
+        .txn(vec![
+            ("DROP TRIGGER background_job_enqueue_command".to_owned(), hiqlite::params!()),
+            (predecessor("background_job_enqueue_command"), hiqlite::params!()),
+            ("DROP TRIGGER background_job_maintenance_command".to_owned(), hiqlite::params!()),
+            (predecessor("background_job_maintenance_command"), hiqlite::params!()),
+            ("UPDATE cluster_meta SET schema_version=62 WHERE singleton=1".to_owned(), hiqlite::params!()),
+            ("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<9999)
+              INSERT INTO background_jobs (id, kind, payload_version, payload_json, dedupe_key, priority,
+                  state, not_before_ms, created_at_ms, updated_at_ms)
+              SELECT '00000000-0000-4000-8000-'||printf('%012d', i), kind, payload_version, payload_json, 'history-'||i, priority,
+                  'succeeded', 1000, 1000, 2000+i FROM n, background_jobs WHERE id = $1".to_owned(),
+             hiqlite::params!(template.id.clone())),
+        ])
+        .await
+        .expect("install predecessor fixture")
+    {
+        result.expect("predecessor statement");
+    }
+    let store: Arc<dyn Store> = Arc::new(
+        plurx_core::store::HiqliteAuthStore::open_or_migrate(
+            client.clone(),
+            &cluster._root.path().join("retention-upgrade-telemetry.db"),
+        )
+        .await
+        .expect("upgrade v62 to current schema"),
+    );
+    let fresh = settled_history_fixture(20_000);
+    assert!(
+        matches!(
+            store.enqueue_job(fresh.clone()).await.expect("admit"),
+            EnqueueOutcome::Accepted { .. }
+        ),
+        "settled history must not refuse live work on the replicated store"
+    );
+    assert!(store
+        .background_job(&template.id)
+        .await
+        .expect("read")
+        .is_none());
+    assert!(store
+        .background_job(&history_id(127))
+        .await
+        .expect("read")
+        .is_none());
+    assert!(store
+        .background_job(&history_id(128))
+        .await
+        .expect("read")
+        .is_some());
+    assert!(store
+        .background_job(&fresh.id)
+        .await
+        .expect("read")
+        .is_some());
+    assert!(store.maintain_jobs(20_001).await.expect("pressure upkeep"));
+    assert!(store
+        .background_job(&history_id(255))
+        .await
+        .expect("read")
+        .is_none());
+    assert!(store
+        .background_job(&history_id(256))
+        .await
+        .expect("read")
+        .is_some());
 }

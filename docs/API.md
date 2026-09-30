@@ -911,7 +911,7 @@ file read. Two extractions run at once per node, each bounded to 15 s and
 `Retry-After`. A failed extraction leaves a marker and the route answers 404
 for that chapter for an hour without running ffmpeg again. The response
 carries `ETag` (file id, size, mtime, index) and `private, max-age=604800`.
-When Settings → Developer → Chapter thumbnails is off the route answers 404
+When Settings → Playback → Chapter thumbnails is off the route answers 404
 and runs nothing. See [clients/WATCH-VIEW-LAYOUT.md](clients/WATCH-VIEW-LAYOUT.md).
 
 ## 7. Playback — the decision
@@ -2353,7 +2353,11 @@ Error codes: `invalid_request` (400), `channel_not_found` (404),
 `request_timeout`/`startup_timeout` (408), `settings_conflict` (409),
 `capability_expired` (410), `drm_unsupported`/`codec_unsupported` (415),
 `stream_failed` (502), and `live_tv_disabled`, `tuner_capacity`,
-`tuner_unavailable`, `device_unavailable`, `owner_unavailable` (503).
+`encoder_capacity`, `tuner_unavailable`, `device_unavailable`,
+`owner_unavailable` (503). `tuner_capacity` means every tuner plurx may use is
+held and carries `holders`/`watchable`; `encoder_capacity` means the tuners
+were free but the owner's video encoder pool refused the transcode this route
+needs — a copy route on the same channel would have started.
 
 ---
 

@@ -680,6 +680,7 @@ struct LiveTvFailure: Error, LocalizedError, Sendable {
                 copy += " " + watchable.map { "Watch \($0.guideNumber) instead" }.joined(separator: " · ") + "."
             }
             return copy
+        case "encoder_capacity": return "The tuner owner's video encoder is busy, so this channel cannot be converted right now. Try again in a moment."
         case "tuner_unavailable": return "The tuner cannot start this channel. Check reception and other tuner clients."
         case "channel_not_found": return "This channel is no longer available. Refresh the lineup."
         case "drm_unsupported": return "DRM-protected television is not supported."
@@ -694,7 +695,7 @@ struct LiveTvFailure: Error, LocalizedError, Sendable {
         // the persisted hint, and the press after this one retires it.
         case "no_answer": return "The server did not answer. Press the channel again."
         case "invalid_request": return "This device sent a live-TV request the server could not read. Update the app."
-        case "invalid_settings": return "Live TV settings are incomplete. An administrator can finish them in Settings → Developer."
+        case "invalid_settings": return "Live TV settings are incomplete. An administrator can finish the tuner configuration in Settings → Live TV."
         case "admin_required": return "Only an administrator can change Live TV settings."
         default: return "The session server is unavailable. Check the server and its network connection."
         }
@@ -1005,6 +1006,14 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
                                                            authenticated: true, session: transport))
     }
 
+    /// The enable card's prerequisites as the server last observed them — the
+    /// same `GET /live-tv/readiness` the web's Enable Live TV card reads when it
+    /// renders. Advisory: nothing reads it back into the enable.
+    func currentReadiness() async throws -> LiveTvReadiness {
+        try decode(LiveTvReadiness.self, data: await request("live-tv/readiness", method: "GET",
+                                                           authenticated: true, session: transport))
+    }
+
     /// The guide's advisory card. A read of what the owner already knows: it
     /// never triggers a refresh and never gates anything the operator can do.
     func guideReadiness() async throws -> LiveTvGuideReadiness {
@@ -1157,7 +1166,7 @@ enum LiveTvStartReducer {
     /// `node_maintenance` row says.
     static let rendered: Set<String> = [
         "live_tv_disabled", "live_tv_protocol_unready", "tuner_capacity",
-        "tuner_unavailable", "channel_not_found", "drm_unsupported",
+        "encoder_capacity", "tuner_unavailable", "channel_not_found", "drm_unsupported",
         "codec_unsupported", "startup_timeout", "source_format_changed",
         "stream_failed", "capability_expired", "settings_conflict",
         "invalid_request", "invalid_settings", "admin_required",
@@ -1331,16 +1340,23 @@ final class LiveTvLease {
     /// ever comes back, this loop is the thing it breaks.
     private func dispatch(_ channel: String, requestId: String?) async throws -> LiveTvStarted {
         var verdict = LiveTvStartReducer.noAnswer
+        var capacityFailure: LiveTvFailure?
         for attempt in 0...LiveTvInputRouting.startReplayAttempts {
             do { return try await requests.start(channel, requestId: requestId) }
             catch {
                 verdict = LiveTvStartReducer.verdict(LiveTvStartAnswer(error: error))
+                let failure = error as? LiveTvFailure
+                capacityFailure = failure?.code == "tuner_capacity" ? failure : nil
                 // The replay carries the SAME request id: the owner joins it
                 // to the session the first POST may already have created.
                 if !verdict.replay || attempt == LiveTvInputRouting.startReplayAttempts { break }
             }
         }
         if !verdict.keepHint, let requestId { forget(requestId) }
+        // The reducer still owns retry and hint disposition. Preserve the
+        // capacity owner's structured alternatives when that same refusal is
+        // rendered; replacing it with a code-only error loses the actions.
+        if verdict.render == "tuner_capacity", let capacityFailure { throw capacityFailure }
         throw LiveTvFailure(code: verdict.render)
     }
 

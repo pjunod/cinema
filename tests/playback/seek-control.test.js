@@ -75,15 +75,15 @@ test("rolling and progressive seeks stay local only inside advertised coverage",
   assert.deepEqual(policy.seekRoute({...base,changing:true}),{route:"reopen"});
 });
 
-function localSeekHarness({buffered, published, vod=false}) {
+function localSeekHarness({buffered, published, vod=false, seekable, copyHls=false, hls=true}) {
   const listeners=new Map(), timers=new Map(), changes=[], logs=[], stalls=[];
-  const video={currentTime:10,buffered,seeking:false,paused:false,ended:false,
+  const video={currentTime:10,buffered,seekable,seeking:false,paused:false,ended:false,
     addEventListener(name,fn){listeners.set(name,fn);},
     removeEventListener(name,fn){if(listeners.get(name)===fn)listeners.delete(name);}};
-  const player={method:"transcode",copyHls:false,vod,offset:0,durMs:600_000,
+  const player={method:copyHls?"remux":"transcode",copyHls,vod,offset:0,durMs:600_000,
     started:true,wantsPlayback:true,source:{video_codec:"h264"},controlHasFrameCallbacks:false,
     mediaAttachment:{id:1},pendingMediaChange:null,stallRecoveries:1,
-    hls:{currentLevel:0,levels:[{details:published}]}};
+    hls:hls?{currentLevel:0,levels:[{details:published}]}:null};
   const api=new Function("policy","video","player","timers","changes","logs","stalls",[
     "let PLAYER=player,now=0;const performance={now:()=>now};",
     "const document={getElementById:()=>video,hidden:false};",
@@ -99,18 +99,125 @@ function localSeekHarness({buffered, published, vod=false}) {
     "function requestPlaybackMediaChange(p,change){changes.push({target:p.controlSeek.targetMs,change});}",
     "function play(){throw new Error('multipart route not expected');}",
     "function playbackSurfaceStep(){}function playbackSurfaceGeneration(){return 1;}",
+    "function recordPlaybackSeekRoute(){}",
     "function playbackOwnsAttachedMedia(){return true;}function samplePlaybackPresentationClock(){return 0;}",
     "function samplePreparedSwitchFrames(){}function streamHasVideo(){return true;}",
     "function completeHlsStartup(){}function clearStall(){}function finishStallRecovery(){}",
     "function bufferRunway(){return 0;}function persistentWait(){throw Error('unexpected persistent wait');}",
     "function notifyPlaybackControl(){}",
+    // The shipped seek-telemetry edges seekTo() now calls (see web-control.test.js).
+    "function playbackContext(){return {};}",
+    source("dispatchPlaybackSeekTelemetry"),source("finishPlaybackSeekTelemetry"),
+    source("watchPlaybackSeekTelemetry"),
     source("playbackSeekBufferedRangesMs"),source("playbackSeekPublishedRangeMs"),
+    source("playbackSeekSeekableRangesMs"),
     source("playbackSeekBufferCovers"),source("settlePlaybackControlSeek"),
     source("playbackProgressTick"),source("seekTo"),
     "return {seekTo,logs,changes,stalls,tick(at){now=at;playbackProgressTick(video,player);},timerDelays(){return [...timers.values()].map(t=>t.ms);},async expire(ms=Infinity){for(const [id,timer] of [...timers])if(timer.ms<=ms){timers.delete(id);timer.fn();}for(let i=0;i<5;i+=1)await Promise.resolve();}};",
   ].join("\n"))(policy,video,player,timers,changes,logs,stalls);
   return {api,video,player,listeners};
 }
+
+// Safari plays copy HLS as a growing EVENT playlist, i.e. live: `seekable` ends
+// three 16 s target durations before the published edge, behind most of the
+// buffer. The field shape (2026-09-29, Safari, copy_hls:buffered): a seek to a
+// buffered but unseekable target was clamped back to the playhead, fired
+// `seeked`, and playback went on from where it was.
+test("a buffered target outside seekable is not local", () => {
+  const base = {method:"remux", copyHls:true, targetMs:30_000,
+    bufferedMs:[{from:0,through:45_000}]};
+  assert.deepEqual(policy.seekRoute({...base,seekableMs:[{from:0,through:12_000}]}),
+    {route:"reopen"});
+  assert.deepEqual(policy.seekRoute({...base,seekableMs:[{from:0,through:40_000}]}),
+    {route:"local",atMs:30_000,basis:"buffered"});
+  assert.deepEqual(policy.seekRoute({...base,seekableMs:[]}),{route:"reopen"},
+    "an element with nothing seekable cannot seek locally");
+  assert.deepEqual(policy.seekRoute(base),{route:"local",atMs:30_000,basis:"buffered"},
+    "no seekable evidence keeps the buffered route");
+  assert.deepEqual(policy.seekRoute({method:"transcode",targetMs:50_000,
+    publishedMs:{from:0,through:80_000},holdbackMs:10_000,
+    seekableMs:[{from:0,through:30_000}]}),{route:"reopen"});
+  assert.equal(policy.seekRoute({method:"direct_play",targetMs:40_000,
+    seekableMs:[{from:0,through:1_000}]}).route,"local","direct play owns its own seekable");
+  assert.deepEqual(policy.seekRoute({...base,seekableMs:[{from:0,through:Infinity}]}),
+    {route:"local",atMs:30_000,basis:"buffered"},"an open-ended seekable range admits the target");
+});
+
+test("hls.js keeps published local seeks inside its seekable range", async () => {
+  const published={fragments:[{start:0}],edge:120,targetduration:10};
+  const h=localSeekHarness({copyHls:true, published,
+    buffered:{length:1,start:()=>0,end:()=>40},
+    seekable:{length:1,start:()=>0,end:()=>120},
+  });
+  await h.api.seekTo(100);
+  assert.equal(h.video.currentTime,100);
+  assert.equal(h.api.logs[0].detail,"copy_hls:published");
+  assert.equal(h.api.changes.length,0);
+
+  const empty=localSeekHarness({copyHls:true, published,
+    buffered:{length:1,start:()=>0,end:()=>40},
+    seekable:{length:0,start:()=>0,end:()=>0},
+  });
+  await empty.api.seekTo(30);
+  assert.equal(empty.video.currentTime,10,"an element that can seek nowhere is not assigned");
+  assert.equal(empty.api.changes.length,1);
+});
+
+test("native HLS reopens a seek past seekable without touching the element", async () => {
+  const h=localSeekHarness({copyHls:true, hls:false,
+    buffered:{length:1,start:()=>0,end:()=>45},
+    seekable:{length:1,start:()=>0,end:()=>12},
+  });
+  await h.api.seekTo(30);
+  assert.equal(h.video.currentTime,10,"the clamped assignment is never made");
+  assert.equal(h.api.logs.some(l=>l.event==="seek_local"),false);
+  assert.equal(h.api.changes.length,1);
+  assert.equal(h.api.changes[0].target,30_000);
+  assert.equal(h.api.changes[0].change.reason,"seek");
+
+  const inside=localSeekHarness({copyHls:true, hls:false,
+    buffered:{length:1,start:()=>0,end:()=>45},
+    seekable:{length:1,start:()=>0,end:()=>40},
+  });
+  await inside.api.seekTo(30);
+  assert.equal(inside.video.currentTime,30);
+  assert.equal(inside.api.logs[0].detail,"copy_hls:buffered");
+  assert.equal(inside.api.changes.length,0);
+});
+
+test("a seeked landing away from the target reopens at once", async () => {
+  const h=localSeekHarness({copyHls:true, hls:false,
+    buffered:{length:1,start:()=>0,end:()=>45},
+    seekable:{length:1,start:()=>0,end:()=>40},
+  });
+  await h.api.seekTo(30);
+  h.video.currentTime=11; // the element clamped
+  h.video.seeking=true;
+  h.listeners.get("seeked")();
+  assert.equal(h.api.changes.length,0,"a stale seeked during the seek is not evidence");
+  h.video.seeking=false;
+  h.listeners.get("seeked")();
+  await h.api.expire(0);
+  assert.equal(h.api.logs[1].event,"seek_local_fallback");
+  assert.equal(h.api.logs[1].detail,"copy_hls:landed_elsewhere");
+  assert.equal(h.api.changes.length,1);
+  assert.equal(h.api.changes[0].target,30_000);
+  assert.equal(h.api.changes[0].change.forceReopen,true);
+  await h.api.expire();
+  assert.equal(h.api.changes.length,1,"the settle timer does not reopen a second time");
+
+  const landed=localSeekHarness({copyHls:true, hls:false,
+    buffered:{length:1,start:()=>0,end:()=>45},
+    seekable:{length:1,start:()=>0,end:()=>40},
+  });
+  await landed.api.seekTo(30);
+  landed.video.currentTime=29.2; // keyframe-aligned landing
+  landed.listeners.get("seeked")();
+  assert.equal(landed.listeners.has("seeked"),false,"a landing at the target settles and detaches");
+  assert.deepEqual(landed.api.timerDelays(),[],"settling retires the fallback timer");
+  await landed.api.expire();
+  assert.equal(landed.api.changes.length,0);
+});
 
 test("a local seek that does not settle reopens once at the same target", async () => {
   const h=localSeekHarness({

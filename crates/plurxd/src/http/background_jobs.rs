@@ -35,6 +35,7 @@ fn summary(job: &BackgroundJob, now_ms: i64) -> Value {
         "id": job.id, "kind": kind, "state": job.state, "priority": job.priority,
         "file_id": file_id.map(|id| id.to_string()),
         "owner_node_id": job.token.as_ref().map(|token| &token.node_id),
+        "lease_expires_ms": job.token.as_ref().map(|token| token.lease_expires_ms),
         "created_at_ms": job.created_at_ms, "updated_at_ms": job.updated_at_ms,
         "age_ms": now_ms.saturating_sub(job.created_at_ms).max(0),
         "not_before_ms": job.not_before_ms, "failed_attempts": job.failed_attempts,

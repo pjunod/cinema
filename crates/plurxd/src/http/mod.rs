@@ -2746,6 +2746,44 @@ mod tests {
         );
     }
 
+    /// C-07 M5 (PLEX-FACADE-PAGING §5.4 acceptance): `/metrics` carries the
+    /// four route-cache families, rendered from the coordinator serving this
+    /// router, so the counts are exactly this test's lookups.
+    #[tokio::test]
+    async fn metrics_render_the_media_session_route_cache_families() {
+        let (app, state) = test_app_with_state();
+        let session_id = "00000000-0000-4000-8000-0000000000e1";
+        assert!(state
+            .media_sessions
+            .route(session_id)
+            .await
+            .expect("miss")
+            .is_none());
+        assert!(state
+            .media_sessions
+            .route(session_id)
+            .await
+            .expect("hit")
+            .is_none());
+        let metrics = app.oneshot(get("/metrics", None)).await.expect("response");
+        assert_eq!(metrics.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(metrics.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let exposition = String::from_utf8(body.to_vec()).expect("utf-8");
+        for line in [
+            "# TYPE plurx_media_session_route_lookups_total counter\n",
+            "# TYPE plurx_media_session_route_lock_seconds histogram\n",
+            "# TYPE plurx_media_session_route_prune_entries histogram\n",
+            "# TYPE plurx_media_session_route_cache_entries gauge\n",
+            "plurx_media_session_route_lookups_total{result=\"store\"} 1\n",
+            "plurx_media_session_route_lookups_total{result=\"cache_hit\"} 1\n",
+            "plurx_media_session_route_lookups_total{result=\"single_flight_hit\"} 0\n",
+        ] {
+            assert!(exposition.contains(line), "/metrics is missing {line:?}");
+        }
+    }
+
     // -- observability baseline (C-08 M1/M2/M3) -----------------------------
 
     use crate::logbuf::testwriter::CapturedWriter;
@@ -5929,6 +5967,66 @@ mod tests {
         assert_eq!(rec["correlation_id"], "t-7-bbb");
     }
 
+    /// A queue that will not take the request answers 503, not 500.
+    ///
+    /// Monarr retries any 5xx, so the import was never lost — but for a day
+    /// its health page said "plurx returned 500: internal server error" for
+    /// every import while nothing in plurx was broken: the durable queue was
+    /// full of settled history and refusing admissions. 503 with the refusal
+    /// in the body says what happened and that trying again is the answer.
+    #[tokio::test]
+    async fn a_refused_scan_admission_is_a_503_with_the_reason() {
+        let (app, _state) = test_app_with_state();
+        // No scan worker: every request stays pending, so the per-library
+        // bound fills without anything having to be slow.
+        let admin = setup_admin(&app).await;
+        let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
+        let dir = crate::test_tempdir().expect("tmp");
+        let movie = dir.path().join("Heat (1995)");
+        std::fs::create_dir_all(&movie).expect("mkdir");
+        std::fs::write(movie.join("Heat (1995).mkv"), b"x").expect("write");
+        call(
+            &app,
+            post(
+                "/api/v1/libraries",
+                Some(&admin),
+                json!({ "name": "Movies", "kind": "movies", "paths": [dir.path()] }),
+            ),
+        )
+        .await;
+        let bound = plurx_core::store::background_jobs_library::MAX_LIBRARY_REQUESTS;
+        // Creating the library queued its own full scan, which is one of the
+        // bound's slots; the targeted requests take the rest.
+        let mut admitted = 0;
+        let mut refused = None;
+        for index in 0..=bound {
+            let (status, body) = call(
+                &app,
+                post(
+                    "/api/v1/scan",
+                    Some(&key),
+                    json!({ "path": movie, "correlation_id": format!("bound-{index}") }),
+                ),
+            )
+            .await;
+            match status {
+                StatusCode::ACCEPTED => admitted += 1,
+                StatusCode::SERVICE_UNAVAILABLE => {
+                    refused = Some(body);
+                    break;
+                }
+                other => panic!("request {index}: unexpected {other}: {body}"),
+            }
+        }
+        let refused = refused.expect("the bound must be reached and answered");
+        assert!(admitted >= bound - 1, "admitted only {admitted} of {bound}");
+        let message = refused["error"].as_str().expect("error text");
+        assert!(
+            message.contains("refused") && message.contains("QueueFull"),
+            "the body must name the refusal so the caller can read it: {message}"
+        );
+    }
+
     /// The happy path: a real folder under a real library, scanned now, with
     /// the answer in the response rather than a promise to look later.
     #[tokio::test]
@@ -9096,6 +9194,84 @@ mod tests {
             b = b.header("authorization", format!("Bearer {t}"));
         }
         b.body(Body::from(body.to_string())).expect("req")
+    }
+
+    #[tokio::test]
+    async fn durable_library_activity_distinguishes_queued_from_remote_execution() {
+        use plurx_core::domain::{LibraryKind, NewLibrary};
+        use plurx_core::store::background_jobs::{ClaimJob, ClaimOutcome, JobKind};
+        use plurx_core::store::background_jobs_library::LibraryWorkQuery;
+
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let root = crate::test_tempdir().expect("library root");
+        let library = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Recordings".into(),
+                kind: LibraryKind::Recordings,
+                paths: vec![root.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        assert!(state.jobs.trigger_scan(library.id).await);
+        let statuses = state.jobs.all_statuses().await;
+        assert_eq!(statuses[&library.id].phase.as_deref(), Some("queued"));
+        let (status, activities) = call(&app, get("/api/v1/activity", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(activities
+            .as_array()
+            .expect("activities")
+            .iter()
+            .any(|a| a["label"] == "Queued scan for Recordings · waiting for a worker"));
+        assert!(!activities.to_string().contains("Scanning Recordings"));
+
+        let record = state
+            .store
+            .library_work_requests(LibraryWorkQuery {
+                pending_only: true,
+                limit: 1,
+                ..Default::default()
+            })
+            .await
+            .expect("request")
+            .remove(0);
+        let job = state
+            .store
+            .background_job(&record.job_id)
+            .await
+            .expect("read")
+            .expect("job");
+        let now_ms = crate::state::clock_ms();
+        let claim = state
+            .store
+            .claim_job(ClaimJob {
+                job_id: job.id,
+                expected_revision: job.revision,
+                node_id: "remote-worker".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::LibraryScan,
+                payload_version: 1,
+                now_ms,
+                dispatched_at_ms: now_ms,
+            })
+            .await
+            .expect("remote claim");
+        assert!(matches!(claim, ClaimOutcome::Claimed { .. }), "{claim:?}");
+        // This observer has no local scanner. It must use replicated job state.
+        let statuses = state.jobs.all_statuses().await;
+        assert!(statuses[&library.id].running);
+        assert_eq!(statuses[&library.id].phase.as_deref(), Some("scanning"));
+        let (status, activities) = call(&app, get("/api/v1/activity", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(activities
+            .as_array()
+            .expect("activities")
+            .iter()
+            .any(|a| a["label"] == "Scanning Recordings"));
+        assert!(!activities.to_string().contains("waiting for a worker"));
     }
 
     #[tokio::test]
@@ -16410,6 +16586,17 @@ mod tests {
         .await;
         assert_eq!(filtered["reopened"], 0, "{filtered}");
 
+        // The earlier control scenario intentionally left a fragment request
+        // queued. Retire it before letting this test's worker run; otherwise
+        // that unrelated source read owns the sole maintenance slot while the
+        // semantic rebuild below waits behind it.
+        let (status, retired) = call(
+            &app,
+            delete(&format!("/api/v1/analysis/jobs/{successor}"), Some(&admin)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{retired}");
+
         // Manual semantic boundaries are a separate, revision-fenced admin
         // action. A rebuild cannot implicitly opt into discarding one.
         let manual_url = format!("/api/v1/files/{}/timeline-annotations/credits", s.file);
@@ -16469,7 +16656,13 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert_eq!(marker_status["state"], "published", "{marker_status}");
+        let all_analysis = call(&app, get("/api/v1/analysis/jobs", Some(&admin)))
+            .await
+            .1;
+        assert_eq!(
+            marker_status["state"], "published",
+            "{marker_status}; all={all_analysis}"
+        );
         let marker_offers = || {
             crate::telemetry::prometheus()
                 .lines()
