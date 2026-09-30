@@ -20,6 +20,60 @@ pub struct JobAttemptObservation {
     pub error_code: Option<String>,
 }
 
+/// A live shared source reader. Paths and ownership tokens stay private; a
+/// phase timestamp is reported only for analysis, where it is recorded apart
+/// from lease renewal. `None` means useful progress is not observable here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceIoHolder {
+    pub resource_key: String,
+    pub work_id: String,
+    pub kind: String,
+    pub priority: String,
+    pub started_at_ms: i64,
+    pub lease_expires_at_ms: i64,
+    pub phase: Option<String>,
+    pub last_phase_at_ms: Option<i64>,
+}
+
+pub(super) const SOURCE_IO_HOLDERS_SQL: &str = r#"
+SELECT json_object('resource_key', resource_key, 'work_id', work_id,
+    'kind', kind, 'priority', priority, 'started_at_ms', started_at_ms,
+    'lease_expires_at_ms', lease_expires_at_ms, 'phase', phase,
+    'last_phase_at_ms', last_phase_at_ms) AS result_json
+FROM (
+  SELECT held.resource_key, held.job_id AS work_id, job.kind,
+    CASE WHEN EXISTS (SELECT 1 FROM background_job_waiters viewer
+        WHERE viewer.job_id = job.id AND viewer.state IN ('pending','awaiting_hydration')
+          AND viewer.deadline_ms > json_extract($1, '$.now_ms')
+          AND viewer.request_scope = 'playback-analysis')
+      THEN 'viewer' ELSE 'maintenance' END AS priority,
+    COALESCE(attempt.started_at_ms, job.updated_at_ms) AS started_at_ms,
+    held.expires_at_ms AS lease_expires_at_ms,
+    NULL AS phase, NULL AS last_phase_at_ms
+  FROM background_job_reservations held JOIN background_jobs job ON job.id = held.job_id
+  LEFT JOIN background_job_attempts attempt ON attempt.job_id = held.job_id
+    AND attempt.fence = held.fence
+  WHERE (held.resource_key = 'source_io' OR held.resource_key GLOB 'source_io:*')
+    AND held.expires_at_ms > json_extract($1, '$.now_ms')
+  UNION ALL
+  SELECT held.resource_key, held.request_id AS work_id, 'analysis_source' AS kind,
+    CASE WHEN request.trigger = 'playback' AND EXISTS (SELECT 1 FROM background_job_waiters viewer
+        WHERE viewer.request_scope = 'playback-analysis'
+          AND viewer.job_id = held.request_id AND viewer.state = 'pending'
+          AND viewer.deadline_ms > json_extract($1, '$.now_ms'))
+      THEN 'viewer' ELSE 'maintenance' END AS priority,
+    COALESCE(attempt.started_at_ms, request.updated_at_ms) AS started_at_ms,
+    held.expires_at_ms AS lease_expires_at_ms,
+    attempt.phase AS phase, attempt.phase_updated_at_ms AS last_phase_at_ms
+  FROM analysis_source_reservations held
+  JOIN analysis_requests request ON request.request_id = held.request_id
+  LEFT JOIN analysis_attempts attempt ON attempt.request_id = held.request_id
+    AND attempt.claim_epoch = held.fence
+  WHERE (held.resource_key = 'source_io' OR held.resource_key GLOB 'source_io:*')
+    AND held.expires_at_ms > json_extract($1, '$.now_ms')
+) ORDER BY started_at_ms, work_id LIMIT 16
+"#;
+
 pub(super) const COUNTS_SQL: &str = r#"
 SELECT json_object('kind', kind, 'state', state, 'count', COUNT(*),
     'oldest_age_ms', MAX(0, json_extract($1, '$.now_ms') - MIN(created_at_ms))) AS result_json

@@ -45,7 +45,8 @@ pub(super) fn prepare(input: &EnqueueFragmentJob) -> Result<(EnqueueJob, String)
             || request.source_size != job.source_size
             || request.source_mtime != job.source_mtime
             || request.priority != job.priority
-            || request.trigger != job.trigger
+            || !(request.trigger == job.trigger
+                || (request.trigger == "playback" && job.trigger == "foreground"))
             || request.target_node_id != job.target_node_id
         {
             return Err(invalid());

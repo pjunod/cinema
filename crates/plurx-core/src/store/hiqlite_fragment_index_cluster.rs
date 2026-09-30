@@ -1536,8 +1536,16 @@ fn valid_request(request: &NewAnalysisRequest) -> bool {
         )
         && (request.force_rebuild == (request.priority == "forced"))
         && !(request.component == "subtitle_source" && request.force_rebuild)
-        && (request.priority != "foreground" || request.component == "subtitle_source")
-        && (request.trigger != "playback" || request.component == "subtitle_source")
+        && (request.priority != "foreground"
+            || matches!(
+                request.component.as_str(),
+                "subtitle_source" | "fragment_index"
+            ))
+        && (request.trigger != "playback"
+            || matches!(
+                request.component.as_str(),
+                "subtitle_source" | "fragment_index"
+            ))
         && request.target_node_id.len() <= 128
         && ((matches!(
             request.component.as_str(),
@@ -2015,13 +2023,18 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             })
     }
 
-    async fn claim_analysis_request(
+    async fn claim_analysis_request_compatible(
         &self,
         node_id: &str,
+        pipeline_version: Option<&str>,
         now_ms: i64,
         lease_expires_ms: i64,
     ) -> Result<Option<AnalysisRequest>, StoreError> {
-        if node_id.is_empty() || node_id.len() > 128 || lease_expires_ms <= now_ms {
+        if node_id.is_empty()
+            || node_id.len() > 128
+            || pipeline_version.is_some_and(str::is_empty)
+            || lease_expires_ms <= now_ms
+        {
             return Err(StoreError::Task("invalid analysis claim".to_owned()));
         }
         let max_attempts = configured_max_attempts(self).await?;
@@ -2079,6 +2092,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
         for _ in 0..8 {
+            let capacity = super::fragment_index_cluster::analysis_source_capacity_clause("$3");
             let candidate = self
                 .client()
                 .query_consistent_map::<RequestRow, _>(
@@ -2088,15 +2102,24 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                               OR (component IN ('skip_markers','subtitle_source') AND target_node_id = ''))
                             AND component <> 'subtitle_source' AND attempts < $2
                             AND state = 'queued' AND not_before_ms <= $3
-                          ORDER BY CASE WHEN priority = 'foreground' THEN 0 ELSE 1 END,
+                            AND ($4 IS NULL OR component <> 'fragment_index' OR pipeline_version = $4)
+                            AND {capacity}
+                          ORDER BY CASE WHEN (component != 'fragment_index' AND priority = 'foreground')
+                            OR (component = 'fragment_index' AND EXISTS (
+                                SELECT 1 FROM background_job_waiters waiter
+                                WHERE waiter.request_scope = 'playback-analysis'
+                                  AND waiter.job_id = analysis_requests.request_id
+                                  AND waiter.state = 'pending' AND waiter.deadline_ms > $3))
+                            THEN 0 ELSE 1 END,
                                    created_at_ms - CASE WHEN priority = 'forced'
-                                     THEN $4 ELSE 0 END,
+                                     THEN $5 ELSE 0 END,
                                    created_at_ms, request_id LIMIT 1"
                     ),
                     params!(
                         node_id,
                         max_attempts,
                         now_ms,
+                        pipeline_version,
                         super::fragment_index_cluster::ANALYSIS_FORCED_PRIORITY_BOOST_MS
                     ),
                 )
@@ -2111,19 +2134,23 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 .client()
                 .txn(vec![
                     (
-                        "UPDATE analysis_requests
+                        format!(
+                            "UPDATE analysis_requests
                         SET state = 'running', owner_node_id = $1, fence = fence + 1,
                             lease_expires_ms = $2, attempts = attempts + 1,
                             last_error_code = NULL, updated_at_ms = $3
                       WHERE request_id = $4 AND fence = $5
-                        AND state = 'queued' AND not_before_ms <= $3"
-                            .to_owned(),
+                        AND state = 'queued' AND not_before_ms <= $3
+                        AND ($6 IS NULL OR component <> 'fragment_index' OR pipeline_version = $6)
+                        AND {capacity}"
+                        ),
                         params!(
                             node_id,
                             lease_expires_ms,
                             now_ms,
                             &candidate.request_id,
-                            candidate.fence
+                            candidate.fence,
+                            pipeline_version
                         ),
                     ),
                     (
