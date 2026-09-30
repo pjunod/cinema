@@ -524,6 +524,26 @@ test("Optical enable saves only the authoritative switch and never reads readine
   assert.doesNotMatch(shippedSource("saveOpticalMedia"), /readiness|requirements/);
 });
 
+test("Optical retail protection remains advisory while the saved switch stays enabled", () => {
+  const card = new Function(
+    "setCard", "cardHead", "togRow", "devReq", "setCardFoot",
+    `${shippedSource("opticalMediaCard")}\nreturn opticalMediaCard;`,
+  )(
+    (body) => body,
+    () => "",
+    (id, _label, note, checked) => `TOG:${id}:checked=${checked}:${note}`,
+    (_readiness, _item, id) => `REQ:${id}`,
+    () => "",
+  );
+  const html = card({ optical_enabled: true }, { items: [{ id: "optical_media", requirements: [
+    { id: "optical_retail_protection", status: "unmet" },
+  ] }] });
+  assert.match(html, /TOG:optical-enabled:checked=true/);
+  assert.match(html, /REQ:optical_retail_protection/);
+  assert.match(html, /A real decoded frame is the proof; this never gates the switch/);
+  assert.match(html, /every requirement below is advice, never a gate/);
+});
+
 test("server guidance sends disabled Live TV features to their current settings", () => {
   const sourceRoot = path.resolve(__dirname, "../../crates/plurxd/src");
   for (const file of ["http/dvr.rs", "http/library_channels.rs", "channel_subjects.rs", "http/live_tv.rs", "live_tv.rs"]) {

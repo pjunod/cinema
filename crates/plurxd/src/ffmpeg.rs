@@ -1736,14 +1736,14 @@ async fn fragment_index_engine_inner() -> FragmentIndexEngine {
 }
 
 async fn fragment_index_engine_inner_for(bin: &str) -> FragmentIndexEngine {
-    let resolved = resolve_executable_path(&bin);
+    let resolved = resolve_executable_path(bin);
     let mut digest = Sha256::new();
     digest.update(b"plurx/fragment-index/engine\0");
     let mut usable = true;
     let mut objects = Vec::new();
 
     let version_output = {
-        let mut command = tokio::process::Command::new(&bin);
+        let mut command = tokio::process::Command::new(bin);
         command.arg("-version");
         bounded_command_output(command).await
     };
@@ -4238,6 +4238,16 @@ mod tests {
             resolve_bin(Some("/opt/jellyfin-ffmpeg/ffmpeg".to_owned()), "ffmpeg"),
             "/opt/jellyfin-ffmpeg/ffmpeg"
         );
+    }
+
+    #[test]
+    fn optical_reader_override_does_not_replace_general_playback_engine() {
+        let general = resolve_bin(Some("/usr/lib/jellyfin-ffmpeg/ffmpeg".to_owned()), "ffmpeg");
+        let optical = resolve_bin(Some("/opt/plurx-optical/bin/ffmpeg".to_owned()), &general);
+        assert_eq!(general, "/usr/lib/jellyfin-ffmpeg/ffmpeg");
+        assert_eq!(optical, "/opt/plurx-optical/bin/ffmpeg");
+        assert_eq!(resolve_bin(None, &general), general);
+        assert_eq!(resolve_bin(Some(String::new()), &general), general);
     }
 
     /// Older builds print help and listings to stderr, so a probe that read

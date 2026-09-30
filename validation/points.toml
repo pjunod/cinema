@@ -713,6 +713,27 @@ checks = ["rust-gate", "rust-gate-ci", "web-static", "player-input-fence", "play
 depends_on = ["core.media", "server.api", "library.catalog"]
 
 [[points]]
+id = "optical.media"
+title = "Physical DVD and Blu-ray playback"
+contract = "Configured physical drives inspect and play bounded DVD/Blu-ray titles through an owner-held reader; authorization, insertion generation, protection failures, and client delivery remain explicit."
+paths = [
+  "crates/plurx-core/src/optical/**",
+  "crates/plurx-core/src/store/hiqlite_optical.rs",
+  "crates/plurx-core/src/store/sqlite/optical.rs",
+  "crates/plurx-core/src/testfixtures/optical.rs",
+  "crates/plurx-optical-helper/**",
+  "crates/plurxd/src/http/optical.rs",
+  "crates/plurxd/src/optical_observer.rs",
+  "crates/plurxd/src/web/pages/optical*.js",
+  "scripts/optical-lab",
+  "tests/web/optical.test.js",
+  "docs/features/OPTICAL-MEDIA-*.md",
+  "docs/features/OPTICAL-MEDIA-STATUS.html",
+]
+checks = ["rust-gate", "rust-gate-ci", "web-static", "operations-contract", "playback-smoke"]
+depends_on = ["playback.pipeline", "identity.access", "operations.packaging"]
+
+[[points]]
 id = "watch-state.sync"
 title = "Watch state and external history sync"
 contract = "Native and Plex progress routes share one bounded coalescer; manual and timestamped activity outranks delayed flushes; watched state and Trakt synchronization converge without losing newer user activity."

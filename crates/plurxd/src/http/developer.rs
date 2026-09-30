@@ -332,7 +332,7 @@ fn optical_media(state: &AppState, enabled: bool) -> DeveloperEnableItem {
     });
     let aacs_backend_configured = std::env::var_os("LIBAACS_PATH")
         .filter(|path| !path.is_empty())
-        .is_some_and(|path| std::path::Path::new(&path).exists());
+        .is_some_and(|path| std::path::Path::new(&path).is_file());
     requirements.push(DeveloperRequirement {
         id: "optical_retail_protection",
         title: "Retail-disc protection reader",
