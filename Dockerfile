@@ -161,6 +161,7 @@ ARG PLURX_CI_SOURCE_SHA=""
 LABEL org.opencontainers.image.revision="${PLURX_CI_SOURCE_SHA}"
 ENV CARGO_HOME=/usr/local/cargo \
     RUSTUP_HOME=/usr/local/rustup \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers \
     PATH=/usr/local/cargo/bin:/opt/playwright-venv/bin:${PATH} \
     PLURX_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg \
     PLURX_FFPROBE=/usr/lib/jellyfin-ffmpeg/ffprobe

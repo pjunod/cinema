@@ -3723,6 +3723,11 @@ assert.equal(context.ACT_TIMER, null);
     def test_m5_shipped_ffmpeg_jobs_use_one_digest_and_keep_burst_coverage(self):
         dockerfile = read("Dockerfile")
         self.assertIn("FROM runtime-assets AS ci", dockerfile)
+        self.assertIn("PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers", dockerfile)
+        self.assertLess(
+            dockerfile.index("PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers"),
+            dockerfile.index("python3 -m playwright install --with-deps chromium"),
+        )
         self.assertIn("PLURX_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg", dockerfile)
         self.assertIn("/usr/local/bin/ffmpeg", dockerfile)
 
