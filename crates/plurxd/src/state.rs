@@ -5650,6 +5650,14 @@ impl JobManager {
     /// Independent durable consumers: discovery keeps its existing cadence,
     /// while admitted work is retried with bounded, jittered read-only polling.
     pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
+        self.background_work_loop_with_ready(transcode, None).await;
+    }
+
+    async fn background_work_loop_with_ready(
+        self: Arc<Self>,
+        transcode: Arc<TranscodeManager>,
+        ready: Option<tokio::sync::oneshot::Sender<()>>,
+    ) {
         use plurx_core::store::background_jobs::JobKind;
         let preparation = async {
             let mut pacing = crate::background_jobs::IdlePoll::new();
@@ -5673,6 +5681,9 @@ impl JobManager {
         let fragments = async {
             let mut pacing = crate::background_jobs::IdlePoll::new();
             let mut wake = fragment_analysis_wake().subscribe();
+            if let Some(ready) = ready {
+                let _ = ready.send(());
+            }
             loop {
                 let kinds = [JobKind::FragmentIndexBuild, JobKind::ArtifactHydrate];
                 let before = crate::background_jobs::accepted_claims(&kinds);
@@ -10483,7 +10494,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn playback_preparation_wakes_idle_analysis_within_two_seconds() {
         use plurx_core::store::ClusterFragmentIndexStore as _;
         use plurx_core::transcode::CopyVideoOptions;
@@ -10537,7 +10548,13 @@ mod tests {
             EncoderCaps::default(),
             Pipeline::Cpu,
         ));
-        let consumer = tokio::spawn(Arc::clone(&jobs).background_work_loop(transcode));
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let consumer = tokio::spawn(
+            Arc::clone(&jobs).background_work_loop_with_ready(transcode, Some(ready_tx)),
+        );
+        // Measure the wake path from an idle subscribed worker. CI can spend
+        // wall time scheduling this test among thousands of concurrent tests.
+        ready_rx.await.expect("analysis worker subscribed");
         let request = enqueue_copy_preparation(
             store.as_ref(),
             "test-node",
