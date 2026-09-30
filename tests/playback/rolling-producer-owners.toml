@@ -2343,7 +2343,20 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # lookups in `concurrent_lookups_of_one_session_produce_one_store_read` (one site).
 # Test-only; each lookup task is joined by the test after its gate closes, and
 # none owns a producer, a process or a recipe decision.
-expected_occurrences = 680
+# C-05 M3, PR #621: +1 in availability.rs::lookup_or_schedule. Its
+# tokio::spawn owns an Arc of the process-lifetime detail cache. The in-flight
+# map registers the path before spawn and caps distinct queued/running tasks
+# at 1,024; the semaphore caps active metadata syscalls at eight. A request
+# cancels only its 250 ms observer wait. Kernel metadata may remain blocked:
+# these are concurrency/task-count bounds, never a wall-time or syscall-
+# cancellation claim. Normal run_probe completion evicts cache entries to
+# 16,384, removes the in-flight path, decrements its gauge, publishes the
+# observation and releases its permit. Runtime teardown drops the async
+# wrapper/timer; it does not cancel kernel work or promise a live-process
+# gauge reset. a_timed_out_caller_leaves_one_probe_and_no_duplicate proves
+# released completion empties the map, restores permits and reuses the cache.
+# This observation owner creates no producer/process/recovery authority.
+expected_occurrences = 681
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3461,7 +3474,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # retaining its output future. The original 200ms cancellation begins only after
 # atomic PID readiness; the actual future is dropped before the death assertion.
 # Current main583 timer census1112 + these two unchanged constructors = 1114.
-expected_occurrences = 1114
+# C-05 M3, PR #621: +2, both in availability.rs. observe_many's timeout
+# bounds one page's receiver wait to 250 ms and drops that wait on expiry;
+# the detached probe remains owned by its registered in-flight path/cache.
+# run_probe's sleep warns after five seconds and resets hourly while the same
+# metadata future remains pending. It is owned and dropped by that probe on
+# completion/runtime teardown, and imposes no syscall or worker deadline.
+expected_occurrences = 1116
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3476,7 +3495,11 @@ pattern = "use\\s+tokio::time"
 # E1 cache copies: one daemon consumer owns joined transfer/cancellation;
 # request/body deadlines and pressure polling are bounded by that consumer.
 # The response status inspection launches no process.
-expected_occurrences = 3
+# C-05 M3, PR #621: availability.rs imports tokio::time::Instant for the
+# cache's 15 s TTL, 120 s maximum observation age and probe-duration metrics.
+# Instant creates no timer, producer, process or recovery authority; the two
+# actual timer constructors and detached task are reviewed in their rows.
+expected_occurrences = 4
 
 [[module_structures]]
 id = "process-command-construction"

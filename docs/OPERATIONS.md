@@ -245,18 +245,17 @@ ssh lab3 'cat /opt/noirr/plurx-agent/.forgejo-registry-token' |
     --username fleet --password-stdin'
 ```
 
-Every successful Forgejo `main` run ends with
-`publish merged image (Forgejo registry)`. The job waits for the post-merge
-validation fan-out, builds once on an X64 runner, verifies the immutable
-registry copy, and only then moves the fleet tag. It publishes
-`sha-<12hex>` for rollback and `main` for the newest qualified merge.
-Versioned releases own `latest`; fleet merges never overwrite that alias.
-**No run currently reaches that job:** `ci.yml` runs on `v*` tags and manual
-dispatch only, and the job's condition is a push to `main`, so no new
-`sha-` image has had an automatic producer since `3cd127e2` (2026-09-10)
-([LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
-correction 1, re-verified 2026-09-24; the fix belongs to
-[RUST-TEST-EXECUTION-POLICY.md](ci/RUST-TEST-EXECUTION-POLICY.md) §3.1(b)).
+Only a manual Forgejo `ci.yml` dispatch on `main` can reach
+`publish merged image (Forgejo registry)`. A merge starts no runtime sweep
+or image build, as P-01 option (a) requires. The dispatched job waits for
+the full validation fan-out, builds once on an X64 runner, verifies the
+immutable registry copy, and only then moves the fleet tag. It publishes
+`sha-<12hex>` for rollback and `main` for the newest manually qualified
+tree. A dispatch on another branch and a `v*` tag cannot reach this job.
+Versioned releases own `latest`; fleet images never overwrite that alias.
+The 2026-09-29 trigger decision and its first-tag limits are recorded in
+[LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
+correction 1.
 
 **Two identities, two questions.** The `sha-<12hex>` image is the deploy and
 rollback identity: it is what `deploy/.env`'s `PLURX_IMAGE` names and what a
