@@ -2534,7 +2534,10 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # `AttemptChild` supervision or its refusal cleanup reaps it.
 # S-13 #637: +1 isolated warning-test std child spawn, owned by OwnedChild.
 # Fixed 30-second deadline and Drop kill/reap; catalog-only child has no encoder.
-expected_occurrences = 52
+# C06 #639: +1 the isolated actual-handler test's exact test-binary child.
+# OwnedChild Drop kills/reaps on its 35-second bound or assertion failure;
+# process-free HLS fixture starts no idle sleep or encoder descendant.
+expected_occurrences = 53
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -3496,7 +3499,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Combined effort/main census: retain C-05's two and seek's two timers.
 # S-13 #637: +1 std::thread::sleep paces the parent's 10-ms child-exit poll
 # under its fixed 30-second deadline. No playback timer/recovery owner added.
-expected_occurrences = 1119
+# C06 #639: +6 test-owned bounds: parent poll sleep, writer release backstop,
+# per-request/body timeout, whole scenario timeout, entered-write timeout and
+# recovery timeout. All end with this isolated fixture, not playback policy.
+expected_occurrences = 1125
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3821,7 +3827,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # test-only piped stand-in producer's `tokio::process::Command::new("sleep")`.
 # S-13 #637: +1 Command::new(current_exe()) runs only the exact warning test
 # with a fresh latch lifetime. OwnedChild owns bounded completion/kill/reap.
-expected_occurrences = 200
+# C06 #639: +1 current_exe command for its exact handler-pressure test only;
+# bounded parent owns kill/reap and requires completed-assertions proof.
+expected_occurrences = 201
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -4274,7 +4282,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # owns nothing.
 # S-13 #637: +1 the same test-owned .spawn() counted by command-construction
 # and method-spawn, not another child or a production process owner.
-expected_occurrences = 407
+# C06 #639: +2, same owned re-exec spawn plus Response::status assertion.
+# The latter starts no process. Existing idle-child fixture callers unchanged.
+expected_occurrences = 409
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -4502,7 +4512,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # polling try_wait. Completion transfers ownership into wait_with_output and
 # requires successful exit plus the completed-assertions marker. Catalog-only
 # seed launches no descendant encoder; no production lifecycle site added.
-expected_occurrences = 245
+# C06 #639: +3, OwnedChild Drop kill/wait and child try_wait; timeout panic
+# invokes that guard. Normal completion takes wait_with_output ownership and
+# requires success plus the exact child completion marker. No descendants.
+expected_occurrences = 248
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"

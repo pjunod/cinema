@@ -1,6 +1,7 @@
 # Store-contract coverage and placeholder validation — close the ten paths, then check the other dialect
 
-**Status:** implementation merged; first-ten lane-cost evidence pending · **Executes:** S10 / F-sc-13 and the
+**Status:** done — M0–M4 merged; §7.1 answered by the 2026-09-30 receipt,
+effective on this receipt's landing · **Executes:** S10 / F-sc-13 and the
 prescriptions of F-hist-1 / F-hist-2 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -626,3 +627,83 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `3ebc50be`, findings `d56ccea6` | Classified all 42 discarded results: 35 best-effort, 5 lost-work, 2 cancelled. The semantic guard covers direct, nested and wrapper Store calls; every operation/severity failure cell is counted and bounded-logged. The actual named no-holder transition passed on in-memory SQLite, file SQLite and three-voter Hiqlite; the daemon arm passed its SQLite regression. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `8cfd50a5` | One typed parameter order now renders both `next_up` dialects; equivalence/validator, SQLite behavior, and backend-neutral watch-contract regressions passed. Measured patch: +119/-61, net +58; the pinned unchecked arity set fell from 91 to 90. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M4 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / this commit | Decision: keep the safe pilot, do not spread or revert. A future spread needs a shape inventory and net reduction across at least three unlike methods. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_registry_pull_audit_sol61 | §7.1 post-merge receipt | `codex/k07-first-ten-receipt` into `effort/architecture-review-2026-09-20` | Coordinator-authorized objective evidence continuation under board rule 7; original milestone authors/history retained. Exact first-ten source replay below answers the marginal median lane-set question. M0–M4 acceptance is already recorded; K-07 is done effective on this receipt's reviewed, gated landing. No runtime saving, ten executed jobs, fleet evidence or main promotion is claimed. |
+
+### First-ten PR lane-set receipt — 2026-09-30
+
+Section 7 question 1 asks whether adding the ten paths changes the **median
+PR lane set**, not job duration. M0 `07796d70f24103368cbfbe6c443b8ecf4e15c6c2`
+landed in [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) as
+`58e7526038761bae1825c98cec82b26130c2880d`, 2026-09-21 08:37:50 UTC.
+The cohort is the first ten subsequent **main PR landings**, in first-parent
+order, not PR-number order or ten later convenient successful runs. Selected
+Forgejo pull metadata agrees with that ordering. Some PRs were opened before
+M0; this receipt measures the first ten merged after it.
+
+**Method:** load the original [runner](../../validation/runner.py) and
+[scope selector](../../validation/ci_scope.py) at M0 into in-memory Python
+modules with `PYTHONDONTWRITEBYTECODE=1`; use their existing
+`_catalog_at_revision` / `load_catalog` and `scope_for_paths` functions.
+Compare parent `6a96fa13dbe54ef3e17063eef1a60dffc36fe268` with M0 on the
+**same** `git diff --name-only LANDING^1 LANDING` path tuple for every row.
+No selector test, CI job or source build is executed by this replay.
+The parser's temporary catalog blobs are removed on return.
+
+The original selector files are unchanged across that M0 commit. Their blob
+SHAs are `9c7dec02abf55afd2c70389f5bdee939594bb0a1` (`ci_scope.py`) and
+`cb53efa9a38c21640e419e78eb80dcca75b39efd` (`runner.py`). The parent catalog
+blob is `7fcd03e8fba1dc33d4db807f990553f042611f67`; M0's is
+`391f5ab366a10e0f16b806a57fdeb3eaf24fdb01`. Thus this isolates M0's
+catalog change rather than replaying today's enlarged catalog.
+
+In the table, R = `rust`, B = `release_build`, C = `cluster_auth`,
+H = `hiqlite_spike`, W = `web_layout`, A = `apple`, J = `android_jvm`,
+D = `android_device`, V = `mobile_version`. Sets list every true execution
+scope flag; `docs_only` is a classification, not a selected lane.
+
+| PR | Landing SHA | Parent set | M0 set | Count before → after |
+|---|---|---|---|---:|
+| #420 | `6063b37c0a011cb6d1160d2f04d259c3c8ff8b65` | empty (`docs_only=true`) | identical | 0 → 0 |
+| #421 | `9deb58a2e9c2e36f1753eb9f4ab01eb0854b40fe` | R, B | identical | 2 → 2 |
+| #430 | `02c7760e2486e09e84d390e0b40b35f64449d53d` | R, B, C | identical | 3 → 3 |
+| #436 | `3c24cabef619eeabf884f7565a6bc10afee13d00` | R, W | identical | 2 → 2 |
+| #423 | `c61317828c34537ede1204a7997a2673147a59a7` | R, B | identical | 2 → 2 |
+| #419 | `75fde34cad1dc963590d9ffe2657bf3bb09b793d` | R, B, H, C | identical | 4 → 4 |
+| #408 | `12d0acde61bbb49ee1205faba67ad1233c4b660c` | R, W, B, C | identical | 4 → 4 |
+| #418 | `a5535abaf6d0445183d038408e515ac03ca0e683` | R, B, H, C | identical | 4 → 4 |
+| #407 | `bc50a9e6f1a555052d4cffd2f020f8e2824da8e5` | R, B | identical | 2 → 2 |
+| #437 | `5c48ed5ab8dd1a927831f5d4b9b8d14f7c986301` | R, A, J, D, W, B, V, C | identical | 8 → 8 |
+
+**Result:** all 11-key maps are identical, 10/10; each row's symmetric
+difference is empty. Median selected-flag count is **2.5 → 2.5**;
+`cluster_auth` selects **5/10 → 5/10**. The complete set distribution is
+unchanged, so the marginal median lane set is unchanged without inventing a
+definition of a median set. None of these ten landing deltas touches any of
+the ten Store paths M0 adds. #418 touches `sqlite/media.rs`, which was not an
+M0 addition. This cohort establishes no broader future-cost claim.
+
+**Original acceptance:** #411's exact head
+`18555d62bf147684abe96f1017d59c3d07f9261a` records M0–M4 proof, the real
+no-holder seam on SQLite/file SQLite/three-voter Hiqlite, watch parity,
+placeholder and discarded-result checks. Sole review
+[3227](http://192.168.4.7:3000/noirr/plurx/pulls/411#issuecomment-3227) is
+addressed by [3246](http://192.168.4.7:3000/noirr/plurx/pulls/411#issuecomment-3246).
+Retained [gate 2457](http://192.168.4.7:3000/noirr/plurx/actions/runs/2457)
+(API run 2475) succeeded on that exact head: scope, preflight, Rust, Windows
+and Main promotion gate. The body truthfully records no broad **local** unit
+sweep under the coordinator's instruction; historical gate and named proof
+are not replaced by a new test claim here. M4's two-statement stay decision
+and +119/−61 cost remain above. Section 6 requires no fleet/device milestone.
+
+**Execution limits, separate from §7.1:** #437's retained exact-head run
+(API 2580 / [UI 2562](http://192.168.4.7:3000/noirr/plurx/actions/runs/2562))
+is entirely skipped, so its replay is not observed execution. #436's run
+(API 2553 / [UI 2535](http://192.168.4.7:3000/noirr/plurx/actions/runs/2535))
+reports contradictory start/stop/duration fields versus its Rust log
+timestamps. Job API records lack timing endpoints. No ten-PR runtime-cost
+median or causal time saving is claimed or required to answer §7.1.
+The historical main fast workflow does not consume `cluster_auth` as a
+separate job conditional; a true scope flag alone does not prove execution
+of `make cluster-check`. These limits do not weaken the source lane-set
+comparison. K-07 is done effective on this documentation receipt's reviewed,
+gated landing; effort/main qualification remains open.
