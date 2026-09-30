@@ -485,7 +485,6 @@ pub(super) fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
             demand,
             demand_observation_age.unwrap_or_default(),
             media_origin_ms,
-            !starting && staged_publication_seconds.is_some(),
         );
         let guard_ms =
             ((ROLLING_PUBLICATION_GUARD_MS as f64) * rolling_playback_rate(Some(demand))).ceil();
