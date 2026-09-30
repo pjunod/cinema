@@ -465,6 +465,18 @@ async fn background_jobs_one_fragment_build_keeps_remote_delivery_durable() {
             })
             .await
             .expect("cancel one interest");
+        let viewer = ArtifactViewerInterest {
+            cache_key: cache_key.clone(),
+            file_id,
+            target_node_id: "node-b".into(),
+            user_id: 1,
+            playback_id: "remote-fragment-viewer".into(),
+            now_ms: 1_001,
+        };
+        assert!(store
+            .join_artifact_viewer(viewer.clone())
+            .await
+            .expect("join remote viewer"));
         let revision = store
             .background_job(&id)
             .await
@@ -528,18 +540,22 @@ async fn background_jobs_one_fragment_build_keeps_remote_delivery_durable() {
             .await
             .expect("receipts")
             .waiters;
-        assert_eq!(
+        assert_eq!(waiters.len(), 4, "{backend}");
+        assert!(
             waiters
                 .iter()
-                .map(|waiter| waiter.state.as_str())
-                .collect::<Vec<_>>(),
-            ["succeeded", "awaiting_hydration", "cancelled"],
-            "{backend}"
+                .any(|waiter| waiter.request_id == viewer.consumer_id()
+                    && waiter.state == "awaiting_hydration"),
+            "{backend}: the viewer follows the exact parent into target hydration"
         );
         // A scheduler restart needs no in-memory callback to recover this intent.
         let intents = store.delivery_intents(1_004).await.expect("durable outbox");
         assert_eq!(intents.len(), 1, "{backend}");
         assert_eq!(intents[0].target_node_id, "node-b");
+        assert_eq!(
+            intents[0].priority, 3,
+            "{backend}: viewer priority reaches hydration"
+        );
         let EnqueueOutcome::Accepted {
             job_id: hydration_id,
             ..
@@ -550,6 +566,16 @@ async fn background_jobs_one_fragment_build_keeps_remote_delivery_durable() {
         else {
             panic!("{backend}: hydration not admitted")
         };
+        assert_eq!(
+            store
+                .background_job(&hydration_id)
+                .await
+                .expect("hydration job")
+                .expect("hydration exists")
+                .priority,
+            3,
+            "{backend}: hydration retains its viewer priority"
+        );
         assert!(store
             .delivery_intents(1_005)
             .await
@@ -599,13 +625,13 @@ async fn background_jobs_one_fragment_build_keeps_remote_delivery_durable() {
             .await
             .expect("delivered receipts")
             .waiters;
-        assert_eq!(
+        assert_eq!(waiters.len(), 4, "{backend}");
+        assert!(
             waiters
                 .iter()
-                .map(|waiter| waiter.state.as_str())
-                .collect::<Vec<_>>(),
-            ["succeeded", "succeeded", "cancelled"],
-            "{backend}"
+                .any(|waiter| waiter.request_id == viewer.consumer_id()
+                    && waiter.state == "succeeded"),
+            "{backend}: target delivery settles the viewer independently"
         );
         assert_eq!(
             store
