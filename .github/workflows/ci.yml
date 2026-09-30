@@ -264,9 +264,22 @@ jobs:
     # only runs when the diff can reach it; qualification and queue runs force
     # the complete fan-out.
     if: needs.scope.outputs.rust == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    # Replace before push with the digest of Dockerfile's `ci` target.
+    container: M5_CI_IMAGE_DIGEST_REQUIRED
     timeout-minutes: 30
     steps:
+      - name: Capture mounted runner workspace owner
+        run: |
+          owner="$(stat -c '%u:%g' "$(dirname -- "$GITHUB_WORKSPACE")")"
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          fi
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            echo '::error::No non-root mounted workspace owner; refusing to leave root-owned runner files' >&2
+            exit 1
+          fi
+          echo "HOST_WORKSPACE_OWNER=$owner" >> "$GITHUB_ENV"
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -275,7 +288,8 @@ jobs:
           components: rustfmt, clippy
       - uses: ./.github/actions/ffmpeg
         with:
-          major: "6"
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
@@ -289,6 +303,13 @@ jobs:
           cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
+
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          if [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
+            chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
+          fi
 
   cluster_store_legacy:
     name: replicated Store contracts (legacy)
@@ -845,9 +866,21 @@ jobs:
     name: cluster daemon contracts
     needs: [scope, preflight]
     if: needs.scope.outputs.cluster_auth == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    container: M5_CI_IMAGE_DIGEST_REQUIRED
     timeout-minutes: 30
     steps:
+      - name: Capture mounted runner workspace owner
+        run: |
+          owner="$(stat -c '%u:%g' "$(dirname -- "$GITHUB_WORKSPACE")")"
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          fi
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            echo '::error::No non-root mounted workspace owner; refusing to leave root-owned runner files' >&2
+            exit 1
+          fi
+          echo "HOST_WORKSPACE_OWNER=$owner" >> "$GITHUB_ENV"
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -858,7 +891,8 @@ jobs:
           lane: cluster-daemon
       - uses: ./.github/actions/ffmpeg
         with:
-          major: "6"
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
       - name: Verify the cluster fixture generator
         run: |
           command -v ffmpeg
@@ -873,15 +907,34 @@ jobs:
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          if [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
+            chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
+          fi
+
   web_layout:
     name: web layout and accessibility
     needs: [scope, preflight]
     if: needs.scope.outputs.web_layout == 'true'
     # Pinned for the same reason as `check`: a browser sweep still plays media
     # through ffmpeg. See .github/actions/ffmpeg.
-    runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    container: M5_CI_IMAGE_DIGEST_REQUIRED
     timeout-minutes: 30
     steps:
+      - name: Capture mounted runner workspace owner
+        run: |
+          owner="$(stat -c '%u:%g' "$(dirname -- "$GITHUB_WORKSPACE")")"
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          fi
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            echo '::error::No non-root mounted workspace owner; refusing to leave root-owned runner files' >&2
+            exit 1
+          fi
+          echo "HOST_WORKSPACE_OWNER=$owner" >> "$GITHUB_ENV"
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -899,7 +952,8 @@ jobs:
           key: playwright-${{ runner.os }}-1.62.0
       - uses: ./.github/actions/ffmpeg
         with:
-          major: "6"
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
       - uses: ./.github/actions/playwright
         with:
           version: "1.62.0"
@@ -918,6 +972,13 @@ jobs:
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          if [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
+            chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
+          fi
+
   vod_web:
     name: film-addressed VOD browser acceptance
     # The eligible lab6 runners are separate VMs on one physical host. Running
@@ -927,9 +988,21 @@ jobs:
     # concurrency group on both siblings but still executed them together.
     needs: [scope, preflight, web_layout]
     if: needs.scope.outputs.web_layout == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    container: M5_CI_IMAGE_DIGEST_REQUIRED
     timeout-minutes: 25
     steps:
+      - name: Capture mounted runner workspace owner
+        run: |
+          owner="$(stat -c '%u:%g' "$(dirname -- "$GITHUB_WORKSPACE")")"
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          fi
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            echo '::error::No non-root mounted workspace owner; refusing to leave root-owned runner files' >&2
+            exit 1
+          fi
+          echo "HOST_WORKSPACE_OWNER=$owner" >> "$GITHUB_ENV"
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -952,7 +1025,8 @@ jobs:
           key: playwright-${{ runner.os }}-1.62.0
       - uses: ./.github/actions/ffmpeg
         with:
-          major: "6"
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
       - uses: ./.github/actions/playwright
         with:
           version: "1.62.0"
@@ -975,6 +1049,13 @@ jobs:
           cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
+
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          if [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
+            chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
+          fi
 
   android_jvm:
     name: Android JVM tests and lint
@@ -1225,7 +1306,8 @@ jobs:
     name: coverage
     # Same fast unit and SQLite-contract suite as `check`, so the same pinned
     # ffmpeg. See .github/actions/ffmpeg.
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    container: M5_CI_IMAGE_DIGEST_REQUIRED
     needs: [scope, check]
     timeout-minutes: 30
     # PR coverage was a second run of the Rust suite whose result was discarded;
@@ -1237,6 +1319,17 @@ jobs:
     # branch-relative URL resolves through either Forgejo or GitHub, so each host
     # authenticates the private image request itself.
     steps:
+      - name: Capture mounted runner workspace owner
+        run: |
+          owner="$(stat -c '%u:%g' "$(dirname -- "$GITHUB_WORKSPACE")")"
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          fi
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            echo '::error::No non-root mounted workspace owner; refusing to leave root-owned runner files' >&2
+            exit 1
+          fi
+          echo "HOST_WORKSPACE_OWNER=$owner" >> "$GITHUB_ENV"
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -1252,7 +1345,8 @@ jobs:
       # needs the same ffmpeg.
       - uses: ./.github/actions/ffmpeg
         with:
-          major: "6"
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
       - name: Measure line coverage
         # Tests intentionally terminate helper processes. A helper can leave one
         # truncated .profraw behind even though the suite and every other profile
@@ -1290,6 +1384,13 @@ jobs:
           cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
+
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          if [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
+            chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
+          fi
 
   package_smoke:
     name: package and smoke (${{ matrix.arch }})

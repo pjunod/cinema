@@ -57,8 +57,9 @@ reason and says so in the file.
 
 Done means: every directive in §3.1 has its observation and validation
 row filled; the child-priority change has its realtime measurement; the
-`check` job's runner label reads `ffmpeg-8`; the release profile is the
-§3.5 one with numbers; four fuzz targets have corpora and artefact upload.
+`check` job verifies Jellyfin ffmpeg 8 in a digest-pinned CI container (the
+§3.4 fallback); the release profile is the §3.5 one with numbers; four fuzz
+targets have corpora and artefact upload.
 
 ---
 
@@ -739,8 +740,22 @@ change `chunk_05.rs` to assert the paced-rate behaviour on 8 instead of
 skipping — and say which in VALIDATION.md, as §3.4 requires.
 
 This is a source audit only. It does **not** establish that `make unit` is
-green on a jellyfin-ffmpeg 8 runner, which is M5's actual acceptance and
-needs the runner-provisioning change in `plurx-agent` first.
+green on the shipped Jellyfin ffmpeg 8 build; that is M5's acceptance.
+
+**M5 fallback decision, 2026-09-29.** The versioned
+`pjunod/ansible` `github-runners/` role registers GitHub Actions runners,
+while Forgejo is this repository's CI control plane. A read-only check on
+`nynuc` found four active Forgejo runner units using independent
+`/opt/forgejo-runner*/.runner` registrations: all four expose
+`general`/`high-cpu`/`ubuntu-26.04`, none exposes `ffmpeg-8`; the host's
+`/usr/bin/ffmpeg` is distro 8.0.1, not the Jellyfin package. No versioned
+Forgejo provisioning owner was identified. M5 therefore takes the
+`runtime-assets` container fallback, not a guessed Ansible change.
+`main-fast-lane.yml`'s existing Ubuntu 24.04 `rust_compile` job runs
+`make unit` on ffmpeg 6, preserving `chunk_05.rs`'s burst-honouring
+assertions. The full-sweep jobs move to Jellyfin 8 only after a separately
+published CI image has been smoke-checked and its immutable digest written
+into `ci.yml`. No runner label or live host is changed by this choice.
 
 ### 3.5 Dockerfile base pin and the release profile
 
@@ -1035,14 +1050,58 @@ still lacks its observed peak. The steps are in the execution log.
 
 ### 5.5 M5 — jellyfin-ffmpeg 8 in CI
 
-The runner provisioning change (in `plurx-agent`'s runner role, referenced
-by path in the PR), the label and `major` changes in `ci.yml`, the audit
-result for a retained ffmpeg-6 lane, VALIDATION.md's ffmpeg paragraph.
+The §3.4 container fallback: Dockerfile `ci` stage from `runtime-assets`,
+with pinned Rust 1.97.1, Node 22 and Playwright 1.62.0/Chromium; one
+published immutable image digest in the five `ci.yml` jobs, each with
+`major: "8"`; the existing ffmpeg-6 `main-fast-lane.yml` `make unit` job
+explicitly retained for burst-honouring coverage; and VALIDATION.md's
+ffmpeg paragraph. The image must exist and be smoke-checked before the
+workflow branch is pushed.
 
 Acceptance: the `check` job's step summary reads `expected major: 8`
-`resolved: ffmpeg version 8…jellyfin`; `make unit` green on that runner;
-`grep -n "ffmpeg-6" .github/workflows/ci.yml` returns either nothing or
-only the retained lane named in VALIDATION.md.
+`resolved: ffmpeg version 8…jellyfin`, with the Jellyfin executable and
+package; `make unit` green inside the CI image and in the retained Ubuntu
+24.04 fast lane; `grep -n "ffmpeg-6" .github/workflows/ci.yml` returns
+nothing, while VALIDATION.md names the retained lane.
+
+**Image publication sequence (not yet run).** Wait until the Mac is free of
+the seek gate; Docker Desktop was not running at source-preparation time.
+Build the exact committed M5 tree locally for Linux amd64, then smoke the
+image before any registry write. The CI stage builds runtime assets and
+tooling, not the release binary. These commands contain no credential:
+
+```bash
+source_sha="$(git rev-parse HEAD)"
+docker buildx build --platform linux/amd64 --target ci --load \
+  --build-arg "PLURX_CI_SOURCE_SHA=$source_sha" \
+  -t plurx-ci:m5-local .
+docker run --rm --platform linux/amd64 plurx-ci:m5-local sh -ec \
+  'rustc +1.97.1 --version; node --version; ffmpeg -version | sed -n "1p"; \
+   test "$(readlink -f "$(command -v ffmpeg)")" = /usr/lib/jellyfin-ffmpeg/ffmpeg; \
+   python3 -c "import importlib.metadata; assert importlib.metadata.version(\"playwright\") == \"1.62.0\""'
+docker image inspect plurx-ci:m5-local \
+  --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+docker run --rm --platform linux/amd64 plurx-ci:m5-local python3 -c \
+  'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True, args=["--no-sandbox"]); b.close(); p.stop()'
+```
+
+Check that the label equals `source_sha`, Chromium starts headless, and the
+FFmpeg action reports the Jellyfin package. Then, with explicit registry
+authorization and the operator's existing Docker login, publish only the
+unique source-SHA tag:
+
+```bash
+image="192.168.4.7:3000/noirr/plurx-ci:p02-m5-${source_sha}"
+docker tag plurx-ci:m5-local "$image"
+docker push "$image"
+docker buildx imagetools inspect "$image" | sed -n '/^Digest:/p'
+```
+
+Resolve the registry manifest digest from that output and put the
+`192.168.4.7:3000/noirr/plurx-ci@sha256:<digest>` reference into all five
+jobs before pushing the workflow branch. A tag, local image ID, or Dockerfile
+base digest is **not** the published CI image digest. No workflow with the
+`M5_CI_IMAGE_DIGEST_REQUIRED` placeholder is pushable.
 
 ### 5.6 M6 — Dockerfile digests and release profile PR 1
 
@@ -1160,9 +1219,10 @@ the whole procedure. Profile changes roll back by the `sha-` image tag.
    measurement may settle on 5 and BE/4 or on none.
    **As built (M3):** two classes, realtime 5 / BE 4 / `+500` and
    background 15 / BE 7 / `+800` (§3.2.2); the measurement still decides.
-3. **Runner provisioning ownership.** The Ansible runner role lives in
-   `plurx-agent`; M5's provisioning half is a PR there, referenced from the
-   `ci.yml` PR.
+3. **Runner provisioning ownership.** The `pjunod/ansible`
+   `github-runners/` role provisions GitHub Actions, not the active Forgejo
+   runner units (§3.4, 2026-09-29). M5 uses the container fallback, so no
+   Forgejo runner provisioning change is proposed.
 4. **Fat LTO build time on the `high-cpu` runner.** If it doubles the
    release build, Paul may prefer thin + CGU 1; PR 3's table is the input.
 5. **`epub_facts` vs `parse_epub`.** Two EPUB parsers exist (metadata facts
@@ -1204,4 +1264,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-25 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | M6 release-profile half — measured, profile not shipped | [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) | `c5ee15d8` adds `plurxd diagnostic-panic`; four profiles built on nuc3 (§5.6 table): PR 1 as written is +427 % binary; `strip = "debuginfo"` is +36 % (+11.5 % gzipped) with named frames; packed split is 230 MiB + a 177 MiB `.dwp`. `Cargo.toml` keeps main's profile; which one ships is §7 question 6, Paul's. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — built (Paul 2026-09-25: go) | [#518](http://192.168.4.7:3000/noirr/plurx/pulls/518) | §3.2.2. One launcher with a `ChildWork` on every call; realtime 5 / BE 4 / `+500`, background 15 / BE 7 / `+800`; the eleven §3.2.1 rows and three Windows-only probes migrated; the decode-fact probe registers its priority before its exec-from-`pre_exec`; a source census plus clippy `disallowed-methods` over every production spawn; `processes` on `/activity/detail`, admin `DELETE /activity/processes/{pid}` through a pidfd, the web Processes table and three `/metrics` families. Built on `origin/main` @ `448e803d`, apart from [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) (M6 profile measurement, M8); #510 merged while this was open and main was merged in after it, with conflicts in documents only. Each behavioural hunk was reverted and its test seen to fail: the `pre_exec` (three priority tests), the pidfd kill (the stop test times out), a spawn site put back to `cmd.spawn()` (the census names `metadata/local.rs:419`), the decode-facts `apply` (its order test), the `processes` field, the `/metrics` families and the DELETE route (the HTTP test, each at its own assertion), the painter line (the web suite), and the census's lexical path resolution (without it the census reads `vodencode_tests.rs`, `include!`d from a test chunk, as production). Gate results are in the PR body. **Outstanding, post-merge (GPT):** §3.2's measurement — on media1, with three concurrent transcodes, a 4K direct play and a DVR recording, `for p in $(pgrep ffmpeg); do echo $p $(awk '{print $19}' /proc/$p/stat) $(cat /proc/$p/oom_score_adj); done` inside the container (realtime children read 5 / 500, background 15 / 800, `/proc/1` its own), the Activity page's Processes table and `curl -s localhost:32400/metrics \| grep plurx_child_` (`plurx_child_priority_unapplied_total` 0 for both classes), then each session's `http_wait_count` and the journal's segment materialisation interval with the build before this PR and with this PR; if a copy-HLS or transcode producer that kept up now falls behind, report it — the values move, not the launcher. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 — not started | [#518](http://192.168.4.7:3000/noirr/plurx/pulls/518) | Not separable from its evidence: no node runs the unit, and each row's acceptance needs a lab VM's playback matrix or GPU selection under the new unit. `OOMScoreAdjust=-500` joins M4. **Steps (GPT, lab VM running `deploy/install`):** (1) at peak (two transcodes, a direct play, a DVR recording) record `systemctl show plurxd -p TasksCurrent -p MemoryCurrent` and `cat /proc/$(pidof plurxd)/oom_score_adj`; (2) add `TasksMax=4096` (only if the peak is ≤ 25 % of it), `PrivateTmp=true`, `ProtectKernelTunables=true`, `RestrictSUIDSGID=true`, `LockPersonality=true` and `OOMScoreAdjust=-500` to the unit, `systemctl daemon-reload && systemctl restart plurxd`; (3) paste `systemd-analyze security plurxd` before and after; (4) play direct, copy HLS, a transcode with burned text subtitles, record one DVR programme, and confirm the GPU probe still selects QSV/VAAPI; (5) confirm `/proc/$(pidof plurxd)/oom_score_adj` is -500 while every ffmpeg reads 500 or 800. Any row that breaks playback stays out and is recorded. |
+| 2026-09-29 | gpt-6-sol | none:codex:2026-09-29 | M5 container fallback — source preparation | Draft PR pending CI image digest | Direct-Forgejo branch `codex/p02-m5-container-ci` prepares the pinned Dockerfile CI stage, five full-sweep jobs on Jellyfin ffmpeg 8, and the retained Ubuntu 24.04 fast-lane `make unit` coverage. No image build, registry publication, workflow push, or runner change has occurred. The workflow has an intentional non-runnable image placeholder until an isolated builder is approved, the image is smoke-checked, and its digest is resolved. Static contracts and the exact image evidence will be recorded before the draft PR. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — review round ([comment 4817](http://192.168.4.7:3000/noirr/plurx/pulls/518#issuecomment-4817)) | [#518](http://192.168.4.7:3000/noirr/plurx/pulls/518) | Main @ `3c89ad2ee` merged in first (`76608b5ca`); conflicts in `subtitles.rs` (main's bounded playhead-window pipe kept, this branch's realtime class given to it), `process/mod.rs` (the `output_job_owned` audit), the ownership ledger (three counts measured by zeroing) and the board; the textually clean `/metrics` `format!` had 17 placeholders for 18 arguments and was given one. **Finding 1 (P1), fixed:** the class is now the caller's (§3.2.2's table). The VOD start's held source probe, its decode-fact probes, the Profile 5 pixel proof asked for by any session start or peer offer, the burn extraction a start joins, and the `/subs` extraction a viewer waits on are realtime; the pre-transcode pass, offline packages, the rate-control refresh and the HLS warm-up are background. `plurx_child_spawns_by_purpose_total{class,purpose}` reads each choice back. Revert-proved: each helper put back to its fixed background class (held probe, decode-fact collection, pixel probe, whole-track `.vtt`, burn extraction) and each caller's choice flipped (`SESSION_START_CLASS`, `BoundPlanCaller::decode_fact_work`, the `/subs` handler) fails its test — `an_empty_stored_track_starts_an_encoded_session_without_the_overlay`, `decode_fact_probes_take_the_class_of_the_caller_waiting_on_them`, `the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it`, `a_whole_track_extraction_runs_at_the_class_its_caller_passes`, `subtitle_extraction_is_cached_by_source_identity`; the counter itself, `every_spawn_is_counted_by_its_class_and_purpose`. **Not changed, recorded:** a joined single flight or a memoized proof keeps the class of the caller that started it (§3.2.2's known limit), and a Profile 5 proof that fails because it timed out is still memoized as failed until restart; the class change makes that timeout less likely under load but does not change the memo, which is a behaviour question for Paul rather than part of this finding. **Finding 2 (P2), fixed:** each `spikes/` workspace carries its own `clippy.toml`; `cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml --tests --no-deps -- -D warnings` exits 0 with it and 101 without it, and `clippy_refuses_every_spawning_method_outside_tests` now fails when a spike workspace has none. **Post-merge (GPT), added to the measurement above:** after a VOD start, a Profile 5 start and a `/subs` request on media1, `curl -s localhost:32400/metrics \| grep plurx_child_spawns_by_purpose_total` shows `held source probe for a session start`, `decode-fact probe for a session start`, `Dolby Vision pixel probe`, `burned-subtitle track extraction` and `subtitle track a viewer turned on` under `class="realtime"`. |

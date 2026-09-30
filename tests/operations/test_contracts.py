@@ -3679,6 +3679,51 @@ assert.equal(context.ACT_TIMER, null);
             "'Which ffmpeg the profiles assume' in the same commit",
         )
 
+    def test_m5_shipped_ffmpeg_jobs_use_one_digest_and_keep_burst_coverage(self):
+        dockerfile = read("Dockerfile")
+        self.assertIn("FROM runtime-assets AS ci", dockerfile)
+        self.assertIn("PLURX_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg", dockerfile)
+        self.assertIn("/usr/local/bin/ffmpeg", dockerfile)
+
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        image = None
+        for name in ("check", "cluster_daemon", "web_layout", "vod_web", "coverage"):
+            with self.subTest(job=name):
+                block = jobs[name]
+                self.assertNotIn("ffmpeg-6", block)
+                self.assertIn('major: "8"', block)
+                self.assertIn(
+                    "binary: /usr/lib/jellyfin-ffmpeg/ffmpeg", block
+                )
+                steps = workflow_step_blocks(block)
+                capture = steps["Capture mounted runner workspace owner"]
+                restore = steps["Restore persistent runner workspace ownership"]
+                self.assertIn('dirname -- "$GITHUB_WORKSPACE"', capture)
+                self.assertIn('echo "HOST_WORKSPACE_OWNER=$owner"', capture)
+                self.assertIn('"${owner%%:*}" = 0', capture)
+                self.assertIn('"${owner##*:}" = 0', capture)
+                self.assertIn('chown -R "$HOST_WORKSPACE_OWNER"', restore)
+                self.assertNotIn('stat -c', restore)
+                match = re.search(r"(?m)^    container: (.+)$", block)
+                self.assertIsNotNone(match)
+                pinned = match.group(1)
+                self.assertRegex(
+                    pinned,
+                    r"^192\.168\.4\.7:3000/noirr/plurx-ci@sha256:[0-9a-f]{64}$",
+                )
+                if image is None:
+                    image = pinned
+                self.assertEqual(image, pinned)
+
+        fast = workflow_job_blocks(".github/workflows/main-fast-lane.yml")[
+            "rust_compile"
+        ]
+        self.assertIn("container: ubuntu:24.04", fast)
+        self.assertIn('major: "6"', fast)
+        self.assertIn("make unit", fast)
+        action = read(".github/actions/ffmpeg/action.yml")
+        self.assertIn('if [ -n "$WANT_BINARY" ]', action)
+
     def test_ci_flake_ledger_records_real_job_outcomes_and_durations(self):
         script = ROOT / "scripts/ci-flake-report"
         subprocess.run([str(script), "--help"], check=True, stdout=subprocess.PIPE)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 
@@ -26,7 +27,20 @@ SUPPORTED_BINARY_COPIES = (
 def _runtime(source: str) -> str:
     if source.count(RUNTIME_STAGE) != 1:
         raise ValueError("tagged Dockerfile must contain one Bookworm runtime stage")
-    return RUNTIME_STAGE + source.split(RUNTIME_STAGE, 1)[1]
+    runtime = RUNTIME_STAGE + source.split(RUNTIME_STAGE, 1)[1]
+    final_stage = "FROM runtime-assets AS runtime"
+    if final_stage not in runtime:
+        return runtime  # Historical one-stage release Dockerfiles.
+    if runtime.count(final_stage) != 1:
+        raise ValueError("tagged Dockerfile must contain one final runtime stage")
+    assets, final = runtime.split(final_stage, 1)
+    # CI-only stages may sit between runtime-assets and the shipped runtime.
+    # The release packager needs the assets and final stage, never their
+    # toolchains; the default Dockerfile still ends in the shipped runtime.
+    intervening = re.search(r"(?m)^FROM ", assets[len(RUNTIME_STAGE) :])
+    if intervening:
+        assets = assets[: len(RUNTIME_STAGE) + intervening.start()]
+    return assets + final_stage + final
 
 
 def required_binaries(source: str) -> tuple[str, ...]:

@@ -137,6 +137,44 @@ RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' \
     && mkdir -p /var/lib/plurx \
     && chown plurx:plurx /var/lib/plurx
 
+# M5's CI image uses the shipped runtime's media assets, not a second ffmpeg
+# install on a persistent runner. These two tool images are pinned by index
+# digest just like the release bases; neither builds the release binaries.
+FROM rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS ci-rust-toolchain
+FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS ci-node-toolchain
+
+FROM runtime-assets AS ci
+ARG PLURX_CI_SOURCE_SHA=""
+LABEL org.opencontainers.image.revision="${PLURX_CI_SOURCE_SHA}"
+ENV CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    PATH=/usr/local/cargo/bin:/opt/playwright-venv/bin:${PATH} \
+    PLURX_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg \
+    PLURX_FFPROBE=/usr/lib/jellyfin-ffmpeg/ffprobe
+# Copy the pinned rustup launcher, not the source image's default compiler;
+# only the repository-pinned 1.97.1 toolchain belongs in this CI layer.
+COPY --from=ci-rust-toolchain /usr/local/cargo/bin /usr/local/cargo/bin
+COPY --from=ci-node-toolchain /usr/local/bin/node /usr/local/bin/node
+# Keep both the daemon's explicit path and shell-invoked fixture generation on
+# jellyfin-ffmpeg 8. Debian bookworm's /usr/bin/ffmpeg remains the release
+# fallback, but must never answer an M5 CI job's bare `ffmpeg` invocation.
+RUN ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg \
+    && ln -s /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe \
+    && apt-get -o Acquire::Retries=3 update \
+    && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+        build-essential clang cmake curl git jq lld llvm make nasm ninja-build \
+        pkg-config python3 python3-venv \
+    && python3 -m venv /opt/playwright-venv \
+    && /opt/playwright-venv/bin/pip install --no-cache-dir 'playwright==1.62.0' \
+    && /opt/playwright-venv/bin/python3 -m playwright install --with-deps chromium \
+    && rustup toolchain install 1.97.1 --profile minimal \
+        --component rustfmt --component clippy --component llvm-tools-preview \
+    && rustc +1.97.1 --version | grep -F 'rustc 1.97.1' \
+    && node --version | grep -E '^v22\.' \
+    && ffmpeg -version | grep -E '^ffmpeg version n?8' \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 # Keep the expensive, architecture-specific runtime asset assertions available
 # as their own CI target. The native release-build matrix already proves both
 # Rust binaries for arm64; rebuilding the entire Rust graph under QEMU made a
