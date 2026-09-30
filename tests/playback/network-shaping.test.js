@@ -34,7 +34,10 @@ function test(name, run) {
 }
 
 async function runAll() {
+  let executed = 0;
   for (const [name, run] of pending) {
+    if (process.env.PLAYBACK_LAB_TEST_FILTER && !new RegExp(process.env.PLAYBACK_LAB_TEST_FILTER).test(name)) continue;
+    executed++;
     try {
       await run();
       process.stdout.write(`PASS ${name}\n`);
@@ -43,7 +46,141 @@ async function runAll() {
       process.stdout.write(`FAIL ${name}: ${error.message}\n`);
     }
   }
+  if (!executed) failures.push("test filter matched no contracts");
+  return executed;
 }
+
+test("D3 intent samples are independent of transport pause and retain lifecycle, replacement and stop", () => {
+  const vm = require("node:vm");
+  let now = 0, tick;
+  const listeners = new Map();
+  let element = { currentTime: 1, paused: true, seeking: false, ended: false, videoHeight: 720 };
+  const context = { performance: { now: () => now }, WeakMap, AUTO_SWITCH_SEQ: 0,
+    PLAYER: { wantsPlayback: true, sessionId: "a", attemptId: "one", offset: 0 },
+    document: { visibilityState: "visible", getElementById: () => element,
+      addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) },
+    setInterval: fn => { tick = fn; return 1; }, clearInterval: () => { tick = null; } };
+  vm.createContext(context);
+  vm.runInContext(`(${lab.installD3Acquisition.toString()})(32,100)`, context);
+  now = 100; tick();
+  context.AUTO_SWITCH_SEQ = 1;
+  context.PLAYER.abr = { switches: [{ seq: 1, at_ms: 101, from_height: 720,
+    to_height: 360, target_session_id: "b", target_attempt_id: "two" }] };
+  context.document.visibilityState = "hidden"; now = 120; listeners.get("visibilitychange")();
+  element = { ...element, currentTime: 0 }; context.PLAYER.sessionId = "b";
+  now = 200; tick();
+  now = 300; context.__plurxLabD3.stop("terminal-unrecovered");
+  const capture = JSON.parse(JSON.stringify(context.__plurxLabD3));
+  assert.equal(capture.records.find(r => r.kind === "start").wants_playback, true,
+    "paused transport must not erase independent viewer intent");
+  assert.ok(capture.records.some(r => r.kind === "lifecycle" && r.visible === false));
+  assert.equal(capture.records.filter(r => r.kind === "attachment").length, 2);
+  assert.equal(capture.records.at(-1).reason, "terminal-unrecovered");
+  assert.equal(capture.auto_switch_end - capture.auto_switch_baseline, 1);
+  assert.equal(capture.records.find(r => r.kind === "automatic_switch").target_session_id, "b");
+  assert.equal(tick, null);
+  assert.equal(listeners.size, 0);
+  assert.equal(lab.d3PresentationEvidence(capture).stalled_seconds, null);
+});
+
+test("D3 overflow preserves the head and makes loss and censored absence explicit", () => {
+  const vm = require("node:vm");
+  let now = 0;
+  const context = { performance: { now: () => ++now }, WeakMap,
+    document: { visibilityState: "visible", getElementById: () => null,
+      addEventListener() {}, removeEventListener() {} }, setInterval: () => 1, clearInterval() {} };
+  vm.createContext(context);
+  vm.runInContext(`(${lab.installD3Acquisition.toString()})(1,100)`, context);
+  context.__plurxLabD3.stop("observation-end");
+  const capture = JSON.parse(JSON.stringify(context.__plurxLabD3));
+  assert.equal(capture.records.length, 1);
+  assert.ok(capture.dropped > 0);
+  const evidence = lab.d3PresentationEvidence(capture);
+  assert.equal(evidence.status, "incomplete");
+  assert.equal(evidence.stationary_integral_bounds_seconds, null);
+  assert.equal(evidence.automatic_switches, null);
+  assert.ok(evidence.missing.includes("record limit exceeded"));
+});
+
+test("D3 skipped and backward composition frames never become an exact zero stall", () => {
+  const capture = { stopped: true, records: [
+    { kind: "start", at_ms: 0, wants_playback: true, visible: true, element_id: 1, current_time: 1 },
+    { kind: "composition_submission", at_ms: 10, visible: true, element_id: 1, media_time: 1, presented_frames: 1 },
+    { kind: "composition_submission", at_ms: 50, visible: true, element_id: 1, media_time: .9, presented_frames: 4 },
+    { kind: "stop", at_ms: 100, wants_playback: true, visible: true, element_id: 1, current_time: 1 },
+    { kind: "censor", at_ms: 100, reason: "terminal" },
+  ] };
+  const result = lab.d3PresentationEvidence(capture);
+  assert.equal(result.skipped_submissions, 2);
+  assert.equal(result.backward_frames, 1);
+  assert.equal(result.sampled_equal_clock_seconds, .1);
+  assert.equal(result.stalled_seconds, null);
+  assert.equal(result.stationary_integral_bounds_seconds, null);
+  assert.equal(result.terminal_censor[0].reason, "terminal");
+});
+
+test("D3 clock brackets bound drift and frame times without interpolating an offset", () => {
+  const anchors = [{ sent_ms: 100, received_ms: 110, browser_ms: 20 },
+    { sent_ms: 200, received_ms: 230, browser_ms: 110 }];
+  const alignment = lab.d3ClockAlignment(anchors);
+  assert.equal(alignment.status, "bracketed");
+  assert.equal(alignment.drift_lower_ms, 0);
+  assert.equal(alignment.drift_upper_ms, 40);
+  assert.deepEqual(lab.d3ControllerTimeBounds(50, anchors), [100, 230]);
+  assert.equal(lab.d3ControllerTimeBounds(5, anchors), null);
+  assert.equal(lab.d3ClockAlignment(anchors.slice(0, 1)).status, "missing");
+  assert.equal(lab.d3ClockAlignment([anchors[0], { ...anchors[1], browser_ms: 10 }]).status, "missing");
+});
+
+test("D3 two cliffs use exact final sixty-second completion boundaries and keep advertisements separate", () => {
+  const stage = { index: 1, entered_at_ms: 12_000, left_at_ms: 87_000 };
+  const samples = [{ at_ms: 26_999, bytes: 900, media: true, session_id: "a" },
+    { at_ms: 27_000, bytes: 500, media: true, session_id: "a" },
+    { at_ms: 27_001, bytes: 60_000, media: true, session_id: "a" },
+    { at_ms: 87_000, bytes: 60_000, media: true, session_id: "a" },
+    { at_ms: 87_001, bytes: 999, media: true, session_id: "a" },
+    { at_ms: 50_000, bytes: 999, media: false, session_id: "a" }];
+  const capture = { stopped: true, records: [
+    { kind: "composition_submission", visible: true, session_id: "a", height: 240 },
+    { session_id: "a", ladder: [{ height: 240, total_kbps: 900 }] },
+  ] };
+  const first = lab.d3FinalDeliveryWindow(stage, samples, 0, capture);
+  assert.equal(first.media_bytes, 120_000);
+  assert.equal(first.delivered_kbps, 16);
+  assert.equal(first.advertised_total_kbps, 900);
+  assert.equal(first.samples.length, 2);
+  assert.match(first.interval, /socket-completion.*not client consumption/);
+  const second = lab.d3FinalDeliveryWindow({ index: 2, entered_at_ms: 87_000, left_at_ms: 162_000 },
+    [{ at_ms: 102_001, bytes: 30_000, media: true, session_id: "b" }]);
+  assert.equal(second.socket_completion_media_bytes, 30_000);
+  assert.equal(second.media_bytes, null);
+  assert.equal(second.delivered_kbps, null);
+  assert.equal(second.advertised_total_kbps, null);
+  assert.ok(second.missing.length);
+  assert.equal(lab.d3FinalDeliveryWindow(stage, samples, 1).media_bytes, null);
+  assert.equal(lab.d3FinalDeliveryWindow({ ...stage, left_at_ms: 50_000 }, samples).media_bytes, null);
+});
+
+test("D3 ambiguous or missing rung evidence stays missing instead of using the cap", () => {
+  const stage = { index: 1, kbps: 1500, entered_at_ms: 0, left_at_ms: 75_000 };
+  const result = lab.d3FinalDeliveryWindow(stage, [{ at_ms: 20_000, media: true, bytes: 123, session_id: null }]);
+  assert.equal(result.advertised_total_kbps, null);
+  assert.ok(result.missing.some(reason => reason.includes("cannot be attributed")));
+});
+
+test("D3 normalization preserves failed raw acquisition, null metrics and provenance verbatim", () => {
+  const acquisition = { acceptance: "incomplete", clock_alignment: { anchors: [{ sent_ms: 12 }] },
+    presentation: { stalled_seconds: null, backward_frames: 1, raw: { records: [{ at_ms: 4 }] } },
+    missing: ["physical grade unavailable"] };
+  const provenance = { runtime_build: "unqualified", missing: ["binary digest unavailable"] };
+  const report = { schema_version: 1, summary: { failed: 1 }, d3_provenance: provenance,
+    results: [{ name: "failed", status: "failed", d3_acquisition: acquisition }] };
+  const normalized = lab.normalizeTrace(report);
+  assert.deepEqual(normalized.results[0].d3_acquisition, acquisition);
+  assert.deepEqual(normalized.d3_provenance, provenance);
+  assert.equal(normalized.results[0].status, "failed");
+  assert.equal(Object.hasOwn(lab.normalizeTrace({ results: [{}] }).results[0], "d3_acquisition"), false);
+});
 
 function cli(args) {
   return spawnSync(process.execPath, [LAB, ...args], { encoding: "utf8", cwd: ROOT });
@@ -2908,11 +3045,11 @@ test("the isolated playback server reserves distinct HTTP, Raft, and API ports",
   assert.doesNotMatch(config, /3240[12]/);
 });
 
-runAll().then(() => {
+runAll().then(executed => {
   if (failures.length) {
     process.stderr.write(`\n${failures.length} shaping contract failure(s)\n`);
     process.exitCode = 1;
     return;
   }
-  process.stdout.write(`\n${pending.length} shaping contracts hold\n`);
+  process.stdout.write(`\n${executed} shaping contracts hold\n`);
 });

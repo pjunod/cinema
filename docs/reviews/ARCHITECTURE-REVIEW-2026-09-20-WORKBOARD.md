@@ -212,6 +212,19 @@ seek-scratch repair effort and is tracked there.
 
 ## Reading the board
 
+**A-04 acquisition continuation, 2026-09-30:**
+`codex/a04-d3-browser-acquisition` (gpt-6.1-sol,
+`agent:/root/p02_registry_pull_audit_sol61`) extends only the existing browser
+lab/normalizer with bounded raw intent/lifecycle/composition records, clock
+uncertainty and final-60-second downstream socket-completion accounting.
+The [A-04 dated acquisition entry](../clients/NATIVE-ADAPTIVE-QUALITY-DESIGN.md#browser-acquisition-continuation-2026-09-30)
+defines the nulls and bounds; seven pure focused contracts are not playback
+or physical qualification. D3 remains incomplete and A-05 M1–M4 still wait
+for the six-metric nine-client/two-profile plus Dolby Vision evidence.
+[Protocol #632](http://192.168.4.7:3000/noirr/plurx/pulls/632) is now integrated
+at `7ede9fc2d` after eight green Effort jobs (UI 3620/API 3641); its earlier
+draft receipt is preserved and its merge does not close D3.
+
 `unclaimed` rows with `week` priority and no `Notes` dependency are what a
 new session should take first, in id order within the `week` set: S-01,
 C-01, C-02, K-03, K-07, P-04, then the client `week` items. A row in

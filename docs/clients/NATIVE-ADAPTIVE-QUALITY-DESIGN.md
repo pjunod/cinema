@@ -768,7 +768,7 @@ The metrics, which are §3.8's list made countable:
 | Metric | Definition |
 |---|---|
 | Stalled seconds | wall seconds with the presentation clock stationary while `wantsPlayback` |
-| Switches | automatic rung changes (0 on today's build, by construction) |
+| Switches | observed automatic rung changes, with complete sequence provenance; never assume zero from build identity |
 | First-frame gap | seconds from a switch or reopen to the next presented frame |
 | Quality regained | seconds from the cliff to the first frame at a rung the link can sustain |
 | Unexpected SDR transitions | count of HDR -> SDR grade changes the viewer did not ask for |
@@ -778,6 +778,69 @@ Acceptance: one JSON report per platform per profile, normalized with
 `scripts/playback-lab normalize` so two runs compare, all six metrics
 filled, recorded under a dated heading in this document. The GPT prompt is
 in §6.
+
+**2026-09-30 definition correction:** the former parenthetical asserting zero
+switches by construction was stale: the retained Chrome/Firefox candidates
+above contain actual automatic switches. Their observed counts and original
+failed/unqualifying outcomes stand. Missing sequence coverage is null, not zero.
+
+#### Browser acquisition continuation, 2026-09-30
+
+`scripts/playback-lab run --d3-acquisition` extends the existing browser
+collector, not the acceptance scorer or an ABR adapter. Its additive
+`d3_acquisition` schema 1 survives normalization verbatim, including failed
+outcomes, raw backwards frames, missing reasons and runtime provenance.
+Ordinary runs retain their existing report fields and scoring. This option is
+measurement instrumentation, not a product feature gate.
+
+The collector samples the independent `PLAYER.wantsPlayback` intent and
+visible element/session/attempt, media clock, seeking, ended/error and
+document visibility at 100 ms, plus visible media events. Element replacement
+gets an explicit attachment record; observation termination gets a stop and
+censor record. It retains the first 32,768 browser records and reports overflow
+rather than silently replacing early evidence. Callback `mediaTime`,
+`presentedFrames`, `presentationTime` and `expectedDisplayTime` come from
+`requestVideoFrameCallback`: these are best-effort composition submissions
+and expected display times, **not physical-display acknowledgements**. Skipped
+submission counters, missing clocks and lost capture remain acquisition gaps.
+
+Equal sampled clocks are reported only as `sampled_equal_clock_seconds`.
+They do not prove stationary presentation between samples. The exact D3
+`stalled_seconds` remains null; a complete sampled interval has only the
+conservative bound zero to its whole observation duration, with sample gaps
+and sampled intent-eligible duration recorded separately. Missing capture or
+overflow makes even that bound unavailable. Terminal/no-frame tails are not
+discarded. Automatic-switch counts require a complete sequence from the
+existing switch records; absent or overflowed evidence is not zero.
+
+Controller/browser round-trip anchors retain send, browser and receive
+timestamps. Each anchor gives an offset interval; first/last intervals give
+a measured drift interval, not an assumed fixed offset. A composition
+timestamp between anchors gets their conservative monotonic ordering bounds;
+outside coverage or across a discontinuity it has no aligned value. The
+shaper's controller origin and actual transition timestamps remain separate
+so relative cliff times cannot be mistaken for absolute controller times.
+
+Each completed downstream socket write has a separate bounded delivery
+ledger, including classified playlists and session attribution. For each
+post-cliff stage, the final 60 seconds are exactly `(end - 60000, end]`, using
+**socket-completion timestamps**. This is not an application-read
+acknowledgement or client-consumption proof. Admission, refund and carry-over
+series remain distinct and cannot substitute for delivered bytes. Short
+stages or ledger overflow yield null byte measurements; unattributed or
+ambiguous rungs keep the raw socket aggregate but leave the D3 delivered-rate
+field null. Advertised total bitrate requires one composition-observed
+session/height with an unambiguous ladder advertisement; it is not inferred
+from the shaping cap or proof of sustained playback.
+
+No acquisition-only run can close D3. Sustainable-rung first-frame latency
+and physical HDR-to-SDR count remain null without their required evidence;
+the presentation integral still needs an adequate continuous presentation
+oracle and intent-boundary coverage. The nine named clients, both profiles,
+and the Dolby Vision pass in §6 still need actual measured, identity-bound
+runs. Synthetic corpus fixtures, pure collector regressions and counters are
+not those measurements. Running-binary SHA/source binding must be supplied
+by the measurement receipt; server version/build metadata alone is not enough.
 
 ### 5.4 D4 — the build plan — DELIVERED
 
@@ -1249,6 +1312,8 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_registry_pull_audit_sol61 | D3 browser/shaper acquisition continuation | `codex/a04-d3-browser-acquisition` draft | Additive bounded capture, independent sampled intent/lifecycle, composition submissions, clock uncertainty and exact final-window socket-completion ledger; normalization preserves raw failed/missing evidence. Seven pure D3 contracts pass with `PLAYBACK_LAB_TEST_FILTER='^D3 ' node tests/playback/network-shaping.test.js`. No traffic/device run or D3 acceptance. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_registry_pull_audit_sol61 | Android protocol integration receipt | [#632](http://192.168.4.7:3000/noirr/plurx/pulls/632) | Protocol merged at `7ede9fc2d142df6c2e38c4c5651cace9b9d42675`, exact head `468f07069106810663550b4bed4a1cee7c85ebbc`; all eight Effort gate jobs green at UI 3620/API 3641. Sole review 5/comment 6457's HDR-baseline finding was fixed. The original dated draft row below remains history; this merge supplies a protocol, not physical D3 acceptance. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/architecture_receipt_reconcile_sol61 | D3 Android manual-protocol continuation | `codex/a04-android-measurement-protocol` draft | [Operational protocol](ANDROID-SHAPED-NETWORK-MEASUREMENT-PROTOCOL.md) prepared against effort `225f3742a`: four named clients × two profiles × baseline/Dolby Vision pass, verified source controls and auth, six-metric acquisition prerequisites, bounded run/restore and null/missing receipt. No device run, traffic, deployment, app instrumentation, feature gate or D3 acceptance. Earlier authors and measurement failures remain the historical record. |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | D1 | [#458](http://192.168.4.7:3000/noirr/plurx/pulls/458) | `tests/playback/auto-quality-policy.json` at schema 1 — 29 cases, 11 controller-gate rows, every §3.2 class and every §3.5 row covered, 516 lines. `node tests/playback/web-policy.test.js` green with the new cases; `make validation-lint` governs the new file (2157 → 2158 audited). Proved by reverting five things under test and re-running: `stallFree` out of `decideRung`'s upgrade gate fails "upgrade: a recent stall holds the rung even once the hold has elapsed: height, 1080 !== 720"; `causeMaxAgeMs` 15000 → 14000 fails the defaults-equality test; `!p.started` out of `autoControllerTick` fails "Not yet started: autoControllerTick no longer contains !p.started"; dropping the HDR row from the fixture fails the §3.5 coverage test; shortening a disagreement's `finding` fails the finding requirement. Four disagreements with today's browser recorded in `web_current`, not papered over: no control-verdict gate anywhere, a 60 s rather than 20 s voluntary gap, no decode class inside the policy, and §3.2's `link:` row over-collecting a publication refusal (§7.6). |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | D2 | [#458](http://192.168.4.7:3000/noirr/plurx/pulls/458) | §8, written by reading the three codebases. Every `AutoSample` field has an API, units, a cadence and a failure mode on all three platforms, or a written statement that it is unavailable and what the policy does. Six fields are not simply available (§8.4) and seven of §3.1's rows were wrong (§8.5). The load-bearing one: Apple has no per-completed-transfer throughput sample, so `decideRung`'s emergency branch is unreachable there as the policy stands (§8.4.1, §7.7). |
