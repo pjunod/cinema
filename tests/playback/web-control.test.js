@@ -26,7 +26,8 @@ function shippedSource(name) {
 // dependencies in each owner harness, rather than replacing the beacons by
 // no-ops that would hide command/presentation regressions.
 function seekTelemetrySources(){
-  return ["dispatchPlaybackSeekTelemetry","finishPlaybackSeekTelemetry",
+  return ["dispatchPlaybackSeekTelemetry","playbackSeekTraceRanges",
+    "recordPlaybackSeekRoute","finishPlaybackSeekTelemetry",
     "watchPlaybackSeekTelemetry"].map(shippedSource).join("\n");
 }
 // A shipped top-level constant, so a scope built out of source cannot drift

@@ -365,7 +365,7 @@ use crate::queue_fixture::QueueFixture;
             None,
         );
         let (hydrated, hydrated_version, hydrated_key) = serve
-            .try_cluster_fragment_index(&file, video)
+            .try_cluster_fragment_index(&file, video, None)
             .await
             .expect("selected converting artifact hydrates")
             .expect("source is already attested");
@@ -380,7 +380,7 @@ use crate::queue_fixture::QueueFixture;
 
         crate::fragment_index_cluster::remove_local_blob(cache.path(), &cache_key).await;
         let unavailable = serve
-            .try_cluster_fragment_index(&file, video)
+            .try_cluster_fragment_index(&file, video, None)
             .await
             .expect_err("a catalogue row without any verified holder is not playable");
         assert!(
