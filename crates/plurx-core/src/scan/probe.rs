@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::domain::{AudioStream, DolbyVisionFacts, ProbeResult, SubtitleStream};
+use crate::domain::{
+    normalize_source_channel_layout, AudioStream, DolbyVisionFacts, ProbeResult, SubtitleStream,
+};
 use crate::error::ProbeError;
 
 /// The ffprobe binary name; overridable via `PLURX_FFPROBE` for jellyfin-ffmpeg
@@ -410,6 +412,10 @@ pub fn parse_probe_json(json: &Value) -> ProbeResult {
                     index: audio_i,
                     codec: str_field(stream, "codec_name").unwrap_or_default(),
                     channels: int_field(stream, "channels"),
+                    channel_layout: stream
+                        .get("channel_layout")
+                        .and_then(Value::as_str)
+                        .and_then(normalize_source_channel_layout),
                     sample_rate: str_field(stream, "sample_rate")
                         .and_then(|rate| rate.parse::<i64>().ok())
                         .filter(|rate| *rate > 0),
@@ -999,6 +1005,57 @@ pub(crate) mod tests {
             ProbeError::Failed { reason, .. } => assert_eq!(reason, "Permission denied"),
             other => panic!("expected permanent probe failure, got {other}"),
         }
+    }
+
+    #[test]
+    fn source_channel_layout_is_bounded_opaque_and_never_inferred() {
+        let cases = [
+            (json!(" 5.1 "), Some("5.1")),
+            (json!("5.1(side)"), Some("5.1(side)")),
+            (json!("future-layout"), Some("future-layout")),
+            (json!(""), None),
+            (json!(" UNKNOWN "), None),
+            (json!("n/A"), None),
+            (json!("5.1\n"), None),
+            (json!("x".repeat(257)), None),
+            (json!(6), None),
+            (json!(["FL", "FR"]), None),
+            (json!({"name": "5.1"}), None),
+            (json!(null), None),
+        ];
+        for (layout, expected) in cases {
+            let document = json!({"streams": [{
+                "codec_type": "audio", "codec_name": "aac", "channels": 6,
+                "channel_layout": layout,
+            }]});
+            let result = parse_probe_json(&document);
+            assert_eq!(result.audio_streams[0].channel_layout.as_deref(), expected);
+            assert_eq!(result.audio_streams[0].channels, Some(6));
+            assert_eq!(
+                serde_json::from_str::<Value>(
+                    result.raw_json.as_deref().expect("retained raw probe")
+                )
+                .expect("raw probe JSON"),
+                document
+            );
+            let stored = json!({"index": 0, "codec": "aac", "channels": 6,
+                "channel_layout": document["streams"][0]["channel_layout"],
+                "language": null, "title": null, "default": false});
+            let restored: AudioStream = serde_json::from_value(stored).expect("stored audio fact");
+            assert_eq!(restored.channel_layout.as_deref(), expected);
+        }
+        let legacy = json!({"index": 0, "codec": "aac", "channels": 6,
+            "language": null, "title": null, "default": false});
+        let restored: AudioStream = serde_json::from_value(legacy).expect("legacy audio fact");
+        assert_eq!(restored.channel_layout, None);
+        assert!(serde_json::to_value(restored)
+            .expect("serialize legacy audio fact")
+            .get("channel_layout")
+            .is_none());
+        let result = parse_probe_json(&json!({"streams": [{
+            "codec_type": "audio", "channels": 6,
+        }]}));
+        assert_eq!(result.audio_streams[0].channel_layout, None);
     }
 
     #[test]
