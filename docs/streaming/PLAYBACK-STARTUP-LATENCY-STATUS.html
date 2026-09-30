@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Playback startup build status</title>
+<style>body{font:16px/1.55 system-ui,sans-serif;max-width:1040px;margin:40px auto;padding:0 24px;color:#17252c;background:#f4f7f8}h1{line-height:1.15}a{color:#075f87}table{border-collapse:collapse;width:100%;background:white;margin:22px 0}th,td{text-align:left;padding:12px;border-bottom:1px solid #d7e0e4;vertical-align:top}th{background:#e5eef2}.tag{display:inline-block;padding:5px 12px;background:#dbe9f6;border-radius:20px}code{overflow-wrap:anywhere}small{color:#53646b}</style></head>
+<body><p class="tag">Build authorized · Sol dispatch pending</p>
+<h1>Playback startup latency</h1><p>Measured: 14.2 seconds to first frame. Build faster starts while preserving playback continuity, media validation and resource bounds.</p>
+<p><a href="PLAYBACK-STARTUP-LATENCY-BUILD.md">Build handoff</a> · <a href="PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md">Implementation contract</a> · <a href="PLAYBACK-STARTUP-LATENCY-REVIEW.md">Adversarial plan review</a></p>
+<p><small>Updated September 29, 2026 EDT. Implementation has not started. No runtime improvement or deployment is claimed.</small></p>
+<table><tr><th>Execution</th><th>Current value</th></tr>
+<tr><td>Workspace</td><td><code>/private/tmp/plurx-startup-build-20260929</code> — independent clone</td></tr>
+<tr><td>Branch / base</td><td><code>codex/playback-startup-latency</code><br><code>38c917225d2c47e66524896c9ad0351d2314f508</code></td></tr>
+<tr><td>PR / builder</td><td>Pending Sol session dispatch</td></tr>
+<tr><td>Compiler</td><td>Rust 1.97.1 available on host; build clone compiler check pending</td></tr>
+<tr><td>Review</td><td>Plan: R1–R3 addressed and independently verified. Implementation review occurs once the full PR is ready.</td></tr>
+<tr><td>Tests / fast lane</td><td>Not run for build. Regression execution deferred until final review fixes, per user instruction.</td></tr></table>
+<table><tr><th>Milestone</th><th>State</th><th>Required evidence</th></tr>
+<tr><td>M0 timing and reproduction</td><td>Not started</td><td>Separate source production, publication hold and client presentation</td></tr>
+<tr><td>M1 exact preparation</td><td>Not started</td><td>Classify missing index and prove any queue/hydration repair</td></tr>
+<tr><td>M2 policy selection</td><td>Not started</td><td>Legal HLS timing and sustainable low-reserve playback</td></tr>
+<tr><td>M3 publication implementation</td><td>Awaiting M2</td><td>Coherent clock, flow, actor and scratch contracts</td></tr>
+<tr><td>M4 first-segment overhead</td><td>Awaiting M0</td><td>Measured phase improvement or demonstrated source/GOP lower bound</td></tr>
+<tr><td>M5 qualification and merge</td><td>Awaiting implementation</td><td>Client measurements, final review addressed, exact-head fast lane green</td></tr></table>
+<h2>Decisions and limits</h2><p>One larger PR with proper commits. No unit-suite loops during development. No arbitrary smaller startup constant, hidden feature gate, production queue reset or silent quality downgrade. The user checkout is not a build workspace.</p>
+<h2>Next action</h2><p>Sol establishes the compiler loop, makes the draft PR durable, and begins M0 in the isolated clone. Update this page as evidence and decisions change.</p>
+</body></html>
