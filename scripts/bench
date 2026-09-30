@@ -130,6 +130,25 @@ FIXTURES = {
         bitexact=True,
         why="fast motion at 59.94 fps",
     ),
+    # Separate identity: do not mutate the existing pinned N1 8-bit fixture.
+    "dark-gradient-10bit": dict(
+        qualification=True,
+        size="1920x1080", codec="libx265", hdr=None,
+        source=("nullsrc=size={size}:rate=24:duration={duration},format=yuv420p10le,"
+                "geq=lum='64+64*X/W*(0.75+0.25*sin(T))':cb=512:cr=512"),
+        extra=["-pix_fmt", "yuv420p10le", "-color_primaries", "bt709",
+               "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
+               "-x265-params", "log-level=none:pools=1:frame-threads=1"],
+        bitexact=True, why="10-bit near-black ramps without an 8-bit intermediate",
+    ),
+    "burn-pgs": dict(
+        qualification=True,
+        size="1920x1080", codec="libx264", extra=["-g", "48"], hdr=None,
+        bitexact=True, pgs=True, why="real PGS stream selected for production bitmap burn",
+    ),
+    "dv-p5": dict(
+        qualification=True, external="PLURX_DV_P5_FIXTURE", why="genuine Profile 5 source with RPU",
+    ),
 }
 
 # Long enough for a session to settle past its burst, short enough that
@@ -1767,16 +1786,72 @@ def print_rate_control(report):
 
 def build_fixture(out_dir, name, spec):
     path = os.path.join(out_dir, f"{name}.mkv")
+    if spec.get("external"):
+        source = os.environ.get(spec["external"])
+        if not source or not Path(source).is_file():
+            raise BenchError(f"{name}: set {spec['external']} to a genuine Profile 5 source; PQ tags are not DV evidence")
+        probe_fixture(source, name)
+        if Path(source).resolve() != Path(path).resolve():
+            shutil.copyfile(source, path)
+        probe_fixture(path, name)
+        return path
     if os.path.exists(path):
+        if name in ("burn-pgs", "dark-gradient-10bit"):
+            probe_fixture(path, name)
         print(f"  {name:14s} exists")
         return path
     cmd = fixture_command(path, spec)
+    if spec.get("pgs"):
+        sup = os.path.join(out_dir, "burn-pgs.sup")
+        authored = sh([str(Path(__file__).resolve().parent / "mkpgs"), "1920", "1080", sup])
+        if authored.returncode:
+            raise BenchError(f"PGS author failed: {authored.stderr}")
+        # Third input, before any output option. Copy the authored subtitle,
+        # do not pre-burn it: the server must execute the composition graph.
+        insert = cmd.index("-c:v")
+        cmd[insert:insert] = ["-i", sup, "-map", "0:v:0", "-map", "1:a:0", "-map", "2:s:0", "-c:s", "copy"]
+        # Sparse subtitle cues end earlier than the video; -shortest would
+        # silently truncate the reference and make the 30-second trim invalid.
+        cmd.remove("-shortest")
+        cmd[-1:-1] = ["-t", str(DURATION)]
     print(f"  {name:14s} building… ({spec['why']})", flush=True)
     r = sh(cmd)
     if r.returncode != 0:
-        print(f"  {name:14s} FAILED: {r.stderr.strip().splitlines()[-1:]}")
-        return None
+        raise BenchError(f"{name}: fixture encode failed: {r.stderr.strip()}")
+    if name in ("burn-pgs", "dark-gradient-10bit"):
+        probe_fixture(path, name)
     return path
+
+
+def probe_fixture(path, name):
+    """Validate actual stream facts; never promote a declared fixture label."""
+    result = sh(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(path)])
+    if result.returncode:
+        raise BenchError(f"{name}: ffprobe failed: {result.stderr}")
+    try:
+        streams = json.loads(result.stdout)["streams"]
+        video = next(stream for stream in streams if stream.get("codec_type") == "video")
+    except (ValueError, KeyError, StopIteration) as error:
+        raise BenchError(f"{name}: no verifiable video stream") from error
+    if name == "dv-p5":
+        records = video.get("side_data_list", [])
+        if video.get("codec_name") != "hevc" or not any(
+            record.get("dv_profile") == 5 and record.get("rpu_present_flag") == 1
+            for record in records
+        ):
+            raise BenchError("dv-p5: genuine Profile 5 RPU record required; PQ metadata alone is insufficient")
+    elif name == "burn-pgs":
+        if not any(stream.get("codec_name") == "hdmv_pgs_subtitle" for stream in streams):
+            raise BenchError("burn-pgs: authored PGS subtitle stream is missing")
+    elif name == "dark-gradient-10bit":
+        if video.get("pix_fmt") != "yuv420p10le" or any(
+            video.get(field) != expected for field, expected in (
+                ("color_transfer", "bt709"), ("color_primaries", "bt709"),
+                ("color_space", "bt709"), ("color_range", "tv"),
+            )
+        ):
+            raise BenchError("dark-gradient-10bit: ten-bit limited BT.709 output facts required")
+    return streams
 
 
 def fixture_command(path, spec):
@@ -1972,6 +2047,7 @@ def main():
     f = sub.add_parser("fixtures", help="build the corpus")
     f.add_argument("--dir", default="./bench-media")
     f.add_argument("--only", choices=sorted(FIXTURES), help="build one named fixture")
+    f.add_argument("--qualification", action="store_true", help="include codec qualification inputs; genuine P5 media is required")
 
     r = sub.add_parser("run", help="play the corpus against a server")
     r.add_argument("--base", default="http://127.0.0.1:32400")
@@ -2071,7 +2147,7 @@ def main():
             sys.exit("ffmpeg not on PATH")
         os.makedirs(args.dir, exist_ok=True)
         print(f"building corpus in {args.dir} ({DURATION}s each)")
-        wanted = [args.only] if args.only else list(FIXTURES)
+        wanted = [args.only] if args.only else [name for name, spec in FIXTURES.items() if args.qualification or not spec.get("qualification")]
         for name in wanted:
             spec = FIXTURES[name]
             build_fixture(args.dir, name, spec)
@@ -2096,7 +2172,7 @@ def main():
             stem = os.path.splitext(mf.get("filename") or "")[0]
             by_name[stem] = mf["id"]
 
-    wanted = [args.only] if args.only else list(FIXTURES)
+    wanted = [args.only] if args.only else [name for name, spec in FIXTURES.items() if not spec.get("qualification")]
     rows = []
     for name in wanted:
         file_id = by_name.get(name)
