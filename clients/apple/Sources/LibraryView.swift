@@ -4,22 +4,18 @@ struct LibraryView: View {
     @EnvironmentObject var model: AppModel
     let collection: LibraryCollection
 
-    @State private var items: [Item] = []
+    @StateObject private var state = LibraryGridCoordinator()
     @State private var sort: LibrarySort = .title
     @State private var filter: WatchFilter = .all
     @State private var query = ""
-    @State private var loading = true
-    @State private var error: String?
-    @State private var visibleItems: [Item] = []
-    @State private var pager: LibraryMerge?
-    @State private var fetchTask: Task<Void, Never>?
-    @State private var requestedThrough = 0
-    @State private var loadedCount = 0
-    @State private var total = 0
-    @State private var complete = false
-    @State private var filterGeneration = 0
-    @State private var pageGeneration = 0
-    @State private var driveTask: Task<Void, Never>?
+
+    private var items: [Item] { state.items }
+    private var visibleItems: [Item] { state.visibleItems }
+    private var loading: Bool { state.loading }
+    private var error: String? { state.error }
+    private var loadedCount: Int { state.loadedCount }
+    private var total: Int { state.total }
+    private var complete: Bool { state.complete }
     @State private var gridColumns = 1
     @State private var visibleIndices: Set<Int> = []
 
@@ -56,22 +52,10 @@ struct LibraryView: View {
         #endif
         .toolbar { libraryToolbar }
         .task(id: loadKey) { await load() }
-        .task(id: query) {
-            try? await Task.sleep(for: .milliseconds(150))
-            guard !Task.isCancelled else { return }
-            filterNow()
-            runDrive()
-        }
-        .task(id: filter) {
-            filterNow()
-            runDrive()
-        }
-        .onChange(of: items) { _, _ in filterNow() }
+        .task(id: query) { await state.queryChanged(query) }
+        .task(id: filter) { state.filterChanged(filter) }
         .onDisappear {
-            driveTask?.cancel()
-            fetchTask?.cancel()
-            pageGeneration += 1
-            requestedThrough = 0
+            state.stop()
             visibleIndices.removeAll()
         }
     }
@@ -79,9 +63,7 @@ struct LibraryView: View {
     private var summary: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(complete && filter == .all && query.isEmpty
-                     ? "\(visibleItems.count) \(visibleItems.count == 1 ? "item" : "items")"
-                     : "\(loadedCount) of \(total) loaded · \(visibleItems.count) match")
+                Text(state.summary)
                     .font(.system(.subheadline, design: .monospaced))
                     .foregroundColor(Palette.muted)
                     .accessibilityIdentifier("library-loaded-summary")
@@ -132,7 +114,7 @@ struct LibraryView: View {
                     .posterButtonStyle()
                     .onAppear {
                         visibleIndices.insert(index)
-                        Task { await fetchUntil(LibraryGridPrefetch.exclusiveCount(lastVisibleIndex: index, columns: gridColumns)) }
+                        Task { await state.fetchUntil(LibraryGridPrefetch.exclusiveCount(lastVisibleIndex: index, columns: gridColumns)) }
                     }
                     .onDisappear { visibleIndices.remove(index) }
                 }
@@ -143,7 +125,7 @@ struct LibraryView: View {
             } action: { columns in
                 gridColumns = columns
                 if let last = visibleIndices.max() {
-                    Task { await fetchUntil(LibraryGridPrefetch.exclusiveCount(lastVisibleIndex: last, columns: columns)) }
+                    Task { await state.fetchUntil(LibraryGridPrefetch.exclusiveCount(lastVisibleIndex: last, columns: columns)) }
                 }
             }
         }
@@ -175,113 +157,13 @@ struct LibraryView: View {
     }
 
     @MainActor
-    private func filterNow() {
-        filterGeneration += 1
-        let generation = filterGeneration
-        let snapshot = items
-        let selected = filter
-        let text = query
-        Task {
-            let result = await Task.detached(priority: .userInitiated) {
-                snapshot.filter {
-                    AppModel.matches($0, filter: selected) &&
-                    (text.isEmpty || $0.title.localizedCaseInsensitiveContains(text))
-                }
-            }.value
-            if generation == filterGeneration { visibleItems = result }
-        }
-    }
-
-    @MainActor
-    private func runDrive() {
-        driveTask?.cancel()
-        guard filter != .all || !query.isEmpty else {
-            // A cleared filter no longer needs a full catalogue walk. Keep
-            // the initial viewport target; scrolling can request more later.
-            requestedThrough = min(requestedThrough, 40)
-            return
-        }
-        driveTask = Task { await fetchUntil(Int.max) }
-    }
-
-    @MainActor
-    private func fetchUntil(_ through: Int) async {
-        guard let current = pager, !current.complete, current.decided.count < through else { return }
-        let generation = pageGeneration
-        requestedThrough = max(requestedThrough, through)
-        // Every caller waits on the same worker. A search arriving during the
-        // initial 40 rows raises its target to the end of the catalogue.
-        // Cancelling a superseded view task does not cancel that worker.
-        while generation == pageGeneration && !Task.isCancelled {
-            guard let current = pager, !current.complete,
-                  current.decided.count < through, error == nil else { return }
-            if fetchTask == nil {
-                fetchTask = Task { await fetchPages(generation: generation) }
-            }
-            await fetchTask?.value
-        }
-    }
-
-    @MainActor
-    private func fetchPages(generation: Int) async {
-        guard var current = pager else { return }
-        defer {
-            if generation == pageGeneration { requestedThrough = 0 }
-            fetchTask = nil
-        }
-        do {
-            while current.decided.count < requestedThrough && !current.complete &&
-                    !Task.isCancelled && generation == pageGeneration {
-                guard let request = current.nextRequest else { break }
-                let page = try await model.libraryPage(request.libraryId, sort: current.sort, offset: request.offset)
-                guard generation == pageGeneration, !Task.isCancelled else { return }
-                let snapshot = current
-                let batch = page.items ?? []
-                current = await Task.detached(priority: .userInitiated) {
-                    var revised = snapshot
-                    revised.receive(libraryId: request.libraryId, items: batch, total: page.total ?? batch.count)
-                    return revised
-                }.value
-                guard generation == pageGeneration, !Task.isCancelled else { return }
-                if current.missingSortKey {
-                    // Older servers do not expose the exact sort key. Keep the
-                    // previous full-walk path until those servers are upgraded.
-                    try await model.libraryItems(collection, sort: sort) { page in
-                        guard generation == pageGeneration, !Task.isCancelled else { return }
-                        items = page
-                        loadedCount = page.count
-                        total = page.count
-                    }
-                    guard generation == pageGeneration, !Task.isCancelled else { return }
-                    complete = true
-                    return
-                }
-                pager = current
-                items = current.decided
-                loadedCount = current.loadedCount
-                total = current.total
-                complete = current.complete
-            }
-        } catch {
-            guard generation == pageGeneration, !Task.isCancelled else { return }
-            self.error = AppModel.homeErrorMessage(for: error, hasCachedContent: !items.isEmpty)
-        }
-    }
-
-    @MainActor
     private func load() async {
-        driveTask?.cancel()
-        fetchTask?.cancel()
-        pageGeneration += 1
-        requestedThrough = 0
-        loading = true
-        error = nil
-        pager = LibraryMerge(libraryIds: collection.libraries.map(\.id), sort: sort)
-        // A refresh preserves the prior content until the new first page lands.
-        let generation = pageGeneration
-        await fetchUntil(40)
-        guard generation == pageGeneration, !Task.isCancelled else { return }
-        loading = false
-        if filter != .all || !query.isEmpty { runDrive() }
+        let apiModel = model
+        let selectedCollection = collection
+        state.configure(
+            fetch: { id, sort, offset in try await apiModel.libraryPage(id, sort: sort, offset: offset) },
+            legacy: { sort, publish in try await apiModel.libraryItems(selectedCollection, sort: sort, publish: publish) }
+        )
+        await state.load(libraryIds: collection.libraries.map(\.id), sort: sort)
     }
 }

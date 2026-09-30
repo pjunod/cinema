@@ -41,6 +41,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.withContext
 import tv.plurx.app.data.Item
+import tv.plurx.app.data.ViewerPreferences
 import tv.plurx.app.ui.components.ChoicePicker
 import tv.plurx.app.ui.components.RequestInitialFocus
 import tv.plurx.app.ui.components.LoadingBox
@@ -63,15 +64,32 @@ fun LibraryScreen(
 ) {
     val preferences by vm.preferences.collectAsStateWithLifecycle()
     val home by vm.home.collectAsStateWithLifecycle()
+    val kind = home.libraries.firstOrNull { it.id in libraryIds }?.kind
+    val pagerFactory = remember(vm, libraryIds) { { order: String -> vm.libraryPager(libraryIds, order) } }
+    LibraryScreen(libraryIds, title, preferences, kind, pagerFactory, onOpenItem, onBack)
+}
+
+/** The production grid with its account-bound dependencies supplied by the
+ * public view-model route. Local loaders can exercise this same focus/paging
+ * composition without constructing a view model that reads saved accounts. */
+@Composable
+internal fun LibraryScreen(
+    libraryIds: List<Long>,
+    title: String,
+    preferences: ViewerPreferences,
+    kind: String?,
+    pagerFactory: (String) -> LibraryPager,
+    onOpenItem: (Long) -> Unit,
+    onBack: () -> Unit,
+) {
     val formFactor = currentFormFactor()
     val side = formFactor.horizontalPadding()
-    val kind = home.libraries.firstOrNull { it.id in libraryIds }?.kind
     // Retained across configuration changes and process death: a rotation, or
     // coming back from a two-hour film, should not silently reset the grid the
     // viewer set up.
     var sort by rememberSaveable(libraryIds) { mutableStateOf(if (kind == "home") "recorded" else "title") }
     var filter by rememberSaveable(libraryIds) { mutableStateOf(WatchFilter.Everything) }
-    val pager = remember(vm, libraryIds, sort) { vm.libraryPager(libraryIds, sort) }
+    val pager = remember(pagerFactory, libraryIds, sort) { pagerFactory(sort) }
     val load by pager.state.collectAsStateWithLifecycle()
     val gridState = rememberLazyGridState()
     var shown by remember(pager) { mutableStateOf<List<Item>>(emptyList()) }
@@ -83,7 +101,7 @@ fun LibraryScreen(
         }.distinctUntilChanged().collectLatest { pager.ensure(it) }
     }
     LaunchedEffect(pager, filter) {
-        pager.setDriveToCompletion(filter != WatchFilter.Everything)
+        pager.setWatchFilter(filter)
     }
     DisposableEffect(pager) { onDispose { pager.setDriveToCompletion(false) } }
     LaunchedEffect(pager, filter) {
