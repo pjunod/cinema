@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import re
+import tempfile
 import unittest
 import shlex
 import subprocess
@@ -13,6 +16,66 @@ ROOT = Path(__file__).resolve().parents[2]
 class EvidenceWorkflowCase(unittest.TestCase):
     def read(self, path: str) -> str:
         return (ROOT / path).read_text(encoding="utf-8")
+
+    def test_manual_fuzz_only_keeps_all_five_campaigns_and_skips_runtime_sweeps(self) -> None:
+        workflow = self.read(".github/workflows/validation-nightly.yml")
+        inputs = workflow.split("    inputs:\n", 1)[1].split("\nenv:", 1)[0]
+        selector = inputs.split("      fuzz_only:\n", 1)[1].split("      seed_pgs_crash:", 1)[0]
+        self.assertIn("type: boolean", selector)
+        self.assertIn("default: false", selector)
+        self.assertNotIn("  schedule:", workflow)
+        jobs = dict(re.findall(r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
+                               workflow.split("\njobs:\n", 1)[1], re.M | re.S))
+        self.assertEqual(set(jobs), {"deep-validation", "pgs-fuzz", "parser-fuzz",
+                                     "ffmpeg8-pacing", "mutation"})
+        for name in ("deep-validation", "ffmpeg8-pacing", "mutation"):
+            self.assertIn("    if: ${{ !inputs.fuzz_only }}\n", jobs[name])
+        for name in ("pgs-fuzz", "parser-fuzz"):
+            self.assertNotRegex(jobs[name], r"(?m)^    (if|needs):", name)
+            self.assertNotIn("inputs.fuzz_only", jobs[name])
+        self.assertIn("target: [fmp4_reader, rpu_rewrite, nfo_parse, epub_facts]",
+                      jobs["parser-fuzz"])
+        self.assertIn('echo "corpus_before=$before" >> "$GITHUB_OUTPUT"', jobs["pgs-fuzz"])
+        self.assertIn("find fuzz/corpus/inspect_sup -type f", jobs["pgs-fuzz"])
+        self.assertIn('"${{ steps.pgs_fuzz.outputs.corpus_before }}"', jobs["pgs-fuzz"])
+
+    def test_fuzz_summary_records_growth_and_refuses_an_unexecuted_clean_receipt(self) -> None:
+        # Run the summary code on disposable corpora/logs, never a fuzzer.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            script = root / "scripts/fuzz-campaign"
+            script.write_text(self.read("scripts/fuzz-campaign"), encoding="utf-8")
+            corpus = root / "fuzz/corpus/inspect_sup"
+            corpus.mkdir(parents=True)
+            for name in ("seed", "new-edge"):
+                (corpus / name).write_bytes(b"seed")
+            log = root / "campaign.log"
+            summary = root / "summary.md"
+            env = {**os.environ, "GITHUB_STEP_SUMMARY": str(summary)}
+            command = ["bash", str(script), "--summarize", "inspect_sup", str(log)]
+            for line in ("stat::number_of_executed_units: 123", "Done 123 runs"):
+                log.write_text(line + "\n", encoding="utf-8")
+                result = subprocess.run(command + ["0", "1"], env=env,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("| `inspect_sup` | 123 | 1 → 2 files", result.stdout)
+                self.assertIn("budget spent, no finding", result.stdout)
+            log.write_text("#99 crash found\n", encoding="utf-8")
+            result = subprocess.run(command + ["1", "1"], env=env,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("| `inspect_sup` | 99 | 1 → 2 files", result.stdout)
+            self.assertIn("finding (exit 1)", result.stdout)
+            before = summary.read_text(encoding="utf-8")
+            log.write_text("compilation failed before fuzzing\n", encoding="utf-8")
+            result = subprocess.run(command + ["0", "1"], env=env,
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(summary.read_text(encoding="utf-8"), before)
+            result = subprocess.run(command + ["0", ""], env=env,
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
 
     def test_vod_restart_checks_reuse_workspace_features_and_stay_exact_serial(self) -> None:
         # Selecting just plurxd changes Cargo's dependency feature union and
