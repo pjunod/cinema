@@ -142,7 +142,9 @@ jobs:
     name: fast policy and contract preflight
     needs: scope
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 3
+    # The same history/contract sweep runs in the effort and main fast lanes.
+    # Use their ten-minute budget rather than timing out a qualified release.
+    timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

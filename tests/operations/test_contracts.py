@@ -3247,6 +3247,20 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("run: make release-check", readiness)
         self.assertIn("fetch-depth: 0", readiness)
 
+    def test_preflight_budgets_allow_full_history_and_contracts(self):
+        for workflow in ("ci", "effort-ci", "main-fast-lane"):
+            with self.subTest(workflow=workflow):
+                preflight = workflow_job_blocks(
+                    f".github/workflows/{workflow}.yml"
+                )["preflight"]
+                self.assertIn("timeout-minutes: 10", preflight)
+                for command in (
+                    "make history-check",
+                    "make validation-lint",
+                    "make operations-check",
+                ):
+                    self.assertIn(command, preflight)
+
     def test_only_manual_main_dispatch_publishes_after_validation(self):
         workflow = read(".github/workflows/ci.yml")
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
