@@ -1,6 +1,7 @@
 # Native adaptive quality — the build plan
 
-**Status:** M0 implemented in draft PR #618; M1–M4 open · **Executes:**
+**Status:** 2026-09-30 — M0 merged in effort via #618; M2 pure runners merged via #634;
+M1 and M3–M4 open · **Executes:**
 [NATIVE-ADAPTIVE-QUALITY-DESIGN.md](NATIVE-ADAPTIVE-QUALITY-DESIGN.md)'s D4
 · **Written:** 2026-09-23 against `main` @ `8839cc72`
 
@@ -139,6 +140,12 @@ A Swift test in `clients/apple/Tests/` and a JVM test under `make
 android-test`, both reading `tests/playback/auto-quality-policy.json` and both
 driving a port of `decideRung`. One JSON, three runners.
 
+Design §3.6 explicitly allows this pure fixture/runner milestone before D3;
+§5.4's baseline dependency still applies to the adapters, not these runners.
+The current browser's `web_current` expectations remain authoritative where
+the fixture records an unresolved proposal: M2 does not implement the proposed
+switch budget, controller gates or measured native bandwidth acquisition.
+
 This is where §7.2's question gets its first cheap answer: if a constant has
 to differ per platform it becomes per-platform **data in the fixture**, never
 a branch in three codebases.
@@ -251,4 +258,6 @@ claim protocol). **Model** is the runtime's exact model identifier;
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_registry_pull_audit_sol61 | M2 integration receipt | [#634](http://192.168.4.7:3000/noirr/plurx/pulls/634), merged | Effort landing `59fe637c65702743e36061dcc974e5167082c257` matches the qualified exact head `2e777de61` at tree `597a4a369`. All eight Effort gate jobs passed (API 3642/UI 3621); sole review 7/comment 6497's source-counter identity finding was corrected on the same PR. Pure runners only: D3 and M1/M3–M4 remain open, no native adapter or physical acceptance. The original draft row below remains history. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/architecture_receipt_reconcile_sol61 | M2 pure policy ports and runners | [#634](http://192.168.4.7:3000/noirr/plurx/pulls/634), draft `codex/a05-native-policy-runners` | Swift and JVM ports of current `PlaybackPolicy.decideRung` read the same `tests/playback/auto-quality-policy.json` through their native test resources; no copied fixture or private parameter values. The remaining switch-budget proposal stays `web_current`, and controller-gate rows are metadata coverage only. Focused iOS/tvOS XCTest, JVM JUnit and the existing web-policy runner passed the shared cases. Adding one deliberately wrong case to that same JSON failed all three languages at the named height assertion (actual 360, expected 480); the Swift failure assertion was retained before terminating its hung result cleanup. The fixture was restored byte-identically and all three languages passed again. Apple 202 / Android 140 are reserved by the coordinator above effort's 201 / 139 for changed app-source inputs; marketing/workspace semantic versions are unchanged. These are source/test build counters, not released or installed products. No Controller/PlayerController, timer, meter, setting or native measurement adapter is wired; no D3 baseline, physical acceptance, enablement or plan closure is claimed. Exact commands and outcomes belong in the continuation PR. |
 | 2026-09-29 | gpt-6-sol | agent:/root/a05_m0_builder | M0 | [#618](http://192.168.4.7:3000/noirr/plurx/pulls/618) | Four M0 cases now use plain `expect`: bounded stall verdict, 60 s voluntary gap, typed decode, and publication refusal. `node tests/playback/web-policy.test.js`, `node tests/playback/web-control.test.js`, and `make web-check` pass. Reverting verdict suppression, decode policy, or stalled-ask publication fails the focused regression. The sole adversarial review found the absent live media-error seam and conflated blocked heights; both are corrected with a shipped error-listener regression and a separate `decodeStepConsumed` state. `transport.js` changes only at that error-listener seam. No native adapter or M1 wire change. |
