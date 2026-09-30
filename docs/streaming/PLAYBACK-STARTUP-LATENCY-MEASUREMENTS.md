@@ -108,6 +108,29 @@ summary and hashes before cleanup. The Mac computer-use tool briefly reported
 that the machine was locked; retry succeeded. This was an automation error,
 not a confirmed physical-device blocker.
 
+## One-hour timing model — useful rejection, no client qualification
+
+The design replay now runs 1280 one-hour scenarios across the candidate
+floors, rate clamp edges, 0.95×/1.05×/1.2×/2× production ratios, cold/resume
+origin leads, reload alignment, and a two-second source pause. Changed reloads
+wait 16 seconds and unchanged reloads wait 8 seconds. Server inventories
+advance on eight-second ticks. The 2.5-second transfer/append allowance remains
+an assumption.
+
+At 1.05× production relative to consumption, modeled buffer deficits occur in
+50/64 scenarios for the 12-second candidate, 48/64 for 16 seconds, and 14/64
+for 24 seconds. The 32- and 48-second candidates have no modeled buffer
+deficit in that subset. All candidates include illegal update-spacing cases
+when production is too slow in absolute media time: sustainable consumption
+alone cannot make a 16-second object appear within the 24-second protocol
+limit. The model does not exercise daemon flow/scratch/actor constraints or
+native initial selection, so zero modeled deficits is not qualification.
+
+Receipt: `/private/tmp/plurx-startup-evidence-20260929/design-replay.json`,
+SHA-256 `9c2633cf73d5a2afe993d29f72aa8ab20e33253db2812cf0268463695a62fea5`.
+This is a bounded design experiment, not a unit-suite execution. Runtime
+runway remains unchanged while actual transport qualification is incomplete.
+
 ## Preparation correction — one consistent admission-settings read
 
 `TranscodeManager::vod_settings` previously issued six serial `get_setting`

@@ -2,12 +2,72 @@
 """Bounded design replay; protocol arithmetic, never physical-client proof."""
 import argparse
 import json
+import math
 from pathlib import Path
 
 DURATIONS_MS = (10427, 12804, 7758, 8675, 11303, 7591)
 LEAD_MS = 7965
 TARGET_MS = 16000
 RATES = (0.249, 0.25, 0.5, 1.0, 1.5, 2.0, 4.0, 4.001)
+
+
+
+def continuity_model(runway_ms, rate, ratio, lead_ms, reload_phase_ms, pause_ms):
+    """One-hour transport model; excludes actor/flow and physical presentation.
+
+    Complete 16-second objects become visible on 8-second server ticks.
+    A changed reload waits 16 seconds; an unchanged reload waits 8 seconds.
+    Transfer/append takes the explicit 2.5-second assumption. A single source
+    pause begins at 45 seconds. Inventory is optimistic and unconstrained by
+    the daemon's flow budget, so a failure is useful; a pass is not admission.
+    """
+    initial = math.ceil((lead_ms + runway_ms) / TARGET_MS)
+    known = initial
+    buffered_end_ms = initial * TARGET_MS
+    producer_rate = rate * ratio
+    fetches = []
+    changed = []
+    previous = initial
+    for tick in range(8000, 3600001, 8000):
+        paused = min(pause_ms, max(0, tick - 45000))
+        inventory = initial + math.floor((tick - paused) * producer_rate / TARGET_MS)
+        if inventory > previous:
+            changed.append(tick)
+            previous = inventory
+    reload_at = reload_phase_ms
+    while reload_at <= 3600000:
+        server_tick = math.floor(reload_at / 8000) * 8000
+        paused = min(pause_ms, max(0, server_tick - 45000))
+        inventory = initial + math.floor((server_tick - paused) * producer_rate / TARGET_MS)
+        changed_reload = inventory > known
+        if changed_reload:
+            known = inventory
+            fetches.append((reload_at + 2500, known * TARGET_MS))
+        reload_at += TARGET_MS if changed_reload else TARGET_MS / 2
+    first_deficit_ms = None
+    min_runway_ms = buffered_end_ms - lead_ms
+    for available_at, end in fetches + [(3600000, buffered_end_ms)]:
+        remaining = buffered_end_ms - lead_ms - available_at * rate
+        min_runway_ms = min(min_runway_ms, remaining)
+        if remaining < 0 and first_deficit_ms is None:
+            first_deficit_ms = round((buffered_end_ms - lead_ms) / rate)
+        buffered_end_ms = max(buffered_end_ms, end)
+    gaps = [b-a for a, b in zip([0] + changed, changed)]
+    return {
+        "runway_requested_ms": runway_ms,
+        "initial_exposed_ms": initial * TARGET_MS,
+        "origin_lead_ms": lead_ms,
+        "playback_rate": rate,
+        "production_to_consumption": ratio,
+        "first_reload_ms": reload_phase_ms,
+        "source_pause_ms": pause_ms,
+        "modeled_seconds": 3600,
+        "first_buffer_deficit_ms": first_deficit_ms,
+        "minimum_buffer_ms": round(min_runway_ms),
+        "max_segment_bearing_update_gap_ms": max(gaps, default=3600000),
+        "legal_update_spacing": bool(gaps) and all(8000 <= gap <= 24000 for gap in gaps),
+        "qualifies_transport": False,
+    }
 
 
 def replay():
@@ -43,6 +103,20 @@ def replay():
                            "sustainable": producer_ratio >= 1,
                            "legal_update_upper_bound": completion_gap_ms + TARGET_MS / 2 <= TARGET_MS * 1.5,
                            "qualifies_transport": False})
+    models = []
+    for candidate in (12000, 16000, 24000, 32000, 48000):
+        for raw_rate in RATES:
+            rate = max(0.25, min(4.0, raw_rate))
+            # Candidate floor replaces the existing 48-second floor only in
+            # this experiment. The runtime reserve ceiling remains 124 seconds.
+            runway = max(candidate, min(124000, math.ceil(candidate * rate)))
+            for ratio in (0.95, 1.05, 1.2, 2.0):
+                for lead in (0, LEAD_MS):
+                    for phase in (8000, 15999):
+                        for pause in (0, 2000):
+                            model = continuity_model(runway, rate, ratio, lead, phase, pause)
+                            model.update(candidate_1x_ms=candidate, requested_rate=raw_rate)
+                            models.append(model)
     return {"kind": "deterministic_design_replay", "physical_client_evidence": False,
             "target_ms": TARGET_MS, "writer_gate_ms": 12000,
             "incident_origin_lead_ms": LEAD_MS, "incident_endpoints_ms": endpoints,
@@ -51,6 +125,8 @@ def replay():
             "old_gate_hold_between_observed_endpoints_ms": 5990,
             "intermediate_completion_times": "not supplied; not interpolated",
             "candidate_readiness": candidates, "capacity_prefilter": traces,
+            "one_hour_transport_models": models,
+            "model_limits": "Optimistic complete inventory; no production flow budget, scratch, actor, native initial selection, or physical client proof.",
             "decision": "No smaller policy qualified by arithmetic alone; preserve existing transport policy pending actual reload and continuity evidence."}
 
 
