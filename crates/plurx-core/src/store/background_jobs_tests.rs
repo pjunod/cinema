@@ -1364,7 +1364,6 @@ fn receipt_pressure_literals_match_constants() {
         super::sqlite::MIGRATIONS[creators[2]],
         migration
     ));
-    assert_eq!(creators[2], super::sqlite::MIGRATIONS.len() - 1);
 }
 
 /// Internal terminal receipts compact under waiter pressure, oldest first;

@@ -1372,6 +1372,22 @@ impl TimedClient {
         .await
     }
 
+    pub(super) async fn batch(
+        &self,
+        sql: &'static str,
+    ) -> Result<Vec<Result<usize, hiqlite::Error>>, StoreError> {
+        validate_sql(sql)?;
+        #[cfg(feature = "cluster-read-cost-validation")]
+        self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
+        time_store_operation(
+            &STORE_OPERATION_METRICS,
+            StoreOperationClass::Write,
+            timeout_store(self.inner().batch(sql)),
+            |results| results.iter().all(Result::is_ok),
+        )
+        .await
+    }
+
     pub(super) async fn is_healthy_db(&self) -> Result<(), StoreError> {
         timeout_store(self.inner().is_healthy_db()).await
     }
@@ -3054,13 +3070,10 @@ impl HiqliteAuthStore {
                     // backfill in one transaction. Each statement is replay-safe
                     // (IF NOT EXISTS or ON CONFLICT DO NOTHING), so a crash
                     // before the marker advance resumes the same batch.
-                    validate_sql(super::background_jobs::VIEWER_ANALYSIS_SCHEMA)?;
-                    for result in timeout_store(
-                        self.client()
-                            .inner()
-                            .batch(super::background_jobs::VIEWER_ANALYSIS_SCHEMA),
-                    )
-                    .await?
+                    for result in self
+                        .client()
+                        .batch(super::background_jobs::VIEWER_ANALYSIS_SCHEMA)
+                        .await?
                     {
                         result.map_err(database_error)?;
                     }
