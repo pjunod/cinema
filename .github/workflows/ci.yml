@@ -142,7 +142,9 @@ jobs:
     name: fast policy and contract preflight
     needs: scope
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 3
+    # The same history/contract sweep runs in the effort and main fast lanes.
+    # Use their ten-minute budget rather than timing out a qualified release.
+    timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -1449,10 +1451,11 @@ jobs:
     with:
       release_tag: ${{ github.ref_name }}
 
-  # A merged main commit is already qualified by its pull request, but the
-  # post-merge run still has to prove the merge tree before changing the fleet
-  # image alias. Build on one X64 runner because every deployed voter is X64;
-  # versioned release tags keep their separate multi-architecture publisher.
+  # Only an operator's manual dispatch on main may publish a sha- image.
+  # Merging allocates no runtime sweep or image build (P-01 option (a)); the
+  # dispatch proves that exact main tree before moving the fleet image alias.
+  # Build on one X64 runner because every deployed voter is X64; versioned
+  # release tags keep their separate multi-architecture publisher.
   publish_main:
     name: publish merged image (Forgejo registry)
     needs:
@@ -1473,7 +1476,7 @@ jobs:
       - android_device
       - package_smoke
     if: >-
-      always() && github.event_name == 'push' &&
+      always() && github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main'
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     timeout-minutes: 90
