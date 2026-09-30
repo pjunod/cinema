@@ -1,7 +1,7 @@
 # Playback startup measurements — separate readiness from continuity
 
-**Status:** M0/M1 investigation in progress; M2 policy unqualified ·
-**Written:** 2026-09-29 EDT · **Source:** diagnostics `b3ca3a0de`; current main integrated at `af60b278c`; serving-settings correction in draft PR #627.
+**Status:** conservative implementation selected; final review in progress ·
+**Written:** 2026-09-29 EDT · **Source:** diagnostics `b3ca3a0de`; current main `4cb902884` integrated; serving-settings correction in draft PR #627.
 
 Companion to [the build contract](PLAYBACK-STARTUP-LATENCY-BUILD.md) — this
 is retained evidence and its limits, not a proposed shipping threshold.
@@ -76,10 +76,10 @@ source-I/O contention, with an incompatible remote artifact. It does not
 prove permanent starvation or the cause of every client's slow startup.
 [Safari seek PR #623](http://192.168.4.7:3000/noirr/plurx/pulls/623) already
 implements durable viewer interest and a reserved source-reader lane.
-Integrate its final main result before duplicating that admission repair;
-do not steal its live claims or reset production queues.
+Its final main result is now integrated into this branch. No duplicate scheduler
+repair is added; no live claims or production queues were reset.
 
-## Generated transport experiment — continuity measurement is still running
+## Generated transport experiment — incomplete captures retained
 
 `scripts/playback-startup-lab` serves generated H.264/AAC fMP4 with a fixed
 16-second target. It uses the repository's shipped hls.js library or native
@@ -89,7 +89,7 @@ snapshots are chosen on 8-second ticks and retain a 160-second window.
 The initial burst is explicitly modeled at 8× with a 3-second setup cost.
 It does not measure actual daemon source production, actor fences or scratch.
 
-The first ongoing comparison uses 32 seconds of post-position runway and
+The retained comparison uses 32 seconds of post-position runway and
 7.965 seconds of origin lead, so complete-segment rounding exposes 48
 seconds total and 40.035 seconds after the requested position. At 1.05×,
 Chrome hls.js reported first frame at 9.126 seconds and continued without a
@@ -181,12 +181,18 @@ existing alternative ADB port is required for automated client measurements.
 
 ## Decisions — preserve contracts while evidence is incomplete
 
-1. **Keep the current runtime runway during M0.** Earlier readiness does not
+1. **Ship with the current runtime runway.** Earlier readiness does not
    prove that the next segment is discoverable before its buffer drains.
-2. **Reuse the exact-preparation repair being qualified in #623.** It overlaps
+2. **Reuse the exact-preparation repair landed in #623.** It overlaps
    the demonstrated source-reader bottleneck; a second scheduler change
    would create competing ownership and integration work.
 3. **Keep unavailable first-frame evidence explicit.** A moving time counter,
    decoded frame or `playing` event does not replace presentation timing.
 4. **Defer unit execution.** Compiler, format and Clippy checks run during
    development; the authored replay executes only after the final review.
+
+The final conservative decision follows the build contract's fallback: no
+smaller fixed-target policy qualified, so retain 48 seconds and ship the
+demonstrated settings-read reduction plus phase instrumentation, alongside
+the integrated preparation repair from main. This completes the bounded
+implementation decision; it does not establish a new fleet TTFF guarantee.
