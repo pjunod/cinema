@@ -209,7 +209,17 @@ function analysisSummaryCard(value,context="activity"){
       <span class="analysis-state cancelled">${expected} recent expected</span>
       <span class="analysis-state ready">${s.ready||0} recent ready</span>
       <span class="analysis-state ${s.enabled?'ready':'cancelled'}">Queue ${s.enabled?'enabled':'paused'}</span>
-    </div>${latest&&attention?`<div class="analysis-sub">Latest problem: <b>${esc(latest.title)}</b></div>`:""}</div>`;
+    </div>${latest&&attention?`<div class="analysis-sub">Latest problem: <b>${esc(latest.title)}</b></div>`:""}${analysisSourceHolders(value)}</div>`;
+}
+function analysisSourceHolders(value){
+  const holders=value&&value.source_io_holders;
+  if(!Array.isArray(holders)) return "";
+  if(!holders.length) return `<div class="analysis-sub">No shared source readers currently hold a slot.</div>`;
+  return `<details class="analysis-sub"><summary>${holders.length} shared source reader${holders.length===1?"":"s"} holding I/O slots</summary><ul>${holders.map(holder=>{
+    const phase=holder.phase?` · ${holder.phase.replace(/_/g," ")}`:"";
+    const progress=holder.last_phase_at_ms?` · phase changed ${fmtAgo(Math.floor(holder.last_phase_at_ms/1000))}`:" · useful progress unavailable";
+    return `<li><b>${esc(holder.priority)}</b> ${esc(holder.kind.replace(/_/g," "))} · ${esc(holder.resource_key)} · ${esc(holder.work_id)} · started ${fmtAgo(Math.floor(holder.started_at_ms/1000))}${esc(phase)}${esc(progress)}</li>`;
+  }).join("")}</ul></details>`;
 }
 // The index pass is also keeping this file's PGS tracks for the stored
 // subtitle tracks: the row says so, with what it has written, and links to the

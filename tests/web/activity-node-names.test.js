@@ -75,6 +75,7 @@ const BORROWED = [
   "fmtDur",
   "durableQueueHtml",
   "clusterWorkersHtml",
+  "restoreDurableFocus",
   "paintActivityBody",
 ];
 
@@ -555,8 +556,8 @@ function refreshingQueue(q,api){
     const ACTIVITY_VIEW={inspector:{kind:"job",id:"job"},detailTab:"history"};
     const ACTIVITY_SNAPSHOT={node_hostnames:{node:"m6"}};
     function paintDurableActivity(){}
-    ${["esc","nodeLabel","durableDuration","durableLeaseExpired","durableStateLabel","durableTypeBreakdownHtml","durableQueueHtml","activityInspectorHtml","activityJobProgress","refreshDurableActivity","resetActivityWork"].map(shippedSource).join("\n")}
-    return {refresh:refreshDurableActivity,reset:()=>{resetActivityWork();PAGE_RENDER_GENERATION++;},html:()=>activityInspectorHtml()};
+    ${["esc","nodeLabel","durableDuration","durableLeaseExpired","durableStateLabel","durableTypeBreakdownHtml","durableQueueHtml","activityInspectorHtml","activityJobProgress","refreshDurableActivity","resetActivityWork","pageDurableJobs","previousDurableJobs","resizeDurableJobs","filterDurableJobs"].map(shippedSource).join("\n")}
+    return {page:pageDurableJobs,previous:previousDurableJobs,resize:resizeDurableJobs,filter:filterDurableJobs,refresh:refreshDurableActivity,reset:()=>{resetActivityWork();PAGE_RENDER_GENERATION++;},html:()=>activityInspectorHtml()};
   `)(q,api);
 }
 test("bounded queue refresh updates the open attempt when execution completes", async () => {
@@ -571,7 +572,7 @@ test("bounded queue refresh updates the open attempt when execution completes", 
       attempts:[{node_id:"node",started_at_ms:now-120000,finished_at_ms:now,outcome:"succeeded"}]};
   });
   await runner.refresh(true);
-  assert.deepEqual(calls,["/cluster/jobs?state=running&limit=25","/cluster/jobs/job"]);
+  assert.deepEqual(calls,["/cluster/jobs?state=running&limit=20","/cluster/jobs/job"]);
   assert.match(runner.html(), /m6<\/b> · succeeded[\s\S]*2 min elapsed/);
   assert.doesNotMatch(runner.html(), /this attempt|awaiting recovery/);
 });
@@ -585,6 +586,32 @@ test("a late detail refresh cannot reopen closed or replace newly selected detai
     });
     await runner.refresh(true);
     assert.notEqual(q.detail?.job.id,"job");
+  }
+});
+
+test("a late detail refresh cannot replace a reopened inspection of the same job", async () => {
+  const q={state:"running",epoch:0,detailEpoch:1,observed:0,rows:[],counts:[],selectedId:"job",detail:{job:{id:"job",state:"running"}}};
+  const runner=refreshingQueue(q,async url=>{
+    if(url.includes("?"))return {jobs:[],counts:[],observed_at_ms:Date.now()};
+    q.detailEpoch++;q.detail={job:{id:"job",state:"reopened"}};
+    return {job:{id:"job",state:"stale"}};
+  });
+  await runner.refresh(true);assert.equal(q.detail.job.state,"reopened");
+});
+
+test("cancel and retry preserve an inspector opened while the mutation was pending", async () => {
+  for(const name of ["cancelDurableJob","retryDurableJob"]){
+    const q={epoch:0,observed:1,selectedId:null,detail:null,retries:new Map()};
+    let release,refreshed;
+    const invoke=new Function("DURABLE_ACTIVITY","api","refreshDurableActivity",`
+      const toast=()=>{},crypto={randomUUID:()=>"retry-id"};
+      ${shippedSource(name)}
+      return ${name};
+    `)(q,()=>new Promise(resolve=>release=resolve),async()=>{refreshed=q.selectedId;});
+    const pending=invoke("old-job",{disabled:false});
+    q.selectedId="newly-inspected-job";q.detail={job:{id:q.selectedId}};
+    release({});await pending;
+    assert.equal(q.selectedId,"newly-inspected-job");assert.equal(refreshed,q.selectedId);
   }
 });
 
@@ -672,6 +699,26 @@ test("job details reject stale and unrelated execution progress", () => {
     painter.durable.detail.job={...job,...change};assert.match(painter.inspect(), /Not reported/);
   }
   painter.view.inspector=null;painter.durable.detail=null;
+});
+
+test("durable pagination visits every job and resets cursor history for filters and sizes", async () => {
+  const jobs=Array.from({length:105},(_,i)=>({id:String(i+1).padStart(3,"0"),kind:"fragment_index_build",state:"queued"}));
+  const q={state:"queued",epoch:0,observed:0,rows:[],counts:[],cursor:null,history:[],pageSize:20};
+  const runner=refreshingQueue(q,async url=>{
+    const query=new URL(url,"http://fixture").searchParams;
+    const rows=jobs.filter(job=>job.id>(query.get("cursor")||"")&&job.state===query.get("state"));
+    const limit=Number(query.get("limit"));
+    return {jobs:rows.slice(0,limit),next_cursor:rows.length>limit?rows[limit-1].id:null,counts:[],observed_at_ms:Date.now()};
+  });
+  await runner.refresh(true);
+  const seen=[];
+  do{seen.push(...q.rows.map(job=>job.id));if(!q.next)break;await runner.page(q.next);}while(true);
+  assert.deepEqual(seen,jobs.map(job=>job.id));
+  await runner.previous();assert.equal(q.rows[0].id,"081");
+  await runner.page();assert.equal(q.rows[0].id,"001");assert.equal(q.history.length,0);
+  await runner.resize("10");assert.equal(q.rows.length,10);
+  await runner.page(q.next);assert.equal(q.history.length,1);
+  await runner.filter("failed");assert.equal(q.cursor,null);assert.equal(q.history.length,0);assert.equal(q.rows.length,0);
 });
 
 let reported = false;

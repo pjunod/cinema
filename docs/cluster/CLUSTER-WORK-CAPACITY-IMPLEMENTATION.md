@@ -1,6 +1,6 @@
 # Cluster work visibility and throughput
 
-**Status:** reviewed; implementation in progress · **Written:** 2026-09-30 ·
+**Status:** implemented and reviewed; awaiting integration · **Written:** 2026-09-30 ·
 **Integration:** `effort/cluster-throughput`
 
 Read the [durable queue contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md) first.
@@ -54,7 +54,8 @@ that change.
 Watching remains above Status and Jobs. Status shows the node matrix,
 reported heavy capacity, reserved CPU threads, GPU reservations, and current
 assignments. Recordings, analysis, processes, scans and sync use disclosures.
-Jobs has job-type counts, state and node filters, and 25-row keyset pages.
+Jobs has job-type counts, state and node filters, and server-side keyset pages
+(default 20 rows; selectable 10, 20 or 50), with First/Previous/Next navigation.
 A native dialog shows Summary, Stages and History without lengthening either
 tab. Preserve selected tab, dialog, focus and scroll across polling. Clear
 protected state and close the dialog on logout.
@@ -145,11 +146,14 @@ releasing capacity. Do not replenish a running batch; this bounds its hold
 time and gives other job types a chance between batches.
 
 Review confirmed that `background_jobs_resources.sql` assigns media probes
-shared-domain reader reservations atomically at claim time. A scan parent
-also holds a domain reader, so one parent often leaves room for only one
-child. A refused second claim must produce a one-probe batch, with no attempt
-created for the refusal. Test this explicitly; never promise two active
-probes on every node regardless of domain contention.
+shared-domain reader reservations atomically at claim time. Current `main` reserves one of the two readers for live demand, so only one
+background reader per storage domain can run. A scan parent owns that reader
+and already probes inline under its own admission. The production callers
+that dispatch leaf batches use unbound `repair:probe` coordinators. A running
+scan blocks repair probes on its domain; a different domain can still run.
+Two-probe batches therefore require two available storage domains, as well as
+CPU capacity. Refused claims create no attempts. Keep the viewer reservation;
+do not introduce a scan parent waiting for children that need its own slot.
 
 ## 5. Decisions and failure behavior
 
@@ -223,17 +227,56 @@ heavy parallelism requires a separate measured resource-class design.
 ## 8. Review and implementation record
 
 The requested adversarial agent review completed on 2026-09-30 with six
-findings. Implementation must satisfy the dispositions below.
+findings. Implementation addresses the dispositions below.
 
 | Finding | Disposition |
 |---|---|
 | P1: accepted claims are not successful work | Preserve legacy pacing where outcomes are ambiguous; add fast pacing only for acknowledged per-pass publication. Test Yield/Retry/refusal as unproductive. |
-| P1: scan parents compete with probe children for two domain readers | Retain atomic claims; bound batches to two and accept partial batches. Add parent/child capacity and physical-lifetime regressions. |
+| P1: scan parents compete with probe children for two domain readers | Retain atomic claims and the newer viewer-reserved reader. Scans probe inline; repair batches span available domains and may contain one probe. Test scan contention, post-scan release and physical lifetime. |
 | P1: moving admission can skip candidate pages | Keep the incoming cursor on admission/authority refusal; advance only after examination. Test compatible work survives contention. |
 | P2: logout can strand a busy queue | Request-owned busy state resets at logout; old finally cannot release a new request. Regression implemented and passing. |
 | P2: failed first detail fetch never retries | Poll from selected job identity, independent of existing detail data. Regression implemented and passing. |
 | P2: progress can outlive the lease or exceed wire bounds | Require current lease freshness plus ID/fence/owner match; validate optional wire fields and guard epochs. |
 
-Local evidence and fleet qualification are recorded separately when the
-implementation is complete. No fleet throughput improvement is claimed from
-these design decisions alone.
+Local evidence is recorded below; fleet qualification remains separate. No
+fleet throughput improvement is claimed from these design decisions alone.
+
+The post-integration review found two additional issues. A newer main change
+reserves the second source reader for playback: the old test expectation of
+a scan plus one repair probe was incorrect. Call-site review confirmed scans
+already probe inline, so production reservation policy stays unchanged and
+the regression now covers scan contention and subsequent probe admission.
+Cancel/Retry also invalidated details opened during a pending mutation; the
+completion now preserves the current selection and refetches it, with a
+regression for both actions.
+
+### Local validation record
+
+The implementation was reconciled with `main` at `28964229c` before these
+checks. Rust checks use `rustc 1.97.1 (8bab26f4f 2026-07-14)` from the pinned
+local toolchain. The default host compiler is newer and was not used as
+validation evidence.
+
+| Surface | Command and result |
+|---|---|
+| Local binary | `cargo build -p plurxd --locked` — passed (macOS development build; not a deployed fleet image) |
+| Workspace compilation | `cargo check --workspace --all-targets` — passed |
+| Probe lifetime and candidate cursor | `cargo test -p plurxd --bin plurxd source_probe::tests -- --test-threads=1` — 2 passed |
+| Pacing | `cargo test -p plurxd --bin plurxd publication_pacing_keeps_refusal_retry_and_yield_on_idle_backoff` — passed |
+| Exact attempt attachment | `cargo test -p plurxd --bin plurxd durable_progress_attachment_cannot_relabel_a_replacement_execution` — passed |
+| Signed Activity observations | `cargo test -p plurxd --bin plurxd http::internal_activity::tests -- --test-threads=1` — 20 passed |
+| Artwork and copies | `cargo test -p plurxd --bin plurxd http::images::worker::tests` and `http::transcode_copies::tests` — 6 passed |
+| DVR catalog purge | Core lib filters `purged_recordings_remove_only_their_catalog_entries` and `failed_catalog_purge_keeps_links_for_retry`, with `--features hiqlite-store` — passed |
+| Empty recordings and filtered queue | Core lib filters `empty_recordings_library_is_normal_but_unexpected_losses_stay_protected` and `background_job_node_filter_precedes_pagination_and_excludes_unassigned_work`, with `--features hiqlite-store` — passed |
+| Probe subprocess behavior | `cargo test -p plurx-core --features hiqlite-store --lib scan::probe::tests -- --test-threads=1` — 28 passed |
+| Storage contract | `cargo test -p plurx-core --features hiqlite-store --test store_contract probe_batches_respect_scan_parent_and_shared_domain_reservations` — passed |
+| Activity render and asynchronous state | `node tests/web/activity-node-names.test.js` — passed, including mutation/inspection, session reset, stale attempt and pagination regressions |
+| Browser behavior | `node tests/web/durable-work.browser.cjs` with bundled Playwright — passed: 105-job pagination, focus, detail retry, stale responses, disclosures, desktop/mobile containment |
+| Shell contracts | Asset load/order/layout, page-read-budget and `scripts/web-types` — passed; the type baseline decreases by one existing diagnostic |
+| Documentation | `python3 -m unittest tests.operations.test_docs_index` — 4 passed |
+
+Local process and socket tests ran outside the restrictive filesystem sandbox
+where macOS denied the test harness's child-process or socket operations. The
+browser uses fixture data; it does not assert that the live fleet is running
+this build. No fleet qualification receipt or matched throughput measurement
+is claimed here. Effort integration and release gates remain required.

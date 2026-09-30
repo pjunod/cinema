@@ -1406,7 +1406,7 @@ mod tests {
     }
 
     /// The downgrade fixture above has to undo every migration *after* the
-    /// guard, and there is exactly one of those today.
+    /// guard, including the common queue's v87 analysis-source reservations.
     ///
     /// The fixture is built by opening at the current version — the committed
     /// claim it needs can only be written through the store's own API — and
@@ -1434,7 +1434,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 41] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 43] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1509,6 +1509,13 @@ mod tests {
             // v85 replaces the enqueue and upkeep triggers under their own
             // names; remove_common_queue_schema drops every background_* object.
             "DROP TRIGGER IF EXISTS background_job_enqueue_command",
+            // v86 replaces the upkeep trigger again (receipt pressure); the
+            // same helper removes it.
+            "DROP TRIGGER IF EXISTS background_job_maintenance_command",
+            // v87 also creates analysis-prefixed source reservations, a view
+            // and two triggers. The shared downgrade helper drops them beside
+            // the background-prefixed queue objects before either replay.
+            "CREATE TABLE IF NOT EXISTS analysis_source_reservations",
         ];
 
         assert!(

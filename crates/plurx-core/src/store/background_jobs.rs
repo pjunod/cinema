@@ -21,10 +21,12 @@ pub use super::background_jobs_library::{
 use super::background_jobs_maintenance::{CANCEL_WAITER_SQL, MAINTENANCE_NEEDED, MAINTENANCE_SQL};
 pub use super::background_jobs_migration::JobMigrationStatus;
 pub use super::background_jobs_observation::{
-    BackgroundJobMetrics, JobAttemptObservation, JobCount, JobLabel, JOB_METRIC_KINDS,
-    JOB_METRIC_SLOTS, JOB_METRIC_STATES,
+    BackgroundJobMetrics, JobAttemptObservation, JobCount, JobLabel, SourceIoHolder,
+    JOB_METRIC_KINDS, JOB_METRIC_SLOTS, JOB_METRIC_STATES,
 };
-use super::background_jobs_observation::{ATTEMPTS_SQL, COUNTS_SQL, LABELS_SQL};
+use super::background_jobs_observation::{
+    ATTEMPTS_SQL, COUNTS_SQL, LABELS_SQL, SOURCE_IO_HOLDERS_SQL,
+};
 pub use super::background_jobs_offline::JoinOfflineJob;
 use super::background_jobs_publication::PUBLISH_TRANSCODE_SQL;
 pub use super::background_jobs_publication::{
@@ -47,6 +49,15 @@ pub const MAX_USER_WAITERS: usize = 128;
 pub const MAX_ATTEMPTS: usize = 40_000;
 pub const RESOLVED_ATTEMPT_HISTORY: usize = 16;
 pub const MAX_PAGE_SIZE: usize = 128;
+/// Receipt pressure. Admission refuses at `MAX_WAITERS` rows of
+/// `background_job_waiters` counting settled receipts, and ordinary
+/// retirement waits the seven-day window, so one busy day of finished work
+/// closes the queue a second way (the first, retained job rows, is v63).
+/// Within eight pages of the cap, upkeep compacts the oldest terminal
+/// internal receipts a page per pass — never a user-scoped or
+/// identity-retaining receipt, nor one whose job is still active. The SQL
+/// carries the literal; `receipt_pressure_literals_match_constants` pins it.
+pub const WAITERS_PRESSURE: usize = MAX_WAITERS - 8 * MAX_PAGE_SIZE;
 pub const MAX_RENEW_BATCH: usize = 64;
 pub const MAX_PAYLOAD_BYTES: usize = 16 * 1_024;
 pub const MAX_CHECKPOINT_BYTES: usize = 4 * 1_024;
@@ -57,7 +68,16 @@ pub(crate) const SCHEMA: &str = include_str!("background_jobs_schema.sql");
 // this migration replaces the enqueue and upkeep triggers. See the file's
 // header for the failure it answers.
 pub(crate) const RETENTION_SCHEMA: &str = include_str!("background_jobs_retention.sql");
+/// Replicated v64 / SQLite v86: the maintenance trigger with receipt
+/// pressure (see `WAITERS_PRESSURE`).
+pub(crate) const RECEIPT_PRESSURE_SCHEMA: &str =
+    include_str!("background_jobs_receipt_pressure.sql");
+/// Replicated v65 / SQLite v87: exact viewer interest and source reservations.
+pub(crate) const VIEWER_ANALYSIS_SCHEMA: &str = include_str!("background_jobs_viewer_analysis.sql");
 
+// Scheduled full-library ticks reuse an equivalent pending request inside this
+// same admission statement. Reads on individual schedulers cannot deduplicate
+// competing voters, and terminal receipts must not suppress the next scan.
 // Both backends execute the same admission statement and schema trigger.
 // The returned snapshot is the verdict that authorized the mutation, not a
 // follow-up read which might observe a different concurrent request.
@@ -78,6 +98,19 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
        AND consumer_ref = json_extract(body, '$.request.consumer_ref')
        AND (state IN ('pending','awaiting_hydration') OR updated_at_ms > json_extract(body, '$.now_ms') - 3600000)
      ORDER BY updated_at_ms DESC, request_id DESC LIMIT 1), json_extract(body, '$.request.request_id')))
+ WHEN json_extract(body, '$.request.scope') = 'library'
+   AND json_extract(body, '$.library_request.kind') = 'full'
+   AND json_extract(body, '$.library_request.trigger') = 'scheduled'
+   AND NOT EXISTS (SELECT 1 FROM background_job_waiters
+     WHERE request_scope = 'library' AND request_id = json_extract(body, '$.request.request_id'))
+ THEN json_set(body, '$.request.request_id', COALESCE((
+   SELECT waiter.request_id FROM background_library_requests intent
+   JOIN background_job_waiters waiter ON waiter.request_scope = 'library' AND waiter.request_id = intent.request_id
+   JOIN background_jobs job ON job.id = intent.job_id
+   WHERE intent.library_id = json_extract(body, '$.payload.library_id')
+     AND waiter.request_digest = json_extract(body, '$.request.request_digest')
+     AND waiter.state = 'pending' AND job.state IN ('queued','running')
+   ORDER BY waiter.created_at_ms, waiter.request_id LIMIT 1), json_extract(body, '$.request.request_id')))
  ELSE body END AS body FROM input
 ), snapshot AS MATERIALIZED (
   SELECT body,
@@ -406,9 +439,66 @@ WHERE id = json_extract($1, '$.job_id')
   AND NOT EXISTS (SELECT 1 FROM background_job_attempts WHERE claim_id = json_extract($1, '$.claim_id'))
   AND (SELECT COUNT(*) FROM background_job_attempts) < 40000
   AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
-    WHERE required.job_id = background_jobs.id AND (SELECT COUNT(*) FROM background_job_reservations held
+    WHERE required.job_id = background_jobs.id AND ((SELECT COUNT(*) FROM background_job_reservations held
       WHERE held.resource_key = required.resource_key AND held.expires_at_ms > json_extract($1, '$.now_ms')
-        AND held.job_id != json_extract($1, '$.job_id')) >= 2)
+        AND held.job_id != json_extract($1, '$.job_id'))
+      + (SELECT COUNT(*) FROM analysis_source_reservations held
+          WHERE held.resource_key = required.resource_key
+            AND held.expires_at_ms > json_extract($1, '$.now_ms')))
+      >= 2)
+  -- A second source reader is reserved for live demand. Classification uses
+  -- durable consumer ownership, never the job's caller-supplied priority.
+  AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
+    WHERE required.job_id = background_jobs.id
+      AND required.resource_key LIKE 'source_io%'
+      AND NOT EXISTS (SELECT 1 FROM background_job_waiters interest
+          WHERE interest.job_id = background_jobs.id
+            AND interest.state IN ('pending','awaiting_hydration')
+            AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract($1, '$.now_ms'))
+            AND (interest.consumer_kind = 'playback_fragment'
+              OR (interest.consumer_kind = 'background_delivery' AND EXISTS (
+                  SELECT 1 FROM background_job_waiters viewer
+                  WHERE viewer.job_id = interest.consumer_ref
+                    AND viewer.target_node_id = interest.target_node_id
+                    AND viewer.consumer_kind = 'playback_fragment'
+                    AND viewer.state IN ('pending','awaiting_hydration')
+                    AND viewer.deadline_ms > json_extract($1, '$.now_ms')))
+              OR (interest.consumer_kind = 'subtitle_source' AND EXISTS (
+                  SELECT 1 FROM analysis_requests request
+                  WHERE request.request_id = interest.consumer_ref
+                    AND request.component = 'subtitle_source'
+                    AND request.trigger = 'playback'
+                    AND request.state IN ('queued','running')))))
+      AND ((SELECT COUNT(*) FROM background_job_reservations held
+          WHERE held.resource_key = required.resource_key
+            AND held.expires_at_ms > json_extract($1, '$.now_ms')
+            AND held.job_id != background_jobs.id
+            AND NOT EXISTS (SELECT 1 FROM background_job_waiters interest
+                WHERE interest.job_id = held.job_id
+                  AND interest.state IN ('pending','awaiting_hydration')
+                  AND (interest.deadline_ms IS NULL OR interest.deadline_ms > json_extract($1, '$.now_ms'))
+                  AND (interest.consumer_kind = 'playback_fragment'
+                    OR (interest.consumer_kind = 'background_delivery' AND EXISTS (
+                        SELECT 1 FROM background_job_waiters viewer
+                        WHERE viewer.job_id = interest.consumer_ref
+                          AND viewer.target_node_id = interest.target_node_id
+                          AND viewer.consumer_kind = 'playback_fragment'
+                          AND viewer.state IN ('pending','awaiting_hydration')
+                          AND viewer.deadline_ms > json_extract($1, '$.now_ms')))
+                    OR (interest.consumer_kind = 'subtitle_source' AND EXISTS (
+                        SELECT 1 FROM analysis_requests request
+                        WHERE request.request_id = interest.consumer_ref
+                          AND request.component = 'subtitle_source'
+                          AND request.trigger = 'playback'
+                          AND request.state IN ('queued','running'))))))
+        + (SELECT COUNT(*) FROM analysis_source_reservations held
+            WHERE held.resource_key = required.resource_key
+              AND held.expires_at_ms > json_extract($1, '$.now_ms')
+              AND NOT EXISTS (SELECT 1 FROM background_job_waiters viewer
+                  WHERE viewer.request_scope = 'playback-analysis'
+                    AND viewer.job_id = held.request_id
+                    AND viewer.state = 'pending'
+                    AND viewer.deadline_ms > json_extract($1, '$.now_ms'))) >= 1))
 "#;
 
 const RENEW_SQL: &str = r#"
@@ -1076,10 +1166,149 @@ pub struct CancelWaiterOutcome {
     pub cancelled: bool,
 }
 
+/// A server-owned playback identity joined to one exact fragment-analysis
+/// generation. A retry of the same playback key renews the same waiter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalysisViewerInterest {
+    pub analysis_request_id: String,
+    pub requested_generation: String,
+    pub pipeline_version: String,
+    pub video_identity: String,
+    pub target_node_id: String,
+    pub user_id: i64,
+    pub playback_id: String,
+    pub now_ms: i64,
+}
+
+impl AnalysisViewerInterest {
+    pub fn consumer_id(&self) -> String {
+        crate::segplan::argv_fingerprint(&[
+            "playback-analysis-v1".to_owned(),
+            self.user_id.to_string(),
+            self.playback_id.clone(),
+            self.analysis_request_id.clone(),
+        ])
+    }
+}
+
+/// Viewer ownership of an already attested, exact fragment computation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactViewerInterest {
+    pub cache_key: String,
+    pub file_id: i64,
+    pub target_node_id: String,
+    pub user_id: i64,
+    pub playback_id: String,
+    pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalysisPreparationObservation {
+    pub shared_io_eligible: bool,
+    pub artifact_job_id: Option<String>,
+    pub artifact_state: Option<String>,
+    pub hydration_job_id: Option<String>,
+    pub hydration_state: Option<String>,
+    pub local_available: bool,
+}
+
+impl ArtifactViewerInterest {
+    pub fn consumer_id(&self) -> String {
+        crate::segplan::argv_fingerprint(&[
+            "playback-artifact-v1".to_owned(),
+            self.user_id.to_string(),
+            self.playback_id.clone(),
+            self.cache_key.clone(),
+            self.target_node_id.clone(),
+        ])
+    }
+}
+
+const JOIN_ANALYSIS_VIEWER_SQL: &str = r#"
+INSERT INTO background_job_commands (id, operation, request_json, result_json)
+SELECT json_extract($1, '$.command_id'), 'join_analysis_viewer', $1,
+  json_object('joined', json('true'))
+WHERE EXISTS (SELECT 1 FROM analysis_requests request JOIN files file
+    ON file.id = request.file_id AND file.size = request.source_size
+    AND file.mtime = request.source_mtime
+  WHERE request.request_id = json_extract($1, '$.analysis_request_id')
+    AND request.component = 'fragment_index'
+    AND request.pipeline_version = json_extract($1, '$.pipeline_version')
+    AND request.video_identity = json_extract($1, '$.video_identity')
+    AND request.requested_generation = json_extract($1, '$.requested_generation')
+    AND request.target_node_id = json_extract($1, '$.target_node_id')
+    AND request.state IN ('queued','running','submitted')
+    AND (request.state != 'submitted' OR EXISTS (
+        SELECT 1 FROM background_job_waiters
+        WHERE request_scope = 'analysis' AND request_id = request.request_id))
+    -- Existing playback identities may renew even when the global queue is
+    -- full. New identities share the same bound as ordinary enqueue.
+    AND (EXISTS (SELECT 1 FROM background_job_waiters
+          WHERE request_scope = 'playback-analysis'
+            AND request_id = json_extract($1, '$.consumer_id'))
+      OR (SELECT COUNT(*) FROM background_job_waiters) < 16384))
+RETURNING result_json
+"#;
+
+const JOIN_ARTIFACT_VIEWER_SQL: &str = r#"
+INSERT INTO background_job_commands (id, operation, request_json, result_json)
+SELECT json_extract($1, '$.command_id'), 'join_artifact_viewer', $1,
+  json_object('joined', json('true'))
+WHERE EXISTS (SELECT 1 FROM background_jobs job
+  JOIN background_job_waiters target ON target.job_id = job.id
+    AND target.target_node_id = json_extract($1, '$.target_node_id')
+    AND target.state IN ('pending','awaiting_hydration')
+  WHERE job.kind = 'fragment_index_build'
+    AND job.dedupe_key = 'fragment:' || json_extract($1, '$.cache_key')
+    AND json_extract(job.payload_json, '$.file_id') = json_extract($1, '$.file_id')
+    AND job.state IN ('queued','running')
+    AND (EXISTS (SELECT 1 FROM background_job_waiters existing
+        WHERE existing.request_scope = 'playback-artifact'
+          AND existing.request_id = json_extract($1, '$.consumer_id'))
+      OR (SELECT COUNT(*) FROM background_job_waiters) < 16384))
+RETURNING result_json
+"#;
+
+const REFRESH_ANALYSIS_VIEWERS_NEEDED: &str = r#"
+SELECT json_object('needed', 1) AS result_json
+WHERE EXISTS (SELECT 1 FROM background_job_waiters waiter
+    JOIN media_sessions session ON session.user_id = json_extract(waiter.consumer_ref, '$.user_id')
+      AND session.playback_id = json_extract(waiter.consumer_ref, '$.playback_id')
+      AND json_extract(session.recipe_json, '$.request.file_id') = json_extract(waiter.consumer_ref, '$.file_id')
+    JOIN media_playback_pointers pointer ON pointer.user_id = session.user_id
+      AND pointer.playback_id = session.playback_id
+      AND pointer.current_incarnation_id = session.incarnation_id
+    WHERE waiter.request_scope IN ('playback-analysis','playback-artifact')
+      AND waiter.state IN ('pending','awaiting_hydration')
+      AND waiter.updated_at_ms <= json_extract($1, '$.now_ms') - 30000
+      AND waiter.deadline_ms > json_extract($1, '$.now_ms')
+      AND session.state = 'active' AND session.lease_expires_at_ms > json_extract($1, '$.now_ms'))
+"#;
+
+const REFRESH_ANALYSIS_VIEWERS_SQL: &str = r#"
+INSERT INTO background_job_commands (id, operation, request_json, result_json)
+VALUES (json_extract($1, '$.command_id'), 'refresh_analysis_viewers', $1, '{}')
+RETURNING result_json
+"#;
+
 /// No generic public enqueue endpoint is implied by this internal boundary.
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    /// Join or renew a viewer's bounded interest in an exact preparation.
+    async fn join_analysis_viewer(
+        &self,
+        interest: AnalysisViewerInterest,
+    ) -> Result<bool, StoreError>;
+    async fn join_artifact_viewer(
+        &self,
+        interest: ArtifactViewerInterest,
+    ) -> Result<bool, StoreError>;
+    async fn analysis_preparation_observation(
+        &self,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<AnalysisPreparationObservation>, StoreError>;
     async fn embedding_for(
         &self,
         item_id: i64,
@@ -1250,6 +1479,7 @@ pub trait BackgroundJobStore: Send + Sync {
     async fn resolve_claim(&self, request: ResolveClaim) -> Result<ClaimResolution, StoreError>;
     async fn job_labels(&self, ids: &[String]) -> Result<Vec<JobLabel>, StoreError>;
     async fn job_counts(&self, now_ms: i64) -> Result<Vec<JobCount>, StoreError>;
+    async fn source_io_holders(&self, now_ms: i64) -> Result<Vec<SourceIoHolder>, StoreError>;
     async fn job_attempts(&self, job_id: &str) -> Result<Vec<JobAttemptObservation>, StoreError>;
     async fn list_jobs(&self, query: JobQuery) -> Result<JobPage, StoreError>;
     async fn job_candidates(&self, query: CandidateQuery) -> Result<CandidatePage, StoreError>;
@@ -1334,6 +1564,122 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn join_analysis_viewer(
+        &self,
+        interest: AnalysisViewerInterest,
+    ) -> Result<bool, StoreError> {
+        if !identifier(&interest.analysis_request_id)
+            || !identifier(&interest.target_node_id)
+            || interest.requested_generation.is_empty()
+            || interest.requested_generation.len() > 128
+            || interest.pipeline_version.is_empty()
+            || interest.pipeline_version.len() > 128
+            || interest.video_identity.len() > 128
+            || interest.user_id <= 0
+            || interest.playback_id.is_empty()
+            || interest.playback_id.len() > 128
+            || interest.now_ms < 0
+            || interest.now_ms > i64::MAX - 604_800_000
+        {
+            return Err(invalid("invalid analysis viewer interest"));
+        }
+        let mut body =
+            serde_json::to_value(&interest).map_err(|error| invalid(&error.to_string()))?;
+        body["consumer_id"] = interest.consumer_id().into();
+        body["command_id"] = uuid::Uuid::new_v4().to_string().into();
+        let rows = self
+            .queue_sql(
+                JOIN_ANALYSIS_VIEWER_SQL.to_owned(),
+                encode(&body)?,
+                true,
+                true,
+            )
+            .await?;
+        Ok(!rows.is_empty())
+    }
+    async fn join_artifact_viewer(
+        &self,
+        interest: ArtifactViewerInterest,
+    ) -> Result<bool, StoreError> {
+        if !digest(&interest.cache_key)
+            || interest.file_id <= 0
+            || !identifier(&interest.target_node_id)
+            || interest.user_id <= 0
+            || interest.playback_id.is_empty()
+            || interest.playback_id.len() > 128
+            || interest.now_ms < 0
+            || interest.now_ms > i64::MAX - 604_800_000
+        {
+            return Err(invalid("invalid artifact viewer interest"));
+        }
+        let mut body =
+            serde_json::to_value(&interest).map_err(|error| invalid(&error.to_string()))?;
+        body["consumer_id"] = interest.consumer_id().into();
+        body["command_id"] = uuid::Uuid::new_v4().to_string().into();
+        let rows = self
+            .queue_sql(
+                JOIN_ARTIFACT_VIEWER_SQL.to_owned(),
+                encode(&body)?,
+                true,
+                true,
+            )
+            .await?;
+        Ok(!rows.is_empty())
+    }
+    async fn analysis_preparation_observation(
+        &self,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<AnalysisPreparationObservation>, StoreError> {
+        if !identifier(request_id) || now_ms < 0 {
+            return Err(invalid("invalid analysis preparation observation"));
+        }
+        let capacity = super::fragment_index_cluster::analysis_source_capacity_clause(
+            "json_extract($1, '$.now_ms')",
+        );
+        let statement = format!(
+            r#"
+SELECT json_object(
+  'shared_io_eligible', CASE WHEN {capacity} THEN json('true') ELSE json('false') END,
+  'artifact_job_id', (SELECT waiter.job_id FROM background_job_waiters waiter
+      WHERE waiter.request_scope = 'analysis' AND waiter.request_id = analysis_requests.request_id),
+  'artifact_state', (SELECT job.state FROM background_jobs job JOIN background_job_waiters waiter
+      ON waiter.job_id = job.id WHERE waiter.request_scope = 'analysis'
+        AND waiter.request_id = analysis_requests.request_id),
+  'hydration_job_id', (SELECT delivery.job_id FROM background_job_waiters delivery
+      WHERE delivery.consumer_kind = 'background_delivery'
+        AND delivery.target_node_id = analysis_requests.target_node_id
+        AND delivery.consumer_ref = (SELECT waiter.job_id FROM background_job_waiters waiter
+            WHERE waiter.request_scope = 'analysis' AND waiter.request_id = analysis_requests.request_id)
+      ORDER BY delivery.updated_at_ms DESC LIMIT 1),
+  'hydration_state', (SELECT hydrate.state FROM background_jobs hydrate
+      JOIN background_job_waiters delivery ON delivery.job_id = hydrate.id
+      WHERE delivery.consumer_kind = 'background_delivery'
+        AND delivery.target_node_id = analysis_requests.target_node_id
+        AND delivery.consumer_ref = (SELECT waiter.job_id FROM background_job_waiters waiter
+            WHERE waiter.request_scope = 'analysis' AND waiter.request_id = analysis_requests.request_id)
+      ORDER BY delivery.updated_at_ms DESC LIMIT 1),
+  'local_available', CASE WHEN EXISTS (SELECT 1 FROM cluster_fragment_index_locations location
+      WHERE location.cache_key = analysis_requests.result_cache_key
+        AND location.node_id = analysis_requests.target_node_id)
+      THEN json('true') ELSE json('false') END) AS result_json
+FROM analysis_requests WHERE request_id = json_extract($1, '$.request_id')
+LIMIT 1
+"#
+        );
+        self.queue_sql(
+            statement,
+            encode(&serde_json::json!({
+                "request_id": request_id, "now_ms": now_ms,
+            }))?,
+            false,
+            true,
+        )
+        .await?
+        .first()
+        .map(|row| decode(row))
+        .transpose()
+    }
     async fn embedding_for(
         &self,
         item_id: i64,
@@ -1931,12 +2277,30 @@ impl<T: QueueSql> BackgroundJobStore for T {
             &serde_json::json!({"now_ms": now_ms, "command_id": uuid::Uuid::new_v4().to_string()}),
         )?;
         let reconciled = super::background_jobs_subtitle::reconcile(self, &request).await?;
+        let refreshed = !self
+            .queue_sql(
+                REFRESH_ANALYSIS_VIEWERS_NEEDED.to_owned(),
+                request.clone(),
+                false,
+                false,
+            )
+            .await?
+            .is_empty();
+        if refreshed {
+            self.queue_sql(
+                REFRESH_ANALYSIS_VIEWERS_SQL.to_owned(),
+                request.clone(),
+                true,
+                true,
+            )
+            .await?;
+        }
         if self
             .queue_sql(MAINTENANCE_NEEDED.to_owned(), request.clone(), false, false)
             .await?
             .is_empty()
         {
-            return Ok(reconciled);
+            return Ok(reconciled || refreshed);
         }
         self.queue_sql(MAINTENANCE_SQL.to_owned(), request, true, true)
             .await?;
@@ -2456,6 +2820,22 @@ impl<T: QueueSql> BackgroundJobStore for T {
         }
         self.queue_sql(
             COUNTS_SQL.into(),
+            encode(&serde_json::json!({"now_ms": now_ms}))?,
+            false,
+            false,
+        )
+        .await?
+        .iter()
+        .map(|row| decode(row))
+        .collect()
+    }
+
+    async fn source_io_holders(&self, now_ms: i64) -> Result<Vec<SourceIoHolder>, StoreError> {
+        if now_ms < 0 {
+            return Err(invalid("invalid queue observation time"));
+        }
+        self.queue_sql(
+            SOURCE_IO_HOLDERS_SQL.into(),
             encode(&serde_json::json!({"now_ms": now_ms}))?,
             false,
             false,

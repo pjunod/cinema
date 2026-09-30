@@ -33,7 +33,8 @@ function harness(options={}){
     setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearTimeout:()=>{},
     armStall:()=>{},playerActivity:()=>{},
   });
-  for(const name of ['dispatchPlaybackSeekTelemetry','finishPlaybackSeekTelemetry','watchPlaybackSeekTelemetry',
+  for(const name of ['dispatchPlaybackSeekTelemetry','playbackSeekTraceRanges',
+    'recordPlaybackSeekRoute','finishPlaybackSeekTelemetry','watchPlaybackSeekTelemetry',
     'beginPlaybackControlSeek','markPlaybackControlSeekExecuted','samplePlaybackPresentationClock',
     'settlePlaybackControlSeek','seekTo'])vm.runInContext(source(name),c);
   function emit(name){for(const fn of [...(listeners.get(name)||[])])fn();}
@@ -48,6 +49,23 @@ test('a dispatched seek reports its first target frame once with monotonic laten
   assert.equal(h.present(),true);h.present();
   const reports=h.posts.filter(x=>x.event==='seek_resumed');assert.equal(reports.length,1);
   assert.equal(reports[0].ms,50);assert.equal(reports[0].method,'remux');assert.equal(reports[0].file_id,7);
+});
+test('route and settlement retain bounded film-coordinate evidence across a nonzero origin',async()=>{
+  const h=harness();h.p.offset=30;h.p.sessionId='session-seven';h.video.currentTime=2;
+  h.c.playbackSeekBufferedRangesMs=()=>[{from:30_000,through:80_000}];
+  h.c.playbackSeekSeekableRangesMs=()=>[{from:30_000,through:75_000}];
+  await h.dispatch(50);
+  const route=JSON.parse(h.posts.find(post=>post.event==='seek_route').seek_trace);
+  assert.equal(route.target_ms,50_000);assert.equal(route.origin_ms,30_000);
+  assert.equal(route.session,'session-seven');
+  assert.equal(route.element_ms,32_000);assert.equal(route.path,'native_hls');
+  assert.deepEqual(route.buffered_ms,[[30_000,80_000]]);
+  assert.deepEqual(route.seekable_ms,[[30_000,75_000]]);
+  assert.equal(route.produced_end_ms,null);
+  h.present();
+  const settled=JSON.parse(h.posts.find(post=>post.event==='seek_resumed').seek_trace);
+  assert.equal(settled.id,route.id);assert.equal(settled.landing_ms,50_000);
+  assert.equal(settled.outcome,'seek_resumed');
 });
 test('a newer dispatched seek abandons its predecessor and resumes once',async()=>{
   const h=harness();await h.dispatch(20);await h.dispatch(40);h.present();
@@ -128,7 +146,8 @@ test('an internal restart without a viewer seek does not add a seek beacon',asyn
 test('seek attachment startup cannot inflate TTFF before or after its target frame',async()=>{
   const h=harness();vm.runInContext(source('reportTtff'),h.c);
   h.p.playStartedAt=1;h.p.ttffMs=123;h.p.attemptReason='seek';h.clock.ms=100;
-  h.c.reportTtff();assert.equal(h.posts.length,0);assert.equal(h.p.playStartedAt,null);assert.equal(h.p.ttffMs,123);
+  h.c.reportTtff();assert.equal(h.posts.filter(x=>x.event==='ttff').length,0);
+  assert.equal(h.p.playStartedAt,null);assert.equal(h.p.ttffMs,123);
   await h.dispatch(30);h.p.playStartedAt=1;h.p.attemptReason='stall-restart';
   h.c.reportTtff();assert.equal(h.posts.filter(x=>x.event==='ttff').length,0);
   h.p.playStartedAt=1;h.present();h.c.reportTtff();

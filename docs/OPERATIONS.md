@@ -3309,6 +3309,13 @@ truth are unchanged.
 
 ## Reading the Server card (Settings)
 
+For the exact FFmpeg identity used in fragment-index cache keys, run
+`plurxd media-runtime-identity` on the same image as the server. Its JSON
+includes the application SHA when stamped, architecture, actual engine digest,
+current-engine check, and hashes of the packaged runtime manifest when present.
+An unavailable image digest or package manifest is `null`; a version string
+alone does not establish compatible index bytes.
+
 The Server card is the health-at-a-glance panel:
 
 - **ffmpeg** — the version string if it ran, or a red "not found" if the binary
@@ -4301,7 +4308,7 @@ guard and final-directory orphan guard until fenced completion.
 
 Settings → Activity keeps Watching above its Status and Jobs tabs. Status
 shows the node matrix and collapsible activity sections. Jobs offers global
-job-type counts, state and owner/destination filters, 25-row pages, and admin
+job-type counts, state and owner/destination filters, 20-row pages (selectable 10, 20 or 50), and admin
 cancellation and explicit retry. Select a node or job for its detail dialog;
 job details separate Summary, Stages and History. Unknown stages stay unknown. A cancelled interest does not cancel
 another viewer's demand. Running children keep their physical permits until
@@ -4323,9 +4330,11 @@ Each node admits **one heavy background pipeline** at a time. Preparation,
 indexing, subtitles, probing, artwork, semantic indexing, verification and
 transcode copies share this permit. A media-probe batch may execute up to two
 one-thread probes within that admission when its reserved CPU budget permits.
-Each probe still claims its own shared storage reader; a scan parent also
-occupies a reader, so the same domain often has room for just one probe. The
-node detail panel reports the batch ceiling. Other worker loops, playback and transfers
+Each probe claims its own shared storage reader. Only one background reader
+per domain is allowed; the second reader is reserved for playback. Scans
+probe inline under their own reservation. Repair batches can run two probes
+only across separate available domains. The node detail panel reports the
+batch ceiling. Other worker loops, playback and transfers
 have their own admission limits. An available heavy slot still needs eligible
 work, enabled settings, compatible tools, source access and storage capacity.
 An occupied slot is retained until its physical work exits. A blocked free

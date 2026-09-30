@@ -61,3 +61,91 @@ reason = """Landing commit of #522 (rolling publication: a late cycle cannot tra
 [[errata]]
 commit = "8ae8cab1e136d0ac59fb9905f10b4a846b67ea5d"
 reason = """PR #524 landed on 2026-09-25 with Forgejo's title-only merge message, omitting the checked Regression-Test lines in its PR body. The immutable landing brought corrective commits c84d3302, 5b0501ad, 0967eb15, 2b80c558, ddf3e6ef and 7e051f4d. Its original references are tests/operations/test_android_credential_exposure.py::test_old_signer_without_installed_data_is_rejected and tests/operations/test_contracts.py::test_ship_physical_is_a_self_contained_device_path; both still resolve in the landing tree. PR #533's fast lane #3119 reported the omission before reaching its Live TV checks. This permanent erratum records the missing merge trailers without changing the audit boundary, test selection or runtime behavior. PR #533 carries its own checked regression lines in the landing message."""
+
+[[errata]]
+commit = "6dac0288a6b6eec3a951af82f03032059106aa88"
+reason = """PR #614 landed documentation and playback prototype captures with `Regression-Test: python3 -m unittest discover -s tests/operations -p test_docs_index.py` in its immutable merge message. That is a command, not the required <path>::<name> reference. The named docs-index command passed four tests before merge; tests/operations/test_docs_index.py::test_every_docs_markdown_file_is_listed and ::test_relative_links_between_documents_resolve cover its new index rows and links. Safari seek fast lane #3603 first reported this malformed historical field. This row records the landing error without changing the boundary or weakening the current PR's regression checks."""
+
+[[errata]]
+commit = "2ea6072638ba157239f16869a99124c950d96ec0"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit 2ea60726 (fix(store): keep viewer migration inside timed client) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "4a38f553a577b3cfee9644dc1729654eddf70416"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit 4a38f553 (fix(validation): record malformed docs landing trailer) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "3010c0456271df0ae204006fe23821e228c716e2"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit 3010c045 (fix(streaming): release successful source readers and align seek contracts) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "718bf891c39980dfed75b8b8f25f628e0cd59f6d"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit 718bf891 (fix(streaming): withdraw unqualified Safari steady runway) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "62202dd53f9a1574e599f5d0c646d89434633c08"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit 62202dd5 (fix(playback-lab): redact native route attachment in seek evidence) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "a4236f00cc8e621c9e21a8d9dba53b34e78350d9"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit a4236f00 (fix(streaming): scope shared source admission and order Hiqlite claim inputs) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "aacc9697c81f0e8771be15eb1efb580f41e948df"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit aacc9697 (fix(streaming): ramp Safari publication and require native HLS evidence) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "6f583c519f49ce4b639a5d95952577768b9b1180"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit 6f583c51 (fix(streaming): preserve viewer demand and source admission through artifact delivery) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "a704f0f7ed61e40028c992eadfa3bb1bb76c9f32"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit a704f0f7 (fix(build): bind the runtime digest in the shipped daemon) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "50611e8b8ab1e71daf7d091b94e01ef3055da385"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit 50611e8b (fix(playback): sample Safari seek routes in film coordinates) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "f91cecd5b6ddb1b04167e8412af3370a28593724"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit f91cecd5 (fix(cluster): expose shared source readers and wait stages) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "9d2faa04803b3691c4c7e9b3aa33e4a015a0c067"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit 9d2faa04 (perf(playback): accumulate bounded steady Safari seek runway) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "bc55a59d5713b834b98aecb3c3a20943f1d83dc2"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit bc55a59d (fix(playback): capture real Safari publication and demand evidence) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "82350708281a008dc2f32a65610f2211e2917d0c"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit 82350708 (fix(cluster): dispatch delivery while analysis scans a source) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "f1fce61d762c293c3160ea7f2c0ac9a76a26b85e"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit f1fce61d (fix(build): pin media runtime and bind release images to its digest) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "190e26d955c0d633b707b0af75413c65d6b16123"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit 190e26d9 (fix(cluster): carry playback interest through source admission) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "edab841a12a9f8aa9977fd41d4b128bd3b298676"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit edab841a (fix(build): report the shipped fragment engine identity) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "3a413b022b385bb279f9524591c6bbd23abf7add"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit 3a413b02 (fix(cluster): wake analysis consumer when playback queues exact preparation) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "8d8f969d3d82a0589a68c9e135316f2fcb1f4e75"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit 8d8f969d (fix(playback): preserve native Safari seek fixture and evidence) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "4c97df6990c39edc7fcc1d347096e757ad987352"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit 4c97df69 (fix(cluster): skip incompatible analysis requests before claim) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."
+
+[[errata]]
+commit = "d459426b20e290aa41491fdb898fb3a2361f838f"
+reason = "Safari PR #623 reached main through merge 287982538 with subject 'fix(streaming): build Safari seek preparation and diagnostics', which omitted its PR number and therefore is not recognized as a landing by the immutable history audit. That merge carries twenty Regression-Test lines. Corrective commit d459426b (fix(web): record seek route and settlement evidence) is part of that landed ancestry. Fast lane #3632 reports it as outside a landing. This permanent erratum records the malformed landing subject; it does not move the boundary, rewrite history, alter runtime behavior or exempt PR #627 from its checked regression fields."

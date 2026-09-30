@@ -120,9 +120,16 @@ books, and home media.
   fenced ownership, retries, cancellation and verified publication. Matching
   fragment demands share one build with separate deliveries. Exact local
   offline recipes can join running preparation without another encoder.
-  Activity exposes job history and explicit retry; Developer enable controls
-  show advisory requirements. Library scan/refresh requests and results are
-  durable; ready learners can execute immutable preparation. One heavy worker
+  Activity exposes job history and explicit retry in a collapsible panel with
+  running, queued and failed counts. Pages show 20 jobs by default (10 or 50
+  optional), with First, Previous and Next controls; folds and the selected
+  page survive live refreshes. Job details expand directly beneath their row.
+  Pending library scans say “Queued · waiting for a worker” in Settings and the
+  activity indicator; remote execution uses the replicated job state. Developer enable
+  controls show advisory requirements. Library scan/refresh requests and results are
+  durable; repeated scheduled ticks share one pending request while waiting for
+  a worker. Manual and targeted requests keep separate identities. Ready
+  learners can execute immutable preparation. One heavy worker
   per node, two readers per named storage domain, and shared provider pacing
   protect playback and shared resources. Nodes reuse content/model-verified
   semantic vectors and distribute pure leaf probes while each scan retains
@@ -389,6 +396,10 @@ the physical Apple/Android device matrix remains a release acceptance step.
 **What it does:** decides how each file must be delivered to the current device,
 and delivers it. Full decision logic is [ARCHITECTURE.md](ARCHITECTURE.md) §3.
 
+- **Collapsible episode browser:** web TV playback starts with Episodes closed.
+  Open it by mouse or keyboard to select a season, browse cards or rows, and
+  play another episode. Folding it preserves the selection and playback;
+  starting a new watch session closes it again.
 - **Three methods, chosen automatically** and reported at `/decision`:
   - **Direct play** — HTTP range serving of the untouched file; zero transcode
     CPU. The goal state.

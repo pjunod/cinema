@@ -232,7 +232,7 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
   // before the new markup replaces it, and nothing else on this page is.
   const m=document.getElementById("main"); if(!m) return;
   const dvrUi=dvrRememberUi(m);
-  const activityFocus=document.activeElement?.dataset?.activityView;
+  const activityFocus=(/** @type {HTMLElement|null} */ (document.activeElement))?.dataset?.activityView;
   const openSections=new Set([...m.querySelectorAll("details[data-activity-section][open]")].map(el=>el.dataset.activitySection));
   const previousSections=new Set([...m.querySelectorAll("details[data-activity-section]")].map(el=>el.dataset.activitySection));
   const section=(key,title,body,defaultOpen=false)=>`<details class="activity-section" data-activity-section="${key}"${openSections.has(key)||(!previousSections.has(key)&&defaultOpen)?" open":""}><summary>${title}</summary>${body}</details>`;
@@ -242,6 +242,7 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
   const focusedDiag=document.activeElement&&document.activeElement.closest
     ?document.activeElement.closest("details.stream-diag"):null;
   const focusKey=focusedDiag?focusedDiag.dataset.stream:null;
+  const durableFocus=(/** @type {HTMLElement} */ (document.activeElement))?.dataset?.durableFocus||(document.activeElement===document.body?DURABLE_ACTIVITY.pendingFocus:null);
   const scans=d.scans.map(sc=>`<tr><td style="width:200px"><b>${esc(sc.library)}</b></td><td class="muted">${statusText(sc.status)}</td></tr>`).join("");
   const t=d.trakt||{};
   const trakt = t.configured
@@ -299,7 +300,8 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
     ${ME?.is_admin?`<section id="activity-jobs" role="tabpanel" aria-labelledby="activity-tab-jobs"${ACTIVITY_VIEW.tab!=="jobs"?" hidden":""}><div id="durable-activity">${durableQueueHtml(nodeNames)}</div></section>`:""}`;
   dvrRestoreUi(m,dvrUi);
   paintActivityInspector();
-  if(activityFocus)[...m.querySelectorAll("[data-activity-view]")].find(el=>el.dataset.activityView===activityFocus)?.focus({preventScroll:true});
+  if(durableFocus)restoreDurableFocus(m,durableFocus);
+  if(activityFocus)[...(/** @type {NodeListOf<HTMLElement>} */ (m.querySelectorAll("[data-activity-view]")))].find(el=>el.dataset.activityView===activityFocus)?.focus({preventScroll:true});
   if(focusKey!=null){
     const again=[...m.querySelectorAll("details.stream-diag")].find(el=>el.dataset.stream===focusKey);
     const summary=again&&again.querySelector("summary");

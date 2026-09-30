@@ -9,7 +9,13 @@ use plurx_core::store::background_jobs::*;
 #[tokio::test]
 async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_fenced() {
     for_each_backend(|store, backend| async move {
-        for scenario in ["published", "source_replaced", "cancelled"] {
+        for (index, scenario) in ["published", "source_replaced", "cancelled"]
+            .into_iter()
+            .enumerate()
+        {
+            // A failed or cancelled source reader keeps its physical slot for
+            // the original 30-second lease. Give each scenario a later clock.
+            let now_ms = 1_000 + index as i64 * 40_000;
             let (_, file_id) = seed_file(&store, &format!("background-{scenario}")).await;
             let file = store.get_file(file_id).await.expect("file").expect("file");
             let job_id = uuid::Uuid::new_v4().to_string();
@@ -42,8 +48,8 @@ async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_f
                     },
                     dedupe_key: format!("transcode:{recipe}"),
                     priority: 1,
-                    not_before_ms: 1_000,
-                    now_ms: 1_000,
+                    not_before_ms: now_ms,
+                    now_ms,
                     request: JobRequest {
                         scope: "internal:pretranscode".to_owned(),
                         request_id: job_id.clone(),
@@ -67,8 +73,8 @@ async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_f
                     claim_id: uuid::Uuid::new_v4().to_string(),
                     kind: JobKind::TranscodePrepare,
                     payload_version: 1,
-                    now_ms: 1_000,
-                    dispatched_at_ms: 1_000,
+                    now_ms,
+                    dispatched_at_ms: now_ms,
                 })
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: claim: {error}"));
@@ -105,7 +111,7 @@ async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_f
                     expected_previous_bytes: None,
                     manifest_digest: "d".repeat(64),
                 },
-                now_ms: 2_000,
+                now_ms: now_ms + 1_000,
             };
             if scenario == "source_replaced" {
                 store
@@ -122,7 +128,7 @@ async fn background_jobs_transcode_publication_is_atomic_idempotent_and_source_f
                 store
                     .cancel_job(CancelJob {
                         job_id,
-                        now_ms: 1_500,
+                        now_ms: now_ms + 500,
                     })
                     .await
                     .expect("cancel");
@@ -465,6 +471,18 @@ async fn background_jobs_one_fragment_build_keeps_remote_delivery_durable() {
             })
             .await
             .expect("cancel one interest");
+        let viewer = ArtifactViewerInterest {
+            cache_key: cache_key.clone(),
+            file_id,
+            target_node_id: "node-b".into(),
+            user_id: 1,
+            playback_id: "remote-fragment-viewer".into(),
+            now_ms: 1_001,
+        };
+        assert!(store
+            .join_artifact_viewer(viewer.clone())
+            .await
+            .expect("join remote viewer"));
         let revision = store
             .background_job(&id)
             .await
@@ -528,18 +546,22 @@ async fn background_jobs_one_fragment_build_keeps_remote_delivery_durable() {
             .await
             .expect("receipts")
             .waiters;
-        assert_eq!(
+        assert_eq!(waiters.len(), 4, "{backend}");
+        assert!(
             waiters
                 .iter()
-                .map(|waiter| waiter.state.as_str())
-                .collect::<Vec<_>>(),
-            ["succeeded", "awaiting_hydration", "cancelled"],
-            "{backend}"
+                .any(|waiter| waiter.request_id == viewer.consumer_id()
+                    && waiter.state == "awaiting_hydration"),
+            "{backend}: the viewer follows the exact parent into target hydration"
         );
         // A scheduler restart needs no in-memory callback to recover this intent.
         let intents = store.delivery_intents(1_004).await.expect("durable outbox");
         assert_eq!(intents.len(), 1, "{backend}");
         assert_eq!(intents[0].target_node_id, "node-b");
+        assert_eq!(
+            intents[0].priority, 3,
+            "{backend}: viewer priority reaches hydration"
+        );
         let EnqueueOutcome::Accepted {
             job_id: hydration_id,
             ..
@@ -550,6 +572,16 @@ async fn background_jobs_one_fragment_build_keeps_remote_delivery_durable() {
         else {
             panic!("{backend}: hydration not admitted")
         };
+        assert_eq!(
+            store
+                .background_job(&hydration_id)
+                .await
+                .expect("hydration job")
+                .expect("hydration exists")
+                .priority,
+            3,
+            "{backend}: hydration retains its viewer priority"
+        );
         assert!(store
             .delivery_intents(1_005)
             .await
@@ -599,13 +631,13 @@ async fn background_jobs_one_fragment_build_keeps_remote_delivery_durable() {
             .await
             .expect("delivered receipts")
             .waiters;
-        assert_eq!(
+        assert_eq!(waiters.len(), 4, "{backend}");
+        assert!(
             waiters
                 .iter()
-                .map(|waiter| waiter.state.as_str())
-                .collect::<Vec<_>>(),
-            ["succeeded", "succeeded", "cancelled"],
-            "{backend}"
+                .any(|waiter| waiter.request_id == viewer.consumer_id()
+                    && waiter.state == "succeeded"),
+            "{backend}: target delivery settles the viewer independently"
         );
         assert_eq!(
             store
@@ -1852,7 +1884,7 @@ async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
             let outcome = store.claim_job(claim.clone()).await.expect("claim");
             assert_eq!(
                 matches!(outcome, ClaimOutcome::Claimed { .. }),
-                index != 2,
+                matches!(index, 0 | 3),
                 "{backend}: alias {index}"
             );
             if index == 2 {
@@ -1895,8 +1927,8 @@ async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
             matches!(
                 store
                     .claim_job(ClaimJob {
-                        now_ms: 1_003,
-                        dispatched_at_ms: 1_003,
+                        now_ms: 31_001,
+                        dispatched_at_ms: 31_001,
                         ..claims[2].clone()
                     })
                     .await
@@ -1984,8 +2016,9 @@ async fn background_provider_contention_does_not_reserve_independent_storage() {
                 "{backend}"
             );
         }
-        // Both independent storage slots must remain available after the third
-        // metadata claim lost provider contention in its all-or-none transaction.
+        // The failed provider claim leaves the independent source unreserved.
+        // One maintenance probe can claim it; the second physical slot stays
+        // reserved for a viewer under the shared source-I/O policy.
         for index in 0..2 {
             let id = uuid::Uuid::new_v4().to_string();
             store
@@ -2009,7 +2042,7 @@ async fn background_provider_contention_does_not_reserve_independent_storage() {
                 })
                 .await
                 .expect("probe enqueue");
-            assert!(
+            assert_eq!(
                 matches!(
                     store
                         .claim_job(ClaimJob {
@@ -2027,6 +2060,7 @@ async fn background_provider_contention_does_not_reserve_independent_storage() {
                         .expect("probe claim"),
                     ClaimOutcome::Claimed { .. }
                 ),
+                index == 0,
                 "{backend}"
             );
         }
@@ -3515,12 +3549,16 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                 .expect("coordinator"),
             backend,
         );
-        for scenario in [
+        for (index, scenario) in [
             "published",
             "source_changed",
             "cancelled",
             "wrong_coordinator",
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let now_ms = 1_000 + index as i64 * 40_000;
             let (_, file_id) = seed_file(&store, &format!("leaf-{scenario}")).await;
             let file = store.get_file(file_id).await.expect("file").expect("file");
             let payload = probe_fixture(&store, file_id).await;
@@ -3531,8 +3569,8 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                     payload: payload.clone(),
                     dedupe_key: format!("leaf:{file_id}"),
                     priority: 1,
-                    not_before_ms: 1000,
-                    now_ms: 1000,
+                    not_before_ms: now_ms,
+                    now_ms,
                     request: JobRequest {
                         scope: "probe-contract".into(),
                         request_id: id.clone(),
@@ -3559,8 +3597,8 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                     claim_id: uuid::Uuid::new_v4().to_string(),
                     kind: JobKind::MediaProbe,
                     payload_version: 1,
-                    now_ms: 1000,
-                    dispatched_at_ms: 1000,
+                    now_ms,
+                    dispatched_at_ms: now_ms,
                 })
                 .await
                 .expect("claim")
@@ -3578,7 +3616,7 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                         ..Default::default()
                     },
                 },
-                now_ms: 1100,
+                now_ms: now_ms + 100,
             };
             if scenario == "source_changed" {
                 store
@@ -3595,7 +3633,7 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                 store
                     .cancel_job(CancelJob {
                         job_id: id.clone(),
-                        now_ms: 1050,
+                        now_ms: now_ms + 50,
                     })
                     .await
                     .expect("cancel");
@@ -3607,7 +3645,7 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
             let mut apply = ApplyProbeJob {
                 job_id: id,
                 lease: coordinator.clone(),
-                now_ms: 1200,
+                now_ms: now_ms + 200,
             };
             if matches!(scenario, "source_changed" | "cancelled") {
                 assert!(
@@ -3623,7 +3661,7 @@ async fn background_probe_facts_require_current_source_and_coordinator_to_apply(
                         settlement: JobSettlement::Stop {
                             error_code: "source_or_interest_changed".into(),
                         },
-                        now_ms: 1200,
+                        now_ms: now_ms + 200,
                     })
                     .await
                     .expect("retire refused publication");
@@ -4556,6 +4594,7 @@ async fn probe_batches_respect_scan_parent_and_shared_domain_reservations() {
             library_id: mappings[0].library_id, generation: "batch-parent".into(),
         }];
         for file in files { payloads.push(probe_fixture(&store, file).await); }
+        let mut claims = Vec::new();
         for (index, payload) in payloads.into_iter().enumerate() {
             let id = uuid::Uuid::new_v4().to_string();
             let kind = payload.kind();
@@ -4565,13 +4604,28 @@ async fn probe_batches_respect_scan_parent_and_shared_domain_reservations() {
                     consumer_kind: "probe-test".into(), consumer_ref: id.clone(), target_node_id: None,
                     deadline_ms: None, retain_identity: false },
             }).await.expect("enqueue");
-            let outcome = store.claim_job(ClaimJob { job_id: id.clone(), expected_revision: 0,
+            let claim = ClaimJob { job_id: id.clone(), expected_revision: 0,
                 node_id: "worker".into(), boot_id: uuid::Uuid::new_v4().to_string(), claim_id: uuid::Uuid::new_v4().to_string(),
                 kind, payload_version: 1, now_ms: 1_000, dispatched_at_ms: 1_000,
-            }).await.expect("claim");
-            assert_eq!(matches!(outcome, ClaimOutcome::Claimed { .. }), index != 2,
-                "{backend}: parent + one NAS child; second NAS child refused; independent domain allowed");
-            if index == 2 { assert!(store.job_attempts(&id).await.expect("attempts").is_empty(), "{backend}"); }
+            };
+            let outcome = store.claim_job(claim.clone()).await.expect("claim");
+            assert_eq!(matches!(outcome, ClaimOutcome::Claimed { .. }), matches!(index, 0 | 3),
+                "{backend}: scan owns the background NAS reader; both NAS probes refused; independent domain allowed");
+            if matches!(index, 1 | 2) { assert!(store.job_attempts(&id).await.expect("attempts").is_empty(), "{backend}"); }
+            claims.push(claim);
+        }
+        let parent = store.background_job(&claims[0].job_id).await.expect("parent").expect("parent");
+        store.settle_job(SettleJob { token: parent.token.expect("token"), now_ms: 1_001,
+            settlement: JobSettlement::Yield { checkpoint: None, not_before_ms: 60_000 },
+        }).await.expect("scan yielded after inline probing");
+        // Physical reservations deliberately survive settlement to lease expiry.
+        for (index, expected) in [(1, true), (2, false)] {
+            let outcome = store.claim_job(ClaimJob { now_ms: 31_001, dispatched_at_ms: 31_001,
+                ..claims[index].clone()
+            }).await.expect("post-scan probe claim");
+            assert_eq!(matches!(outcome, ClaimOutcome::Claimed { .. }), expected,
+                "{backend}: one background probe per domain; viewer capacity stays reserved");
+            if !expected { assert!(store.job_attempts(&claims[index].job_id).await.expect("attempts").is_empty()); }
         }
     }).await;
 }

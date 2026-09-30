@@ -529,6 +529,7 @@ impl VodServingAdmissionHooks for NoopVodServingAdmissionHooks {
 struct VodCreateFences<'a> {
     release_fence: Option<VodReleaseFence<'a>>,
     serving_admission: Option<VodServingAdmission>,
+    viewer: Option<crate::state::PlaybackViewerDemand>,
 }
 
 impl VodServingAdmission {

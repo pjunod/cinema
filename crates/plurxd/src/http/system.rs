@@ -542,6 +542,10 @@ pub struct ClientServerSnapshot {
     pub suspend_count: Option<i64>,
     pub progress_idle_ms: Option<i64>,
     pub published_end_ms: Option<i64>,
+    pub produced_end_ms: Option<i64>,
+    pub playlist_target_ms: Option<i64>,
+    pub budget_anchor_sequence: Option<u64>,
+    pub demand_observation_age_ms: Option<i64>,
     pub fetched_end_ms: Option<i64>,
     pub fetched_segment: Option<i64>,
     pub first_retained_segment: Option<i64>,
@@ -628,6 +632,10 @@ pub struct ClientLog {
     pub stack: Option<String>,
     /// Extra detail (hls.js error type, stall verdict, …).
     pub detail: Option<String>,
+    /// Bounded JSON from the client route and settlement sample. The browser
+    /// sends film coordinates and at most four ranges of each kind; this is
+    /// diagnostic evidence, never authority for server publication.
+    pub seek_trace: Option<String>,
     /// Browser label the client computed ("Safari" | "Chrome" | …).
     pub ua: Option<String>,
     /// Whether this browser will decode this stream in hardware, as reported
@@ -993,6 +1001,8 @@ fn join_session_truth(event: &mut PlaybackEvent, info: &crate::transcode::Sessio
         "playlist_ready": info.playlist_ready,
         "published_segment": info.published_segment,
         "published_end_ms": info.published_end_ms,
+        "budget_anchor_sequence": info.budget_anchor_sequence,
+        "demand_observation_age_ms": info.demand_observation_age_ms,
         "next_media_sequence": info.next_media_sequence,
         "fetched_end_ms": info.fetched_end_ms,
         "fetched_segment": info.fetched_segment,
@@ -1018,6 +1028,14 @@ fn join_session_truth(event: &mut PlaybackEvent, info: &crate::transcode::Sessio
     let server_fields = server.as_object_mut().expect("server telemetry object");
     for (key, value) in [
         ("produced_end_ms", serde_json::json!(info.produced_end_ms)),
+        (
+            "budget_anchor_sequence",
+            serde_json::json!(info.budget_anchor_sequence),
+        ),
+        (
+            "demand_observation_age_ms",
+            serde_json::json!(info.demand_observation_age_ms),
+        ),
         ("served_end_ms", serde_json::json!(info.served_end_ms)),
         ("staged_bytes", serde_json::json!(info.staged_bytes)),
         (
@@ -1273,6 +1291,12 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
                 ("suspend_count", server.suspend_count),
                 ("progress_idle_ms", server.progress_idle_ms),
                 ("published_end_ms", server.published_end_ms),
+                ("produced_end_ms", server.produced_end_ms),
+                ("playlist_target_ms", server.playlist_target_ms),
+                (
+                    "demand_observation_age_ms",
+                    server.demand_observation_age_ms,
+                ),
                 ("fetched_end_ms", server.fetched_end_ms),
                 ("fetched_segment", server.fetched_segment),
                 ("first_retained_segment", server.first_retained_segment),
@@ -1281,6 +1305,9 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
                 if let Some(value) = value.filter(|value| *value >= 0) {
                     status.insert(key.to_owned(), value.into());
                 }
+            }
+            if let Some(sequence) = server.budget_anchor_sequence {
+                status.insert("budget_anchor_sequence".to_owned(), sequence.into());
             }
             for (key, value) in [
                 ("recent_speed", server.recent_speed),
@@ -1523,6 +1550,9 @@ fn client_log_line(ev: &ClientLog, suppressed: u64) -> String {
     }
     if let Some(d) = field(&ev.detail, 200) {
         line.push_str(&format!(" [{d}]"));
+    }
+    if let Some(trace) = one_line_field(&ev.seek_trace, 640) {
+        line.push_str(&format!(" seek_trace={trace}"));
     }
     // Attempt identity last: it's what you group by when reading back, and
     // putting it at the end keeps the front of every line comparable.
@@ -4352,12 +4382,18 @@ async fn local_activity(state: &AppState) -> Result<Vec<Activity>, ApiError> {
     for (id, status) in statuses {
         let name = names.get(&id).cloned().unwrap_or_else(|| format!("#{id}"));
         let enriching = status.phase.as_deref() == Some("enriching");
-        let (kind, label) = if enriching {
+        let queued = status.phase.as_deref() == Some("queued");
+        let (kind, label) = if queued {
+            (
+                "scan",
+                format!("Queued scan for {name} · waiting for a worker"),
+            )
+        } else if enriching {
             ("enrich", format!("Fetching metadata for {name}"))
         } else {
             ("scan", format!("Scanning {name}"))
         };
-        let (detail, percent) = match status.progress.filter(|_| !enriching) {
+        let (detail, percent) = match status.progress.filter(|_| !enriching && !queued) {
             Some(p) if p.found > 0 => (
                 Some(format!("{} of {} files", p.processed, p.found)),
                 Some(((p.processed * 100 / p.found).min(100)) as u8),
@@ -6205,6 +6241,7 @@ mod tests {
             col: None,
             stack: None,
             detail: None,
+            seek_trace: None,
             ua: None,
             attempt: None,
             reason: None,
@@ -6223,6 +6260,17 @@ mod tests {
             delivered_dv_profile: None,
             declared_dv_profiles: None,
         }
+    }
+
+    #[test]
+    fn client_seek_trace_is_bounded_to_one_log_line() {
+        let mut event = beacon("seek_route", 0);
+        event.seek_trace = Some(format!("{{\"target_ms\":50000}}\n{}", "x".repeat(2_000)));
+        let line = client_log_line(&event, 0);
+        let trace = line.split(" seek_trace=").nth(1).expect("seek trace");
+        assert!(trace.starts_with("{\"target_ms\":50000}x"));
+        assert!(!trace.contains('\n'));
+        assert!(trace.chars().count() <= 641);
     }
 
     #[test]
@@ -6783,6 +6831,8 @@ mod tests {
         assert_eq!(extra["server"]["lease_state"], "active");
         assert_eq!(extra["server"]["lease_timeout_ms"], 30_000);
         assert_eq!(extra["server"]["produced_end_ms"], 48_000);
+        assert_eq!(extra["server"]["budget_anchor_sequence"], 7);
+        assert_eq!(extra["server"]["demand_observation_age_ms"], 1_000);
         assert_eq!(extra["server"]["served_end_ms"], 44_000);
         assert_eq!(extra["server"]["staged_bytes"], 400_000);
         assert_eq!(extra["server"]["playlist_target_ms"], 16_000);
@@ -6824,6 +6874,10 @@ mod tests {
                 readrate: Some(0.8),
                 progress_idle_ms: Some(11_000),
                 published_end_ms: Some(125_000),
+                produced_end_ms: Some(141_000),
+                playlist_target_ms: Some(16_000),
+                budget_anchor_sequence: Some(8),
+                demand_observation_age_ms: Some(1_500),
                 fetched_end_ms: Some(121_000),
                 playlist_shape: Some("sliding".into()),
                 last_request: Some("segment".into()),
@@ -6847,6 +6901,8 @@ mod tests {
         assert_eq!(extra["client"]["media_requests"], 17);
         assert_eq!(extra["client"]["server"]["observed_age_ms"], 2_345);
         assert_eq!(extra["client"]["server"]["progress_idle_ms"], 11_000);
+        assert_eq!(extra["client"]["server"]["produced_end_ms"], 141_000);
+        assert_eq!(extra["client"]["server"]["budget_anchor_sequence"], 8);
         assert_eq!(extra["client"]["server"]["playlist_shape"], "sliding");
 
         let line = client_log_line(&event, 0);
