@@ -45,6 +45,8 @@ pub struct SQLiteSnapshotBuilder {
     #[cfg(feature = "backup")]
     pub path_backups: String,
     pub path_snapshots: String,
+    pub(crate) database_path: std::path::PathBuf,
+    pub(crate) storage_deferral: std::time::Duration,
     pub write_tx: flume::Sender<WriterRequest>,
     pub(crate) snapshot_files: Arc<Mutex<SnapshotFileState>>,
     pub(crate) snapshot_recovery_pending: Arc<AtomicBool>,
@@ -88,6 +90,8 @@ impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
         // - open db snapshot file
         // - return snapshot handle
 
+        crate::snapshot_admission::wait_for_storage(&self.database_path, self.storage_deferral)
+            .await;
         let snapshot_id = Uuid::now_v7();
 
         let path = format!("{}/{}", self.path_snapshots, snapshot_id);

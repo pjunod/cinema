@@ -144,6 +144,23 @@ pub const LIVE_TV_CAPABILITY: &str = "live_tv_v1";
 /// always retain room for Raft WAL growth, a received snapshot, and SQLite's
 /// replacement database even when every disposable cache is full.
 const MIN_VOTER_STORAGE_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
+const SNAPSHOT_STORAGE_FLOOR_CAPABILITY: &str = "snapshot_storage_floor_v1";
+const PROMOTION_TARGET_SQL: &str =
+    "SELECT node.raft_id, node.role, node.last_seen_at, \
+        EXISTS (SELECT 1 FROM cluster_node_removals removal \
+          WHERE removal.node_id = node.node_id) AS removal_pending, \
+        progress.last_applied_index, progress.apply_lag_entries, \
+        COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
+        COALESCE(progress.voter_storage_ready, 0) AS voter_storage_ready, \
+        progress.storage_headroom_bytes, progress.storage_probe_observed_at, \
+        COALESCE(progress.voter_role_persisted, 0) AS voter_role_persisted, \
+        (SELECT capability.last_seen_at FROM cluster_node_capabilities capability \
+          WHERE capability.node_id = node.node_id \
+            AND capability.capability = 'snapshot_storage_floor_v1') AS snapshot_floor_observed_at, \
+        progress.observed_at \
+     FROM cluster_nodes node \
+     LEFT JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
+     WHERE node.node_id = $1 AND ($2 OR node.removed_at IS NULL)";
 /// A promotion barrier waits for the target's own heartbeat to prove that its
 /// local state machine applied through the quorum-confirmed barrier index.
 const PROMOTION_BARRIER_WAIT: Duration = Duration::from_secs(20);
@@ -2955,6 +2972,36 @@ fn reachable_after(now: i64) -> i64 {
     now.saturating_sub(NODE_REACHABLE_WINDOW_MS)
 }
 
+fn snapshot_floor_heartbeat_matches(
+    capability: Option<i64>,
+    progress: Option<i64>,
+    node: i64,
+) -> bool {
+    capability.is_some_and(|observed| Some(observed) == progress && observed == node)
+}
+
+fn voter_snapshot_storage_ready(
+    durable: bool,
+    fresh: bool,
+    required: Option<u64>,
+    available: Option<u64>,
+) -> bool {
+    durable
+        && fresh
+        && required
+            .zip(available)
+            .is_some_and(|(required, available)| {
+                available >= required.max(MIN_VOTER_STORAGE_HEADROOM_BYTES)
+            })
+}
+
+fn snapshot_database_path(storage_root: &Path) -> PathBuf {
+    storage_root
+        .join(super::migration::HIQLITE_ACTIVE_DIRNAME)
+        .join("state_machine/db")
+        .join(super::migration::HIQLITE_DATABASE_FILENAME)
+}
+
 fn node_is_reachable(now: i64, last_seen_at: i64) -> bool {
     now.saturating_sub(last_seen_at) <= NODE_REACHABLE_WINDOW_MS
 }
@@ -3270,7 +3317,11 @@ impl MembershipManager {
             .local_db_raft_metrics()
             .map_err(MembershipError::from)?;
         let voter_storage_probe = StorageDurabilityObservation {
-            successful: voter_storage_durability_probe(&storage_root),
+            successful: voter_storage_durability_probe(
+                snapshot_database_path(&storage_root)
+                    .parent()
+                    .expect("database has a parent"),
+            ),
             observed_at: unix_ms()?,
             checked_at: tokio::time::Instant::now(),
         };
@@ -4381,16 +4432,35 @@ impl MembershipManager {
             && passive.watermark_valid
             && passive.watermark_local_reads_supported
             && watermark.is_some_and(|sample| sample.apply_lag_entries == Some(0));
-        let storage_headroom = available_storage_headroom_bytes(&inner.storage_root);
+        let snapshot_database = snapshot_database_path(&inner.storage_root);
+        let storage_headroom = available_storage_headroom_bytes(
+            snapshot_database.parent().expect("database has a parent"),
+        );
+        let required_storage =
+            hiqlite::snapshot_admission::snapshot_storage_requirement(&snapshot_database).ok();
         let storage_probe = self.refresh_voter_storage_probe(inner).await?;
         let storage_probe_fresh =
             now.saturating_sub(storage_probe.observed_at) <= STORAGE_DURABILITY_PROBE_MAX_AGE_MS;
-        let voter_storage_ready = storage_probe.successful
-            && storage_probe_fresh
-            && storage_headroom.is_some_and(|bytes| bytes >= MIN_VOTER_STORAGE_HEADROOM_BYTES);
+        let voter_storage_ready = voter_snapshot_storage_ready(
+            storage_probe.successful,
+            storage_probe_fresh,
+            required_storage,
+            storage_headroom,
+        );
         let voter_role_persisted = inner.local_voter_role_persisted.load(Ordering::Acquire);
         let to_sql = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
         let mut statements = vec![
+            (
+                "INSERT INTO cluster_node_capabilities (node_id, capability, last_seen_at) \
+                 VALUES ($1, $2, $3) ON CONFLICT(node_id, capability) DO UPDATE SET \
+                 last_seen_at = excluded.last_seen_at"
+                    .to_owned(),
+                params!(
+                    inner.identity.node_id.as_str(),
+                    SNAPSHOT_STORAGE_FLOOR_CAPABILITY,
+                    now
+                ),
+            ),
             (
                 "INSERT INTO cluster_node_heartbeat_intents (node_id, last_seen_at) \
                      VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
@@ -4662,7 +4732,10 @@ impl MembershipManager {
     ) -> Result<StorageDurabilityObservation, MembershipError> {
         let mut observation = inner.voter_storage_probe.lock().await;
         if observation.checked_at.elapsed() >= STORAGE_DURABILITY_PROBE_INTERVAL {
-            let root = inner.storage_root.clone();
+            let root = snapshot_database_path(&inner.storage_root)
+                .parent()
+                .expect("database has a parent")
+                .to_owned();
             let successful =
                 tokio::task::spawn_blocking(move || voter_storage_durability_probe(&root))
                     .await
@@ -7581,19 +7654,8 @@ impl MembershipManager {
         inner
             .client
             .query_consistent_map::<PromotionTargetRow, _>(
-                "SELECT node.raft_id, node.role, node.last_seen_at, \
-                        EXISTS (SELECT 1 FROM cluster_node_removals removal \
-                          WHERE removal.node_id = node.node_id) AS removal_pending, \
-                        progress.last_applied_index, progress.apply_lag_entries, \
-                        COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
-                        COALESCE(progress.voter_storage_ready, 0) AS voter_storage_ready, \
-                        progress.storage_headroom_bytes, progress.storage_probe_observed_at, \
-                        COALESCE(progress.voter_role_persisted, 0) AS voter_role_persisted, \
-                        progress.observed_at \
-                 FROM cluster_nodes node \
-                 LEFT JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
-                 WHERE node.node_id = $1 AND node.removed_at IS NULL",
-                params!(node_id),
+                PROMOTION_TARGET_SQL,
+                params!(node_id, false),
             )
             .await?
             .into_iter()
@@ -7615,7 +7677,11 @@ impl MembershipManager {
         {
             return Err(MembershipError::LearnerNotReady(node_id.to_owned()));
         }
-        if !target.voter_storage_ready
+        if !snapshot_floor_heartbeat_matches(
+            target.snapshot_floor_observed_at,
+            target.observed_at,
+            target.last_seen_at,
+        ) || !target.voter_storage_ready
             || !target.storage_probe_observed_at.is_some_and(|observed_at| {
                 now.saturating_sub(observed_at) <= STORAGE_DURABILITY_PROBE_MAX_AGE_MS
             })
@@ -7730,19 +7796,8 @@ impl MembershipManager {
         let target = inner
             .client
             .query_consistent_map::<PromotionTargetRow, _>(
-                "SELECT node.raft_id, node.role, node.last_seen_at, \
-                        EXISTS (SELECT 1 FROM cluster_node_removals removal \
-                          WHERE removal.node_id = node.node_id) AS removal_pending, \
-                        progress.last_applied_index, progress.apply_lag_entries, \
-                        COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
-                        COALESCE(progress.voter_storage_ready, 0) AS voter_storage_ready, \
-                        progress.storage_headroom_bytes, progress.storage_probe_observed_at, \
-                        COALESCE(progress.voter_role_persisted, 0) AS voter_role_persisted, \
-                        progress.observed_at \
-                 FROM cluster_nodes node \
-                 LEFT JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
-                 WHERE node.node_id = $1",
-                params!(node_id),
+                PROMOTION_TARGET_SQL,
+                params!(node_id, true),
             )
             .await?
             .into_iter()
@@ -9891,7 +9946,7 @@ fn unix_seconds() -> Result<i64, MembershipError> {
     i64::try_from(seconds).map_err(|_| MembershipError::Internal("clock overflow".to_owned()))
 }
 
-/// Prove that the authoritative root can durably publish and remove a file.
+/// Prove that the state-machine filesystem can durably publish and remove a file.
 /// A learner may replicate on storage that is merely writable; promotion is
 /// the point where that machine becomes part of the quorum's durability
 /// promise, so the proof is retained separately from current free space.
@@ -10047,6 +10102,7 @@ struct TargetNodeRow {
 }
 
 struct PromotionTargetRow {
+    snapshot_floor_observed_at: Option<i64>,
     raft_id: i64,
     admitted_role: Option<String>,
     last_seen_at: i64,
@@ -10456,6 +10512,7 @@ impl From<&mut Row<'_>> for TargetNodeRow {
 impl From<&mut Row<'_>> for PromotionTargetRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
+            snapshot_floor_observed_at: row.get("snapshot_floor_observed_at"),
             raft_id: row.get("raft_id"),
             admitted_role: row.get("role"),
             last_seen_at: row.get("last_seen_at"),
@@ -10767,6 +10824,136 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn snapshot_floor_requires_current_process_heartbeat_proof() {
+        let database = rusqlite::Connection::open_in_memory().expect("floor SQL fixture");
+        database.execute_batch(
+            "CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, raft_id INTEGER, role TEXT, last_seen_at INTEGER, removed_at INTEGER); \
+             CREATE TABLE cluster_node_removals (node_id TEXT); \
+             CREATE TABLE cluster_node_capabilities (node_id TEXT, capability TEXT, last_seen_at INTEGER, PRIMARY KEY(node_id,capability)); \
+             CREATE TABLE cluster_node_progress (node_id TEXT, last_applied_index INTEGER, apply_lag_entries INTEGER, bounded_read_ready INTEGER, voter_storage_ready INTEGER, storage_headroom_bytes INTEGER, storage_probe_observed_at INTEGER, voter_role_persisted INTEGER, observed_at INTEGER); \
+             INSERT INTO cluster_nodes VALUES ('target',1,'learner',50,NULL); \
+             INSERT INTO cluster_node_progress VALUES ('target',10,0,1,1,536870912,50,0,50);"
+        ).expect("seed legacy readiness rows");
+        let proven = || {
+            database
+                .query_row(
+                    super::PROMOTION_TARGET_SQL,
+                    rusqlite::params!["target", false],
+                    |row| {
+                        Ok(super::snapshot_floor_heartbeat_matches(
+                            row.get("snapshot_floor_observed_at")?,
+                            row.get("observed_at")?,
+                            row.get("last_seen_at")?,
+                        ))
+                    },
+                )
+                .expect("production promotion target projection")
+        };
+        assert!(
+            !proven(),
+            "legacy 512MiB readiness is not the new floor proof"
+        );
+        database
+            .execute(
+                "INSERT INTO cluster_node_capabilities VALUES ('target',?1,49)",
+                [super::SNAPSHOT_STORAGE_FLOOR_CAPABILITY],
+            )
+            .expect("insert stale capability");
+        assert!(!proven(), "stale capability must fail closed");
+        database
+            .execute("UPDATE cluster_node_capabilities SET last_seen_at=50", [])
+            .expect("publish current capability");
+        assert!(
+            proven(),
+            "same heartbeat must prove the target's new semantics"
+        );
+        database
+            .execute("UPDATE cluster_node_progress SET observed_at=51", [])
+            .expect("advance legacy progress");
+        assert!(
+            !proven(),
+            "a later legacy progress row invalidates the retained marker"
+        );
+        database
+            .execute("UPDATE cluster_nodes SET last_seen_at=51", [])
+            .expect("advance node heartbeat");
+        assert!(!proven());
+        database
+            .execute("UPDATE cluster_node_capabilities SET last_seen_at=51", [])
+            .expect("publish new same-heartbeat capability");
+        assert!(proven());
+        database
+            .execute("UPDATE cluster_nodes SET removed_at=52", [])
+            .expect("mark node removed");
+        assert!(database
+            .query_row(
+                super::PROMOTION_TARGET_SQL,
+                rusqlite::params!["target", false],
+                |_| Ok(())
+            )
+            .is_err());
+        assert!(database
+            .query_row(
+                super::PROMOTION_TARGET_SQL,
+                rusqlite::params!["target", true],
+                |_| Ok(())
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn voter_snapshot_storage_floor_is_target_local_known_fresh_and_at_least_512_mib() {
+        let minimum = super::MIN_VOTER_STORAGE_HEADROOM_BYTES;
+        assert!(!super::voter_snapshot_storage_ready(
+            true,
+            true,
+            Some(1),
+            Some(minimum - 1)
+        ));
+        assert!(super::voter_snapshot_storage_ready(
+            true,
+            true,
+            Some(1),
+            Some(minimum)
+        ));
+        assert!(!super::voter_snapshot_storage_ready(
+            true,
+            true,
+            Some(2 * minimum),
+            Some(minimum)
+        ));
+        assert!(super::voter_snapshot_storage_ready(
+            true,
+            true,
+            Some(2 * minimum),
+            Some(2 * minimum)
+        ));
+        assert!(!super::voter_snapshot_storage_ready(
+            true,
+            true,
+            None,
+            Some(u64::MAX)
+        ));
+        assert!(!super::voter_snapshot_storage_ready(
+            true,
+            true,
+            Some(1),
+            None
+        ));
+        assert!(!super::voter_snapshot_storage_ready(
+            false,
+            true,
+            Some(1),
+            Some(u64::MAX)
+        ));
+        assert!(!super::voter_snapshot_storage_ready(
+            true,
+            false,
+            Some(1),
+            Some(u64::MAX)
+        ));
+    }
     use super::*;
 
     #[test]
