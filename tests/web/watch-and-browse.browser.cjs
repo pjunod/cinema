@@ -3,6 +3,7 @@
 // WATCH_MEDIA must be a local H.264 MP4 at least 120 s long. This is browser
 // regression evidence, not a substitute for the real-server/media acceptance.
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE||"playwright");
+const {test}=require('node:test');
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
 const root=path.resolve(__dirname,'../../crates/plurxd/src/web');
 const media=fs.readFileSync(process.env.WATCH_MEDIA);
@@ -16,7 +17,7 @@ const file=id=>({id:String(100+Number(id)),filename:'Coast.mp4',available:true,d
 // taller than a compact picture, which is the case the popover checks need.
 const manySubtitles=Array.from({length:30},(_,i)=>({index:i,language:['eng','spa','fre','ger','ita','por','jpn','kor','chi','nld'][i%10],title:i%3===2?'Forced':'Full',forced:i%3===2,text:i%2===0,codec:i%2===0?'subrip':'hdmv_pgs_subtitle'}));
 const data=id=>id==='10'?{item:show,files:[],children:[season],ancestors:[]}:id==='11'?{item:season,files:[],children:episodes,ancestors:[show]}:{item:id==='20'?movie:episodes.find(e=>e.id===id),files:[file(id)],children:[],ancestors:id==='20'?[]:[show,season]};
-(async()=>{
+test('watch browser folds episodes without disrupting playback',async()=>{
  const browser=await chromium.launch({headless:true});
  const page=await browser.newPage({viewport:{width:1440,height:1000},hasTouch:!!process.env.WATCH_COARSE});
  const touchSession=process.env.WATCH_COARSE?await page.context().newCDPSession(page):null;
@@ -52,7 +53,24 @@ const data=id=>id==='10'?{item:show,files:[],children:[season],ancestors:[]}:id=
   await page.waitForFunction(()=>document.getElementById('video').readyState>=2);
   await page.evaluate(()=>document.getElementById('video').play());
   await page.waitForFunction(()=>PLAYER.started&&!document.getElementById('ploading').classList.contains('on'));
-  await page.waitForSelector('[data-watch-play="2"]');
+  await page.waitForSelector('[data-watch-play="2"]',{state:'attached'});
+  const episodeDisclosure=page.locator('.watch-episode-disclosure');
+  const episodeSummary=episodeDisclosure.locator('summary');
+  assert.equal(await episodeDisclosure.evaluate(e=>e.open),false,'episodes start collapsed');
+  assert.equal(await page.locator('#watch-season').isVisible(),false,'season controls fold with episodes');
+  assert.equal(await page.locator('#watch-episodes').isVisible(),false,'episode cards start hidden');
+  const opensBeforeDisclosure=decisions.length;
+  await episodeSummary.focus();await page.keyboard.press('Enter');
+  assert.equal(await page.locator('#watch-episodes').isVisible(),true,'Enter expands episodes');
+  await page.locator('#watch-row-toggle').click();
+  assert.equal(await page.locator('#watch-episodes').evaluate(e=>e.classList.contains('watch-rows')),true);
+  await episodeSummary.focus();await page.keyboard.press('Space');
+  assert.equal(await page.locator('#watch-episodes').isVisible(),false,'Space collapses episodes');
+  await episodeSummary.click();
+  assert.equal(await page.locator('#watch-episodes').isVisible(),true,'click reopens episodes');
+  assert.equal(await page.locator('#watch-episodes').evaluate(e=>e.classList.contains('watch-rows')),true,'folding preserves row selection');
+  await page.locator('#watch-row-toggle').click();
+  assert.equal(decisions.length,opensBeforeDisclosure,'folding does not reopen playback');
   assert.equal(await page.locator('#app').evaluate(e=>e.inert),false);
   assert.equal(await page.locator('#modal').getAttribute('aria-modal'),null);
   await page.evaluate(()=>{window.watchOriginalVideo=document.getElementById('video');window.watchOriginalPlayer=PLAYER;window.watchOriginalAttachment=PLAYER.mediaAttachment;togglePlay();});
@@ -102,6 +120,7 @@ const data=id=>id==='10'?{item:show,files:[],children:[season],ancestors:[]}:id=
   await requested;
   await page.locator('#watch-episodes [data-watch-play="2"]').click();
   await page.waitForFunction(()=>WATCH.accepted==='2');
+  assert.equal(await episodeDisclosure.evaluate(e=>e.open),true,'switching episodes keeps the browser open');
   releaseOld();delayItem=null;await page.evaluate(()=>window.oldEpisodeLoad);
   assert.equal(await page.evaluate(()=>ITEM_FOR_FILE['103']),undefined,'stale load must not mutate file identity');
   assert.equal(new URL(page.url()).hash,'#/item/2');
@@ -204,4 +223,4 @@ const data=id=>id==='10'?{item:show,files:[],children:[season],ancestors:[]}:id=
   assert.deepEqual(errors,[]);
   console.log('PASS shipped watch browser: persistent media, fullscreen return, 11 widths, episode acceptance/failure, Play next, progress, Close ordering and chapter seek');
  }catch(e){console.error(e);console.error({errors,decisions});console.error(await page.evaluate(()=>({surface:PLAYBACK_SURFACE.surface,loading:document.getElementById('ploadText').textContent,paused:document.getElementById('video').paused,watch:WATCH&&{accepted:WATCH.accepted,page:WATCH.page?.item.id,mode:WATCH.mode},player:PLAYER&&{fileId:PLAYER.fileId,pending:PLAYER.pendingOpenAttempt,started:PLAYER.started,seek:PLAYER.controlSeek},time:document.getElementById('video').currentTime,chapters:Array.from(document.querySelectorAll('[data-watch-chapter]')).map(b=>b.dataset.startMs)})));if(output)await page.screenshot({path:path.join(output,'failure.png')});throw e;}finally{await browser.close();}
-})().catch(e=>{console.error(e);process.exitCode=1;});
+});
