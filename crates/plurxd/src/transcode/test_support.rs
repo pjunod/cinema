@@ -17,6 +17,13 @@ pub(crate) struct HlsDeliveryFixture {
 }
 
 #[cfg(test)]
+enum DeliveryFixtureKind {
+    Hooked,
+    Unhooked,
+    ProcessFree,
+}
+
+#[cfg(test)]
 impl HlsDeliveryFixture {
     /// Install a compatibility serving window without publishing first media
     /// to the control actor. Response-race tests use this narrow state to open
@@ -132,6 +139,27 @@ impl HlsDeliveryFixture {
         Self::publish_with_takeover(dir, session_id, None, false, false).await
     }
 
+    /// C06 pressure proof needs a published session without an OS descendant:
+    /// its bounded test-process parent may kill it on failure. Ordinary
+    /// producer-less fixtures still retain their historical idle stand-in.
+    pub(crate) async fn publish_without_process(dir: &std::path::Path, session_id: &str) -> Self {
+        let fixture = Self::publish_with_takeover_and_state_root(
+            dir,
+            dir,
+            session_id,
+            None,
+            false,
+            false,
+            DeliveryFixtureKind::ProcessFree,
+        )
+        .await;
+        assert!(
+            fixture.session.child.lock().await.is_none(),
+            "process-free fixture"
+        );
+        fixture
+    }
+
     pub(crate) async fn publish_actor_managed(dir: &std::path::Path, session_id: &str) -> Self {
         Self::publish_with_takeover(dir, session_id, None, false, true).await
     }
@@ -180,7 +208,7 @@ impl HlsDeliveryFixture {
             None,
             false,
             false,
-            false,
+            DeliveryFixtureKind::Hooked,
         )
         .await
     }
@@ -199,7 +227,7 @@ impl HlsDeliveryFixture {
             takeover,
             copy,
             actor_managed,
-            false,
+            DeliveryFixtureKind::Hooked,
         )
         .await
     }
@@ -208,8 +236,16 @@ impl HlsDeliveryFixture {
     /// [`crate::state::AppState::new_unhooked`]: every HLS route point reads
     /// the no-op production installs.
     pub(crate) async fn publish_unhooked(dir: &std::path::Path, session_id: &str) -> Self {
-        Self::publish_with_takeover_and_state_root(dir, dir, session_id, None, false, false, true)
-            .await
+        Self::publish_with_takeover_and_state_root(
+            dir,
+            dir,
+            session_id,
+            None,
+            false,
+            false,
+            DeliveryFixtureKind::Unhooked,
+        )
+        .await
     }
 
     async fn publish_with_takeover_and_state_root(
@@ -219,7 +255,7 @@ impl HlsDeliveryFixture {
         takeover: Option<SessionTakeoverStart>,
         copy: bool,
         actor_managed: bool,
-        production_route_hooks: bool,
+        fixture_kind: DeliveryFixtureKind,
     ) -> Self {
         use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
         use plurx_core::store::SqliteStore;
@@ -283,7 +319,11 @@ impl HlsDeliveryFixture {
                 None,
             )
         };
-        let mut raw_session = test_session_with_control(session_dir.to_path_buf(), control);
+        let mut raw_session = test_session_with_optional_child(
+            session_dir.to_path_buf(),
+            control,
+            !matches!(fixture_kind, DeliveryFixtureKind::ProcessFree),
+        );
         raw_session.takeover = takeover;
         raw_session.file_id = file_id;
         if copy {
@@ -355,7 +395,7 @@ impl HlsDeliveryFixture {
                 .store(true, Release);
         }
         let session = Arc::new(raw_session);
-        let construct = if production_route_hooks {
+        let construct = if matches!(fixture_kind, DeliveryFixtureKind::Unhooked) {
             crate::state::AppState::new_unhooked
         } else {
             crate::state::AppState::new
@@ -660,14 +700,26 @@ fn test_session_with_control(
     dir: PathBuf,
     control: crate::playback_control::RollingControlHandle,
 ) -> Session {
-    let child = tokio::process::Command::new("sleep")
-        .arg("30")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn placeholder child");
+    test_session_with_optional_child(dir, control, true)
+}
+
+#[cfg(test)]
+fn test_session_with_optional_child(
+    dir: PathBuf,
+    control: crate::playback_control::RollingControlHandle,
+    stand_in_child: bool,
+) -> Session {
+    let child = stand_in_child.then(|| {
+        let child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn placeholder child");
+        AttemptChild::new(0, child, control.clone(), None)
+    });
     Session {
         dir,
         recovery: None,
@@ -686,7 +738,7 @@ fn test_session_with_control(
         scratch_cleanup_started: AtomicBool::new(false),
         retirement_context: None,
         cache_integrity_cleanup_started: AtomicBool::new(false),
-        child: Mutex::new(Some(AttemptChild::new(0, child, control.clone(), None))),
+        child: Mutex::new(child),
         child_transition: Mutex::new(()),
         replacing_child: AtomicBool::new(false),
         terminal_response_pending: Arc::new(AtomicBool::new(false)),
