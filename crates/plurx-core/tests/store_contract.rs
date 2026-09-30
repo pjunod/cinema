@@ -20688,8 +20688,19 @@ async fn analysis_worker_skips_incompatible_engine_before_spending_a_claim() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: unrelated claim: {error}"))
             .is_none());
+        assert!(
+            store
+                .complete_analysis_request(&claimed, "current-generation", 31)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: complete current-engine work: {error}")),
+            "backend {backend}: current-engine work completes"
+        );
+        // The source reservation conservatively remains through its original
+        // lease, so exercise the second engine after that physical-reader
+        // allowance expires rather than bypassing the one-maintenance-reader
+        // policy this compatibility test is independent of.
         let old_claim = store
-            .claim_analysis_request_compatible("analysis-node", Some("old-engine"), 32, 1_032)
+            .claim_analysis_request_compatible("analysis-node", Some("old-engine"), 1_031, 2_031)
             .await
             .unwrap_or_else(|error| panic!("{backend}: old-engine claim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: old-engine worker can claim its work"));
