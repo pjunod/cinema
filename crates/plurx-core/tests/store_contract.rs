@@ -826,6 +826,24 @@ async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
             .unwrap_or_else(|error| panic!("{backend}: first claim: {error}"))
             .expect("one ordinary source reader");
         assert_eq!(first.request_id, requests[0].request_id, "{backend}");
+        assert_eq!(
+            store
+                .source_io_holders(1_004)
+                .await
+                .expect("first holder")
+                .len(),
+            1,
+            "{backend}: the first claim must reserve its source domain"
+        );
+        let availability = store
+            .analysis_preparation_observation(&requests[1].request_id, 1_004)
+            .await
+            .expect("capacity observation")
+            .expect("second request");
+        assert!(
+            !availability.shared_io_eligible,
+            "{backend}: a maintenance candidate must see the held viewer slot: {availability:?}"
+        );
         assert!(
             store
                 .claim_analysis_request("source-b", 1_004, 31_004)

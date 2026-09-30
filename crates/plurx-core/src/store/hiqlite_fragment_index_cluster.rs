@@ -2102,7 +2102,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                               OR (component IN ('skip_markers','subtitle_source') AND target_node_id = ''))
                             AND component <> 'subtitle_source' AND attempts < $2
                             AND state = 'queued' AND not_before_ms <= $3
-                            AND ($5 IS NULL OR component <> 'fragment_index' OR pipeline_version = $5)
+                            AND ($4 IS NULL OR component <> 'fragment_index' OR pipeline_version = $4)
                             AND {capacity}
                           ORDER BY CASE WHEN (component != 'fragment_index' AND priority = 'foreground')
                             OR (component = 'fragment_index' AND EXISTS (
@@ -2112,15 +2112,15 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                                   AND waiter.state = 'pending' AND waiter.deadline_ms > $3))
                             THEN 0 ELSE 1 END,
                                    created_at_ms - CASE WHEN priority = 'forced'
-                                     THEN $4 ELSE 0 END,
+                                     THEN $5 ELSE 0 END,
                                    created_at_ms, request_id LIMIT 1"
                     ),
                     params!(
                         node_id,
                         max_attempts,
                         now_ms,
-                        super::fragment_index_cluster::ANALYSIS_FORCED_PRIORITY_BOOST_MS,
-                        pipeline_version
+                        pipeline_version,
+                        super::fragment_index_cluster::ANALYSIS_FORCED_PRIORITY_BOOST_MS
                     ),
                 )
                 .await?

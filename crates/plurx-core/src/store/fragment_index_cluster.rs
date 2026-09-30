@@ -114,7 +114,7 @@ pub(crate) fn analysis_source_capacity_clause(now: &str) -> String {
                             WHERE source.request_id = viewer.consumer_ref
                               AND source.component = 'subtitle_source'
                               AND source.trigger = 'playback'
-                              AND source.state IN ('queued','running')))))
+                              AND source.state IN ('queued','running'))))))
             + (SELECT COUNT(*) FROM analysis_source_reservations held
                 WHERE held.resource_key = required.resource_key AND held.expires_at_ms > {now}
                   AND NOT EXISTS (SELECT 1 FROM background_job_waiters viewer

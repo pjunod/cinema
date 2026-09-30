@@ -460,7 +460,7 @@ WHERE id = json_extract($1, '$.job_id')
                         WHERE request.request_id = interest.consumer_ref
                           AND request.component = 'subtitle_source'
                           AND request.trigger = 'playback'
-                          AND request.state IN ('queued','running')))))
+                          AND request.state IN ('queued','running'))))))
         + (SELECT COUNT(*) FROM analysis_source_reservations held
             WHERE held.resource_key = required.resource_key
               AND held.expires_at_ms > json_extract($1, '$.now_ms')
@@ -468,7 +468,7 @@ WHERE id = json_extract($1, '$.job_id')
                   WHERE viewer.request_scope = 'playback-analysis'
                     AND viewer.job_id = held.request_id
                     AND viewer.state = 'pending'
-                    AND viewer.deadline_ms > json_extract($1, '$.now_ms')))) >= 1)
+                    AND viewer.deadline_ms > json_extract($1, '$.now_ms'))) >= 1))
 "#;
 
 const RENEW_SQL: &str = r#"
