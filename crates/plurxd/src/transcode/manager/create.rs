@@ -443,6 +443,7 @@ impl TranscodeManager {
             self.require_cluster_serving_authority(admission)?;
         }
 
+        let startup_create_at = Instant::now();
         // Immutable VOD remains first. During the index backfill, a typed
         // prerequisite refusal may use the retained live engine rather than
         // turning background preparation into a catalogue-wide outage.
@@ -464,6 +465,7 @@ impl TranscodeManager {
             record_live_recovery(LiveRecoveryReason::RequestedLive);
             started
         } else {
+            let vod_lookup_at = Instant::now();
             let vod = self
                 .try_vod_session(
                     req,
@@ -474,6 +476,14 @@ impl TranscodeManager {
                     serving_admission,
                 )
                 .await;
+            tracing::info!(
+                target: "plurxd::transcode",
+                file_id = req.file_id,
+                phase = "vod_create",
+                elapsed_ms = vod_lookup_at.elapsed().as_millis() as u64,
+                outcome = if vod.is_ok() { "ready" } else { "refused" },
+                "playback startup phase completed"
+            );
             match vod {
                 Ok(info) => info,
                 Err(error) => {
@@ -526,6 +536,13 @@ impl TranscodeManager {
             live.extend(self.vod.session_ids().await);
             claim.complete(&info.session_id, &live);
         }
+        tracing::info!(
+            target: "plurxd::transcode",
+            session = %session_log_id(&info.session_id),
+            phase = "create",
+            elapsed_ms = startup_create_at.elapsed().as_millis() as u64,
+            "playback startup phase completed"
+        );
         Ok(SessionCreation {
             info,
             created: true,

@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Bounded design replay; protocol arithmetic, never physical-client proof."""
+import argparse
+import json
+from pathlib import Path
+
+DURATIONS_MS = (10427, 12804, 7758, 8675, 11303, 7591)
+LEAD_MS = 7965
+TARGET_MS = 16000
+RATES = (0.249, 0.25, 0.5, 1.0, 1.5, 2.0, 4.0, 4.001)
+
+
+def replay():
+    endpoints = []
+    end = 0
+    for duration in DURATIONS_MS:
+        end += duration
+        endpoints.append(end)
+    candidates = []
+    for runway in (12000, 16000, 24000, 32000, 48000):
+        threshold = LEAD_MS + runway
+        selected = next((i + 1 for i, end in enumerate(endpoints) if end >= threshold), None)
+        candidates.append({"runway_1x_ms": runway, "required_endpoint_ms": threshold,
+                           "incident_first_segment_count": selected,
+                           "usable_media_ms": None if selected is None else endpoints[selected - 1] - LEAD_MS})
+    # A completion can just miss a cadence tick; its next snapshot then waits
+    # one cadence. The client can just miss that update at a changed reload.
+    # Transfer/append and scheduling are explicit experiment inputs, not
+    # measured bounds. Reject a candidate here rather than calling it qualified.
+    traces = []
+    for raw_rate in RATES:
+        rate = max(0.25, min(4.0, raw_rate))
+        for producer_ratio in (0.95, 1.05, 1.2, 2.0):
+            producer_rate = rate * producer_ratio
+            completion_gap_ms = TARGET_MS / producer_rate
+            discoverable_delay_ms = completion_gap_ms + TARGET_MS / 2 + TARGET_MS + 2500
+            required_ms = rate * discoverable_delay_ms
+            traces.append({"requested_rate": raw_rate, "accepted_rate": rate,
+                           "production_to_consumption": producer_ratio,
+                           "max_segment_completion_ms": round(completion_gap_ms),
+                           "assumed_transfer_append_schedule_ms": 2500,
+                           "worst_discovery_media_requirement_ms": round(required_ms),
+                           "sustainable": producer_ratio >= 1,
+                           "legal_update_upper_bound": completion_gap_ms + TARGET_MS / 2 <= TARGET_MS * 1.5,
+                           "qualifies_transport": False})
+    return {"kind": "deterministic_design_replay", "physical_client_evidence": False,
+            "target_ms": TARGET_MS, "writer_gate_ms": 12000,
+            "incident_origin_lead_ms": LEAD_MS, "incident_endpoints_ms": endpoints,
+            "incident_observed_first_complete_ms": 5950,
+            "incident_observed_sixth_complete_ms": 11940,
+            "old_gate_hold_between_observed_endpoints_ms": 5990,
+            "intermediate_completion_times": "not supplied; not interpolated",
+            "candidate_readiness": candidates, "capacity_prefilter": traces,
+            "decision": "No smaller policy qualified by arithmetic alone; preserve existing transport policy pending actual reload and continuity evidence."}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+    text = json.dumps(replay(), indent=2) + "\n"
+    if args.output:
+        args.output.write_text(text)
+    else:
+        print(text, end="")
+
+
+if __name__ == "__main__":
+    main()
