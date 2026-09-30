@@ -756,6 +756,13 @@ That asymmetry is D3's one build item: either an Android `device-run`, or a
 written manual protocol. Prefer the protocol first — a harness for a
 measurement nobody has taken yet is speculative.
 
+**2026-09-30 Android procedure continuation:** the
+[manual measurement protocol](ANDROID-SHAPED-NETWORK-MEASUREMENT-PROTOCOL.md)
+supplies that written deliverable. It verifies the current proxy CLI/control
+format and Android diagnostics, names the missing continuous clock/intent,
+target-frame and physical output-grade acquisition prerequisites, and keeps
+unknown observations null. It is not a physical trace or D3 acceptance.
+
 The metrics, which are §3.8's list made countable:
 
 | Metric | Definition |
@@ -810,6 +817,14 @@ exist. `make unit` is unaffected — no Rust changes in A-04 — except that
 `cargo test -p plurxd metrics_auto_quality`.
 
 **GPT prompt — shaped-network baseline, all platforms (D3):**
+
+For Android, use the [manual acquisition protocol](ANDROID-SHAPED-NETWORK-MEASUREMENT-PROTOCOL.md)
+instead of treating steps 3–4 below as a complete measurement instrument.
+The outline is retained for historical context: the current proxy deletes its
+private control file at exit, native point panels cannot supply all six
+metrics, and auto-advance does not guarantee a second cliff. Preserve sanitized
+control evidence before exit and disclose missing acquisition. The protocol
+requires explicit operator authority for device changes and restoration.
 
 ```text
 With the current plurx build deployed to media1 and the repo checked out on
@@ -976,8 +991,10 @@ implementer.
 
 ### 7.5 What drives the Android shaped run?
 
-D3 proposes a manual protocol through `device-proxy` rather than an
-Android `device-run`. If the fleet ends up running this trace more than
+D3 uses the [written manual protocol](ANDROID-SHAPED-NETWORK-MEASUREMENT-PROTOCOL.md)
+through `device-proxy` (prepared 2026-09-30), rather than an Android
+`device-run`. Its acquisition preflight is not a feature enablement gate;
+the physical traces remain owed. If the fleet ends up running this trace more than
 twice, the harness is worth building — `adb shell am start` plus the
 existing control-file protocol is most of it. Decide after D3.
 
@@ -1232,6 +1249,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-09-30 | gpt-6.1-sol | agent:/root/architecture_receipt_reconcile_sol61 | D3 Android manual-protocol continuation | `codex/a04-android-measurement-protocol` draft | [Operational protocol](ANDROID-SHAPED-NETWORK-MEASUREMENT-PROTOCOL.md) prepared against effort `225f3742a`: four named clients × two profiles × baseline/Dolby Vision pass, verified source controls and auth, six-metric acquisition prerequisites, bounded run/restore and null/missing receipt. No device run, traffic, deployment, app instrumentation, feature gate or D3 acceptance. Earlier authors and measurement failures remain the historical record. |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | D1 | [#458](http://192.168.4.7:3000/noirr/plurx/pulls/458) | `tests/playback/auto-quality-policy.json` at schema 1 — 29 cases, 11 controller-gate rows, every §3.2 class and every §3.5 row covered, 516 lines. `node tests/playback/web-policy.test.js` green with the new cases; `make validation-lint` governs the new file (2157 → 2158 audited). Proved by reverting five things under test and re-running: `stallFree` out of `decideRung`'s upgrade gate fails "upgrade: a recent stall holds the rung even once the hold has elapsed: height, 1080 !== 720"; `causeMaxAgeMs` 15000 → 14000 fails the defaults-equality test; `!p.started` out of `autoControllerTick` fails "Not yet started: autoControllerTick no longer contains !p.started"; dropping the HDR row from the fixture fails the §3.5 coverage test; shortening a disagreement's `finding` fails the finding requirement. Four disagreements with today's browser recorded in `web_current`, not papered over: no control-verdict gate anywhere, a 60 s rather than 20 s voluntary gap, no decode class inside the policy, and §3.2's `link:` row over-collecting a publication refusal (§7.6). |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | D2 | [#458](http://192.168.4.7:3000/noirr/plurx/pulls/458) | §8, written by reading the three codebases. Every `AutoSample` field has an API, units, a cadence and a failure mode on all three platforms, or a written statement that it is unavailable and what the policy does. Six fields are not simply available (§8.4) and seven of §3.1's rows were wrong (§8.5). The load-bearing one: Apple has no per-completed-transfer throughput sample, so `decideRung`'s emergency branch is unreachable there as the policy stands (§8.4.1, §7.7). |
 | 2026-09-23 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | D3 | — | **needs:** one shaped-network trace per platform per profile, on today's build, with all six §5.3 metrics filled. Nothing has been measured and no number in §5.3 has a value. The prompts are in §6; they need a deployed build, three browsers, two Apple devices and four Android devices. Post-merge evidence under the work board's rule 9, appended here through the evidence-only docs PR. |

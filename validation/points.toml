@@ -1071,6 +1071,8 @@ paths = [
   "scripts/ci-cargo-cache-prepare",
   "scripts/ci-cargo-cache-refresh",
   "scripts/image-base-drift",
+  "scripts/p02-release-cost.py",
+  "scripts/p02-release-cost.Dockerfile",
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
   "scripts/k08-build-measure",

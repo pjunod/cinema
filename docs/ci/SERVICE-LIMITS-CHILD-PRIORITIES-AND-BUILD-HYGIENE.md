@@ -1168,6 +1168,59 @@ table; overflow checks after `make test-full` and seven lab1 days.
 Acceptance: each PR body carries its table; PR 4's acceptance is the
 journal grep `attempt to .* with overflow` empty after seven days on lab1.
 
+**2026-09-30 PR 3 preparation (not executed).** Existing draft #629 adds
+[`scripts/p02-release-cost.py`](../../scripts/p02-release-cost.py): four
+serial thin/fat × CGU 16/1 cold builds on the native AMD64 high-CPU runner
+**host**, not a Forgejo workflow-job receipt or unit acceptance. A committed
+source-only archive and an audited immutable compiler image are prerequisites.
+The shipped debug/strip/panic/overflow policy stays unchanged. Each trial has
+8 CPU, 24 GiB memory with no swap, 1024 PIDs and 45 minutes; the cumulative
+deadline is 180 minutes and actual owned scratch is capped at 20 GiB.
+Capacity/production-health checks stop only the owned trial on deterioration;
+timeouts/OOMs remain failures without retry. Each target is cold and removed
+after its trial; a separately bounded ten-minute fetch precedes every timed
+trial, then builds use `--offline --locked` and network-none. Only download
+cache may stay warm within the run. The container root is read-only with a
+bounded 1 GiB temporary mount; its logging driver is bounded. Host load must
+be at most 8 initially and 12 while the owned eight-CPU trial runs.
+Health/cgroup samples run every two seconds and full scratch scans every ten
+seconds; observer overhead is included in wall time and recorded separately.
+The 20 GiB limit is monitored, not a filesystem quota: detection may lag ten
+seconds plus bounded RPC time, so a transient overshoot remains possible.
+The full temporary/log allocation is conservatively reserved in the budget.
+Setup/extraction/preflight failures also retain compact failure receipts and
+remove only exact owned scratch, unless a live owned container requires it.
+Compact source/archive/image/host provenance, timing/RSS, binary size/hash, OOM/exit
+and failed logs survive cleanup. The focused operations contract is
+`test_release_cost_measurement_is_serial_cold_bounded_and_not_ci_acceptance`.
+The source-free tooling recipe is
+[`scripts/p02-release-cost.Dockerfile`](../../scripts/p02-release-cost.Dockerfile),
+based on the audited native AMD64 public Rust 1.97.1 image and recording
+installed-package versions. Its provisioning is not a measured trial.
+Root recipe inspection precedes execution; no profile choice, publication,
+deployment or measurement result is claimed by this preparation.
+
+**Source-free tooling provisioned, 2026-09-30 (not a cold-build result).**
+One pre-start Docker logging failure was retained: the local logging driver
+requires `compress=false` with `max-file=1`. No process/apt ran in that failed
+attempt, and its exact container was removed. The explicitly approved finite
+configuration continuation passed in 20.02 seconds with unchanged 2 CPU,
+2 GiB/no-swap, PID 512 and 900-second bounds. Five host/RW samples recorded
+310,751,232 peak writable-layer bytes and at least 58,612,400,128 available
+memory bytes. Installed `rustc` reads `1.97.1 (8bab26f4f 2026-07-14)`.
+The retained source-free local tooling image ID is
+`sha256:858e143bef76b513e689a655a9733faa62f9912fc2db5dc942b11ded31fe2151`;
+this is a Docker image ID, not an asserted OCI config digest. The public base
+index is `0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97`,
+its AMD64 child is `408fe88047cef61a2087653b0c5255fa51c0f2d6d94ddedd7a2562a9b91a46f6`.
+The exact provisioning container is gone and production stayed healthy with
+zero restarts/readiness 200. Nynuc retains both provisioning receipts;
+successful receipt SHA-256 is
+`070b832138823ee9313f06342973a8fd51fbaf113d1c6949bd113be0d6fd44b2`,
+package-manifest SHA-256 is
+`e01501eeb5973d135ac27717984da780ed012a390c3add5a2923f5afe270c40d`.
+No four-way cold build, profile change or CI-job acceptance is claimed.
+
 ### 5.8 M8 — four fuzz targets
 
 `fuzz/Cargo.toml` bins, harnesses, seed corpora, nightly steps, the

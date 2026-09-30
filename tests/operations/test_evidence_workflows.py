@@ -7,6 +7,8 @@ import tempfile
 import unittest
 import shlex
 import subprocess
+import importlib.util
+from unittest import mock
 from validation.rust_modules import module_source
 
 
@@ -16,6 +18,59 @@ ROOT = Path(__file__).resolve().parents[2]
 class EvidenceWorkflowCase(unittest.TestCase):
     def read(self, path: str) -> str:
         return (ROOT / path).read_text(encoding="utf-8")
+
+    def test_release_cost_measurement_is_serial_cold_bounded_and_not_ci_acceptance(self) -> None:
+        script = self.read("scripts/p02-release-cost.py")
+        for required in ('(("thin", 16), ("thin", 1), ("fat", 16), ("fat", 1))',
+                         '"trial_seconds": 2700', '"total_seconds": 10800',
+                         '"scratch": 20 * GIB', '"--memory-swap=24g"',
+                         '"--cpus=8"', '"--pids-limit=1024"', '"--cap-drop=ALL"',
+                         '"--security-opt=no-new-privileges"', 'shutil.rmtree(target)',
+                         '"high-cpu-runner-host-not-workflow-job"',
+                         '"CARGO_PROFILE_RELEASE_PANIC=unwind"',
+                         '"CARGO_PROFILE_RELEASE_DEBUG=0"',
+                         '"CARGO_PROFILE_RELEASE_STRIP=symbols"',
+                         '"CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false"',
+                         '"archive_sha256": archive_sha', 'state["OOMKilled"]'):
+            self.assertIn(required, script)
+        self.assertNotIn('"--privileged"', script)
+        self.assertNotIn('/var/run/docker.sock', script)
+        self.assertNotIn('cargo test', script)
+        # Dry description executes no compiler/Docker workload.
+        result = subprocess.run(["python3", str(ROOT / "scripts/p02-release-cost.py")],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"execution": "not started"', result.stdout)
+        # Invalid setup fails before Docker and still retains a compact receipt.
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run([
+                "python3", str(ROOT / "scripts/p02-release-cost.py"), "--run",
+                "--source", "0" * 40, "--archive", directory + "/missing.tar",
+                "--archive-sha", "0" * 64, "--image", "sha256:" + "0" * 64,
+                "--receipts", directory + "/receipts"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(len(list(Path(directory).glob("receipts/setup-failure-*.json"))), 1)
+            self.assertNotIn("Traceback", result.stderr)
+
+    def test_release_cost_running_guard_allows_own_load_but_refuses_pressure(self) -> None:
+        spec = importlib.util.spec_from_file_location("release_cost", ROOT / "scripts/p02-release-cost.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        baseline = {"swap": 0, "restarts": 0}
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(module, "capacity") as capacity, \
+                mock.patch.object(module, "inspect", return_value={"RestartCount": 0, "State": {"Health": {"Status": "healthy"}}}), \
+                mock.patch.object(module.shutil, "disk_usage", return_value=mock.Mock(free=48 * module.GIB)), \
+                mock.patch.object(module, "command", return_value="0 owned"), \
+                mock.patch.object(module.urllib.request, "urlopen") as ready:
+            ready.return_value.__enter__.return_value.status = 200
+            capacity.return_value = {"available": 40 * module.GIB, "swap": 0, "load": 9}
+            module.guard(Path(directory), baseline, "http://localhost/readyz")
+            with self.assertRaisesRegex(RuntimeError, "load/swap"):
+                module.guard(Path(directory), baseline, "http://localhost/readyz", initial=True)
+            capacity.return_value["load"] = 13
+            with self.assertRaisesRegex(RuntimeError, "load/swap"):
+                module.guard(Path(directory), baseline, "http://localhost/readyz")
 
     def test_manual_fuzz_only_keeps_all_five_campaigns_and_skips_runtime_sweeps(self) -> None:
         workflow = self.read(".github/workflows/validation-nightly.yml")
