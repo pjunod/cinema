@@ -123,6 +123,46 @@ RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' \
     && mkdir -p /var/lib/plurx \
     && chown plurx:plurx /var/lib/plurx
 
+# Jellyfin FFmpeg keeps the existing VOD hardware stack, but its packaged
+# build and Bookworm's FFmpeg 5.1 both lack the DVD-Video title demuxer. Build
+# a separate, source-pinned optical reader with DVD navigation, Blu-ray
+# playlists and software H.264 output. Keep the GPL source tarballs in the
+# image alongside the binaries; no MakeMKV or disc key material is bundled.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential pkg-config nasm meson ninja-build curl ca-certificates \
+        libdvdnav-dev libdvdread-dev libbluray-dev libx264-dev \
+    && curl -fsSL https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz \
+        -o /tmp/ffmpeg-8.1.3.tar.xz \
+    && echo '7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3  /tmp/ffmpeg-8.1.3.tar.xz' | sha256sum -c - \
+    && curl -fsSL https://download.videolan.org/pub/libdvdcss/1.6.0/libdvdcss-1.6.0.tar.xz \
+        -o /tmp/libdvdcss-1.6.0.tar.xz \
+    && echo '7ea556c846b7bfc32d47b41cae56d1863a6b6d5f706bb162778d6f298490977c  /tmp/libdvdcss-1.6.0.tar.xz' | sha256sum -c - \
+    && mkdir -p /usr/share/src/plurx-optical \
+    && cp /tmp/ffmpeg-8.1.3.tar.xz /tmp/libdvdcss-1.6.0.tar.xz /usr/share/src/plurx-optical/ \
+    && tar -xf /tmp/ffmpeg-8.1.3.tar.xz -C /tmp \
+    && cd /tmp/ffmpeg-8.1.3 \
+    && ./configure --prefix=/opt/plurx-optical --enable-gpl \
+        --enable-libdvdnav --enable-libdvdread --enable-libbluray \
+        --enable-libx264 --disable-doc --disable-ffplay --disable-avdevice \
+    && make -j4 \
+    && make install \
+    && tar -xf /tmp/libdvdcss-1.6.0.tar.xz -C /tmp \
+    && meson setup /tmp/libdvdcss-build /tmp/libdvdcss-1.6.0 --prefix=/usr/local \
+    && meson compile -C /tmp/libdvdcss-build \
+    && meson install -C /tmp/libdvdcss-build \
+    && ldconfig \
+    && /opt/plurx-optical/bin/ffmpeg -hide_banner -h demuxer=dvdvideo 2>&1 | grep -q 'Demuxer dvdvideo' \
+    && /opt/plurx-optical/bin/ffmpeg -hide_banner -h protocol=bluray 2>&1 | grep -q 'bluray AVOptions' \
+    && apt-get purge -y build-essential pkg-config nasm meson ninja-build \
+        libdvdnav-dev libdvdread-dev libbluray-dev libx264-dev curl \
+    && apt-get autoremove -y \
+    && apt-get install -y --no-install-recommends \
+        libdvdnav4 libdvdread8 libbluray2 libx264-164 libaacs0 libbdplus0 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/ffmpeg-8.1.3 /tmp/libdvdcss-1.6.0 /tmp/libdvdcss-build \
+        /tmp/ffmpeg-8.1.3.tar.xz /tmp/libdvdcss-1.6.0.tar.xz
+
 # Keep the expensive, architecture-specific runtime asset assertions available
 # as their own CI target. The native release-build matrix already proves both
 # Rust binaries for arm64; rebuilding the entire Rust graph under QEMU made a
@@ -166,6 +206,8 @@ ENV PLURX_BIND=0.0.0.0:32400 \
     PLURX_DATA_DIR=/var/lib/plurx \
     PLURX_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg \
     PLURX_FFPROBE=/usr/lib/jellyfin-ffmpeg/ffprobe \
+    PLURX_OPTICAL_FFMPEG=/opt/plurx-optical/bin/ffmpeg \
+    PLURX_OPTICAL_FFPROBE=/opt/plurx-optical/bin/ffprobe \
     PLURX_DOVI_TOOL=/usr/local/bin/dovi_tool \
     PLURX_MKVMERGE=/usr/bin/mkvmerge
 

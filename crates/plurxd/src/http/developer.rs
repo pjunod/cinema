@@ -325,6 +325,32 @@ fn optical_media(state: &AppState, enabled: bool) -> DeveloperEnableItem {
             evidence,
         });
     }
+    let protected_disc_failed = snapshots.iter().any(|snapshot| {
+        matches!(&snapshot.state, OpticalDriveState::Failed { reason, .. }
+            if reason.to_ascii_lowercase().contains("protection")
+                || reason.to_ascii_lowercase().contains("decrypt"))
+    });
+    let aacs_backend_configured = std::env::var_os("LIBAACS_PATH")
+        .filter(|path| !path.is_empty())
+        .is_some_and(|path| std::path::Path::new(&path).exists());
+    requirements.push(DeveloperRequirement {
+        id: "optical_retail_protection",
+        title: "Retail-disc protection reader",
+        status: if protected_disc_failed {
+            RequirementStatus::Unmet
+        } else {
+            RequirementStatus::Unobservable
+        },
+        evidence: format!(
+            "CSS DVDs need libdvdcss; AACS/BD+ Blu-rays need usable keys or a compatible, operator-installed backend. A local AACS library path is {}. {} A decoded frame from representative protected media is still required; this reading never gates the saved enable choice.",
+            if aacs_backend_configured { "present" } else { "not configured" },
+            if protected_disc_failed {
+                "The inserted disc currently reports unsupported protection."
+            } else {
+                "This node has not proved protected-disc decryption."
+            }
+        ),
+    });
     requirements.push(DeveloperRequirement {
         id: "optical_cluster_compatibility",
         title: "Cluster optical protocol compatibility",

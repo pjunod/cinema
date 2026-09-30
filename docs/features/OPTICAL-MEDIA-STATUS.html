@@ -16,13 +16,26 @@
 </head>
 <body>
   <h1>Optical media implementation status</h1>
-  <p><strong>Updated:</strong> 2026-09-28 · <strong>Task branch:</strong>
+  <p><strong>Updated:</strong> 2026-09-29 · <strong>Task branch:</strong>
     <code>codex/optical-m0-foundations</code> · <strong>PR:</strong>
-    <code>#403 → effort/optical-media</code> · <strong>Implementation head:</strong>
-    <code>b1ca2d95d</code></p>
+    <code>#403 → effort/optical-media</code></p>
   <p>This page is the live execution ledger for DVD and Blu-ray playback.
     A green implementation row means code and focused evidence exist; it does
     not stand in for physical-media acceptance.</p>
+  <p><strong>Commercial-media correction:</strong> ordinary retail DVD and
+    Blu-ray playback is part of the required outcome. On 2026-09-29 the shipped
+    Jellyfin FFmpeg and its Debian fallback both reported
+    <code>Unknown format 'dvdvideo'</code>; the host Blu-ray read still lacks a
+    usable AACS/BD+ backend. A temporary reader lab on <code>nynuc</code> now
+    holds the same inserted disc read-only. A separate title-aware optical
+    FFmpeg reports DVD-Video and Blu-ray inputs, while normal VOD keeps
+    Jellyfin FFmpeg. MakeMKV 2.0.0 enumerated titles when its documented
+    drive-specific <code>SDF_STOP</code> workaround disabled a hanging
+    LibreDrive probe. LibMMBD could not decrypt in the lab because its
+    evaluation was not active; the vendor's public beta-key registration is
+    still being checked. Neither a first decoded frame nor application
+    playback has been proved. The running Plurx service is unchanged; no
+    fast-lane tests or adversarial review have run.</p>
   <p><strong>Latest hardening:</strong> <code>bd5280be0</code> turns every
     unsupported managed-copy recipe and missing immutable copy index into a
     typed refusal rather than a daemon panic, and advances the optical cache

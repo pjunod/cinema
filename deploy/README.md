@@ -593,24 +593,59 @@ SupplementaryGroups=cdrom
 ReadOnlyPaths=/mnt/optical/media-room
 ```
 
-Confirm the configured probe binary really carries the two required inputs.
-Do not trust the command's exit status by itself; some FFmpeg builds exit zero
-while printing an unknown-input diagnostic.
+The Docker image builds a separate optical FFmpeg at
+`/opt/plurx-optical/bin/{ffmpeg,ffprobe}`. Its DVD-Video demuxer, Blu-ray
+playlist protocol, and software H.264 encoder are independent of the default
+Jellyfin FFmpeg used for ordinary VOD and hardware encoding. The image also
+builds VideoLAN's GPL `libdvdcss` for CSS-protected DVDs; its pinned source
+archive travels in `/usr/share/src/plurx-optical`. A source installation must
+provide an optical-capable FFmpeg/FFprobe pair and `libdvdcss` itself, then
+set `PLURX_OPTICAL_FFMPEG` and `PLURX_OPTICAL_FFPROBE` to that pair. Leaving
+those variables unset uses the normal configured FFmpeg/FFprobe, which may
+not have DVD title support.
+
+Confirm the configured optical reader really carries both inputs. Do not
+trust the command's exit status by itself; some FFmpeg builds exit zero while
+printing an unknown-input diagnostic.
 
 ```sh
-ffprobe -hide_banner -h demuxer=dvdvideo 2>&1 | grep -E 'dvdvideo|title'
-ffprobe -hide_banner -h protocol=bluray 2>&1 | grep -E 'bluray'
+"${PLURX_OPTICAL_FFPROBE:-ffprobe}" -hide_banner -h demuxer=dvdvideo 2>&1 | grep 'Demuxer dvdvideo'
+"${PLURX_OPTICAL_FFPROBE:-ffprobe}" -hide_banner -h protocol=bluray 2>&1 | grep 'bluray AVOptions'
 sudo -u plurx plurx-optical-helper presence \
   --device /dev/disk/by-id/replace-with-actual-optical-drive \
   --mount /mnt/optical/media-room
 ```
 
-For Compose, map the stable host device to `/dev/optical`, bind the mounted
-filesystem read-only, and add the host device's numeric group with
-`group_add`. The complete commented shape is in
+Commercial AACS/BD+ Blu-rays need a working decryption backend in the same
+runtime as the optical FFmpeg. The image does not bundle MakeMKV, license
+credentials, or disc keys. An operator may install a compatible MakeMKV and
+LibMMBD for that runtime, then set `LIBAACS_PATH` and `LIBBDPLUS_PATH` to
+the installed `libmmbd.so.0` file. LibMMBD also needs its `makemkvcon`
+executable and companion libraries; mounting only `libmmbd.so.0` from a
+different Linux distribution is not a supported shortcut. Without that
+backend (or usable operator-supplied AACS keys), the Developer readiness
+section reports the protected-disc failure but never prevents saving the
+optical enable switch. [MakeMKV's LibMMBD documentation](https://www.makemkv.com/libmmbd/)
+describes the on-the-fly integration; its licensing and installation remain
+the operator's choice.
+
+For Compose, map the stable host block device to `/dev/optical`, bind the
+mounted filesystem read-only, and add the host device's numeric group with
+`group_add`. A LibMMBD-backed reader may additionally need this drive's
+SCSI-generic endpoint, such as `/dev/sg1`; identify the exact peer from
+`/sys/class/block/srN/device/scsi_generic/` and map only that endpoint and
+its group. Mapping `/dev/sr0` alone did not let the 2026-09-29 lab MakeMKV
+installation discover the drive. The complete commented shape is in
 [`docker-compose.override.example.yml`](docker-compose.override.example.yml).
 Set the TOML paths to the container-side paths. Do not grant broad privileged
 mode or mount `/dev` wholesale.
+
+On a Pioneer BDR-XD07U in the isolated 2026-09-29 lab, MakeMKV's default
+LibreDrive probe hung while the disc was inserted. Its documented `SDF_STOP`
+setting, scoped to that drive's ID from a bounded debug log, let the title
+scan complete without firmware access. Do not guess an ID or change drive
+firmware/region settings. A completed title scan is not decryption proof:
+the same lab has not yet produced a decoded Blu-ray frame through LibMMBD.
 
 Eject is generation- and session-checked by the API before the helper receives
 an ioctl request. Disabling optical stops observation and fences the active

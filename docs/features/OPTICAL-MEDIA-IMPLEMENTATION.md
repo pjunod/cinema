@@ -61,13 +61,15 @@ the drive host is Linux.
 | One active viewing session per drive | Multiple viewers: competing reads need a different admission/caching policy |
 | Configured Linux drives, insertion/removal, authorized eject | Arbitrary network URLs, user-supplied device paths or remote mounts |
 | Disc-specific progress and optional verified metadata match | Automatic movie/episode matching from a volume label |
-| Readable media and explicit capability/protection failures | A blanket promise that all protected commercial discs play |
+| Ordinary retail CSS DVD and AACS/BD+ Blu-ray playback with a configured, lawful reader backend; explicit failures for genuinely unsupported discs | A blanket promise that every protection revision or region combination works |
 | Tiny authored disc-folder fixtures for testing | User-facing ISO/folder library import and full-disc copying |
 
 Physical media is the objective. Folder fixtures alone cannot complete this
-effort. Commercial protection requirements remain visible: collect the user's
-representative discs if available, report compatibility per backend/build,
-and do not describe unreadable retail media as supported.
+effort. The inserted commercial Blu-ray on `nynuc` is the available acceptance
+disc; a protected DVD is still needed for physical CSS acceptance. A typed
+protection refusal is useful diagnostic behavior, not completion of ordinary
+retail playback. Report compatibility per backend/build and do not describe
+unreadable retail media as supported.
 
 ### 1.2 Release invariants
 
@@ -797,9 +799,11 @@ permissions. Avoid persisting or replicating device credentials/key material.
 
 Verify FFmpeg build options and library notices using the repository license
 checks. FFmpeg's DVD demuxer requires libdvdnav/libdvdread build support and
-provides no decryption; libbluray alone does not cover many AACS/BD+ discs.
-Record supported combinations and failures. Do not auto-download protection
-keys, change drive region settings, or claim original menus as title playback.
+provides no decryption; CSS DVDs need a compatible CSS reader. Libbluray
+alone does not cover many AACS/BD+ discs, so a compatible, operator-installed
+protection backend must be qualified with a real protected disc. Record
+supported combinations and failures. Do not auto-download protection keys,
+change drive region settings, or claim original menus as title playback.
 Dependency choice/redistribution must pass existing project policy before
 packaging; a subprocess boundary is not by itself a license conclusion.
 

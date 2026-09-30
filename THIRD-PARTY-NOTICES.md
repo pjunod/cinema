@@ -6,11 +6,11 @@ require. Full license texts that are not Apache-2.0 live in
 [`licenses/`](licenses/); Apache-2.0 components are covered by the root
 [LICENSE](LICENSE).
 
-plurx is Apache-2.0. Nothing it ships is copyleft, so nothing here imposes a
-copyleft obligation on plurx or on anything built with it. Two things sit
-close enough to that line to be worth stating plainly: ffmpeg, which plurx
-invokes but never links (§1), and JUnit, which is copyleft but test-scoped
-and never reaches a shipped artifact (§5).
+plurx is Apache-2.0. The application does not link a copyleft media library,
+but its Docker image ships separate GPL media executables and `libdvdcss`.
+Their distribution obligations apply to those components, not to plurx's
+Apache-2.0 code. JUnit is copyleft but test-scoped and never reaches a shipped
+artifact (§5).
 
 Dependency licenses come from `cargo metadata` over the resolved graph, not
 from `Cargo.lock` — the lockfile records versions and sources, never license
@@ -52,7 +52,14 @@ binaries, not for plurx. Two ways to stay clean:
 # deploy/install already does on bare metal.
 ```
 
-`Dockerfile.store-shard` installs no ffmpeg and is unaffected.
+The optical-capable FFmpeg 8.1.3 build and VideoLAN `libdvdcss` 1.6.0 are
+additional GPL components of the main Docker image. Their exact source
+archives are included at `/usr/share/src/plurx-optical/` beside the installed
+binaries. The optical FFmpeg links libdvdnav, libdvdread, libbluray and x264;
+it is not the default general-media encoder. The image does not include
+MakeMKV, LibMMBD, disc keys, or a license credential. Operators who add such
+a backend must honor its separate license. `Dockerfile.store-shard` installs
+no ffmpeg and is unaffected.
 
 **How to read it:** the distinction is linkage, not proximity. Shipping
 ffmpeg *next to* plurx is aggregation and leaves plurx's license alone;

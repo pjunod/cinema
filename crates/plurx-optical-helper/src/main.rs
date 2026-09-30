@@ -270,7 +270,10 @@ mod linux {
             return Err("no playable optical titles were found".into());
         }
         let fingerprint = fingerprint(format, &mount, &navigation_root)?;
-        let ffprobe = std::env::var_os("PLURX_FFPROBE").unwrap_or_else(|| "ffprobe".into());
+        let ffprobe = std::env::var_os("PLURX_OPTICAL_FFPROBE")
+            .filter(|value| !value.is_empty())
+            .or_else(|| std::env::var_os("PLURX_FFPROBE").filter(|value| !value.is_empty()))
+            .unwrap_or_else(|| "ffprobe".into());
         let mut titles = Vec::new();
         let mut diagnostics = Vec::new();
         for locator in locators {

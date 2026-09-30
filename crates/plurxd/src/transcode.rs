@@ -19072,7 +19072,9 @@ impl TranscodeManager {
             )
         })?;
         let deinterlace = optical_probe_requires_deinterlace(probe_json);
-        let encoder = self.encoder().await;
+        // The title-aware reader is independently packaged and may not carry
+        // the hardware encoders measured for ordinary file playback.
+        let encoder = Encoder::Software;
         let workload = Workload::of_playback_facts(facts, target_height);
         let software_threads = workload
             .software_threads()
@@ -19108,7 +19110,9 @@ impl TranscodeManager {
             "optical-v1:{}",
             hex::encode(Sha256::digest(source_identity.as_bytes()))
         );
-        let engine = crate::ffmpeg::EncodedEngine::capture(
+        let optical_ffmpeg = crate::ffmpeg::optical_ffmpeg_bin();
+        let engine = crate::ffmpeg::EncodedEngine::capture_for(
+            &optical_ffmpeg,
             options
                 .subtitle_burn
                 .as_ref()
@@ -19125,8 +19129,8 @@ impl TranscodeManager {
             grid,
             subtitle: None,
             subtitle_digest: None,
-            ffmpeg_build: crate::ffmpeg::ffmpeg_build().await,
-            executable: crate::ffmpeg::EncodedExecutable::capture()
+            ffmpeg_build: crate::ffmpeg::ffmpeg_build_for(&optical_ffmpeg).await,
+            executable: crate::ffmpeg::EncodedExecutable::capture_for(&optical_ffmpeg)
                 .await
                 .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?,
             engine,

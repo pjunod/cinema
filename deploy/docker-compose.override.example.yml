@@ -55,7 +55,10 @@ services:
       # - /mnt/shared/plurx-cache:/var/cache/plurx-shared
       # Optional optical mount. The same container path belongs in
       # [[optical.drives]].mount_path; keep it read-only. Pair it with the
-      # stable block-device mapping in the devices section below.
+      # stable block-device mapping in the devices section below. Protected
+      # Blu-ray readers such as LibMMBD may also need the drive's matching
+      # SCSI-generic /dev/sgN endpoint (find it under
+      # /sys/class/block/srN/device/scsi_generic/); map only that endpoint.
       # - /mnt/optical/media-room:/mnt/optical/media-room:ro
       # Optional persistent-cache and disposable-scratch roots, paired with the
       # PLURX_CACHE_DIR / PLURX_TRANSCODE_DIR block below. Create both host
@@ -72,6 +75,14 @@ services:
     # environment:
     #   PLURX_FFMPEG: "/usr/lib/jellyfin-ffmpeg/ffmpeg"
     #   PLURX_FFPROBE: "/usr/lib/jellyfin-ffmpeg/ffprobe"
+    #   PLURX_OPTICAL_FFMPEG: "/opt/plurx-optical/bin/ffmpeg"
+    #   PLURX_OPTICAL_FFPROBE: "/opt/plurx-optical/bin/ffprobe"
+    #   # If an operator-installed, compatible LibMMBD is present in this
+    #   # container, point libbluray at it for protected Blu-ray titles:
+    #   LIBAACS_PATH: "/usr/lib/libmmbd.so.0"
+    #   LIBBDPLUS_PATH: "/usr/lib/libmmbd.so.0"
+    #   # Only if this drive needs it: use its exact ID from MakeMKV's debug log.
+    #   # SDF_STOP: "PIONEER_..."
     #   PLURX_HWACCEL: "vaapi"   # nvenc | qsv | vaapi | videotoolbox | software
     #   PLURX_SHARED_CACHE_DIR: "/var/cache/plurx-shared"
     #   PLURX_SHARED_CACHE_ID: "media-cache-a"
@@ -95,6 +106,7 @@ services:
     # group below (stat -c '%g' /dev/sr0) when the image uid needs it.
     # devices:
     #   - /dev/disk/by-id/replace-with-actual-optical-drive:/dev/optical
+    #   - /dev/sg1:/dev/sg1  # only this drive's verified SCSI-generic peer
     #   # Intel QuickSync / AMD VA-API, when needed:
     #   - /dev/dri:/dev/dri
     # group_add:

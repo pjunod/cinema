@@ -1936,7 +1936,14 @@ async fn probe_system(
     let optical_capabilities = if config.optical.drives.is_empty() {
         None
     } else {
-        Some(probe_optical_capabilities(&ffmpeg, &ffprobe, &config.optical.helper_path).await)
+        Some(
+            probe_optical_capabilities(
+                &crate::ffmpeg::optical_ffmpeg_bin(),
+                &crate::ffmpeg::optical_ffprobe_bin(),
+                &config.optical.helper_path,
+            )
+            .await,
+        )
     };
     for (codec, backend, decoder) in measured_decoders.measured_paths() {
         tracing::info!(%codec, backend = backend.name(), %decoder, "measured the decoder this ffmpeg selects");

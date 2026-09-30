@@ -78,6 +78,17 @@ pub fn ffprobe_bin() -> String {
     resolve_bin(std::env::var("PLURX_FFPROBE").ok(), &default_bin("ffprobe"))
 }
 
+/// The title-aware reader can differ from the general media encoder. In the
+/// packaged image Jellyfin FFmpeg handles normal VOD, while the optical build
+/// carries the DVD-Video demuxer that Jellyfin FFmpeg does not ship.
+pub fn optical_ffmpeg_bin() -> String {
+    resolve_bin(std::env::var("PLURX_OPTICAL_FFMPEG").ok(), &ffmpeg_bin())
+}
+
+pub fn optical_ffprobe_bin() -> String {
+    resolve_bin(std::env::var("PLURX_OPTICAL_FFPROBE").ok(), &ffprobe_bin())
+}
+
 /// Pass held source/sidecar capabilities into reserved child FDs. Duplicate
 /// every original before assigning any target: an original may itself be
 /// fd 3 or fd 5. The post-fork closure performs only descriptor syscalls.
@@ -320,6 +331,12 @@ impl EncodedExecutable {
         Self::capture_at(path).await
     }
 
+    pub async fn capture_for(bin: &str) -> Result<Self, String> {
+        let path =
+            resolve_executable_path(bin).ok_or("cannot resolve the optical encoder executable")?;
+        Self::capture_at(path).await
+    }
+
     async fn capture_at(path: std::path::PathBuf) -> Result<Self, String> {
         let (digest, object_version) = hash_engine_object(&path).await?;
         Ok(Self {
@@ -338,16 +355,21 @@ impl EncodedExecutable {
 
 /// The executable and first line it reports from `-version`.
 pub async fn ffmpeg_build() -> String {
-    let bin = ffmpeg_bin();
-    let version = probe_ffmpeg(&["-version"])
-        .await
-        .ok()
-        .and_then(|text| {
-            text.lines()
-                .find(|line| !line.trim().is_empty())
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| "version unavailable".to_owned());
+    ffmpeg_build_for(&ffmpeg_bin()).await
+}
+
+pub async fn ffmpeg_build_for(bin: &str) -> String {
+    let version =
+        crate::bounded_process::output(bin, &["-version"], Duration::from_secs(5), 64 * 1024)
+            .await
+            .ok()
+            .and_then(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "version unavailable".to_owned());
     format!("{bin} ({version})")
 }
 
@@ -1568,9 +1590,19 @@ pub(crate) struct EncodedEngine {
 
 impl EncodedEngine {
     pub async fn capture(text_burn: bool) -> Result<Self, String> {
-        let media = FRAGMENT_INDEX_ENGINE
-            .get_or_init(fragment_index_engine_inner)
-            .await;
+        Self::capture_for(&ffmpeg_bin(), text_burn).await
+    }
+
+    pub async fn capture_for(bin: &str, text_burn: bool) -> Result<Self, String> {
+        let other;
+        let media = if bin == ffmpeg_bin() {
+            FRAGMENT_INDEX_ENGINE
+                .get_or_init(fragment_index_engine_inner)
+                .await
+        } else {
+            other = fragment_index_engine_inner_for(bin).await;
+            &other
+        };
         if !media.usable || !engine_objects_are_current(&media.objects) {
             return Err("the encoder dependency closure could not be attested".to_owned());
         }
@@ -1700,6 +1732,10 @@ fn engine_objects_are_current(objects: &[(std::path::PathBuf, String)]) -> bool 
 
 async fn fragment_index_engine_inner() -> FragmentIndexEngine {
     let bin = ffmpeg_bin();
+    fragment_index_engine_inner_for(&bin).await
+}
+
+async fn fragment_index_engine_inner_for(bin: &str) -> FragmentIndexEngine {
     let resolved = resolve_executable_path(&bin);
     let mut digest = Sha256::new();
     digest.update(b"plurx/fragment-index/engine\0");
