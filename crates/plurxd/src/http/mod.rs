@@ -9197,6 +9197,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_library_activity_distinguishes_queued_from_remote_execution() {
+        use plurx_core::domain::{LibraryKind, NewLibrary};
+        use plurx_core::store::background_jobs::{ClaimJob, ClaimOutcome, JobKind};
+        use plurx_core::store::background_jobs_library::LibraryWorkQuery;
+
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let root = crate::test_tempdir().expect("library root");
+        let library = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Recordings".into(),
+                kind: LibraryKind::Recordings,
+                paths: vec![root.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        assert!(state.jobs.trigger_scan(library.id).await);
+        let statuses = state.jobs.all_statuses().await;
+        assert_eq!(statuses[&library.id].phase.as_deref(), Some("queued"));
+        let (status, activities) = call(&app, get("/api/v1/activity", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(activities
+            .as_array()
+            .expect("activities")
+            .iter()
+            .any(|a| a["label"] == "Queued scan for Recordings · waiting for a worker"));
+        assert!(!activities.to_string().contains("Scanning Recordings"));
+
+        let record = state
+            .store
+            .library_work_requests(LibraryWorkQuery {
+                pending_only: true,
+                limit: 1,
+                ..Default::default()
+            })
+            .await
+            .expect("request")
+            .remove(0);
+        let job = state
+            .store
+            .background_job(&record.job_id)
+            .await
+            .expect("read")
+            .expect("job");
+        let now_ms = crate::state::clock_ms();
+        let claim = state
+            .store
+            .claim_job(ClaimJob {
+                job_id: job.id,
+                expected_revision: job.revision,
+                node_id: "remote-worker".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::LibraryScan,
+                payload_version: 1,
+                now_ms,
+                dispatched_at_ms: now_ms,
+            })
+            .await
+            .expect("remote claim");
+        assert!(matches!(claim, ClaimOutcome::Claimed { .. }), "{claim:?}");
+        // This observer has no local scanner. It must use replicated job state.
+        let statuses = state.jobs.all_statuses().await;
+        assert!(statuses[&library.id].running);
+        assert_eq!(statuses[&library.id].phase.as_deref(), Some("scanning"));
+        let (status, activities) = call(&app, get("/api/v1/activity", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(activities
+            .as_array()
+            .expect("activities")
+            .iter()
+            .any(|a| a["label"] == "Scanning Recordings"));
+        assert!(!activities.to_string().contains("waiting for a worker"));
+    }
+
+    #[tokio::test]
     async fn durable_job_api_is_admin_only_redacts_ownership_and_cancels_idempotently() {
         use plurx_core::store::background_jobs::{
             ClaimJob, EnqueueJob, JobKind, JobPayload, JobRequest,
@@ -16543,6 +16621,17 @@ mod tests {
         .await;
         assert_eq!(filtered["reopened"], 0, "{filtered}");
 
+        // The earlier control scenario intentionally left a fragment request
+        // queued. Retire it before letting this test's worker run; otherwise
+        // that unrelated source read owns the sole maintenance slot while the
+        // semantic rebuild below waits behind it.
+        let (status, retired) = call(
+            &app,
+            delete(&format!("/api/v1/analysis/jobs/{successor}"), Some(&admin)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{retired}");
+
         // Manual semantic boundaries are a separate, revision-fenced admin
         // action. A rebuild cannot implicitly opt into discarding one.
         let manual_url = format!("/api/v1/files/{}/timeline-annotations/credits", s.file);
@@ -16602,7 +16691,13 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert_eq!(marker_status["state"], "published", "{marker_status}");
+        let all_analysis = call(&app, get("/api/v1/analysis/jobs", Some(&admin)))
+            .await
+            .1;
+        assert_eq!(
+            marker_status["state"], "published",
+            "{marker_status}; all={all_analysis}"
+        );
         let marker_offers = || {
             crate::telemetry::prometheus()
                 .lines()

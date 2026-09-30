@@ -107,6 +107,7 @@ use plurx_core::metadata::{self, AniListClient, TmdbClient};
 use plurx_core::store::SqliteStore;
 use plurx_core::store::{keys, Store};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::io::IsTerminal;
 use tracing_subscriber::EnvFilter;
 
@@ -305,6 +306,8 @@ enum Command {
     /// Probe a running local server's /readyz and exit 0/1 (container
     /// health checks: no curl needed in the image).
     Healthcheck,
+    /// Print the exact fragment-index engine identity used by this binary.
+    MediaRuntimeIdentity,
     /// Advertise a bridge-networked server on the host's Bonjour interfaces.
     /// This is intended for the discovery companion container; the HTTP server
     /// remains attached to its normal Docker networks.
@@ -519,6 +522,7 @@ async fn dispatch(
         }
         Command::RefreshMetadata { .. } => {}
         Command::Healthcheck
+        | Command::MediaRuntimeIdentity
         | Command::Advertise { .. }
         | Command::Cluster { .. }
         | Command::Restore { .. }
@@ -544,6 +548,13 @@ async fn dispatch(
                 eprintln!("unhealthy: {error:#}");
                 std::process::exit(1);
             }
+            Ok(())
+        }
+        Command::MediaRuntimeIdentity => {
+            println!(
+                "{}",
+                serde_json::to_string(&media_runtime_identity().await)?
+            );
             Ok(())
         }
         Command::Advertise { server } => advertise(&server).await,
@@ -596,6 +607,35 @@ async fn dispatch(
             }
         }
         Command::Wal { command } => crate::wal_cli::run(command, &config).await,
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct MediaRuntimeIdentity {
+    architecture: &'static str,
+    application_sha: Option<&'static str>,
+    runtime_image_digest: Option<String>,
+    package_manifest_sha256: Option<String>,
+    engine_digest: String,
+    engine_current: bool,
+}
+
+/// The index cache key's actual FFmpeg identity, not a lookalike package or
+/// version hash. The image build writes the package manifest alongside the
+/// shipped tools; a local source build reports that field as unavailable.
+async fn media_runtime_identity() -> MediaRuntimeIdentity {
+    let manifest = std::fs::read("/usr/share/doc/plurx/media-runtime-packages.txt")
+        .ok()
+        .map(|bytes| hex::encode(Sha256::digest(bytes)));
+    MediaRuntimeIdentity {
+        architecture: std::env::consts::ARCH,
+        application_sha: option_env!("PLURX_BUILD_SHA").filter(|sha| !sha.is_empty()),
+        runtime_image_digest: std::env::var("PLURX_MEDIA_RUNTIME_DIGEST")
+            .ok()
+            .filter(|digest| !digest.is_empty()),
+        package_manifest_sha256: manifest,
+        engine_digest: crate::ffmpeg::fragment_index_engine_digest().await,
+        engine_current: crate::ffmpeg::fragment_index_engine_is_current().await,
     }
 }
 
@@ -3944,6 +3984,17 @@ mod startup_tests {
     use plurx_core::domain::Library;
     use plurx_core::store::Store;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn media_runtime_record_uses_the_fragment_cache_engine_identity() {
+        let record = media_runtime_identity().await;
+        assert_eq!(
+            record.engine_digest,
+            crate::ffmpeg::fragment_index_engine_digest().await
+        );
+        assert_eq!(record.architecture, std::env::consts::ARCH);
+        assert_eq!(record.engine_digest.len(), 64);
+    }
 
     async fn timeout_test_server(
         timeouts: HttpTimeouts,

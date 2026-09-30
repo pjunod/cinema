@@ -348,6 +348,7 @@ impl VodServe {
         &self,
         file: &MediaFile,
         video: CopyVideoOptions,
+        viewer: Option<&crate::state::PlaybackViewerDemand>,
     ) -> Result<Option<(FragmentIndex, String, String)>, String> {
         if !crate::ffmpeg::fragment_index_engine_is_current().await {
             return Err("the fragment-index engine changed; restart is required".to_owned());
@@ -414,6 +415,22 @@ impl VodServe {
                 .enqueue_cluster_fragment_index(&repair)
                 .await
                 .map_err(|error| format!("queueing the exact v2 artifact: {error}"))?;
+            if queued {
+                if let Some(viewer) = viewer.filter(|viewer| viewer.user_id > 0) {
+                    self.shared
+                        .store
+                        .join_artifact_viewer(plurx_core::store::ArtifactViewerInterest {
+                            cache_key: cache_key.clone(),
+                            file_id: file.id,
+                            target_node_id: node_id.to_owned(),
+                            user_id: viewer.user_id,
+                            playback_id: viewer.playback_id.clone(),
+                            now_ms: crate::fragment_index_cluster::unix_ms(),
+                        })
+                        .await
+                        .map_err(|error| format!("joining the exact v2 artifact: {error}"))?;
+                }
+            }
             return Err(if queued {
                 "the exact v2 artifact is queued".to_owned()
             } else {

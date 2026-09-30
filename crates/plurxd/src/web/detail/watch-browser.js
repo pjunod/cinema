@@ -188,16 +188,21 @@ async function watchLoadSeasons(page){
   const w=WATCH;
   const show=page.ancestors.find(a=>a.kind==="show"),season=page.ancestors.find(a=>a.kind==="season");
   if(!season)return;
-  const lowerHost=document.getElementById("watch-lower");if(lowerHost)lowerHost.hidden=false;
+  const lowerHost=document.getElementById("watch-lower");if(!lowerHost)return;
+  lowerHost.hidden=false;
+  // A fresh watch session starts folded; episode switches keep this DOM and
+  // the viewer's current disclosure state, without touching playback.
+  if(!document.getElementById("watch-episode-browser"))lowerHost.innerHTML='<details class="watch-episode-disclosure"><summary>Episodes</summary><div id="watch-episode-browser"></div></details>';
+  const lower=document.getElementById("watch-episode-browser");
+  lower.innerHTML='<p class="muted">Loading episodes…</p>';
   try{
     const showData=show?await api(`/items/${exactWireId(show)}`):null;
     if(WATCH!==w)return;
     const seasons=(showData?.children||[season]).filter(s=>s.kind==="season");
-    const lower=document.getElementById("watch-lower");
-    lower.innerHTML=`<div class="watch-season"><h2>Episodes</h2><button id="watch-row-toggle" class="ghost" onclick="watchToggleEpisodeRows()" aria-pressed="false">Rows</button><label>Season <select id="watch-season">${seasons.map(s=>`<option value="${esc(exactWireId(s))}" ${exactWireId(s)===exactWireId(season)?"selected":""}>${esc(s.title)}</option>`).join("")}</select></label></div><div id="watch-episodes" class="watch-episodes"></div>`;
+    lower.innerHTML=`<div class="watch-season"><button id="watch-row-toggle" class="ghost" onclick="watchToggleEpisodeRows()" aria-pressed="false">Rows</button><label>Season <select id="watch-season">${seasons.map(s=>`<option value="${esc(exactWireId(s))}" ${exactWireId(s)===exactWireId(season)?"selected":""}>${esc(s.title)}</option>`).join("")}</select></label></div><div id="watch-episodes" class="watch-episodes"></div>`;
     document.getElementById("watch-season").addEventListener("change",e=>watchSelectSeason(e.target.value));
     await watchSelectSeason(exactWireId(season));
-  }catch(e){if(WATCH===w)document.getElementById("watch-lower").innerHTML='<p>Episodes could not load. <button onclick="watchLoadSeasons(WATCH.page)">Retry</button></p>';}
+  }catch(e){if(WATCH===w)lower.innerHTML='<p>Episodes could not load. <button onclick="watchLoadSeasons(WATCH.page)">Retry</button></p>';}
 }
 async function watchSelectSeason(id){
   const w=WATCH;if(!w)return;

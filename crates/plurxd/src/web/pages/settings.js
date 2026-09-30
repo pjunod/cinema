@@ -11,6 +11,7 @@ function statusText(st,lastScanAt){
   st=currentScanStatus(st,lastScanAt);
   if(!st) return lastScanAt?`Last scan ${fmtAgo(lastScanAt)} · result unavailable`:"No scan result available";
   if(st.running){
+    if(st.phase==="queued") return "Queued · waiting for a worker"+(st.error?` — ${esc(st.error)}`:"");
     if(st.phase==="enriching") return "fetching metadata…";
     const p=st.progress;
     return "scanning…"+(p&&p.found?` ${p.processed} / ${p.found} files`:"");

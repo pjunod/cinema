@@ -122,6 +122,43 @@ function dispatchPlaybackSeekTelemetry(p,pending){
     method:["direct_play","remux","transcode"].includes(p.method)?p.method:null,
     file_id:p.fileId||null});
 }
+// One bounded route sample per viewer command. Coordinates are film milliseconds
+// so a reopened attachment with a nonzero origin remains comparable to the
+// server's published endpoints. Null means the client did not observe a fact.
+function playbackSeekTraceRanges(ranges){
+  if(!Array.isArray(ranges)) return null;
+  return ranges.slice(0,4).map(range=>[
+    Math.round(Number(range.from)),
+    Number.isFinite(Number(range.through))?Math.round(Number(range.through)):"inf",
+  ]).filter(range=>Number.isFinite(range[0]));
+}
+function recordPlaybackSeekRoute(p,pending,v,route,buffered,seekable,published,reason){
+  const measurement=pending&&pending.seekTelemetry;
+  if(!measurement||measurement.trace) return;
+  const originMs=Math.round((Number(p.offset)||0)*1000);
+  const elementMs=Number(v&&v.currentTime);
+  const trace={
+    id:`${p.attemptId||"unknown"}:${pending.sequence}`,
+    session:p.sessionId||null,
+    target_ms:pending.targetMs,
+    element_ms:Number.isFinite(elementMs)?originMs+Math.round(elementMs*1000):null,
+    origin_ms:originMs,
+    path:p.method==="direct_play"?"direct":p.hls?"hlsjs":"native_hls",
+    mode:p.method==="direct_play"?"direct":p.vod?"vod":"rolling",
+    buffered_ms:playbackSeekTraceRanges(buffered),
+    seekable_ms:playbackSeekTraceRanges(seekable),
+    published_ms:published&&published.range
+      ?playbackSeekTraceRanges([published.range])?.[0]||null:null,
+    target_duration_ms:published?published.holdbackMs:null,
+    produced_end_ms:null,
+    demand_sequence:null,
+    demand_age_ms:null,
+    route:route.route,
+    reason:reason||route.basis||"outside_coverage",
+  };
+  measurement.trace=trace;
+  clientLog({level:"info",event:"seek_route",seek_trace:JSON.stringify(trace)});
+}
 function finishPlaybackSeekTelemetry(p,pending,event){
   const measurement=pending&&pending.seekTelemetry;
   if(!measurement||measurement.startedAt==null||measurement.outcome) return false;
@@ -129,6 +166,15 @@ function finishPlaybackSeekTelemetry(p,pending,event){
   measurement.cleanup?.();
   measurement.cleanup=null;
   const report=Object.assign({},measurement.context,{level:"info",event});
+  if(measurement.trace){
+    const video=/** @type {HTMLVideoElement|null} */ (document.getElementById("video"));
+    const elementMs=Number(video&&video.currentTime);
+    report.seek_trace=JSON.stringify(Object.assign({},measurement.trace,{
+      landing_ms:event==="seek_resumed"&&Number.isFinite(elementMs)
+        ?Math.round(((Number(p.offset)||0)+elementMs)*1000):null,
+      outcome:event,
+    }));
+  }
   if(event==="seek_resumed"){
     report.ms=Math.max(0,Math.round(performance.now()-measurement.startedAt));
     report.method=["direct_play","remux","transcode"].includes(p.method)?p.method:null;
@@ -982,6 +1028,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
       const m=Object.assign({},PLAYER.meta||{},{part_offset_ms:part.part_offset_ms||0});
       const pending=beginPlaybackControlSeek(PLAYER,local,viewerInitiated,
         viewerInitiated&&!forceReopen?{startedAt:null,outcome:null,context:null,cleanup:null}:null);
+      recordPlaybackSeekRoute(PLAYER,pending,v,{route:"reopen"},null,null,null,"part_change");
       dispatchPlaybackSeekTelemetry(Object.assign({},PLAYER,{fileId:part.id}),pending);
       PENDING_ATTEMPT_REASON="seek";
       return play(part.id,PLAYER.title,Math.round(local*1000),part.duration_ms||0,m,undefined,
@@ -1022,6 +1069,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   const seekIntent=beginPlaybackControlSeek(PLAYER,targetSec,viewerInitiated,seekTelemetry);
   endWait(false);
   if(restartPendingPlaybackOpen(PLAYER,forceReopen?"stall-restart":"seek")){
+    recordPlaybackSeekRoute(PLAYER,seekIntent,v,{route:"reopen"},null,null,null,"pending_open");
     dispatchPlaybackSeekTelemetry(PLAYER,seekIntent);
     return;
   }
@@ -1033,13 +1081,19 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   const me=PLAYER;
   const bufferedMs=playbackSeekBufferedRangesMs(v,me);
   const published=playbackSeekPublishedRangeMs(me);
+  const seekableMs=playbackSeekSeekableRangesMs(v,me);
   const route=PlaybackPolicy.seekRoute({
     method:me.method,copyHls:!!me.copyHls,vod:!!me.vod,forceReopen,
     changing:!!me.pendingMediaChange,targetMs:targetSec*1000,bufferedMs,
     publishedMs:published&&published.range,
     holdbackMs:published&&published.holdbackMs,
-    seekableMs:playbackSeekSeekableRangesMs(v,me),
+    seekableMs,
   });
+  const outsideSeekable=Array.isArray(seekableMs)
+    &&!seekableMs.some(range=>targetSec*1000>=range.from&&targetSec*1000<=range.through);
+  recordPlaybackSeekRoute(me,seekIntent,v,route,bufferedMs,seekableMs,published,
+    route.route==='local'?route.basis:forceReopen?"forced_reopen"
+      :me.pendingMediaChange?"changing":outsideSeekable?"outside_seekable":"outside_coverage");
   if(route.route==='local'){
     const attachment=me.mediaAttachment, atMs=route.atMs;
     const vod=route.basis==='vod';
@@ -1064,6 +1118,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
       if(settled) return;
       settled=true;
       cleanup();
+      if(seekIntent.seekTelemetry?.trace) seekIntent.seekTelemetry.trace.fallback=why;
       clientLog({level:'warn',event:'seek_local_fallback',
         detail:`${me.copyHls?'copy_hls':me.method||'unknown'}:${why}`,
         message:'local seek did not settle; reopening at the same target'});

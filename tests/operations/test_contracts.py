@@ -1067,14 +1067,23 @@ assert.equal(context.ACT_TIMER, null);
 
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
         dockerfile = read("Dockerfile")
+        # Only the shipped media installer owns these two cache-clean points.
+        # The CI tooling stage cleans its independently installed build tools.
+        dockerfile = dockerfile.split("FROM runtime-assets AS ci", 1)[0]
         distro_install = dockerfile.index("intel-media-va-driver-non-free")
         first_clean = dockerfile.index("apt-get clean", distro_install)
-        jellyfin_install = dockerfile.index("apt-get install -y --no-install-recommends jellyfin-ffmpeg8")
+        jellyfin_verify = dockerfile.index("sha256sum -c -", first_clean)
+        jellyfin_install = dockerfile.index(
+            'apt-get install -y --no-install-recommends "/tmp/${jellyfin_deb}"'
+        )
+        jellyfin_remove = dockerfile.index('rm -f "/tmp/${jellyfin_deb}"', jellyfin_install)
         second_clean = dockerfile.index("apt-get clean", jellyfin_install)
 
         self.assertLess(distro_install, first_clean)
-        self.assertLess(first_clean, jellyfin_install)
-        self.assertLess(jellyfin_install, second_clean)
+        self.assertLess(first_clean, jellyfin_verify)
+        self.assertLess(jellyfin_verify, jellyfin_install)
+        self.assertLess(jellyfin_install, jellyfin_remove)
+        self.assertLess(jellyfin_remove, second_clean)
         self.assertEqual(dockerfile.count("&& apt-get clean"), 2)
 
     def test_docker_build_requires_the_profile5_renderer_used_at_runtime(self):

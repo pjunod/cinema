@@ -467,6 +467,7 @@ impl TranscodeManager {
             let vod = self
                 .try_vod_session(
                     req,
+                    recovery.user_id,
                     user_name,
                     supersession_user,
                     replacement_deadline,
@@ -969,9 +970,11 @@ impl TranscodeManager {
 
     /// The only public HLS presentation. A request either receives immutable
     /// VOD or fails with a stable refusal; it never enters the live arms.
+    #[allow(clippy::too_many_arguments)]
     async fn try_vod_session(
         &self,
         req: &SessionRequest,
+        user_id: i64,
         user_name: &str,
         supersession_user: &str,
         replacement_deadline: Option<tokio::time::Instant>,
@@ -1065,7 +1068,7 @@ impl TranscodeManager {
         };
         let start = if let Some(admission) = serving_admission {
             self.vod
-                .try_create_cluster(
+                .try_create_cluster_for_viewer(
                     prepared,
                     &file,
                     &settings,
@@ -1076,6 +1079,10 @@ impl TranscodeManager {
                         admission.generation,
                         admission.deadline.into_std(),
                     ),
+                    crate::state::PlaybackViewerDemand {
+                        user_id,
+                        playback_id: req.playback_id.clone(),
+                    },
                 )
                 .await
                 .map_err(|error| {
@@ -1091,7 +1098,17 @@ impl TranscodeManager {
                 })?
         } else {
             self.vod
-                .try_create(prepared, &file, &settings, attribution, session_id)
+                .try_create_for_viewer(
+                    prepared,
+                    &file,
+                    &settings,
+                    attribution,
+                    session_id,
+                    crate::state::PlaybackViewerDemand {
+                        user_id,
+                        playback_id: req.playback_id.clone(),
+                    },
+                )
                 .await?
         };
         if let Some((encoder, grade, pipeline)) = codec_qualification {

@@ -8,6 +8,10 @@ from pathlib import Path
 
 
 RUNTIME_STAGE = "FROM debian:bookworm-slim"
+RUNTIME_FINAL_STAGE = "FROM runtime-assets AS runtime"
+IMMUTABLE_IMAGE = re.compile(
+    r"^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[0-9a-f]{64}$"
+)
 SUPPORTED_BINARY_COPIES = (
     (
         "plurxd",
@@ -63,9 +67,19 @@ def required_binaries(source: str) -> tuple[str, ...]:
     return tuple(binaries)
 
 
-def render(source: str) -> str:
+def render(source: str, runtime_image: str | None = None) -> str:
     runtime = _runtime(source)
     binaries = required_binaries(source)
+    if runtime_image is not None:
+        if not IMMUTABLE_IMAGE.fullmatch(runtime_image):
+            raise ValueError("media runtime image must have an immutable sha256 digest")
+        if runtime.count(RUNTIME_FINAL_STAGE) != 1:
+            raise ValueError("tagged Dockerfile must contain one final runtime stage")
+        runtime = (
+            f"FROM {runtime_image} AS runtime-assets\n\n"
+            + RUNTIME_FINAL_STAGE
+            + runtime.split(RUNTIME_FINAL_STAGE, 1)[1]
+        )
     for name, source_copy, artifact_copy in SUPPORTED_BINARY_COPIES:
         if name in binaries:
             runtime = runtime.replace(source_copy, artifact_copy)
@@ -116,10 +130,13 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--list-binaries", action="store_true")
     mode.add_argument("--binary-export", action="store_true")
+    parser.add_argument("--runtime-image")
     parser.add_argument("source", type=Path)
     parser.add_argument("output", type=Path, nargs="?")
     args = parser.parse_args()
     source = args.source.read_text(encoding="utf-8")
+    if args.runtime_image and (args.binary_export or args.list_binaries):
+        parser.error("--runtime-image is only valid when rendering packaging")
     if args.list_binaries:
         if args.output is not None:
             parser.error("--list-binaries does not accept an output path")
@@ -128,7 +145,11 @@ def main() -> int:
         return 0
     if args.output is None:
         parser.error("output is required unless --list-binaries is used")
-    generated = render_binary_export(source) if args.binary_export else render(source)
+    generated = (
+        render_binary_export(source)
+        if args.binary_export
+        else render(source, args.runtime_image)
+    )
     args.output.write_text(generated, encoding="utf-8")
     return 0
 
