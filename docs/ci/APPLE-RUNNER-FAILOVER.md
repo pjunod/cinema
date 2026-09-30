@@ -1,5 +1,7 @@
 # Apple runners — the M4 primary and M3 Max standby
 
+**Status:** live · **Updated:** 2026-09-30
+
 Companion to [CI_TEST_OVERHAUL_PLAN.md](CI_TEST_OVERHAUL_PLAN.md) (what Apple
 CI verifies) and [RUNNER-DISK.md](RUNNER-DISK.md) (runner disk maintenance).
 This document owns Apple runner preference, outage detection and installation.
