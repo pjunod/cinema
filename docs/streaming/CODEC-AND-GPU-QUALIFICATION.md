@@ -693,6 +693,19 @@ are checked by `qualified()`; existing boot capability validation remains in
 the node's resolution path. No new tuple is admitted, no argv changes, and
 the plan/digest/recipe versions stay unchanged.
 
+**Sole review disposition, 2026-09-30 — [#649 review 22](http://192.168.4.7:3000/noirr/plurx/pulls/649#issuecomment-6639):**
+P2 accepted: the incumbent HDR10 builder always emits bitrate-bounded VBR,
+so the new delivered contract normalizes a supplied HDR10 QVBR preference
+to VBR and `qualified()` refuses a manually malformed HDR10/QVBR contract.
+SDR retains its supplied effective mode. The incumbent options and recipe
+field bytes remain unchanged, including their historical HDR10 option key
+space; no cache version bump or invalidation is smuggled into the correction.
+Focused regressions prove effective-mode truth, malformed-tuple refusal,
+byte-identical encoder argv and retained legacy options/identity. P3 accepted:
+the rollout paragraph now follows task PRs into the existing effort, focused
+regressions/current-head Effort gate and separate exact-tree final promotion.
+No second formal review or new media qualification is claimed.
+
 Focused proof:
 `cargo +1.97.1 test -p plurx-core --features hiqlite-store --lib output_codec_contract`
 covers all legacy family/grade pairs and renderer pairings, refused HEVC SDR
@@ -814,7 +827,9 @@ display/3D hardware or accepted NVENC route and no VideoToolbox route; M7/M8
 are inapplicable for this inventory only. A new node or changed inventory
 reopens them. Generic HEVC encoder symbols are not qualified HEVC SDR graphs.
 
-Fast lane for the plan PR: `make unit`. Focused per milestone as named in §5.
+Task PRs use the focused per-milestone regressions named in §5 and the
+blocking Effort development gate. Full-suite `make unit` evidence belongs
+to final qualification, not a claimed result of this scoped M2 task.
 `make benchmark-check` still gates the committed A/B coverage
 ([../BENCHMARKING.md](../BENCHMARKING.md)); M1's new fixtures do not enter
 that matrix and must not silently change it.
@@ -891,8 +906,13 @@ Report one table. Name the OS/browser versions.
 playing an HEVC SDR transcode at 1080 and 2160 in both fMP4 and MPEG-TS,
 with the same four columns.
 
-Rollout: one draft plan PR into `main`, with logical milestone commits and
-Execution-log rows, then the fast lane. Metric names
+Rollout: reviewable milestone task PRs into the existing
+`effort/architecture-review-2026-09-20`, with logical commits and Execution-log
+rows, focused local regressions recorded in each PR and the blocking current-head
+Effort development gate. This M2 task did not run the full `make unit` suite.
+Final promotion is separate: freeze task merges, merge current main into the
+effort, qualify that exact tree and pass the Main promotion gate before merging
+the effort into main. A moved base requires new exact-tree evidence. Metric names
 and labels are fixed by §3.2 and are the only observability surface added.
 No settings key is added; `PLURX_HWACCEL` and `PLURX_TONEMAP` keep their
 current meaning. Cache identity, per milestone: M0 and M2 invalidate
