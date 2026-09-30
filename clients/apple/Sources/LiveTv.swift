@@ -695,7 +695,7 @@ struct LiveTvFailure: Error, LocalizedError, Sendable {
         // the persisted hint, and the press after this one retires it.
         case "no_answer": return "The server did not answer. Press the channel again."
         case "invalid_request": return "This device sent a live-TV request the server could not read. Update the app."
-        case "invalid_settings": return "Live TV settings are incomplete. An administrator can finish them in Settings → Developer."
+        case "invalid_settings": return "Live TV settings are incomplete. An administrator can finish the tuner configuration in Settings → Live TV."
         case "admin_required": return "Only an administrator can change Live TV settings."
         default: return "The session server is unavailable. Check the server and its network connection."
         }
@@ -1006,6 +1006,14 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
                                                            authenticated: true, session: transport))
     }
 
+    /// The enable card's prerequisites as the server last observed them — the
+    /// same `GET /live-tv/readiness` the web's Enable Live TV card reads when it
+    /// renders. Advisory: nothing reads it back into the enable.
+    func currentReadiness() async throws -> LiveTvReadiness {
+        try decode(LiveTvReadiness.self, data: await request("live-tv/readiness", method: "GET",
+                                                           authenticated: true, session: transport))
+    }
+
     /// The guide's advisory card. A read of what the owner already knows: it
     /// never triggers a refresh and never gates anything the operator can do.
     func guideReadiness() async throws -> LiveTvGuideReadiness {
@@ -1158,7 +1166,7 @@ enum LiveTvStartReducer {
     /// `node_maintenance` row says.
     static let rendered: Set<String> = [
         "live_tv_disabled", "live_tv_protocol_unready", "tuner_capacity",
-        "tuner_unavailable", "channel_not_found", "drm_unsupported",
+        "encoder_capacity", "tuner_unavailable", "channel_not_found", "drm_unsupported",
         "codec_unsupported", "startup_timeout", "source_format_changed",
         "stream_failed", "capability_expired", "settings_conflict",
         "invalid_request", "invalid_settings", "admin_required",

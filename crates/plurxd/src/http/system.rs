@@ -5368,7 +5368,7 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{codec_qualification_metrics}{decode_fact_metrics}{auth_revocation_metrics}{login_metrics}{live_tv_metrics}{backup_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}{interlace_metrics}{artwork_metrics}",
+        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{codec_qualification_metrics}{decode_fact_metrics}{auth_revocation_metrics}{login_metrics}{live_tv_metrics}{backup_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{availability_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}{interlace_metrics}{artwork_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         // The takeover statics, then this node's route-cache instrumentation
@@ -5376,6 +5376,7 @@ pub(crate) async fn metrics(
         takeover_metrics = crate::media_sessions::prometheus() + &state.route_cache.prometheus(),
         control_metrics = crate::playback_control::prometheus(),
         playback_metrics = crate::telemetry::prometheus(),
+        availability_metrics = crate::availability::prometheus(),
         // The retained live-HLS engine spends real encode time. Zero on a node
         // whose VOD coverage is complete, which is the number that says the
         // fallback can be turned off.

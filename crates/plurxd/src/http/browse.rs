@@ -395,22 +395,28 @@ pub async fn item_detail(
         files.sort_by(|left, right| natural_path_cmp(&left.path, &right.path));
     }
 
-    // Check each file actually resolves on disk right now, so the client can
-    // refuse to "play" a file that's missing (unmounted share, moved file,
-    // wrong container mount) instead of opening a dead player. One stat per
-    // file — cheap for the handful a movie/episode has. Admins also get the
-    // full path back so they can see what to fix.
+    // Start every file's node-local observation together and give the whole
+    // detail page one deadline, including a many-part audiobook. This is an
+    // advisory answer; playback's source open remains authoritative.
     //
     // Track defaults are independent of that availability check: they use the
     // stored stream rows plus one settings snapshot, never a playback decision
     // or a media probe. Missing/unmounted files can therefore still explain
     // which tracks they contain and which policy choice would apply.
     let playback_prefs = state.transcode.lang_prefs().await;
+    let availability = state
+        .detail_availability
+        .observe_many(
+            &files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+        )
+        .await;
     let mut file_dtos: Vec<FileDto> = Vec::with_capacity(files.len());
     let mut part_offset_ms = 0_i64;
-    for f in files {
+    for (f, observation) in files.into_iter().zip(availability) {
         let path = f.path.clone();
-        let available = tokio::fs::metadata(&path).await.is_ok();
         let raw_probe = state.catalogue.get_file_probe_json(f.id).await?;
         let duration_ms = f.duration_ms.unwrap_or(0).max(0);
         let mut vod_index_refusal = None;
@@ -471,7 +477,9 @@ pub async fn item_detail(
             })
         };
         let mut dto = FileDto::from_media_file(f, &playback_prefs);
-        dto.available = available;
+        dto.available = observation.available();
+        dto.availability = observation.state.as_str();
+        dto.availability_observed_at_ms = observation.observed_at_ms;
         dto.vod_index_status = vod_index_status;
         dto.vod_index_refusal = vod_index_refusal.map(|(_, detail)| detail);
         dto.part_offset_ms = part_offset_ms;
@@ -479,9 +487,7 @@ pub async fn item_detail(
         if item.kind == ItemKind::Audiobook {
             part_offset_ms = part_offset_ms.saturating_add(duration_ms);
         }
-        if !available && user.is_admin {
-            dto.missing_path = Some(path.to_string_lossy().into_owned());
-        }
+        dto.missing_path = observation.missing_path(user.is_admin, &path);
         file_dtos.push(dto);
     }
 

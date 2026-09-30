@@ -232,8 +232,8 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   const developer = ["pcpv1", "dverr"];
   const prepared = ["pqh", "pqherr", "pqhstate"];
   // `vdcard` is read too: this handler replaces its own card rather than
-  // re-rendering the panel, because the four cards beside it stage unsaved
-  // edits. The handler's own catch would swallow a missing-id assertion, so
+  // re-rendering the panel, because the other Playback cards (Streaming and
+  // the rest of Advanced server delivery) stage unsaved edits. The handler's own catch would swallow a missing-id assertion, so
   // the id has to be listed here for the guard to mean anything.
   const verifiedDecode = ["dhqa", "dhqerr", "vdcard"];
   const automaticRecovery = ["adr", "adrerr", "drcard"];
@@ -534,7 +534,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const html = renderComposedPanel(
     "developerPanel", () => panels.developerPanel(settings, readiness),
   );
-  for (const id of ["dev-live-tv-enable", "hevc-unverified", "pabr", "pqh", "pdp", "dhqa", "adr", "sub503", "pgsoverlay", "subsrc", "subcluster", "subbackfill", "chthumb"])
+  for (const id of ["dev-live-tv-enable", "hevc-unverified", "pabr", "pqh", "pdp", "sub503", "pgsoverlay", "subsrc", "subcluster", "subbackfill"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
   // Parallel playback ranges are automatic: the card explains them and reads
   // peer reachability as advisory, and offers no switch of its own.
@@ -548,13 +548,25 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.match(unverified, /not configured/);
   assert.match(html, /FOOT:saveLiveTvEnable/);
   assert.match(html, /Readiness observations never disable the control/);
+  // Graduated 2026-09-28 at Paul's word: chapter thumbnails and both decoder
+  // controls are permanent Playback settings now, each with its own Save.
   // Absent from the settings document is on: chapter thumbnails default on.
-  assert.match(html, /TOG:chthumb\|[^|]*\|[^|]*\|checked=true/);
-  assert.match(html, /FOOT:saveChapterThumbnails/);
+  const graduatedPlayback = panels.playbackPanel(settings, readiness);
+  assert.match(graduatedPlayback, /TOG:chthumb\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(graduatedPlayback, /FOOT:saveChapterThumbnails/);
   assert.match(
-    panels.developerPanel({ ...settings, chapter_thumbnails: false }, readiness),
+    panels.playbackPanel({ ...settings, chapter_thumbnails: false }, readiness),
     /TOG:chthumb\|[^|]*\|[^|]*\|checked=false/,
   );
+  // The decoder controls sit inside Advanced server delivery: they change how
+  // the server transcodes, not what a viewer picks.
+  const advanced = graduatedPlayback.slice(graduatedPlayback.indexOf("<summary>Advanced server delivery</summary>"));
+  for (const id of ["dhqa", "adr"])
+    assert.match(advanced, new RegExp(`TOG:${id}\\|`), `Advanced server delivery owns ${id}`);
+  assert.doesNotMatch(graduatedPlayback.slice(0, graduatedPlayback.indexOf("<summary>Advanced server delivery</summary>")), /TOG:(dhqa|adr)\|/);
+  for (const id of ["chthumb", "dhqa", "adr"])
+    assert.ok(!html.includes(`TOG:${id}|`), `Developer no longer owns ${id}`);
+  assert.doesNotMatch(html, /Decoder experiments|Chapter thumbnails|Verified decode artifacts|Automatic decode recovery/);
   assert.match(html, /TOG:pgsoverlay\|[^|]*\|[^|]*\|checked=false/);
   assert.match(html, /FOOT:savePgsOverlay/);
   assert.match(panels.developerPanel({ ...settings, pgs_overlay: true }, readiness),
@@ -613,13 +625,14 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   // that the server never hears about.
   assert.match(html, /TOG:pdp\|[^|]*\|[^|]*\|checked=true\|onchange="setPreparedHandoff\(this\.checked\)"/,
     "the prepared-handoff switch reflects the stored state and sets it");
-  assert.match(html, /Automatic decode recovery/);
-  assert.match(html, /TOG:adr\|[^|]*\|[^|]*\|checked=true/);
-  assert.match(html, /FOOT:saveAutomaticDecoderRecovery/);
-  assert.match(html, /missing measurements or retained contracts never turn it back off/);
-  assert.match(html, /reopen loop/);
-  assert.match(html, /One recovery per playback, and it is never given back/);
-  assert.match(html, /best-effort selected-stream diagnostics/);
+  assert.match(playback, /Automatic decode recovery/);
+  assert.match(playback, /TOG:adr\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(playback, /FOOT:saveAutomaticDecoderRecovery/);
+  assert.match(playback, /FOOT:saveVerifiedDecode/);
+  assert.match(playback, /missing measurements or retained contracts never turn it back off/);
+  assert.match(playback, /reopen loop/);
+  assert.match(playback, /One recovery per playback, and it is never given back/);
+  assert.match(playback, /best-effort selected-stream diagnostics/);
   assert.match(html, /Native controllers[\s\S]*?not met in this build/);
   assert.match(html, /HDR playback[\s\S]*?not measured/);
   assert.match(html, /These observations never gate this checkbox/);
@@ -628,7 +641,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   // what it is waiting on and where it goes when that lands. A card added
   // without saying so fails here, whatever else it renders.
   const developerCards = html.split("CARD[").slice(1);
-  assert.ok(developerCards.length >= 18, `Developer renders its cards (${developerCards.length})`);
+  assert.ok(developerCards.length >= 15, `Developer renders its cards (${developerCards.length})`);
   for (const card of developerCards) {
     const title = (/CARDHEAD:([^|]*)/.exec(card) || [])[1] || card.slice(0, 80);
     assert.match(card, /<b>Leaves Developer when:<\/b> \S[^<]*<b>Then:<\/b> \S/,
@@ -970,7 +983,7 @@ test("a rejected guide refresh reports into the replacement card", async () => {
 test("Verified decode states its cost, its prerequisites, and what this node measured", () => {
   const card = new Function(
     "setCard", "cardHead", "togRow", "setCardFoot", "esc",
-    `${shippedSource("devGraduation")}\n${shippedSource("verifiedDecodeCard")}\nreturn verifiedDecodeCard;`,
+    `${shippedSource("verifiedDecodeCard")}\nreturn verifiedDecodeCard;`,
   )(
     (body) => `CARD[${body}]`,
     (title, sub, tools) => `CARDHEAD:${title}|${sub || ""}|${tools || ""}`,
@@ -1075,7 +1088,7 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
 test("Automatic recovery is directly enabled and coverage remains advisory", () => {
   const card = new Function(
     "setCard", "cardHead", "togRow", "setCardFoot", "esc",
-    `${shippedSource("devGraduation")}\n${shippedSource("decodeRecoveryCard")}\nreturn decodeRecoveryCard;`,
+    `${shippedSource("decodeRecoveryCard")}\nreturn decodeRecoveryCard;`,
   )(
     (body) => `CARD[${body}]`,
     (title, sub, tools) => `CARDHEAD:${title}|${sub || ""}|${tools || ""}`,

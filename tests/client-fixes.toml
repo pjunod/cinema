@@ -1241,7 +1241,7 @@ test_anchor = "testTheTenFootSurfaceKeepsSomethingFocusableWhileTheOverlayIsHidd
 # A transient settings request may not disable the Library-channel switch.
 id = "apple.library-channel-enablement-remains-advisory"
 commits = ["9bfef968"]
-source = "clients/apple/Sources/LiveTvDeveloperView.swift"
+source = "clients/apple/Sources/LiveTvSettingsView.swift"
 source_anchor = "Toggle(\"Enable Library channels\""
 test = "tests/operations/test_evidence_workflows.py"
 test_anchor = "test_apple_prepared_enablement_is_visible_and_advisory"
@@ -2748,16 +2748,17 @@ test = "clients/android/app/src/test/java/tv/plurx/app/player/AudioSinkPolicyTes
 test_anchor = "changedRouteGetsOneNewDecisionBeforeAnyTranscodeRescue"
 
 [[fixes]]
-# The Live TV PlayerView is moved between the inline box and the fullscreen
-# box with movableContentOf; a moved View keeps its last measured size, so
-# on tablets the fullscreen picture stayed the inline strip in the top-left
-# corner. The surface forces a layout pass whenever its host box resizes.
+# The Live TV PlayerView was moved between the inline box and the fullscreen
+# box with movableContentOf, and on tablets the fullscreen picture stayed the
+# inline strip in the top-left corner. A forced relayout and surface rebind
+# (a825be23, b7c72861) did not fix it on hardware; every host box now builds
+# its own PlayerView and a released view unbinds the shared player.
 id = "android.live-tv-surface-relayout-on-host-resize"
-commits = ["a825be23", "b7c72861"]
-source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvSurfaceRelayout.kt"
-source_anchor = "fun hostResized(previousWidth: Int, previousHeight: Int, width: Int, height: Int): Boolean"
-test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvSurfaceRelayoutTest.kt"
-test_anchor = "theSurfaceRelaysOutWhenItsHostBoxChangesSize"
+commits = ["a825be23", "b7c72861", "726f1241"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
+source_anchor = "onRelease = { view -> view.player = null }"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvPlayerSurfaceTest.kt"
+test_anchor = "everyHostBoxBuildsItsOwnPlayerView"
 
 [[fixes]]
 # 2026-09-24: the watch slot's player host outranked the sticky header and
@@ -3262,3 +3263,45 @@ source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryScreen.kt"
 source_anchor = "pager.setWatchFilter(filter)"
 test = "tests/operations/test_android_library_paging_wiring.py"
 test_anchor = "test_view_model_route_uses_the_same_grid_and_watch_filter_policy"
+
+# A rolling session retired by the 180 s pause grace failed the paused item
+# with "resource unavailable" and raised "Playback stopped." for nobody. The
+# failure now parks while paused and Play reopens at the saved position.
+[[fixes]]
+id = "apple.paused-retirement-reopen"
+commits = ["f06062c1"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "if let retiredSession = sessionId, Self.parksPausedItemFailure("
+test = "clients/apple/Tests/PlayerResumeTests.swift"
+test_anchor = "testAPausedItemFailureParksBeforeFailoverOrAnySurface"
+
+# Android twin of apple.paused-retirement-reopen: a paused rolling session
+# retired by the pause grace parks its player error and Play reopens.
+[[fixes]]
+id = "android.paused-retirement-reopen"
+commits = ["4cc2a5b7"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "if (retiredSession != null && parksPausedPlaybackError("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackPolicyTest.kt"
+test_anchor = "fun onlyAPausedRollingNonCompatibilityErrorParks()"
+
+# The PR review's gaps: an Android MediaSession Play (notification, headset,
+# Assistant) now opens the replacement for a retired paused session too.
+[[fixes]]
+id = "android.paused-retirement-mediasession-play"
+commits = ["df1b0074"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "currentPausedRetirement()?.let(::reopenAfterPausedRetirement)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackPolicyTest.kt"
+test_anchor = "fun theReplacementOpensWhereTheViewerLeftIt()"
+
+# The shared Live TV start fixture gained an encoder_capacity row, but the
+# Apple reducer drew it as owner_unavailable, so an encoder refusal told the
+# viewer the owner was unreachable instead of that its encoder was busy.
+[[fixes]]
+id = "apple.live-tv-encoder-capacity-render"
+commits = ["9c243256"]
+source = "clients/apple/Sources/LiveTv.swift"
+source_anchor = "\"encoder_capacity\", \"tuner_unavailable\","
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testTheStartReducerAnswersEverySharedCase"

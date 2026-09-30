@@ -100,6 +100,12 @@ from `SET_GROUPS`/`SET_TABS`; do not maintain a second hardcoded list.
 | Typeless sliding HLS | Developer, Delivery experiments | `hls_typeless_sliding` | Own Save; new sessions only |
 | Cluster transport recovery | Cluster | Automatic capability, not an enable setting | Informational guidance and readiness; no fabricated switch |
 
+This table is the 2026-09-09 build contract as delivered. Placement has moved
+since: on 2026-09-28 the two decoder rows graduated to Playback → Advanced
+server delivery under Paul's Developer lifecycle
+([status, decisions 5 and 6](SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md#decisions--preserve-operator-choice)).
+The layout sketch in §3 is historical in the same way.
+
 Server controls remain administrator-only. A browser-local override changes only
 that browser; it must not change another viewer or a server-wide setting. No
 readiness result may disable a control or silently reset a saved choice.

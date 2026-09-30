@@ -313,6 +313,7 @@ function endWait(resumed){
   const reportedMs=Number(p.waitReportedMs)||0;
   const reportedDetail=p.waitReportedDetail||"persistent";
   p.waitAt=null; p.waitStartedRunway=null; p.waitNudgedAt=null; p.waitReported=false;
+  if(p.abr) p.abr.controlStallVerdict=null;
   p.waitReportedMs=null; p.waitReportedDetail=null;
   if(reported){
     // persistentWait already reported this stall, while it was still frozen,
@@ -485,6 +486,7 @@ async function persistentWait(v,p,began,generation,actionGeneration){
       control_trigger:controlTrigger,wait_started_runway:startedRunway,
       current_runway:currentRunway});
   }
+  if(p.abr) p.abr.controlStallVerdict=null;
   if(verdict&&verdict.type==="terminal"){
     // Ruling D1: the verdict is armed, not executed. Everything this player
     // had buffered is already spent — that is what a persistent wait means —
@@ -504,6 +506,11 @@ async function persistentWait(v,p,began,generation,actionGeneration){
       title:verdictText,detail:"Your place is saved.",
       actions:playbackStallActions(p,"stall-terminal")});
     return;
+  }
+  if(kind==="presentation"&&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS
+    &&verdict&&["hold","retry_resource"].includes(verdict.type)&&p.abr){
+    p.abr.controlStallVerdict={waitAt:began,atMs:performance.now(),
+      untilMs:began+CONTROL_STALL_DEFER_DEADLINE_MS};
   }
   if(kind==="presentation"&&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
     const remaining=CONTROL_STALL_DEFER_DEADLINE_MS-controlElapsedMs;
@@ -535,6 +542,8 @@ async function persistentWait(v,p,began,generation,actionGeneration){
       // eight seconds into a frozen picture with no UI and no bound, forever.
       // The reopen is what a hold suppresses; the explanation is what it earns.
       p.stallDeferrals=(p.stallDeferrals||0)+1;
+      if(p.abr) p.abr.controlStallVerdict={waitAt:began,
+        atMs:performance.now(),untilMs:began+CONTROL_STALL_DEFER_DEADLINE_MS};
       clientLog({level:"info",event:"stall_recovery",detail:"deferred:hold",
         message:`server holds this stall (${verdict.reason}) — reopen deferred`,
         control_trigger:controlTrigger});
@@ -560,6 +569,8 @@ async function persistentWait(v,p,began,generation,actionGeneration){
     // one that is never going to be ready, and today's path is better than an
     // unbounded wait.
     p.stallDeferrals=(p.stallDeferrals||0)+1;
+    if(p.abr) p.abr.controlStallVerdict={waitAt:began,
+      atMs:performance.now(),untilMs:began+CONTROL_STALL_DEFER_DEADLINE_MS};
     const again=Math.min(Math.max(verdict.after_ms,CONTROL_MIN_EXCHANGE_MS),PERSISTENT_STALL_MS);
     clientLog({level:"info",event:"stall_recovery",detail:"deferred:retry_resource",
       message:`server paces this stall (${verdict.reason}) — waiting ${(again/1000).toFixed(1)}s`+

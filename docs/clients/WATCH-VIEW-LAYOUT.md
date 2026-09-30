@@ -174,8 +174,8 @@ somebody is watching, and worth nothing for the films nobody opens — so
 there is no background producer, no library sweep, and nothing that runs
 unless a page asks. That is also what keeps it honest under the standing
 rule that hardware work must be attributable from inside the product: the
-only work is the request in front of it, and the Developer tab counts every
-one.
+only work is the request in front of it, and its settings card (Playback,
+since 2026-09-28; Developer before) counts every one.
 
 **HDR sources** come out flat: the frame is scaled and converted to 8-bit
 without tone mapping. The thumbnail is a locator, not a reference image;
@@ -209,7 +209,7 @@ is inline and the chevron folds it back. Fold state is per browser in
 `plurx_watch_folds` (`audio`, `subs`, default folded). Video, Delivery and
 File are one line each and never fold.
 
-## Settings → Developer → Chapter thumbnails
+## Settings → Playback → Chapter thumbnails
 
 The switch `chapter_thumbnails` (settings API field; store key
 `playback.chapter_thumbnails`; default on) is the enable path. Off answers
@@ -235,7 +235,7 @@ back. The card's rows are advisory and never turn the switch:
 | Styles (`.watch-*`) | `crates/plurxd/src/web/app.css` |
 | Thumbnail route, extraction, cache, counters | `crates/plurxd/src/http/chapter_thumbs.rs` |
 | The setting on the wire | `crates/plurxd/src/http/system.rs` (`chapter_thumbnails`) |
-| Developer card (server rows / web card / save) | `crates/plurxd/src/http/developer.rs` · `web/pages/settings-developer.js` · `web/pages/settings-playback.js` |
+| Settings card (advisory server rows / web card and save) | `crates/plurxd/src/http/developer.rs` · `web/pages/settings-playback.js` |
 | Browser acceptance (shipped assets, intercepted server) | `tests/web/watch-and-browse.browser.cjs` |
 
 ## Decisions taken without Paul in the room (2026-09-23)
@@ -247,8 +247,9 @@ Each is easy to reverse; they are recorded so they can be looked over.
    makes its thumbnails while you watch (two at a time, a few seconds each);
    the benefit is nothing ever runs for a film nobody opens.
 2. **The switch defaults on.** Matches how stored PGS tracks shipped and
-   Paul's rule against gating features; the Developer card is where it is
-   turned off, with the counters beside it.
+   Paul's rule against gating features; its settings card (Developer until
+   2026-09-28, Playback since) is where it is turned off, with the counters
+   beside it.
 3. **Rail open, track rows folded, on first visit.** The renders Paul chose
    showed that state; both choices are remembered per browser once changed.
 4. **Folded subtitle summary shows up to three names, then `+N`.** Names

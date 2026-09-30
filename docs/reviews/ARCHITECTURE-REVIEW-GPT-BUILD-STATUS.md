@@ -4,6 +4,18 @@
 
 ## Current work
 
+**A03 integration, 2026-09-30:** Existing draft PR #603 resumes its original
+source at `bedd440be80930ceba07e7b99cd46c6ca2b36325` and integrates effort
+`7ece20a8cb83e3956bea0ba40919d8b4394db78b`. The effort's Apple build201 and
+Android versionCode139, native Live TV settings and paused-session repairs
+are preserved. The Apple200/Android137 receipts below remain historical
+`f91b881` evidence: version metadata and other native inputs have changed,
+so they do not qualify this integrated tree. Affected native compilation
+precedes its sole independent review; the bounded14 focused executions,
+effort gate and installation remain pending. Named Apple TV/Lenovo6000-title
+request/order/tail/focus/frame measurements and original failures remain open.
+No deployment, install or new signed product is claimed.
+
 [PR #600](http://192.168.4.7:3000/noirr/plurx/pulls/600) merged as
 `b5649e55d9826500dbbc92160e0374e7a1bc6021`. Its sole review's three P2
 findings are addressed. All 40 focused checks pass: six Apple simulator cases,

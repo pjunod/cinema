@@ -8,10 +8,10 @@
 //! request for the same chapter is a file read. There is no background
 //! producer and no library sweep — the only work this module ever does is the
 //! chapter a viewer's page just asked for, and every extraction is counted so
-//! the Developer tab can say how many ran, how many failed and how many are
-//! running now. The `chapter_thumbnails` switch there stops new extractions;
-//! nothing here outlives the request that started it by more than the
-//! extraction timeout. A failed extraction leaves a marker so the next page
+//! Settings → Playback → Chapter thumbnails can say how many ran, how many
+//! failed and how many are running now. The `chapter_thumbnails` switch there
+//! stops new extractions; nothing here outlives the request that started it
+//! by more than the extraction timeout. A failed extraction leaves a marker so the next page
 //! view of a broken file does not run ffmpeg again for an hour. The cache has
 //! no cap: it holds one small JPEG per chapter ever viewed on this node, and
 //! removing the `chapter-thumbs` directory under the runtime cache reclaims
@@ -61,7 +61,7 @@ const CACHE_CONTROL: &str = "private, max-age=604800";
 
 static EXTRACT_PERMITS: Semaphore = Semaphore::const_new(EXTRACT_CONCURRENCY);
 
-/// Process-local counts for the Developer tab: requests answered from the
+/// Process-local counts for the Playback settings card: requests answered from the
 /// cache, extractions that produced a thumbnail, extractions that failed, and
 /// extractions running right now.
 static SERVED_CACHED: AtomicU64 = AtomicU64::new(0);
@@ -136,7 +136,7 @@ pub(crate) async fn enabled(state: &AppState) -> bool {
 
 /// The cache key names the file's identity, so a replaced file gets fresh
 /// thumbnails and the old ones become an orphan directory the operator can
-/// clear from the Developer tab.
+/// see counted on the Playback settings card and clear with the runtime cache.
 fn title_dir(runtime_cache: &FsPath, file_id: i64, size: i64, mtime: i64) -> PathBuf {
     cache_root(runtime_cache).join(format!("{file_id}-{size}-{mtime}"))
 }

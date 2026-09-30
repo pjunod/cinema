@@ -3,7 +3,7 @@
 **Status:** open — shipped on `main`; collection-route correction merged as
 `29d97094`; production playback correction tracked by
 [#237](http://forge.lan:3000/noirr/plurx/issues/237)
-· **Updated:** 2026-09-10 · **Playback correction base:** `9e29429e`
+· **Updated:** 2026-09-28 · **Playback correction base:** `9e29429e`
 
 Companion to [FEATURES.md](../FEATURES.md) (what Plurx supports),
 [PLAYBACK.md](../PLAYBACK.md) (finite-media delivery), and
@@ -24,6 +24,24 @@ proved, and what remains?*
 | M6 promotion | complete | PR #231 merged as `cb76cc8a` after exactly one adversarial review and a green current-head Main promotion gate |
 | M7 production collection route | complete | PR #234 merged as `29d97094` after one adversarial review and a green exact-head Main promotion gate; all clients use the canonical collection route, the server accepts both rollout spellings, and Apple build 133 / Android versionCode 82 carry the correction |
 | M8 multi-entry HEVC playback | diagnosed; correction in progress at issue #237 | production session `s-99a265…` on media1 proved ffmpeg can emit two legal `hvc1` sample descriptions after a mid-title channel seek; the copy reader currently calls that unsupported container shape an invalid decoder configuration instead of using its bounded prepublication legacy-HLS retry |
+
+## Web correction — deleting a channel (2026-09-28)
+
+Deleting from the web editor applied on the server and then reported
+"The string did not match the expected pattern" while leaving the editor
+open. The route answers `204 No Content`; the shared `api()` helper called
+`res.json()` on the empty body, and WebKit's JSON parse failure is that
+sentence. `api()` now answers `null` for 204/205, which also fixes the same
+false failure on favouriting. Every delete now ends on the list with a
+"Channel deleted" notice, a 404 counts as already deleted, and a refused
+delete stays in the editor with the server's reason.
+
+Delete is also on the list: each card the viewer can edit has a Delete
+button and a select box, and a bar above the grid offers Select all and
+Delete selected (a partial failure names what was not deleted). Admins get
+the same controls across every user's channels under Manage all channels.
+Native clients already handled the 204 correctly and keep editor-only
+delete.
 
 ## Production correction — route failure, not Store failure
 

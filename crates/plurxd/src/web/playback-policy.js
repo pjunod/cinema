@@ -339,6 +339,8 @@
     recentSpeed = null,
     activeSupplyStall = false,
     supplyStalls = 0,
+    decodeStalls = 0,
+    decodeStepConsumed = false,
     lastStallAtMs = null,
     nowMs = 0,
     lastSwitchAtMs = null,
@@ -410,13 +412,15 @@
       "authority-refused",
       "loader-suspended",
       "delivery-refused",
+      "control-stall-verdict",
     ].includes(causeKind)
       ? causeKind
       : null;
 
     if (
       namedSuppression ||
-      (starvation && !freshBandwidthCliff && causeKind !== "capacity-shortfall")
+      (starvation && !freshBandwidthCliff &&
+        causeKind !== "capacity-shortfall" && causeKind !== "decode-failed")
     ) {
       return {
         height: current.height,
@@ -432,6 +436,23 @@
         mildSamples: 0,
         upgradeSinceMs: null,
       };
+    }
+
+    // A named decoder failure belongs to one rung. Report the height for the
+    // adapter to retain; another failure on that height is for compatibility
+    // recovery, not another quality step.
+    const blocked = blockedHeights instanceof Set
+      ? blockedHeights
+      : new Set(Array.isArray(blockedHeights) ? blockedHeights : []);
+    if (causeFresh && causeKind === "decode-failed" && decodeStalls > 0) {
+      const target = available[currentIndex - 1];
+      if (decodeStepConsumed || !target) {
+        return {height: current.height, reason: "decode", action: "suppressed",
+          emergency: false, mildSamples: 0, upgradeSinceMs: null};
+      }
+      return {height: target.height, reason: "decode", action: "switch",
+        blockedHeights: [current.height], emergency: false,
+        mildSamples: 0, upgradeSinceMs: null};
     }
 
     const severe = freshBandwidthCliff;
@@ -521,9 +542,6 @@
     // A rung that already failed this playback is not a candidate. The
     // dwell/hold timers alone cannot end a loop whose every cycle looks new:
     // a rung that fails and is re-entered on schedule oscillates forever.
-    const blocked = blockedHeights instanceof Set
-      ? blockedHeights
-      : new Set(Array.isArray(blockedHeights) ? blockedHeights : []);
     const next = nextCandidate
       && nextCandidate.height <= playerCeiling
       && !blocked.has(nextCandidate.height)
@@ -970,6 +988,9 @@
   // A local rolling/progressive seek gets one short chance to land. The
   // transport owns the timer; this policy owns the frozen bound and route.
   const SEEK_LOCAL_SETTLE_MS = 3_000;
+  // How far a `seeked` landing may sit from the target and still be the
+  // viewer's seek. An element clamp lands tens of seconds away.
+  const SEEK_LOCAL_LANDING_SLACK_MS = 5_000;
 
   function seekRoute({
     method,
@@ -981,6 +1002,7 @@
     bufferedMs = [],
     publishedMs = null,
     holdbackMs = 0,
+    seekableMs = null,
   } = {}) {
     const target = Number(targetMs);
     if (!Number.isFinite(target) || target < 0 || forceReopen || changing) {
@@ -990,6 +1012,18 @@
     if (vod) return { route: "local", atMs: target, basis: "vod" };
     const rolling = Boolean(copyHls) || method === "transcode";
     if (!rolling && method !== "remux") return { route: "reopen" };
+    // The element clamps any assignment to `seekable`, and a growing EVENT
+    // playlist is live to native HLS: Safari ends `seekable` three target
+    // durations (3 x 16 s) before the published edge, which is behind most of
+    // what it has buffered. Buffered-but-unseekable is not a local target -
+    // the assignment would land back at the playhead and play on from there.
+    if (Array.isArray(seekableMs) && !seekableMs.some(range => {
+      const from = Number(range && range.from);
+      const through = Number(range && range.through);
+      // An open-ended range (duration Infinity) is still a range.
+      return Number.isFinite(from) && !Number.isNaN(through)
+        && target >= from && target <= through;
+    })) return { route: "reopen" };
     for (const range of Array.isArray(bufferedMs) ? bufferedMs : []) {
       const from = Number(range && range.from);
       const through = Number(range && range.through);
@@ -1087,6 +1121,26 @@
   // that schedules the retry cannot disagree with the test that pins it.
   function hlsRetryAllowed({ used = 0 } = {}) {
     return (Number(used) || 0) < HLS_RETRY.per_attach;
+  }
+
+  // The server retires a rolling presentation 180 s after an accepted Hold
+  // (`ROLLING_PAUSE_GRACE`) and answers `410 pause_grace_expired`; the playlist
+  // then answers 404/410. The sliding-HLS contract (§9.5): a paused client
+  // stays paused and opens one replacement at the saved position on resume.
+  // VOD and direct play are kept alive by a paused client, so only a rolling
+  // session's network failure parks.
+  function parksPausedPlaybackError({ wantsPlayback, sessionId = null, vod = false,
+    networkFailure = true } = {}) {
+    return wantsPlayback === false && !!sessionId && !vod && !!networkFailure;
+  }
+
+  function isPauseGraceExpiry(error) {
+    return !!error && Number(error.status) === 410 && error.code === "pause_grace_expired";
+  }
+
+  // The latch names its session, so a successor retires it by identity.
+  function pausedRetirementCurrent(retirement, sessionId) {
+    return !!retirement && !!sessionId && retirement.sessionId === sessionId;
   }
 
   function hlsMediaFatalAction({
@@ -2117,7 +2171,11 @@
     hlsRetryAllowed,
     HLS_MEDIA_RECOVERY,
     hlsMediaFatalAction,
+    parksPausedPlaybackError,
+    isPauseGraceExpiry,
+    pausedRetirementCurrent,
     SEEK_LOCAL_SETTLE_MS,
+    SEEK_LOCAL_LANDING_SLACK_MS,
     seekRoute,
     HLS_STARTUP,
     HLS_STARTUP_TERMINAL_CODES,

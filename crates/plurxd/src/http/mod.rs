@@ -5967,6 +5967,66 @@ mod tests {
         assert_eq!(rec["correlation_id"], "t-7-bbb");
     }
 
+    /// A queue that will not take the request answers 503, not 500.
+    ///
+    /// Monarr retries any 5xx, so the import was never lost — but for a day
+    /// its health page said "plurx returned 500: internal server error" for
+    /// every import while nothing in plurx was broken: the durable queue was
+    /// full of settled history and refusing admissions. 503 with the refusal
+    /// in the body says what happened and that trying again is the answer.
+    #[tokio::test]
+    async fn a_refused_scan_admission_is_a_503_with_the_reason() {
+        let (app, _state) = test_app_with_state();
+        // No scan worker: every request stays pending, so the per-library
+        // bound fills without anything having to be slow.
+        let admin = setup_admin(&app).await;
+        let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
+        let dir = crate::test_tempdir().expect("tmp");
+        let movie = dir.path().join("Heat (1995)");
+        std::fs::create_dir_all(&movie).expect("mkdir");
+        std::fs::write(movie.join("Heat (1995).mkv"), b"x").expect("write");
+        call(
+            &app,
+            post(
+                "/api/v1/libraries",
+                Some(&admin),
+                json!({ "name": "Movies", "kind": "movies", "paths": [dir.path()] }),
+            ),
+        )
+        .await;
+        let bound = plurx_core::store::background_jobs_library::MAX_LIBRARY_REQUESTS;
+        // Creating the library queued its own full scan, which is one of the
+        // bound's slots; the targeted requests take the rest.
+        let mut admitted = 0;
+        let mut refused = None;
+        for index in 0..=bound {
+            let (status, body) = call(
+                &app,
+                post(
+                    "/api/v1/scan",
+                    Some(&key),
+                    json!({ "path": movie, "correlation_id": format!("bound-{index}") }),
+                ),
+            )
+            .await;
+            match status {
+                StatusCode::ACCEPTED => admitted += 1,
+                StatusCode::SERVICE_UNAVAILABLE => {
+                    refused = Some(body);
+                    break;
+                }
+                other => panic!("request {index}: unexpected {other}: {body}"),
+            }
+        }
+        let refused = refused.expect("the bound must be reached and answered");
+        assert!(admitted >= bound - 1, "admitted only {admitted} of {bound}");
+        let message = refused["error"].as_str().expect("error text");
+        assert!(
+            message.contains("refused") && message.contains("QueueFull"),
+            "the body must name the refusal so the caller can read it: {message}"
+        );
+    }
+
     /// The happy path: a real folder under a real library, scanned now, with
     /// the answer in the response rather than a promise to look later.
     #[tokio::test]
@@ -14043,6 +14103,41 @@ mod tests {
             resuming.contains(&h.video),
             "a partially-watched home video belongs in continue-watching: {hubs}"
         );
+    }
+
+    /// The real start route must keep its authoritative presence check even
+    /// when detail has a newer, bounded observation cache. A poisoned detail
+    /// probe is counted through the router, not an unused cache instance.
+    #[tokio::test]
+    async fn playback_decision_does_not_probe_detail_availability() {
+        let (_, mut state) = test_state();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        state.detail_availability =
+            crate::availability::AvailabilityCache::with_test_probe(move |_| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    false
+                }
+            });
+        let app = router(state.clone());
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let (status, body) = call(
+            &app,
+            get(
+                &format!(
+                    "/api/v1/files/{}/decision?vcodec=h264&acodec=aac&container=mp4&hdr=0",
+                    seeded.file
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["method"], "direct_play");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     /// A big remux gets told to go through MSE; an ordinary direct play does

@@ -1229,6 +1229,12 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("cargo tree --locked -p plurxd -e features", dockerfile)
         self.assertIn("grep -q 'cluster-read-cost-validation'", dockerfile)
         self.assertIn("CARGO_TARGET_DIR=/src/target-plurxd", dockerfile)
+        # Cache-mounted target dirs must never serve a stale workspace crate.
+        self.assertIn(
+            "find crates vendor -type f -exec touch {} + \\\n"
+            "    && ! cargo tree --locked -p plurxd",
+            dockerfile,
+        )
         self.assertIn("CARGO_TARGET_DIR=/src/target-cluster-check", dockerfile)
         self.assertIn("id=plurx-cargo-registry,sharing=locked", dockerfile)
         self.assertIn("id=plurx-target-plurxd-${TARGETARCH},sharing=locked", dockerfile)
@@ -2561,6 +2567,11 @@ assert.equal(context.ACT_TIMER, null);
             dockerfile,
         )
         self.assertIn("--test store_contract --no-run", dockerfile)
+        self.assertIn(
+            "find crates vendor -type f -exec touch {} + \\\n"
+            "    && mkdir -p /src/target-store-contract/debug/deps",
+            dockerfile,
+        )
         self.assertIn('test "$#" -eq 1', dockerfile)
         self.assertIn("rustc -Vv > /rustc-vv.txt", dockerfile)
         self.assertIn("FROM scratch AS store-contract-binary", dockerfile)
@@ -3236,15 +3247,47 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("run: make release-check", readiness)
         self.assertIn("fetch-depth: 0", readiness)
 
-    def test_main_push_builds_once_and_publishes_only_after_validation(self):
+    def test_effort_web_provisions_pinned_browser_before_contracts(self):
+        web = workflow_job_blocks(".github/workflows/effort-ci.yml")["web_static"]
+        provision = "uses: ./.github/actions/playwright"
+        check = "run: make web-check"
+        self.assertIn(provision, web)
+        self.assertLess(web.index(provision), web.index(check))
+        self.assertRegex(web, r'uses: \./\.github/actions/playwright\n\s+with:\n\s+version: "1\.62\.0"')
+        self.assertIn("path: ~/.cache/ms-playwright", web)
+        self.assertIn("key: playwright-${{ runner.os }}-1.62.0", web)
+
+    def test_preflight_budgets_allow_full_history_and_contracts(self):
+        for workflow in ("ci", "effort-ci", "main-fast-lane"):
+            with self.subTest(workflow=workflow):
+                preflight = workflow_job_blocks(
+                    f".github/workflows/{workflow}.yml"
+                )["preflight"]
+                self.assertIn("timeout-minutes: 10", preflight)
+                for command in (
+                    "make history-check",
+                    "make validation-lint",
+                    "make operations-check",
+                ):
+                    self.assertIn(command, preflight)
+
+    def test_only_manual_main_dispatch_publishes_after_validation(self):
         workflow = read(".github/workflows/ci.yml")
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
         publish = jobs["publish_main"]
         script = read("scripts/registry-push")
 
         self.assertIn("name: publish merged image (Forgejo registry)", publish)
-        self.assertIn("github.event_name == 'push'", publish)
-        self.assertIn("github.ref == 'refs/heads/main'", publish)
+        condition = publish.split("    if: >-\n", 1)[1].split("\n    runs-on:", 1)[0]
+        self.assertEqual(
+            " ".join(condition.split()),
+            "always() && github.event_name == 'workflow_dispatch' && "
+            "github.ref == 'refs/heads/main'",
+        )
+        triggers = workflow.split("on:\n", 1)[1].split("\njobs:", 1)[0]
+        self.assertIn("workflow_dispatch:", triggers)
+        self.assertNotIn("branches: [main]", triggers)
+        self.assertNotIn("  schedule:", triggers)
         for dependency in (
             "check",
             "cluster_store",

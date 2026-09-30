@@ -11,6 +11,35 @@ Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md)
 This page records actual implementation and evidence. “Planned” means no
 implementation is claimed; “compiled” does not mean tests passed.
 
+## Settled-history eviction follow-up
+
+**2026-09-28:** production observation on nynuc, m6 and nuc4 (build
+`g86d516219`): every enqueue answered `QueueFull` from three seconds after
+startup, `library intent was not accepted` once a minute per library, and
+Monarr's `POST /api/v1/scan` came back 500 for every import for a day. The
+replicated `background_jobs` table held exactly 10,000 rows: 6,219 succeeded
+semantic embeddings, 2,700 succeeded subtitle extractions, 971 queued and 5
+running — all created after the 2026-09-27 02:32 reset. The table bound
+(`MAX_RETAINED_JOBS`) counted settled history, and history is only retired
+after seven days, 128 rows per upkeep pass, so the queue would have stayed
+wedged until the prune began retiring rows on 2026-10-04, with almost nothing
+running. nuc3 logged no admissions at all in the same window.
+
+The fix (SQLite migration 85, replicated schema 63) replaces the enqueue and
+upkeep triggers: admission evicts the oldest evictable settled rows (no pending
+waiter, not fragment history a legacy import still needs) when the table is at
+its bound, upkeep evicts from 9,000 rows so the enqueue path rarely has to, and
+the admission statement answers `queue_full` for size only when nothing is
+evictable. Waiters keep their receipts; a settled row going early is the state
+the seven-day prune already produces. `POST /api/v1/scan` maps a refused
+admission to 503 with the refusal in the body instead of 500.
+
+Regression coverage: SQLite admission at the bound with eviction order and
+upkeep convergence below the watermark; the replicated store upgraded from the
+exact v62 predecessor with 10,000 settled rows present; the per-library bound
+still refuses and does so as `TargetError::Refused`; and the HTTP contract
+that a refused admission is a 503 naming `QueueFull`.
+
 ## Activity and subtitle throughput follow-up
 
 **2026-09-27:** implemented in [PR #588](http://192.168.4.7:3000/noirr/plurx/pulls/588); final review addressed.

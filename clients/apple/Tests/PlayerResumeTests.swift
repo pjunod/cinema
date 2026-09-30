@@ -403,3 +403,141 @@ final class PlayerResumeTests: XCTestCase {
         XCTAssertFalse(tail.contains(".disabled("))
     }
 }
+
+/// A rolling session ends 180 s after the viewer pauses (`ROLLING_PAUSE_GRACE`).
+/// AVPlayer keeps reloading the live playlist while paused, the reload answers
+/// 404/410, and before this the viewer came back to "Playback stopped. resource
+/// unavailable" over a player nobody had touched. The sliding-HLS contract
+/// (§9.5) wants the client to stay paused and open one replacement at the
+/// saved position on resume.
+@MainActor
+final class PausedRetirementTests: XCTestCase {
+    private var sourcesDirectory: URL {
+        URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../Sources")
+    }
+
+    private func playerSource() throws -> String {
+        try String(
+            contentsOf: sourcesDirectory.appendingPathComponent("PlayerController.swift"),
+            encoding: .utf8
+        )
+    }
+
+    /// The body of `name`, up to the next declaration at the same indent.
+    private func body(of name: String, in source: String) throws -> Substring {
+        let start = try XCTUnwrap(source.range(of: name), "\(name) not found")
+        let rest = source[start.upperBound...]
+        let end = rest.range(of: "\n    private func ")?.lowerBound
+            ?? rest.range(of: "\n    func ")?.lowerBound
+            ?? rest.endIndex
+        return rest[..<end]
+    }
+
+    private func parks(
+        started: Bool = true,
+        wantsPlayback: Bool = false,
+        rolling: Bool = true,
+        compatibility: Bool = false,
+        resume: Bool = false
+    ) -> Bool {
+        PlayerController.parksPausedItemFailure(
+            started: started,
+            wantsPlayback: wantsPlayback,
+            isRollingSession: rolling,
+            isCompatibilityFailure: compatibility,
+            resumeInFlight: resume
+        )
+    }
+
+    func testOnlyAPausedRollingNonCompatibilityFailureParks() {
+        XCTAssertTrue(parks())
+        XCTAssertFalse(parks(wantsPlayback: true),
+                       "a viewer who is watching gets the ordinary ladder and its surface")
+        XCTAssertFalse(parks(rolling: false),
+                       "VOD and direct play are kept alive while paused; their failure is real")
+        XCTAssertFalse(parks(compatibility: true),
+                       "a media rejection is a verdict, not a retired session")
+        XCTAssertFalse(parks(resume: true), "an explicit resume owns its own repair")
+        XCTAssertFalse(parks(started: false))
+    }
+
+    func testThePauseGraceRefusalIsRecognisedExactly() {
+        XCTAssertTrue(PlayerController.isPauseGraceExpiry("transport:410:pause_grace_expired"))
+        XCTAssertFalse(PlayerController.isPauseGraceExpiry("transport:410:media_session_ended"))
+        XCTAssertFalse(PlayerController.isPauseGraceExpiry("transport:409:owner_changed"))
+        XCTAssertFalse(PlayerController.isPauseGraceExpiry("transport:none:-"))
+    }
+
+    func testTheReplacementOpensWhereTheViewerLeftIt() {
+        typealias R = PlayerController.PausedRetirement
+        let s = "4f9c0a52-0000-4000-8000-000000000001"
+        XCTAssertEqual(PlayerController.pausedRetirementReopenPositionMs(
+            pendingSeekMs: 90_000, retired: R(sessionId: s, positionMs: 40_000),
+            attachedPositionMs: nil, lastObservedMs: 40_000
+        ), 90_000, "a seek made while paused wins")
+        XCTAssertEqual(PlayerController.pausedRetirementReopenPositionMs(
+            pendingSeekMs: nil, retired: R(sessionId: s, positionMs: 40_000),
+            attachedPositionMs: 0, lastObservedMs: 12_000
+        ), 40_000, "a dead item's clock never replaces the saved position")
+        XCTAssertEqual(PlayerController.pausedRetirementReopenPositionMs(
+            pendingSeekMs: nil, retired: R(sessionId: s, positionMs: nil),
+            attachedPositionMs: 41_500, lastObservedMs: 40_000
+        ), 41_500, "a still-attached item's own clock is the most exact")
+        XCTAssertEqual(PlayerController.pausedRetirementReopenPositionMs(
+            pendingSeekMs: nil, retired: R(sessionId: s, positionMs: nil),
+            attachedPositionMs: nil, lastObservedMs: 40_000
+        ), 40_000)
+    }
+
+    func testAPausedItemFailureParksBeforeFailoverOrAnySurface() throws {
+        let source = try playerSource()
+        let failure = try body(of: "private func handleItemFailure(", in: source)
+        let park = try XCTUnwrap(failure.range(of: "Self.parksPausedItemFailure("))
+        for later in ["if let attempt = resumeAttempt", "retryMediaOnNextNode(item)",
+                      "stopForBlockingSurface(", "raiseOwnerFault("] {
+            let at = try XCTUnwrap(failure.range(of: later), later)
+            XCTAssertLessThan(park.lowerBound, at.lowerBound, "\(later) runs before the park")
+        }
+        XCTAssertTrue(failure.contains("isRollingSession: !isVOD && !isDirectPlayback"))
+        XCTAssertTrue(failure.contains("sessionId: retiredSession,"))
+    }
+
+    func testResumeConsumesTheLatchBeforeAnyInPlaceResumePath() throws {
+        let source = try playerSource()
+        let play = try body(of: "func setPlaybackRequested(", in: source)
+        let latch = try XCTUnwrap(play.range(
+            of: "} else if let retired = currentPausedRetirement, !isChangingStream {"
+        ))
+        let inPlace = try XCTUnwrap(play.range(of: "beginResumeAttempt("))
+        XCTAssertLessThan(latch.lowerBound, inPlace.lowerBound)
+        XCTAssertFalse(play.contains("pausedRetirement = nil"),
+                       "only the successor's session identity retires the latch")
+        XCTAssertTrue(play.contains("await self.reopen(at: position)"))
+    }
+
+    /// A create that fails restores the dead item with `sessionId` unchanged,
+    /// so the latch must survive `open()` and retire only by identity.
+    func testTheLatchRetiresBySessionIdentityNotAtOpen() throws {
+        let source = try playerSource()
+        let open = try body(of: "    private func open(\n", in: source)
+        XCTAssertFalse(open.contains("pausedRetirement = nil"))
+        XCTAssertTrue(source.contains(
+            "guard let retired = pausedRetirement, retired.sessionId == sessionId else { return nil }"
+        ))
+        let stop = try body(of: "    func stop(deactivateAudioSession: Bool = true) {", in: source)
+        XCTAssertTrue(stop.contains(
+            "let position = currentPausedRetirement?.positionMs ?? realPositionMs()"
+        ))
+        XCTAssertTrue(stop.contains("pausedRetirement = nil"))
+    }
+
+    func testTheControlRefusalArmsTheLatchOnlyWhilePaused() throws {
+        let source = try playerSource()
+        let hook = try XCTUnwrap(source.range(of: "onExchangeFailure: { [weak self] failure in"))
+        let tail = source[hook.lowerBound...].prefix(1_100)
+        XCTAssertTrue(tail.contains("Self.isPauseGraceExpiry(failure), !self.wantsPlayback"))
+        XCTAssertTrue(tail.contains("!self.isChangingStream, self.currentPausedRetirement == nil"))
+        XCTAssertTrue(tail.contains("sessionId: retiredSession, positionMs: nil"))
+    }
+}

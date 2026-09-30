@@ -941,6 +941,7 @@ function buildPlayer(attempt,decided,prepared){
       recentEstimateSource:null,recentEstimateUrl:null,
       completedTransfers:[],lastCliffAtMs:null,
       switches:[],switching:false,stableSinceMs:clickedAt,supplyRescued:false,
+      decodeStepConsumed:false,
       // Rungs this playback has already failed to open. Per playback, not
       // persisted: a transient server failure must not cap quality forever.
       failedHeights:new Set()},

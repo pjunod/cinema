@@ -465,9 +465,21 @@ function togglePlay(){
   else if(PLAYER){
     rememberPlaybackTransportIntent(v,PLAYER);
     PLAYER.wantsPlayback=!PLAYER.wantsPlayback;
-    if(PLAYER.wantsPlayback) resumeHlsStartup(v,PLAYER);
-    else pauseHlsStartup(PLAYER);
-    applyPlaybackTransportIntent(v,PLAYER);
+    if(PLAYER.wantsPlayback&&PlaybackPolicy.pausedRetirementCurrent(
+      PLAYER.pausedRetirement,PLAYER.sessionId)){
+      // The session this pause held was retired (§9.5): reopen at the saved
+      // position, or the seek made while paused. The reopen keeps Play.
+      PLAYER.pausedRetirement=null;
+      const at=PLAYER.controlSeek?.targetMs!=null
+        ? (PLAYER.controlSeek.targetMs+(PLAYER.bookOffset||0))/1000 : pbPosSec();
+      clientLog(Object.assign({level:"info",event:"paused_retirement",detail:"reopen",
+        message:`reopening the retired paused session at ${at.toFixed(1)}s`},playbackContext()));
+      seekTo(at,true,null,false);
+    }else{
+      if(PLAYER.wantsPlayback) resumeHlsStartup(v,PLAYER);
+      else pauseHlsStartup(PLAYER);
+      applyPlaybackTransportIntent(v,PLAYER);
+    }
   }
   if(PLAYER)playerActivity();
   // The pause EDGE beats (F-web-12), so the server hears where the viewer
@@ -732,10 +744,22 @@ function wirePlayerMedia(v){
     const err=v.error, code=err?err.code:0, msg=(err&&err.message)||"";
     const src=(v.currentSrc||"").split("?")[0];
     console.warn("[cinema] video error",{code,msg,method:PLAYER&&PLAYER.method,src});
+    // Paused on a rolling session and the network failed: the pause grace
+    // retired it (§9.5). Native HLS has no loader to stop, so this is where
+    // Safari meets the dead playlist. Park it; Play opens the replacement.
+    if(PLAYER&&code===2&&PlaybackPolicy.parksPausedPlaybackError({wantsPlayback:PLAYER.wantsPlayback,
+      sessionId:PLAYER.sessionId,vod:PLAYER.vod,networkFailure:true})){
+      PLAYER.pausedRetirement={sessionId:PLAYER.sessionId};
+      clientLog(Object.assign({level:"info",event:"paused_retirement",detail:"parked:native_network",
+        message:"paused rolling session failed its playlist — Play reopens at the saved position"},
+        playbackContext()));
+      return;
+    }
     if(finishStallRecovery("failed",msg||"video element error "+code)){
       showStallRecoveryFailure(msg||"The browser reported video error "+code+".");
       return;
     }
+    if(code===3&&autoDecodeMediaError(PLAYER,v)) return;
     // `playbackIsReal()` and not `PLAYER.started`: the guard means "we already
     // got real playback going, don't churn", and audio alone used to satisfy
     // it — which disabled this rescue in precisely the black-picture-with-
@@ -895,6 +919,22 @@ function playbackSeekBufferedRangesMs(v,p){
   }catch(e){}
   return ranges;
 }
+// Null when the element exposes no `seekable` (test doubles); a real element
+// always has one, and an empty one means nothing can be sought locally.
+function playbackSeekSeekableRangesMs(v,p){
+  const seekable=v&&v.seekable;
+  if(!seekable||typeof seekable.length!=="number") return null;
+  const ranges=[];
+  const offsetMs=(Number(p&&p.offset)||0)*1000;
+  try{
+    for(let index=0;index<seekable.length;index+=1){
+      const from=offsetMs+seekable.start(index)*1000;
+      const through=offsetMs+seekable.end(index)*1000;
+      if(Number.isFinite(from)&&through>=from) ranges.push({from,through});
+    }
+  }catch(e){}
+  return ranges;
+}
 function playbackSeekPublishedRangeMs(p){
   if(!p||!p.hls||!p.hls.levels) return null;
   const level=p.hls.levels[p.hls.currentLevel];
@@ -998,6 +1038,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
     changing:!!me.pendingMediaChange,targetMs:targetSec*1000,bufferedMs,
     publishedMs:published&&published.range,
     holdbackMs:published&&published.holdbackMs,
+    seekableMs:playbackSeekSeekableRangesMs(v,me),
   });
   if(route.route==='local'){
     const attachment=me.mediaAttachment, atMs=route.atMs;
@@ -1009,11 +1050,31 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
       if(vod) seekIntent.localVodSeekFallbackPending=false;
       try{v.removeEventListener('seeked',onSeeked);}catch(e){}
     };
-    const onSeeked=()=>{ if(!current()) return; settled=true; cleanup(); };
+    // `seeked` proves the element finished seeking, not that it went where it
+    // was told: a clamp lands elsewhere and still fires it. Only a landing at
+    // the target settles the local seek; anywhere else reopens now.
+    const onSeeked=()=>{
+      // A `seeked` already queued by an earlier seek arrives while this one
+      // is still seeking; only the edge that ends this seek is evidence.
+      if(!current()||/** @type {HTMLVideoElement} */(v).seeking) return;
+      const landedMs=((me.offset||0)+(Number(/** @type {HTMLVideoElement} */(v).currentTime)||0))*1000;
+      if(Math.abs(landedMs-atMs)>PlaybackPolicy.SEEK_LOCAL_LANDING_SLACK_MS){ fallback('landed_elsewhere'); return; }
+      settled=true; cleanup(); };
+    const fallback=(why)=>{
+      if(settled) return;
+      settled=true;
+      cleanup();
+      clientLog({level:'warn',event:'seek_local_fallback',
+        detail:`${me.copyHls?'copy_hls':me.method||'unknown'}:${why}`,
+        message:'local seek did not settle; reopening at the same target'});
+      Promise.resolve(seekTo(
+        targetSec,true,autoHeightOverride,viewerInitiated,recoveryEpisode
+      )).catch(()=>{});
+    };
     // A `waiting` event may have armed an old 8 s timer during the 100 ms
     // scrub coalescing above. The committed seek replaces that observation.
     endWait(false);
-    if(!vod) try{v.addEventListener('seeked',onSeeked,{once:true});}catch(e){}
+    if(!vod) try{v.addEventListener('seeked',onSeeked);}catch(e){}
     if(vod){
       seekIntent.localVodSeek=true;
       seekIntent.localVodSeekFallbackPending=true;
@@ -1032,13 +1093,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
     timer=setTimeout(()=>{
       if(settled||!current()||vod&&seekIntent.localVodPresented) { cleanup(); return; }
       if(playbackSeekBufferCovers(v,me,atMs)) { cleanup(); return; }
-      cleanup();
-      clientLog({level:'warn',event:'seek_local_fallback',
-        detail:me.copyHls?'copy_hls':me.method||'unknown',
-        message:'local seek did not settle; reopening at the same target'});
-      Promise.resolve(seekTo(
-        targetSec,true,autoHeightOverride,viewerInitiated,recoveryEpisode
-      )).catch(()=>{});
+      fallback('unsettled');
     },vod?PlaybackPolicy.HLS_STARTUP.seek_deadline_ms:PlaybackPolicy.SEEK_LOCAL_SETTLE_MS);
     return;
   }

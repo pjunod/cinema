@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS background_job_commands (
 ) STRICT;
 
 -- next statement
+-- Superseded by background_jobs_retention.sql (settled-history eviction); edit there.
 CREATE TRIGGER IF NOT EXISTS background_job_enqueue_command
 AFTER INSERT ON background_job_commands WHEN NEW.operation = 'enqueue'
 BEGIN
@@ -473,6 +474,7 @@ BEGIN
     DELETE FROM background_job_commands WHERE id = NEW.id;
 END;
 -- next statement
+-- Superseded by background_jobs_retention.sql (settled-history eviction); edit there.
 CREATE TRIGGER IF NOT EXISTS background_job_maintenance_command
 AFTER INSERT ON background_job_commands WHEN NEW.operation = 'maintain'
 BEGIN

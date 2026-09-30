@@ -116,7 +116,13 @@ async function api(path, {method="GET", body=null, raw=false, signal=null, keepS
     });
     throw error;
   }
-  return raw?res:res.json();
+  if(raw) return res;
+  // A 204 has no body, and `res.json()` on an empty body rejects — WebKit's
+  // wording is "The string did not match the expected pattern." Every
+  // no-content write (deleting a Library channel, favouriting one) reached its
+  // caller as that failure after the server had already applied it.
+  if(res.status===204||res.status===205) return null;
+  return res.json();
 }
 const tok = u => u + (u.includes("?")?"&":"?") + "token=" + encodeURIComponent(TOKEN||"");
 // The library list is small, changes only from Settings, and is needed on

@@ -55,3 +55,11 @@ test("malformed and overflowing receipts never become read headers",async()=>{
     request=f.start();assert.equal(f.calls[1].options.headers["x-plurx-read-after"],undefined);f.reply(1);await request;
   }
 });
+test("no-content writes resolve instead of failing to parse an empty body",async()=>{
+  for(const status of [204,205]){
+    const f=fixture();const request=f.start("DELETE");
+    f.calls[0].resolve({ok:true,status,headers:{get:()=>null},json:async()=>{throw new SyntaxError("The string did not match the expected pattern.");}});
+    assert.equal(await request,null);
+  }
+  const f=fixture();const request=f.start("PUT");f.reply(0);assert.deepEqual(await request,{ok:true});
+});
