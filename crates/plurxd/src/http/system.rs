@@ -4334,12 +4334,18 @@ async fn local_activity(state: &AppState) -> Result<Vec<Activity>, ApiError> {
     for (id, status) in statuses {
         let name = names.get(&id).cloned().unwrap_or_else(|| format!("#{id}"));
         let enriching = status.phase.as_deref() == Some("enriching");
-        let (kind, label) = if enriching {
+        let queued = status.phase.as_deref() == Some("queued");
+        let (kind, label) = if queued {
+            (
+                "scan",
+                format!("Queued scan for {name} · waiting for a worker"),
+            )
+        } else if enriching {
             ("enrich", format!("Fetching metadata for {name}"))
         } else {
             ("scan", format!("Scanning {name}"))
         };
-        let (detail, percent) = match status.progress.filter(|_| !enriching) {
+        let (detail, percent) = match status.progress.filter(|_| !enriching && !queued) {
             Some(p) if p.found > 0 => (
                 Some(format!("{} of {} files", p.processed, p.found)),
                 Some(((p.processed * 100 / p.found).min(100)) as u8),

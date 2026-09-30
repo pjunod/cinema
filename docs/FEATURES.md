@@ -124,7 +124,8 @@ books, and home media.
   running, queued and failed counts. Pages show 20 jobs by default (10 or 50
   optional), with First, Previous and Next controls; folds and the selected
   page survive live refreshes. Job details expand directly beneath their row.
-  Pending library scans say “Queued · waiting for a worker.” Developer enable
+  Pending library scans say “Queued · waiting for a worker” in Settings and the
+  activity indicator; remote execution uses the replicated job state. Developer enable
   controls show advisory requirements. Library scan/refresh requests and results are
   durable; repeated scheduled ticks share one pending request while waiting for
   a worker. Manual and targeted requests keep separate identities. Ready

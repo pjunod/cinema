@@ -1329,7 +1329,7 @@ pub struct AppConfig {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ScanStatus {
     pub running: bool,
-    /// What the job is doing right now: "scanning" or "enriching".
+    /// Durable waiting state "queued", or active "scanning" / "enriching".
     pub phase: Option<String>,
     /// Live counters while running (sampled from the scan's atomics).
     pub progress: Option<ProgressSnapshot>,

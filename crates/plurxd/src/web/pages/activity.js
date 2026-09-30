@@ -77,13 +77,26 @@ function durableQueueHtml(nodeNames={}){
     ${(q.repairs||[]).length?`<details class="durable-repairs"${q.repairsOpen?" open":""} ontoggle="if(this.isConnected)DURABLE_ACTIVITY.repairsOpen=this.open"><summary data-durable-focus="repairs">Artifact repairs · ${(q.repairs||[]).length} recent plans</summary><p class="hint">Copy first, then one rebuild and delivery if needed. Failed plans stop automatically; inspect the work for its reason and retry controls.</p><div class="tbl"><table><thead><tr><th>Artifact</th><th>Destination</th><th>Phase</th><th>Age</th><th></th></tr></thead><tbody>${q.repairs.map(repair=>`<tr><td data-label="Artifact">${esc(repair.kind)}</td><td data-label="Destination">${esc(nodeLabel(nodeNames,repair.target_node_id))}</td><td data-label="Phase">${esc(repair.phase)}</td><td data-label="Age">${esc(Math.floor(repair.age_ms/60000))} min</td><td>${repair.job_id?`<button class="ghost sm" data-durable-focus="repair-${esc(repair.id)}" aria-expanded="${expanded(repair.job_id)&&q.repairSelected===repair.id}" onclick="showDurableJob(${esc(JSON.stringify(repair.job_id))},false,${esc(JSON.stringify(repair.id))})">Inspect work</button>`:""}</td></tr>${expanded(repair.job_id)&&q.repairSelected===repair.id?`<tr><td colspan="5">${detailHtml()}</td></tr>`:""}`).join("")}</tbody></table></div></details>`:""}
     </div></details>`;
 }
+// Replacement markup can temporarily disable the focused control. Retain its
+// identity until the request settles, then use a nearby control at page edges.
+function restoreDurableFocus(host,focus){
+  const q=DURABLE_ACTIVITY;
+  q.pendingFocus=null;
+  if(!focus)return;
+  const controls=[...(/** @type {NodeListOf<HTMLButtonElement>} */ (host.querySelectorAll("[data-durable-focus]")))];
+  let control=controls.find(el=>el.dataset.durableFocus===focus);
+  if(control?.disabled){
+    if(q.busy||!q.observed){q.pendingFocus=focus;return;}
+    control=["previous","next","state"].map(key=>controls.find(el=>el.dataset.durableFocus===key)).find(el=>el&&!el.disabled);
+  }
+  control?.focus({preventScroll:true});
+}
 function paintDurableActivity(){
   if(location.hash!=="#/activity")return;
   const host=document.getElementById("durable-activity");if(!host)return;
-  const focus=(/** @type {HTMLElement} */ (document.activeElement))?.dataset?.durableFocus;
+  const focus=(/** @type {HTMLElement} */ (document.activeElement))?.dataset?.durableFocus||(document.activeElement===document.body?DURABLE_ACTIVITY.pendingFocus:null);
   host.innerHTML=durableQueueHtml(ACTIVITY_SNAPSHOT?.node_hostnames||{});
-  const buttons=/** @type {NodeListOf<HTMLButtonElement>} */ (host.querySelectorAll("[data-durable-focus]"));
-  if(focus)[...buttons].find(el=>el.dataset.durableFocus===focus)?.focus({preventScroll:true});
+  restoreDurableFocus(host,focus);
 }
 async function refreshDurableActivity(force=false){
   const q=DURABLE_ACTIVITY,generation=PAGE_RENDER_GENERATION,epoch=q.epoch,detailId=q.detail?.job.id,detailEpoch=q.detailEpoch;

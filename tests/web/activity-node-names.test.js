@@ -69,6 +69,7 @@ const BORROWED = [
   "durableLeaseExpired",
   "durableStateLabel",
   "durableQueueHtml",
+  "restoreDurableFocus",
   "paintActivityBody",
 ];
 
@@ -508,7 +509,7 @@ test("durable owners, attempts and repair destinations use roster names", () => 
     detail:{job,waiters:[],attempts:[{node_id:"owner-id",started_at_ms:now-120000,outcome:null}]}});
   const html=paint(snapshot({node_hostnames:{"owner-id":"m6"}}));
   assert.match(html, /title="owner-id">m6<\/span>/);
-  assert.match(html, /<td>m6<\/td><td>copying/);
+  assert.match(html, /<td data-label="Destination">m6<\/td><td data-label="Phase">copying/);
   assert.match(html, /m6 · running · .*2 min this attempt/);
   assert.match(html, /Since requested/);
   assert.match(html, /23h 47m/);

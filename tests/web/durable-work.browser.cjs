@@ -32,6 +32,21 @@ const root=path.resolve(__dirname,"../../crates/plurxd/src/web");
  await page.addScriptTag({path:path.join(root,'pages/activity.js')});
  await page.evaluate(()=>refreshDurableActivity(true));
  assert.equal(await page.locator('.durable-title').count(),20);
+ // Keyboard pagination and refresh retain focus through disabled loading states.
+ await page.getByRole('button',{name:'Next',exact:true}).focus();
+ await page.keyboard.press('Enter');
+ await page.waitForFunction(()=>!DURABLE_ACTIVITY.busy);
+ assert.equal(await page.evaluate(()=>document.activeElement.dataset.durableFocus),'next');
+ await page.keyboard.press('Enter');
+ await page.waitForFunction(()=>!DURABLE_ACTIVITY.busy);
+ assert.match(await page.locator('.durable-title').first().innerText(),/Film 41$/);
+ await page.getByRole('button',{name:'Refresh',exact:true}).focus();
+ await page.keyboard.press('Enter');
+ await page.waitForFunction(()=>!DURABLE_ACTIVITY.busy);
+ assert.equal(await page.evaluate(()=>document.activeElement.dataset.durableFocus),'refresh');
+ await page.getByRole('button',{name:'First',exact:true}).click();
+ await page.waitForFunction(()=>!DURABLE_ACTIVITY.busy);
+ assert.equal(await page.evaluate(()=>document.activeElement.dataset.durableFocus),'next');
  const ids=[];
  for(let n=0;n<6;n++){
   ids.push(...await page.locator('.durable-title').evaluateAll(els=>els.map(el=>el.dataset.durableFocus)));
@@ -39,6 +54,7 @@ const root=path.resolve(__dirname,"../../crates/plurxd/src/web");
  }
  assert.equal(ids.length,105);assert.equal(new Set(ids).size,105);
  assert.equal(await page.getByRole('button',{name:'Next',exact:true}).isDisabled(),true);
+ assert.equal(await page.evaluate(()=>document.activeElement.dataset.durableFocus),'previous');
  await page.getByRole('button',{name:'Previous',exact:true}).click();
  await page.waitForFunction(()=>!DURABLE_ACTIVITY.busy);
  assert.match(await page.locator('.durable-title').first().innerText(),/Film 81$/);

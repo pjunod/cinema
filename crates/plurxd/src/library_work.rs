@@ -1,6 +1,6 @@
 //! Durable library admission and execution; the existing scanner owns identity.
 use super::*;
-use plurx_core::store::background_jobs::{EnqueueOutcome, JobPayload, JobSettlement};
+use plurx_core::store::background_jobs::{EnqueueOutcome, JobPayload, JobSettlement, JobState};
 use plurx_core::store::background_jobs_library::{
     LibraryTrigger, LibraryWorkInput, LibraryWorkQuery, LibraryWorkRecord, LibraryWorkResult,
     NewLibraryWork, MAX_LIBRARY_RESULT_BYTES,
@@ -148,6 +148,7 @@ impl JobManager {
             }
         };
         let mut statuses = HashMap::new();
+        let now_ms = clock_ms();
         for record in records {
             if !matches!(record.input, LibraryWorkInput::Full { .. })
                 || statuses.contains_key(&record.library_id)
@@ -155,19 +156,37 @@ impl JobManager {
                 continue;
             }
             let pending = record.state == "pending";
+            let executing = pending
+                && matches!(
+                    record.job_state,
+                    Some(JobState::Running | JobState::Cancelling)
+                )
+                && record
+                    .job_lease_expires_ms
+                    .is_some_and(|expires| expires > now_ms);
+            let phase = pending.then(|| {
+                if !executing {
+                    "queued"
+                } else if matches!(record.input, LibraryWorkInput::Full { refresh: true, .. }) {
+                    "enriching"
+                } else {
+                    "scanning"
+                }
+                .into()
+            });
             let (last_scan, mut error) = match record.result {
                 Some(LibraryWorkResult::Completed { scan }) => (Some(scan.report), None),
                 Some(LibraryWorkResult::Failed { error }) => (None, Some(error)),
                 None => (None, record.error_code),
             };
-            if pending && error.is_none() {
+            if pending && !executing && error.is_none() {
                 error = self.library_readiness.problem(record.library_id);
             }
             statuses.insert(
                 record.library_id,
                 ScanStatus {
                     running: pending,
-                    phase: pending.then(|| "queued".into()),
+                    phase,
                     started_at: Some(record.created_at_ms / 1_000),
                     finished_at: (!pending).then_some(record.updated_at_ms / 1_000),
                     last_scan,
