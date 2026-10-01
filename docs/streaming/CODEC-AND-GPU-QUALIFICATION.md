@@ -1,6 +1,6 @@
 # Codec and GPU qualification — widen the measured boundary, one graph at a time
 
-**Status:** blocked: M0 one-week deployed observation · **Executes:** Q12 (§3.1.3), Q6 / F-stream-10,
+**Status:** open: M1 corpus and M2 contract implementation, 2026-09-30 · **Executes:** Q12 (§3.1.3), Q6 / F-stream-10,
 Q8 / F-stream-16 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -15,6 +15,17 @@ rules), [VOD-ENCODING.md](VOD-ENCODING.md) (the immutable VOD recipe and
 what may not move inside it) and
 [TONE-MAP-CHAIN-CORRECTIONS.md](TONE-MAP-CHAIN-CORRECTIONS.md) (what the
 colour chain already got wrong once).
+
+**2026-09-30 prerequisite amendment:** Paul's ruling makes the organic-use
+week supplementary observation, not eligibility for M1 or M2. Current scoped
+hardware, compiled-family, boot-probe and selected-graph evidence determines
+which graphs to investigate. A zero process counter does not prove absence.
+All content, exact graph/device, quality, throughput and HDR acceptance bars
+below remain unchanged; no new HEVC default or qualification follows from
+this amendment. M7/M8 are inapplicable only for an inventory that actually
+proves the relevant hardware/family absent, and reopen when that inventory
+changes. Meaningful manual choices remain advisory, never readiness gates;
+automatic contract correctness does not acquire an unfinished-feature toggle.
 
 This is a **qualification programme**, not a set of argument edits. The
 review is explicit about that in all three items: Q12 is "qualify one more
@@ -323,8 +334,11 @@ bounded by construction; `family` and `pipeline` come from
 the request supplies. The values come from `EncoderCaps` and from the same
 place `MediaNodeRuntime` reads. No settings key is added.
 
-The answer to "is NVENC in use?" is then `plurx_encoder_sessions_total{family="nvenc"}`
-over a week, not an inspection of hardware.
+The supplementary answer to "how much organic NVENC use was observed?" is
+reset-aware `plurx_encoder_sessions_total{family="nvenc"}` over a week.
+Eligibility to begin corpus/contract work instead uses the current scoped
+inventory: hardware, compiled families, accepted boot probes and selected
+graphs. Missing history is unknown, and a final zero is not absence evidence.
 
 ### 3.3 One fleet GPU first: QSV, and HEVC SDR where it measures a benefit
 
@@ -332,8 +346,9 @@ QSV is the fleet's GPU. [../OPERATIONS.md](../OPERATIONS.md) records the
 2026-08-14 D5 sweep on **media1** and says "media1 performs production
 encoding"; the Profile 5 / QSV Main10 measurements at `encoder.rs:233-238`
 are also media1's, and `PLURX_HWACCEL: "qsv"` is the documented preference
-for Arc-class GPUs. Confirm the current selection per node from M0's metric
-before starting M1 — the doc is the prior, the metric is the fact.
+for Arc-class GPUs. Confirm current accepted families and selected graphs
+from scoped M0 inventory before widening a graph — the doc is the prior,
+the current evidence is the fact. M1/M2 need no completed organic-use week.
 
 The widening, in order of what it buys:
 
@@ -359,9 +374,10 @@ comment — the way `HDR10_HLS_CODEC`'s was.
 
 ### 3.4 NVENC arguments and a CUDA graph — only if M0 finds an NVENC node
 
-Conditional on `plurx_encoder_sessions_total{family="nvenc"} > 0` over M0's
-window. If it is zero, M3 does not happen and this section is the record of
-why.
+Conditional on current scoped inventory identifying an applicable NVENC
+node/graph. The organic-use counter is supplementary; zero does not prove
+absence. If actual hardware/family/probe evidence proves no applicable node,
+M7 does not happen for that inventory and this section records why.
 
 If it does happen, two separable pieces:
 
@@ -396,7 +412,8 @@ If it does happen, two separable pieces:
    frame each way per frame today), not merely "it ran".
 
 VideoToolbox gets the same treatment on the Mac nodes (maca/macb) and only
-if M0 shows sessions there: `-hwaccel videotoolbox -hwaccel_output_format
+if the current M0 inventory identifies an applicable node/graph there:
+`-hwaccel videotoolbox -hwaccel_output_format
 videotoolbox` with the `scale_vt`/`tonemap_vt` graph where the build has
 it. Same probe, same acceptance, separate milestone, no shared recipe with
 NVENC.
@@ -573,8 +590,8 @@ attachment, or after the first publishable Live TV inventory crosses its
 serving fence. It does not claim first-media publication for rolling or VOD.
 Bounded labels only. No behaviour change.
 
-Then one week of reset-aware collection, then the GPT prompt in §6 to read it
-off every node. These counters are process-local. A final zero from a direct
+Collect a supplementary reset-aware usage week with the GPT prompt in §6;
+do not wait for it to begin M1/M2. These counters are process-local. A final zero from a direct
 scrape is never week-long absence evidence: use a continuously scraped
 Prometheus `increase(...[7d])` and verify the exact `plurx_build_info` series
 throughout that interval, or retain start/end scrapes and prove
@@ -586,10 +603,11 @@ Acceptance: a scrape from each current node prints one
 `plurx_encoder_sessions_total` counter that advances once at the accepted
 start boundary; focused rolling, VOD and Live TV seam tests prove one increment
 and pre-boundary failure/replay non-increments; `cargo test -p plurxd
-metrics_encoder` green; `make unit` green; and, one week later, the §6 table
-filled from reset-aware evidence for every node, stating for each: families
+metrics_encoder` green; and the current scoped §6 inventory table
+filled for every node, stating for each: families
 compiled, families the probe accepted, family actually selected, sessions
-per family and grade, tone-map pipelines used.
+per family and grade where observed, tone-map pipelines selected/used. The
+organic usage week is supplementary; unknown history remains labelled unknown.
 
 **This milestone decides whether M7 and M8 exist at all.**
 
@@ -622,12 +640,32 @@ The existing image exports none of the three M0 metric families, and its
 pre-change VOD logs do not preserve the resolved encoder as a countable
 session field. Recent container logs therefore cannot reconstruct a truthful
 one-week use table. This PR adds the bounded process counters, but M0 remains
-open until that image is deployed and continuously scraped for one reset-aware
-week. The direct-scrape fallback is valid only when start/end evidence proves
+open for supplementary organic-use evidence until that image is deployed and
+continuously scraped for one reset-aware week. The direct-scrape fallback is valid only when start/end evidence proves
 uninterrupted uptime; otherwise its window restarts. M1-M6 do not begin on an
-invented baseline.
+invented baseline. **Superseded 2026-09-30:** this historical waiting rule
+does not prevent M1/M2; use the current inventory and preserve unknowns.
 
 ### 5.2 M1 — extend the corpus to §3.1.3's content classes
+
+**2026-09-30 implementation scope:** the effort already contains
+`1080p-animation`, `sport` and the incumbent N1 eight-bit `dark-gradient`.
+Keep those byte identities unchanged. `dark-gradient-10bit` is a separate
+HEVC ten-bit input; `burn-pgs` muxes the existing deterministic `scripts/mkpgs`
+SUP as an actual copied subtitle stream, rather than pre-burning pixels.
+`dv-p5` requires `PLURX_DV_P5_FIXTURE` to name genuine media and verifies the
+HEVC Profile 5 / RPU-present probe record before copying it into the corpus.
+`scripts/bench fixtures --qualification` includes these acquisition-dependent
+inputs; the ordinary incumbent corpus remains unchanged. Missing media and failed generation fail the command, never count as a built
+class. No genuine P5 source is yet identified for this run.
+
+M1 is **not accepted** by the generator or its mock tests. Actual generation,
+the intended per-class stream facts, production bitmap-burn selection and
+captured session matrix remain owed. The incumbent rate-control scorer refuses
+HDR references because it lacks a reference tone-map: do not bypass that
+refusal or score PQ/HLG against SDR as if the result meant quality. A versioned
+all-class corpus receipt requires genuine inputs and appropriate HDR-reference
+scoring, plus §3.6's independent fidelity checks. No manifest alone closes it.
 
 Code: five new `FIXTURES` entries (§3.5) in `scripts/bench`, a new
 `scripts/codec-qualification-corpus.json` at schema version 1 with
@@ -643,6 +681,38 @@ against a dev server and writes its JSON; the corpus JSON is committed and
 `make unit` is unaffected.
 
 ### 5.3 M2 — the explicit output-codec contract
+
+**2026-09-30 runtime:** `OutputCodecContract` lives in
+`transcode/encoder.rs`, not a parallel manifest. The pure production resolver
+stores it on the private `ResolvedTranscode` and derives the existing
+`PresentationContract` delivered codec/encoder from it. Session reporting and
+recipe identity continue consuming that presentation, so source `file.*` facts
+cannot substitute for delivered facts. `video_codec_for` delegates to the
+same measured codec/depth/grade/family table. The renderer pairing and grade
+are checked by `qualified()`; existing boot capability validation remains in
+the node's resolution path. No new tuple is admitted, no argv changes, and
+the plan/digest/recipe versions stay unchanged.
+
+**Sole review disposition, 2026-09-30 — [#649 review 22](http://192.168.4.7:3000/noirr/plurx/pulls/649#issuecomment-6639):**
+P2 accepted: the incumbent HDR10 builder always emits bitrate-bounded VBR,
+so the new delivered contract normalizes a supplied HDR10 QVBR preference
+to VBR and `qualified()` refuses a manually malformed HDR10/QVBR contract.
+SDR retains its supplied effective mode. The incumbent options and recipe
+field bytes remain unchanged, including their historical HDR10 option key
+space; no cache version bump or invalidation is smuggled into the correction.
+Focused regressions prove effective-mode truth, malformed-tuple refusal,
+byte-identical encoder argv and retained legacy options/identity. P3 accepted:
+the rollout paragraph now follows task PRs into the existing effort, focused
+regressions/current-head Effort gate and separate exact-tree final promotion.
+No second formal review or new media qualification is claimed.
+
+Focused proof:
+`cargo +1.97.1 test -p plurx-core --features hiqlite-store --lib output_codec_contract`
+covers all legacy family/grade pairs and renderer pairings, refused HEVC SDR
+and mismatched depth/grade, every supported legacy rate/forced-IDR encoder
+argv, actual source-HEVC-to-delivered-H264 resolution, codec-distinct recipe
+identity and the unchanged preexisting golden SHA-256. This is not new GPU or
+device qualification.
 
 Code: §3.1. `OutputCodecContract` plus `qualified()`, with
 `video_codec_for` reimplemented on top of it so behaviour is identical.
@@ -718,7 +788,8 @@ recorded here — that is also a completed milestone.
 
 ### 5.8 M7 — NVENC arguments and `Pipeline::Cuda` (conditional on M0)
 
-Runs only if M0 found NVENC sessions. Code: §3.4, both pieces, each flag
+Runs only if the current scoped M0 inventory identifies an applicable NVENC
+node/graph; an organic-use week is not eligibility. Code: §3.4, both pieces, each flag
 probed and recorded in `EncoderCaps`; `Pipeline::Cuda` joins `CANDIDATES`
 only behind its own boot probe.
 
@@ -736,12 +807,34 @@ instrument. Separate milestone and measurements, no shared recipe with M7.
 
 ## 6. Verification and rollout
 
-Fast lane for the plan PR: `make unit`. Focused per milestone as named in §5.
+#### 2026-09-30 current scoped inventory, without a new production probe
+
+Read-only SSH inspected PCI display/3D hardware, shipped FFmpeg encoder lists
+and existing startup validation logs. No encode/probe was initiated by this
+run, and no process-local zero was used as absence evidence.
+
+| Node | Hardware | Compiled H.264 families | Existing boot validation | Selection evidence |
+|---|---|---|---|---|
+| `nynuc` | Intel Arc Pro 130T/140T, `8086:7d51` | NVENC, QSV, VA-API | QSV/VA-API accepted; NVENC refused `libcuda.so.1`; VideoToolbox false | Existing production pre-transcode records name Intel QuickSync |
+| `m6` | AMD Phoenix1, `1002:15bf` | NVENC, QSV, VA-API | VA-API accepted; QSV device creation refused; NVENC refused `libcuda.so.1`; VideoToolbox false | Existing boot caption graph records use VA-API |
+| `nuc4` | Intel Iris Xe, `8086:46a6` | NVENC, QSV, VA-API | QSV/VA-API accepted; NVENC refused `libcuda.so.1`; VideoToolbox false | Accepted-family evidence; ordinary-session selection not independently sampled |
+| `nuc3` | Intel Iris Xe, `8086:46a6` | NVENC, QSV, VA-API | QSV/VA-API accepted; NVENC refused `libcuda.so.1`; VideoToolbox false | Accepted-family evidence; ordinary-session selection not independently sampled |
+
+Container starts were respectively 16:34:55, 18:32:39, 18:43:58 and
+16:39:35 UTC on 2026-09-30. These are current capability observations, not
+a seven-day organic-use receipt. The four scoped Linux nodes have no NVIDIA
+display/3D hardware or accepted NVENC route and no VideoToolbox route; M7/M8
+are inapplicable for this inventory only. A new node or changed inventory
+reopens them. Generic HEVC encoder symbols are not qualified HEVC SDR graphs.
+
+Task PRs use the focused per-milestone regressions named in §5 and the
+blocking Effort development gate. Full-suite `make unit` evidence belongs
+to final qualification, not a claimed result of this scoped M2 task.
 `make benchmark-check` still gates the committed A/B coverage
 ([../BENCHMARKING.md](../BENCHMARKING.md)); M1's new fixtures do not enter
 that matrix and must not silently change it.
 
-**GPT prompt — fleet encoder inventory (M0, after one reset-aware week):**
+**GPT prompt — current fleet encoder inventory (M0; organic week supplementary):**
 
 ```text
 On the maintained Plurx nodes `nynuc`, `m6`, `nuc4`, and `nuc3`, with the
@@ -769,6 +862,9 @@ exact candidate build running:
 Report one row per host: compiled families, probe-accepted families,
 selected family, sessions per family and grade over the week, tone-map
 pipelines used, GPU model and driver version.
+Steps 3-5 establish today's scoped eligibility inventory immediately. Steps
+1-2 are supplementary organic-use observation, not a prerequisite to M1/M2.
+Do not infer absent hardware or an inapplicable M7/M8 from zero counters.
 ```
 
 **GPT prompt — rolling segment-grid census (M3):**
@@ -810,8 +906,13 @@ Report one table. Name the OS/browser versions.
 playing an HEVC SDR transcode at 1080 and 2160 in both fMP4 and MPEG-TS,
 with the same four columns.
 
-Rollout: one draft plan PR into `main`, with logical milestone commits and
-Execution-log rows, then the fast lane. Metric names
+Rollout: reviewable milestone task PRs into the existing
+`effort/architecture-review-2026-09-20`, with logical commits and Execution-log
+rows, focused local regressions recorded in each PR and the blocking current-head
+Effort development gate. This M2 task did not run the full `make unit` suite.
+Final promotion is separate: freeze task merges, merge current main into the
+effort, qualify that exact tree and pass the Main promotion gate before merging
+the effort into main. A moved base requires new exact-tree evidence. Metric names
 and labels are fixed by §3.2 and are the only observability surface added.
 No settings key is added; `PLURX_HWACCEL` and `PLURX_TONEMAP` keep their
 current meaning. Cache identity, per milestone: M0 and M2 invalidate
@@ -873,3 +974,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [`17dfebc4` / #422](http://192.168.4.7:3000/noirr/plurx/pulls/422) | Implemented five-family availability, family/grade accepted-start, and eight-pipeline counters with closed enum labels. Count points are manager registration for rolling, reader attachment for VOD, and first publishable/fenced Live TV inventory (encoder only; Live TV currently refuses tone-map-required routes). Read-only inventory found QSV/VA-API nodes only; M7 NVENC and M8 VideoToolbox are refused for this fleet. Review correction: the seven-day gate is reset-aware and bound to the exact build; focused production-seam tests cover rolling, VOD and Live TV once-only/pre-boundary behavior. Needs: deploy and collect one valid reset-aware week before M1-M6. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/k06_runtime_sol61 | M2 runtime; M1 generator seams, incomplete | pending | Typed contract drives the actual resolved plan/delivered presentation; all legacy selections and golden recipe identity preserved, five focused storage-enabled core regressions green. Three fixture-seam tests and all 59 existing harness tests green. No new HEVC qualification/default or production change. Current four-node hardware/compiled/existing-probe evidence above, with unknown ordinary-session observations retained. Organic week now supplementary by Paul's ruling; M1 remains open for genuine P5 acquisition, actual generation/session burn and HDR-aware scoring/fidelity evidence. |

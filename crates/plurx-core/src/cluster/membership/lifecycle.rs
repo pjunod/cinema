@@ -42,11 +42,70 @@
 //!   nothing reads `barrier_index` back. The test pins that split to §3.8's
 //!   specification, which is not an agreement with production.
 //!
-//! Nothing in the daemon reads this projection yet; a transition function is
-//! a later milestone, written only after the projection has agreed with
-//! production for a release.
+//! The daemon still does not read this row projection. The removal-only
+//! candidate below models an attempt's proposal and survivor outcomes instead;
+//! the manager retains its authoritative reads and executes the effects. It
+//! does not adopt unchecked promotion dimensions. The canonical plan's
+//! one-release agreement prerequisite and its retained delivery evidence are
+//! recorded by Decision D-M7-removal; that is not full release qualification.
 
 use std::collections::BTreeSet;
+
+/// Attempt-local removal progress, not an authoritative projection of rows or
+/// Raft membership. Only an accepted proposal or survivor proof can finalize.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RemovalProposalOutcome {
+    Rejected,
+    Accepted,
+    Ambiguous,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RemovalEffect {
+    RollbackExactAttempt,
+    ReconcileSurvivors,
+    FinalizeTombstone,
+    RetainFence,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RemovalTransition<'a> {
+    pub node_id: &'a str,
+    pub attempt_id: &'a str,
+    pub effect: RemovalEffect,
+}
+
+impl<'a> RemovalTransition<'a> {
+    pub fn proposal(
+        node_id: &'a str,
+        attempt_id: &'a str,
+        outcome: RemovalProposalOutcome,
+    ) -> Self {
+        let effect = match outcome {
+            RemovalProposalOutcome::Rejected => RemovalEffect::RollbackExactAttempt,
+            RemovalProposalOutcome::Accepted => RemovalEffect::FinalizeTombstone,
+            RemovalProposalOutcome::Ambiguous => RemovalEffect::ReconcileSurvivors,
+        };
+        Self {
+            node_id,
+            attempt_id,
+            effect,
+        }
+    }
+
+    /// The manager supplies the existing uniform-survivor-quorum proof. An
+    /// unrelated or indeterminate outcome cannot release the removal fence.
+    pub fn survivors(self, removed: bool) -> Option<Self> {
+        (self.effect == RemovalEffect::ReconcileSurvivors).then_some(Self {
+            effect: if removed {
+                RemovalEffect::FinalizeTombstone
+            } else {
+                RemovalEffect::RetainFence
+            },
+            ..self
+        })
+    }
+}
 
 /// One `cluster_nodes` row, as the membership predicates read it.
 #[derive(Debug, Clone, PartialEq, Eq)]

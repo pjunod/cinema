@@ -2156,6 +2156,7 @@ pub struct ResolvedTranscode {
     source_identity: DecodeSourceIdentity,
     source_binding: PlanSourceBinding,
     output_contract: PresentationContract,
+    codec_contract: super::OutputCodecContract,
     input_dynamic_range: Option<DynamicRangeClass>,
     routing_dynamic_range: Option<String>,
     deinterlace: Deinterlace,
@@ -2180,6 +2181,11 @@ impl ResolvedTranscode {
 
     pub fn output_contract(&self) -> &PresentationContract {
         &self.output_contract
+    }
+
+    /// Delivered dimensions, resolved from this node's graph, never the source codec.
+    pub fn codec_contract(&self) -> &super::OutputCodecContract {
+        &self.codec_contract
     }
 
     pub fn input_dynamic_range(&self) -> Option<DynamicRangeClass> {
@@ -2682,10 +2688,15 @@ pub fn resolve_transcode(
     } else {
         None
     };
-    let output_grade = options.pipeline.output_grade();
-    let output_encoder = request
-        .encoder
-        .video_codec_for(output_grade)
+    let codec_contract = super::OutputCodecContract::resolve(
+        request.encoder,
+        options.pipeline,
+        options.effective_rate_control,
+    )
+    .ok_or(PlanError::IncompatibleRenderer)?;
+    let output_grade = codec_contract.grade;
+    let output_encoder = codec_contract
+        .encoder_name()
         .ok_or(PlanError::IncompatibleRenderer)?;
     let surface = surface_contract(
         backend,
@@ -2697,11 +2708,7 @@ pub fn resolve_transcode(
     let effective_geometry = effective_output_geometry(facts, requested_max_height);
     let output_contract = PresentationContract {
         output_grade,
-        output_codec: match output_grade {
-            OutputGrade::Sdr => "h264",
-            OutputGrade::Hdr10 => "hevc",
-        }
-        .to_owned(),
+        output_codec: codec_contract.codec.name().to_owned(),
         output_encoder: output_encoder.to_owned(),
         output_profile: match output_grade {
             OutputGrade::Hdr10 => Some("main10".to_owned()),
@@ -2745,6 +2752,7 @@ pub fn resolve_transcode(
         source_identity: facts.source_identity.clone(),
         source_binding: facts.binding,
         output_contract,
+        codec_contract,
         input_dynamic_range: facts.dynamic_range,
         routing_dynamic_range: facts.routing_dynamic_range().map(str::to_owned),
         deinterlace,

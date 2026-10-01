@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/python-unit-pr-receipts",
+  "suite": "validation",
+  "test_file": "tests/validation/test_python_unit_receipts.py",
+  "test_file_sha256": "66ddd8640f7ad93a56b56477d428736a257f3f8dd1605a584469c9f5fdd017ce",
+  "command": "python3 -m unittest tests.validation.test_python_unit_receipts.PythonReceiptCase.test_post_success_class_fixture_skip_is_not_silently_green",
+  "output": "Ran 1 test in 0.002s; OK; exit 0",
+  "test_ids": [
+    "test_python_unit_receipts.PythonReceiptCase.test_post_success_class_fixture_skip_is_not_silently_green"
+  ],
+  "result": {
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "expected_failures": 0,
+    "unexpected_successes": 0,
+    "count": 1
+  },
+  "source_attribution": "Original local worktree focused first pass after sole review; existing passed IDs not rerun. Fake internal fixture outcomes are regression inputs."
+}
