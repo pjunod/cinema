@@ -1517,3 +1517,17 @@ backward clock samples; execution is deferred to the final lane.
 iOS and tvOS arm64 simulator compilation passed with Xcode 27.0; this is
 compile evidence, not device or physical-display qualification. The existing
 item-transfer prepared exposure still needs repair and qualification.
+
+### 10.23 Android prepared first-frame active-wall budget
+
+Android's switched-successor deadline now preserves its remaining five-second
+budget through explicit Pause and background suspension. Playback commands and
+lifecycle edges update the budget directly; active decoder stalls still spend
+time. The proof owner clears the budget on first frame, failure and release.
+Pure regressions cover long Pause, remaining-budget resume, active stalls and
+backward clock samples, with unit execution deferred.
+
+Production and unit-test Kotlin sources compiled successfully using the
+installed Android 37.0 SDK and Java 21 runtime. The pinned CI environment uses
+Java 25; this local compile is not a receipt for that environment. The surface
+transfer and native/device qualification remain unfinished.

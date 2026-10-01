@@ -933,3 +933,26 @@ class CommittedMediaOriginTest {
         )
     }
 }
+
+class PreparedActiveWallBudgetTest {
+    @Test fun explicitPausePreservesRemainingFirstFrameBudget() {
+        val budget = PreparedActiveWallBudget(5_000, 100, true)
+        assertFalse(budget.update(2_100, false))
+        assertEquals(3_000L, budget.remainingMs)
+        assertFalse(budget.update(62_100, true))
+        assertEquals(3_000L, budget.remainingMs)
+        assertFalse(budget.update(65_099, true))
+        assertTrue(budget.update(65_100, true))
+        assertEquals(0L, budget.remainingMs)
+    }
+
+    @Test fun activeStallsRemainBoundedAndBackwardSamplesCannotRefillBudget() {
+        val budget = PreparedActiveWallBudget(5_000, 100, true)
+        assertFalse(budget.update(2_100, true))
+        assertFalse(budget.update(1_100, true))
+        assertEquals(3_000L, budget.remainingMs)
+        assertTrue(budget.update(5_100, true))
+        assertEquals(0L, budget.remainingMs)
+        assertTrue(budget.update(90_000, false))
+    }
+}

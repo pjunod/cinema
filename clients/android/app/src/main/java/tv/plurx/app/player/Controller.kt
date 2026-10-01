@@ -545,6 +545,7 @@ class Controller internal constructor(
     /** Keep the viewer's intent untouched while ON_STOP suppresses output. */
     private fun applyEffectivePlayWhenReady() {
         val target = effectivePlayWhenReady()
+        samplePreparedCommitFrameBudget()
         if (lifecyclePaused && playbackIntent.playbackRequested && player.playWhenReady != target) {
             pendingLifecyclePauseCallback = true
             viewerTransport.ownerStopping()
@@ -1127,6 +1128,7 @@ class Controller internal constructor(
                     currentPausedRetirement()?.let(::reopenAfterPausedRetirement)
                 }
                 playbackIntent.setPlaybackRequested(playWhenReady)
+                samplePreparedCommitFrameBudget()
                 // The client's own fact, on the edge it already listens to: no
                 // new detector and no new timer. A `buffering` fault is about a
                 // player that wants media, so the viewer pausing makes it about
@@ -1688,6 +1690,7 @@ class Controller internal constructor(
         }
         playbackControl.clearVerdict()
         stallGuard.setPlaybackRequested(playbackIntent, !playbackIntent.playbackRequested) {
+            samplePreparedCommitFrameBudget()
             player.playWhenReady = it && !lifecyclePaused
         }
         playbackControl.playerChanged()
@@ -1707,6 +1710,7 @@ class Controller internal constructor(
         if (plan.isAudioOnly) PlaybackService.attach(context, mediaSession)
         playbackControl.clearVerdict()
         stallGuard.setPlaybackRequested(playbackIntent, true) {
+            samplePreparedCommitFrameBudget()
             player.playWhenReady = it && !lifecyclePaused
         }
         val position = pausedRetirementReopenPositionMs(
@@ -1739,6 +1743,7 @@ class Controller internal constructor(
         // encoder runs for another 330 seconds after the viewer left.
         abandonPreparedReplacement(failed = false)
         awaitingCommitFrameSinceMs = null
+        preparedCommitFrameBudget = null
         val settling = settlingSnapshotIfOwed()
         val endingSession = sessionId
         // Every read below this line is against a player that is about to be
@@ -3227,6 +3232,7 @@ class Controller internal constructor(
         playbackTelemetry.supersedeForIntent(playbackIntent.pendingSeek?.sequence)
         settleVideoPlaybackIntentIfPresented()
         val now = monotonicNowMs()
+        samplePreparedCommitFrameBudget()
         val event = targetPresentationDeadline.sample(
             pending = playbackIntent.pendingSeek,
             playbackRequested = player.playWhenReady && player.playbackState != Player.STATE_ENDED,
@@ -3698,6 +3704,7 @@ class Controller internal constructor(
         stallGuard.invalidateForUserAction()
         playbackControl.clearVerdict()
         stallGuard.setPlaybackRequested(playbackIntent, true) {
+            samplePreparedCommitFrameBudget()
             player.playWhenReady = it && !lifecyclePaused
         }
         playbackControl.playerChanged()
@@ -3776,6 +3783,12 @@ class Controller internal constructor(
      * proves it. Null when no commit is outstanding.
      */
     private var awaitingCommitFrameSinceMs: Long? = null
+    private var preparedCommitFrameBudget: PreparedActiveWallBudget? = null
+
+    private fun samplePreparedCommitFrameBudget(): Boolean? = preparedCommitFrameBudget?.update(
+        nowMs = monotonicNowMs(),
+        playbackRequested = playbackIntent.playbackRequested && presentationForeground,
+    )
 
     /** Everything overwritten when a prepared successor becomes incumbent. */
     private data class PreparedPredecessor(
@@ -3974,8 +3987,8 @@ class Controller internal constructor(
         ) {
             collectRetiredPlayer()
         }
-        awaitingCommitFrameSinceMs?.let { since ->
-            if (monotonicNowMs() - since > PREPARED_COMMIT_FRAME_BOUND_MS) {
+        awaitingCommitFrameSinceMs?.let {
+            if (samplePreparedCommitFrameBudget() != false) {
                 val restored = rollbackSwitchedReplacement()
                 // The directed change takes its one reopen here, and it carries
                 // the viewer's rung. The deferred rollback reopen would only
@@ -4151,6 +4164,11 @@ class Controller internal constructor(
         // not is a window where a preparation can be left permanently
         // unsettleable.
         awaitingCommitFrameSinceMs = monotonicNowMs()
+        preparedCommitFrameBudget = PreparedActiveWallBudget(
+            PREPARED_COMMIT_FRAME_BOUND_MS,
+            monotonicNowMs(),
+            playbackIntent.playbackRequested && presentationForeground,
+        )
         // M3. Three assignments, on the line the swap is decided at. Nothing
         // is awaited, nothing is read back, and the picture is untouched.
         preparedSwitch.noteCommit(
@@ -4288,6 +4306,7 @@ class Controller internal constructor(
     private fun settleCommitOnFirstFrame(firstFrameUnixMs: Long) {
         if (awaitingCommitFrameSinceMs == null) return
         awaitingCommitFrameSinceMs = null
+        preparedCommitFrameBudget = null
         preparedSwitch.noteFirstFrame(monotonicNowMs())
         autoDesiredCandidate?.let { requested ->
             if (preparedLedger.action?.effectiveSelection?.candidateId == requested.id) {
@@ -4368,6 +4387,7 @@ class Controller internal constructor(
     private fun failSwitchedReplacement(): Boolean {
         if (awaitingCommitFrameSinceMs == null) return false
         awaitingCommitFrameSinceMs = null
+        preparedCommitFrameBudget = null
         publishAcknowledgement(preparedLedger.failedAfterSwitch())
         return fallBackAfterPreparedFailure()
     }

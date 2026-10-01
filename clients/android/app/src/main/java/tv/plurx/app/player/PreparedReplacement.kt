@@ -427,6 +427,22 @@ internal object PreparedReplacementAdvisory {
     }
 }
 
+/** Presentation time spent under Play intent, independent of decoder stalls. */
+internal class PreparedActiveWallBudget(boundMs: Long, nowMs: Long, playbackRequested: Boolean) {
+    var remainingMs = boundMs.coerceAtLeast(0)
+        private set
+    private var observedAtMs = nowMs.coerceAtLeast(0)
+    private var wasActive = playbackRequested
+
+    fun update(nowMs: Long, playbackRequested: Boolean): Boolean {
+        val current = maxOf(observedAtMs, nowMs)
+        if (wasActive) remainingMs -= minOf(remainingMs, current - observedAtMs)
+        observedAtMs = current
+        wasActive = playbackRequested
+        return remainingMs == 0L
+    }
+}
+
 /**
  * How long a commit waits for the successor's own first rendered frame before
  * failing the prepared path and taking the ordinary reopen.
