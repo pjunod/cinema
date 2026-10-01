@@ -14,6 +14,7 @@ mod background_jobs;
 mod backup;
 mod cachekeep;
 mod channel_subjects;
+mod clock_offset;
 mod copyseg;
 mod decode_facts;
 mod decoder_health;
@@ -2747,6 +2748,10 @@ fn spawn_background_loops(
     state: &AppState,
     background_shutdown: tokio_util::sync::CancellationToken,
 ) {
+    tokio::spawn(crate::clock_offset::run(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(http::file_grants::prune_loop(
         state.clone(),
         background_shutdown.clone(),
